@@ -65,6 +65,14 @@ func assertShellRecovered(t *testing.T, e *Engine, outcome string, wantError boo
 	if !wantError && op.Error != nil {
 		t.Fatalf("old P error=%+v", op.Error)
 	}
+	// The recovered P must stay addressable by the owning agent, not 409.
+	status, statusErr := e.Status("agent", "Pshell")
+	if statusErr != nil {
+		t.Fatalf("status(Pshell) rejected after recovery: %v", statusErr)
+	}
+	if status.OperationState != OperationFinished || status.Phase != "previous_instance" {
+		t.Fatalf("status(Pshell)=%+v", status)
+	}
 }
 
 // Case 12a: an alive runner with the recorded identity is terminated; admission
