@@ -92,10 +92,10 @@ PowerShell、docs 或 Manifest 中另写一份版本号；`contract_version` 只
 2. 暂停普通准入；用旧版本结束活动会话或 STOP，分别确认执行链、task/recents 与 display。
    任一未确认就停止推进，不强停 App 把缺少描述当作已清理。
 3. 停止旧服务与 App；安装整组产物。过渡期保持不可准入。
-4. 启动新服务与 App：核验实例、release/contract、模式、STOP、恢复屏障与安装后的 App
-   versionName/versionCode；默认虚拟屏，主屏共享需要用户重新确认。
+4. 启动新服务、App 与手机侧 MCP 适配器：核验实例、release/contract、模式、STOP、恢复屏障
+   与安装后的 App versionName/versionCode；默认虚拟屏，主屏共享需要用户重新确认。
 5. 重启实际 MCP 宿主进程/连接，使宿主重新发现工具目录；不能只替换磁盘文件或依赖
-   `list_changed` 通知。
+   `list_changed` 通知。手机适配器默认随部署安装并启动，主机自建适配器可选。
 6. 条件成立才报告完成；分别记录版本匹配、App 配对、恢复屏障、STOP 可用、MCP 宿主刷新与
    本次最小闭环结果，不合并成一个 success。
 

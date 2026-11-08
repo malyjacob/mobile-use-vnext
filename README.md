@@ -23,7 +23,9 @@ HTTP 协议配对。
 - `notify` 保存的消息通过控制同步进入 App 消息中心与系统通知；`notification.state=pending`
   只表示已保存入队，已读仅存在 App 本地，不回报 Agent。
 - MCP 双入口（stdio / Streamable HTTP）由独立 `cmd/device-mcp` 提供，Go 客户端在
-  `internal/client`；见 [MCP 入口](docs/mcp.md) 与 [Go 客户端](docs/client.md)。
+  `internal/client`；默认部署会把 linux/arm64 适配器安装到 chroot 并在手机
+  `127.0.0.1:18882` 启动 HTTP 入口（主机转发 `18883`），主机自建适配器仍可选。见
+  [MCP 入口](docs/mcp.md)、[Agent 接入指南](docs/integration.md) 与 [Go 客户端](docs/client.md)。
 
 ## 目录
 
@@ -92,7 +94,8 @@ $env:GOEXPERIMENT = 'jsonv2'; go build -o build/device-mcp.exe ./cmd/device-mcp
 `scripts/deploy.ps1` 面向当前单一机型/单一 chroot 的受控部署，要求已有一台在线 adb 设备；
 默认先构建整组发布并核验 manifest，然后：读取或生成令牌 → 写私有配置 → 停止旧控制
 （含旧 Python 服务，尽力而为）→ 推送并安装到 chroot → 覆盖安装并启动控制 App（保留 App
-私有数据）→ 建立 `adb forward` → 轮询 `/health` 与 `/api/status`，直到 `can_start=true`。
+私有数据）→ 安装并启动手机 MCP 适配器 → 建立 `adb forward` `18881→18880` 与
+`18883→18882` → 轮询 `/health` 与 `/api/status`，直到 `can_start=true`。
 
 ```powershell
 ./scripts/deploy.ps1                       # 完整构建、整组核验并部署
@@ -105,16 +108,19 @@ $env:GOEXPERIMENT = 'jsonv2'; go build -o build/device-mcp.exe ./cmd/device-mcp
 | 项 | 值 |
 | --- | --- |
 | chroot | `/data/local/chroots/debian13` |
-| 服务目录 | `/opt/mobile-use-vnext`（`device-service`、`u2.jar`、`service.sh`、`config.json`） |
-| 状态目录 | `/var/lib/mobile-use-vnext`（恢复账本、消息文件、pid、日志；目录 0700） |
+| 服务目录 | `/opt/mobile-use-vnext`（`device-service`、`device-mcp`、`mcp-config.json`、`u2.jar`、`service.sh`、`config.json`） |
+| 状态目录 | `/var/lib/mobile-use-vnext`（恢复账本、消息文件、服务/MCP 的 pid 与日志；目录 0700） |
 | 服务端口 | `18880`（仅 `127.0.0.1`） |
+| 手机 MCP 端口 | `18882`（仅 `127.0.0.1`，默认安装并启动） |
 | adb 串口 | `127.0.0.1:5555` |
 | 主机验证入口 | `adb forward tcp:18881 tcp:18880` 后的 `http://127.0.0.1:18881` |
+| 主机 MCP 入口 | `adb forward tcp:18883 tcp:18882` 后的 `http://127.0.0.1:18883/mcp` |
 
 **私有配置不入库。** 部署在仓库根写入 `.state/`（已由 `.gitignore` 排除，脚本另设 0600）：
 
-- `.state/deploy.json`：`agent_token`、`control_token` 与端口等部署记录；
-- `.state/config.json`：服务私有配置（含两个令牌）；
+- `.state/deploy.json`：`agent_token`、`control_token`、`mcp_token` 与端口等部署记录；
+- `.state/config.json`：服务私有配置（含服务令牌）；
+- `.state/phone-mcp-config.json`：手机 MCP 适配器私有配置（含 MCP token）；
 - `.state/connection.json`：推送进 App 私有目录的 `base_url` + `control_token`。
 
 这些文件只在部署机与手机私有目录存在，不复制到仓库、文档或日志。

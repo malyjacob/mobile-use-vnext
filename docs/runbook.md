@@ -13,18 +13,20 @@
 | 设备 | Xiaomi `24117RK2CC`，Android 16（API 36），arm64 |
 | 特权 | Magisk root；Debian 13 chroot 需预先准备 |
 | chroot | `/data/local/chroots/debian13` |
-| 服务目录（chroot 内） | `/opt/mobile-use-vnext`：`device-service`、`u2.jar`、`applist.dex`、`service.sh`、`config.json` |
-| 状态目录（chroot 内） | `/var/lib/mobile-use-vnext`：`recovery-ledger.json`、`messages.json`、`device-service.pid`、`device-service.log`（0700） |
+| 服务目录（chroot 内） | `/opt/mobile-use-vnext`：`device-service`、`device-mcp`、`config.json`、`mcp-config.json`、`u2.jar`、`applist.dex`、`service.sh` |
+| 状态目录（chroot 内） | `/var/lib/mobile-use-vnext`：`recovery-ledger.json`、`messages.json`、`device-service.pid/.log`、`device-mcp.pid/.log`（0700） |
 | 服务端口 | `18880`，只监听 `127.0.0.1` |
+| 手机 MCP 端口 | `18882`，只监听 `127.0.0.1`（默认部署安装并启动 `device-mcp`） |
 | adb 串口 | `127.0.0.1:5555` |
-| 主机转发端口 | `18881`（`adb forward tcp:18881 tcp:18880`） |
+| 主机转发端口 | `18881` → `18880`（直连 HTTP）；`18883` → `18882`（手机 MCP） |
 | 控制 App | `com.mobileuse.vnext`，固定连接 `http://127.0.0.1:18880` |
 | 固定制品 | `third_party/uiautomator/u2.jar`、`third_party/android-applist/applist.dex`（SHA-256 固定，替换前必须核对） |
 | 受管执行临时资源 | `/data/local/tmp/mobile-use-shell-runner.sh`（固定脚本）与 `/data/local/tmp/mobile-use-shell/<run-id>/`（单次运行目录，确认结束后移除） |
 
 服务进程在 chroot 内运行，ADB/u2 通过 Android 侧 `adb`/`app_process` 工作；控制 App 运行在
-Android 侧，只与服务通信。Windows 主机只负责构建与下发，不参与设备服务运行时状态；MCP
-适配进程按部署选择运行在宿主或设备侧，只通过服务的 loopback HTTP 入口工作。
+Android 侧，只与服务通信。Windows 主机只负责构建与下发，不参与设备服务运行时状态。默认部署
+同时安装并启动手机 MCP 适配器（`device-mcp`，手机回环 `18882`），主机可经 `18883` 使用，
+也可另行运行主机侧适配器；两条路径都只通过服务的 loopback HTTP 入口工作。
 
 受管 shell 的命令文件、start/done 元数据与有界输出位于单次运行目录；命令正文与输出不写
 服务日志、不写恢复账本。运行目录残留或进程身份无法核验时，保持恢复屏障并人工核验，
@@ -34,8 +36,9 @@ Android 侧，只与服务通信。Windows 主机只负责构建与下发，不�
 
 | 文件 | 位置 | 内容 |
 | --- | --- | --- |
-| `deploy.json` | 仓库 `.state/`（部署机） | agent/control 令牌、端口、chroot、版本 |
-| `config.json` | `.state/` 生成，推送到 `/opt/mobile-use-vnext/`（0600） | 监听地址、状态目录、ADB 串口、令牌、u2 路径 |
+| `deploy.json` | 仓库 `.state/`（部署机） | agent/control/mcp 令牌、端口、chroot、版本 |
+| `config.json` | `.state/` 生成，推送到 `/opt/mobile-use-vnext/`（0600） | 监听地址、状态目录、ADB 串口、服务令牌、u2 路径 |
+| `mcp-config.json`（手机） | `.state/phone-mcp-config.json` 生成并推送到 `/opt/mobile-use-vnext/`（0600） | 手机 MCP 适配器的 `base_url`、agent 令牌、监听与 MCP token |
 | `connection.json` | 推送到 `/data/data/com.mobileuse.vnext/files/`（0600，App UID 所有） | `base_url` + control 令牌 |
 | `messages.json`（服务） | chroot `/var/lib/mobile-use-vnext/`（0600） | 未确认的 Agent 消息；有界，正文不进入账本/日志 |
 | `messages.json`（App） | `/data/data/com.mobileuse.vnext/files/`（0600） | App 消息中心列表、本地已读与去重 ID |
@@ -68,21 +71,24 @@ SDK/JDK（构建 App 用）；chroot 已存在且可 `su` 进入。
 `deploy.ps1` 的实际动作：
 
 1. 未 `-SkipBuild` 时先构建整组发布，然后始终运行 `verify-manifest.ps1`；
-2. 读取或生成 `.state/deploy.json`，写 `.state/config.json`、`.state/connection.json`；
-3. 尽力停止旧 Python 服务与现有 Go 服务，再停止控制 App；
+2. 读取或生成 `.state/deploy.json`，写 `.state/config.json`、`.state/phone-mcp-config.json`
+   与 `.state/connection.json`；
+3. 尽力停止旧 Python 服务与现有 Go 服务、旧手机 MCP 适配器，再停止控制 App；
 4. 推送 manifest 指向的产物到 `/data/local/tmp/mobile-use-vnext-deploy`，`su` 复制进 chroot；
 5. 用 `adb install -r` 覆盖安装 APK（**不卸载、不清库**），重写 `connection.json` 并授予
    通知权限与悬浮窗 appops；
-6. 用 `service.sh start` 启动服务，用 root 启动 `com.mobileuse.vnext/.ControlService`
-   （MIUI 新装包可能被挂起，脚本会 `pm unsuspend` 并重试）；
-7. `adb forward tcp:18881 tcp:18880`，轮询 `/health` 与 `/api/status`，要求
-   `/health` 的 release/contract 与清单一致且 `can_start=true`；90 秒未就绪则失败并打印
-   最后一次 `status`。安装后的 App versionName/versionCode 必须与清单一致。
+6. 用 `service.sh start` 启动服务，再启动手机 MCP 适配器并确认 `/mcp` 无 token 返回 `401`；
+7. 启动 `com.mobileuse.vnext/.ControlService`（MIUI 新装包可能被挂起，脚本会 `pm unsuspend`
+   并重试）；
+8. 建立 `adb forward tcp:18881 tcp:18880` 与 `tcp:18883 tcp:18882`，轮询 `/health` 与
+   `/api/status`，要求 `/health` 的 release/contract 与清单一致且 `can_start=true`；90 秒
+   未就绪则失败并打印最后一次 `status`。安装后的 App versionName/versionCode 必须与清单
+   一致。默认部署安装并启动手机 MCP 适配器；`-SkipPhoneMcp` 只用于显式跳过（此时部署不
+   完整，手机内 MCP 不可用）。
 
 发布完成需要分别确认：版本匹配、App 配对（`can_start=true` 蕴含新鲜配对同步）、恢复屏障、
-STOP 可用与 MCP 宿主已重新发现工具。最后一项不能由部署脚本证明：必须重启实际 MCP 宿主
-进程/连接，不能用替换磁盘文件或等待 `list_changed` 代替。安装失败（签名、降级等）时停止
-发布并排查，**不得卸载 App 或清空数据**来凑配对。
+STOP 可用与 MCP 宿主已重新发现工具。手机适配器的安装/监听/`401` 由部署验证；MCP 客户端
+仍须重启实际宿主进程/连接并重新 `tools/list`，不能只替换磁盘文件。
 
 部署不会创建 chroot、不会安装 Magisk、不会修改系统 IME 设置。升级服务或 App 后必须让新
 进程重新启动，旧进程会继续使用旧二进制与旧配置。
@@ -108,6 +114,16 @@ adb -s 127.0.0.1:5555 shell su -c 'chroot /data/local/chroots/debian13 /bin/sh -
 - `status`：进程匹配且健康才退出 0。
 - 进程退出码：`2` 配置被拒、`3` 进程锁被占用、`4` 账本目录不可用、`5` ADB/Android 配置
   被拒。端口监听失败、设备未就绪等会在日志里留下事件。
+
+手机 MCP 适配器不由 `service.sh` 托管；重部署会停止旧进程、覆盖二进制/配置并启动新进程：
+
+```bash
+# 启动 / 查看 / 停止
+adb shell su -c 'chroot /data/local/chroots/debian13 /bin/sh -c "nohup setsid /opt/mobile-use-vnext/device-mcp -transport http -config /opt/mobile-use-vnext/mcp-config.json >> /var/lib/mobile-use-vnext/device-mcp.log 2>&1 < /dev/null &"'
+adb shell 'su -c "pgrep -f \"^/opt/mobile-use-vnext/device-mcp \""'
+adb shell su -c 'tail -n 50 /data/local/chroots/debian13/var/lib/mobile-use-vnext/device-mcp.log'
+adb shell su -c 'pkill -f "^/opt/mobile-use-vnext/device-mcp " || true'
+```
 
 控制 App 侧：安装后打开一次 `MainActivity`，或由部署直接启动
 `com.mobileuse.vnext/.ControlService`（action `com.mobileuse.vnext.START`）。App 每秒同步，
@@ -140,11 +156,19 @@ curl -s -X POST http://127.0.0.1:18881/api/status \
 - `can_start=false` 时读 `blocking_code` 与 `cleanup`/`session`；
 - 端口已监听、`/health` 正常、进程存在都不能替代这个门禁。
 
+手机 MCP 监听检查（主机经 `18883`）：
+
+```powershell
+curl.exe -s -o NUL -w "%{http_code}" http://127.0.0.1:18883/mcp
+# 无 token：401；带 token 用 GET：405（正常，客户端应 POST）
+```
+
 ## 6. 日志
 
 | 日志 | 位置 | 说明 |
 | --- | --- | --- |
 | 服务日志 | chroot `/var/lib/mobile-use-vnext/device-service.log`（轮转为 `.log.1`） | 事件名 + 白名单字段；不写树、输入正文、命令输出或异常文本 |
+| MCP 适配器日志 | chroot `/var/lib/mobile-use-vnext/device-mcp.log` | 启动/停止/配置错误；stdout/stderr |
 | App 诊断 | `/data/data/com.mobileuse.vnext/files/diagnostics.log` | 固定事件/原因码、UUID、数字；0600，单份有界 |
 
 ```bash
@@ -177,6 +201,9 @@ adb -s 127.0.0.1:5555 shell su -c 'tail -n 100 /data/data/com.mobileuse.vnext/fi
 | `can_start=false`、`blocking_code=mode_not_selected`/`stop_unavailable` | App 模式/通知/停止通道不可用 | 在 App 选择虚拟屏或确认主屏共享；授予通知权限并确认通知频道可用 |
 | `409 contract_mismatch` | `X-Mobile-Use-Contract` 缺失/不是 `2`，或 App 契约版本不符 | 服务与客户端必须同为 `contract_version=2`；升级整组产物，不要只升一侧 |
 | `401 unauthorized` | Bearer 令牌错误，或用了另一身份的令牌 | 从私有配置核对 agent/control 令牌；两者不能互换 |
+| 主机 `18883/mcp` 不通或 401 | 手机适配器未运行、转发失效、填错 token | 看 `device-mcp.log` 与 `pgrep`；重建 `adb forward tcp:18883 tcp:18882`；手机路径填 `.state/deploy.json` 的 `mcp_token` |
+| MCP 客户端 403 | `Origin` 未在 `allowed_origins` | 部署时用 `-McpAllowedOrigins` 精确放行并重启适配器；不要填 `*` |
+| 手机 `18882` 启动失败 | 端口被占用或配置/二进制不匹配 | 只保留一个适配器进程；检查 `mcp-config.json` 与日志 |
 | `409 device_busy` | 已有普通工作占用工作位置 | 读 `blocking_operation_id`；串行化调用 |
 | `409 observation_expired`/`target_changed`/`foreground_changed` | 观察已过期（60 秒）或界面变化 | 重新 `observe`，用新 O 再 `act`；不要重放旧动作 |
 | `504 action_result_uncertain` | 输入已派发但结果无法确认 | 用 `status(P)`/重新观察判断现状，不重放；结束会话时该事实会反映到 `cleanup.execution` |
@@ -211,17 +238,47 @@ adb -s 127.0.0.1:5555 shell su -c 'tail -n 100 /data/data/com.mobileuse.vnext/fi
 
 `cmd/device-mcp` 是独立的 MCP 适配进程，可用 stdio 或 Streamable HTTP 运行；它通过
 `internal/client` 访问服务的 `/api/<tool>`，不接触设备或账本。工具目录、schema、结果与
-取消语义见 [MCP 入口](mcp.md)；客户端 API 见 [Go 客户端](client.md)。
+取消语义见 [MCP 入口](mcp.md)；客户端 API 见 [Go 客户端](client.md)；完整接入示例见
+[Agent 接入指南](integration.md)。
 
-构建（Windows 主机上的 stdio/HTTP 验证用宿主二进制；`scripts/build.ps1` 另构建
-linux/arm64 的 `device-mcp`）：
+### 10.1 默认：手机适配器
+
+部署会把 linux/arm64 的 `device-mcp` 和手机侧私有 `mcp-config.json` 安装到 chroot，并在
+手机 `127.0.0.1:18882` 启动 HTTP 入口：
+
+```text
+手机内：  http://127.0.0.1:18882/mcp
+主机转发：http://127.0.0.1:18883/mcp
+```
+
+主机 MCP 客户端填 URL 与 `Authorization: Bearer <mcp_token>`；`mcp_token` 在
+`.state/deploy.json`，同一个值也在 chroot `/opt/mobile-use-vnext/mcp-config.json` 的
+`http.token`。它不是 `agent_token`，也不是控制 App 的 `control_token`。
+
+```powershell
+adb forward tcp:18883 tcp:18882
+$mcpToken = (Get-Content .state/deploy.json -Raw | ConvertFrom-Json).mcp_token
+# 客户端：URL=http://127.0.0.1:18883/mcp, Authorization: Bearer $mcpToken
+```
+
+无 token 的 `/mcp` 返回 `401` 是正常的监听证明；带 token 使用 `GET` 返回 `405` 也是正常，
+MCP 客户端应使用 POST。手机内 Android 宿主直接使用 `127.0.0.1:18882/mcp`，不经过转发。
+
+手机适配器的配置由部署生成，字段为 `service.base_url`（18880）、`service.agent_token`、
+`transport=http`、`http.listen`（18882）、`http.token`（即 `mcp_token`）与
+`http.allowed_origins`。需要放行带 `Origin` 的客户端时，部署时传
+`-McpAllowedOrigins 'http://127.0.0.1:3000'`，不要使用通配符。
+
+### 10.2 可选：主机适配器
+
+只有宿主只支持 stdio，或要在主机本地监听 MCP 时才需要：
 
 ```powershell
 $env:GOEXPERIMENT = 'jsonv2'
 go build -o build/device-mcp.exe ./cmd/device-mcp
 ```
 
-私有配置 `.state/mcp-config.json`（0600，不入库；`agent_token` 只能来自部署机私有材料）：
+主机私有配置 `.state/mcp-config.json`（0600，不入库）：
 
 ```json
 {
@@ -229,24 +286,25 @@ go build -o build/device-mcp.exe ./cmd/device-mcp
   "transport": "stdio",
   "http": {
     "listen": "127.0.0.1:18882",
-    "token": "<mcp-token>",
+    "token": "<host-mcp-token>",
     "allowed_origins": []
   }
 }
 ```
 
-`agent_token` 与 `http.token` 必须不同；`base_url` 与 `http.listen` 必须是 loopback。
-stdout 只承载 MCP 协议帧，诊断写 stderr。
-
 ```powershell
 # stdio：由 MCP 宿主拉起的子进程
 ./build/device-mcp.exe -transport stdio -config .state/mcp-config.json
 
-# Streamable HTTP：独立进程，宿主以 bearer 认证连接
+# 主机 Streamable HTTP：独立进程，宿主以 bearer 认证连接
 ./build/device-mcp.exe -transport http -config .state/mcp-config.json
 ```
 
-HTTP 入口的每个请求都需要 `Authorization: Bearer <mcp-token>`；携带 `Origin` 时必须命中
+主机适配器的 `http.token` 是另一个独立口令；`service.agent_token` 与 `http.token` 必须
+不同，`base_url` 与 `http.listen` 必须是 loopback。主机 HTTP 入口使用主机 `18882`；手机
+适配器已转发到 `18883`，不要把手机 `18882` 再转发到主机 `18882`，否则端口冲突。
+
+HTTP 入口的每个请求都需要 `Authorization: Bearer <MCP token>`；携带 `Origin` 时必须命中
 `allowed_origins`。缺失/错误令牌返回 `401`，不允许的 Origin 返回 `403`。MCP 会话按请求
 隔离；协议版本锁定 `2026-07-28`，客户端使用更低版本时拒绝。
 
@@ -281,8 +339,8 @@ adb -s 127.0.0.1:5555 shell su -c 'ls -l /data/data/com.mobileuse.vnext/files/me
    未确认就停止推进，不强停 App 把缺少描述当已清理。
 3. 停止旧服务/App，安装整组产物（`adb install -r`，保留 App 私有数据）；过渡期保持不可
    准入。安装失败时保留现场，不以卸载/清库重试。
-4. 启动新服务与 App；要求 release/contract 与清单一致、`can_start=true`、STOP 可用、
-   恢复屏障通过。默认虚拟屏，主屏共享需要用户重新确认。
+4. 启动新服务、手机侧 MCP 适配器与 App；要求 release/contract 与清单一致、
+   `can_start=true`、STOP 可用、恢复屏障通过。默认虚拟屏，主屏共享需要用户重新确认。
 5. 重启实际 MCP 宿主进程/连接，重新发现工具目录；只替换磁盘文件不算完成。
 6. 运行相关最小闭环与回归；任何阶段失败都保持普通准入关闭并记录失败阶段。
 

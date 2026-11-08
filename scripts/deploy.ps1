@@ -4,6 +4,10 @@ param(
     [string]$HostPort = 18881,
     [string]$AgentName = 'local-agent',
     [string]$Manifest = 'build/release/manifest.json',
+    [int]$PhoneMcpPort = 18882,
+    [int]$PhoneMcpHostPort = 18883,
+    [string[]]$McpAllowedOrigins = @(),
+    [switch]$SkipPhoneMcp,
     [switch]$SkipBuild,
     [switch]$SkipOldServiceStop
 )
@@ -179,11 +183,12 @@ if ($sourceDirty) {
 }
 
 $serviceBinary = Get-ManifestArtifactPath $manifestObject $manifestDirectory 'device-service'
+$mcpBinary = Get-ManifestArtifactPath $manifestObject $manifestDirectory 'device-mcp'
 $u2Jar = Get-ManifestArtifactPath $manifestObject $manifestDirectory 'u2.jar'
 $applistDex = Get-ManifestArtifactPath $manifestObject $manifestDirectory 'applist.dex'
 $serviceScript = Get-ManifestArtifactPath $manifestObject $manifestDirectory 'service.sh'
 $apkPath = Get-ManifestArtifactPath $manifestObject $manifestDirectory 'control.apk'
-foreach ($required in @($serviceBinary, $u2Jar, $applistDex, $serviceScript, $apkPath)) {
+foreach ($required in @($serviceBinary, $mcpBinary, $u2Jar, $applistDex, $serviceScript, $apkPath)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
         throw "Missing deployment artifact: $required"
     }
@@ -203,22 +208,47 @@ function New-Token {
 }
 if ($null -eq $deployState) {
     $deployState = [pscustomobject]@{
-        agent_token     = (New-Token)
-        control_token   = (New-Token)
-        app_port        = $AppPort
-        host_port       = $HostPort
-        agent_name      = $AgentName
-        chroot          = $Chroot
-        release_version = $releaseVersion
+        agent_token          = (New-Token)
+        control_token        = (New-Token)
+        mcp_token            = (New-Token)
+        app_port             = $AppPort
+        host_port            = $HostPort
+        phone_mcp_port       = $PhoneMcpPort
+        phone_mcp_host_port  = $PhoneMcpHostPort
+        agent_name           = $AgentName
+        chroot               = $Chroot
+        release_version      = $releaseVersion
     }
 } else {
     $deployState.app_port = $AppPort
     $deployState.host_port = $HostPort
     $deployState.chroot = $Chroot
     $deployState.release_version = $releaseVersion
+    foreach ($pair in @(
+            @{ Name = 'phone_mcp_port'; Value = $PhoneMcpPort },
+            @{ Name = 'phone_mcp_host_port'; Value = $PhoneMcpHostPort })) {
+        $deployState | Add-Member -NotePropertyName $pair.Name -NotePropertyValue $pair.Value -Force
+    }
 }
+$mcpToken = [string](Get-Field $deployState 'mcp_token')
+if ($mcpToken -eq '') {
+    $mcpToken = New-Token
+    if ($null -eq $deployState.PSObject.Properties['mcp_token']) {
+        $deployState | Add-Member -NotePropertyName mcp_token -NotePropertyValue $mcpToken
+    } else {
+        $deployState.mcp_token = $mcpToken
+    }
+}
+while ($mcpToken -eq [string]$deployState.agent_token -or
+        $mcpToken -eq [string]$deployState.control_token) {
+    $mcpToken = New-Token
+}
+$deployState | Add-Member -NotePropertyName mcp_token -NotePropertyValue $mcpToken -Force
 Write-Utf8NoBom -Path $deployStatePath -Text ($deployState | ConvertTo-Json -Depth 4)
 & icacls $deployStatePath /inheritance:r /grant:r "$($env:USERNAME):(R,W)" | Out-Null
+
+$installDirectory = "$Chroot/opt/mobile-use-vnext"
+$stateOnDevice = "$Chroot/var/lib/mobile-use-vnext"
 
 # ---------------------------------------------------------------- stop old deployments
 if (-not $SkipOldServiceStop) {
@@ -243,6 +273,12 @@ $null = Invoke-DeviceScriptAllowFailure -Script @"
 su -c 'chroot $Chroot /bin/sh -c "export PATH=/usr/local/bin:/usr/bin:/bin; if [ -x /opt/mobile-use-vnext/service.sh ]; then /opt/mobile-use-vnext/service.sh stop || true; fi"'
 "@
 
+Write-Output 'Stopping the phone-side MCP adapter (if present)...'
+$null = Invoke-DeviceScriptAllowFailure -Script @"
+su -c 'pkill -f "^/opt/mobile-use-vnext/device-mcp " || true'
+su -c 'rm -f $stateOnDevice/device-mcp.pid'
+"@
+
 # ---------------------------------------------------------------- stage artifacts
 $staging = '/data/local/tmp/mobile-use-vnext-deploy'
 $null = Invoke-DeviceScript -Script "rm -rf $staging && mkdir -p $staging"
@@ -261,12 +297,32 @@ $config = [ordered]@{
 Write-Utf8NoBom -Path $configPath -Text ($config | ConvertTo-Json -Depth 5)
 & icacls $configPath /inheritance:r /grant:r "$($env:USERNAME):(R,W)" | Out-Null
 
-foreach ($file in @($serviceBinary, $u2Jar, $applistDex, $serviceScript, $configPath)) {
+if (-not $SkipPhoneMcp) {
+    $phoneMcpConfigPath = Join-Path $stateDirectory 'phone-mcp-config.json'
+    $phoneMcpConfig = [ordered]@{
+        service   = [ordered]@{
+            base_url    = "http://127.0.0.1:$AppPort"
+            agent_token = $deployState.agent_token
+        }
+        transport = 'http'
+        http      = [ordered]@{
+            listen          = "127.0.0.1:$PhoneMcpPort"
+            token           = $mcpToken
+            allowed_origins = @($McpAllowedOrigins)
+        }
+    }
+    Write-Utf8NoBom -Path $phoneMcpConfigPath -Text ($phoneMcpConfig | ConvertTo-Json -Depth 5)
+    & icacls $phoneMcpConfigPath /inheritance:r /grant:r "$($env:USERNAME):(R,W)" | Out-Null
+}
+
+$stagedFiles = @($serviceBinary, $u2Jar, $applistDex, $serviceScript, $configPath)
+if (-not $SkipPhoneMcp) {
+    $stagedFiles += @($mcpBinary, $phoneMcpConfigPath)
+}
+foreach ($file in $stagedFiles) {
     $null = Invoke-Adb -Arguments @('push', $file, "$staging/")
 }
 
-$installDirectory = "$Chroot/opt/mobile-use-vnext"
-$stateOnDevice = "$Chroot/var/lib/mobile-use-vnext"
 $null = Invoke-DeviceScript -Script @"
 su -c 'mkdir -p $installDirectory $stateOnDevice'
 su -c 'cp $staging/device-service $installDirectory/device-service'
@@ -278,6 +334,15 @@ su -c 'chmod 755 $installDirectory/device-service $installDirectory/service.sh'
 su -c 'chmod 600 $installDirectory/config.json $installDirectory/u2.jar $installDirectory/applist.dex'
 su -c 'chmod 700 $stateOnDevice'
 "@
+
+if (-not $SkipPhoneMcp) {
+    $null = Invoke-DeviceScript -Script @"
+su -c 'cp $staging/device-mcp $installDirectory/device-mcp'
+su -c 'cp $staging/phone-mcp-config.json $installDirectory/mcp-config.json'
+su -c 'chmod 755 $installDirectory/device-mcp'
+su -c 'chmod 600 $installDirectory/mcp-config.json'
+"@
+}
 
 # ---------------------------------------------------------------- install control App
 Write-Output 'Installing the paired control App with adb install -r (private data preserved)...'
@@ -333,6 +398,33 @@ $startOutput = Invoke-DeviceScript -Script @"
 su -c 'chroot $Chroot /bin/sh -c "export PATH=/usr/local/bin:/usr/bin:/bin; /opt/mobile-use-vnext/service.sh start"'
 "@
 Write-Output $startOutput
+
+if (-not $SkipPhoneMcp) {
+    Write-Output 'Starting the phone-side MCP adapter...'
+    $null = Invoke-DeviceScript -Script @"
+su -c 'chroot $Chroot /bin/sh -c "export PATH=/usr/local/bin:/usr/bin:/bin; umask 077; nohup setsid /opt/mobile-use-vnext/device-mcp -transport http -config /opt/mobile-use-vnext/mcp-config.json >> /var/lib/mobile-use-vnext/device-mcp.log 2>&1 < /dev/null &"'
+"@
+    $mcpReady = $false
+    for ($attempt = 0; $attempt -lt 30; $attempt++) {
+        $code = Invoke-DeviceScriptAllowFailure -Script "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:$PhoneMcpPort/mcp || true"
+        if ($code.Trim() -eq '401') {
+            $mcpReady = $true
+            break
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    if (-not $mcpReady) {
+        throw ("Phone-side MCP adapter did not answer 401 on 127.0.0.1:$PhoneMcpPort/mcp; " +
+            "inspect /var/lib/mobile-use-vnext/device-mcp.log and do not report the release complete.")
+    }
+    $mcpPid = Invoke-DeviceScriptAllowFailure -Script @"
+su -c 'pgrep -f "^/opt/mobile-use-vnext/device-mcp " | head -n 1'
+"@
+    if ($mcpPid.Trim() -match '^\d+$') {
+        $null = Invoke-DeviceScript -Script "su -c 'echo $($mcpPid.Trim()) > $stateOnDevice/device-mcp.pid'"
+    }
+    $null = Invoke-DeviceScript -Script "su -c 'chmod 600 $stateOnDevice/device-mcp.log $stateOnDevice/device-mcp.pid 2>/dev/null || true'"
+}
 
 Write-Output 'Launching the control App service...'
 # MIUI can suspend a newly installed package before its first Activity launch;
@@ -406,8 +498,12 @@ $healthRelease = [string](Get-Field $health 'release_version')
 $healthContract = [string](Get-Field $health 'contract_version')
 $healthStatus = [string](Get-Field $health 'status')
 $toolCatalog = Get-Field $manifestObject 'tool_catalog'
-$catalogCount = Get-Field $toolCatalog 'count'
+$catalogCount = [int](Get-Field $toolCatalog 'count')
 $catalogFingerprint = [string](Get-Field $toolCatalog 'sha256')
+$null = Invoke-Adb -Arguments @('forward', '--remove', "tcp:$PhoneMcpHostPort") -AllowFailure
+if (-not $SkipPhoneMcp) {
+    $null = Invoke-Adb -Arguments @('forward', "tcp:$PhoneMcpHostPort", "tcp:$PhoneMcpPort")
+}
 Write-Output 'Deployment ready.'
 Write-Output ("version match: PASS (health release=$healthRelease contract=$healthContract)")
 Write-Output 'App pairing: PASS (can_start=true implies a fresh paired control sync)'
@@ -415,6 +511,12 @@ Write-Output ("recovery barrier: PASS (health status=$healthStatus; can_start=tr
 Write-Output 'STOP availability: PASS (stop_ready is part of can_start)'
 Write-Output ("manifest: source_commit={0} source_dirty={1} tool_catalog_count={2} tool_catalog_sha256={3}" -f
     $sourceCommit, $sourceDirty, $catalogCount, $catalogFingerprint)
+if ($SkipPhoneMcp) {
+    Write-Warning 'Phone-side MCP adapter skipped: the deployment does not include phone-hosted MCP use.'
+} else {
+    Write-Output ("phone MCP adapter: PASS listen=127.0.0.1:$PhoneMcpPort url=http://127.0.0.1:$PhoneMcpHostPort/mcp")
+    Write-Output "phone MCP token: mcp_token in $deployStatePath (private, not printed)"
+}
 Write-Output "host verification URL: $baseUrl"
 Write-Output "tokens/config: $deployStatePath (private, gitignored)"
-Write-Output 'MCP host rediscovery: NOT VERIFIED (restart the real MCP host process separately)'
+Write-Output 'MCP client tools/list: NOT VERIFIED by deploy (restart the real client; verify-m6.ps1 covers server/discover)'

@@ -13,7 +13,7 @@ Agent 宿主接入见[Agent 接入指南](integration.md)。
 | `RootDisplayMain` 助手 | Android 侧，root，`nohup setsid` 脱离服务 | 虚拟屏创建/释放的 Binder 入口 |
 | 控制 App `com.mobileuse.vnext` | Android 前台服务 + Activity | 控制同步、模式选择、本地停止、虚拟屏、通知/悬浮与消息中心 |
 | Android 侧 adb 服务 | `127.0.0.1:5555` | 服务执行 ADB 命令的传输依赖 |
-| 手机内 MCP 适配器（可选） | chroot 或手机内进程 | 由运维显式安装；默认部署不安装 |
+| 手机 MCP 适配器 `device-mcp` | chroot `/opt/mobile-use-vnext/device-mcp`，默认部署启动 | 手机 `127.0.0.1:18882/mcp`；Android/手机内 MCP 宿主使用 |
 
 - 服务进程在固定运行目录取得内核锁；第二个实例拿不到锁时退出码 `3`，不会接触账本、
   App 或设备。
@@ -26,13 +26,17 @@ Agent 宿主接入见[Agent 接入指南](integration.md)。
 | 路径 | 内容 | 权限/上限 |
 | --- | --- | --- |
 | `/opt/mobile-use-vnext/device-service` | 设备服务二进制 | `0755` |
+| `/opt/mobile-use-vnext/device-mcp` | MCP 适配器二进制 | `0755` |
 | `/opt/mobile-use-vnext/config.json` | 监听、状态目录、ADB、令牌、制品路径 | `0600` |
+| `/opt/mobile-use-vnext/mcp-config.json` | 手机 MCP 适配器配置（含 MCP token） | `0600` |
 | `/opt/mobile-use-vnext/u2.jar`、`applist.dex` | 固定制品 | `0600`，按哈希校验 |
-| `/opt/mobile-use-vnext/service.sh` | 启停脚本 | `0755` |
+| `/opt/mobile-use-vnext/service.sh` | 设备服务启停脚本 | `0755` |
 | `/var/lib/mobile-use-vnext/recovery-ledger.json` | 恢复账本：归属与资源证据 | `0600`，≤64 KiB |
 | `/var/lib/mobile-use-vnext/messages.json` | 未确认 Agent 消息 | `0600`，≤2 MiB（256 条 / 1 MiB 正文） |
 | `/var/lib/mobile-use-vnext/device-service.log` | 服务事件日志（启动时轮转） | `0600`，无固定上限 |
-| `/var/lib/mobile-use-vnext/device-service.pid` | 进程记录 | `0600` |
+| `/var/lib/mobile-use-vnext/device-service.pid` | 服务进程记录 | `0600` |
+| `/var/lib/mobile-use-vnext/device-mcp.log` | MCP 适配器日志 | `0600`，无固定上限 |
+| `/var/lib/mobile-use-vnext/device-mcp.pid` | MCP 适配器进程记录 | `0600` |
 | `/data/data/com.mobileuse.vnext/files/connection.json` | App 的 `base_url` + control token | App UID 私有，`0600` |
 | `/data/data/com.mobileuse.vnext/files/messages.json` | App 消息、本地已读 | App UID 私有，`0600` |
 | `/data/data/com.mobileuse.vnext/files/diagnostics.log` | App 受控诊断 | App UID 私有，有界 |
@@ -60,18 +64,42 @@ adb shell su -c 'chroot /data/local/chroots/debian13 /bin/sh -c "export PATH=/us
 - App 未运行时服务仍可响应 `/health`/`/api/status`，但普通准入会被 `control_unavailable`
   或 `control_sync_pending` 拦住。
 
+手机 MCP 适配器由部署安装并启动，但 **`service.sh` 只管理 `device-service`，不管理
+`device-mcp`**。适配器生命周期命令：
+
+```bash
+# 启动（手机内 127.0.0.1:18882）
+adb shell su -c 'chroot /data/local/chroots/debian13 /bin/sh -c "nohup setsid /opt/mobile-use-vnext/device-mcp -transport http -config /opt/mobile-use-vnext/mcp-config.json >> /var/lib/mobile-use-vnext/device-mcp.log 2>&1 < /dev/null &"'
+
+# 查看进程与日志
+adb shell 'su -c "pgrep -f \"^/opt/mobile-use-vnext/device-mcp \""'
+adb shell su -c 'tail -n 50 /data/local/chroots/debian13/var/lib/mobile-use-vnext/device-mcp.log'
+
+# 停止
+adb shell su -c 'pkill -f "^/opt/mobile-use-vnext/device-mcp " || true'
+```
+
+- 同一时间只能有一个监听 `18882` 的适配器；重新部署会先停止旧进程再启动新进程。
+- 适配器无会话状态；重启后调用方重新 `tools/list`，会话权威仍在设备服务。
+
 主机侧转发：
 
 ```powershell
 adb forward --remove tcp:18881
 adb forward tcp:18881 tcp:18880
+adb forward --remove tcp:18883
+adb forward tcp:18883 tcp:18882
 curl.exe -s http://127.0.0.1:18881/health
 ```
+
+`18881` 供主机直连 HTTP；`18883` 供主机 MCP 客户端访问手机适配器。不要再把手机 `18882`
+转发到主机 `18882`，否则会与主机自建 MCP 适配器冲突。
 
 ## 4. 重启、开机与恢复
 
 - 本仓库不安装开机自启。手机重启后按顺序确认：chroot 可进入、Android 侧 adb 服务可用、
-  固定制品存在；然后 `service.sh start`、启动控制 App、重新建立主机转发。
+  固定制品存在；然后 `service.sh start`、启动控制 App、启动手机 MCP 适配器、重新建立
+  主机转发 `18881` 与 `18883`。
 - 开机后首次 `/api/status` 往往为 `can_start=false`；App 同步新鲜、旧资源核验完成与恢复
   屏障通过后才转为 true。这期间不要删除账本、不要强停 App 或重启服务来“清状态”。
 - 控制 App 重建默认虚拟屏，不恢复主屏共享；主屏需要用户在 Activity 中重新确认。
@@ -101,7 +129,8 @@ curl.exe -s http://127.0.0.1:18881/health
 | --- | --- | --- |
 | Agent token | 服务 `config.json`；部署机 `.state/deploy.json` | 修改部署机私有记录后重新部署；服务与 Agent/MCP 配置同步更新 |
 | Control token | 服务 `config.json`；App `connection.json` | 重新部署会重写 App 连接配置 |
-| MCP HTTP token | `.state/mcp-config.json` | 重新生成/编辑私有配置并重启 MCP 适配器 |
+| 手机 MCP token | `.state/deploy.json` 的 `mcp_token`；chroot `mcp-config.json` 的 `http.token` | 在 `.state/deploy.json` 写入/删除该字段后重新部署；适配器配置与进程一起刷新 |
+| 主机 MCP token（可选） | `.state/mcp-config.json` 的 `http.token` | 重新生成/编辑该私有配置并重启主机适配器与客户端 |
 
 - 令牌只出现在对应私有文件中；不要打印到终端历史、工单或日志。
 - 轮换后旧令牌立即失效；所有使用方必须同步更新，否则会得到 `401`。
@@ -110,7 +139,8 @@ curl.exe -s http://127.0.0.1:18881/health
 
 ## 7. 容量与清理
 
-- 账本、消息文件、App 消息与诊断均有界；增长主要来自服务日志与受管 shell 运行目录。
+- 账本、消息文件、App 消息与诊断均有界；增长主要来自服务日志、MCP 适配器日志与受管
+  shell 运行目录。
 - 服务日志只在 `service.sh start` 时轮转（`.log.1`、`.log.1.old`）；长期不重启时需外部
   轮转或监控磁盘，不要删除正在写入的日志。
 - 受管 shell 的单次运行目录位于 `/data/local/tmp/mobile-use-shell/<run-id>/`；确认结束后
@@ -148,6 +178,10 @@ curl.exe -s http://127.0.0.1:18881/health
 | `display_probe_failed`/`old_resource_unconfirmed` | 显示探测或旧屏核验失败 | 确认 SurfaceFlinger/`dumpsys display` 与 App `display` 描述；不要手工关闭用户主屏 |
 | 控制 App 崩溃或反复重启 | 权限、系统挂起或旧版本缺陷 | 更新到配套 App；`pm unsuspend`；查看 App 诊断日志的受控事件 |
 | 主机 `/health` 不通 | adb 转发失效或服务未启动 | 重建 `adb forward`；`service.sh status`；核对端口 |
+| 主机 `18883/mcp` 不通 | 手机适配器未运行、转发失效或端口冲突 | 看 `device-mcp.log` 与 `pgrep`；重建 `adb forward tcp:18883 tcp:18882` |
+| 手机适配器启动即退出 | `18882` 被占用、配置错误或二进制不匹配 | 只保留一个适配器进程；检查 `mcp-config.json` 与日志 |
+| MCP 客户端 401 | 用了主机 token、agent token，或 token 已轮换 | 手机路径填 `mcp_token`；主机适配器填其 `http.token`；重启客户端 |
+| 手机适配器 403 | 客户端发送了 `Origin` 但未在 `allowed_origins` | 部署时用 `-McpAllowedOrigins` 精确放行并重启适配器 |
 | 消息中心无新消息 | 服务队列、App 同步或消息频道 | 看 `notify` 是否 `pending`、App 是否运行；消息频道关闭不影响私存 |
 | 通知栏没有停止按钮 | 通知权限/频道关闭或 FGS 未运行 | 恢复通知权限；App 内按钮与悬浮入口仍可用 |
 
@@ -155,6 +189,7 @@ curl.exe -s http://127.0.0.1:18881/health
 
 ```bash
 adb shell su -c 'tail -n 100 /data/local/chroots/debian13/var/lib/mobile-use-vnext/device-service.log'
+adb shell su -c 'tail -n 100 /data/local/chroots/debian13/var/lib/mobile-use-vnext/device-mcp.log'
 adb shell su -c 'tail -n 100 /data/data/com.mobileuse.vnext/files/diagnostics.log'
 ```
 
@@ -178,12 +213,15 @@ adb shell su -c 'tail -n 100 /data/data/com.mobileuse.vnext/files/diagnostics.lo
    `app_instance_id` 下重复使用同一 `stop_seq` 只会得到 `duplicate`，每次独立操作应使用
    新 UUID，或在该 UUID 上递增序号。服务会在 App 下一次成功同步后重新评估准入。
 
-4. `service.sh stop` 只停止进程；服务退出会撤权并启动收尾，但收尾结果仍来自证据。不要用
-   `kill -9`、删除账本或重启 App 当作清理完成。
+4. `service.sh stop` 只停止设备服务进程；服务退出会撤权并启动收尾，但收尾结果仍来自证据。
+   手机 MCP 适配器是独立进程，需要时按第 3 节单独停止。不要用 `kill -9`、删除账本或重启
+   App 当作清理完成。
 
 ## 11. 安全检查
 
 - 服务、u2 与 MCP 只使用回环地址；不把端口暴露到局域网/公网，不做反向代理。
+- 手机 MCP 适配器以 root 读取 agent token；Android 客户端只应持有 `mcp_token`，不要把
+  `mcp-config.json` 或 `config.json` 复制到应用可读目录。
 - root 私有文件保持 `0600`/`0700`；不复制令牌到 `/sdcard`、共享目录或其他应用可读位置。
 - 控制 App 只从私有 `connection.json` 读取 control token；Activity/通知/悬浮都只消费
   同一份服务快照。

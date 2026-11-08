@@ -3,7 +3,7 @@
 本页说明 Agent 宿主如何连接设备服务，覆盖两类宿主：
 
 - **主机宿主**：运行在 PC（Windows/Linux/macOS）上的 Agent、脚本或 MCP 客户端；
-- **手机内宿主**：运行在手机 chroot 内（或其他可访问手机回环地址）的 Agent 或 MCP 客户端。
+- **手机内宿主**：Android 应用、Termux、chroot 内进程等运行在手机上的 Agent 或 MCP 客户端。
 
 工具字段、错误码与恢复语义见[接口契约](interface.md)；MCP 工具投影见 [MCP 入口](mcp.md)；
 控制 App 的配对协议见[控制端协议](control-protocol.md)；手机侧进程、文件与故障处置见
@@ -11,83 +11,197 @@
 
 ## 快速接入
 
-1. 主机执行 `adb devices` 与 `adb forward tcp:18881 tcp:18880`，确认 `/health` 返回
-   `contract_version=2`；
-2. 用 agent token 调 `POST /api/status`，确认 `can_start=true`；
-3. 主机宿主：构建 `build/device-mcp.exe`，用私有 `.state/mcp-config.json` 配 stdio，或运行
-   HTTP 适配器后连接 `http://127.0.0.1:18882/mcp`；直连则使用
-   `http://127.0.0.1:18881/api/<tool>` 与 `X-Mobile-Use-Contract: 2`；
-4. 手机内宿主：直接使用 `http://127.0.0.1:18880`；Android App 可只持有 MCP token，连接
-   手机内 HTTP 适配器 `http://127.0.0.1:18882/mcp`。
+默认部署会自动完成以下四件事：
 
-## 1. 接入面与网络位置
+```text
+device-service        手机 127.0.0.1:18880
+device-mcp           手机 127.0.0.1:18882（HTTP MCP 适配器）
+控制 App              与设备服务配对
+adb forward          主机 18881 → 服务；主机 18883 → 手机 MCP
+```
+
+因此：
+
+1. `./scripts/deploy.ps1` 部署后，主机执行
+   `adb forward tcp:18883 tcp:18882`（部署已自动建立）；
+2. 取手机 MCP token（只读取，不打印）：
+
+   ```powershell
+   $mcpToken = (Get-Content .state/deploy.json -Raw | ConvertFrom-Json).mcp_token
+   ```
+
+3. 主机 MCP 客户端填：
+
+   ```text
+   URL:    http://127.0.0.1:18883/mcp
+   Header: Authorization: Bearer <mcpToken>
+   ```
+
+4. 手机内 Android 宿主直接填 `http://127.0.0.1:18882/mcp` 与同一个 MCP token；不需要
+   `adb forward`，也不需要 Agent token。
+
+只需要直连 HTTP 的 Agent 则使用 `http://127.0.0.1:18881/api/<tool>`、`agent_token` 与
+`X-Mobile-Use-Contract: 2`。
+
+## 1. 默认部署后的网络与进程
 
 ```text
 手机 Android
   ├─ 控制 App com.mobileuse.vnext ──/v1/control/*──┐
-  ├─ 手机内 Agent（可选）────────/api/*────────────┤
+  ├─ 手机内 MCP 宿主 ──HTTP /mcp──────────────────┤
   │                                                ▼
-  └─ chroot：device-service 127.0.0.1:18880
-        ▲
-        │ adb forward tcp:18881 tcp:18880
-        │
-主机 Agent / device-mcp（stdio 或 Streamable HTTP）──/api/*
+  ├─ device-mcp 127.0.0.1:18882 ──/api/*──> device-service 127.0.0.1:18880
+  │                                                ▲
+  │                                                │
+  └─ 主机 adb forward ─────────────────────────────┘
+       18881 → 18880（直连 HTTP）
+       18883 → 18882（手机 MCP）
 ```
 
-- 设备服务只监听手机回环地址 `127.0.0.1:18880`，不监听局域网或公网。
-- 主机宿主通过 `adb forward` 使用 `127.0.0.1:18881`；手机内进程直接使用 `127.0.0.1:18880`。
-- 控制身份、Agent 身份与 MCP HTTP 身份是三份不同凭据，不能互换。
-- 一个部署只有一个 Agent 身份（默认 `local-agent`）。多个宿主同时使用同一凭据时仍共享
-  该身份与同一设备工作位置；服务不按宿主拆分会话权威。
-
-## 2. 身份与凭据
-
-| 凭据 | 位置 | 用途 |
+| 端点 | 位置 | 用途 |
 | --- | --- | --- |
-| `agent_token` | 服务私有 `config.json` 的 `tokens.agent`；部署机 `.state/deploy.json` | `/api/*` 普通工具 |
-| `control_token` | 服务 `tokens.control`；App 私有 `files/connection.json` | `/v1/control/*` 控制同步与 STOP |
-| MCP HTTP `token` | 私有 `mcp-config.json` 的 `http.token` | MCP Streamable HTTP 入口认证 |
+| `127.0.0.1:18880` | 手机 | 设备服务；Agent 工具与健康检查 |
+| `127.0.0.1:18882/mcp` | 手机 | 手机内 MCP 适配器；Android/手机内宿主使用 |
+| `127.0.0.1:18881` | 主机转发 | 主机直连 HTTP |
+| `127.0.0.1:18883/mcp` | 主机转发 | 主机 MCP 客户端使用手机适配器 |
+| `127.0.0.1:18882/mcp` | 主机（可选） | 主机自建 MCP 适配器时的默认监听 |
 
-- 三者必须不同；MCP 配置会拒绝 `http.token` 与 `agent_token` 相同。
-- 凭据不进入工具参数、MCP 正文、日志、错误或仓库；`config.json` 为 `0600`，App
-  `connection.json` 为 App UID 私有。
-- 手机内 Agent 需要读取私有配置或由运维显式提供受限凭据；默认部署不向 Android 第三方
-  应用下发 Agent 令牌。
+- 手机侧只监听回环；不要做端口映射、反向代理或 `adb reverse` 暴露到局域网/公网。
+- 主机的 `18882` 与手机的 `18882` 是两个命名空间；手机适配器默认转发到主机 `18883`，
+  以免与主机自建适配器冲突。
 
-## 3. 选择接入方式
+## 2. 三个 token 到底分别是什么
 
-| 方式 | 适用 | 传输 | 身份 |
-| --- | --- | --- | --- |
-| 直连 HTTP `/api/<tool>` | 自写 Agent/脚本 | HTTP JSON，单请求 | agent token + 契约头 |
-| MCP stdio | 本地 MCP 客户端/桌面宿主 | 宿主拉起子进程，stdin/stdout | 配置内 agent token |
-| MCP Streamable HTTP | 已支持 HTTP MCP 的宿主 | `POST/GET`，`/mcp` | Bearer MCP token + agent token |
+默认部署有三个独立凭据，**用途、存放位置和客户端配置都不同**：
 
-三种方式最终都调用同一套服务端工具；MCP 适配器不保存第二份会话、不直接访问 ADB 或账本。
+| 凭据 | 谁生成 | 存放在哪里 | 谁读取 | 用途 |
+| --- | --- | --- | --- | --- |
+| `agent_token` | `deploy.ps1` | 部署机 `.state/deploy.json`；chroot `/opt/mobile-use-vnext/config.json` 的 `tokens.agent`；适配器配置的 `service.agent_token` | 设备服务、MCP 适配器、直连 HTTP 的 Agent | `/api/*` 普通工具认证 |
+| `control_token` | `deploy.ps1` | 部署机 `.state/deploy.json`；服务 `config.json` 的 `tokens.control`；App 私有 `files/connection.json` | 设备服务与控制 App | `/v1/control/*` 控制同步与 STOP |
+| `mcp_token` | `deploy.ps1` | 部署机 `.state/deploy.json` 的 `mcp_token`；chroot `/opt/mobile-use-vnext/mcp-config.json` 的 `http.token` | 手机 MCP 适配器与 MCP 客户端 | 手机 MCP HTTP 入口的 Bearer 认证 |
 
-## 4. 主机宿主接入
+关键区别：
 
-### 4.1 前置检查
+- **`http.token` 不是服务端 token，也不是 `agent_token`。** 它是 MCP 适配器自己的 HTTP
+  Bearer 口令，只写在适配器配置的 `http.token`，以及 MCP 客户端的
+  `Authorization: Bearer ...` 请求头里。设备服务的 `config.json` 里没有 `http.token`。
+- 手机适配器的 `http.token` 就是部署机 `.state/deploy.json` 的 `mcp_token`。部署时由
+  `deploy.ps1` 生成，并通过私有配置写入 chroot。
+- 主机自建 MCP 适配器时，使用 `.state/mcp-config.json` 里的 `http.token`；它与手机
+  `mcp_token` 可以不同，二者是两个独立监听器/入口。
+- 三个 token 必须互不相同。适配器配置会拒绝 `http.token` 与 `service.agent_token` 相同。
+- 客户端永远不需要同时持有两个 MCP token：用手机适配器就只填 `mcp_token`，用主机适配器
+  就只填主机配置里的 `http.token`。
 
-```powershell
-adb devices
-adb forward tcp:18881 tcp:18880
-curl.exe -s http://127.0.0.1:18881/health
-```
-
-`/health` 返回 `contract_version=2` 与 `release_version`。再用 agent token 查询准入：
+读取 token 时不要打印到终端历史或日志：
 
 ```powershell
 $deploy = Get-Content .state/deploy.json -Raw | ConvertFrom-Json
-Invoke-RestMethod -Uri http://127.0.0.1:18881/api/status -Method Post `
-  -Headers @{ Authorization = "Bearer $($deploy.agent_token)"; "X-Mobile-Use-Contract" = "2" } `
-  -ContentType 'application/json' -Body '{}'
+$mcpToken = $deploy.mcp_token       # 手机 MCP
+$agentToken = $deploy.agent_token   # 直连 HTTP / 主机适配器内部使用
 ```
 
-`can_start=true` 才可开始普通工作；`/health` 正常、端口监听或进程存在都不是准入证明。
+如果需要生成一个自己的 MCP token（例如主机适配器）：
 
-### 4.2 直连 HTTP
+```powershell
+$rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+$bytes = New-Object byte[] 32
+$rng.GetBytes($bytes)
+$rng.Dispose()
+$hostMcpToken = ([System.BitConverter]::ToString($bytes) -replace '-', '').ToLowerInvariant()
+```
 
-所有工具使用 `POST /api/<tool>`，JSON 对象，必须携带：
+不要把生成的 token 回显到屏幕或提交到仓库。
+
+## 3. 选择哪条接入路径
+
+| 场景 | 使用路径 | 客户端需要什么 |
+| --- | --- | --- |
+| PC 上的 MCP 客户端（Claude Desktop、Operit、其他 HTTP MCP 客户端） | **默认：手机适配器** `18883/mcp` | 手机 `mcp_token` |
+| PC 上的 MCP 客户端只支持 stdio | 主机适配器（stdio） | `.state/mcp-config.json`（内含 agent token） |
+| PC 上的普通 Agent/脚本 | 直连 HTTP `18881/api/*` | `agent_token` + 契约头 |
+| PC 上想自己跑 HTTP MCP 适配器 | 主机适配器（HTTP，`18882/mcp`） | 主机配置的 `http.token` |
+| Android App / Termux / 手机内 MCP | **默认：手机适配器** `18882/mcp` | 手机 `mcp_token` |
+| chroot 内 Agent | 直连 `18880/api/*` 或手机适配器 | `agent_token` 或 `mcp_token` |
+
+默认部署已经把手机适配器装好并启动；不需要再手工构建或复制。只有选择主机适配器（stdio
+或主机 HTTP）时才需要 `build/device-mcp.exe` 和 `.state/mcp-config.json`。
+
+## 4. 路径 A：主机 MCP 客户端 → 手机适配器（推荐）
+
+### 4.1 确认部署与转发
+
+```powershell
+adb devices
+adb forward tcp:18883 tcp:18882
+curl.exe -s -o NUL -w "%{http_code}" http://127.0.0.1:18883/mcp
+```
+
+最后一条应输出 `401`：说明手机适配器在监听，且没有 bearer 时拒绝请求。`405` 只有在
+带 token 使用 `GET` 时才出现；MCP 客户端应使用 POST，不要用 GET 判断可用性。
+
+### 4.2 取 MCP token
+
+```powershell
+$mcpToken = (Get-Content .state/deploy.json -Raw | ConvertFrom-Json).mcp_token
+if (-not $mcpToken) { throw 'mcp_token is missing; redeploy with the MCP adapter enabled' }
+```
+
+不要把 `$mcpToken` 打印出来，只把它填进宿主配置或宿主的凭据存储。
+
+### 4.3 配置宿主
+
+不同 MCP 客户端的字段名不同，但值只有两个：
+
+```text
+URL:    http://127.0.0.1:18883/mcp
+Header: Authorization: Bearer <mcp_token>
+```
+
+例如通用 JSON 形状：
+
+```json
+{
+  "mcpServers": {
+    "mobile-use-vnext": {
+      "url": "http://127.0.0.1:18883/mcp",
+      "headers": {
+        "Authorization": "Bearer <mcp_token>"
+      }
+    }
+  }
+}
+```
+
+如果宿主把 HTTP MCP 配置成 `transport: "http"` + `serverUrl`/`endpoint`，填同一个 URL 和
+同一个 Authorization 头即可；具体字段以宿主文档为准。
+
+### 4.4 重启宿主并确认工具目录
+
+1. 完全退出并重启 MCP 客户端/宿主进程；
+2. 执行 `server/discover` 与 `tools/list`；
+3. 应看到固定 12 个工具：`start`、`status`、`observe`、`act`、`inspect`、`keepalive`、
+   `end`、`apps`、`open_app`、`notify`、`shell`、`diagnose`。
+
+只替换手机上的二进制或重启设备服务，不会让已连接的宿主自动刷新工具；必须重启宿主进程/
+连接。MCP 适配器本身不保存会话，重启后重新发现即可。
+
+### 4.5 Origin 限制
+
+只有浏览器/Electron 等会发送 `Origin` 的客户端才需要配置允许来源。默认手机适配器的
+`allowed_origins` 为空数组，带 `Origin` 的请求会被拒绝（403）。
+
+需要放行时，部署时显式传入精确来源：
+
+```powershell
+./scripts/deploy.ps1 -SkipBuild -McpAllowedOrigins 'http://127.0.0.1:3000'
+```
+
+不要填 `*`；比较是精确匹配。改完来源后需要重新部署/重启适配器，并重启宿主。
+
+## 5. 路径 B：主机直连 HTTP
+
+所有工具使用 `POST /api/<tool>`，必须携带：
 
 ```text
 Authorization: Bearer <agent_token>
@@ -95,227 +209,309 @@ X-Mobile-Use-Contract: 2
 Content-Type: application/json; charset=utf-8
 ```
 
-工作工具在发送前分配操作号，可用 `X-Mobile-Use-Operation: P...` 预分配；未预分配时服务
-生成。直连 HTTP 建议**始终预分配 P**：响应丢失后仍可用 `status(P)` 查询原事实；没有 P
-的服务端生成操作只能按 `status()` 恢复自身唯一活动启动 P，无法直接引用本次普通工作。
-示例：
+```powershell
+$deploy = Get-Content .state/deploy.json -Raw | ConvertFrom-Json
+$headers = @{
+    Authorization           = "Bearer $($deploy.agent_token)"
+    'X-Mobile-Use-Contract' = '2'
+}
+Invoke-RestMethod http://127.0.0.1:18881/api/status -Method Post `
+  -Headers $headers -ContentType 'application/json' -Body '{}'
+```
+
+- `can_start=true` 才可开始普通工作；`/health` 正常、端口监听或进程存在都不是准入证明。
+- 工作工具建议始终预分配 `X-Mobile-Use-Operation: P...`；响应丢失后可用 `status(P)` 查询
+  原事实。没有 P 的服务端生成操作只能按 `status()` 恢复自身唯一活动启动 P。
+- 不自动重试、不跟随重定向、不排队；同一 P 重复到达只返回原操作视图。
+- `409 device_busy` 表示已有普通工作，应串行化调用，不要并发重试。
+
+## 6. 路径 C：主机自建 MCP 适配器
+
+只有需要 stdio，或希望在主机本地监听 MCP 时才使用。手机适配器已经满足 HTTP MCP 场景时，
+不必再起第二个适配器。
+
+### 6.1 构建
 
 ```powershell
-$base = 'http://127.0.0.1:18881'
-$headers = @{
-    Authorization = "Bearer $($deploy.agent_token)"
-    'X-Mobile-Use-Contract' = '2'
-    'X-Mobile-Use-Operation' = 'Pdemo-start-1'
-}
-Invoke-RestMethod -Uri "$base/api/start" -Method Post -Headers $headers `
-  -ContentType 'application/json' -Body '{}'
+$env:GOEXPERIMENT = 'jsonv2'
+go build -o build/device-mcp.exe ./cmd/device-mcp
 ```
 
-- 不自动重试、不跟随重定向、不排队；同一 P 重复到达只返回原操作视图。
-- 传输超时且已持有 P 时，用 `POST /api/status {"reference":"P..."}` 查询原事实，不重发动作。
-- 设备同时只有一项普通工作；冲突立即 `409 device_busy`，应串行化调用而不是并发重试。
-- 普通契约不匹配返回 `409 contract_mismatch`；`/v1/control/stop` 不受该版本检查影响。
+### 6.2 创建主机适配器配置
 
-### 4.3 MCP stdio
+`.state/mcp-config.json` 是**主机适配器**的私有配置，不是手机上的 `mcp-config.json`：
 
-构造私有配置 `.state/mcp-config.json`（`0600`，不入库）。可运行
-`./scripts/verify-m5.ps1` 生成/刷新该配置，同时构建适配器并验证两种传输：
-
-```json
-{
-  "service": {
-    "base_url": "http://127.0.0.1:18881",
-    "agent_token": "<agent_token>"
-  },
-  "transport": "stdio",
-  "http": {
-    "listen": "127.0.0.1:18882",
-    "token": "<独立 MCP token>",
-    "allowed_origins": ["http://127.0.0.1:3000"]
-  }
+```powershell
+$deploy = Get-Content .state/deploy.json -Raw | ConvertFrom-Json
+$rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+$bytes = New-Object byte[] 32
+$rng.GetBytes($bytes)
+$rng.Dispose()
+$hostMcpToken = ([System.BitConverter]::ToString($bytes) -replace '-', '').ToLowerInvariant()
+$config = [ordered]@{
+    service   = [ordered]@{
+        base_url    = 'http://127.0.0.1:18881'
+        agent_token = $deploy.agent_token
+    }
+    transport = 'stdio'
+    http      = [ordered]@{
+        listen          = '127.0.0.1:18882'
+        token           = $hostMcpToken
+        allowed_origins = @()
+    }
 }
+$json = $config | ConvertTo-Json -Depth 5
+[System.IO.File]::WriteAllText(
+    (Join-Path (Get-Location) '.state/mcp-config.json'),
+    $json,
+    (New-Object System.Text.UTF8Encoding($false)))
 ```
 
-宿主只引用二进制与配置路径，不把 token 写进宿主配置文件：
+字段含义：
+
+| 字段 | 主机适配器取值 | 说明 |
+| --- | --- | --- |
+| `service.base_url` | `http://127.0.0.1:18881` | 主机经 adb forward 访问服务 |
+| `service.agent_token` | `.state/deploy.json` 的 `agent_token` | 适配器内部调用 `/api/*` |
+| `transport` | `stdio` 或 `http` | 可被 `-transport` 命令行覆盖 |
+| `http.listen` | `127.0.0.1:18882` | 仅 HTTP 模式使用；只允许回环 |
+| `http.token` | 上面生成的 `hostMcpToken` | MCP HTTP Bearer；不得等于 agent token |
+| `http.allowed_origins` | `[]` 或精确 Origin | 仅浏览器类客户端需要 |
+
+也可以用 `./scripts/verify-m5.ps1` 生成/刷新该配置并验证两种传输；注意它会重新生成
+`http.token`，之后要重新读取并更新宿主配置。
+
+### 6.3 stdio 宿主配置
 
 ```json
 {
   "mcpServers": {
     "mobile-use-vnext": {
-      "command": "E:\\Code\\Python\\mobile-use-vnext\\build\\device-mcp.exe",
+      "command": "E:/Code/Python/mobile-use-vnext/build/device-mcp.exe",
       "args": [
         "-transport", "stdio",
-        "-config", "E:\\Code\\Python\\mobile-use-vnext\\.state\\mcp-config.json"
+        "-config", "E:/Code/Python/mobile-use-vnext/.state/mcp-config.json"
       ]
     }
   }
 }
 ```
 
-不同宿主的顶层字段名可能不同（`mcpServers`/`command`/`args` 等），语义相同。启动后宿主应
-发现固定 12 个工具；升级后必须重启实际宿主进程重新 `tools/list`，不能只替换磁盘文件。
+宿主只引用二进制和配置路径，不把 token 写进宿主文件。重启宿主后应看到 12 个工具。
 
-手工运行：
-
-```powershell
-$env:GOEXPERIMENT = 'jsonv2'
-go build -o build/device-mcp.exe ./cmd/device-mcp
-./build/device-mcp.exe -transport stdio -config .state/mcp-config.json
-```
-
-stdout 只承载 MCP 协议帧，诊断写 stderr。
-
-### 4.4 MCP Streamable HTTP
+### 6.4 主机 HTTP 适配器
 
 ```powershell
 ./build/device-mcp.exe -transport http -config .state/mcp-config.json
 ```
 
-宿主配置：
+```text
+URL:    http://127.0.0.1:18882/mcp
+Header: Authorization: Bearer <hostMcpToken>
+```
+
+主机 HTTP 适配器使用主机 `18882`；手机适配器已转发到主机 `18883`，两者不冲突。不要把
+手机 `18882` 再转发到主机 `18882`，否则主机适配器无法绑定该端口。
+
+### 6.5 与手机适配器的区别
+
+| 项 | 手机适配器（默认） | 主机适配器（可选） |
+| --- | --- | --- |
+| 进程位置 | chroot `/opt/mobile-use-vnext/device-mcp` | 主机 `build/device-mcp.exe` |
+| 服务地址 | `127.0.0.1:18880` | `127.0.0.1:18881`（adb forward） |
+| HTTP 入口 | 手机 `18882/mcp`；主机转发 `18883/mcp` | 主机 `18882/mcp` |
+| Token | `.state/deploy.json` 的 `mcp_token` | `.state/mcp-config.json` 的 `http.token` |
+| stdio | Android 宿主需自行提供拉起封装 | 宿主直接拉起 `device-mcp.exe` |
+| 适用 | 主机/手机 HTTP MCP 客户端 | 只支持 stdio 的宿主，或主机本地 HTTP |
+
+## 7. 路径 D：手机内宿主
+
+### 7.1 Android 应用 / Termux（只持有 MCP token）
+
+默认手机适配器已经启动，Android 应用直接配置：
 
 ```text
 URL:    http://127.0.0.1:18882/mcp
-Header: Authorization: Bearer <http.token>
+Header: Authorization: Bearer <mcp_token>
 ```
 
-- 缺失或错误 bearer 返回 `401`。
-- 请求携带 `Origin` 时必须与 `allowed_origins` 精确匹配，否则返回 `403`。
-- 会话按请求隔离（stateless）；每次请求都重新认证，不能继承其他客户端的 MCP 会话。
-- 适配器只监听 `127.0.0.1:18882`；不要把它改成局域网地址或反向代理到公网。
+- 不需要 `agent_token`，也不需要 `control_token`；适配器在 chroot 内读取服务凭据。
+- 不需要 `adb forward`；`18882` 是手机回环。
+- Android 宿主必须允许本机明文 HTTP；`usesCleartextTraffic`/network security config
+  由宿主应用决定，服务端不提供 TLS 或公网入口。
+- 如果宿主需要 `Origin`，部署时用 `-McpAllowedOrigins` 放行精确来源并重启适配器。
 
-### 4.5 多宿主
+### 7.2 chroot 内 Agent
 
-多个宿主可以共享同一 agent 凭据，但服务只有一个设备工作位置：
-
-- 普通工作冲突立即 `409 device_busy`，不建队列；
-- 同一 P 不会被派发第二次；
-- 一个宿主的 `STOP`/`end` 会撤销设备上的原会话，即使其他宿主仍持有旧 O/P；
-- 需要多个并发 Agent 时，应由运维层串行化，不要依赖服务排队。
-
-## 5. 手机内宿主接入
-
-### 5.1 直连 HTTP
-
-手机内进程（chroot 内或同网络命名空间）直接使用：
+两种选择：
 
 ```text
-http://127.0.0.1:18880
+直连 HTTP:  http://127.0.0.1:18880/api/<tool>   + agent_token + X-Mobile-Use-Contract: 2
+MCP HTTP:   http://127.0.0.1:18882/mcp          + mcp_token
 ```
 
-不需要 `adb forward`。其余请求头、契约版本、P/恢复语义与主机接入相同。
+直连 HTTP 需要能读取 chroot `/opt/mobile-use-vnext/config.json`（root，`0600`），或由运维
+提供该 agent token 的私有副本（仅该 UID 可读）。不要把 root 配置复制到 `/sdcard`、共享
+目录或其他应用可读路径。
 
-### 5.2 凭据边界
+### 7.3 手机内 stdio
 
-服务私有配置位于 chroot `/opt/mobile-use-vnext/config.json`（`0600`，root）。手机内 Agent
-只有在能够读取该配置（例如以 root 运行于 chroot）时，才能直接取得 `agent_token`。
+手机内 stdio 需要宿主能拉起一个持有私有配置的进程。默认部署不提供这种封装；只支持
+stdio 的 Android 宿主应改用手机适配器的 HTTP 入口，或由运维自行实现拉起封装。
 
-默认部署不为 Android 第三方 App 提供 Agent 凭据下发通道；不要把 root 私有配置复制到
-`/sdcard`、共享目录或其他应用可读路径。非 root 的手机内 Agent 需要由运维显式提供该
-agent token 的私有副本（仅其 UID 可读），并接受同一 Agent 身份与单工作位置约束。
+### 7.4 生命周期与电源
 
-### 5.3 手机内 MCP 适配器
+- 默认手机适配器由部署启动，不由 `service.sh` 托管；重启手机后需要重新启动（见第 9 节）。
+- 控制 App 的前台服务与唤醒锁只保证控制同步和停止通道，不替 Agent 续租会话或延长 O。
+- Doze、锁屏与熄屏由 App 上报；服务按 `device_not_interactive`/`device_locked` 拒绝普通
+  工作，不要用第二个唤醒锁或后台白名单绕过。
 
-整组发布包含 `device-mcp` 产物，但默认部署只安装设备服务、固定制品与 `service.sh`。要在
-手机内运行 MCP 适配器：
+## 8. 手机适配器的生命周期
 
-1. 使用 linux/arm64 构建：
+部署会自动安装并启动：
 
-   ```bash
-   GOEXPERIMENT=jsonv2 GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
-     go build -trimpath -o build/device-mcp ./cmd/device-mcp
-   ```
+```text
+/opt/mobile-use-vnext/device-mcp          二进制，0755
+/opt/mobile-use-vnext/mcp-config.json     手机适配器配置，0600
+/var/lib/mobile-use-vnext/device-mcp.pid  进程号
+/var/lib/mobile-use-vnext/device-mcp.log  适配器日志（stdout/stderr）
+```
 
-2. 由运维把 `device-mcp` 放入 chroot（例如 `/opt/mobile-use-vnext/device-mcp`，`0755`），
-   并使用手机内私有配置：
+`./scripts/deploy.ps1 -SkipPhoneMcp` 只用于显式跳过手机适配器；这时部署不完整，手机内
+HTTP MCP 不可用，主机只能走直连 HTTP 或自建适配器。
 
-   ```json
-   {
-     "service": {"base_url": "http://127.0.0.1:18880", "agent_token": "<agent_token>"},
-     "transport": "stdio",
-     "http": {"listen": "127.0.0.1:18882", "token": "<独立 token>", "allowed_origins": []}
-   }
-   ```
+重启手机或升级后，如果部署脚本没有刚运行过，手工启动：
 
-3. `stdio` 由手机内宿主拉起；`http` 监听手机回环 `127.0.0.1:18882/mcp`。不要监听
-   `0.0.0.0`，也不要在 chroot 外再启动第二个同端口进程。
+```powershell
+adb shell su -c 'chroot /data/local/chroots/debian13 /bin/sh -c "nohup setsid /opt/mobile-use-vnext/device-mcp -transport http -config /opt/mobile-use-vnext/mcp-config.json >> /var/lib/mobile-use-vnext/device-mcp.log 2>&1 < /dev/null &"'
+```
 
-手机内适配器与主机适配器共用同一工具目录与投影；版本升级后同样需要重启实际进程。
+停止：
 
-### 5.4 Android 侧 MCP 宿主
+```powershell
+adb shell su -c 'pkill -f "^/opt/mobile-use-vnext/device-mcp " || true'
+```
 
-手机内 Android 应用（Termux、Operit 或其他支持 Streamable HTTP 的 MCP 客户端）不必持有
-Agent token，可以只连接手机回环上的 MCP 适配器：
+查看：
 
-1. 在 chroot 内启动 HTTP 适配器，配置
-   `service.base_url=http://127.0.0.1:18880`、`http.listen=127.0.0.1:18882`、
-   `http.token=<独立 MCP token>`；
-2. Android 宿主配置 `http://127.0.0.1:18882/mcp`，请求携带
-   `Authorization: Bearer <http.token>`；
-3. 适配器以 chroot/root 权限读取 Agent 凭据；Android 应用只持有受限的 MCP token，不接触
-   `agent_token` 或控制凭据。
+```powershell
+adb shell 'su -c "pgrep -f \"^/opt/mobile-use-vnext/device-mcp \""'
+adb shell su -c 'tail -n 50 /data/local/chroots/debian13/var/lib/mobile-use-vnext/device-mcp.log'
+```
 
-注意：
+- 同一时间只启动一个监听手机 `18882` 的进程；端口冲突会出现在适配器日志中。
+- 适配器无状态；重启后客户端重新 `tools/list`，不会丢失设备服务的会话事实。
+- 部署升级会停止旧适配器、覆盖二进制与配置并启动新适配器；宿主仍需重启以刷新工具目录。
 
-- Android 宿主必须允许本机明文 HTTP；`usesCleartextTraffic`/network security config 由宿主
-  决定，服务端不提供 TLS、反向代理或公网入口。
-- 适配器不由设备服务托管，需要 `nohup ... &` 或运维进程管理器保持运行。它不保存会话；
-  重启后宿主重新 `tools/list`，会话权威仍在设备服务。
-- 同一时间只启动一个监听 `127.0.0.1:18882` 的进程；升级后重启该进程，不能只替换磁盘文件。
-- 只支持 stdio 的 Android 宿主需要自行提供能拉起 chroot 进程且持有私有配置的封装；默认
-  部署不提供该封装，由运维显式实现并承担进程生命周期。
+## 9. 启动顺序、升级与回退
 
-### 5.5 生命周期与电源
+部署脚本的正常顺序（已自动执行）：
 
-- 长期运行的手机内 Agent 应自行管理其线程/网络生命周期，不依赖控制 App 的每秒同步。
-- 控制 App 的前台服务与部分唤醒锁只保证控制同步和停止通道；不会替 Agent 续租会话、
-  延长 O 期限或绕过锁屏门禁。
-- Doze、锁屏与熄屏由 App 上报，服务按 `device_not_interactive`/`device_locked` 拒绝普通工作；
-  不要用第二个唤醒锁或后台白名单绕过。
-- 手机内 MCP 适配器不保存会话；宿主重启后重新 `tools/list` 并从服务事实恢复。
+1. 启动设备服务并等待 `/health`；
+2. 安装并启动手机 MCP 适配器，确认 `/mcp` 无 token 返回 `401`；
+3. 启动控制 App；
+4. 建立主机转发 `18881→18880`、`18883→18882`；
+5. 等待 `can_start=true`，然后报告完成。
 
-## 6. 启动顺序与升级
+手工重启后的顺序：
 
-推荐顺序：
-
-1. 确认 chroot 与 Android 侧 ADB 可用；
-2. 启动设备服务（`/opt/mobile-use-vnext/service.sh start`）；
+1. 确认 chroot 与 Android 侧 adb 可用；
+2. `service.sh start`；
 3. 启动控制 App 前台服务；
-4. 主机建立 `adb forward tcp:18881 tcp:18880`；
-5. 检查 `/health` 与 `can_start`；
-6. 启动 MCP 适配器或 Agent；
-7. 宿主完成 `server/discover` 与 `tools/list`。
+4. 建立 `adb forward tcp:18881 tcp:18880` 与 `tcp:18883 tcp:18882`；
+5. 启动手机 MCP 适配器（第 8 节）；
+6. 检查 `/health`、`can_start` 与 `18883/mcp` 的 `401`；
+7. 重启/连接实际 MCP 客户端，重新 `tools/list`。
 
 升级后：
 
-- 服务、App、MCP 适配器与客户端共同使用新的 `contract_version`；
-- 重新建立端口转发（如已失效）；
-- 重启实际 MCP 宿主进程，重新发现工具目录；
+- 服务、App、适配器与客户端共同使用新的 `contract_version`；
+- 重新建立可能失效的转发；
+- 重启实际 MCP 宿主进程，不能只替换磁盘文件；
 - 不恢复旧会话、不重放旧操作；主屏共享需要用户重新确认。
 
-## 7. 错误与恢复映射
+回退是另一轮受控部署，不自动回放旧操作；见[发布与回退](release.md)。
+
+## 10. 配置字段速查
+
+适配器配置（手机和主机同 schema）：
+
+```json
+{
+  "service": {
+    "base_url": "http://127.0.0.1:18880",
+    "agent_token": "<agent_token>"
+  },
+  "transport": "http",
+  "http": {
+    "listen": "127.0.0.1:18882",
+    "token": "<mcp_token>",
+    "allowed_origins": []
+  }
+}
+```
+
+| 字段 | 手机适配器 | 主机适配器 | 规则 |
+| --- | --- | --- | --- |
+| `service.base_url` | `http://127.0.0.1:18880` | `http://127.0.0.1:18881` | 必须 loopback |
+| `service.agent_token` | 部署生成 | 部署生成，写入主机配置 | 必填，不打印 |
+| `transport` | `http` | `stdio` 或 `http` | 被 `-transport` 覆盖 |
+| `http.listen` | `127.0.0.1:18882` | `127.0.0.1:18882` | HTTP 模式必填，loopback |
+| `http.token` | `mcp_token` | 主机自生成 | 必填，不得等于 agent token |
+| `http.allowed_origins` | `[]` 或部署参数 | `[]` 或精确 Origin | 仅浏览器客户端需要 |
+
+配置是严格 JSON：未知成员、重复键、类型错误会被拒绝。手机适配器配置由部署生成，
+通常不需要手改；主机适配器配置由运维创建。
+
+## 11. 常见困惑
+
+**Q：`http.token` 要写进设备服务的 `config.json` 吗？**
+不需要。设备服务 `config.json` 只有 `tokens.agent` 与 `tokens.control`。`http.token` 属于
+MCP 适配器配置，是 MCP HTTP 入口的 Bearer 口令；手机适配器的值就是 `mcp_token`。
+
+**Q：手机 `/opt/mobile-use-vnext/mcp-config.json` 和主机 `.state/mcp-config.json` 是同一份吗？**
+不是。前者由部署生成，服务地址是手机 `18880`，token 是 `mcp_token`；后者是主机自建适配器
+的可选配置，服务地址是主机 `18881`，token 是主机自己的 `http.token`。两者不要混用。
+
+**Q：客户端应该连 `18882` 还是 `18883`？**
+主机 MCP 客户端连 `http://127.0.0.1:18883/mcp`（`adb forward` 到手机 `18882`）；手机内
+Android 宿主连 `http://127.0.0.1:18882/mcp`。主机自建 HTTP 适配器才使用主机 `18882`。
+
+**Q：为什么 `GET /mcp` 带 token 返回 405？**
+这是正常的：MCP Streamable HTTP 用 POST。无 token 的 `401` 用来确认适配器在监听；不要用
+GET 判断工具是否可用。
+
+**Q：轮换 token 后客户端一直 401？**
+手机路径要重新读取 `.state/deploy.json` 的 `mcp_token` 并重启客户端；主机适配器要重新读取
+`.state/mcp-config.json` 的 `http.token` 并重启适配器/客户端。旧 token 不会继续有效。
+
+## 12. 错误与恢复映射
 
 | 现象 | 含义 | 处理 |
 | --- | --- | --- |
-| `401 unauthorized` | Agent/MCP/控制凭据错误 | 核对对应身份令牌；三者不能互换 |
-| `403 forbidden` | MCP HTTP Origin 不在允许列表 | 精确加入 `allowed_origins`，不要放宽为任意来源 |
+| `/mcp` 无 token 返回 `401` | 正常：适配器在监听且要求认证 | 带 `Authorization: Bearer <mcp_token>` |
+| `/mcp` 带 token 用 GET 返回 `405` | 正常：MCP 客户端应使用 POST | 用 MCP 客户端连接，不用 GET 判断 |
+| 带 token 仍 `401` | token 填错，或用了主机/手机另一侧的 token | 手机用 `mcp_token`；主机适配器用其 `http.token` |
+| `403 forbidden` | `Origin` 不在 `allowed_origins` | 精确加入来源并重启适配器 |
+| 适配器启动即退出 | 端口被占用、配置错误或二进制不匹配 | 看 `device-mcp.log`；确认手机 `18882` 只有一个进程 |
 | `409 contract_mismatch` | 普通契约版本不一致 | 整组更新服务/App/客户端，不要只升一侧 |
 | `409 device_busy` | 已有普通工作 | 读 `blocking_operation_id`，串行化后重试 |
 | `409 observation_expired`/`target_changed` | O 过期或目标变化 | 重新 `observe`，不要重放旧动作 |
 | `503 delivery_unavailable` | 慢交付额度不足 | 等待既有结果交付后再试，不排队 |
-| `504 action_result_uncertain` | 输入已派发但结果未知 | `status(P)`/重新观察判断现状，不重放 |
+| `504 action_result_uncertain` | 输入已派发但结果未知 | `status(P)`/重新观察，不重放 |
 | `409 session_not_found`/`operation_not_found` | 引用不属于当前身份或已淘汰 | 重新建立会话，不猜测旧引用 |
 | 传输超时且持有 P | 服务事实可能已提交 | `status(P)` 查询；不重发动作 |
-| 传输超时且未持有 P | 只读查询未完成，或服务已生成 P 但客户端未知 | 只读查询可重新查询；工作调用不重发，先用 `status()` 恢复自身唯一活动启动 P/会话，或重新观察 |
+| 传输超时且未持有 P | 只读查询未完成，或服务已生成 P 但客户端未知 | 只读可重查；工作不重发，先用 `status()` 恢复启动 P/会话 |
 
 独立 STOP 不受普通契约影响；`accepted=true` 只表示停止边界已绑定，物理清理仍看
 `status.cleanup` 与 App 呈现。
 
-## 8. 最小示例
+## 13. 最小示例
 
 ```powershell
 $deploy = Get-Content .state/deploy.json -Raw | ConvertFrom-Json
 $headers = @{
-    Authorization = "Bearer $($deploy.agent_token)"
+    Authorization           = "Bearer $($deploy.agent_token)"
     'X-Mobile-Use-Contract' = '2'
 }
 $start = Invoke-RestMethod http://127.0.0.1:18881/api/start -Method Post `
@@ -327,10 +523,13 @@ Invoke-RestMethod http://127.0.0.1:18881/api/end -Method Post -Headers $headers 
   -ContentType 'application/json' -Body (@{ reference = $start.operation_id } | ConvertTo-Json)
 ```
 
-## 9. 安全边界
+## 14. 安全边界
 
-- 设备服务与 MCP HTTP 只允许回环地址；不要做端口映射、反向代理或 `adb reverse` 暴露。
-- `agent_token`、`control_token`、MCP token 不进入仓库、日志、聊天或宿主云端配置。
-- 手机内接入不改变身份模型：同一部署仍是同一 Agent 身份与同一设备工作位置。
+- 设备服务、手机适配器与主机适配器都只允许回环地址；不做端口映射、反向代理或
+  `adb reverse` 暴露。
+- `agent_token`、`control_token`、`mcp_token`/`http.token` 不进入仓库、日志、聊天或宿主
+  云端配置；主机适配器配置含 agent token，尤其要私有保存。
+- Android 应用默认只拿 MCP token，不接触 agent/control 凭据；不要为了省事把 root 配置
+  复制到共享目录。
 - 控制 App 的 STOP 与本地停止始终优先；接入方不能用配置或文案扩大授权。
 - MCP stdout 只承载协议，诊断写 stderr；不要把日志混入协议流。

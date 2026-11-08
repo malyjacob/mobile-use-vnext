@@ -84,8 +84,9 @@ GOEXPERIMENT=jsonv2 GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build ./...
 
 Go 服务、Java App 与固定 JAR 独立构建，发布包由 `scripts/build-release.ps1` 组装；
 `build/release/manifest.json` 记录源码提交、共同 `contract_version`、发行号、每个产物的
-SHA-256/大小、Android 版本与工具目录指纹。部署先用 `scripts/verify-manifest.ps1` 核验，
-再覆盖安装并保留 App 私有数据；MCP 宿主必须重启实际进程以重新发现工具。
+SHA-256/大小、Android 版本与工具目录指纹。默认部署安装并启动手机 MCP 适配器，主机自建
+适配器仍可选。部署先用 `scripts/verify-manifest.ps1` 核验，再覆盖安装并保留 App 私有数据；
+MCP 宿主必须重启实际进程以重新发现工具。
 
 ## 提交与验证记录
 

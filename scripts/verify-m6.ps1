@@ -145,7 +145,11 @@ function Invoke-Http {
     $request.Proxy = $null
     $request.KeepAlive = $false
     foreach ($name in $Headers.Keys) {
-        $request.Headers.Add([string]$name, [string]$Headers[$name])
+        if ($name -eq 'Accept') {
+            $request.Accept = [string]$Headers[$name]
+        } else {
+            $request.Headers.Add([string]$name, [string]$Headers[$name])
+        }
     }
     if ($Method -eq 'POST') {
         $payload = [System.Text.Encoding]::UTF8.GetBytes($Body)
@@ -477,6 +481,12 @@ try {
     $null = Invoke-Adb -Arguments @('forward', "tcp:$servicePort", 'tcp:18880')
     $null = Invoke-Adb -Arguments @('forward', '--remove', 'tcp:19008')
     $null = Invoke-Adb -Arguments @('forward', 'tcp:19008', 'tcp:9008')
+    $mcpToken = [string](Get-Field $deploy 'mcp_token')
+    $phoneMcpHostPort = [int](Get-Field $deploy 'phone_mcp_host_port')
+    if ($phoneMcpHostPort -lt 1) { $phoneMcpHostPort = 18883 }
+    Assert-True ($mcpToken -ne '') 'deploy state is missing mcp_token; the phone MCP adapter is part of the release'
+    $null = Invoke-Adb -Arguments @('forward', '--remove', "tcp:$phoneMcpHostPort")
+    $null = Invoke-Adb -Arguments @('forward', "tcp:$phoneMcpHostPort", 'tcp:18882')
 
     # ---------------------------------------------------------------- release identity
     $manifestPath = if ([System.IO.Path]::IsPathRooted($Manifest)) {
@@ -530,6 +540,24 @@ try {
         exit 2
     }
     Write-Output 'CHECK admissible baseline: PASS can_start=true'
+
+    # ---------------------------------------------------------------- phone MCP adapter
+    $mcpUrl = 'http://127.0.0.1:' + $phoneMcpHostPort + '/mcp'
+    $mcpNoAuth = Invoke-Http -Url $mcpUrl -Method 'GET'
+    Assert-True ($mcpNoAuth.Status -eq 401) ('phone MCP adapter did not reject an unauthenticated request: HTTP ' + $mcpNoAuth.Status)
+    $discoverBody = '{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{' +
+        '"io.modelcontextprotocol/protocolVersion":"2026-07-28",' +
+        '"io.modelcontextprotocol/clientCapabilities":{}}}}'
+    $mcpHeaders = @{
+        Authorization          = 'Bearer ' + $mcpToken
+        'MCP-Protocol-Version' = '2026-07-28'
+        'Mcp-Method'           = 'server/discover'
+        'Accept'               = 'application/json, text/event-stream'
+    }
+    $mcpResponse = Invoke-Http -Url $mcpUrl -Body $discoverBody -Headers $mcpHeaders
+    Assert-True ($mcpResponse.Status -eq 200) ('phone MCP discover returned HTTP ' + $mcpResponse.Status)
+    Assert-True ($mcpResponse.Text -match 'supportedVersions') 'phone MCP discover did not return a supported version'
+    Write-Output ('CHECK phone MCP adapter: PASS url=' + $mcpUrl + ' discover=supportedVersions')
 
     # ---------------------------------------------------------------- contract pairing
     $oldApp = New-Uuid
