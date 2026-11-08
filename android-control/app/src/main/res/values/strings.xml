@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Mobile Use 控制</string>
+    <string name="app_version">0.4.0-p3</string>
+    <string name="version_label">连接状态 · %1$s</string>
+    <string name="capability_notice">启动后台后每秒与本机服务同步控制视图。停止会先阻止本地旧命令，再独立同步服务；后台同步和通知继续运行。</string>
+
+    <string name="control_view_title">控制状态</string>
+    <string name="mode_title">操作屏幕</string>
+    <string name="mode_selection_value">已选择：%1$s</string>
+    <string name="use_primary">使用主屏（共享）</string>
+    <string name="use_virtual">使用虚拟屏</string>
+    <string name="primary_mode_detail">Agent 可观察并操作你正在使用的本机主屏。停止后主屏应用仍保留；后台重启后需重新确认共享。</string>
+    <string name="virtual_mode_detail">Agent 在独立虚拟屏幕操作。切换模式会先停止当前会话，等待新会话就绪。</string>
+    <string name="primary_confirmation_title">共享本机主屏给 Agent？</string>
+    <string name="primary_confirmation_detail">Agent 将能够观察本机主屏显示的内容，并点击、输入或操作你正在使用的应用。你和 Agent 共用同一块屏幕，操作会影响当前应用。\n\n确认后会先停止当前会话，再等待新的主屏会话。你可随时通过悬浮窗、通知或本 App 停止操作；停止不会关闭你的主屏应用。后台重启后会恢复为虚拟屏，需重新确认主屏共享。</string>
+
+    <string name="session_standby">虚拟屏 · 待命</string>
+    <string name="session_standby_detail">当前没有 Agent 会话。</string>
+
+    <string name="message_center_title">Agent 消息</string>
+    <string name="message_center_empty_button">消息中心（0）</string>
+    <string name="message_center_unavailable">消息中心骨架 · 当前控制协议不携带消息</string>
+    <string name="message_empty">当前协议不提供消息同步；Agent 的通知不会出现在这里。</string>
+    <string name="message_authorization_detail">P3 最小控制协议不包含消息、回执或已读上报。此页面只保留入口骨架；消息通知频道将在后续版本恢复。</string>
+    <string name="message_settings_button">打开通知设置</string>
+    <string name="message_center_close">关闭</string>
+
+    <string name="background_title">后台与停止</string>
+    <string name="background_running">后台运行中（离开页面 / 锁屏仍同步）</string>
+    <string name="background_stopped">后台未运行</string>
+    <string name="start_background">启动后台</string>
+    <string name="grant_notifications">授权通知</string>
+    <string name="notification_settings">通知设置</string>
+    <string name="overlay_settings">授权 / 设置悬浮窗</string>
+    <string name="stop_operation">停止操作</string>
+    <string name="display_title">屏幕状态</string>
+
+    <string name="service_title">服务连接</string>
+    <string name="connecting">正在连接…</string>
+    <string name="waiting_for_status">等待本机服务响应</string>
+    <string name="last_sync_label">上次成功同步（距现在）</string>
+    <string name="never_synced">尚未成功同步 / 当前未知</string>
+    <string name="sync_age_seconds">%1$d 秒前（每秒同步，6 秒失鲜）</string>
+    <string name="unknown_value">—</string>
+</resources>

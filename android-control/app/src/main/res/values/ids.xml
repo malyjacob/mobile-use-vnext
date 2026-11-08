@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <item name="message_center_authorization" type="id" />
+    <item name="message_center_settings" type="id" />
+    <item name="message_center_rows" type="id" />
+    <item name="message_center_empty" type="id" />
+</resources>

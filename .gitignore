@@ -1,0 +1,33 @@
+# Build output
+/build/
+/bin/
+*.exe
+*.apk
+*.idsig
+
+# Go workspace-local artifacts
+*.test
+*.out
+coverage.txt
+
+# Private runtime material (never commit device material, credentials or logs)
+.state/
+private/
+*.log
+*.pid
+*.lock
+
+# Android build output and signing material
+android-control/build/
+android-control/app/build/
+*.jks
+*.keystore
+
+# Editor/OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Probe app build output (verification only)
+android-control/build-probe/

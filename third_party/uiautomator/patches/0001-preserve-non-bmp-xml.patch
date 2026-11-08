@@ -1,0 +1,45 @@
+diff --git a/app/src/androidTest/java/com/github/uiautomator/stub/AccessibilityNodeInfoDumper.java b/app/src/androidTest/java/com/github/uiautomator/stub/AccessibilityNodeInfoDumper.java
+index e99b219..91e275c 100644
+--- a/app/src/androidTest/java/com/github/uiautomator/stub/AccessibilityNodeInfoDumper.java
++++ b/app/src/androidTest/java/com/github/uiautomator/stub/AccessibilityNodeInfoDumper.java
+@@ -239,21 +239,21 @@ class AccessibilityNodeInfoDumper {
+     private static String stripInvalidXMLChars(CharSequence cs) {
+         StringBuilder ret = new StringBuilder();
+-        char ch;
+-        for (int i = 0; i < cs.length(); i++) {
+-            ch = cs.charAt(i);
++        for (int i = 0; i < cs.length();) {
++            int codePoint = Character.codePointAt(cs, i);
+             // http://www.w3.org/TR/xml11/#charsets
+-            if ((ch >= 0x0 && ch <= 0x8)
+-                    || (ch >= 0xB && ch <= 0xC)
+-                    || (ch >= 0xE && ch <= 0x1F)
+-                    || (ch >= 0x7F && ch <= 0x84)
+-                    || (ch >= 0x86 && ch <= 0x9F)
+-                    || (ch >= 0xD800 && ch <= 0xDFFF)
+-                    || (ch >= 0xFDD0 && ch <= 0xFDDF)
+-                    || (ch >= 0xFFFE && ch <= 0xFFFF)) {
++            if ((codePoint >= 0x0 && codePoint <= 0x8)
++                    || (codePoint >= 0xB && codePoint <= 0xC)
++                    || (codePoint >= 0xE && codePoint <= 0x1F)
++                    || (codePoint >= 0x7F && codePoint <= 0x84)
++                    || (codePoint >= 0x86 && codePoint <= 0x9F)
++                    || (codePoint >= 0xD800 && codePoint <= 0xDFFF)
++                    || (codePoint >= 0xFDD0 && codePoint <= 0xFDDF)
++                    || codePoint == 0xFFFE || codePoint == 0xFFFF) {
+                 ret.append(".");
+             } else {
+-                ret.append(ch);
++                ret.appendCodePoint(codePoint);
+             }
++            i += Character.charCount(codePoint);
+         }
+         return ret.toString();
+     }
+@@ -293,4 +293,4 @@ class AccessibilityNodeInfoDumper {
+                     accessibilityWindowInfo.getDisplayId();
+         }
+     }
+-}
+\ No newline at end of file
++}
