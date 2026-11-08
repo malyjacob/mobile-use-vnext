@@ -12,22 +12,31 @@ cmd/device-service
   ├─ internal/engine     唯一业务权威（会话、O/P、工作位置、STOP、收尾、恢复）
   ├─ internal/android    ADB、u2 JSON-RPC、固定 JAR、root 显示助手
   ├─ internal/observation 公开树构造、保号、full/delta 纯算法
+  ├─ internal/imaging    图片等比缩小与单次 JPEG 编码（纯算法）
   ├─ internal/store      私有恢复账本（原子文件、单写者）
   └─ internal/eventlog   有界字段白名单日志
+
+cmd/device-mcp
+  ├─ 私有配置、stdio / Streamable HTTP 传输、认证与 Origin 门禁
+  ├─ internal/mcp        12 工具注册、schema、严格接入、结果与图片投影、取消包装
+  └─ internal/client     强类型 HTTP 客户端（发送前 P、结构化结果/错误、图片字节）
 ```
 
 依赖方向由 `cmd` 组装时固定：
 
 - 请求方向是 `httpapi → engine →（经注入的 Device 接口）android`；`engine` 同时使用
-  `observation` 的纯算法、`store` 的账本与 `eventlog` 的事件汇。反向依赖不存在：`httpapi`
-  不访问 ADB、不保存会话、不判定接纳。
-- `engine` 不导入 `internal/android`、`internal/store`；设备、账本、投影与差分都是 `cmd`
-  注入的小接口（`Device`、`Store`、`Projector`、`Differ`）。
-- `internal/device` 只放原始事实类型（`Capture`、`RawNode`、`Display`、`TextTarget` 等），
-  无 I/O、无运行状态。
-- `internal/observation` 是纯算法：输入一次 `device.Capture` 输出不可变公开树，或输入两棵树
-  输出 delta；不接触会话、账本与设备。
+  `observation` 的纯算法、`imaging` 的受控错误分类、`store` 的账本与 `eventlog` 的事件汇。
+  反向依赖不存在：`httpapi` 不访问 ADB、不保存会话、不判定接纳。
+- `engine` 不导入 `internal/android`、`internal/store`；设备、账本、投影、差分与图片编码
+  都是 `cmd` 注入的小接口（`Device`、`Store`、`Projector`、`Differ`、`ImageEncoder`）。
+- `internal/device` 只放原始事实类型（`Capture`、`ImageSource`、`RawNode`、`Display`、
+  `TextTarget` 等），无 I/O、无运行状态。
+- `internal/observation` 与 `internal/imaging` 是纯算法：前者输入一次 `device.Capture`
+  输出不可变公开树或差异，后者输入一次 `device.ImageSource` 输出一张有界 JPEG；都不接触
+  会话、账本与设备。
 - `internal/android` 只执行有界设备 I/O 并返回受控事实；不决定观察什么、操作什么。
+- `internal/mcp` 只依赖 `protocol` 与 `client`，不导入 `engine`、`android`、`store`，不因
+  同仓而绕过认证与服务状态；`internal/client` 只依赖 `protocol`。
 - `internal/store` 实现 `engine.Store`，只持久化 `engine.Ledger`。
 - `internal/eventlog` 只接收批准字段；队列有界（1024），满时丢弃并计数，不阻塞 STOP。
 
@@ -106,6 +115,23 @@ engine 的状态锁只做有限内存检查与转换：锁内不等待 ADB、u2 
 8. 在锁内重验：会话仍 `active`、`epoch` 不变、工作未被撤销、仍持有工作位置、显示 ID 与
    `generation` 未变、采集未过期；
 9. 通过后 `session.Revision++`，分配 O，发布，退休上一个 ready O，续租。
+
+### 图片附加材料
+
+`observe(image=true)` 与 `act(image=true)` 的后观察在同一次采集中增加一次目标屏源图读取：
+先确认显示身份，以运行时 SurfaceFlinger 标识读取源图，成功读到源图后再确认同一显示身份，
+然后读取层级；图片编码在树读取之后执行一次。图片与树共享同一个提交门禁：核心树失败不发布
+O，图片成功也不单独发布；核心树有效而图片失败只把本次观察标为 `partial`，不改变树与 O
+的有效性。
+
+- 图片来源必须绑定本次目标逻辑屏与运行时标识；不读取主屏代替，不跨屏跟随。
+- 源图尺寸必须与目标显示几何一致；只做一次等比缩小（不放大）与一次 JPEG 编码，输出
+  媒体类型固定 `image/jpeg`。
+- 图片读取开始与树采集开始的跨度受固定预算约束；超跨度、编码失败或超字节预算只报
+  `image_*` 错误，不重试、不换质量、不改判主动作。
+- 附加图片时 `actionable_until` 从两者更早的实际读取起点计算，编码或交付时间不能延长。
+- 图片与树都不进入账本；图片字节不参与 full/delta 编码与比例判断。
+- 图片只作为本次结果的附加材料交付，不保留历史图片，也不提供图片补取工具。
 
 full/delta 的选择（`useDelta`）：
 
@@ -244,7 +270,8 @@ delta 的五类块：`set`（逐字段完整新值，显式保留 `false`/`0`/`"
 | 层 | 字段 | 含义 |
 | --- | --- | --- |
 | 动作执行 | `outcome` | `executed` / `not_executed` / `uncertain`；只描述本次输入是否已派发并有完成证据 |
-| 观察 | `observation.status` | `complete` / `failed`；后观察失败不改写已确认的 `executed` |
+| 观察 | `observation.status` | `complete` / `partial` / `failed`；后观察失败不改写已确认的 `executed` |
+| 图片 | `observation.image` | 本次附图的元数据或受控错误；图片失败不改写核心树与主动作 |
 | 会话 | `session.state` | `starting` / `active` / `ended` |
 | 物理收尾 | `cleanup.*` | 显示/任务/执行链是否确认释放 |
 

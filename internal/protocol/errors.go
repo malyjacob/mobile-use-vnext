@@ -147,6 +147,14 @@ const (
 	CodeRootUnavailable         = "root_unavailable"
 	CodeDeliveryUnavailable     = "delivery_unavailable"
 	CodeNotificationUnavailable = "notification_unavailable"
+
+	// Observation image stage codes. They describe the additional visual
+	// material of one acquisition; they never replace a confirmed core tree or
+	// the main action outcome.
+	CodeImageCapture = "image_capture_failed"
+	CodeImageEncode  = "image_encode_failed"
+	CodeImageTooLarge = "image_too_large"
+	CodeImageStale    = "image_stale"
 )
 
 // Err is a sentinel used by the engine to signal that the work position is
@@ -178,7 +186,8 @@ func Status(code string) int {
 		return http.StatusConflict
 	case CodeDeviceUnavailable, CodeDisplayCreate, CodeHierarchyFailed,
 		CodeTreeTooLarge, CodeAppLaunchFailed, CodeAppListUnavailable,
-		CodeShellStartFailed, CodeShellOutput, CodeDeliveryUnavailable:
+		CodeShellStartFailed, CodeShellOutput, CodeDeliveryUnavailable,
+		CodeImageCapture, CodeImageEncode, CodeImageTooLarge, CodeImageStale:
 		return http.StatusServiceUnavailable
 	case CodeActionUnknown, CodeAppLaunchUnknown, CodeShellUnknown:
 		return http.StatusGatewayTimeout

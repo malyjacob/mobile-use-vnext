@@ -50,6 +50,10 @@ type fakeDevice struct {
 	recentIDs        map[int]bool
 	recentKnown      bool
 	foreground       *device.Foreground
+	imageSource      *device.ImageSource
+	imageCalls       int
+	imageErr         error
+	imageSFID        uint64
 	shell            fakeShellHooks
 }
 
@@ -70,6 +74,19 @@ func (f *fakeDevice) ProbeDisplay(_ context.Context, id int) (device.DisplayStat
 		return device.DisplayState{Exists: true, SFID: 1}, nil
 	}
 	return device.DisplayState{Exists: f.displayExists, SFID: f.sfid}, nil
+}
+func (f *fakeDevice) CaptureImage(_ context.Context, sfid uint64) (device.ImageSource, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.imageCalls++
+	f.imageSFID = sfid
+	if f.imageErr != nil {
+		return device.ImageSource{}, f.imageErr
+	}
+	if f.imageSource != nil {
+		return *f.imageSource, nil
+	}
+	return device.ImageSource{}, errors.New("no image source configured")
 }
 func (f *fakeDevice) Foreground(_ context.Context, displayID int) (device.Foreground, error) {
 	f.mu.Lock()

@@ -18,6 +18,7 @@ const (
 	deliveryDeadline  = 15 * time.Second
 
 	deliveryReserveTree  = 256 << 10
+	deliveryReserveImage = 1 << 20 // tree + one bounded base64 image carrier
 	deliveryReserveShell = 384 << 10
 	deliveryReserveApps  = 64 << 10
 	deliveryReserveDiag  = 32 << 10

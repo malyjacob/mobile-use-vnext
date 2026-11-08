@@ -1,6 +1,6 @@
 param(
     [string]$Output = 'build',
-    [string]$Version = '0.2.0-m4'
+    [string]$Version = '0.3.0'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -23,17 +23,21 @@ try {
     $env:GOARCH = 'arm64'
     Push-Location $repository
     try {
-        $target = Join-Path $outputDirectory 'device-service'
-        & go build -trimpath -buildvcs=false `
-            -ldflags "-s -w -X github.com/malyjacob/mobile-use-vnext/internal/protocol.ReleaseVersion=$Version" `
-            -o $target ./cmd/device-service
-        if ($LASTEXITCODE -ne 0) {
-            throw "go build exited with code $LASTEXITCODE"
+        foreach ($target in @(
+                @{ Name = 'device-service'; Package = './cmd/device-service' },
+                @{ Name = 'device-mcp'; Package = './cmd/device-mcp' })) {
+            $path = Join-Path $outputDirectory $target.Name
+            & go build -trimpath -buildvcs=false `
+                -ldflags "-s -w -X github.com/malyjacob/mobile-use-vnext/internal/protocol.ReleaseVersion=$Version" `
+                -o $path $target.Package
+            if ($LASTEXITCODE -ne 0) {
+                throw "go build exited with code $LASTEXITCODE for $($target.Package)"
+            }
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()
+            Write-Output "$($target.Name): $path"
+            Write-Output "  sha256: $hash"
         }
-        $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $target).Hash.ToLowerInvariant()
-        Write-Output "device-service: $target"
         Write-Output "release version: $Version"
-        Write-Output "sha256: $hash"
     } finally {
         Pop-Location
     }

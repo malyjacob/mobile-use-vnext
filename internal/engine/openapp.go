@@ -419,7 +419,7 @@ func (e *Engine) finishOpenAppSuccess(work *workState, op *operationState, sessi
 		e.addSessionIfEnded(result)
 		return result, nil
 	}
-	public, _, postErr := e.captureAndPublish(work.Ctx, work, current, true, "open_app")
+	public, _, postErr := e.captureAndPublish(work.Ctx, work, current, true, false, "open_app")
 	if postErr != nil {
 		result.Observation = &protocol.Observation{
 			Status: "failed", Missing: []string{"tree"}, Error: postErr.Public(),

@@ -644,7 +644,7 @@ func (e *Engine) finishShellResult(op *operationState, work *workState, result *
 		e.addShellSession(op, result)
 		return result
 	}
-	public, _, postErr := e.captureAndPublish(work.Ctx, work, session, true, "shell")
+	public, _, postErr := e.captureAndPublish(work.Ctx, work, session, true, false, "shell")
 	if postErr != nil {
 		result.Observation = &protocol.Observation{
 			Status: "failed", Missing: []string{"tree"}, Error: postErr.Public(),

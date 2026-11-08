@@ -14,6 +14,7 @@ import (
 	"github.com/malyjacob/mobile-use-vnext/internal/engine"
 	"github.com/malyjacob/mobile-use-vnext/internal/eventlog"
 	"github.com/malyjacob/mobile-use-vnext/internal/httpapi"
+	"github.com/malyjacob/mobile-use-vnext/internal/imaging"
 	"github.com/malyjacob/mobile-use-vnext/internal/observation"
 	"github.com/malyjacob/mobile-use-vnext/internal/protocol"
 	"github.com/malyjacob/mobile-use-vnext/internal/store"
@@ -72,7 +73,8 @@ func run() int {
 	engineConfig.ControlPackage = cfg.ControlPackage
 	eng := engine.New(engineConfig, logger,
 		deviceAdapter, ledger,
-		&observationProjector{builder: observation.NewBuilder()}, treeDiffer{})
+		&observationProjector{builder: observation.NewBuilder()}, treeDiffer{},
+		engine.WithImageEncoder(imageEncoder{}))
 
 	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
@@ -177,4 +179,16 @@ type treeDiffer struct{}
 
 func (treeDiffer) Diff(baseID string, base, current *protocol.Tree) (*protocol.Delta, error) {
 	return observation.Diff(baseID, base, current)
+}
+
+// imageEncoder adapts the pure image post-processing package to the engine's
+// small consumer interface. The engine decides when to call it and what the
+// result means; the adapter only encodes one bounded output.
+type imageEncoder struct{}
+
+func (imageEncoder) Encode(source device.ImageSource, display device.Display,
+	maxLongSide, quality, maxBytes int) (*protocol.ImageMeta, []byte, error) {
+	return imaging.Encode(source, display, imaging.Policy{
+		MaxLongSide: maxLongSide, Quality: quality, MaxBytes: maxBytes,
+	})
 }

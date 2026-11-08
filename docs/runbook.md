@@ -22,7 +22,8 @@
 | 受管执行临时资源 | `/data/local/tmp/mobile-use-shell-runner.sh`（固定脚本）与 `/data/local/tmp/mobile-use-shell/<run-id>/`（单次运行目录，确认结束后移除） |
 
 服务进程在 chroot 内运行，ADB/u2 通过 Android 侧 `adb`/`app_process` 工作；控制 App 运行在
-Android 侧，只与服务通信。Windows 主机只负责构建与下发，不参与运行时状态。
+Android 侧，只与服务通信。Windows 主机只负责构建与下发，不参与设备服务运行时状态；MCP
+适配进程按部署选择运行在宿主或设备侧，只通过服务的 loopback HTTP 入口工作。
 
 受管 shell 的命令文件、start/done 元数据与有界输出位于单次运行目录；命令正文与输出不写
 服务日志、不写恢复账本。运行目录残留或进程身份无法核验时，保持恢复屏障并人工核验，
@@ -53,7 +54,7 @@ cd E:\Code\Python\mobile-use-vnext
 
 `deploy.ps1` 的实际动作：
 
-1. 校验在线设备与必需产物；构建 Go 服务与控制 App（未 `-SkipBuild` 时）；
+1. 校验在线设备与必需产物；构建 Go 服务、MCP 适配与控制 App（未 `-SkipBuild` 时）；
 2. 读取或生成 `.state/deploy.json`，写 `.state/config.json`、`.state/connection.json`；
 3. 尽力停止旧 Python 服务、旧包 `com.mobileuse.control` 与现有 Go 服务；
 4. 推送到 `/data/local/tmp/mobile-use-vnext-deploy`，再 `su` 复制进 chroot，设置权限；
@@ -180,5 +181,52 @@ adb -s 127.0.0.1:5555 shell su -c 'tail -n 100 /data/data/com.mobileuse.vnext/fi
   App 当作清理完成。
 - 不在虚拟屏上显示控制 App 界面；采集发现控制包可见节点会直接失败。
 - 不把令牌、节点树、输入正文、截图、原始 `dumpsys`/logcat 输出贴进仓库或工单。
-- 服务只提供 [接口契约](interface.md) 列出的端点；图片与 MCP 不由本服务提供，
-  不要用 ADB 手工命令伪造为服务能力。
+- 服务只提供 [接口契约](interface.md) 列出的端点；图片通过 `observe`/`act` 的 `image=true`
+  取得。MCP 由独立 `device-mcp` 进程提供，不并入设备服务的端口。
+
+## 10. MCP 入口
+
+`cmd/device-mcp` 是独立的 MCP 适配进程，可用 stdio 或 Streamable HTTP 运行；它通过
+`internal/client` 访问服务的 `/api/<tool>`，不接触设备或账本。工具目录、schema、结果与
+取消语义见 [MCP 入口](mcp.md)；客户端 API 见 [Go 客户端](client.md)。
+
+构建（Windows 主机上的 stdio/HTTP 验证用宿主二进制；`scripts/build.ps1` 另构建
+linux/arm64 的 `device-mcp`）：
+
+```powershell
+$env:GOEXPERIMENT = 'jsonv2'
+go build -o build/device-mcp.exe ./cmd/device-mcp
+```
+
+私有配置 `.state/mcp-config.json`（0600，不入库；`agent_token` 只能来自部署机私有材料）：
+
+```json
+{
+  "service": {"base_url": "http://127.0.0.1:18881", "agent_token": "<agent-token>"},
+  "transport": "stdio",
+  "http": {
+    "listen": "127.0.0.1:18882",
+    "token": "<mcp-token>",
+    "allowed_origins": []
+  }
+}
+```
+
+`agent_token` 与 `http.token` 必须不同；`base_url` 与 `http.listen` 必须是 loopback。
+stdout 只承载 MCP 协议帧，诊断写 stderr。
+
+```powershell
+# stdio：由 MCP 宿主拉起的子进程
+./build/device-mcp.exe -transport stdio -config .state/mcp-config.json
+
+# Streamable HTTP：独立进程，宿主以 bearer 认证连接
+./build/device-mcp.exe -transport http -config .state/mcp-config.json
+```
+
+HTTP 入口的每个请求都需要 `Authorization: Bearer <mcp-token>`；携带 `Origin` 时必须命中
+`allowed_origins`。缺失/错误令牌返回 `401`，不允许的 Origin 返回 `403`。MCP 会话按请求
+隔离；协议版本锁定 `2026-07-28`，客户端使用更低版本时拒绝。
+
+取消与漏收：stdio 的 `notifications/cancelled` 与 HTTP 的请求 SSE 流关闭都映射为本次调用
+取消；有本次 P 时适配进程发起有界 `end(P)`，只读工具仅取消读取。连接断开或 `end` 发出都
+不等于手机动作已撤回或原执行链已结束；恢复仍按 `status(P)`/`status()` 与收尾事实。

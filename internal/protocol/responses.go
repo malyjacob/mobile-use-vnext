@@ -73,7 +73,9 @@ func (f Foreground) MarshalJSONTo(enc *jsontext.Encoder) error {
 }
 
 // ImageMeta is the observation image metadata. The bytes travel in the
-// transport (HTTP image block / MCP ImageContent), never inside the tree text.
+// transport (the HTTP/SDK base64 carrier / MCP ImageContent), never inside the
+// tree text. Base64 is set only by the HTTP boundary and is removed by the MCP
+// adapter before it renders text or structured content.
 type ImageMeta struct {
 	CapturedAt string
 	Width      int
@@ -82,6 +84,7 @@ type ImageMeta struct {
 	ReadOnly   bool
 	Screen     *Screen
 	Error      *Error
+	Base64     string
 }
 
 // MarshalJSONTo writes image metadata.
@@ -140,6 +143,16 @@ func (m ImageMeta) MarshalJSONTo(enc *jsontext.Encoder) error {
 			return err
 		}
 		if err := MarshalJSONTo(enc, m.Error); err != nil {
+			return err
+		}
+	}
+	if m.Base64 != "" {
+		// Transport carrier only: the encoded image bytes with the MIME type
+		// above. MCP projects them into an ImageContent instead.
+		if err := writeName(enc, "base64"); err != nil {
+			return err
+		}
+		if err := writeString(enc, m.Base64); err != nil {
 			return err
 		}
 	}

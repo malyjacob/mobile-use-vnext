@@ -131,14 +131,17 @@ func TestTaskListUsesCurrentTasks(t *testing.T) {
 	}
 }
 
-func TestScreenshotReturnsPNG(t *testing.T) {
+func TestCaptureImageReturnsPNGWithReadStart(t *testing.T) {
 	d := newStubDevice(t, "screenshot")
-	raw, err := d.Screenshot(t.Context(), 4630946540531149187)
+	raw, err := d.CaptureImage(t.Context(), 4630946540531149187)
 	if err != nil {
-		t.Fatalf("Screenshot: %v", err)
+		t.Fatalf("CaptureImage: %v", err)
 	}
-	if !strings.HasPrefix(string(raw), "\x89PNG\r\n\x1a\n") {
-		t.Fatalf("not a PNG: %q", raw)
+	if !strings.HasPrefix(string(raw.Data), "\x89PNG\r\n\x1a\n") {
+		t.Fatalf("not a PNG: %q", raw.Data)
+	}
+	if raw.CapturedAt.IsZero() {
+		t.Fatal("CaptureImage did not record the source read start")
 	}
 }
 

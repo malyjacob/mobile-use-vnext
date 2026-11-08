@@ -83,6 +83,13 @@ type Config struct {
 	ShellConfirmTimeout time.Duration // 5s termination/confirmation budget
 	ShellStartTimeout   time.Duration // 3s managed start evidence budget
 	ShellOutputBytes    int           // 64 KiB retained output prefix
+
+	// Image policy. The image is additional material of one acquisition, so
+	// these are fixed service budgets, never per-call options.
+	ImageMaxLongSide int           // longest output edge in pixels (never upscaled)
+	ImageQuality     int           // JPEG quality for the single output encode
+	MaxImageBytes    int           // encoded image byte budget
+	ImageMaxSpan     time.Duration // allowed image-read start to tree-read start span
 }
 
 // DefaultConfig returns the first-version policy values.
@@ -110,6 +117,10 @@ func DefaultConfig(instanceID, agentName string) Config {
 		ShellConfirmTimeout: 5 * time.Second,
 		ShellStartTimeout:   3 * time.Second,
 		ShellOutputBytes:    65536,
+		ImageMaxLongSide:    1200,
+		ImageQuality:        80,
+		MaxImageBytes:       512 * 1024,
+		ImageMaxSpan:        3 * time.Second,
 	}
 }
 
@@ -122,6 +133,10 @@ type Device interface {
 	LogicalSize(ctx context.Context) (width, height, density int, err error)
 	ProbeDisplay(ctx context.Context, displayID int) (device.DisplayState, error)
 	Capture(ctx context.Context, display device.Display) (device.Capture, error)
+	// CaptureImage reads one raw source image bound to the current target
+	// display surface. The engine decides whether to attach, discard or report
+	// it; the adapter never encodes or publishes it.
+	CaptureImage(ctx context.Context, sfid uint64) (device.ImageSource, error)
 	Foreground(ctx context.Context, displayID int) (device.Foreground, error)
 	TaskList(ctx context.Context) ([]device.Task, error)
 	Tap(ctx context.Context, displayID, x, y int) error
@@ -174,6 +189,23 @@ type Differ interface {
 	Diff(baseID string, base, current *protocol.Tree) (*protocol.Delta, error)
 }
 
+// ImageEncoder turns one source image into the single bounded output image.
+// It is a pure algorithm: it performs no device I/O and publishes nothing. The
+// returned metadata carries the actual output size, MIME type and source read
+// start; the engine alone decides whether the image belongs to an observation.
+type ImageEncoder interface {
+	Encode(source device.ImageSource, display device.Display, maxLongSide, quality, maxBytes int) (*protocol.ImageMeta, []byte, error)
+}
+
+// Option customizes engine capabilities that are not part of every test.
+type Option func(*Engine)
+
+// WithImageEncoder supplies the pure image encoder used by observe/act when
+// the caller asked for an image.
+func WithImageEncoder(enc ImageEncoder) Option {
+	return func(e *Engine) { e.imaging = enc }
+}
+
 // Engine is the single authority. All exported methods are safe for concurrent
 // use; device I/O always happens outside the state lock.
 type Engine struct {
@@ -183,6 +215,7 @@ type Engine struct {
 	store     Store
 	projector Projector
 	differ    Differ
+	imaging   ImageEncoder
 
 	mu        sync.Mutex
 	persistMu sync.Mutex // serializes snapshot + Save, never held with state I/O
@@ -387,7 +420,7 @@ type cleanupState struct {
 }
 
 // New constructs an engine with the real monotonic clock.
-func New(cfg Config, log *eventlog.Logger, dev Device, st Store, projector Projector, differ Differ) *Engine {
+func New(cfg Config, log *eventlog.Logger, dev Device, st Store, projector Projector, differ Differ, opts ...Option) *Engine {
 	e := &Engine{
 		cfg:            cfg,
 		log:            log,
@@ -403,6 +436,11 @@ func New(cfg Config, log *eventlog.Logger, dev Device, st Store, projector Proje
 		observations:   map[string]*observationState{},
 		operations:     map[string]*operationState{},
 		tickerDone:     make(chan struct{}),
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(e)
+		}
 	}
 	return e
 }

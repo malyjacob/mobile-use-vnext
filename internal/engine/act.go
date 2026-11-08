@@ -12,9 +12,6 @@ import (
 // Static rejection happens before claiming; after claiming the old observation
 // is never returned to ready, even when no input was dispatched.
 func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequest) (*protocol.Result, *protocol.APIError) {
-	if req.Image {
-		return nil, protocol.NewError(501, protocol.CodeUnsupported, "本阶段尚未实现图片交付")
-	}
 	op, duplicate, apiErr := e.registerOperation(p, agent, "act")
 	if apiErr != nil {
 		return nil, apiErr
@@ -96,12 +93,18 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 		e.addSessionIfEnded(result)
 		return result, nil
 	}
-	public, _, postErr := e.captureAndPublish(work.Ctx, work, session, false, "act")
+	public, _, postErr := e.captureAndPublish(work.Ctx, work, session, false, req.Image, "act")
 	result := newResult(op)
 	result.Outcome = OutcomeExecuted
 	if postErr != nil {
-		result.Observation = &protocol.Observation{
-			Status: "failed", Missing: []string{"tree"}, Error: postErr.Public(),
+		// The action outcome stays executed; the post observation only reports
+		// the failed tree, or read-only image material of that failed tree.
+		if public != nil {
+			result.Observation = public
+		} else {
+			result.Observation = &protocol.Observation{
+				Status: "failed", Missing: []string{"tree"}, Error: postErr.Public(),
+			}
 		}
 		result.Next = "observe"
 		e.finishOperation(op, OutcomeExecuted, "post_observation_failed", nil)

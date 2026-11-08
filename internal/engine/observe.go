@@ -19,9 +19,6 @@ type observeTarget struct {
 // never creates a session, never changes ownership and never confirms another
 // caller's baseline.
 func (e *Engine) Observe(ctx context.Context, agent, p string, req *protocol.ObserveRequest) (*protocol.Result, *protocol.APIError) {
-	if req.Image {
-		return nil, protocol.NewError(501, protocol.CodeUnsupported, "本阶段尚未实现图片交付")
-	}
 	op, duplicate, apiErr := e.registerOperation(p, agent, "observe")
 	if apiErr != nil {
 		return nil, apiErr
@@ -67,11 +64,18 @@ func (e *Engine) Observe(ctx context.Context, agent, p string, req *protocol.Obs
 	}
 
 	e.setOperationPhase(op, "capture")
-	public, _, captureErr := e.captureAndPublish(work.Ctx, work, target.session, target.forceFull || req.Full, "observe")
+	public, _, captureErr := e.captureAndPublish(work.Ctx, work, target.session,
+		target.forceFull || req.Full, req.Image, "observe")
 	result := newResult(op)
 	if captureErr != nil {
-		result.Observation = &protocol.Observation{
-			Status: "failed", Missing: []string{"tree"}, Error: captureErr.Public(),
+		// The acquisition may still return read-only image material of its own
+		// failed tree; never replace that with a synthetic shape.
+		if public != nil {
+			result.Observation = public
+		} else {
+			result.Observation = &protocol.Observation{
+				Status: "failed", Missing: []string{"tree"}, Error: captureErr.Public(),
+			}
 		}
 		e.finishOperation(op, "", "failed", captureErr)
 		e.mu.Lock()
@@ -79,6 +83,8 @@ func (e *Engine) Observe(ctx context.Context, agent, p string, req *protocol.Obs
 			result.IncludeSession = true
 			result.Session = e.sessionViewLocked(e.session)
 			result.Next = "status"
+		} else {
+			result.Next = "observe"
 		}
 		e.mu.Unlock()
 		return result, nil

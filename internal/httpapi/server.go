@@ -214,13 +214,23 @@ func (s *Server) observe(w http.ResponseWriter, r *http.Request, p string) {
 		writeAPIError(w, apiErr)
 		return
 	}
-	release, ok := s.delivery.acquire(deliveryReserveTree)
-	if !ok {
-		writeAPIError(w, protocol.NewError(503, protocol.CodeDeliveryUnavailable,
-			"结果交付容量不足，请在当前结果交付后再试"))
-		return
+	if req.Image {
+		release, ok := s.delivery.acquire(deliveryReserveImage)
+		if !ok {
+			writeAPIError(w, protocol.NewError(503, protocol.CodeDeliveryUnavailable,
+				"结果交付容量不足，请在当前结果交付后再试"))
+			return
+		}
+		defer release()
+	} else {
+		release, ok := s.delivery.acquire(deliveryReserveTree)
+		if !ok {
+			writeAPIError(w, protocol.NewError(503, protocol.CodeDeliveryUnavailable,
+				"结果交付容量不足，请在当前结果交付后再试"))
+			return
+		}
+		defer release()
 	}
-	defer release()
 	result, apiErr := s.engine.Observe(r.Context(), s.cfg.AgentName, p, req)
 	s.finish(w, result, apiErr)
 }
@@ -235,7 +245,11 @@ func (s *Server) act(w http.ResponseWriter, r *http.Request, p string) {
 		writeAPIError(w, apiErr)
 		return
 	}
-	release, ok := s.delivery.acquire(deliveryReserveTree)
+	reserve := int64(deliveryReserveTree)
+	if req.Image {
+		reserve = deliveryReserveImage
+	}
+	release, ok := s.delivery.acquire(reserve)
 	if !ok {
 		writeAPIError(w, protocol.NewError(503, protocol.CodeDeliveryUnavailable,
 			"结果交付容量不足，请在当前结果交付后再试"))
@@ -447,7 +461,12 @@ func (s *Server) finish(w http.ResponseWriter, result *protocol.Result, apiErr *
 		if status == http.StatusInternalServerError {
 			status = http.StatusConflict
 		}
-	} else if result.Observation != nil && result.Observation.Status == "failed" {
+	} else if result.Observation != nil &&
+		(result.Observation.Status == "failed" ||
+			(result.Observation.Status == "partial" && result.Observation.ID == "")) {
+		// A valid core observation (with an O) stays 200 even when only the
+		// requested image is missing. Read-only image material without a new O
+		// is not a usable observation, so the acquisition failed.
 		status = http.StatusServiceUnavailable
 	}
 	writeJSONDelivery(w, status, result)

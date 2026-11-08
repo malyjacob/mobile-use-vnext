@@ -155,6 +155,14 @@ type DisplayState struct {
 	SFID   uint64
 }
 
+// ImageSource is one raw screenshot read bound to a SurfaceFlinger display id.
+// CapturedAt is the start of the device read, not the encode or delivery time;
+// the bytes are the source image and are never published as a second fact set.
+type ImageSource struct {
+	Data       []byte
+	CapturedAt time.Time
+}
+
 // InputKind is one dispatched input primitive.
 type InputKind string
 

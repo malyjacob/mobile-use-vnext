@@ -525,28 +525,41 @@ func parseWxH(text string) (int, int, bool) {
 	return w, h, true
 }
 
-// Screenshot reads raw PNG bytes for one SurfaceFlinger display id. The layer
-// id is an unsigned 64-bit value (it exceeds int64 on this device).
-func (d *Device) Screenshot(ctx context.Context, sfid uint64) ([]byte, error) {
+// maxScreenshotBytes bounds one source screenshot read. The encoded output is
+// separately bounded; this cap only protects the process from a runaway write.
+const maxScreenshotBytes = 24 << 20
+
+// CaptureImage reads raw PNG bytes for one SurfaceFlinger display id. The layer
+// id is an unsigned 64-bit value (it exceeds int64 on this device). CapturedAt
+// is the start of the device read, so later encode/delivery work cannot make
+// the source look newer than it is.
+func (d *Device) CaptureImage(ctx context.Context, sfid uint64) (device.ImageSource, error) {
 	if d == nil {
-		return nil, errNilDevice
+		return device.ImageSource{}, errNilDevice
+	}
+	if sfid == 0 {
+		return device.ImageSource{}, newErr(CodeInvalidArgs, "invalid display surface id", nil)
 	}
 	exe, err := d.exePath()
 	if err != nil {
-		return nil, err
+		return device.ImageSource{}, err
 	}
+	started := time.Now()
 	result, err := d.run(ctx, d.screenshotTimeout(), exe,
 		d.adbArgs("exec-out", "screencap", "-p", "-d", fmt.Sprintf("%d", sfid))...)
 	if err != nil {
-		return nil, err
+		return device.ImageSource{}, err
 	}
 	if result.ExitCode != 0 {
-		return nil, exitDetail(result.ExitCode)
+		return device.ImageSource{}, exitDetail(result.ExitCode)
+	}
+	if len(result.Stdout) > maxScreenshotBytes {
+		return device.ImageSource{}, newErr(CodeOutputTooBig, "the screenshot exceeds the source limit", nil)
 	}
 	if !bytes.HasPrefix(result.Stdout, []byte("\x89PNG\r\n\x1a\n")) {
-		return nil, newErr(CodeAvailability, "the screenshot is not a PNG image", nil)
+		return device.ImageSource{}, newErr(CodeAvailability, "the screenshot is not a PNG image", nil)
 	}
-	return result.Stdout, nil
+	return device.ImageSource{Data: result.Stdout, CapturedAt: started}, nil
 }
 
 func (d *Device) screenshotTimeout() time.Duration {
@@ -814,7 +827,10 @@ func (d *Device) Capture(ctx context.Context, display device.Display) (device.Ca
 		Nodes:      stampCapture(nodes),
 		Root:       root,
 		Foreground: foreground,
-		CapturedAt: time.Now(),
+		// CapturedAt is the start of the hierarchy read (T), not the end of
+		// the dumpsys/foreground work, so freshness and image pairing use the
+		// earliest actual source time.
+		CapturedAt: started,
 	}
 	d.logEvent(eventlog.Debug, "android.capture.done",
 		eventlog.Int("display_id", display.ID),

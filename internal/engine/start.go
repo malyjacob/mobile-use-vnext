@@ -208,7 +208,7 @@ func (e *Engine) Start(ctx context.Context, agent, p string) (*protocol.Result, 
 	persistCancel()
 
 	e.setOperationPhase(op, "first_observation")
-	public, _, obsErr := e.captureAndPublish(work.Ctx, work, session, true, "start")
+	public, _, obsErr := e.captureAndPublish(work.Ctx, work, session, true, false, "start")
 	result := newResult(op)
 	result.Outcome = OutcomeExecuted
 	e.mu.Lock()

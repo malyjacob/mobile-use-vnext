@@ -178,3 +178,58 @@
 - **选择**：固定 `third_party/android-applist/applist.dex`（`app_process`，shell 身份，
   `package<TAB>base64(label)`），带 SHA-256、源码、构建脚本与部署接线；服务按固定哈希懒推送。
 - **影响**：标签只进入 `apps.items[].name`，不写日志；换制品必须同时更新哈希、源码与说明。
+
+## D20 图片作为单次观察的附加材料
+
+- **背景**：`observe`/`act` 的 `image=true` 原先返回 `501`；MCP 要求 `ImageContent`。
+  设计规定图片与树同次采集、同次提交，但允许分层失败，且图片不能成为第二份页面事实或
+  独立图片身份协议。
+- **选择**：新增纯算法包 `internal/imaging`（PNG 解码、等比缩小一次、JPEG 编码一次）。
+  `engine` 的同一采集改为：确认显示身份 → 以运行时 SFID 读取源图 → 再确认同一显示身份 →
+  读取层级 → 编码图片 → 原提交门禁。核心树失败不发布 O；核心树有效而图片失败发布
+  `status=partial`、`missing=["image"]` 的有效 O；图片成功而树失败只给
+  `read_only=true` 的只读图。附加图片时 `actionable_until` 取图片读取开始与树采集开始中
+  更早者。图片预算固定为最长边 1200px、JPEG 质量 80、输出 ≤512 KiB、图树起点跨度 ≤3s、
+  源图 ≤24 MiB/16M 像素；不开放每次调用的质量、尺寸、格式或重试参数。
+- **载体**：HTTP 以 `observation.image.base64` 携带本次图片字节（同一 `observation.image`
+  元数据），客户端解码后清空该成员；MCP 投影为 `ImageContent`，文本与结构化内容不再含
+  base64。图片错误只出现在 `observation.image.error`，不改写主动作或核心树。
+- **影响**：`internal/engine` 只依赖注入的 `ImageEncoder` 小接口；`cmd/device-service`
+  注入 `internal/imaging`；图片字节不进入树、delta、账本、历史或日志；历史图片不可补取。
+
+## D21 MCP 双入口的共用接入层
+
+- **背景**：需要 stdio 与 Streamable HTTP 两个入口，但只能有一套工具注册、schema、严格
+  接入与结果投影；MCP 不能绕过服务认证或保存第二份执行权威。
+- **选择**：`internal/mcp` 使用 `github.com/modelcontextprotocol/go-sdk v1.8.0`，锁定
+  MCP `2026-07-28`，注册固定 12 工具的低层 handler（显式 JSON Schema +
+  `additionalProperties=false`）。参数由 `internal/protocol` 的严格解码器接入；结果投影
+  为可读 `key=value` 正文、去 base64 的规范 `Result` 结构化内容与可选 `ImageContent`。
+  `isError` 按“主动作是否达成”分工具投影：`executed` 不因后树/图片/清理失败改判为错误；
+  `not_executed`/`uncertain` 为真；`status`/`diagnose` 的正常查询事实为假；无有效 O 的
+  `observe` 与不可用 `inspect` 为真。
+- **取消**：`internal/mcp` 在发送前用 `client.NewOperationID()` 生成 P 并传给客户端；
+  stdio 的 `notifications/cancelled` 与 HTTP 请求 SSE 流关闭都取消本次调用上下文。有本次
+  P 的工作调用在锁外上下文中有界 `end(P)`（5s），只读工具只取消读取；取消结果保留已知
+  服务事实，但不声称设备动作已撤回。MCP 请求 ID 不作为公开恢复编号。
+- **HTTP 入口**：使用 SDK stateless Streamable HTTP（每次请求独立会话，
+  `PropagateRequestCancellation`），外层要求私有配置的宿主 bearer 令牌（与 `agent_token`
+  不同）并在出现 `Origin` 时精确匹配允许列表；令牌错误 401、Origin 不匹配 403。
+  stdio 的 stdout 只写协议帧，日志写 stderr。
+- **影响**：两个入口共用同一 handler 与投影，只差传输；MCP 进程只依赖 `internal/client`，
+  不直接访问 engine/android/store；服务看到的 Agent 归属仍只由私有服务凭据决定。
+
+## D22 Go 客户端的 P、错误与图片
+
+- **背景**：服务到 SDK 的响应可能丢失，错误不能降成无归属字符串；SDK 需要在发送前持有
+  本次 P，并保留图片元数据与字节。
+- **选择**：`internal/client` 使用 `internal/protocol` 的规范请求编码器与响应解码器；
+  工作工具在发送前生成 `P`+24 位十六进制（`NewOperationID`），可由 `WithOperationID`
+  指定已持有 P。每条逻辑调用至多一次 HTTP 请求，不重试、不跟随重定向、不排队。传输失败
+  返回 `Error{Transport=true, OperationID=<P>, Code="transport_unavailable"}`；服务结构化
+  错误保留 `Result` 与稳定 code；响应上限 8 MiB。图片从
+  `observation.image.base64` 解码到 `Response.Image` 并清空结果中的载体。`Discover` 只做
+  `GET /health` 与 `POST /api/status {}`，把服务实例、契约版本、`can_start`/`blocking_code`
+  与自身会话投影成只读材料。
+- **影响**：客户端取消 `ctx` 只停止读取/交付，不自动 `end`；取消到有界 `end(P)` 的映射由
+  MCP 接入层完成。客户端不保存服务事实副本，`status(P)` 仍是服务端权威。

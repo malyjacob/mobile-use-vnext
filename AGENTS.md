@@ -36,12 +36,16 @@ docs-only 变更修订设计源头，不在实现里暗改语义。
 
 ```text
 cmd/device-service/     设备服务进程组装、启动、退出
+cmd/device-mcp/         MCP 双入口进程（stdio / Streamable HTTP）
 internal/protocol/      公共数据、严格 JSON 接入、错误码与可读排版
 internal/device/        原始设备事实类型（不执行 I/O、不持运行状态）
 internal/observation/   公开树构造、保守保号、full/delta 计算与还原
+internal/imaging/       图片等比缩小与单次 JPEG 编码（纯算法）
 internal/engine/        唯一业务入口：会话、O/P、工作位置、STOP、收尾、恢复
 internal/android/       ADB、u2 RPC、制品管理与受管执行链
 internal/httpapi/       认证 HTTP 接入、/api/<tool>、控制端同步与最小 STOP
+internal/client/        强类型 HTTP 客户端（发送前 P、结构化结果、图片字节）
+internal/mcp/           12 工具注册/schema/投影、取消包装、HTTP 认证与 Origin
 internal/store/         私有恢复账本（原子文件、单写者、修订序）
 internal/eventlog/      有界事件/字段白名单日志
 android-control/        Java 控制 App 源码与构建入口

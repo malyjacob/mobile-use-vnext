@@ -5,7 +5,7 @@ param(
     [string]$AppPort = 18880,
     [string]$HostPort = 18881,
     [string]$AgentName = 'local-agent',
-    [string]$ReleaseVersion = '0.2.0-m4',
+    [string]$ReleaseVersion = '0.3.0',
     [switch]$SkipBuild,
     [switch]$SkipOldServiceStop
 )

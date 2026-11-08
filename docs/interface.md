@@ -61,8 +61,7 @@ HTTP 状态映射（`protocol.Status`）：
 | 401 | `unauthorized` |
 | 409 | `contract_mismatch`、`device_busy`、`session_*`、`reference_*`、`operation_*`、`observation_*`、`node_not_found`、`node_disabled`、`stale_screen`、`target_changed`、`foreground_changed`、`foreground_unknown`、`control_revoked`、`request_closed`、`cleanup_unconfirmed`、`control_unavailable`、`stop_unavailable`、`mode_not_selected`、`device_locked`、`device_not_interactive`、`recovering`、`no_ready_observation`、`display_unavailable`、`text_target_uncertain`、`text_result_uncertain`、`control_ui_on_virtual_display`、`app_not_found`、`application_moved`、`task_focus_unavailable`、`task_remove_unconfirmed`、`content_unavailable`、`inspection_too_large`、`root_unavailable` |
 | 422 | `invalid_request`、`invalid_coordinates`、`unsupported_key`、`unsupported_node_action`、`text_too_long`、`reference_invalid` |
-| 501 | `unsupported_feature`（`image=true`） |
-| 503 | `device_unavailable`、`display_create_failed`、`hierarchy_unavailable`、`tree_too_large`、`app_launch_failed`、`app_list_unavailable`、`shell_start_failed`、`delivery_unavailable`；以及 `observation.status=failed` 的结果 |
+| 503 | `device_unavailable`、`display_create_failed`、`hierarchy_unavailable`、`tree_too_large`、`app_launch_failed`、`app_list_unavailable`、`shell_start_failed`、`delivery_unavailable`；以及 `observation.status=failed` 或没有新 O 的 `partial` 结果 |
 | 504 | `action_result_uncertain`（输入已派发但无法确认完成）、`app_launch_unconfirmed`、`shell_result_unconfirmed` |
 | 500 | `internal_error`（接入层自身失败）；工具结果中的 500 会被改写为 409 |
 
@@ -180,7 +179,7 @@ HTTP 状态映射（`protocol.Status`）：
 | --- | --- | --- | --- |
 | `reference` | 是 | `O…`/`P…`，≤64 | 原观察或原操作；`O` 必须属于本 Agent 且属于活动会话 |
 | `full` | 否 | 布尔，默认 `false` | `true` 强制本次输出 full；`false` 或省略由服务端按基线与编码成本决定 |
-| `image` | 否 | 布尔，默认 `false` | `true` 直接返回 `501 unsupported_feature` |
+| `image` | 否 | 布尔，默认 `false` | `true` 请求与本次树同次采集的一张图片；图片失败不影响有效核心树 |
 | `wait_ms` | 否 | 整数 0–10000，默认 `0` | 采集前等待；等待期间撤销返回 `409 control_revoked` |
 
 输出由服务端基线状态决定：
@@ -207,6 +206,27 @@ HTTP 状态映射（`protocol.Status`）：
 `hierarchy_unavailable`/`display_unavailable`/`tree_too_large`/`stale_screen`/
 `control_ui_on_virtual_display`；会话若已结束，响应带 `session` 与 `next="status"`。
 
+### 图片
+
+`image=true` 时服务在同一项设备工作内先读取目标屏源图，再读取层级；图片只是本次观察的
+附加材料，不进入树或差异正文，也不构成第二份页面事实或图片身份协议。
+
+- 核心树有效、图片成功：`observation.status=complete`，`observation.image` 含
+  `captured_at`（源图读取开始）、`width`/`height`（输出实际尺寸）与
+  `media_type=image/jpeg`；HTTP 载体 `observation.image.base64` 携带本次图片字节。
+- 核心树有效、图片失败或过旧：仍发布有效 O，`status=partial`、`missing=["image"]`，
+  `image.error.code` 为 `image_capture_failed`、`image_encode_failed`、`image_too_large`
+  或 `image_stale`；失败图片不带尺寸、时间或字节。
+- 图片成功、核心树失败：不发布 O（无 `id`/`origin`/`revision`/`actionable_until`），
+  `observation.status=partial`、`missing=["tree"]`、`error` 为核心错误；`image` 带
+  `read_only=true` 与同屏 `screen`，只作阅读材料，不能作为输入依据。
+- 两者都失败：`status=failed`、`missing=["tree"]`，可同时带 `image.error`。
+- 未请求图片：整份 `image`/`missing` 省略；服务不截图、不编码，也不返回上一次图片。
+
+附加图片时 `actionable_until` 取源图读取开始与树采集开始中更早者加 60 秒，并受原会话到期
+时间上界约束。图片按服务固定预算做一次等比缩小（不放大）与一次 JPEG 编码；超限只报
+`image_too_large`，不改判核心树。图片缺失本身不强制 `next=observe`。
+
 ## 6. `POST /api/act`
 
 ```json
@@ -217,7 +237,7 @@ HTTP 状态映射（`protocol.Status`）：
 | --- | --- | --- |
 | `observation_id` | 是 | 本次要消费的 ready O |
 | `operation` | 是 | 非 null 对象，见下表 |
-| `image` | 否 | 布尔，默认 `false`；`true` 返回 `501 unsupported_feature` |
+| `image` | 否 | 布尔，默认 `false`；`true` 为本次后观察附加一张图片，规则见 §5 图片 |
 
 `operation` 的五个分支（成员出现即校验，多余成员一律拒绝）：
 
@@ -430,6 +450,21 @@ HTTP 状态映射（`protocol.Status`）：
   `remove` 删除基线中的整棵子树；
 - 角色变化、跨父移动、根替换等不可表达的变化不会出现在 delta 中，服务会改发 full。
 
+### Image
+
+```json
+"image": {"captured_at":"…","width":540,"height":1200,"media_type":"image/jpeg"}
+"image": {"read_only":true,"captured_at":"…","width":540,"height":1200,
+  "media_type":"image/jpeg","screen":{"width":1080,"height":2400,"rotation":0}}
+"image": {"error":{"code":"image_capture_failed","message":"未能取得本次截图"}}
+```
+
+`captured_at` 是源图读取开始的服务 UTC 时间；`width`/`height` 是输出图片的实际尺寸；
+`media_type` 固定 `image/jpeg`。`read_only` 仅在没有新 O 的只读图片上出现，并附同屏
+`screen`。失败图片只带受控 `error`，不带伪造的尺寸或时间。HTTP 载体
+`observation.image.base64` 是本次编码图片的 base64；MCP 入口把它投影为 `ImageContent`，
+文本与结构化内容不携带该成员。
+
 ### Session / Cleanup
 
 ```json
@@ -591,11 +626,11 @@ O/P 必须属于本 Agent 并定位一个仍 `active` 的原会话；只续租�
 | --- | --- |
 | `start`、`status`、`observe`、`end` | 见 §3、§4、§5、§7 |
 | `act`：`tap`、`long_press`、`swipe`、`key`、`text` | 定义于 §6；其他动作类型不被接受 |
-| `observe`/`act` 的 `image=true` | 返回 `501 unsupported_feature`；本契约不定义图片载荷 |
-| 截图、图片块、MCP `ImageContent` | 不在本契约范围 |
+| `observe`/`act` 的 `image=true` | 见 §5 图片；图片是本次观察的附加材料，不是单独工具 |
+| 截图、图片块 | HTTP/SDK 用同一 `observation.image` 元数据与 `base64` 载体；MCP `ImageContent` 承载图片字节 |
 | `open_app`、`apps`、`keepalive`、`inspect`、`notify`、`diagnose` | 定义于 §12 |
 | `shell` | 定义于 §12 |
-| MCP stdio / Streamable HTTP、Go client | 服务不提供 MCP 端点或 Go client |
+| MCP stdio / Streamable HTTP、Go client | 由独立入口提供，见 [MCP 入口](mcp.md) 与 [Go 客户端](client.md)；不改变本页 `/api/*` 契约 |
 | `/v1/control/sync`、`/v1/control/stop`、`create_display`/`close_display` | 定义于 [控制端协议](control-protocol.md) |
 | `selected_mode=primary` | 使用主屏（display 0），不创建虚拟屏 |
 

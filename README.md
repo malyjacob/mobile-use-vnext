@@ -15,20 +15,27 @@ HTTP 协议配对。
 - Agent 工具为 `POST /api/<tool>`，当前注册 `start`/`status`/`observe`/`act`/`end`/
   `inspect`/`keepalive`/`diagnose`/`apps`/`open_app`/`notify`/`shell`；逐项字段、错误码与
   空值规则见 [接口契约](docs/interface.md)。
+- `observe`/`act` 的 `image=true` 返回与本次树同次采集的一张 JPEG 图片；图片元数据在
+  `observation.image`，HTTP 载体为 `observation.image.base64`。
 - 控制端为 `POST /v1/control/sync|stop`；显示命令固定为 `create_display`、`close_display`，
   见 [控制端最小协议](docs/control-protocol.md)。
-- `image=true` 返回 `501 unsupported_feature`；MCP、图片、消息中心与发布包组装见下文“未提供”。
+- MCP 双入口（stdio / Streamable HTTP）由独立 `cmd/device-mcp` 提供，Go 客户端在
+  `internal/client`；见 [MCP 入口](docs/mcp.md) 与 [Go 客户端](docs/client.md)。
 
 ## 目录
 
 ```text
 cmd/device-service/     设备服务进程组装、进程锁、启动与退出
+cmd/device-mcp/         MCP 双入口进程（stdio / Streamable HTTP）
 internal/protocol/      公共数据、严格 JSON 接入、错误码与可读排版
 internal/device/        原始设备事实类型（不执行 I/O、不持运行状态）
 internal/observation/   公开树构造、保守保号、full/delta 计算与还原（纯算法）
+internal/imaging/       等比缩小与单次 JPEG 编码（纯算法）
 internal/engine/        唯一业务入口：会话、O/P、工作位置、STOP、收尾、恢复
 internal/android/       ADB、u2 RPC、制品管理与受管执行链
 internal/httpapi/       认证 HTTP 接入、/api/<tool>、控制端同步与最小 STOP
+internal/client/        强类型 HTTP 客户端（发送前 P、结构化结果、图片字节）
+internal/mcp/           12 工具注册/schema/结果投影、取消包装、HTTP 认证与 Origin
 internal/store/         私有恢复账本（原子文件、单写者、修订序）
 internal/eventlog/      有界事件/字段白名单日志
 android-control/        Java 控制 App 源码与构建入口（含 test-target 验证探针）
@@ -57,8 +64,14 @@ go build ./...
 发布构建使用脚本（自动设置上述环境、注入版本、打印 SHA-256）：
 
 ```powershell
-./scripts/build.ps1                              # 输出 build/device-service，默认 0.2.0-m4
-./scripts/build.ps1 -Version 0.2.0-m4 -Output build
+./scripts/build.ps1                              # 输出 build/device-service 与 build/device-mcp，默认 0.3.0
+./scripts/build.ps1 -Version 0.3.0 -Output build
+```
+
+MCP 适配进程若运行在 Windows 宿主上（stdio/HTTP 验证），用宿主工具链单独构建：
+
+```powershell
+$env:GOEXPERIMENT = 'jsonv2'; go build -o build/device-mcp.exe ./cmd/device-mcp
 ```
 
 控制 App 由 `android-control/build.ps1` 用本机 SDK/JDK 直接构建（无 Gradle），输出
@@ -107,8 +120,9 @@ GOEXPERIMENT=jsonv2 go test ./...
 $env:GOEXPERIMENT = 'jsonv2'; go test ./...
 ```
 
-包内测试覆盖 `internal/protocol`、`internal/observation`、`internal/engine`、`internal/android`
-（ADB/u2 走本地桩，不需要真机）；`internal/httpapi`、`internal/store`、`internal/eventlog`、
+包内测试覆盖 `internal/protocol`、`internal/observation`、`internal/imaging`、`internal/engine`、
+`internal/android`（ADB/u2 走本地桩，不需要真机）、`internal/client`、`internal/mcp` 与
+`scripts/mcp-probe`；`internal/httpapi`、`internal/store`、`internal/eventlog`、
 `internal/device` 没有包内测试。Windows 上的通过不证明设备路径或账本耐久性。
 
 ## 接口
@@ -120,8 +134,8 @@ Agent 工具（`POST /api/<tool>`，`Authorization: Bearer <agent_token>`，
 | --- | --- |
 | `start` | 请求体必须为 `{}`；创建/绑定目标屏幕并发布首个 full 观察 |
 | `status` | 无参数、`{"reference":"O…"}` 或 `{"reference":"P…"}`；只读查询 |
-| `observe` | `reference`（O/P）；按服务端基线返回 full 或 delta；`observe(P)` 与 `full=true` 强制 full |
-| `act` | `observation_id` + `operation`：`tap`、`long_press`、`swipe`、`key`、`text` |
+| `observe` | `reference`（O/P）；按服务端基线返回 full 或 delta；`observe(P)` 与 `full=true` 强制 full；`image=true` 附加本次图片 |
+| `act` | `observation_id` + `operation`：`tap`、`long_press`、`swipe`、`key`、`text`；`image=true` 为后观察附图 |
 | `inspect` | `observation_id` 可选 `node` 或 `query`；只读历史树 |
 | `keepalive` | `reference`（O/P）；续租原活动会话 |
 | `end` | `reference`（O/P）；撤权并启动独立收尾 |
@@ -140,17 +154,18 @@ Agent 工具（`POST /api/<tool>`，`Authorization: Bearer <agent_token>`，
 
 ## 未提供
 
-- MCP 双入口（stdio / Streamable HTTP）与 Go client。
-- 图片/截图交付：`image=true` 返回 `501 unsupported_feature`。
 - App 消息中心的完整通知交付、已读回执与界面整理。
-- 发布包组装与整组发布演练。
+- 完整 `control_view` 呈现与整组发布包组装；破坏性发布演练不在当前能力范围。
+- 历史图片补取、图片差异、裁剪/质量参数与第二套观察配置。
 
 ## 文档
 
-- [架构](docs/architecture.md)：进程分层、唯一权威、O/P 生命周期、full/delta、STOP 与收尾、恢复屏障、账本。
-- [接口契约](docs/interface.md)：逐端点 JSON、空值规则、错误码、工具支持范围。
-- [运行手册](docs/runbook.md)：手机环境、部署/启动/停止、健康检查、常见故障。
+- [架构](docs/architecture.md)：进程分层、唯一权威、O/P 生命周期、full/delta、图片附加材料、STOP 与收尾、恢复屏障、账本。
+- [接口契约](docs/interface.md)：逐端点 JSON、空值规则、错误码、图片与工具支持范围。
+- [运行手册](docs/runbook.md)：手机环境、部署/启动/停止、健康检查、MCP 入口与常见故障。
 - [控制端最小协议](docs/control-protocol.md)：同步、显示命令、独立 STOP。
+- [MCP 入口](docs/mcp.md)：双传输、工具 schema、结果投影、取消与漏收边界。
+- [Go 客户端](docs/client.md)：P、结构化错误、发现与图片字节。
 - [工程决策](maintenance/decisions.md) 与 `maintenance/verification/`。
 
 `docs/` 只写正式架构、现行契约与运行说明；提案、决策、验证记录和未决项放在
