@@ -930,3 +930,23 @@ func TestCancellationInMemorySDK(t *testing.T) {
 		t.Fatal("read-only cancellation issued an end")
 	}
 }
+
+// A structured service-level error has no query fact to report, so status and
+// diagnose must stay errors even though a Result object was obtained.
+func TestReadOnlyServiceErrorsAreErrors(t *testing.T) {
+	serviceFailure := &execution{
+		result:  &protocol.Result{Error: &protocol.Error{Code: protocol.CodeUnauthorized, Message: "认证失败"}},
+		service: true,
+	}
+	for _, tool := range []string{"status", "diagnose"} {
+		if !serviceFailure.isError(tool) {
+			t.Fatalf("%s treated a service error as a query fact", tool)
+		}
+	}
+	queryFact := &execution{result: &protocol.Result{OperationState: "not_seen"}, service: true}
+	for _, tool := range []string{"status", "diagnose"} {
+		if queryFact.isError(tool) {
+			t.Fatalf("%s treated a query fact as an error", tool)
+		}
+	}
+}

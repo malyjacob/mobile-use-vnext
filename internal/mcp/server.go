@@ -378,14 +378,15 @@ func structuredContent(result *protocol.Result) json.RawMessage {
 	return json.RawMessage(encoded)
 }
 
-// isError applies the per-tool success rule. It distinguishes a service result
-// from an adapter failure, so status and diagnose stay non-error for every
-// served answer while a transport failure is still an error.
+// isError applies the per-tool success rule. It distinguishes a served query
+// fact from an admission, protocol, transport or service-level error, so
+// status/diagnose stay non-error only when a result actually carries the
+// queried facts.
 func (e *execution) isError(tool string) bool {
 	result := e.result
 	switch tool {
 	case "status", "diagnose":
-		return !e.service
+		return result == nil || result.Error != nil
 	case "observe":
 		return result == nil || result.Observation == nil || result.Observation.ID == ""
 	case "act":
