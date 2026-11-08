@@ -7,7 +7,7 @@
 
 | 项 | 值 |
 | --- | --- |
-| 代码提交 | 实现检查点 `3f84918`（M4 协议、apps/open_app、只读工具、shell 设备层） |
+| 代码提交 | `e5d0d15056a726eb4b9312f98bff35ad462eab4c`（基础检查点 `3f84918`） |
 | 服务构建 | `0.2.0-m4`；最终 shell 恢复修复后 SHA-256 `a13dea122466d7b343c235d4726ed407105150a5933021e00cea24d6c0641033`（早期检查点 `f414a31d…`） |
 | 契约 | `contract_version = 1` |
 | 设备 | `24117RK2CC`，Android 16（API 36），arm64，Magisk + Debian 13 chroot |
