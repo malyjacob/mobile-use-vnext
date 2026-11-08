@@ -13,7 +13,7 @@ import android.widget.TextView;
 
 /**
  * 控制 App 的消息入口与列表骨架。
- * P3 最小控制协议的同步与停止路径都不携带 inbox，因此这里固定渲染空收件箱：
+ * 最小控制协议的同步与停止路径都不携带 inbox，因此这里固定渲染空收件箱：
  * 不发明第二套消息协议，也不保留旧 receipt/已读上报。通知授权入口仍由本页提供。
  */
 final class MessageCenterUi {
@@ -122,7 +122,7 @@ final class MessageCenterUi {
                     PERMISSION_REQUEST);
             return;
         }
-        // 消息频道在 P3 不再创建；始终打开本 App 的通知总设置，避免指向不存在的频道。
+        // 消息频道当前不再创建；始终打开本 App 的通知总设置，避免指向不存在的频道。
         Intent settings = new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS);
         settings.putExtra(Settings.EXTRA_APP_PACKAGE, activity.getPackageName());
         PrimaryDisplayUi.open(activity, settings);

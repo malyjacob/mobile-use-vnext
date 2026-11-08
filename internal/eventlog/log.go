@@ -70,6 +70,9 @@ var allowedKeys = map[string]struct{}{
 	"connected": {}, "stop_ready": {}, "can_start": {}, "queued": {},
 	"dropped": {}, "request_id": {}, "closure": {}, "cleanup": {},
 	"delivery": {}, "attempt": {}, "generation": {}, "version": {},
+	// Managed shell execution facts. They are enums, booleans and counters;
+	// commands, output text and paths are never whitelisted.
+	"root": {}, "termination": {}, "exit_code": {}, "truncated": {},
 }
 
 // Logger is a bounded, drop-counting event sink.

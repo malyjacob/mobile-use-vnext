@@ -82,7 +82,7 @@ engine 的状态锁只做有限内存检查与转换：锁内不等待 ADB、u2 
 
 `P` 的公开状态为 `running → finished`；`status(P)` 可返回 `not_seen`。
 
-- `start`/`observe`/`act`/`end` 在任何设备副作用之前登记 P
+- 每个工具在任何设备副作用之前登记 P
   （`registerOperation`），可用 `X-Mobile-Use-Operation` 预分配；缺省时服务生成 `P<n>`。
   格式为 `P` + 字母/数字/`-`/`_`，总长 ≤64。
 - 同一 P 重复到达只返回原操作的公开视图，不再次派发（包括已失败的操作）。
@@ -124,10 +124,10 @@ delta 的五类块：`set`（逐字段完整新值，显式保留 `false`/`0`/`"
 
 ## 5. 工作位置与并发
 
-- 设备同时只有一项普通工作（`start`/`observe`/`act`）。冲突立即返回
+- 设备同时只有一项普通工作（`start`/`observe`/`act`/`apps`/`open_app`/`shell`）。冲突立即返回
   `409 device_busy`，不建普通动作队列；同一 Agent 会得到 `blocking_operation_id`。
 - 工作上下文按类型设上限：`start` = `StartTimeout + WorkTimeout`（40s）、`observe` =
-  `WorkTimeout + 15s`（35s）、`act` 约 50s；具体超时是服务策略，不是请求参数。
+  `WorkTimeout + 15s`（35s）、`act`/`open_app` 约 50s、`apps` 约 30s、`shell` 约 65s；具体超时是服务策略，不是请求参数。
 - `end`、STOP、`status` 不占普通工作位置，也不等待普通工作完成。
 - 控制同步 `/v1/control/sync` 不占工作位置，不做设备 I/O；只更新 App 事实、处理命令回执与
   停止意图，至多下发一条显示命令。
@@ -164,24 +164,30 @@ delta 的五类块：`set`（逐字段完整新值，显式保留 `false`/`0`/`"
 ### 收尾链
 
 `cleanup` 固定五元组：`state`（`pending`/`complete`/`unconfirmed`）、`execution`、
-`tasks`、`recents`、`display`（每项可为 `pending`/`complete`/`confirmed`/`unconfirmed`/
-`not_applicable`）。
+`tasks`、`recents`、`display`（每项可为 `pending`/`confirmed`/`unconfirmed`/`not_applicable`）。
 
 - `execution`：若结束瞬间仍有本会话已派发但结果未知的输入（`DispatchUnknown`），记
-  `unconfirmed`；否则 `confirmed`。
-- `primary` 模式：`tasks`/`recents`/`display` 全为 `not_applicable`。
+  `unconfirmed`；否则 `confirmed`。受管执行链（`shell`）在取得精确终止证据后可将这一项
+  从 `unconfirmed` 提升为 `confirmed`；UI 输入的不确定性保持不可改判。
+- `primary` 模式：`tasks`/`recents`/`display` 全为 `not_applicable`，从不关闭用户应用。
 - 虚拟屏且显示身份未知：给 App 至多 4s 上报描述；仍无描述时，若创建明确失败或 App 明确
   报告无自有显示，则 `display=confirmed`，否则 `unconfirmed`。
 - 显示身份已知：App 实例未更换时下发精确 `close_display`（带
-  `target_app_instance_id`/`target_display_id`/`target_generation`）；查询该显示上的任务，
-  非空则 `tasks`/`recents` 都记 `unconfirmed`（不静默清理）；否则 `tasks=confirmed`、
-  `recents=not_applicable`；随后最多 `CleanupTimeout=12s` 轮询，要求连续两次确认显示不存在
-  才记 `display=confirmed`。
+  `target_app_instance_id`/`target_display_id`/`target_generation`）。关闭显示前先移除该虚拟屏上的全部实时任务（至多三轮，每轮重读实时任务），再核验
+  `dumpsys activity recents`：任务全部消失且最近任务项也消失时 `tasks=confirmed`、
+  `recents=confirmed`；仍有任务或无法核验则相应记 `unconfirmed` 并带
+  `task_remove_unconfirmed`/`recents_cleanup_unconfirmed`。随后最多 `CleanupTimeout=12s`
+  轮询，要求连续两次确认显示不存在才记 `display=confirmed`。
+- 虚拟会话在内存维护受管窗口登记（`taskEntry`：task id、包名、display、generation、
+  owned、proven，上限 16）；它是每次动作前由实时任务列表核对的缓存，不跨会话或重启
+  继承控制权；主屏会话不建立该登记。
 - `state=complete` 仅当 `execution`/`display`/`tasks`/`recents` 均不为 `pending` 或
-  `unconfirmed`。完成时清空该会话的 O、基线与显示命令。
+  `unconfirmed`。完成时清空该会话的 O、基线、任务登记与显示命令。
 - 收尾期间 `availability=recovering`（原因 `cleanup_pending`），同步仍会投递
   `close_display`（否则无法释放），但 `start` 因可用性非 `ready` 被阻塞；收尾 `unconfirmed`
   时 `availability=blocked`（原因 `cleanup_unconfirmed`），`can_start=false`。
+- 未确认结束的受管 shell 链保持 `recovering`（原因 `shell_pending`）；终止中尚无证据为
+  `shell_chain_unconfirmed`；期间不接纳普通工作，直到精确 runner 被确认结束。
 - 服务退出（SIGINT/SIGTERM）：撤权并启动收尾，等待已接纳的后台工作至多 25s，然后同步写一次
   账本；进程退出本身从不被当作资源已释放。
 
@@ -194,6 +200,8 @@ delta 的五类块：`set`（逐字段完整新值，显式保留 `false`/`0`/`"
   另由可用性检查要求（`device_unavailable`）；
 - 有记录 → 先要求 App 心跳新鲜，再按记录中的会话/待创建命令逐项核验：
   - 无会话且无待创建 → `no_session`，恢复完成；
+  - 记录有受管 runner：按记录的 runner 身份探测/终止；`shell_probe_failed` 或
+    `shell_chain_unconfirmed` 时保持 `recovering`，确认结束才写完成记录、不重放命令；
   - 记录有显示 ID：探测显示；仍存在且 App 实例匹配 → 下发精确 `close_display` 并保持
     `recovering`，等待 App 回执/显示消失后重试；显示已不存在也要先完成 App 同步与 TaskList
     核验，不能只凭一次 absent 放行；
@@ -219,7 +227,8 @@ delta 的五类块：`set`（逐字段完整新值，显式保留 `false`/`0`/`"
 - 单写者：包内互斥 + 进程锁；`Save` 先 fsync 临时文件，再 rename 覆盖，再 fsync 父目录
   （Windows 跳过目录 fsync，因此 Windows 不提供同等耐久证据）；
 - 内容只有归属与资源证据：会话（origin/agent/mode/state/App 实例/模式代次/显示 ID/SFID/
-  generation/尺寸/密度/旋转/开始时间）、待创建/待关闭命令、收尾五元组、停止边界；
+  generation/尺寸/密度/旋转/开始时间）、待创建/待关闭命令、收尾五元组、停止边界、虚拟屏
+  受管任务 id 登记（≤16）、受管 shell runner 身份与阶段；
 - 明确不含：请求体、节点树、图片、输入正文、命令输出、异常字符串；
 - `start` 在启动显示助手前同步写一次（原归属 + 创建意图），会话激活后再写一次；其余进度
   异步写。写失败置 `ledgerUnsafe`，可用性转 `blocked`（原因 `ledger_unavailable`）；

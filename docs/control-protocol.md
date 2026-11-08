@@ -84,7 +84,8 @@
 - `control.revision` 在同一 `service_instance_id` 下单调递增；只有实际控制事实变化才递增。
 - `availability.state` 为 `ready` / `recovering` / `blocked`，`reason` 为受控短码。
 - `session` 为 `null` 或 {origin, agent, mode, state, started_at, expires_at/ended_at, reason}。
-- `work` 为 `null` 或 {operation_id, kind, phase}，不得携带节点、坐标、输入正文或命令。
+- `work` 为 `null` 或 {operation_id, kind, phase}，`kind` 为 `start`/`observe`/`act`/`apps`/`open_app`/`shell`；
+  不得携带节点、坐标、输入正文或命令。
 - `cleanup` 为 `null` 或 {state, execution, tasks, recents, display}；只表达最低摘要。
 - `commands` 只包含显示生命周期命令，每拍至多一条；重复投递同一命令直到收到回执。
 - `stop` 只在本次请求携带了 `stop_pending` 时出现，确认服务已绑定该停止边界。
@@ -143,7 +144,10 @@ App 只能从 `control` 与本机事实构造界面，不显示 Agent step，也
 | session.state=starting | Agent · 正在准备 |
 | session.state=active，work=null | Agent · 会话有效，无设备操作 |
 | session.state=active，work.kind=act | Agent · 正在操作 |
+| session.state=active，work.kind=open_app | Agent · 正在打开应用 |
 | session.state=active，work.kind=observe | Agent · 正在观察 |
+| session.state=active，work.kind=apps | Agent · 正在读取应用清单 |
+| session.state=active，work.kind=shell | Agent · 正在执行命令 |
 | 本地 stop pending 未确认 | 已阻止本地旧命令 · 停止待同步 |
 | cleanup.state=pending/unconfirmed | 控制已停止 · 资源清理未确认 |
 | 连接失鲜 | 连接中断 · 服务状态未知 |

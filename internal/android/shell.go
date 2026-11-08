@@ -3,7 +3,6 @@ package android
 import (
 	"context"
 	_ "embed"
-	"errors"
 	"strconv"
 	"strings"
 	"time"
@@ -34,12 +33,13 @@ const (
 )
 
 // ErrShellNotStarted means the runner directory exists but the command was
-// provably never started.
-var ErrShellNotStarted = errors.New("managed shell never started")
+// provably never started. Its identity is shared with the device contract so
+// the engine can classify the outcome without importing this package.
+var ErrShellNotStarted = device.ErrShellNotStarted
 
 // ErrShellStartUnconfirmed means the dispatch was issued but no start or finish
 // evidence was readable within the bounded window.
-var ErrShellStartUnconfirmed = errors.New("managed shell start is unconfirmed")
+var ErrShellStartUnconfirmed = device.ErrShellStartUnconfirmed
 
 // runnerScript is the fixed device-side script embedded at build time.
 //
@@ -465,9 +465,19 @@ func parseShellStart(value string) (device.ShellStart, bool) {
 	}
 	pid, err1 := strconv.Atoi(parts[1])
 	pgid, err2 := strconv.Atoi(parts[2])
-	ticks, err3 := strconv.ParseUint(parts[3], 10, 64)
-	if err1 != nil || err2 != nil || err3 != nil || pid <= 0 || pgid <= 0 {
+	if err1 != nil || err2 != nil || pid <= 0 || pgid <= 0 {
 		return device.ShellStart{}, false
+	}
+	// A command can finish before the runner reads /proc/<pid>/stat. The PID
+	// remains valid identity evidence; an empty start tick is recorded as 0,
+	// not treated as a malformed record.
+	var ticks uint64
+	if parts[3] != "" {
+		parsed, err := strconv.ParseUint(parts[3], 10, 64)
+		if err != nil {
+			return device.ShellStart{}, false
+		}
+		ticks = parsed
 	}
 	return device.ShellStart{
 		HasIdentity: true, PID: pid, PGID: pgid,

@@ -12,16 +12,21 @@
 | 设备 | Xiaomi `24117RK2CC`，Android 16（API 36），arm64 |
 | 特权 | Magisk root；Debian 13 chroot 需预先准备 |
 | chroot | `/data/local/chroots/debian13` |
-| 服务目录（chroot 内） | `/opt/mobile-use-vnext`：`device-service`、`u2.jar`、`service.sh`、`config.json` |
+| 服务目录（chroot 内） | `/opt/mobile-use-vnext`：`device-service`、`u2.jar`、`applist.dex`、`service.sh`、`config.json` |
 | 状态目录（chroot 内） | `/var/lib/mobile-use-vnext`：`recovery-ledger.json`、`device-service.pid`、`device-service.log`（0700） |
 | 服务端口 | `18880`，只监听 `127.0.0.1` |
 | adb 串口 | `127.0.0.1:5555` |
 | 主机转发端口 | `18881`（`adb forward tcp:18881 tcp:18880`） |
 | 控制 App | `com.mobileuse.vnext`，固定连接 `http://127.0.0.1:18880` |
-| 固定制品 | `third_party/uiautomator/u2.jar`（SHA-256 固定，替换前必须核对） |
+| 固定制品 | `third_party/uiautomator/u2.jar`、`third_party/android-applist/applist.dex`（SHA-256 固定，替换前必须核对） |
+| 受管执行临时资源 | `/data/local/tmp/mobile-use-shell-runner.sh`（固定脚本）与 `/data/local/tmp/mobile-use-shell/<run-id>/`（单次运行目录，确认结束后移除） |
 
 服务进程在 chroot 内运行，ADB/u2 通过 Android 侧 `adb`/`app_process` 工作；控制 App 运行在
 Android 侧，只与服务通信。Windows 主机只负责构建与下发，不参与运行时状态。
+
+受管 shell 的命令文件、start/done 元数据与有界输出位于单次运行目录；命令正文与输出不写
+服务日志、不写恢复账本。运行目录残留或进程身份无法核验时，保持恢复屏障并人工核验，
+不得按包名/PID 猜测清理。
 
 ## 2. 私有文件
 
@@ -138,11 +143,12 @@ adb -s 127.0.0.1:5555 shell su -c 'tail -n 100 /data/data/com.mobileuse.vnext/fi
 | `dumpsys SurfaceFlinger` 的层 id 解析失败或溢出 | 该机 SFID 超出 int64（大于 2^63） | 服务按 `uint64` 解析并原样传给 `screencap -d`；不要改成 `int64`/`int`，不要回退到 display 0。只读核对用 `dumpsys SurfaceFlinger --display-id` |
 | u2 启动失败或采集报 `hierarchy_unavailable` | 旧 `app_process` 仍在跑旧 JAR、JAR 哈希不符、端口未就绪 | 重启服务触发 `EnsureU2`（校验本地哈希 → 停旧 server → 比对/推送远端 → `/ping`）；JAR 替换后必须重启，进程不会热加载。服务只 `pkill` 固定模式 `^app_process / com.wetest.uia2.Main$`，不影响其他进程 |
 | 虚拟屏没有子节点，疑似采集失败 | 空虚拟屏是合法画面 | 公开树只有合成根、无 `children`，是正常空树；不要把它当失败，也不要伪造子节点。空树仍可 `observe`/`end` |
+| `can_start=false`、`blocking_code=shell_pending`/`shell_chain_unconfirmed` | 受管命令仍在执行或终止未确认 | 等 `shell` 返回或 `status` 的 `shell.termination` 确认；不要 kill 进程或删运行目录 |
 | `can_start=false`、`blocking_code=cleanup_unconfirmed` | 上一个会话的显示/任务/执行链未确认释放 | 保持服务运行，用 `status` 看 `cleanup` 五项；确认 App 在线并收到 `close_display`、`dumpsys` 中旧屏已消失；必要时 `end` 原会话等待收尾。不要删账本、不要用重启绕过门禁 |
 | `can_start=false`、`blocking_code=cleanup_pending` | 收尾仍在进行 | 等待收尾；此期间同步仍会投递 `close_display`，但 `start` 被阻塞 |
 | `can_start=false`、`blocking_code=old_resource_unconfirmed` / `recovery_pending` | 重启后旧归属未核验完 | 等 App 恢复心跳与模式；恢复先要求 App 同步，再核验旧 display、`close_display` 回执/消失与 TaskList；显示仍在但 App 实例不匹配、TaskList 失败或旧 display 仍有任务时保持阻塞，不能强行 `start`。旧显示不存在也不能只凭一次 absent 放行 |
 | `can_start=false`、`blocking_code=ledger_corrupt` / `ledger_unavailable` | 账本损坏或不可写 | 检查 `/var/lib/mobile-use-vnext` 权限与磁盘；损坏账本需要明确的人工处置（移走并重新部署），不能带病启动 |
-| `can_start=false`、`blocking_code=device_busy` | 已有普通工作（start/observe/act）在进行 | 等该操作完成或用 `status` 查 `blocking_operation_id`；不建队列，不重试并发动作 |
+| `can_start=false`、`blocking_code=device_busy` | 已有普通工作（start/observe/act/apps/open_app/shell）在进行 | 等该操作完成或用 `status` 查 `blocking_operation_id`；不建队列，不重试并发动作 |
 | `can_start=false`、`blocking_code=device_locked` / `device_not_interactive` | 锁屏或熄屏 | 解锁并点亮屏幕；服务不绕过锁屏 |
 | `can_start=false`、`blocking_code=control_revoked` | 收到 STOP 后未完成一次新同步 | 等 App 下一拍同步（不再携带 `stop_pending`）后再 `start` |
 | `can_start=false`、`blocking_code=mode_not_selected`/`stop_unavailable` | App 模式/通知/停止通道不可用 | 在 App 选择虚拟屏或确认主屏共享；授予通知权限并确认通知频道可用 |
@@ -174,5 +180,5 @@ adb -s 127.0.0.1:5555 shell su -c 'tail -n 100 /data/data/com.mobileuse.vnext/fi
   App 当作清理完成。
 - 不在虚拟屏上显示控制 App 界面；采集发现控制包可见节点会直接失败。
 - 不把令牌、节点树、输入正文、截图、原始 `dumpsys`/logcat 输出贴进仓库或工单。
-- 服务只提供 [接口契约](interface.md) 列出的端点；图片、MCP 与其他工具不由本服务提供，
+- 服务只提供 [接口契约](interface.md) 列出的端点；图片与 MCP 不由本服务提供，
   不要用 ADB 手工命令伪造为服务能力。

@@ -12,15 +12,15 @@ import (
 	"github.com/malyjacob/mobile-use-vnext/internal/protocol"
 )
 
-// ------------------------------------------------------------- M4 fixtures
+// ------------------------------------------------------------- read-only fixtures
 
-func m4StringPtr(value string) *string { return &value }
+func readonlyStringPtr(value string) *string { return &value }
 
-func m4Tree(root *protocol.Node) *protocol.Tree {
+func readonlyTree(root *protocol.Node) *protocol.Tree {
 	return &protocol.Tree{Format: "full", Scope: protocol.Scope, Root: root}
 }
 
-func m4Node(ref string, role protocol.Role, labels ...string) *protocol.Node {
+func readonlyNode(ref string, role protocol.Role, labels ...string) *protocol.Node {
 	node := &protocol.Node{
 		Ref: ref, Role: role,
 		Bounds: &protocol.Bounds{Left: 0, Top: 0, Right: 10, Bottom: 10},
@@ -144,17 +144,17 @@ func TestInspectReturnsTreeAndSubtree(t *testing.T) {
 
 func TestInspectQueryMatchesLabelValueHintResource(t *testing.T) {
 	h := newHarness(t)
-	root := m4Node("n1", protocol.RoleRoot)
-	confirm := m4Node("n2", protocol.RoleButton, "确定")
-	input := m4Node("n3", protocol.RoleInput, "姓名")
-	input.Value = m4StringPtr("张三")
-	input.Hint = m4StringPtr("请输入姓名")
-	resource := m4Node("n4", protocol.RoleView)
-	resource.Resource = m4StringPtr("com.example:id/确认")
-	okButton := m4Node("n5", protocol.RoleText, "OK")
-	german := m4Node("n6", protocol.RoleText, "Straße")
+	root := readonlyNode("n1", protocol.RoleRoot)
+	confirm := readonlyNode("n2", protocol.RoleButton, "确定")
+	input := readonlyNode("n3", protocol.RoleInput, "姓名")
+	input.Value = readonlyStringPtr("张三")
+	input.Hint = readonlyStringPtr("请输入姓名")
+	resource := readonlyNode("n4", protocol.RoleView)
+	resource.Resource = readonlyStringPtr("com.example:id/确认")
+	okButton := readonlyNode("n5", protocol.RoleText, "OK")
+	german := readonlyNode("n6", protocol.RoleText, "Straße")
 	root.Children = []*protocol.Node{confirm, input, resource, okButton, german}
-	attachObservation(t, h.engine, "O901", "agent", ObservationRetired, m4Tree(root))
+	attachObservation(t, h.engine, "O901", "agent", ObservationRetired, readonlyTree(root))
 
 	for _, tc := range []struct {
 		query string
@@ -215,7 +215,7 @@ func TestInspectQueryMatchesLabelValueHintResource(t *testing.T) {
 
 func TestInspectReadableForEveryRetainedStatus(t *testing.T) {
 	h := newHarness(t)
-	tree := m4Tree(m4Node("n1", protocol.RoleRoot))
+	tree := readonlyTree(readonlyNode("n1", protocol.RoleRoot))
 	for i, status := range []string{
 		ObservationReady, ObservationClaimed, ObservationRetired, ObservationExpired,
 	} {
@@ -266,10 +266,10 @@ func TestInspectBudgetsRejectOversizedUnits(t *testing.T) {
 		t.Fatalf("full tree over budget: %+v", apiErr)
 	}
 
-	huge := m4Node("n1", protocol.RoleRoot)
-	child := m4Node("n2", protocol.RoleText, strings.Repeat("宽", 20000))
+	huge := readonlyNode("n1", protocol.RoleRoot)
+	child := readonlyNode("n2", protocol.RoleText, strings.Repeat("宽", 20000))
 	huge.Children = []*protocol.Node{child}
-	attachObservation(t, h.engine, "O903", "agent", ObservationRetired, m4Tree(huge))
+	attachObservation(t, h.engine, "O903", "agent", ObservationRetired, readonlyTree(huge))
 
 	if _, apiErr := h.engine.Inspect("agent", &protocol.InspectRequest{
 		ObservationID: "O903", Node: "n2", HasNode: true,
@@ -286,14 +286,14 @@ func TestInspectBudgetsRejectOversizedUnits(t *testing.T) {
 
 func TestInspectQueryTruncatesOnlyCompleteUnits(t *testing.T) {
 	h := newHarness(t)
-	root := m4Node("n1", protocol.RoleRoot)
+	root := readonlyNode("n1", protocol.RoleRoot)
 	for i := 0; i < 400; i++ {
-		root.Children = append(root.Children, m4Node(
+		root.Children = append(root.Children, readonlyNode(
 			"n"+string(rune('a'+i%26))+string(rune('a'+i/26)),
 			protocol.RoleText, "命中"+strings.Repeat("x", 120),
 		))
 	}
-	attachObservation(t, h.engine, "O904", "agent", ObservationRetired, m4Tree(root))
+	attachObservation(t, h.engine, "O904", "agent", ObservationRetired, readonlyTree(root))
 
 	result, apiErr := h.engine.Inspect("agent", &protocol.InspectRequest{
 		ObservationID: "O904", Query: "命中", HasQuery: true,
@@ -526,7 +526,7 @@ func TestKeepaliveRejectsForeignUnknownAndNoSession(t *testing.T) {
 	bare := New(DefaultConfig("instance-test", "agent"), nil, newFakeDevice(),
 		&fakeStore{}, &testProjector{builder: observation.NewBuilder()}, testDiffer{})
 	attachObservation(t, bare, "O920", "agent", ObservationRetired,
-		m4Tree(m4Node("n1", protocol.RoleRoot)))
+		readonlyTree(readonlyNode("n1", protocol.RoleRoot)))
 	bare.mu.Lock()
 	bare.operations["P920"] = &operationState{
 		ID: "P920", Agent: "agent", Kind: "notify",

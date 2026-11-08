@@ -17,7 +17,7 @@
 | 身份隔离 | agent token 不能访问 `/v1/control/*`，control token 不能访问 `/api/*`；错误为 `401 unauthorized` |
 | 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 1`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
 | 预分配 P | `/api/*` 可带 `X-Mobile-Use-Operation: P…`；缺省由服务分配。`status` 不使用该头 |
-| 请求体 | 必须是一个 JSON 对象；大小上限：`start`/`status`/`end` 16 KiB，`observe` 32 KiB，`act` 64 KiB，`sync` 32 KiB，`stop` 8 KiB |
+| 请求体 | 必须是一个 JSON 对象；大小上限：`start`/`status`/`end` 16 KiB，`observe` 32 KiB，`act` 64 KiB，`inspect`/`keepalive`/`diagnose`/`apps`/`open_app` 8 KiB，`notify` 16 KiB，`shell` 32 KiB，`sync` 32 KiB，`stop` 8 KiB |
 | 响应 | `Content-Type: application/json; charset=utf-8`，`Cache-Control: no-store` |
 | 健康检查 | `GET /health` 无认证，见 §10 |
 
@@ -37,7 +37,8 @@
 ```text
 operation_id, operation_state, outcome, phase, target_reference, request_closed,
 blocking_operation_id, can_start, blocking_code, start_operation_id,
-observation_state, input_state, session, observation, cleanup, error, next
+observation_state, input_state, message_id, saved, session, observation, inspection,
+apps, app, shell, notification, diagnosis, cleanup, error, next
 ```
 
 四层事实互不替代：`outcome`（动作执行）、`observation.status`（观察）、`session.state`
@@ -58,11 +59,11 @@ HTTP 状态映射（`protocol.Status`）：
 | --- | --- |
 | 200 | 成功；含 `end`/`start` 的 `cleanup=pending`（收尾未完成不是 HTTP 错误） |
 | 401 | `unauthorized` |
-| 409 | `contract_mismatch`、`device_busy`、`session_*`、`reference_*`、`operation_*`、`observation_*`、`node_not_found`、`node_disabled`、`stale_screen`、`target_changed`、`foreground_changed`、`foreground_unknown`、`control_revoked`、`request_closed`、`cleanup_unconfirmed`、`control_unavailable`、`stop_unavailable`、`mode_not_selected`、`device_locked`、`device_not_interactive` |
-| 422 | `invalid_request`、`invalid_coordinates`、`unsupported_key`、`unsupported_node_action` |
+| 409 | `contract_mismatch`、`device_busy`、`session_*`、`reference_*`、`operation_*`、`observation_*`、`node_not_found`、`node_disabled`、`stale_screen`、`target_changed`、`foreground_changed`、`foreground_unknown`、`control_revoked`、`request_closed`、`cleanup_unconfirmed`、`control_unavailable`、`stop_unavailable`、`mode_not_selected`、`device_locked`、`device_not_interactive`、`recovering`、`no_ready_observation`、`display_unavailable`、`text_target_uncertain`、`text_result_uncertain`、`control_ui_on_virtual_display`、`app_not_found`、`application_moved`、`task_focus_unavailable`、`task_remove_unconfirmed`、`content_unavailable`、`inspection_too_large`、`root_unavailable` |
+| 422 | `invalid_request`、`invalid_coordinates`、`unsupported_key`、`unsupported_node_action`、`text_too_long`、`reference_invalid` |
 | 501 | `unsupported_feature`（`image=true`） |
-| 503 | `device_unavailable`、`display_unavailable`、`display_create_failed`、`hierarchy_unavailable`、`tree_too_large`；以及 `observation.status=failed` 的结果 |
-| 504 | `action_result_uncertain`（输入已派发但无法确认完成） |
+| 503 | `device_unavailable`、`display_create_failed`、`hierarchy_unavailable`、`tree_too_large`、`app_launch_failed`、`app_list_unavailable`、`shell_start_failed`、`delivery_unavailable`；以及 `observation.status=failed` 的结果 |
+| 504 | `action_result_uncertain`（输入已派发但无法确认完成）、`app_launch_unconfirmed`、`shell_result_unconfirmed` |
 | 500 | `internal_error`（接入层自身失败）；工具结果中的 500 会被改写为 409 |
 
 接入层错误（认证、方法、契约、JSON）直接返回 `{"error":{…}}`，按需附带 `next`，不带
@@ -337,7 +338,7 @@ HTTP 状态映射（`protocol.Status`）：
 
 - `availability.state`：`ready`/`recovering`/`blocked`；非 `ready` 时可带 `reason`；
 - `session`：`null` 或 `{origin, agent?, mode, state, started_at?, expires_at?, ended_at?, reason?}`；
-- `work`：`null` 或 `{operation_id, kind, phase}`；`kind` 为 `start`/`observe`/`act`；
+- `work`：`null` 或 `{operation_id, kind, phase}`；`kind` 为 `start`/`observe`/`act`/`apps`/`open_app`/`shell`；
 - `cleanup`：`null` 或 `{state, execution?, tasks?, recents?, display?}`；
 - `commands`：数组，每拍至多一条显示命令；`create_display` 仅在有 `starting` 会话且显示助手
   已就绪时下发，`close_display` 在收尾/恢复需要精确释放时下发；
@@ -441,10 +442,150 @@ HTTP 状态映射（`protocol.Status`）：
 ```
 
 `cleanup.error` 只在存在未确认项时出现（`pending` 或 `unconfirmed` 都可能带），`code` 可能是
-内部原因串：`execution_unconfirmed`、`display_create_unconfirmed`、`owned_tasks_present`、
-`display_release_unconfirmed`。
+内部原因串：`execution_unconfirmed`、`display_create_unconfirmed`、`task_remove_unconfirmed`、
+`recents_cleanup_unconfirmed`、`display_release_unconfirmed`。
 
-## 12. 端点与能力边界
+## 12. 发现、应用、只读、通知与受管执行工具
+
+本节列出 `inspect`、`keepalive`、`diagnose`、`apps`、`open_app`、`notify`、`shell` 的请求与结果。
+
+### `POST /api/inspect`
+
+```json
+{"observation_id":"O2"}
+{"observation_id":"O2","node":"n7"}
+{"observation_id":"O2","query":"确定"}
+```
+
+`node` 与 `query` 互斥。`inspect` 只读保留中的历史树，不采集、不续租、不确认基线、
+不认领 O，也不需要 O 仍可输入。
+
+- 整树补看受完整公开树上限（128 KiB）；`node` 子树与 `query` 单个命中受 32 KiB 上限；
+- `query` 在 `label`/`value`/`hint`/`resource` 上做字面 Unicode 折叠子串匹配，按原树顺序
+  返回完整命中子树和祖先 `ref` 路径；`total` 为预算前命中数，只给完整单位时显式
+  `truncated`；
+- 常见失败：`409 observation_not_found`（不存在或不属于本 Agent）、
+  `409 content_unavailable`（树已被淘汰）、`409 node_not_found`、
+  `409 inspection_too_large`（`details.limit` 为字节上限）。
+
+### `POST /api/keepalive`
+
+```json
+{"reference":"O1"}
+```
+
+O/P 必须属于本 Agent 并定位一个仍 `active` 的原会话；只续租会话活动期，不延长任何 O 的
+`actionable_until`，不改变 O 状态，不占工作位置、不访问设备。成功返回
+`outcome=executed` 与新的 `session.expires_at`。重复 P 只返回原操作视图，不会再次续租。
+已结束/过期会话返回 `session_ended`/`session_expired`；P 没有原会话返回
+`reference_has_no_session`。
+
+### `POST /api/diagnose`
+
+```json
+{}
+{"reference":"O2"}
+```
+
+无参数查看自身近期有界事实；指定 O/P 时只查原归属。输出只有
+`diagnosis.summary`、`issues`（`phase`/`code`）、白名单 `timing_ms`、必要时短 `timeline`、
+`coverage` 与 `truncated`，不返回树、日志、输入、命令或输出，也不修复任何状态。
+未知或他人引用是正常查询事实：`coverage=record_unavailable`，不返回顶层错误。
+指定 P 且原操作仍可解析时，`diagnosis` 另带 `operation_id` 与已知 `outcome`。
+
+### `POST /api/apps`
+
+```json
+{}
+{"query":"设置"}
+```
+
+`query` 对本地化应用名或包名做字面 Unicode 折叠子串匹配，不是正则或选择器。成功返回：
+
+```json
+{"operation_id":"P7","apps":{"items":[{"name":"设置","package":"com.android.settings"}],
+  "total":1,"truncated":false,"captured_at":"…"}}
+```
+
+`items` 总是数组；`total` 是预算前匹配数；`truncated` 表示只返回了完整条目前缀；
+`captured_at` 是设备清单的实际读取时间（缓存命中时保持原时间）。`apps` 不返回
+`outcome`，不占 UI 输入权、不续租。设备清单读取占普通工作位置；另一项工作占用时，
+只有仍可信的新鲜缓存可直接返回，否则 `409 device_busy`。无会话时可调用。
+常见失败：`503 app_list_unavailable`、`409 control_revoked`、`409 device_busy`。
+
+### `POST /api/open_app`
+
+```json
+{"observation_id":"O4","app":"com.android.settings"}
+```
+
+`app` 只接受明确包名。它和 `act` 一样消费当前 `ready` O；静态/只读拒绝（包名不存在、
+控制界面出现在虚拟屏）发生在认领之前，不消费 O。
+
+- 虚拟屏：优先复用目标屏上该包已有的 live 窗口（`reused=true`），否则在目标屏新建窗口；
+  不搬走/认领用户主屏任务；新语境后置一次 full 观察；
+- 主屏：按普通同屏应用打开，不登记/不关闭用户任务；
+- 返回 `app`（`package`、`task_id`、`display_id`、`reused`、`state_preserved`）与
+  `observation`；只有已证明的任务才返回 `app`；
+- 常见失败：`409 app_not_found`（next=user）、`503 app_launch_failed`、
+  `504 app_launch_unconfirmed`、`409 application_moved`、`409 task_focus_unavailable`。
+  派发后无法证明任务归属为 `uncertain`，不重放。
+
+虚拟会话收尾按精确任务 id 移除目标屏任务并核验 `dumpsys activity recents`，再关闭显示；
+`cleanup.tasks`/`cleanup.recents` 分别表达。主屏收尾不关闭用户应用。
+
+### `POST /api/notify`
+
+```json
+{"text":"消息正文"}
+```
+
+无需会话；`text` 非空且不超过 4096 个 Unicode 码点。成功返回 `outcome=executed`、
+`message_id`、`saved=true` 与 `notification.state`。
+`executed` 只表示消息已保存，不表示已读或已完成通知交付。`notification.state` 为 `unavailable`，并带受控 `notification_unavailable` 错误；
+本契约不返回 `pending`/`submitted`。正文不进日志、错误或账本。
+
+### `POST /api/shell`
+
+```json
+{"reference":"O1","command":"id -u","root":false}
+```
+
+`reference` 为 O/P，只定位原活动会话；可以是该会话已消费/过期/退役的 O，或首次树失败的启动 P。
+`command` 非空、≤4096 个 Unicode 码点且不含 NUL；`root=false` 使用设备 shell 身份，
+`root=true` 明确请求 root，不自动降级/提权重试。命令在 Android shell 环境执行，不进入 chroot。
+
+派发前服务原子地撤销原会话当前 O 的输入授权、清除已确认基线并置全量恢复边界；旧树可继续
+`inspect`，但旧 full 的迟到确认不能解除该边界。受管链确认结束、原作用域复核通过后，默认
+后置一次 full 观察（不取图）。
+
+```json
+{"operation_id":"P30","outcome":"executed",
+ "shell":{"termination":"exited","exit_code":0,"output":"…","truncated":false},
+ "observation":{"status":"complete","id":"O31","origin":"P_start","tree":{"format":"full","scope":"reported_visible_with_context","root":{…}}}}
+```
+
+`shell` 字段总是包含 `termination`、`exit_code`、`output`、`truncated`：
+
+| 字段 | 规则 |
+| --- | --- |
+| `termination` | `not_started`/`exited`/`timeout`/`cancelled`/`unknown` |
+| `exit_code` | 可靠自然退出时为实际整数；没有时为 `null`，不伪造 124 |
+| `output` | 已取得的有界前缀；`""` 表示已知空输出，`null` 表示未取得 |
+| `truncated` | 已知是否超过 64 KiB 时为布尔值；字节计数未知时 `null` |
+| `output_error` | 仅输出取得失败时出现，`shell_output_unavailable` |
+
+结果分层：自然退出（含非零与命令自行 `exit 124`）为 `executed`/`exited`；监管超时且已确认
+进程组停止为 `executed`/`timeout`；STOP/end 后已确认停止为 `cancelled`（若信号前已有自然退出码
+则保留 `exited`/实际码）；已派发但开始/结束无法确认为 `uncertain`/`unknown`；确认未启动为
+`not_executed`/`not_started`。超时/取消只报告已确认的终止；没有停止证据不包装成 timeout。
+
+常见失败：`409 root_unavailable`、`503 shell_start_failed`、`504 shell_result_unconfirmed`、
+`409 session_ended`/`reference_has_no_session`/`operation_unknown`、`409 device_busy`。
+已结束但仅输出缺失时响应仍为 `executed`，错误在嵌套 `shell.output_error`；后观察失败不改写
+命令执行事实，`next=observe`。命令正文、输出与异常文本不进入日志或账本。
+
+## 13. 端点与能力边界
 
 | 端点/能力 | 契约行为 |
 | --- | --- |
@@ -452,7 +593,8 @@ HTTP 状态映射（`protocol.Status`）：
 | `act`：`tap`、`long_press`、`swipe`、`key`、`text` | 定义于 §6；其他动作类型不被接受 |
 | `observe`/`act` 的 `image=true` | 返回 `501 unsupported_feature`；本契约不定义图片载荷 |
 | 截图、图片块、MCP `ImageContent` | 不在本契约范围 |
-| `open_app`、`apps`、`keepalive`、`inspect`、`notify`、`shell`、`diagnose` | 路由未定义；请求返回 `404 page not found` |
+| `open_app`、`apps`、`keepalive`、`inspect`、`notify`、`diagnose` | 定义于 §12 |
+| `shell` | 定义于 §12 |
 | MCP stdio / Streamable HTTP、Go client | 服务不提供 MCP 端点或 Go client |
 | `/v1/control/sync`、`/v1/control/stop`、`create_display`/`close_display` | 定义于 [控制端协议](control-protocol.md) |
 | `selected_mode=primary` | 使用主屏（display 0），不创建虚拟屏 |

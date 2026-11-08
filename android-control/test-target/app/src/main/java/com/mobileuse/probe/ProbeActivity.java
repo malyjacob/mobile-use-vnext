@@ -12,7 +12,7 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 
 /**
- * Controlled verification target for the P3 writable loop. It exposes a text
+ * Controlled verification target for the writable loop. It exposes a text
  * label, one editable field, one clickable button with a visible counter and a
  * checkbox so a public tree can be observed and a Chinese text write can be
  * verified without any production app or personal data.

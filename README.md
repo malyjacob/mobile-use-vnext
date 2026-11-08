@@ -8,27 +8,16 @@ HTTP 协议配对。
 - 模块：`github.com/malyjacob/mobile-use-vnext`
 - Go：1.27.1，启用 `GOEXPERIMENT=jsonv2`
 - 契约：`contract_version = "1"`，服务、HTTP 客户端、控制 App 精确相等才做普通工作
-- 发布标识：`0.1.0-p3`（`-ldflags -X internal/protocol.ReleaseVersion`）
-- 当前阶段：**P3 最小可写闭环**
+- 发布标识：由构建注入（`-ldflags -X internal/protocol.ReleaseVersion`）；源码默认 `0.1.0-dev`，不是契约
 
-## 当前阶段
+## 能力边界
 
-P3 已实现：配对控制 App 的最小控制协议与独立 STOP、启动恢复账本与 `can_start` 门禁、
-`start`（首个 full 观察）/`status`/`observe`/`act`（`tap`、`long_press`、`swipe`、`key`、
-`text`）/`end`、精确归属与物理收尾。设备服务与 App 的共同契约版本为 `1`；控制 App 的
-`versionName` 为 `0.4.0-p3`。
-
-事实分层（以 2026-11-08 的工作区为准）：
-
-| 类别 | 内容 |
-| --- | --- |
-| 已实现 | 上述工具与 `/v1/control/sync`、`/v1/control/stop`；`create_display`/`close_display` 两种显示命令；进程锁、恢复账本、收尾链、事件日志白名单 |
-| 已实测 | 见 [P3 实机记录](maintenance/verification/p3-real-device.md)：`scripts/verify-p3.ps1` 连续四次 PASS（虚拟屏 start/observe/tap/中文 text/end、清理与重新准入）、服务 SIGKILL 后旧显示仍存在的精确关闭恢复、App `force-stop` 后的撤销与收尾、并发认领、`observe.full=true`、严格接入与 `image=true` → 501 |
-| 未验证 | `primary` 模式、App 通知按钮实点、HTTP 层独立回归、完整 G3 |
-| 未实现 | MCP 双入口与客户端、图片交付（`image=true` 返回 501）、`open_app`/`apps`/`keepalive`/`inspect` 等其余工具、消息中心 |
-
-G3 尚未整体收口：实现已到“最小可写闭环”，`display` 仍存在的恢复分支已实测，但 `primary`
-模式、App 通知按钮实点与 HTTP 独立回归还没有实机证据，不能把 P3 之外的阶段能力写成已具备。
+- Agent 工具为 `POST /api/<tool>`，当前注册 `start`/`status`/`observe`/`act`/`end`/
+  `inspect`/`keepalive`/`diagnose`/`apps`/`open_app`/`notify`/`shell`；逐项字段、错误码与
+  空值规则见 [接口契约](docs/interface.md)。
+- 控制端为 `POST /v1/control/sync|stop`；显示命令固定为 `create_display`、`close_display`，
+  见 [控制端最小协议](docs/control-protocol.md)。
+- `image=true` 返回 `501 unsupported_feature`；MCP、图片、消息中心与发布包组装见下文“未提供”。
 
 ## 目录
 
@@ -68,8 +57,8 @@ go build ./...
 发布构建使用脚本（自动设置上述环境、注入版本、打印 SHA-256）：
 
 ```powershell
-./scripts/build.ps1                              # 输出 build/device-service，默认 0.1.0-p3
-./scripts/build.ps1 -Version 0.1.0-p3 -Output build
+./scripts/build.ps1                              # 输出 build/device-service，默认 0.2.0-m4
+./scripts/build.ps1 -Version 0.2.0-m4 -Output build
 ```
 
 控制 App 由 `android-control/build.ps1` 用本机 SDK/JDK 直接构建（无 Gradle），输出
@@ -118,47 +107,43 @@ GOEXPERIMENT=jsonv2 go test ./...
 $env:GOEXPERIMENT = 'jsonv2'; go test ./...
 ```
 
-当前包内测试覆盖 `internal/protocol`、`internal/observation`、`internal/engine`、
-`internal/android`（ADB/u2 走本地桩，不需要真机）。`internal/httpapi`、`internal/store`、
-`internal/eventlog`、`internal/device` 没有包内测试；Windows 上的通过不证明设备路径或账本
-耐久性。设备相关验证边界见 [P3 实机记录](maintenance/verification/p3-real-device.md)。
+包内测试覆盖 `internal/protocol`、`internal/observation`、`internal/engine`、`internal/android`
+（ADB/u2 走本地桩，不需要真机）；`internal/httpapi`、`internal/store`、`internal/eventlog`、
+`internal/device` 没有包内测试。Windows 上的通过不证明设备路径或账本耐久性。
 
-服务已部署、`can_start=true` 时，可运行实机闭环脚本（探针 APK 缺失会自动构建）：
-
-```powershell
-./scripts/verify-p3.ps1 -SkipBuildProbe
-```
-
-## 已实现接口
+## 接口
 
 Agent 工具（`POST /api/<tool>`，`Authorization: Bearer <agent_token>`，
 `X-Mobile-Use-Contract: 1`）：
 
 | 工具 | 说明 |
 | --- | --- |
-| `start` | 请求体必须为 `{}`；创建/绑定目标屏幕并发布首个 full 观察，返回 `session` 与 `observation` |
-| `status` | 无参数、`{"reference":"O…"}` 或 `{"reference":"P…"}`；查询，不续租、不确认基线 |
-| `observe` | `reference` 必填（O/P），`wait_ms` 0–10000；按服务端基线返回 full 或 delta；`observe(P)` 与 `full=true` 强制 full |
-| `act` | `observation_id` + `operation`：`tap`、`long_press`、`swipe`、`key`、`text`；一次性认领 O，动作后附后观察 |
-| `end` | `reference`（O/P）；撤权并启动独立收尾，返回 `cleanup` 进度 |
+| `start` | 请求体必须为 `{}`；创建/绑定目标屏幕并发布首个 full 观察 |
+| `status` | 无参数、`{"reference":"O…"}` 或 `{"reference":"P…"}`；只读查询 |
+| `observe` | `reference`（O/P）；按服务端基线返回 full 或 delta；`observe(P)` 与 `full=true` 强制 full |
+| `act` | `observation_id` + `operation`：`tap`、`long_press`、`swipe`、`key`、`text` |
+| `inspect` | `observation_id` 可选 `node` 或 `query`；只读历史树 |
+| `keepalive` | `reference`（O/P）；续租原活动会话 |
+| `end` | `reference`（O/P）；撤权并启动独立收尾 |
+| `apps` | 可选 `query`；发现可启动应用 |
+| `open_app` | `observation_id` + `app`；在会话屏打开/复用应用并返回新观察 |
+| `notify` | `text`；保存一条 Agent 消息 |
+| `shell` | `reference` + `command` + 可选 `root`；受管命令执行与后观察 |
+| `diagnose` | 可选 `reference`；有界诊断事实 |
 
 控制端（`POST /v1/control/sync|stop`，`Authorization: Bearer <control_token>`）：心跳同步
-下发普通控制视图与至多一条显示命令，独立 STOP 只绑定停止边界、不等待清理。显示命令固定为
-`create_display`、`close_display` 两种。`GET /health` 无认证，只表示进程可应答。
+下发普通控制视图与至多一条显示命令，独立 STOP 只绑定停止边界、不等待清理。`GET /health`
+无认证，只表示进程可应答。
 
 严格字段、错误码与空值规则见 [接口契约](docs/interface.md)；控制端协议细节见
 [控制端最小协议](docs/control-protocol.md)。
 
-## 未实现
+## 未提供
 
-- MCP 双入口（stdio / Streamable HTTP）与 Go client：无 `internal/mcp`、无 SDK 配置。
-- 图片/截图交付：`observe`、`act` 的 `image=true` 直接返回 `501 unsupported_feature`；
-  设备层没有图片块或 MCP ImageContent 输出。
-- `open_app`、`apps`、`keepalive`、`inspect`、`notify`、`shell`、`diagnose` 等其余工具：
-  路由未注册。
-- 完整 control_view 呈现（P6）、消息/回执/已读、App 界面整理。
-- go-sdk 取消语义与 stdio 配置 spike：未开展（见
-  [jsonv2 spike](maintenance/spikes/p0-jsonv2.md) 与 [账本 spike](maintenance/spikes/p0-ledger.md)）。
+- MCP 双入口（stdio / Streamable HTTP）与 Go client。
+- 图片/截图交付：`image=true` 返回 `501 unsupported_feature`。
+- App 消息中心的完整通知交付、已读回执与界面整理。
+- 发布包组装与整组发布演练。
 
 ## 文档
 
@@ -166,7 +151,7 @@ Agent 工具（`POST /api/<tool>`，`Authorization: Bearer <agent_token>`，
 - [接口契约](docs/interface.md)：逐端点 JSON、空值规则、错误码、工具支持范围。
 - [运行手册](docs/runbook.md)：手机环境、部署/启动/停止、健康检查、常见故障。
 - [控制端最小协议](docs/control-protocol.md)：同步、显示命令、独立 STOP。
-- [工程决策](maintenance/decisions.md) 与 [P3 实机记录](maintenance/verification/p3-real-device.md)。
+- [工程决策](maintenance/decisions.md) 与 `maintenance/verification/`。
 
-`docs/` 只写已实现架构、现行契约与运行说明；提案、决策、验证记录和未决项放在
+`docs/` 只写正式架构、现行契约与运行说明；提案、决策、验证记录和未决项放在
 `maintenance/`。原始日志、节点树、截图、坐标与个人信息不入库。

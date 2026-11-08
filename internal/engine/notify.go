@@ -22,7 +22,7 @@ type messageState struct {
 	Text string
 }
 
-// Notify saves one Agent message for the control App message center. M4 has no
+// Notify saves one Agent message for the control App message center. There is no
 // delivery channel into the App, so notification stays explicitly unavailable
 // without turning a saved message into a submitted or pending claim.
 func (e *Engine) Notify(agent, p string, req *protocol.NotifyRequest) (*protocol.Result, *protocol.APIError) {

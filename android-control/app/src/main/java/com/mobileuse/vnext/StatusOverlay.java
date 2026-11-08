@@ -199,7 +199,7 @@ final class StatusOverlay implements AutoCloseable {
 
     /**
      * 仅更新内容，不展开、不写偏好、不移动、不请求焦点。
-     * 消息中心骨架在 P3 无服务端邮局，未读徽标固定不显示；停止入口始终保留。
+     * 消息中心骨架当前无服务端邮局，未读徽标固定不显示；停止入口始终保留。
      */
     void render(ControlState snapshot) {
         state = snapshot;

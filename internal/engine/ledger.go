@@ -23,6 +23,43 @@ type Ledger struct {
 	// Stop carries the bound stop boundary so a restart keeps the admission
 	// barrier even when the original App instance is gone.
 	Stop *LedgerStop `json:"stop,omitempty"`
+	// Shell is the managed runner ownership that must be resolved before any
+	// new ordinary work is admitted. It carries identity, phase and bounded
+	// counters only: never the command, its output, hashes or error strings.
+	Shell *LedgerShell `json:"shell,omitempty"`
+}
+
+// LedgerShell is the durable identity and minimum end receipt of one managed
+// shell run. CommandRunes is a length, not the command.
+type LedgerShell struct {
+	RunnerID          string    `json:"runner_id"`
+	Dir               string    `json:"dir,omitempty"`
+	OperationID       string    `json:"operation_id"`
+	Agent             string    `json:"agent,omitempty"`
+	Origin            string    `json:"origin,omitempty"`
+	Epoch             int64     `json:"epoch,omitempty"`
+	AppInstanceID     string    `json:"app_instance_id,omitempty"`
+	ModeGeneration    string    `json:"mode_generation,omitempty"`
+	DisplayID         int       `json:"display_id,omitempty"`
+	DisplayGeneration string    `json:"display_generation,omitempty"`
+	Root              bool      `json:"root"`
+	State             string    `json:"state"`
+	Phase             string    `json:"phase,omitempty"`
+	CommandRunes      int       `json:"command_runes"`
+	StartedAt         time.Time `json:"started_at"`
+	DeadlineAt        time.Time `json:"deadline_at"`
+	Termination       string    `json:"termination,omitempty"`
+	ExitCode          *int      `json:"exit_code,omitempty"`
+	OutputBytes       int       `json:"output_bytes"`
+	Truncated         *bool     `json:"truncated,omitempty"`
+	ConfirmedAt       time.Time `json:"confirmed_at,omitempty"`
+	// Start identity of the managed process group, recorded after the runner
+	// reported it. Recovery uses it to prove that an alive PID is not a reused
+	// one; it is not user content.
+	StartPID   int    `json:"start_pid,omitempty"`
+	StartPGID  int    `json:"start_pgid,omitempty"`
+	StartTicks uint64 `json:"start_ticks,omitempty"`
+	BootID     string `json:"boot_id,omitempty"`
 }
 
 // LedgerSession is the durable ownership record of one session attempt.
@@ -63,13 +100,17 @@ type LedgerCommand struct {
 
 // LedgerCleanup is the durable closure progress of the original resources.
 type LedgerCleanup struct {
-	State     string    `json:"state"`
-	Execution string    `json:"execution"`
-	Tasks     string    `json:"tasks"`
-	Recents   string    `json:"recents"`
-	Display   string    `json:"display"`
-	Reason    string    `json:"reason,omitempty"`
-	StartedAt time.Time `json:"started_at"`
+	State     string `json:"state"`
+	Execution string `json:"execution"`
+	Tasks     string `json:"tasks"`
+	Recents   string `json:"recents"`
+	Display   string `json:"display"`
+	Reason    string `json:"reason,omitempty"`
+	// ExecReason records the source of an execution uncertainty
+	// (ui_input / shell_chain) so a restart can still tell whether exact-chain
+	// release evidence may promote it.
+	ExecReason string    `json:"exec_reason,omitempty"`
+	StartedAt  time.Time `json:"started_at"`
 }
 
 // LedgerStop is the bound minimal-STOP boundary.

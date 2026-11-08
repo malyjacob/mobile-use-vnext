@@ -126,3 +126,55 @@
   由服务端按基线、编码成本与语境决定 full/delta。
 - **影响**：主动 full 不改变 O 的单向消费与提交门禁；调用方不能靠 `full=true` 绕过会话/显示/
   工作校验。
+
+## D14 M4 工具工作类别与 detached P
+
+- **背景**：`apps`/`notify` 无会话，`open_app`/`shell` 需要自己的设备工作类别；P3 的
+  `registerOperation` 会把当前会话绑定到任意 P，若 `notify`/`apps` 沿用，`end(该P)` 会误结束
+  无关的活动会话。
+- **选择**：工作类别扩为 `start/observe/act/apps/open_app/shell`；新增
+  `registerDetachedOperation`，`apps`/`notify` 的 P 不写 `SessionOrigin`。`open_app`/`shell`
+  仍绑定原会话。
+- **影响**：`end(appsP)`/`end(notifyP)` 明确返回 `reference_has_no_session`，不会碰到其他
+  会话；App 控制视图的 `work.kind` 对未知值已有安全文案，不需要破坏性升级。
+
+## D15 app 清单缓存 60 秒
+
+- **背景**：缓存分案只规定 `apps` 可有可信缓存，没有给出 TTL。
+- **选择**：引擎内存单条缓存 60 秒（与 O 输入寿命一致），不持久化；TTL 到期、App 实例变化、
+  读取失败、恢复/退出时失效。缓存命中不占工作位置；新读占工作位置。
+- **影响**：`apps.captured_at` 永远是真实读取时间；调用方不能用缓存冒充当前采集；重启不
+  复活旧清单。
+
+## D16 虚拟会话任务登记与清理
+
+- **背景**：P3 收尾链假设会话从不启动应用；M4 `open_app` 后若仍按“任务非空即未确认”处理，
+  每个用过应用的会话都会永久阻塞准入。
+- **选择**：虚拟会话在内存登记 `taskEntry`（task id、包名、display、generation、owned、
+  proven），账本只存有界 task id/包名/display/proven（≤16 项，无窗口内容）。收尾先按精确
+  task id 移除目标屏任务（≤3 轮、每轮重读实时任务），再核验 `dumpsys activity recents`，
+  最后关闭显示。主屏会话从不登记/移除用户任务。
+- **影响**：`cleanup.tasks`/`recents` 由实时任务与 recents 证据分别确认；未确认时保留
+  `task_remove_unconfirmed`/`recents_cleanup_unconfirmed`；恢复屏障对旧 display 上的任务
+  先做同样的有界清扫，仍无法确认则保持阻塞。
+
+## D17 慢交付额度
+
+- **背景**：设备工作位置在结果发送前释放；慢连接可让冻结结果无限积压。
+- **选择**：HTTP 层独立交付额度：最多 2 份、合计 4 MiB、单份写期限 15 s；需树/清单/诊断
+  结果的工具在调用 engine 前预留上界，不足立即 503 `delivery_unavailable`，不排队。
+- **影响**：交付失败不改写已提交事实；调用方仍按原 P 恢复；STOP/end/status 不受额度阻塞。
+
+## D18 notify 的 M4 交付边界
+
+- **背景**：设计把消息中心与实际通知交付放在 App；M4 不整理 App 界面。
+- **选择**：服务端有界保存消息（256 条 / 1 MiB，内存），`executed` 只确认保存；
+  `notification.state=unavailable` 并带 `notification_unavailable`，不伪造 pending/submitted。
+- **影响**：M4 可验证保存与去重；App 消息中心接入属后续阶段，正文不进日志/错误/账本。
+
+## D19 apps 的应用清单制品
+
+- **背景**：需要本地化应用名，Android shell 没有稳定的标签来源。
+- **选择**：固定 `third_party/android-applist/applist.dex`（`app_process`，shell 身份，
+  `package<TAB>base64(label)`），带 SHA-256、源码、构建脚本与部署接线；服务按固定哈希懒推送。
+- **影响**：标签只进入 `apps.items[].name`，不写日志；换制品必须同时更新哈希、源码与说明。

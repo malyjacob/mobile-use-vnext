@@ -55,6 +55,7 @@ func (e *Engine) beginCleanupLocked(session *sessionState, reason string) *clean
 	}
 	if execUnknown {
 		cleanup.Execution = protocol.CleanupUnconfirmed
+		cleanup.ExecReason = e.cleanupExecReasonLocked()
 		cleanup.Error = &protocol.Error{Code: "execution_unconfirmed",
 			Message: "存在未确认结束的已派发输入"}
 	}
@@ -68,6 +69,20 @@ func (e *Engine) beginCleanupLocked(session *sessionState, reason string) *clean
 	e.cleanup = cleanup
 	e.broadcastAppLocked()
 	return cleanup
+}
+
+// cleanupExecReasonLocked attributes the execution uncertainty. A managed shell
+// chain can later be confirmed gone by its own termination evidence, which is
+// release-of-barrier evidence; UI input uncertainty keeps today's sticky
+// behavior and is never rewritten by a later observation.
+func (e *Engine) cleanupExecReasonLocked() string {
+	if e.work != nil && e.work.Kind == WorkShell {
+		return "shell_chain"
+	}
+	if e.shell != nil && !e.shell.settled() {
+		return "shell_chain"
+	}
+	return "ui_input"
 }
 
 // launchCleanup starts the independent closure chain for one original session.
@@ -282,6 +297,17 @@ func (e *Engine) finishCleanup(target cleanupTarget, cleanup *cleanupState, resu
 	}
 	if cleanup.Execution == protocol.CleanupUnconfirmed {
 		result.Execution = protocol.CleanupUnconfirmed
+	} else if cleanup.Execution == protocol.CleanupConfirmed {
+		// Release-of-barrier evidence may have promoted execution while the
+		// physical chain was still running. The live record wins over the copy
+		// taken when this chain started.
+		result.Execution = protocol.CleanupConfirmed
+	}
+	if result.Execution == protocol.CleanupConfirmed && result.Error != nil &&
+		result.Error.Code == "execution_unconfirmed" {
+		// The promotion is the release evidence for this cause; the stale
+		// begin-time error must not survive in the public closure record.
+		result.Error = nil
 	}
 	complete := result.Execution != protocol.CleanupUnconfirmed &&
 		result.Display != protocol.CleanupUnconfirmed &&

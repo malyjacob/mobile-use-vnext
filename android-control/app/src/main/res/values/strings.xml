@@ -22,7 +22,7 @@
     <string name="message_center_empty_button">消息中心（0）</string>
     <string name="message_center_unavailable">消息中心骨架 · 当前控制协议不携带消息</string>
     <string name="message_empty">当前协议不提供消息同步；Agent 的通知不会出现在这里。</string>
-    <string name="message_authorization_detail">P3 最小控制协议不包含消息、回执或已读上报。此页面只保留入口骨架；消息通知频道将在后续版本恢复。</string>
+    <string name="message_authorization_detail">最小控制协议不包含消息、回执或已读上报。此页面只保留入口骨架；消息通知频道将在后续版本恢复。</string>
     <string name="message_settings_button">打开通知设置</string>
     <string name="message_center_close">关闭</string>
 

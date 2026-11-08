@@ -79,6 +79,10 @@ type Config struct {
 	ControlPackage      string        // paired control App package
 	MaxAppsBytes        int           // 32 KiB apps result budget
 	AppListTTL          time.Duration // 60s trusted app-list cache
+	ShellTimeout        time.Duration // 30s managed shell execution budget
+	ShellConfirmTimeout time.Duration // 5s termination/confirmation budget
+	ShellStartTimeout   time.Duration // 3s managed start evidence budget
+	ShellOutputBytes    int           // 64 KiB retained output prefix
 }
 
 // DefaultConfig returns the first-version policy values.
@@ -102,6 +106,10 @@ func DefaultConfig(instanceID, agentName string) Config {
 		ControlPackage:      "com.mobileuse.vnext",
 		MaxAppsBytes:        32 * 1024,
 		AppListTTL:          60 * time.Second,
+		ShellTimeout:        30 * time.Second,
+		ShellConfirmTimeout: 5 * time.Second,
+		ShellStartTimeout:   3 * time.Second,
+		ShellOutputBytes:    65536,
 	}
 }
 
@@ -130,6 +138,16 @@ type Device interface {
 	RemoveTask(ctx context.Context, taskID int) error
 	RecentTaskIDs(ctx context.Context) (map[int]bool, bool)
 	TasksOnDisplay(ctx context.Context, displayID int) ([]device.Task, bool)
+	// Managed shell runner. The concrete adapter writes the exact command
+	// bytes, starts the detached runner and reports bounded evidence; the
+	// engine owns admission, ownership persistence and the outcome mapping.
+	PrepareManagedShell(ctx context.Context, runID string, command []byte) error
+	StartManagedShell(ctx context.Context, runID string, root bool, deadline time.Duration) (device.ShellStart, error)
+	InspectManagedShell(ctx context.Context, runID string) (device.ShellSnapshot, error)
+	ReadManagedShellOutput(ctx context.Context, runID string) ([]byte, error)
+	TerminateManagedShell(ctx context.Context, runID string, root bool, reason string) (device.ShellTermination, error)
+	RemoveManagedShell(ctx context.Context, runID string, root bool) error
+	RootAvailable(ctx context.Context) (bool, error)
 }
 
 // Store is the recovery ledger capability.
@@ -196,6 +214,10 @@ type Engine struct {
 	operations   map[string]*operationState
 	work         *workState
 	cleanup      *cleanupState
+	// shell is the current managed runner ownership. It outlives the ordinary
+	// work slot when the chain is unresolved so admission stays closed.
+	shell        *shellState
+	shellProbing bool
 
 	nextObservation int64
 	nextOperation   int64
@@ -355,9 +377,13 @@ type cleanupState struct {
 	Recents   string
 	Display   string
 	Reason    string
-	StartedAt time.Time
-	Error     *protocol.Error
-	done      chan struct{}
+	// ExecReason records where the execution uncertainty came from:
+	// ui_input (sticky, as before) or shell_chain (release-of-barrier
+	// evidence can later confirm it). It is not a public field.
+	ExecReason string
+	StartedAt  time.Time
+	Error      *protocol.Error
+	done       chan struct{}
 }
 
 // New constructs an engine with the real monotonic clock.
@@ -411,6 +437,14 @@ func (e *Engine) availabilityLocked(now time.Time) (string, string) {
 		case protocol.CleanupUnconfirmed:
 			return AvailabilityBlocked, protocol.CodeCleanupUnconfirmed
 		}
+	}
+	// An unresolved managed shell chain keeps the barrier closed: no new
+	// ordinary work may be admitted until the exact runner is confirmed gone.
+	if e.shell != nil && !e.shell.settled() {
+		if e.shell.State == ShellTerminating {
+			return AvailabilityRecovering, "shell_chain_unconfirmed"
+		}
+		return AvailabilityRecovering, "shell_pending"
 	}
 	if e.ledgerUnsafe {
 		return AvailabilityBlocked, "ledger_unavailable"
@@ -573,9 +607,19 @@ func (e *Engine) housekeeping(ctx context.Context) {
 	}
 	e.pruneClosedLocked(now)
 	needsRecovery := e.recovery != nil
+	// An unresolved managed chain is re-probed from the bounded clock, never
+	// from the request path, so a natural end does not keep admission closed.
+	probeShell := e.shell != nil && !e.shell.settled() && e.work == nil &&
+		!e.shellProbing && !e.shuttingDown
+	if probeShell {
+		e.wg.Add(1)
+	}
 	e.mu.Unlock()
 	if expired != nil {
 		e.launchCleanup(expired, "lease_expired")
+	}
+	if probeShell {
+		go func() { defer e.wg.Done(); e.confirmUnresolvedShell(ctx) }()
 	}
 	if needsRecovery {
 		e.driveRecovery(ctx)

@@ -60,7 +60,7 @@ func nextFor(code string) string {
 	case "device_busy", "operation_running", "delivery_unavailable",
 		"app_launch_unconfirmed", "application_moved", "task_focus_unavailable",
 		"shell_result_unconfirmed", "task_remove_unconfirmed",
-		"app_list_unavailable":
+		"shell_start_failed", "app_list_unavailable":
 		return "status"
 	case "observation_expired", "observation_retired", "observation_claimed",
 		"observation_not_ready", "no_ready_observation", "tree_unavailable",
@@ -129,9 +129,9 @@ const (
 	CodeInternal           = "internal_error"
 	CodeForbidden          = "forbidden"
 
-	// M4 tool-surface codes. These describe controlled stages of the
+	// Tool-surface codes. These describe controlled stages of the
 	// discovery, app launch and managed shell tools; no new code changes the
-	// meaning of the P3 codes above.
+	// meaning of the earlier codes above.
 	CodeAppNotFound             = "app_not_found"
 	CodeAppLaunchFailed         = "app_launch_failed"
 	CodeAppLaunchUnknown        = "app_launch_unconfirmed"

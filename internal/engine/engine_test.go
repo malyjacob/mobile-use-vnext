@@ -31,7 +31,7 @@ type fakeDevice struct {
 	captureErrs    bool
 	closeDisplayID int
 
-	// M4 discovery and task facts. Tests set these before calling the engine.
+	// Discovery and task facts. Tests set these before calling the engine.
 	appEntries       []device.AppEntry
 	appErr           error
 	appCalls         int
@@ -50,6 +50,7 @@ type fakeDevice struct {
 	recentIDs        map[int]bool
 	recentKnown      bool
 	foreground       *device.Foreground
+	shell            fakeShellHooks
 }
 
 func newFakeDevice() *fakeDevice {

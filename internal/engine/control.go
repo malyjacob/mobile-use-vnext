@@ -466,6 +466,17 @@ func (e *Engine) driveRecovery(ctx context.Context) {
 	e.mu.Unlock()
 	defer func() { e.mu.Lock(); e.recoveryRunning = false; e.broadcastAppLocked(); e.mu.Unlock() }()
 
+	// One early step resolves the previous instance's managed runner before any
+	// display or task work: while the exact chain is unresolved, new ordinary
+	// work must stay closed.
+	if resolved, reason := e.resolveRecoveryShellChain(ctx); !resolved {
+		e.setRecoveryReason(reason)
+		return
+	}
+	// A shell_chain execution uncertainty whose runner ownership is already
+	// gone was released in an earlier pass; only the closure write was lost.
+	e.promoteOrphanShellCleanup(record)
+
 	displayID, generation, owner := 0, "", record.AppInstanceID
 	virtual := record.PendingCreate != nil || record.PendingClose != nil
 	if session := record.Session; session != nil {
@@ -603,6 +614,19 @@ func (e *Engine) restoreRecoveryLocked(record *Ledger) {
 			Kind: "close_display", AppInstance: c.AppInstanceID, RequestedAt: c.RequestedAt})
 		e.closeAttempted[displayOwner{c.AppInstanceID, c.DisplayID, c.DisplayGeneration}] = true
 	}
+	// The runner identity is restored for barrier resolution only: it never
+	// revives a session and never grants new input authority.
+	e.shell = shellStateFromLedger(record.Shell)
+	// The durable closure progress is restored so recovery can still tell a
+	// shell-caused execution uncertainty (promotable by exact-chain release
+	// evidence) from a sticky UI-input one. No chain is restarted.
+	if c := record.Cleanup; c != nil {
+		e.cleanup = &cleanupState{
+			State: c.State, Execution: c.Execution, Tasks: c.Tasks,
+			Recents: c.Recents, Display: c.Display, Reason: c.Reason,
+			ExecReason: c.ExecReason, StartedAt: c.StartedAt,
+		}
+	}
 }
 
 // enqueueCloseCommand adds one precise close command for the original display.
@@ -677,7 +701,8 @@ func (e *Engine) ledgerRecordLocked() *Ledger {
 		record.Cleanup = &LedgerCleanup{
 			State: e.cleanup.State, Execution: e.cleanup.Execution, Tasks: e.cleanup.Tasks,
 			Recents: e.cleanup.Recents, Display: e.cleanup.Display,
-			Reason: e.cleanup.Reason, StartedAt: e.cleanup.StartedAt,
+			Reason: e.cleanup.Reason, ExecReason: e.cleanup.ExecReason,
+			StartedAt: e.cleanup.StartedAt,
 		}
 	}
 	if e.stopBoundary != nil {
@@ -686,6 +711,10 @@ func (e *Engine) ledgerRecordLocked() *Ledger {
 			AcceptedAt: e.stopBoundary.AcceptedAt,
 		}
 	}
+	// The managed runner identity is the only durable evidence that can close
+	// an unresolved shell chain after a restart. It carries no command text and
+	// no output.
+	record.Shell = e.shell.ledger()
 	return record
 }
 

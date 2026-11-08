@@ -31,6 +31,12 @@ func TestParseShellStart(t *testing.T) {
 		start.StartTicks != 456 || start.BootID != "boot" {
 		t.Fatalf("start=%+v ok=%v", start, ok)
 	}
+	// A command can exit before /proc/<pid>/stat is read; the empty tick is
+	// valid because the PID still identifies the recorded process.
+	fast, ok := parseShellStart("start_v1\t123\t123\t\tboot")
+	if !ok || !fast.HasIdentity || fast.PID != 123 || fast.StartTicks != 0 {
+		t.Fatalf("fast start=%+v ok=%v", fast, ok)
+	}
 	for _, bad := range []string{
 		"", "start_v1\t0\t0\t0\tboot", "start_v1\tx\t1\t1\tboot",
 		"start_v1\t1\t1\tx\tboot", "start_v2\t1\t1\t1\tboot",

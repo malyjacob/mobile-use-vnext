@@ -7,7 +7,7 @@ import (
 )
 
 // App discovery and task primitives for the engine fake. They are kept in a
-// separate file so the P3 fake remains readable.
+// separate file so the base fake remains readable.
 
 func (f *fakeDevice) AppList(context.Context) ([]device.AppEntry, error) {
 	f.mu.Lock()

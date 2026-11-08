@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestM4StrictAdmission(t *testing.T) {
+func TestToolSurfaceStrictAdmission(t *testing.T) {
 	cases := []struct {
 		name string
 		body string
@@ -71,7 +71,7 @@ func TestM4StrictAdmission(t *testing.T) {
 	}
 }
 
-func TestM4DuplicateAndTrailingRejected(t *testing.T) {
+func TestToolSurfaceDuplicateAndTrailingRejected(t *testing.T) {
 	cases := []struct {
 		name string
 		body string

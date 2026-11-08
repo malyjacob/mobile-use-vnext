@@ -8,7 +8,7 @@ import (
 	"unicode/utf8"
 )
 
-// M4 request shapes. Each tool admits exactly the members listed by its
+// Tool request shapes. Each tool admits exactly the members listed by its
 // presence struct; every optional member is omitted from the wire when not
 // supplied (never encoded as an explicit null).
 
