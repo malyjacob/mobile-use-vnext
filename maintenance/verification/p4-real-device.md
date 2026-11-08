@@ -38,6 +38,14 @@ GOEXPERIMENT=jsonv2 go vet ./...
 `internal/protocol`）；`go vet` 无输出。`internal/httpapi`、`internal/store`、
 `internal/eventlog`、`internal/device` 仍无包内测试。
 
+最终 HEAD 上另跑：
+
+```bash
+GOEXPERIMENT=jsonv2 go test ./internal/engine/ -count=5
+```
+
+结果：`ok … 300.389s`（5 次全绿）。
+
 ### 2.3 P3 回归
 
 ```powershell
