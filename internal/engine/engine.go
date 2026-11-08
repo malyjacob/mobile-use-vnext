@@ -217,8 +217,10 @@ type Engine struct {
 	differ    Differ
 	imaging   ImageEncoder
 
-	mu        sync.Mutex
-	persistMu sync.Mutex // serializes snapshot + Save, never held with state I/O
+	mu               sync.Mutex
+	persistMu        sync.Mutex // serializes snapshot + Save, never held with state I/O
+	messagePersistMu sync.Mutex // serializes message-box snapshot + Save
+	messageStore     MessageStore
 
 	startedAt       time.Time
 	blockedReason   string // permanent blocker (corrupt ledger)
@@ -258,11 +260,12 @@ type Engine struct {
 	nextSession     int64
 	nextMessage     int64
 
-	// messages is the bounded in-memory message store behind notify. It never
-	// reaches the ledger and holds no execution authority.
-	messages     []messageState
-	messageBytes int
-	appsCache    *appListCache
+	// messages is the bounded message queue behind notify. It never reaches the
+	// ledger and holds no execution authority.
+	messages           []messageState
+	messageBytes       int
+	messageSaveFailing bool
+	appsCache          *appListCache
 
 	lastControl     *protocol.ControlView
 	lastFingerprint *controlComparable

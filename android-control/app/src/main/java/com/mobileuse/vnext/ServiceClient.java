@@ -12,22 +12,26 @@ import java.io.OutputStream;
 import java.net.ConnectException;
 import java.net.HttpURLConnection;
 import java.net.SocketTimeoutException;
+import java.time.Instant;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 /**
- * Control protocol v1 的 HTTP/JSON 边界：POST /v1/control/sync 与 POST /v1/control/stop。
+ * 控制同步协议的 HTTP/JSON 边界：POST /v1/control/sync 与 POST /v1/control/stop。
  * 只使用系统 HttpURLConnection，无设备状态和调度职责；同步与停止可在独立线程并发，
  * 每次调用拥有自己的连接及不可变请求/响应。
  * 除脱敏后的固定说明外不向界面或日志暴露 token、原始响应体或未知服务字段。
  */
 final class ServiceClient implements AutoCloseable {
     /** 共同普通契约；与服务端必须精确相等才能执行普通命令或声明模式就绪。 */
-    static final String CONTRACT_VERSION = "1";
+    static final String CONTRACT_VERSION = GeneratedVersion.CONTRACT_VERSION;
     static final String MODE_VIRTUAL = "virtual";
     static final String MODE_PRIMARY = "primary";
     static final String STOP_REASON_USER = "user_stop";
@@ -35,6 +39,10 @@ final class ServiceClient implements AutoCloseable {
     // 显示命令集合固定；其他 kind 一律使整份响应作废。
     static final String COMMAND_CREATE_DISPLAY = "create_display";
     static final String COMMAND_CLOSE_DISPLAY = "close_display";
+    /** 每拍响应最多携带的消息条数与请求最多携带的确认条数。 */
+    static final int MAX_MESSAGES = 8;
+    static final int MAX_MESSAGE_ACKS = 32;
+    private static final Pattern MESSAGE_ID = Pattern.compile("M[1-9][0-9]{0,62}");
     private static final int TIMEOUT_MS = 3000;
     private final String instanceId;
     private final String appVersion;
@@ -54,10 +62,19 @@ final class ServiceClient implements AutoCloseable {
     SyncResponse sync(ConnectionConfig config, SyncRequest request) throws ServiceException {
         JSONObject body = request.toJson(instanceId, appVersion);
         Reply reply = post(config, config.syncUrl, body, true);
-        if (reply.statusCode == HttpURLConnection.HTTP_CONFLICT) {
-            // 服务在解析普通命令之前拒绝；本地只展示版本不匹配，不尝试旧字段回退。
+        // 旧服务会在解析普通请求时拒绝新增的必填成员：旧同步入口返回 400，旧严格接入层
+        // 返回 422；404/405 同样说明该地址不接受本 App 的普通契约。统一进入版本不匹配视图，
+        // 不回退旧字段、不重试旧请求。
+        if (reply.statusCode == HttpURLConnection.HTTP_CONFLICT
+                || reply.statusCode == HttpURLConnection.HTTP_BAD_REQUEST
+                || reply.statusCode == HttpURLConnection.HTTP_NOT_FOUND
+                || reply.statusCode == HttpURLConnection.HTTP_BAD_METHOD
+                || reply.statusCode == 422) {
+            String code = reply.statusCode == HttpURLConnection.HTTP_CONFLICT
+                    ? "contract_mismatch" : "contract_rejected";
             throw new ServiceException("版本不匹配 · 设备操作不可用",
-                    "服务与本 App 的共同契约版本不一致，请同步更新 App 与服务。", "contract_mismatch");
+                    "服务不接受本 App 的普通契约（HTTP " + reply.statusCode
+                            + "），请同时更新 App 与服务。", code);
         }
         return parseSync(requireOk(reply), config, reply.requestId);
     }
@@ -191,12 +208,21 @@ final class ServiceClient implements AutoCloseable {
             for (int i = 0; i < array.length(); i++) {
                 commands.add(command(array.getJSONObject(i)));
             }
+            // messages 是必填数组；缺失、非数组或元素形状错误都使整份响应作废。
+            List<Message> messages = new ArrayList<>();
+            JSONArray messageArray = json.getJSONArray("messages");
+            if (messageArray.length() > MAX_MESSAGES) {
+                throw new IllegalArgumentException("too many messages");
+            }
+            for (int i = 0; i < messageArray.length(); i++) {
+                messages.add(message(messageArray.getJSONObject(i)));
+            }
             StopState stop = json.isNull("stop") || !json.has("stop") ? null
                     : new StopState(json.getJSONObject("stop").getLong("seq"),
                             json.getJSONObject("stop").getString("state"));
             return new SyncResponse(serviceInstanceId, requestId,
                     new ControlView(revision, availability, session, work, cleanup),
-                    Collections.unmodifiableList(commands), stop);
+                    Collections.unmodifiableList(commands), Collections.unmodifiableList(messages), stop);
         } catch (JSONException | IllegalArgumentException error) {
             // Instant/UUID/枚举解析错误同属外部响应错误，不回显原始输入。
             throw new ServiceException("响应格式错误", "服务返回的控制同步不符合共同契约版本 "
@@ -295,6 +321,26 @@ final class ServiceClient implements AutoCloseable {
         throw new IllegalArgumentException("unknown command kind");
     }
 
+    /** 消息投影；id/seq/时间形状不合法时拒绝整份响应。正文只交给 App 私有存储。 */
+    private static Message message(JSONObject json) throws JSONException {
+        String id = text(json, "id");
+        if (!MESSAGE_ID.matcher(id).matches()) {
+            throw new IllegalArgumentException("invalid message id");
+        }
+        long seq = json.getLong("seq");
+        if (seq <= 0) {
+            throw new IllegalArgumentException("invalid message seq");
+        }
+        String text = text(json, "text");
+        String createdAt = text(json, "created_at");
+        try {
+            Instant.parse(createdAt);
+        } catch (DateTimeParseException invalidTime) {
+            throw new IllegalArgumentException("invalid message time");
+        }
+        return new Message(id, seq, text, createdAt);
+    }
+
     private static String nullableString(JSONObject json, String key) throws JSONException {
         return json.isNull(key) || !json.has(key) ? null : json.getString(key);
     }
@@ -366,7 +412,8 @@ final class ServiceClient implements AutoCloseable {
     }
 
     /**
-     * 主线程冻结的同步请求。results 是本次请求携带的回执；stopSeq 仅在本地停止未确认时出现。
+     * 主线程冻结的同步请求。results 是本次请求携带的回执；messageAcks 是已持久化消息的
+     * 确认，最多 32 条且按 id 去重；stopSeq 仅在本地停止未确认时出现。
      * primaryDisplay 在 virtual 模式必有，display 只在 App 当前持有虚拟屏时出现。
      */
     static final class SyncRequest {
@@ -381,14 +428,15 @@ final class ServiceClient implements AutoCloseable {
         final VirtualDisplayHost.Descriptor primaryDisplay;
         final VirtualDisplayHost.Descriptor display;
         final List<CommandResult> results;
+        final List<String> messageAcks;
         final Long stopSeq;
         final String stopReason;
 
         SyncRequest(String selectedMode, String modeGeneration, boolean modeReady, boolean stopReady,
                 boolean notificationsEnabled, boolean backgroundRunning, Boolean powerInteractive,
                 Boolean keyguardLocked, VirtualDisplayHost.Descriptor primaryDisplay,
-                VirtualDisplayHost.Descriptor display, List<CommandResult> results, Long stopSeq,
-                String stopReason) {
+                VirtualDisplayHost.Descriptor display, List<CommandResult> results,
+                List<String> messageAcks, Long stopSeq, String stopReason) {
             this.selectedMode = selectedMode;
             this.modeGeneration = modeGeneration;
             this.modeReady = modeReady;
@@ -400,6 +448,19 @@ final class ServiceClient implements AutoCloseable {
             this.primaryDisplay = primaryDisplay;
             this.display = display;
             this.results = Collections.unmodifiableList(new ArrayList<>(results));
+            LinkedHashSet<String> uniqueAcks = new LinkedHashSet<>();
+            if (messageAcks != null) {
+                for (String id : messageAcks) {
+                    if (id == null || !MESSAGE_ID.matcher(id).matches()) {
+                        continue;
+                    }
+                    uniqueAcks.add(id);
+                    if (uniqueAcks.size() == MAX_MESSAGE_ACKS) {
+                        break;
+                    }
+                }
+            }
+            this.messageAcks = Collections.unmodifiableList(new ArrayList<>(uniqueAcks));
             this.stopSeq = stopSeq;
             this.stopReason = stopReason;
         }
@@ -409,6 +470,10 @@ final class ServiceClient implements AutoCloseable {
                 JSONArray array = new JSONArray();
                 for (CommandResult result : results) {
                     array.put(result.toJson());
+                }
+                JSONArray ackArray = new JSONArray();
+                for (String id : messageAcks) {
+                    ackArray.put(id);
                 }
                 return new JSONObject().put("contract_version", CONTRACT_VERSION)
                         .put("app_instance_id", instanceId).put("app_version", appVersion)
@@ -424,6 +489,7 @@ final class ServiceClient implements AutoCloseable {
                                 ? JSONObject.NULL : primaryDisplay.toJson())
                         .put("display", display == null ? JSONObject.NULL : display.toJson())
                         .put("command_results", array)
+                        .put("message_acks", ackArray)
                         .put("stop_pending", stopSeq == null ? JSONObject.NULL
                                 : new JSONObject().put("seq", stopSeq).put("reason", stopReason));
             } catch (JSONException error) {
@@ -479,21 +545,38 @@ final class ServiceClient implements AutoCloseable {
         }
     }
 
-    /** 单次成功同步的不可变控制视图；commands 只在主线程消费。 */
+    /** 单次成功同步的不可变控制视图；commands 与 messages 只在主线程消费。 */
     static final class SyncResponse {
         final String serviceInstanceId;
         final String requestId;
         final ControlView control;
         final List<Command> commands;
+        final List<Message> messages;
         final StopState stop;
 
         SyncResponse(String serviceInstanceId, String requestId, ControlView control,
-                List<Command> commands, StopState stop) {
+                List<Command> commands, List<Message> messages, StopState stop) {
             this.serviceInstanceId = serviceInstanceId;
             this.requestId = requestId;
             this.control = control;
             this.commands = commands;
+            this.messages = messages;
             this.stop = stop;
+        }
+    }
+
+    /** 服务端保存的 Agent 消息投影；正文只进入 App 私有存储与界面。 */
+    static final class Message {
+        final String id;
+        final long seq;
+        final String text;
+        final String createdAt;
+
+        Message(String id, long seq, String text, String createdAt) {
+            this.id = id;
+            this.seq = seq;
+            this.text = text;
+            this.createdAt = createdAt;
         }
     }
 

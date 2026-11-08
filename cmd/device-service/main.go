@@ -54,6 +54,11 @@ func run() int {
 		fmt.Fprintln(os.Stderr, "device-service: ledger directory unavailable")
 		return 4
 	}
+	messages, err := store.NewMessages(cfg.StateDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "device-service: message directory unavailable")
+		return 4
+	}
 	deviceAdapter, err := android.New(android.Config{
 		AdbPath:        cfg.ADB.Path,
 		Serial:         cfg.ADB.Serial,
@@ -74,7 +79,8 @@ func run() int {
 	eng := engine.New(engineConfig, logger,
 		deviceAdapter, ledger,
 		&observationProjector{builder: observation.NewBuilder()}, treeDiffer{},
-		engine.WithImageEncoder(imageEncoder{}))
+		engine.WithImageEncoder(imageEncoder{}),
+		engine.WithMessageStore(messages))
 
 	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()

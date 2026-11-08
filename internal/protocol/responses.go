@@ -5,15 +5,6 @@ import (
 	"fmt"
 )
 
-// ContractVersion is the single ordinary-contract version shared by the
-// service, HTTP client, MCP adapter and control App. Exact equality is
-// required before ordinary work; the minimal STOP carrier is independent.
-const ContractVersion = "1"
-
-// ReleaseVersion identifies this build artifact; it is not a contract. It is a
-// variable so the build can stamp the exact artifact version.
-var ReleaseVersion = "0.1.0-dev"
-
 // Screen is the target display size and Android rotation.
 type Screen struct {
 	Width    int `json:"width"`
@@ -718,6 +709,16 @@ type AppStopPending struct {
 	Reason string `json:"reason"`
 }
 
+// AppMessage is one saved Agent message delivered through the control sync.
+// The body travels only on this channel: it is never logged, written to the
+// recovery ledger or placed in an error.
+type AppMessage struct {
+	ID        string `json:"id"`
+	Seq       int64  `json:"seq"`
+	Text      string `json:"text"`
+	CreatedAt string `json:"created_at"`
+}
+
 // AppSyncRequest is the control App heartbeat.
 type AppSyncRequest struct {
 	ContractVersion      string             `json:"contract_version"`
@@ -735,6 +736,9 @@ type AppSyncRequest struct {
 	Display              *AppDisplay        `json:"display"`
 	CommandResults       []AppCommandResult `json:"command_results"`
 	StopPending          *AppStopPending    `json:"stop_pending"`
+	// MessageAcks releases messages the App has durably stored. Unknown or
+	// already released ids are ignored.
+	MessageAcks []string `json:"message_acks"`
 }
 
 // AppCommand is one display lifecycle command delivered in a sync response.
@@ -861,6 +865,7 @@ type AppSyncResponse struct {
 	ServiceInstanceID string       `json:"service_instance_id"`
 	Control           ControlView  `json:"control"`
 	Commands          []AppCommand `json:"commands"`
+	Messages          []AppMessage `json:"messages"`
 	Stop              *AppStopAck  `json:"stop,omitempty"`
 }
 

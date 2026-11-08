@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Mobile Use 控制</string>
-    <string name="app_version">0.4.0-p3</string>
     <string name="version_label">连接状态 · %1$s</string>
     <string name="capability_notice">启动后台后每秒与本机服务同步控制视图。停止会先阻止本地旧命令，再独立同步服务；后台同步和通知继续运行。</string>
 
@@ -19,12 +18,26 @@
     <string name="session_standby_detail">当前没有 Agent 会话。</string>
 
     <string name="message_center_title">Agent 消息</string>
-    <string name="message_center_empty_button">消息中心（0）</string>
-    <string name="message_center_unavailable">消息中心骨架 · 当前控制协议不携带消息</string>
-    <string name="message_empty">当前协议不提供消息同步；Agent 的通知不会出现在这里。</string>
-    <string name="message_authorization_detail">最小控制协议不包含消息、回执或已读上报。此页面只保留入口骨架；消息通知频道将在后续版本恢复。</string>
-    <string name="message_settings_button">打开通知设置</string>
+    <string name="message_center_button">消息中心（未读 %1$d）</string>
+    <string name="message_center_button_initial">消息中心</string>
+    <string name="message_status_line">未读 %1$d 条 · 共 %2$d 条 · %3$s</string>
+    <string name="message_channel_available">消息通知频道可用</string>
+    <string name="message_channel_unavailable">消息通知不可用：请在通知设置中允许本 App 通知并启用“Agent 消息”频道</string>
+    <string name="message_empty">暂时没有 Agent 消息</string>
+    <string name="message_authorization_detail">Agent 消息保存在本机 App 私有存储；已读状态只记录在本机，不会同步给服务。通知权限或“Agent 消息”频道关闭时，新消息仍会显示在本页。</string>
+    <string name="message_settings_button">打开消息通知设置</string>
+    <string name="message_center_all_read">全部已读</string>
     <string name="message_center_close">关闭</string>
+    <string name="message_detail_title">Agent 消息</string>
+    <string name="message_detail_created">时间：%1$s</string>
+    <string name="message_detail_received">收到：%1$s</string>
+    <string name="message_row_meta_unread">%1$s · 未读</string>
+    <string name="message_row_meta_read">%1$s · 已读</string>
+    <string name="message_row_description_unread">%1$s 的未读 Agent 消息，点击查看详情</string>
+    <string name="message_row_description_read">%1$s 的 Agent 消息，点击查看详情</string>
+    <string name="message_notification_title">Agent 消息</string>
+    <string name="message_channel_name">Agent 消息</string>
+    <string name="message_channel_description">新 Agent 消息通知；点击打开消息详情</string>
 
     <string name="background_title">后台与停止</string>
     <string name="background_running">后台运行中（离开页面 / 锁屏仍同步）</string>

@@ -1,30 +1,17 @@
 package engine
 
 import (
-	"strconv"
+	"time"
 	"unicode/utf8"
 
 	"github.com/malyjacob/mobile-use-vnext/internal/eventlog"
 	"github.com/malyjacob/mobile-use-vnext/internal/protocol"
 )
 
-// The message store is bounded service policy: it neither persists to the
-// ledger nor grows without limit across repeated calls.
-const (
-	maxStoredMessages     = 256
-	maxStoredMessageBytes = 1 << 20
-)
-
-// messageState is one saved Agent message. Its body stays in memory only and
-// must never reach a log, error or ledger.
-type messageState struct {
-	ID   string
-	Text string
-}
-
-// Notify saves one Agent message for the control App message center. There is no
-// delivery channel into the App, so notification stays explicitly unavailable
-// without turning a saved message into a submitted or pending claim.
+// Notify saves one Agent message for the control App message center. The
+// control sync is the delivery channel, so notification.state is pending
+// (saved and queued) rather than a claim that the user saw it. executed still
+// means only "the message was saved".
 func (e *Engine) Notify(agent, p string, req *protocol.NotifyRequest) (*protocol.Result, *protocol.APIError) {
 	op, duplicate, apiErr := e.registerDetachedOperation(p, agent, "notify")
 	if apiErr != nil {
@@ -41,7 +28,8 @@ func (e *Engine) Notify(agent, p string, req *protocol.NotifyRequest) (*protocol
 		return e.finishWithError(op, "admission",
 			protocol.Invalid("text 超过长度上限").WithDetail("limit", protocol.MaxTextRunes)), nil
 	}
-	messageID, count, totalBytes := e.storeMessage(req.Text)
+	messageID, count, totalBytes := e.storeMessage(req.Text, time.Now())
+	e.persistMessages()
 	saved := true
 	result := &protocol.Result{
 		OperationID: op.ID,
@@ -49,11 +37,7 @@ func (e *Engine) Notify(agent, p string, req *protocol.NotifyRequest) (*protocol
 		MessageID:   messageID,
 		Saved:       &saved,
 		Notification: &protocol.NotificationView{
-			State: "unavailable",
-			Error: &protocol.Error{
-				Code:    protocol.CodeNotificationUnavailable,
-				Message: "消息已保存，控制 App 消息中心尚未接入",
-			},
+			State: "pending",
 		},
 	}
 	e.finishOperation(op, OutcomeExecuted, "saved", nil)
@@ -63,23 +47,4 @@ func (e *Engine) Notify(agent, p string, req *protocol.NotifyRequest) (*protocol
 			eventlog.Int("count", count), eventlog.Int("bytes", totalBytes))
 	}
 	return result, nil
-}
-
-// storeMessage appends one message and evicts the oldest entries until both the
-// count and byte bounds hold. It returns the assigned id and the bounded store
-// facts.
-func (e *Engine) storeMessage(text string) (string, int, int) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.nextMessage++
-	id := "M" + strconv.FormatInt(e.nextMessage, 10)
-	e.messages = append(e.messages, messageState{ID: id, Text: text})
-	e.messageBytes += len(text)
-	for len(e.messages) > maxStoredMessages || e.messageBytes > maxStoredMessageBytes {
-		e.messageBytes -= len(e.messages[0].Text)
-		copy(e.messages, e.messages[1:])
-		e.messages[len(e.messages)-1] = messageState{}
-		e.messages = e.messages[:len(e.messages)-1]
-	}
-	return id, len(e.messages), e.messageBytes
 }

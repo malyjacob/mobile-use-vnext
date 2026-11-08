@@ -1,0 +1,113 @@
+# 发布与回退
+
+本页定义整组发布单位、单一版本源、构建清单、受控部署顺序与回退边界。控制端协议见
+[控制端协议](control-protocol.md)，日常操作命令见[运行手册](runbook.md)。
+
+## 1. 发布单位
+
+一次发行是一组配套产物，不是单个二进制：
+
+| 产物 | 说明 |
+| --- | --- |
+| `device-service` | 设备服务（linux/arm64，`CGO_ENABLED=0`） |
+| `device-mcp` | MCP 适配进程（stdio / Streamable HTTP） |
+| `control.apk` | 控制 App，包名 `com.mobileuse.vnext` |
+| `u2.jar` | 固定 uiautomator 制品 |
+| `applist.dex` | 固定应用清单制品 |
+| `service.sh` | chroot 内进程管理脚本 |
+
+服务、App、Go 客户端与 MCP 共用一个 `contract_version`，必须精确相等才进行普通工作；
+不一致时普通同步按 `409 contract_mismatch` 拒绝，只有最小 STOP 仍可用。`release_version`
+只标识发行产物，不参与能力协商。Go 客户端源码随同一源码提交发布，不作为独立产物写入
+清单；MCP 适配器以 `device-mcp` 产物发布。
+
+## 2. 单一版本源
+
+`release/versions.json` 是以下内容的唯一手工来源：
+
+| 字段 | 用途 |
+| --- | --- |
+| `release_version` | 发行号（MAJOR.MINOR.PATCH），写入 Go `ReleaseVersion`、App versionName 与清单 |
+| `contract_version` | 共同普通契约号，写入 Go/Java 常量与清单 |
+| `android_version_code` | Android versionCode，写入 `AndroidManifest.xml` 与清单 |
+| `source_commit` | 该版本号冻结时的基线提交（仅供校验）；清单记录构建时的 HEAD |
+
+`scripts/generate-version.ps1` 生成：
+
+- `internal/protocol/version_generated.go`（`ContractVersion`、`ReleaseVersion`）；
+- `android-control/app/src/main/java/com/mobileuse/vnext/GeneratedVersion.java`；
+- `android-control/app/src/main/res/values/strings_version.xml`（`app_version`）；
+- 同步 `AndroidManifest.xml` 的 `android:versionCode`。
+
+生成文件随源码提交，构建入口在编译前重新生成或使用 `-Check` 校验。不得在 Go、Java、
+PowerShell、docs 或 Manifest 中另写一份版本号；`contract_version` 只在改变普通请求/响应
+必需形状、默认行为、核心枚举或执行语义时前进。
+
+## 3. 构建与清单
+
+```powershell
+./scripts/build-release.ps1
+./scripts/verify-manifest.ps1 -Manifest build/release/manifest.json
+```
+
+`build-release.ps1`：
+
+1. 校验版本源与生成常量一致；
+2. 构建 linux/arm64、`CGO_ENABLED=0` 的 `device-service` 与 `device-mcp`，并构建 APK；
+3. 收集固定制品与 `service.sh`；产物复制到 `build/release/`；
+4. 计算每个产物的 SHA-256 与字节数；
+5. 记录源码提交与脏标记、Go 版本、MCP SDK/协议、Android 包名/版本、工具目录指纹；
+6. 写入 `build/release/manifest.json`。
+
+清单形状：
+
+```json
+{
+  "format": "mobile-use-vnext-release",
+  "version": 1,
+  "release_version": "0.4.0",
+  "contract_version": 2,
+  "source_commit": "<40 位提交>",
+  "source_dirty": false,
+  "built_at": "…",
+  "go_version": "go1.27.1",
+  "go_experiment": "jsonv2",
+  "build_target": {"goos": "linux", "goarch": "arm64", "cgo_enabled": false},
+  "mcp": {"sdk": "github.com/modelcontextprotocol/go-sdk v1.8.0", "protocol": "2026-07-28"},
+  "android": {"package": "com.mobileuse.vnext", "version_name": "0.4.0", "version_code": 3},
+  "tool_catalog": {"count": 12, "sha256": "…"},
+  "artifacts": [{"name": "device-service", "path": "device-service", "sha256": "…", "bytes": 0}]
+}
+```
+
+`-SkipAndroid` 只用于开发验证，产出的清单带 `complete=false` 且缺少 `control.apk`；
+`verify-manifest.ps1` 与 `deploy.ps1` 都拒绝这种清单。
+
+清单不包含 `.state/`、令牌、账本、消息、截图、节点树或日志。工具目录指纹用于运维比对本次
+构建的 `tools/list`，不证明任何宿主已读取它。
+
+## 4. 部署顺序
+
+1. 准备并核验整组构建、清单、契约号、Android 版本与固定制品哈希。
+2. 暂停普通准入；用旧版本结束活动会话或 STOP，分别确认执行链、task/recents 与 display。
+   任一未确认就停止推进，不强停 App 把缺少描述当作已清理。
+3. 停止旧服务与 App；安装整组产物。过渡期保持不可准入。
+4. 启动新服务与 App：核验实例、release/contract、模式、STOP、恢复屏障与安装后的 App
+   versionName/versionCode；默认虚拟屏，主屏共享需要用户重新确认。
+5. 重启实际 MCP 宿主进程/连接，使宿主重新发现工具目录；不能只替换磁盘文件或依赖
+   `list_changed` 通知。
+6. 条件成立才报告完成；分别记录版本匹配、App 配对、恢复屏障、STOP 可用、MCP 宿主刷新与
+   本次最小闭环结果，不合并成一个 success。
+
+App 覆盖安装保留私有消息、已读、连接配置与停止意图。不得卸载 App、`pm clear`、删除消息
+文件或清空账本来解决签名、契约或配对问题；安装失败时保留现场并停止发布。
+
+## 5. 失败与回退
+
+- 任何中间失败都保持普通准入关闭，记录已完成阶段与失败阶段，不继续叠加升级。
+- 服务进程启动但 App 不配对、契约不一致、清理请求未确认，都不算发布完成。
+- 消息在服务重启后按原 ID 继续投递；升级不要求清空 App 消息或已读。
+- 回退是另一轮受控部署：安装上一组已核验产物，重新确认旧资源、契约配对与准入；不自动
+  回放旧操作、不恢复主屏授权、不清空消息或归属来凑兼容。
+- 旧二进制无法读取已迁移数据时明确不能直接回退；未完成归属必须阻塞并由有明确原归属的
+  恢复部署处理，不能删除后假装干净。

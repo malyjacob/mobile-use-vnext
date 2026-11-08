@@ -39,6 +39,15 @@ Set-StrictMode -Version Latest
 $repository = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $stateDirectory = Join-Path $repository '.state'
 $deployStatePath = Join-Path $stateDirectory 'deploy.json'
+$versionsPath = Join-Path $repository 'release/versions.json'
+if (-not (Test-Path -LiteralPath $versionsPath -PathType Leaf)) {
+    throw "Version source is missing: $versionsPath"
+}
+$versions = Get-Content -LiteralPath $versionsPath -Raw | ConvertFrom-Json
+$contractVersion = [string]$versions.contract_version
+if ($contractVersion -notmatch '^[1-9][0-9]{0,2}$') {
+    throw "contract_version must be a positive integer: $contractVersion"
+}
 $mcpConfigPath = Join-Path $stateDirectory 'mcp-config.json'
 $adapterBinary = Join-Path $repository 'build/device-mcp.exe'
 $probeBinary = Join-Path $repository 'build/mcp-probe.exe'
@@ -46,7 +55,6 @@ $httpListen = '127.0.0.1:18882'
 $httpPort = 18882
 $allowedOrigin = 'http://127.0.0.1:3000'
 $probeTimeoutSeconds = 180
-$contractVersion = '1'
 
 function Write-Utf8NoBom {
     param([string]$Path, [string]$Text)

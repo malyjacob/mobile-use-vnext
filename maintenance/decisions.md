@@ -1,7 +1,7 @@
-# 工程决策（P3）
+# 工程决策
 
-状态：2026-11-08。只记录已经体现在工作区代码/脚本中的决定；后续阶段的选择在真正实施前
-不预写。每条给出背景、选择与影响。
+状态：2026-11-09。只记录已经体现在工作区代码/脚本中的决定；后续阶段的选择在真正实施前
+不预写。每条给出背景、选择与影响。阶段代号只在本页与验证记录中出现，不进入正式文档。
 
 ## D1 Go 1.27 与 `GOEXPERIMENT=jsonv2`
 
@@ -171,6 +171,7 @@
 - **选择**：服务端有界保存消息（256 条 / 1 MiB，内存），`executed` 只确认保存；
   `notification.state=unavailable` 并带 `notification_unavailable`，不伪造 pending/submitted。
 - **影响**：M4 可验证保存与去重；App 消息中心接入属后续阶段，正文不进日志/错误/账本。
+- **状态**：由 D23/D24/D25 取代；交付通道与 `pending` 语义以新决定为准。
 
 ## D19 apps 的应用清单制品
 
@@ -233,3 +234,79 @@
   与自身会话投影成只读材料。
 - **影响**：客户端取消 `ctx` 只停止读取/交付，不自动 `end`；取消到有界 `end(P)` 的映射由
   MCP 接入层完成。客户端不保存服务事实副本，`status(P)` 仍是服务端权威。
+
+## D23 notify 消息经控制同步进入 App 消息中心
+
+- **背景**：notify 之前只保存消息，`notification.state=unavailable`，App 消息中心是空骨架；
+  设计与用户要求 Agent 告知的消息真正到达手机用户，但不新增 Agent 工具、参数或已读轮询。
+- **选择**：复用 `POST /v1/control/sync`。响应增加有界 `messages`（`id`、`seq`、`text`、
+  `created_at`，每拍最多 8 条 / 32 KiB 正文，按创建顺序重发未确认项）；请求增加
+  `message_acks`（消息 ID 数组，至多 32 个，未知/已释放 ID 忽略）。确认即释放服务端保存。
+  `notify` 的 `notification.state` 改为 `pending`（已保存、已入队待投递），不再返回
+  `notification_unavailable`；`executed` 仍只表示保存，不表示已显示或已读。
+- **契约**：sync 增加必需结构字段，`contract_version` 前进为 `"2"`；服务、App、Go client、
+  MCP、docs 与构建常量同步。旧 App 的普通同步被 `409 contract_mismatch` 拒绝，独立 STOP
+  不校验普通契约，仍然可用。
+- **影响**：消息正文只出现在 sync 响应与 App 私有存储，不进入日志、错误、账本、恢复记录或
+  发布清单；App 去重按消息 ID，重复投递不会重复通知或重复列表项。
+
+## D24 未确认消息跨服务重启保留
+
+- **背景**：服务重启会丢内存消息；“已保存”若只在一次进程内成立，用户会丢失 Agent 已确认
+  保存的内容。消息不是执行权威，不能因为恢复账本损坏而阻塞恢复。
+- **选择**：新增独立私有存储 `<state_dir>/messages.json`（格式
+  `mobile-use-vnext-messages`，版本 1），有界 256 条 / 1 MiB 正文 / 2 MiB 文件；原子替换，
+  `0600`；只由 messagebox 单写者读写。`next_seq` 随文件持久化，ID 跨重启不重复，从而让
+  App 能对重投消息去重。启动时加载；加载失败记录受控码并保持运行期内存交付，同时停止覆盖
+  该文件（不销毁现场）。无可读消息文件时以当前毫秒时间初始化 ID 起点，避免 App 仍保留的
+  旧 ID 与新消息冲突。服务重启后未确认消息继续按原 ID 投递。
+- **影响**：正文不写恢复账本、不写日志；消息存储故障不改变 STOP、清理或准入；确认后消息
+  被删除，不保留历史。App 本地已读状态只属于 App。
+
+## D25 App 本地已读不上报
+
+- **背景**：Agent 只需要低频告知，不应引入已读轮询、优先级或用户回执通道。
+- **选择**：App 在用户打开消息中心/详情时本地标记已读并更新角标；不向服务或 Agent 回报
+  已读，也不新增任何 Agent 可见的已读字段。App 只确认“已保存到本机”，用于释放服务端队列。
+- **影响**：服务不知道用户是否已读；`notify` 结果永远不声称已读。App 重启后本地已读保留在
+  私有消息文件；删除 App 数据会丢失本地已读与消息。
+
+## D26 单一版本源与整组发布清单
+
+- **背景**：契约号、发行号与 App versionName 分散在 Go、Java、PowerShell、docs 与
+  AndroidManifest 中，手改会漂移；发布需要按组核验而不是只看进程存活。
+- **选择**：仓库内 `release/versions.json` 是发行号、契约号、Android versionCode 与基线
+  源码提交的唯一来源。`scripts/generate-version.ps1` 从它生成
+  `internal/protocol/version_generated.go`、`GeneratedVersion.java`、
+  `res/values/strings_version.xml`，并同步 `AndroidManifest.xml` 的 versionCode；
+  `-Check` 模式只校验不写。`scripts/build-release.ps1` 产出整组产物与
+  `build/release/manifest.json`：release/contract、实际源码提交与脏标记、Go 版本、MCP
+  SDK/协议、每个产物的 SHA-256/字节数、Android 包名/versionName/versionCode、工具目录
+  指纹。清单不含 `.state/`、令牌、账本、消息、截图、树或日志。
+- **影响**：构建与部署先核验清单；版本号只在 `release/versions.json` 手改。发行号与契约号
+  不同义：`release_version` 只定位产物，`contract_version` 决定普通接口兼容。
+
+## D27 发布保留 App 私有数据
+
+- **背景**：旧部署脚本卸载再安装 App，会清空消息、已读、连接配置与停止意图；用清库解决
+  签名或配对问题会丢失用户数据与未同步停止。
+- **选择**：部署只做覆盖安装（`adb install -r`），不卸载、不清除 App 数据；`connection.json`
+  由部署重新写入并保持 root-only。签名不一致或版本降级导致安装失败时停止发布并报告，
+  不回退为卸载；回退是另一轮受控部署。发布顺序固定为：准备并核验整组产物 → 暂停普通
+  准入并结束旧会话/确认旧资源 → 停止旧服务/App → 安装服务与 App → 启动并核验实例、契约、
+  STOP、恢复屏障 → 重启实际 MCP 宿主并重新发现工具。
+- **影响**：App 私有消息、已读与停止意图跨升级保留；破坏性契约升级仍要求先完成旧会话
+  停止与资源确认，过渡期 `can_start=false`。发布完成需分别记录版本匹配、App 配对、恢复
+  屏障、STOP 可用与 MCP 宿主刷新。
+
+## D28 控制呈现优先级与本地风险
+
+- **背景**：App 已有 control_view 骨架，但“App 当前持有虚拟屏”被当作清理风险，活动会话
+  期间会误显示“资源清理未确认”；停止、失鲜、清理与活动工作也需要固定优先级。
+- **选择**：主文案优先级固定为：本地停止待同步 > 连接失鲜 > 清理风险（服务
+  `cleanup.pending/unconfirmed` 或 App 释放未确认）> 活动工作/会话 > 待命。App 持有当前
+  会话的虚拟屏本身不是风险；只有本机停止后仍持有、释放未确认或服务报告清理未确认才算
+  风险。Activity、常驻通知与悬浮入口消费同一份不可变快照；“上次会话/上次操作”只是 App
+  内存中的历史展示（只保留已结束事实），不参与主文案、准入或任何授权。
+- **影响**：断线或停止后不会用缓存 active 冒充当前运行；本地停止、停止同步、清理证据与
+  最近历史分开显示；不新增第二套会话状态或网络轮询。

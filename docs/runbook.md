@@ -13,7 +13,7 @@
 | 特权 | Magisk root；Debian 13 chroot 需预先准备 |
 | chroot | `/data/local/chroots/debian13` |
 | 服务目录（chroot 内） | `/opt/mobile-use-vnext`：`device-service`、`u2.jar`、`applist.dex`、`service.sh`、`config.json` |
-| 状态目录（chroot 内） | `/var/lib/mobile-use-vnext`：`recovery-ledger.json`、`device-service.pid`、`device-service.log`（0700） |
+| 状态目录（chroot 内） | `/var/lib/mobile-use-vnext`：`recovery-ledger.json`、`messages.json`、`device-service.pid`、`device-service.log`（0700） |
 | 服务端口 | `18880`，只监听 `127.0.0.1` |
 | adb 串口 | `127.0.0.1:5555` |
 | 主机转发端口 | `18881`（`adb forward tcp:18881 tcp:18880`） |
@@ -36,9 +36,12 @@ Android 侧，只与服务通信。Windows 主机只负责构建与下发，不�
 | `deploy.json` | 仓库 `.state/`（部署机） | agent/control 令牌、端口、chroot、版本 |
 | `config.json` | `.state/` 生成，推送到 `/opt/mobile-use-vnext/`（0600） | 监听地址、状态目录、ADB 串口、令牌、u2 路径 |
 | `connection.json` | 推送到 `/data/data/com.mobileuse.vnext/files/`（0600，App UID 所有） | `base_url` + control 令牌 |
+| `messages.json`（服务） | chroot `/var/lib/mobile-use-vnext/`（0600） | 未确认的 Agent 消息；有界，正文不进入账本/日志 |
+| `messages.json`（App） | `/data/data/com.mobileuse.vnext/files/`（0600） | App 消息中心列表、本地已读与去重 ID |
 
 `.state/` 已在 `.gitignore` 中排除；不要复制到仓库、工单、聊天或日志。令牌泄漏时重新部署会
-复用旧令牌——需要轮换时删除对应私有文件后再部署。
+复用旧令牌——需要轮换时删除对应私有文件后再部署。服务消息文件与 App 消息文件都只由各自
+进程写入；不要手工编辑，也不要用卸载/清库方式“修复”消息或配对。
 
 ## 3. 部署与升级
 
@@ -46,23 +49,39 @@ Android 侧，只与服务通信。Windows 主机只负责构建与下发，不�
 SDK/JDK（构建 App 用）；chroot 已存在且可 `su` 进入。
 
 ```powershell
-cd E:\Code\Python\mobile-use-vnext
-./scripts/build.ps1                           # 可选：单独构建 Go 服务
-./scripts/deploy.ps1                          # 完整构建 + 部署
-./scripts/deploy.ps1 -SkipBuild               # 复用现有产物
+./scripts/build-release.ps1                   # 整组产物 + build/release/manifest.json
+./scripts/verify-manifest.ps1 -Manifest build/release/manifest.json
+./scripts/deploy.ps1                          # 构建、核验并按清单部署
+./scripts/deploy.ps1 -SkipBuild               # 复用已核验的 build/release
 ```
+
+`build-release.ps1` 的实际动作：
+
+1. 校验 `release/versions.json` 与生成常量一致（`generate-version.ps1 -Check`）；
+2. 构建 linux/arm64、`CGO_ENABLED=0` 的 `device-service` 与 `device-mcp`；
+3. 构建 `control.apk`；`-SkipAndroid` 只用于开发，清单标记 `complete=false` 且不可部署；
+4. 收集 `u2.jar`、`applist.dex`、`service.sh`，计算每个产物的 SHA-256 与大小；
+5. 记录源码提交/脏标记、Go 版本、MCP SDK `v1.8.0`/协议 `2026-07-28`、Android
+   包名/versionName/versionCode 与工具目录指纹，写入 `build/release/manifest.json`。
 
 `deploy.ps1` 的实际动作：
 
-1. 校验在线设备与必需产物；构建 Go 服务、MCP 适配与控制 App（未 `-SkipBuild` 时）；
+1. 未 `-SkipBuild` 时先构建整组发布，然后始终运行 `verify-manifest.ps1`；
 2. 读取或生成 `.state/deploy.json`，写 `.state/config.json`、`.state/connection.json`；
-3. 尽力停止旧 Python 服务、旧包 `com.mobileuse.control` 与现有 Go 服务；
-4. 推送到 `/data/local/tmp/mobile-use-vnext-deploy`，再 `su` 复制进 chroot，设置权限；
-5. 安装 APK、写入 `connection.json`、授予通知权限与悬浮窗 appops；
+3. 尽力停止旧 Python 服务与现有 Go 服务，再停止控制 App；
+4. 推送 manifest 指向的产物到 `/data/local/tmp/mobile-use-vnext-deploy`，`su` 复制进 chroot；
+5. 用 `adb install -r` 覆盖安装 APK（**不卸载、不清库**），重写 `connection.json` 并授予
+   通知权限与悬浮窗 appops；
 6. 用 `service.sh start` 启动服务，用 root 启动 `com.mobileuse.vnext/.ControlService`
-   （MIUI 新装包可能被挂起，脚本会 `pm unsuspend` 并重试 8 次）；
-7. `adb forward tcp:18881 tcp:18880`，轮询 `/health` 与 `/api/status`，直到
-   `can_start=true`；90 秒未就绪则失败并打印最后一次 `status`。
+   （MIUI 新装包可能被挂起，脚本会 `pm unsuspend` 并重试）；
+7. `adb forward tcp:18881 tcp:18880`，轮询 `/health` 与 `/api/status`，要求
+   `/health` 的 release/contract 与清单一致且 `can_start=true`；90 秒未就绪则失败并打印
+   最后一次 `status`。安装后的 App versionName/versionCode 必须与清单一致。
+
+发布完成需要分别确认：版本匹配、App 配对（`can_start=true` 蕴含新鲜配对同步）、恢复屏障、
+STOP 可用与 MCP 宿主已重新发现工具。最后一项不能由部署脚本证明：必须重启实际 MCP 宿主
+进程/连接，不能用替换磁盘文件或等待 `list_changed` 代替。安装失败（签名、降级等）时停止
+发布并排查，**不得卸载 App 或清空数据**来凑配对。
 
 部署不会创建 chroot、不会安装 Magisk、不会修改系统 IME 设置。升级服务或 App 后必须让新
 进程重新启动，旧进程会继续使用旧二进制与旧配置。
@@ -94,6 +113,8 @@ adb -s 127.0.0.1:5555 shell su -c 'chroot /data/local/chroots/debian13 /bin/sh -
 连续 6 秒无成功响应即判失鲜；失鲜期间 `start` 会以 `control_unavailable` 被拒
 （`can_start=false`），同步恢复后自动解除。`availability` 是 App 上报事实的投影，
 失鲜不一定马上把它改成 `blocked`；准入判断以 `can_start` 与 `blocking_code` 为准。
+同一份快照驱动完整界面、常驻通知与悬浮入口；`notify` 消息另走独立消息通知频道，打开 App
+的消息详情只在本机标记已读。
 
 ## 5. 健康检查与就绪
 
@@ -110,7 +131,7 @@ curl -s http://127.0.0.1:18881/health
 ```bash
 curl -s -X POST http://127.0.0.1:18881/api/status \
   -H "Authorization: Bearer $AGENT_TOKEN" \
-  -H "X-Mobile-Use-Contract: 1" \
+  -H "X-Mobile-Use-Contract: 2" \
   -H "Content-Type: application/json" -d '{}'
 ```
 
@@ -141,7 +162,7 @@ adb -s 127.0.0.1:5555 shell su -c 'tail -n 100 /data/data/com.mobileuse.vnext/fi
 | --- | --- | --- |
 | 刚装完 App 没有心跳，`can_start=false`（`control_sync_pending`/`control_unavailable`） | MIUI 在新包首次组件启动前挂起（suspended），或系统“屏幕用时限制”拦截 Activity（`MST_LimitActivity`） | 关闭系统的屏幕用时限制；`su -c 'pm unsuspend --user 0 com.mobileuse.vnext'`，再 `su -c 'am start-foreground-service -n com.mobileuse.vnext/.ControlService -a com.mobileuse.vnext.START'`；`deploy.ps1` 已自动重试 |
 | `start` 报显示不可用/创建未确认 | App 未运行、通知/停止通道不可用、模式未就绪、虚拟屏 helper 未起来 | 先看 `status.blocking_code`；确认 App 通知与悬浮窗授权、`stop_ready`、`mode_ready`；再看日志 `android.display_helper.*` |
-| `dumpsys SurfaceFlinger` 的层 id 解析失败或溢出 | 该机 SFID 超出 int64（大于 2^63） | 服务按 `uint64` 解析并原样传给 `screencap -d`；不要改成 `int64`/`int`，不要回退到 display 0。只读核对用 `dumpsys SurfaceFlinger --display-id` |
+| `dumpsys SurfaceFlinger` 的层 id 解析失败或溢出 | 虚拟屏 SFID 可能超出 `int64` 范围 | 服务按 `uint64` 解析并原样传给 `screencap -d`；不要改成 `int64`/`int`，不要回退到 display 0。只读核对用 `dumpsys SurfaceFlinger --display-id` |
 | u2 启动失败或采集报 `hierarchy_unavailable` | 旧 `app_process` 仍在跑旧 JAR、JAR 哈希不符、端口未就绪 | 重启服务触发 `EnsureU2`（校验本地哈希 → 停旧 server → 比对/推送远端 → `/ping`）；JAR 替换后必须重启，进程不会热加载。服务只 `pkill` 固定模式 `^app_process / com.wetest.uia2.Main$`，不影响其他进程 |
 | 虚拟屏没有子节点，疑似采集失败 | 空虚拟屏是合法画面 | 公开树只有合成根、无 `children`，是正常空树；不要把它当失败，也不要伪造子节点。空树仍可 `observe`/`end` |
 | `can_start=false`、`blocking_code=shell_pending`/`shell_chain_unconfirmed` | 受管命令仍在执行或终止未确认 | 等 `shell` 返回或 `status` 的 `shell.termination` 确认；不要 kill 进程或删运行目录 |
@@ -153,7 +174,7 @@ adb -s 127.0.0.1:5555 shell su -c 'tail -n 100 /data/data/com.mobileuse.vnext/fi
 | `can_start=false`、`blocking_code=device_locked` / `device_not_interactive` | 锁屏或熄屏 | 解锁并点亮屏幕；服务不绕过锁屏 |
 | `can_start=false`、`blocking_code=control_revoked` | 收到 STOP 后未完成一次新同步 | 等 App 下一拍同步（不再携带 `stop_pending`）后再 `start` |
 | `can_start=false`、`blocking_code=mode_not_selected`/`stop_unavailable` | App 模式/通知/停止通道不可用 | 在 App 选择虚拟屏或确认主屏共享；授予通知权限并确认通知频道可用 |
-| `409 contract_mismatch` | `X-Mobile-Use-Contract` 缺失/不是 `1`，或 App 契约版本不符 | 服务与客户端必须同为 `contract_version=1`；升级整组产物，不要只升一侧 |
+| `409 contract_mismatch` | `X-Mobile-Use-Contract` 缺失/不是 `2`，或 App 契约版本不符 | 服务与客户端必须同为 `contract_version=2`；升级整组产物，不要只升一侧 |
 | `401 unauthorized` | Bearer 令牌错误，或用了另一身份的令牌 | 从私有配置核对 agent/control 令牌；两者不能互换 |
 | `409 device_busy` | 已有普通工作占用工作位置 | 读 `blocking_operation_id`；串行化调用 |
 | `409 observation_expired`/`target_changed`/`foreground_changed` | 观察已过期（60 秒）或界面变化 | 重新 `observe`，用新 O 再 `act`；不要重放旧动作 |
@@ -177,8 +198,9 @@ adb -s 127.0.0.1:5555 shell su -c 'tail -n 100 /data/data/com.mobileuse.vnext/fi
 
 - 不在 Windows 上运行服务或把 Windows 文件时间/日志当作耐久证据；账本目录 fsync 的目录项
   在 Windows 被跳过。
-- 不手工编辑 `recovery-ledger.json`；不在未确认收尾时删除状态目录；不以 `kill -9` 或重启
-  App 当作清理完成。
+- 不手工编辑 `recovery-ledger.json` 或服务/App 的 `messages.json`；不在未确认收尾时删除
+  状态目录；不以 `kill -9` 或重启 App 当作清理完成。
+- 不用卸载 App、`pm clear` 或删除消息文件解决签名、契约或配对问题。
 - 不在虚拟屏上显示控制 App 界面；采集发现控制包可见节点会直接失败。
 - 不把令牌、节点树、输入正文、截图、原始 `dumpsys`/logcat 输出贴进仓库或工单。
 - 服务只提供 [接口契约](interface.md) 列出的端点；图片通过 `observe`/`act` 的 `image=true`
@@ -230,3 +252,47 @@ HTTP 入口的每个请求都需要 `Authorization: Bearer <mcp-token>`；携带
 取消与漏收：stdio 的 `notifications/cancelled` 与 HTTP 的请求 SSE 流关闭都映射为本次调用
 取消；有本次 P 时适配进程发起有界 `end(P)`，只读工具仅取消读取。连接断开或 `end` 发出都
 不等于手机动作已撤回或原执行链已结束；恢复仍按 `status(P)`/`status()` 与收尾事实。
+
+## 11. 消息中心
+
+- Agent 调用 `POST /api/notify` 后，消息先进入服务有界队列；App 每秒同步取下未确认消息，
+  写入私有 `messages.json` 后在下一次同步确认。确认只释放服务端队列，不代表已显示/已读。
+- 新消息发到独立通知频道 `agent-messages`；点击通知打开对应消息详情。打开消息中心或详情
+  即在本机标记已读并更新角标，不向服务或 Agent 回报。
+- 服务重启后未确认消息按原 ID 重发；App 按 ID 去重，不会重复列表项或重复通知。App 私有
+  消息与已读不因服务实例变化、App 覆盖安装或 Activity 重建而清空。
+- 不把消息正文写入服务日志、App 诊断、账本或发布清单。需要排查投递时只看受控计数/ID 与
+  App 消息中心列表，不导出正文。
+
+```bash
+# 服务侧队列规模（不打印正文）
+adb -s 127.0.0.1:5555 shell su -c 'wc -c /data/local/chroots/debian13/var/lib/mobile-use-vnext/messages.json'
+# App 私有消息文件权限（不打印正文）
+adb -s 127.0.0.1:5555 shell su -c 'ls -l /data/data/com.mobileuse.vnext/files/messages.json'
+```
+
+## 12. 整组发布、回退与服务重启演练
+
+整组发布以 `docs/release.md` 为准。操作顺序固定：
+
+1. 准备并核验构建、清单、契约号与工具目录；未核验的目录不得部署。
+2. 暂停普通准入；用旧版本结束活动会话/STOP，分别确认执行链、task/recents/display。
+   未确认就停止推进，不强停 App 把缺少描述当已清理。
+3. 停止旧服务/App，安装整组产物（`adb install -r`，保留 App 私有数据）；过渡期保持不可
+   准入。安装失败时保留现场，不以卸载/清库重试。
+4. 启动新服务与 App；要求 release/contract 与清单一致、`can_start=true`、STOP 可用、
+   恢复屏障通过。默认虚拟屏，主屏共享需要用户重新确认。
+5. 重启实际 MCP 宿主进程/连接，重新发现工具目录；只替换磁盘文件不算完成。
+6. 运行相关最小闭环与回归；任何阶段失败都保持普通准入关闭并记录失败阶段。
+
+回退是另一轮受控部署：安装上一组已核验产物、重新确认资源与准入；不自动回放旧操作、不恢复
+主屏授权、不清空消息或归属来凑兼容。旧二进制无法读取已迁移数据时明确不能直接回退。
+
+服务重启恢复演练（活动会话/资源存在时）：
+
+1. 构造活动会话并使用虚拟屏；记录 `status` 的会话、`cleanup` 与显示。
+2. 停止服务：`service.sh stop`（SIGTERM 路径）或受控 `SIGKILL` 路径；不得删除账本。
+3. 重启服务与 App。预期：App 显示核验中/不可用，`can_start=false`，直到旧资源证据确认；
+   不恢复旧会话、不重放动作。
+4. 按 `status.cleanup` 核对执行链、task/recents/display；只有全部确认后 `can_start=true`。
+5. 若长期 `blocked`，保留账本与现场，按 §7 排查，不以重启或删账本绕过。

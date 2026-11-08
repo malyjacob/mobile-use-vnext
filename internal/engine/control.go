@@ -52,11 +52,20 @@ func (e *Engine) SyncApp(ctx context.Context, req *protocol.AppSyncRequest) (*pr
 			return nil, protocol.Invalid("command_results 错误码无效")
 		}
 	}
+	if len(req.MessageAcks) > maxMessageAcks {
+		return nil, protocol.Invalid("message_acks 超过长度上限").WithDetail("limit", maxMessageAcks)
+	}
+	for _, id := range req.MessageAcks {
+		if !validMessageID(id) {
+			return nil, protocol.Invalid("message_acks 无效")
+		}
+	}
 
 	now := time.Now()
 	var revoked *sessionState
 	var instanceRevoked *sessionState
 	var needRecovery bool
+	var messagesChanged bool
 
 	e.mu.Lock()
 	instanceChanged := e.app.InstanceID != "" && e.app.InstanceID != req.AppInstanceID
@@ -104,13 +113,16 @@ func (e *Engine) SyncApp(ctx context.Context, req *protocol.AppSyncRequest) (*pr
 		}
 	}
 	needRecovery = e.recovery != nil
+	messagesChanged = e.ackMessagesLocked(req.MessageAcks)
 	view := e.controlViewLocked(now)
 	commands := e.pendingCommandsLocked(now)
+	messages := e.deliveryMessagesLocked()
 	response := &protocol.AppSyncResponse{
 		ContractVersion:   protocol.ContractVersion,
 		ServiceInstanceID: e.cfg.ServiceInstanceID,
 		Control:           view,
 		Commands:          commands,
+		Messages:          messages,
 	}
 	if req.StopPending != nil && e.stopBoundary != nil &&
 		e.stopBoundary.AppInstanceID == req.AppInstanceID &&
@@ -133,6 +145,11 @@ func (e *Engine) SyncApp(ctx context.Context, req *protocol.AppSyncRequest) (*pr
 	if needRecovery {
 		e.wg.Add(1)
 		go func() { defer e.wg.Done(); e.driveRecovery(context.Background()) }()
+	}
+	if messagesChanged {
+		// Releasing acknowledged messages happens outside the state lock and
+		// never blocks the heartbeat's control facts.
+		e.persistMessages()
 	}
 	e.persistAsync()
 	return response, nil
@@ -413,6 +430,7 @@ func (e *Engine) Stop(ctx context.Context, req *protocol.ControlStopRequest) (*p
 // The service stays recovering until old ownership is resolved and the paired
 // App facts are valid.
 func (e *Engine) StartRecovery(ctx context.Context) error {
+	e.loadMessages()
 	e.mu.Lock()
 	e.recovering, e.recoveryLoading = true, true
 	e.mu.Unlock()

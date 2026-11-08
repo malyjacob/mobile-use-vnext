@@ -9,11 +9,11 @@
 cmd/device-service
   ├─ 私有配置、进程锁、信号、启动顺序、退出
   ├─ internal/httpapi    认证与 /api/<tool>、/v1/control/*
-  ├─ internal/engine     唯一业务权威（会话、O/P、工作位置、STOP、收尾、恢复）
+  ├─ internal/engine     唯一业务权威（会话、O/P、工作位置、STOP、收尾、恢复、消息队列）
   ├─ internal/android    ADB、u2 JSON-RPC、固定 JAR、root 显示助手
   ├─ internal/observation 公开树构造、保号、full/delta 纯算法
   ├─ internal/imaging    图片等比缩小与单次 JPEG 编码（纯算法）
-  ├─ internal/store      私有恢复账本（原子文件、单写者）
+  ├─ internal/store      私有恢复账本与消息文件（原子文件、单写者）
   └─ internal/eventlog   有界字段白名单日志
 
 cmd/device-mcp
@@ -37,7 +37,9 @@ cmd/device-mcp
 - `internal/android` 只执行有界设备 I/O 并返回受控事实；不决定观察什么、操作什么。
 - `internal/mcp` 只依赖 `protocol` 与 `client`，不导入 `engine`、`android`、`store`，不因
   同仓而绕过认证与服务状态；`internal/client` 只依赖 `protocol`。
-- `internal/store` 实现 `engine.Store`，只持久化 `engine.Ledger`。
+- `internal/store` 实现 `engine.Store` 与 `engine.MessageStore`，分别持久化 `engine.Ledger`
+  与有界 Agent 消息。两者是不同文件、不同语义：账本只含归属与资源证据，消息文件只含待
+  投递正文，正文不进入账本。
 - `internal/eventlog` 只接收批准字段；队列有界（1024），满时丢弃并计数，不阻塞 STOP。
 
 进程启动顺序（`cmd/device-service/main.go`）：读取并校验私有配置 → 在固定运行目录取得
@@ -155,8 +157,8 @@ delta 的五类块：`set`（逐字段完整新值，显式保留 `false`/`0`/`"
 - 工作上下文按类型设上限：`start` = `StartTimeout + WorkTimeout`（40s）、`observe` =
   `WorkTimeout + 15s`（35s）、`act`/`open_app` 约 50s、`apps` 约 30s、`shell` 约 65s；具体超时是服务策略，不是请求参数。
 - `end`、STOP、`status` 不占普通工作位置，也不等待普通工作完成。
-- 控制同步 `/v1/control/sync` 不占工作位置，不做设备 I/O；只更新 App 事实、处理命令回执与
-  停止意图，至多下发一条显示命令。
+- 控制同步 `/v1/control/sync` 不占工作位置，不做设备 I/O；只更新 App 事实、处理命令回执、
+  停止意图与消息确认，至多下发一条显示命令与一批未确认消息。
 
 ## 6. STOP、end 与收尾
 
@@ -277,3 +279,22 @@ delta 的五类块：`set`（逐字段完整新值，显式保留 `false`/`0`/`"
 
 事件日志只记白名单键（ID、枚举、布尔、计数、时长），值经过单行截断；不记录树、差异、输入
 正文、命令、原始响应或异常文本。
+
+## 10. 消息投递与发布边界
+
+### 消息
+
+`notify` 只保存消息并把它放入控制同步队列（`notification.state=pending`）。消息队列有界
+（256 条 / 1 MiB 正文），未确认项持久化在 `<state_dir>/messages.json`，与恢复账本分离；
+服务重启后按原 ID 重发，App 按 ID 去重并确认已保存。确认只释放服务端队列，不表示显示或
+已读；App 的已读是本机事实，不回报 Agent。消息正文不进入日志、错误、账本、恢复记录、
+工具结果投影或发布清单；消息存储故障不改变 STOP、清理与准入。
+
+### 发布
+
+`release/versions.json` 是发行号、共同契约号与 Android versionCode 的唯一来源，构建生成
+Go/Java 常量；`scripts/build-release.ps1` 产出整组产物与 `build/release/manifest.json`
+（源码提交、Go 版本、MCP SDK/协议、各产物 SHA-256/大小、Android 包名/版本、工具目录指纹）。
+部署按清单核验后覆盖安装，服务与 App 的契约必须精确相等；App 私有数据保留，不使用卸载/
+清库解决签名或配对。MCP 宿主必须重启实际进程并重新发现工具，替换磁盘文件不等于发布完成。
+发布与回退的受控顺序见[发布与回退](release.md)。

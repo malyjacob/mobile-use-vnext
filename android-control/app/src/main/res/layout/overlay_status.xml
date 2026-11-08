@@ -132,7 +132,7 @@
             android:id="@+id/overlay_messages"
             android:layout_width="match_parent"
             android:layout_height="48dp"
-            android:text="消息中心（0）" />
+            android:text="@string/message_center_button_initial" />
 
         <Button
             android:id="@+id/overlay_open"

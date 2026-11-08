@@ -33,6 +33,8 @@ import java.util.Locale;
  */
 public final class MainActivity extends Activity {
     static final String ACTION_OPEN_MESSAGE_CENTER = "com.mobileuse.vnext.OPEN_MESSAGE_CENTER";
+    static final String ACTION_OPEN_MESSAGE = "com.mobileuse.vnext.OPEN_MESSAGE";
+    static final String EXTRA_MESSAGE_ID = "com.mobileuse.vnext.EXTRA_MESSAGE_ID";
     private static final String TAG = "MainActivity";
     private static final int NOTIFICATION_PERMISSION = 1;
     private final DateTimeFormatter syncTime = DateTimeFormatter
@@ -67,7 +69,7 @@ public final class MainActivity extends Activity {
         }
         setContentView(R.layout.activity_main);
         application = (ControlApplication) getApplication();
-        messageCenter = new MessageCenterUi(this);
+        messageCenter = new MessageCenterUi(this, application.messages());
         applySystemInsets();
         ((TextView) findViewById(R.id.version)).setText(
                 getString(R.string.version_label, getString(R.string.app_version)));

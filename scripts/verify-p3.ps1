@@ -28,10 +28,18 @@ Set-StrictMode -Version Latest
 $script:repository = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $script:stateDirectory = Join-Path $script:repository '.state'
 $script:deployStatePath = Join-Path $script:stateDirectory 'deploy.json'
+$script:versionsPath = Join-Path $script:repository 'release/versions.json'
 $script:probeApkPath = Join-Path $script:repository 'android-control/build-probe/probe.apk'
 $script:probePackage = 'com.mobileuse.probe'
 $script:probeActivity = 'com.mobileuse.probe/.ProbeActivity'
-$script:contractVersion = '1'
+if (-not (Test-Path -LiteralPath $script:versionsPath -PathType Leaf)) {
+    throw "Version source is missing: $script:versionsPath"
+}
+$script:versions = Get-Content -LiteralPath $script:versionsPath -Raw | ConvertFrom-Json
+$script:contractVersion = [string]$script:versions.contract_version
+if ($script:contractVersion -notmatch '^[1-9][0-9]{0,2}$') {
+    throw "contract_version must be a positive integer: $script:contractVersion"
+}
 $script:u2HostPort = 19008
 $script:u2DevicePort = 9008
 $script:textExpected = '你好，世界！'

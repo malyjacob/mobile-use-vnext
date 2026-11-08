@@ -751,7 +751,7 @@ func TestDiscoverBuildsInstance(t *testing.T) {
 	mux.HandleFunc("/health", func(w http.ResponseWriter, request *http.Request) {
 		healthCaptures <- captureRequest(t, request)
 		writeResponse(w, http.StatusOK,
-			`{"status":"ok","contract_version":"1","service_instance_id":"instance-1","release_version":"0.1.0-dev"}`)
+			fmt.Sprintf(`{"status":"ok","contract_version":"%s","service_instance_id":"instance-1","release_version":"0.1.0-dev"}`, protocol.ContractVersion))
 	})
 	mux.HandleFunc("/api/status", func(w http.ResponseWriter, request *http.Request) {
 		statusCaptures <- captureRequest(t, request)
@@ -809,7 +809,7 @@ func TestDiscoverCanStart(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, request *http.Request) {
 		writeResponse(w, http.StatusOK,
-			`{"status":"ok","contract_version":"1","service_instance_id":"instance-2","release_version":"0.1.0-dev"}`)
+			fmt.Sprintf(`{"status":"ok","contract_version":"%s","service_instance_id":"instance-2","release_version":"0.1.0-dev"}`, protocol.ContractVersion))
 	})
 	mux.HandleFunc("/api/status", func(w http.ResponseWriter, request *http.Request) {
 		writeResponse(w, http.StatusOK, `{"can_start":true}`)
@@ -835,7 +835,7 @@ func TestDiscoverRejectsContractMismatch(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, request *http.Request) {
 		writeResponse(w, http.StatusOK,
-			`{"status":"ok","contract_version":"2","service_instance_id":"instance-1","release_version":"0.1.0-dev"}`)
+			`{"status":"ok","contract_version":"0","service_instance_id":"instance-1","release_version":"0.1.0-dev"}`)
 	})
 	mux.HandleFunc("/api/status", func(w http.ResponseWriter, request *http.Request) {
 		statusHits.Add(1)
@@ -866,7 +866,7 @@ func TestDiscoverRejectsUnreadyHealth(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, request *http.Request) {
 		writeResponse(w, http.StatusOK,
-			`{"status":"recovering","contract_version":"1","service_instance_id":"instance-1","release_version":"0.1.0-dev"}`)
+			fmt.Sprintf(`{"status":"recovering","contract_version":"%s","service_instance_id":"instance-1","release_version":"0.1.0-dev"}`, protocol.ContractVersion))
 	})
 	mux.HandleFunc("/api/status", func(w http.ResponseWriter, request *http.Request) {
 		statusHits.Add(1)

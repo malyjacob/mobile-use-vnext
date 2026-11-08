@@ -16,7 +16,19 @@ public final class ControlApplication extends Application {
     private final Set<MainActivityVisibilityListener> visibilityListeners = new LinkedHashSet<>();
     // onStart 加入、onStop 删除独立 Activity token；配置重建时旧 onStop 不会覆盖新 onStart。
     private final Set<Object> visibleMainActivities = new LinkedHashSet<>();
+    private MessageStore messageStore;
     private ControlState state = ControlState.inactive();
+
+    @Override public void onCreate() {
+        super.onCreate();
+        // 消息存储与诊断日志只在本进程启动时各初始化一次；Activity 与 Service 共用同一实例。
+        DiagnosticLog.initialize(this, instanceId);
+        messageStore = MessageStore.load(this);
+    }
+
+    MessageStore messages() {
+        return messageStore;
+    }
 
     interface Listener {
         void onControlState(ControlState state);

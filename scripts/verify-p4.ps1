@@ -24,7 +24,15 @@ Set-StrictMode -Version Latest
 $script:repository = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $script:stateDirectory = Join-Path $script:repository '.state'
 $script:deployStatePath = Join-Path $script:stateDirectory 'deploy.json'
-$script:contractVersion = '1'
+$script:versionsPath = Join-Path $script:repository 'release/versions.json'
+if (-not (Test-Path -LiteralPath $script:versionsPath -PathType Leaf)) {
+    throw "Version source is missing: $script:versionsPath"
+}
+$script:versions = Get-Content -LiteralPath $script:versionsPath -Raw | ConvertFrom-Json
+$script:contractVersion = [string]$script:versions.contract_version
+if ($script:contractVersion -notmatch '^[1-9][0-9]{0,2}$') {
+    throw "contract_version must be a positive integer: $script:contractVersion"
+}
 $script:probePackage = 'com.mobileuse.probe'
 $script:agentToken = ''
 $script:baseUrl = ''
@@ -535,14 +543,14 @@ function Test-Shell {
     $stopStart = Start-VerifySession
     $stopOid = [string](Get-Field (Get-Field $stopStart 'observation') 'id')
     $job = Start-Job -ScriptBlock {
-        param($url, $token, $body, $op)
+        param($url, $token, $body, $op, $contract)
         $request = [System.Net.HttpWebRequest]::Create($url)
         $request.Method = 'POST'
         $request.Timeout = 60000
         $request.ReadWriteTimeout = 60000
         $request.Proxy = $null
         $request.Headers.Add('Authorization', 'Bearer ' + $token)
-        $request.Headers.Add('X-Mobile-Use-Contract', '1')
+        $request.Headers.Add('X-Mobile-Use-Contract', $contract)
         $request.Headers.Add('X-Mobile-Use-Operation', $op)
         $payload = [System.Text.Encoding]::UTF8.GetBytes($body)
         $request.ContentType = 'application/json; charset=utf-8'
@@ -564,7 +572,8 @@ function Test-Shell {
         ($script:baseUrl + '/api/shell'),
         $script:agentToken,
         ('{"reference":"' + $stopOid + '","command":"sleep 40"}'),
-        ('Pverify-shell-stop-' + $script:runId)
+        ('Pverify-shell-stop-' + $script:runId),
+        $script:contractVersion
     )
     Start-Sleep -Milliseconds 2500
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
@@ -598,14 +607,14 @@ function Test-ShellRecovery {
     $oid = [string](Get-Field (Get-Field $start 'observation') 'id')
     $operation = 'Pverify-shell-recovery-' + $script:runId
     $job = Start-Job -ScriptBlock {
-        param($url, $token, $body, $op)
+        param($url, $token, $body, $op, $contract)
         $request = [System.Net.HttpWebRequest]::Create($url)
         $request.Method = 'POST'
         $request.Timeout = 90000
         $request.ReadWriteTimeout = 90000
         $request.Proxy = $null
         $request.Headers.Add('Authorization', 'Bearer ' + $token)
-        $request.Headers.Add('X-Mobile-Use-Contract', '1')
+        $request.Headers.Add('X-Mobile-Use-Contract', $contract)
         $request.Headers.Add('X-Mobile-Use-Operation', $op)
         $payload = [System.Text.Encoding]::UTF8.GetBytes($body)
         $request.ContentType = 'application/json; charset=utf-8'
@@ -625,7 +634,8 @@ function Test-ShellRecovery {
         ($script:baseUrl + '/api/shell'),
         $script:agentToken,
         ('{"reference":"' + $oid + '","command":"sleep 60"}'),
-        $operation
+        $operation,
+        $script:contractVersion
     )
     Start-Sleep -Milliseconds 3000
     $dirs = Invoke-DeviceScript -Script 'ls -d /data/local/tmp/mobile-use-shell/* 2>/dev/null || true'

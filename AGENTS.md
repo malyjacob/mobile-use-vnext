@@ -31,6 +31,12 @@ docs-only 变更修订设计源头，不在实现里暗改语义。
     `maintenance/` 承载提案/决策/验证记录/未决项；原始截图、节点树、日志与个人信息不入库。
 12. **验证边界**：只验证本次真实改变的路径。已实现/已实测/已验证分别表达；不在文档里
     把设计推演写成验证结论。
+13. **单一版本源**：发行号、共同 `contract_version` 与 Android versionCode 只在
+    `release/versions.json` 手改；Go/Java/XML 常量由脚本生成。发布按
+    `build/release/manifest.json` 核验产物、契约与工具目录指纹；不得跳过清单、手改多处
+    版本号或用卸载/清库解决签名或配对。
+14. **消息边界**：`notify` 只保存并入队；正文只经控制同步与 App 私有存储传递，不写日志、
+    错误、恢复账本或发布清单。App 本地已读不上报，不新增 Agent 已读通道。
 
 ## 目录
 
@@ -41,15 +47,16 @@ internal/protocol/      公共数据、严格 JSON 接入、错误码与可读�
 internal/device/        原始设备事实类型（不执行 I/O、不持运行状态）
 internal/observation/   公开树构造、保守保号、full/delta 计算与还原
 internal/imaging/       图片等比缩小与单次 JPEG 编码（纯算法）
-internal/engine/        唯一业务入口：会话、O/P、工作位置、STOP、收尾、恢复
+internal/engine/        唯一业务入口：会话、O/P、工作位置、STOP、收尾、恢复、消息队列
 internal/android/       ADB、u2 RPC、制品管理与受管执行链
 internal/httpapi/       认证 HTTP 接入、/api/<tool>、控制端同步与最小 STOP
 internal/client/        强类型 HTTP 客户端（发送前 P、结构化结果、图片字节）
 internal/mcp/           12 工具注册/schema/投影、取消包装、HTTP 认证与 Origin
-internal/store/         私有恢复账本（原子文件、单写者、修订序）
+internal/store/         私有恢复账本与有界消息文件（原子文件、单写者）
 internal/eventlog/      有界事件/字段白名单日志
 android-control/        Java 控制 App 源码与构建入口
 third_party/uiautomator/固定 JAR 输入/补丁/哈希/来源/许可证
+release/                发行号、契约号与 Android versionCode 的唯一版本源
 maintenance/            公开维护材料
 docs/                   正式文档
 ```
@@ -63,8 +70,10 @@ Go 工具链锁定 1.27 系列并启用 `GOEXPERIMENT=jsonv2`。常规构建目�
 GOEXPERIMENT=jsonv2 GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build ./...
 ```
 
-Go 服务、Java App 与固定 JAR 独立构建，发布包再组装；产物记录源码版本、共同
-`contract_version` 与 Android 制品哈希。
+Go 服务、Java App 与固定 JAR 独立构建，发布包由 `scripts/build-release.ps1` 组装；
+`build/release/manifest.json` 记录源码提交、共同 `contract_version`、发行号、每个产物的
+SHA-256/大小、Android 版本与工具目录指纹。部署先用 `scripts/verify-manifest.ps1` 核验，
+再覆盖安装并保留 App 私有数据；MCP 宿主必须重启实际进程以重新发现工具。
 
 ## 提交与验证记录
 

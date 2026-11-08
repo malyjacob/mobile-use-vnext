@@ -36,6 +36,12 @@ final class ControlState {
     /** 最近一次成功同步的控制视图；serviceInstanceId 为空表示本 App 实例从未同步成功。 */
     final String serviceInstanceId;
     final ServiceClient.ControlView control;
+    /** App 私有消息存储的未读数，供悬浮入口与通知入口共用同一快照。 */
+    final int unreadMessages;
+    /** 只读展示用：最近一次观察到的已结束会话摘要，不参与主文案、授权或准入。 */
+    final String lastEndedSessionSummary;
+    /** 只读展示用：最近一次观察到的设备工作摘要，不参与主文案、授权或准入。 */
+    final String lastObservedWorkSummary;
 
     ControlState(boolean backgroundRunning, boolean notificationsEnabled, boolean overlayReady,
             boolean overlayVisible, String overlayIssue, boolean stopReady,
@@ -44,7 +50,8 @@ final class ControlState {
             VirtualDisplayHost.Descriptor display, String displayError, boolean cleanupUnconfirmed,
             boolean connected, long lastSyncElapsedMs,
             String connectionTitle, String connectionDetail, String serviceInstanceId,
-            ServiceClient.ControlView control) {
+            ServiceClient.ControlView control, int unreadMessages,
+            String lastEndedSessionSummary, String lastObservedWorkSummary) {
         this.backgroundRunning = backgroundRunning;
         this.notificationsEnabled = notificationsEnabled;
         this.overlayReady = overlayReady;
@@ -66,12 +73,16 @@ final class ControlState {
         this.connectionDetail = connectionDetail;
         this.serviceInstanceId = serviceInstanceId;
         this.control = control;
+        this.unreadMessages = unreadMessages;
+        this.lastEndedSessionSummary = lastEndedSessionSummary;
+        this.lastObservedWorkSummary = lastObservedWorkSummary;
     }
 
     static ControlState inactive() {
         return new ControlState(false, false, false, false, null, false, false, 0, null,
                 ServiceClient.MODE_VIRTUAL, null, null, null, false,
-                false, -1, "后台未启动", "点击“启动后台”后持续同步；离开页面不影响服务。", null, null);
+                false, -1, "后台未启动", "点击“启动后台”后持续同步；离开页面不影响服务。", null, null,
+                0, null, null);
     }
 
     /** 连接失鲜或协议失败后不再使用缓存 control；只有新鲜成功响应才可回答服务事实。 */
@@ -100,13 +111,19 @@ final class ControlState {
         return fresh() ? control.availability.reason : null;
     }
 
-    /** §5 主文案：顺序表达停止待同步、失鲜、控制基础与本地清理风险。 */
+    /**
+     * §5 主文案优先级：本地停止待同步 > 连接失鲜 > 资源清理风险 > 可用性阻塞/核验 >
+     * 当前会话/工作 > 待命。历史摘要不参与该映射。
+     */
     String primaryText() {
         if (stopPending) {
             return "已阻止本地旧命令 · 停止待同步";
         }
         if (!fresh()) {
-            return "连接中断 · 当前服务状态未知";
+            return "连接中断 · 服务状态未知";
+        }
+        if (cleanupRisk()) {
+            return "控制已停止 · 资源清理未确认";
         }
         String availability = control.availability.state;
         if ("recovering".equals(availability)) {
@@ -117,15 +134,14 @@ final class ControlState {
         }
         ServiceClient.Session session = control.session;
         if (session == null) {
-            return cleanupRisk() ? "控制已停止 · 资源清理未确认" : modeLabel(selectedMode) + " · 待命";
+            return modeLabel(selectedMode) + " · 待命";
         }
         String agent = hasText(session.agent) ? session.agent.trim() : "Agent";
         if ("starting".equals(session.state)) {
             return agent + " · 正在准备";
         }
         if ("ended".equals(session.state)) {
-            return cleanupRisk() ? "控制已停止 · 资源清理未确认"
-                    : "上次会话已结束" + reasonSuffix(session.reason);
+            return "上次会话已结束" + reasonSuffix(session.reason);
         }
         ServiceClient.Work work = control.work;
         if (work == null) {
@@ -157,7 +173,7 @@ final class ControlState {
 
     /** 悬浮进度行只表达 work 类别，不显示节点、坐标、输入正文或命令。 */
     String overlayProgress() {
-        if (stopPending || !fresh() || control.session == null) {
+        if (stopPending || !fresh() || cleanupRisk() || control.session == null) {
             return primaryText();
         }
         ServiceClient.Work work = control.work;
@@ -167,46 +183,111 @@ final class ControlState {
         return "阶段：" + workText(work.kind) + phaseSuffix(work.phase);
     }
 
-    /** 展开详情：可用性、会话时段、停止同步与分项清理摘要。 */
+    /**
+     * 展开详情：同一不可变快照中的停止同步、连接新鲜度、可用性、会话、工作、五项清理、
+     * 所选模式与通知/悬浮风险。历史摘要只在快照新鲜且当前无会话/工作时追加。
+     */
     String overlayDetail() {
         StringBuilder detail = new StringBuilder(primaryText());
+        detail.append("\n停止同步：").append(stopPending ? "待同步" : "已同步");
         if (stopPending) {
-            detail.append("\n停止序号 ").append(stopSeq)
+            detail.append(" · 序号 ").append(stopSeq)
                     .append(stopError == null ? " · 正在同步服务" : " · 上次同步失败，重试中");
         }
         if (!fresh()) {
+            detail.append("\n连接：已中断 · ").append(connectionTitle);
+            if (hasText(connectionDetail)) {
+                detail.append(" · ").append(connectionDetail);
+            }
+            detail.append("\n可用性：未知");
+            detail.append("\n会话：未知（不沿用缓存）");
+            detail.append("\n设备操作：未知");
+            detail.append("\n资源清理：未知");
+            appendLocalFacts(detail);
             return detail.toString();
         }
+        detail.append("\n连接：已连接 · ")
+                .append(Math.max(0, lastSyncElapsedMs / 1000))
+                .append(" 秒前成功同步（").append(STALE_AFTER_MS / 1000).append(" 秒失鲜）");
         detail.append("\n可用性：").append(availabilityLabel(control.availability.state));
         if (hasText(control.availability.reason)) {
             detail.append(" · 原因：").append(reasonLabel(control.availability.reason.trim()));
         }
-        ServiceClient.Session session = control.session;
-        if (session != null) {
-            detail.append("\n会话：").append(modeLabel(session.mode));
-            if (hasText(session.agent)) {
-                detail.append(" · ").append(session.agent.trim());
-            }
-            detail.append(" · ").append(sessionStateLabel(session.state));
-            if (hasText(session.startedAt)) {
-                detail.append("\n开始：").append(session.startedAt.trim());
-            }
-            String end = hasText(session.endedAt) ? session.endedAt : session.expiresAt;
-            if (hasText(end)) {
-                detail.append(hasText(session.endedAt) ? "\n结束：" : "\n有效至：").append(end.trim());
-            }
-            detail.append(reasonLine("结束原因", session.reason));
-        }
+        appendSession(detail, control.session);
+        appendWork(detail, control.work);
         detail.append(cleanupText(control.cleanup));
+        appendLocalFacts(detail);
+        if (control.session == null && control.work == null) {
+            if (hasText(lastEndedSessionSummary)) {
+                detail.append("\n上次会话：").append(lastEndedSessionSummary);
+            }
+            if (hasText(lastObservedWorkSummary)) {
+                detail.append("\n上次操作：").append(lastObservedWorkSummary);
+            }
+        }
         return detail.toString();
     }
 
-    /** 本地持有的虚拟屏尚未确认清理；叠加在服务摘要之上，不替代服务事实。 */
+    private static void appendSession(StringBuilder detail, ServiceClient.Session session) {
+        if (session == null) {
+            detail.append("\n会话：无");
+            return;
+        }
+        detail.append("\n会话：").append(modeLabel(session.mode));
+        if (hasText(session.origin)) {
+            detail.append(" · 来源 ").append(session.origin.trim());
+        }
+        if (hasText(session.agent)) {
+            detail.append(" · ").append(session.agent.trim());
+        }
+        detail.append(" · ").append(sessionStateLabel(session.state));
+        if (hasText(session.startedAt)) {
+            detail.append("\n开始：").append(timeLabel(session.startedAt));
+        }
+        if ("ended".equals(session.state)) {
+            if (hasText(session.endedAt)) {
+                detail.append("\n结束：").append(timeLabel(session.endedAt));
+            }
+            detail.append(reasonLine("结束原因", session.reason));
+        } else {
+            if (hasText(session.expiresAt)) {
+                detail.append("\n有效至：").append(timeLabel(session.expiresAt));
+            }
+            detail.append(reasonLine("原因", session.reason));
+        }
+    }
+
+    private static void appendWork(StringBuilder detail, ServiceClient.Work work) {
+        if (work == null) {
+            detail.append("\n设备操作：无");
+            return;
+        }
+        detail.append("\n设备操作：").append(workText(work.kind));
+        detail.append("\n阶段：").append(phaseLabel(work.phase));
+    }
+
+    private void appendLocalFacts(StringBuilder detail) {
+        detail.append("\n所选模式：").append(modeLabel(selectedMode));
+        detail.append("\n通知：").append(notificationsEnabled
+                ? "可用" : "不可用 · 停止入口可能不可见");
+        if (overlayIssue != null) {
+            detail.append("\n悬浮窗：不可用 · ").append(overlayIssue);
+        } else if (overlayReady) {
+            detail.append("\n悬浮窗：可用")
+                    .append(overlayVisible ? "（已显示）" : "（完整控制界面打开时隐藏）");
+        } else {
+            detail.append("\n悬浮窗：准备中或不可用");
+        }
+    }
+
+    /** 本地持有的虚拟屏尚未确认清理，或新鲜的服务摘要仍报告清理未确认。 */
     boolean cleanupRisk() {
-        ServiceClient.Cleanup cleanup = control.cleanup;
-        return cleanupUnconfirmed || display != null
-                || (cleanup != null && ("pending".equals(cleanup.state)
-                || "unconfirmed".equals(cleanup.state)));
+        if (cleanupUnconfirmed) {
+            return true;
+        }
+        ServiceClient.Cleanup cleanup = cleanup();
+        return cleanup != null && ("pending".equals(cleanup.state)
+                || "unconfirmed".equals(cleanup.state));
     }
 
     private static String cleanupText(ServiceClient.Cleanup cleanup) {
@@ -222,9 +303,8 @@ final class ControlState {
     }
 
     private static void appendPart(StringBuilder text, String label, String value) {
-        if (hasText(value)) {
-            text.append(" · ").append(label).append(' ').append(cleanupLabel(value.trim()));
-        }
+        text.append(" · ").append(label).append(' ')
+                .append(hasText(value) ? cleanupLabel(value.trim()) : "不适用");
     }
 
     /** 选择值和会话 mode 都已在协议/Intent 边界校验；各入口统一使用可辨认的模式名称。 */
@@ -258,29 +338,72 @@ final class ControlState {
         return "未知";
     }
 
-    /** work.kind 只有类别；未知类别也不展开任何执行材料。 */
+    /** work.kind 只有类别；未知类别不展开任何执行材料，统一显示通用文案。 */
     static String workText(String kind) {
         if ("act".equals(kind)) {
             return "正在操作";
         }
+        if ("open_app".equals(kind)) {
+            return "正在打开应用";
+        }
         if ("observe".equals(kind)) {
             return "正在观察";
+        }
+        if ("apps".equals(kind)) {
+            return "正在读取应用清单";
+        }
+        if ("shell".equals(kind)) {
+            return "正在执行命令";
         }
         return "正在执行其他设备操作";
     }
 
     static String phaseSuffix(String phase) {
+        String label = phaseLabel(phase);
+        return "未知".equals(label) ? "" : "（" + label + "）";
+    }
+
+    /** 阶段只映射受控短码；未知阶段显示通用文案，不回显服务原文。 */
+    static String phaseLabel(String phase) {
         if (!hasText(phase)) {
-            return "";
+            return "未知";
         }
-        String value = phase.trim();
-        if ("dispatch".equals(value)) {
-            return "（已派发）";
+        switch (phase.trim()) {
+            case "admitted": return "已接纳";
+            case "dispatch": return "已派发";
+            case "capture": return "采集中";
+            case "observe": return "后置观察";
+            case "running": return "运行中";
+            case "finished": return "已结束";
+            default: return "未知";
         }
-        if ("observe".equals(value)) {
-            return "（后置观察）";
+    }
+
+    /** 只读展示：已结束会话的简短摘要，不参与主文案、授权或准入。 */
+    static String historySession(ServiceClient.Session session) {
+        if (session == null) {
+            return null;
         }
-        return "";
+        StringBuilder summary = new StringBuilder(modeLabel(session.mode))
+                .append(" · ").append(sessionStateLabel(session.state));
+        if (hasText(session.agent)) {
+            summary.append(" · ").append(session.agent.trim());
+        }
+        if (hasText(session.endedAt)) {
+            summary.append(" · 结束 ").append(timeLabel(session.endedAt));
+        }
+        if (hasText(session.reason)) {
+            summary.append(" · ").append(reasonLabel(session.reason.trim()));
+        }
+        return summary.toString();
+    }
+
+    /** 只读展示：最近一次设备工作摘要，不参与主文案、授权或准入。 */
+    static String historyWork(ServiceClient.Work work) {
+        if (work == null) {
+            return null;
+        }
+        return workText(work.kind) + " · 阶段 " + phaseLabel(work.phase);
     }
 
     static String cleanupLabel(String value) {

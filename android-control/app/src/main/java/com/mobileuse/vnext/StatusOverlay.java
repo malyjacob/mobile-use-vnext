@@ -199,7 +199,7 @@ final class StatusOverlay implements AutoCloseable {
 
     /**
      * 仅更新内容，不展开、不写偏好、不移动、不请求焦点。
-     * 消息中心骨架当前无服务端邮局，未读徽标固定不显示；停止入口始终保留。
+     * 未读徽标只来自本机 MessageStore 快照；停止入口始终保留。
      */
     void render(ControlState snapshot) {
         state = snapshot;
@@ -211,31 +211,39 @@ final class StatusOverlay implements AutoCloseable {
             ((TextView) root.findViewById(R.id.overlay_compact_text)).setText(form == Form.edge_handle
                     ? (right ? "‹ " : "› ") + mode + compactLine + status
                     : mode + compactLine + status);
-            TextView badge = root.findViewById(R.id.overlay_compact_unread);
-            badge.setVisibility(View.GONE);
+            updateBadge(root.findViewById(R.id.overlay_compact_unread), state.unreadMessages);
             root.setContentDescription(state.primaryText() + "；点击展开为条后可停止；拖动可移动");
             return;
         }
         ((TextView) root.findViewById(R.id.overlay_title)).setText(state.overlayTitle());
         ((TextView) root.findViewById(R.id.overlay_progress)).setText(state.overlayProgress());
         ((TextView) root.findViewById(R.id.overlay_detail_text)).setText(state.overlayDetail());
-        TextView badge = root.findViewById(R.id.overlay_unread);
-        badge.setVisibility(View.GONE);
+        updateBadge(root.findViewById(R.id.overlay_unread), state.unreadMessages);
         ((Button) root.findViewById(R.id.overlay_messages)).setText(
-                context.getString(R.string.message_center_empty_button));
+                context.getString(R.string.message_center_button, state.unreadMessages));
         Button button = root.findViewById(R.id.overlay_stop);
         button.setText(state.stopPending ? "停止中" : "停止操作");
         // 停止随时可用：它不依赖连接、契约版本或服务可用性。
         button.setEnabled(state.backgroundRunning && !state.stopPending);
     }
 
+    private void updateBadge(TextView badge, int unread) {
+        if (badge == null) return;
+        if (unread <= 0) {
+            badge.setVisibility(View.GONE);
+            return;
+        }
+        badge.setText(unread > 99 ? "99+" : String.valueOf(unread));
+        badge.setVisibility(View.VISIBLE);
+    }
+
     /** 把手内侧只有两字宽；用完整短词避免“运行中”被省略成“运…”。 */
     private String compactStatus() {
         if (state.stopPending) return "停中";
         if (!state.fresh()) return "断线";
+        if (state.cleanupRisk()) return "清理";
         if ("recovering".equals(state.availability())) return "核验";
         if ("blocked".equals(state.availability())) return "阻塞";
-        if (state.cleanupRisk()) return "清理";
         ServiceClient.Session session = state.session();
         if (session == null) return "待命";
         if ("starting".equals(session.state)) return "准备";

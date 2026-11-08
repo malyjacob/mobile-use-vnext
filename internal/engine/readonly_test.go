@@ -808,9 +808,8 @@ func TestNotifySavesWithoutSession(t *testing.T) {
 		result.Saved == nil || !*result.Saved {
 		t.Fatalf("notify result: %+v", result)
 	}
-	if result.Notification == nil || result.Notification.State != "unavailable" ||
-		result.Notification.Error == nil ||
-		result.Notification.Error.Code != protocol.CodeNotificationUnavailable {
+	if result.Notification == nil || result.Notification.State != "pending" ||
+		result.Notification.Error != nil {
 		t.Fatalf("notify notification branch: %+v", result.Notification)
 	}
 	if result.Session != nil || result.IncludeSession || result.Cleanup != nil {
@@ -931,7 +930,7 @@ func TestNotifyRejectsEmptyAndOversizedText(t *testing.T) {
 	}
 }
 
-func TestNotifyUnavailableWhenAppDisabledOrStale(t *testing.T) {
+func TestNotifyPendingIsIndependentOfAppState(t *testing.T) {
 	h := newHarness(t)
 	h.engine.mu.Lock()
 	h.engine.app.Notifications = false
@@ -941,8 +940,8 @@ func TestNotifyUnavailableWhenAppDisabledOrStale(t *testing.T) {
 		t.Fatalf("disabled notify rejected: %v", apiErr)
 	}
 	if disabled.Saved == nil || !*disabled.Saved || disabled.Notification == nil ||
-		disabled.Notification.State != "unavailable" {
-		t.Fatalf("disabled app must not change the saved fact: %+v", disabled)
+		disabled.Notification.State != "pending" || disabled.Notification.Error != nil {
+		t.Fatalf("disabled app must not change the saved/queued fact: %+v", disabled)
 	}
 
 	h.engine.mu.Lock()
@@ -954,8 +953,8 @@ func TestNotifyUnavailableWhenAppDisabledOrStale(t *testing.T) {
 		t.Fatalf("stale notify rejected: %v", apiErr)
 	}
 	if stale.Saved == nil || !*stale.Saved || stale.Notification == nil ||
-		stale.Notification.State != "unavailable" {
-		t.Fatalf("stale app must not change the saved fact: %+v", stale)
+		stale.Notification.State != "pending" || stale.Notification.Error != nil {
+		t.Fatalf("stale app must not change the saved/queued fact: %+v", stale)
 	}
 }
 
@@ -989,9 +988,9 @@ func TestNotifyNeverLogsMessageText(t *testing.T) {
 	if result.Error != nil {
 		t.Fatalf("notify returned an unexpected error: %+v", result.Error)
 	}
-	if result.Notification == nil || result.Notification.Error == nil ||
-		strings.Contains(result.Notification.Error.Message, secret) {
-		t.Fatalf("notification error leaked the message text")
+	if result.Notification == nil || result.Notification.State != "pending" ||
+		result.Notification.Error != nil {
+		t.Fatalf("notification branch must only state the queued fact: %+v", result.Notification)
 	}
 	logger.Close()
 	logged := out.String()

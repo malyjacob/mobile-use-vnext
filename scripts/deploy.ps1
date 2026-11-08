@@ -1,11 +1,9 @@
 param(
     [string]$Chroot = '/data/local/chroots/debian13',
-    [string]$DeviceService = 'build/device-service',
-    [string]$Apk = 'android-control/build/control.apk',
     [string]$AppPort = 18880,
     [string]$HostPort = 18881,
     [string]$AgentName = 'local-agent',
-    [string]$ReleaseVersion = '0.3.0',
+    [string]$Manifest = 'build/release/manifest.json',
     [switch]$SkipBuild,
     [switch]$SkipOldServiceStop
 )
@@ -26,10 +24,18 @@ function Write-Utf8NoBom {
 
 function Quote-Argument {
     param([string]$Value)
-    if ($Value -match '[\s"]') {
-        return '"' + ($Value -replace '"', '\"') + '"'
+    if ($Value -match '[\\s"]') {
+        return '"' + ($Value -replace '"', '\\"') + '"'
     }
     return $Value
+}
+
+function Get-Field {
+    param($Object, [string]$Name)
+    if ($null -eq $Object) { return $null }
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $property) { return $null }
+    return $property.Value
 }
 
 function Invoke-Adb {
@@ -87,6 +93,44 @@ function Invoke-DeviceScriptAllowFailure {
     try { return Invoke-DeviceScript -Script $Script } catch { return '' }
 }
 
+function Get-ManifestArtifactPath {
+    param($ManifestObject, [string]$Root, [string]$Name)
+    foreach ($artifact in @(Get-Field $ManifestObject 'artifacts')) {
+        if ([string](Get-Field $artifact 'name') -eq $Name) {
+            $relativePath = [string](Get-Field $artifact 'path')
+            return [System.IO.Path]::GetFullPath((Join-Path $Root $relativePath))
+        }
+    }
+    throw "Manifest has no artifact named '$Name'."
+}
+
+# Read the installed package identity back from the device. A successful
+# `adb install -r` only proves the package manager accepted the APK; the
+# versionName/versionCode must also match the signed release manifest.
+function Get-InstalledAppIdentity {
+    param([string]$Package)
+    $dump = Invoke-Adb -Arguments @('shell', 'dumpsys', 'package', $Package)
+    $packageMatch = [regex]::Match($dump, 'Package \[([^\]]+)\]')
+    $versionCodeMatch = [regex]::Match($dump, '(?m)^\s*versionCode=(\d+)')
+    $versionNameMatch = [regex]::Match($dump, '(?m)^\s*versionName=([^\r\n]+)')
+    if (-not $packageMatch.Success -or -not $versionCodeMatch.Success -or -not $versionNameMatch.Success) {
+        throw "Could not read the installed App identity from dumpsys package $Package."
+    }
+    return [pscustomobject]@{
+        Package     = $packageMatch.Groups[1].Value
+        VersionName = $versionNameMatch.Groups[1].Value.Trim()
+        VersionCode = [int]$versionCodeMatch.Groups[1].Value
+    }
+}
+
+# ---------------------------------------------------------------- release manifest
+if ([System.IO.Path]::IsPathRooted($Manifest)) {
+    $manifestPath = [System.IO.Path]::GetFullPath($Manifest)
+} else {
+    $manifestPath = [System.IO.Path]::GetFullPath((Join-Path $repository $Manifest))
+}
+$manifestDirectory = Split-Path -Parent $manifestPath
+
 # ---------------------------------------------------------------- prerequisites
 $devices = Invoke-Adb -Arguments @('devices')
 if ($devices -notmatch '\tdevice') {
@@ -94,18 +138,52 @@ if ($devices -notmatch '\tdevice') {
 }
 
 if (-not $SkipBuild) {
-    & (Join-Path $PSScriptRoot 'build.ps1') -Version $ReleaseVersion
-    if ($LASTEXITCODE -ne 0) { throw 'Go build failed.' }
-    & (Join-Path $repository 'android-control/build.ps1')
-    if ($LASTEXITCODE -ne 0) { throw 'Android build failed.' }
+    if ([System.IO.Path]::GetFileName($manifestPath) -ne 'manifest.json') {
+        throw "-Manifest must name manifest.json inside the release output when building (got '$manifestPath')."
+    }
+    & (Join-Path $PSScriptRoot 'build-release.ps1') -Output $manifestDirectory
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Release build failed.'
+    }
 }
 
-$serviceBinary = [System.IO.Path]::GetFullPath((Join-Path $repository $DeviceService))
-$apkPath = [System.IO.Path]::GetFullPath((Join-Path $repository $Apk))
-foreach ($required in @($serviceBinary, $apkPath,
-        (Join-Path $repository 'third_party/uiautomator/u2.jar'),
-        (Join-Path $repository 'third_party/android-applist/applist.dex'),
-        (Join-Path $repository 'scripts/service.sh'))) {
+& (Join-Path $PSScriptRoot 'verify-manifest.ps1') -Manifest $manifestPath
+if ($LASTEXITCODE -ne 0) {
+    throw "Release manifest verification failed: $manifestPath"
+}
+
+if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+    throw "Release manifest is missing: $manifestPath"
+}
+$manifestObject = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+$complete = Get-Field $manifestObject 'complete'
+if ($null -ne $complete -and -not [bool]$complete) {
+    throw 'Refusing an incomplete release manifest (complete=false). Build a full release first.'
+}
+$releaseVersion = [string](Get-Field $manifestObject 'release_version')
+$contractVersion = [string](Get-Field $manifestObject 'contract_version')
+if ($releaseVersion -eq '' -or $contractVersion -eq '') {
+    throw 'Release manifest has no release_version/contract_version.'
+}
+$sourceCommit = [string](Get-Field $manifestObject 'source_commit')
+$sourceDirty = [bool](Get-Field $manifestObject 'source_dirty')
+$manifestAndroid = Get-Field $manifestObject 'android'
+$expectedPackage = [string](Get-Field $manifestAndroid 'package')
+$expectedVersionName = [string](Get-Field $manifestAndroid 'version_name')
+$expectedVersionCode = [int](Get-Field $manifestAndroid 'version_code')
+if ($expectedPackage -eq '' -or $expectedVersionName -eq '' -or $expectedVersionCode -lt 1) {
+    throw 'Release manifest has an incomplete android identity.'
+}
+if ($sourceDirty) {
+    Write-Warning "Release source tree was dirty at build time (source_commit=$sourceCommit); artifact hashes still match the manifest."
+}
+
+$serviceBinary = Get-ManifestArtifactPath $manifestObject $manifestDirectory 'device-service'
+$u2Jar = Get-ManifestArtifactPath $manifestObject $manifestDirectory 'u2.jar'
+$applistDex = Get-ManifestArtifactPath $manifestObject $manifestDirectory 'applist.dex'
+$serviceScript = Get-ManifestArtifactPath $manifestObject $manifestDirectory 'service.sh'
+$apkPath = Get-ManifestArtifactPath $manifestObject $manifestDirectory 'control.apk'
+foreach ($required in @($serviceBinary, $u2Jar, $applistDex, $serviceScript, $apkPath)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
         throw "Missing deployment artifact: $required"
     }
@@ -131,13 +209,13 @@ if ($null -eq $deployState) {
         host_port       = $HostPort
         agent_name      = $AgentName
         chroot          = $Chroot
-        release_version = $ReleaseVersion
+        release_version = $releaseVersion
     }
 } else {
     $deployState.app_port = $AppPort
     $deployState.host_port = $HostPort
     $deployState.chroot = $Chroot
-    $deployState.release_version = $ReleaseVersion
+    $deployState.release_version = $releaseVersion
 }
 Write-Utf8NoBom -Path $deployStatePath -Text ($deployState | ConvertTo-Json -Depth 4)
 & icacls $deployStatePath /inheritance:r /grant:r "$($env:USERNAME):(R,W)" | Out-Null
@@ -151,11 +229,12 @@ su -c 'pkill -f "mobile-use-service serve" || true'
 "@
 }
 
-Write-Output 'Stopping the installed control App and removing the old signature...'
+# Private App data is never removed: no uninstall, no pm clear and no deletion
+# under /data/data/com.mobileuse.vnext. Only the process is stopped so the new
+# APK can be installed over the existing one with adb install -r.
+Write-Output 'Stopping the installed control App...'
 $null = Invoke-Adb -Arguments @('shell', 'am', 'force-stop', 'com.mobileuse.vnext') -AllowFailure
-$null = Invoke-Adb -Arguments @('uninstall', 'com.mobileuse.vnext') -AllowFailure
 $null = Invoke-Adb -Arguments @('shell', 'am', 'force-stop', 'com.mobileuse.control') -AllowFailure
-$null = Invoke-Adb -Arguments @('uninstall', 'com.mobileuse.control') -AllowFailure
 
 # The Go service must be restarted for a new binary/config; a running instance
 # keeps the old package/tokens until it is stopped.
@@ -169,22 +248,20 @@ $staging = '/data/local/tmp/mobile-use-vnext-deploy'
 $null = Invoke-DeviceScript -Script "rm -rf $staging && mkdir -p $staging"
 $configPath = Join-Path $stateDirectory 'config.json'
 $config = [ordered]@{
-    server          = [ordered]@{ host = '127.0.0.1'; port = [int]$AppPort }
-    state_dir       = '/var/lib/mobile-use-vnext'
-    adb             = [ordered]@{ path = 'adb'; serial = '127.0.0.1:5555'; u2_port = 9008; timeout_seconds = 8 }
-    tokens          = [ordered]@{ agent = $deployState.agent_token; control = $deployState.control_token }
-    agent_name      = $AgentName
-    control_package = 'com.mobileuse.vnext'
-    u2_jar_path     = '/opt/mobile-use-vnext/u2.jar'
+    server           = [ordered]@{ host = '127.0.0.1'; port = [int]$AppPort }
+    state_dir        = '/var/lib/mobile-use-vnext'
+    adb              = [ordered]@{ path = 'adb'; serial = '127.0.0.1:5555'; u2_port = 9008; timeout_seconds = 8 }
+    tokens           = [ordered]@{ agent = $deployState.agent_token; control = $deployState.control_token }
+    agent_name       = $AgentName
+    control_package  = 'com.mobileuse.vnext'
+    u2_jar_path      = '/opt/mobile-use-vnext/u2.jar'
     applist_dex_path = '/opt/mobile-use-vnext/applist.dex'
-    release_version = $ReleaseVersion
+    release_version  = $releaseVersion
 }
 Write-Utf8NoBom -Path $configPath -Text ($config | ConvertTo-Json -Depth 5)
 & icacls $configPath /inheritance:r /grant:r "$($env:USERNAME):(R,W)" | Out-Null
 
-foreach ($file in @($serviceBinary, (Join-Path $repository 'third_party/uiautomator/u2.jar'),
-        (Join-Path $repository 'third_party/android-applist/applist.dex'),
-        (Join-Path $repository 'scripts/service.sh'), $configPath)) {
+foreach ($file in @($serviceBinary, $u2Jar, $applistDex, $serviceScript, $configPath)) {
     $null = Invoke-Adb -Arguments @('push', $file, "$staging/")
 }
 
@@ -203,10 +280,39 @@ su -c 'chmod 700 $stateOnDevice'
 "@
 
 # ---------------------------------------------------------------- install control App
-Write-Output 'Installing the paired control App...'
-$installOutput = Invoke-Adb -Arguments @('install', '-r', $apkPath)
+Write-Output 'Installing the paired control App with adb install -r (private data preserved)...'
+try {
+    $installOutput = Invoke-Adb -Arguments @('install', '-r', $apkPath)
+} catch {
+    throw ("APK install failed. Stop the release and investigate the device/package state; " +
+        "do not uninstall com.mobileuse.vnext because its private data must be preserved. " +
+        $_.Exception.Message)
+}
 if ($installOutput -notmatch 'Success') {
-    throw "APK install failed: $installOutput"
+    throw ("APK install failed: $installOutput. Stop the release and investigate; " +
+        'do not uninstall com.mobileuse.vnext (private App data must be preserved).')
+}
+
+# The package manager can accept an APK while a stale or wrong-signed package
+# remains installed. Verify the installed identity against the manifest and
+# fail the release without uninstalling anything on mismatch.
+Write-Output 'Verifying the installed App identity against the release manifest...'
+try {
+    $installedApp = Get-InstalledAppIdentity -Package $expectedPackage
+} catch {
+    throw ("Installed App identity check failed. Stop the release and investigate; " +
+        "do not uninstall com.mobileuse.vnext because its private data must be preserved. " +
+        $_.Exception.Message)
+}
+Write-Output ("installed App: package={0} versionName={1} versionCode={2}" -f
+    $installedApp.Package, $installedApp.VersionName, $installedApp.VersionCode)
+if ($installedApp.Package -ne $expectedPackage -or
+        $installedApp.VersionName -ne $expectedVersionName -or
+        $installedApp.VersionCode -ne $expectedVersionCode) {
+    throw ("Installed App identity does not match the release manifest: " +
+        "installed package=$($installedApp.Package) versionName=$($installedApp.VersionName) versionCode=$($installedApp.VersionCode); " +
+        "manifest package=$expectedPackage versionName=$expectedVersionName versionCode=$expectedVersionCode. " +
+        'Stop the release and investigate; do not uninstall com.mobileuse.vnext (private App data must be preserved).')
 }
 $connection = [ordered]@{ base_url = "http://127.0.0.1:$AppPort"; token = $deployState.control_token }
 $connectionPath = Join-Path $stateDirectory 'connection.json'
@@ -256,36 +362,59 @@ $null = Invoke-Adb -Arguments @('forward', '--remove', "tcp:$HostPort") -AllowFa
 $null = Invoke-Adb -Arguments @('forward', "tcp:$HostPort", "tcp:$AppPort")
 $baseUrl = "http://127.0.0.1:$HostPort"
 $headers = @{
-    Authorization = "Bearer $($deployState.agent_token)"
-    'X-Mobile-Use-Contract' = '1'
+    Authorization           = "Bearer $($deployState.agent_token)"
+    'X-Mobile-Use-Contract' = $contractVersion
 }
 $deadline = (Get-Date).AddSeconds(90)
 $ready = $false
 $lastStatus = $null
 $health = $null
+$versionMismatch = ''
 while ((Get-Date) -lt $deadline) {
     try {
         $health = Invoke-RestMethod -Uri "$baseUrl/health" -Method Get -TimeoutSec 3
         $lastStatus = Invoke-RestMethod -Uri "$baseUrl/api/status" -Method Post -Headers $headers `
             -ContentType 'application/json' -Body '{}' -TimeoutSec 5
-        if ($lastStatus.can_start -eq $true) {
-            $ready = $true
-            break
-        }
     } catch {
         Start-Sleep -Milliseconds 500
         continue
     }
+    $healthRelease = [string](Get-Field $health 'release_version')
+    $healthContract = [string](Get-Field $health 'contract_version')
+    if ($healthRelease -ne $releaseVersion -or $healthContract -ne $contractVersion) {
+        $versionMismatch = "health release=$healthRelease contract=$healthContract; manifest release=$releaseVersion contract=$contractVersion"
+        break
+    }
+    if ([bool](Get-Field $lastStatus 'can_start')) {
+        $ready = $true
+        break
+    }
     Start-Sleep -Milliseconds 500
+}
+if ($versionMismatch -ne '') {
+    throw "Deployed service does not match the verified manifest: $versionMismatch"
 }
 if (-not $ready) {
     $diagnostic = ''
-    if ($null -ne $lastStatus) { $diagnostic = $lastStatus | ConvertTo-Json -Depth 8 }
+    if ($null -ne $lastStatus) {
+        $diagnostic = $lastStatus | ConvertTo-Json -Depth 8
+    }
     throw "Service did not become start-ready. Last status: $diagnostic"
 }
 
+$healthRelease = [string](Get-Field $health 'release_version')
+$healthContract = [string](Get-Field $health 'contract_version')
+$healthStatus = [string](Get-Field $health 'status')
+$toolCatalog = Get-Field $manifestObject 'tool_catalog'
+$catalogCount = Get-Field $toolCatalog 'count'
+$catalogFingerprint = [string](Get-Field $toolCatalog 'sha256')
 Write-Output 'Deployment ready.'
-Write-Output "health: contract=$($health.contract_version) service=$($health.service_instance_id) release=$($health.release_version)"
-Write-Output "status: can_start=$($lastStatus.can_start)"
+Write-Output ("version match: PASS (health release=$healthRelease contract=$healthContract)")
+Write-Output 'App pairing: PASS (can_start=true implies a fresh paired control sync)'
+Write-Output ("recovery barrier: PASS (health status=$healthStatus; can_start=true requires availability=ready)")
+Write-Output 'STOP availability: PASS (stop_ready is part of can_start)'
+Write-Output ("manifest: source_commit={0} source_dirty={1} tool_catalog_count={2} tool_catalog_sha256={3}" -f
+    $sourceCommit, $sourceDirty, $catalogCount, $catalogFingerprint)
 Write-Output "host verification URL: $baseUrl"
 Write-Output "tokens/config: $deployStatePath (private, gitignored)"
+Write-Output 'MCP host rediscovery: NOT VERIFIED (restart the real MCP host process separately)'

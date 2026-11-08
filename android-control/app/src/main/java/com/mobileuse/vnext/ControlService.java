@@ -26,6 +26,7 @@ import java.io.File;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -48,6 +49,11 @@ public final class ControlService extends Service {
     private static final String ACTION_SELECT_PRIMARY = "com.mobileuse.vnext.SELECT_PRIMARY";
     private static final String ACTION_SELECT_VIRTUAL = "com.mobileuse.vnext.SELECT_VIRTUAL";
     static final String CHANNEL_ID = "agent-control";
+    /** Agent 消息通知使用独立频道，不复用停止/前台频道。 */
+    static final String CHANNEL_ID_MESSAGES = "agent-messages";
+    private static final String MESSAGE_GROUP = "agent-messages";
+    private static final int MESSAGE_NOTIFICATION_ID = 1;
+    private static final int MAX_NOTIFICATION_CODE_POINTS = 200;
     private static final int NOTIFICATION_ID = 78124;
     private static final String PREFERENCES = "control-lifecycle";
     // 停止意图跨进程重建保留：递增序号 + 原因，重建后仍按原意图重试。
@@ -64,6 +70,10 @@ public final class ControlService extends Service {
     // 本实例已派发过的命令 ID；同 ID 重复投递不再执行，直到收到服务已移除该命令。
     private final Set<String> executedCommands = new HashSet<>();
     private final Map<String, ServiceClient.CommandResult> pendingResults = new LinkedHashMap<>();
+    // 已成功持久化、等待服务释放的消息 id；每拍最多发送 32 条，成功响应后移除。
+    private final LinkedHashSet<String> pendingMessageAcks = new LinkedHashSet<>();
+    // 已写入内存但尚未确认落盘的消息；落盘成功后才确认并通知。
+    private final Map<String, MessageList.Item> pendingPersistMessages = new LinkedHashMap<>();
     // 以下都由主线程拥有，并在发出同步时冻结副本；成功响应只清理本次实际携带的项。
     private final ControlApplication.MainActivityVisibilityListener mainActivityVisibilityListener =
             this::onMainActivityVisibility;
@@ -98,6 +108,10 @@ public final class ControlService extends Service {
     private boolean failureReported;
     private String connectionTitle = "正在连接…";
     private String connectionDetail = "等待本机服务响应";
+    private MessageStore messageStore;
+    // 仅用于控制视图显示，不持久化、不参与主文案、授权或准入判断。
+    private String lastEndedSessionSummary;
+    private String lastObservedWorkSummary;
 
     private final Runnable tick = new Runnable() {
         @Override public void run() {
@@ -117,7 +131,8 @@ public final class ControlService extends Service {
         application = (ControlApplication) getApplication();
         DiagnosticLog.initialize(this, application.instanceId);
         DiagnosticLog.event(DiagnosticLog.Event.STARTED, null, null);
-        client = new ServiceClient(application.instanceId, getString(R.string.app_version));
+        messageStore = application.messages();
+        client = new ServiceClient(application.instanceId, GeneratedVersion.RELEASE_VERSION);
         notifications = getSystemService(NotificationManager.class);
         powerManager = getSystemService(PowerManager.class);
         keyguardManager = getSystemService(KeyguardManager.class);
@@ -127,6 +142,12 @@ public final class ControlService extends Service {
         channel.setShowBadge(false);
         channel.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
         notifications.createNotificationChannel(channel);
+        NotificationChannel messageChannel = new NotificationChannel(CHANNEL_ID_MESSAGES,
+                getString(R.string.message_channel_name), NotificationManager.IMPORTANCE_DEFAULT);
+        messageChannel.setDescription(getString(R.string.message_channel_description));
+        messageChannel.setShowBadge(true);
+        messageChannel.setLockscreenVisibility(Notification.VISIBILITY_PRIVATE);
+        notifications.createNotificationChannel(messageChannel);
         SharedPreferences preferences = getSharedPreferences(PREFERENCES, MODE_PRIVATE);
         stopPending = preferences.getBoolean(STOP_PENDING, false);
         stopSeq = preferences.getLong(STOP_SEQ, 0);
@@ -252,8 +273,8 @@ public final class ControlService extends Service {
         ServiceClient.SyncRequest request = new ServiceClient.SyncRequest(selectedMode, modeGeneration,
                 !stopPending && !displays.cleanupPending(), foreground && visible, visible, foreground,
                 powerInteractive, keyguardLocked, primaryDisplay(), displays.descriptor(),
-                new ArrayList<>(pendingResults.values()), stopPending ? stopSeq : null,
-                pendingStopReason);
+                new ArrayList<>(pendingResults.values()), messageAcksForRequest(),
+                stopPending ? stopSeq : null, pendingStopReason);
         syncWorker.execute(() -> {
             try {
                 ConnectionConfig config = loadConfig();
@@ -270,12 +291,18 @@ public final class ControlService extends Service {
     private void finishSync(long requestEpoch, ServiceClient.SyncRequest request,
             ServiceClient.SyncResponse response) {
         syncInFlight = false;
+        // 成功响应说明服务已处理本拍请求；已发送的确认可移除，传输失败路径不会到这里。
+        for (String id : request.messageAcks) {
+            pendingMessageAcks.remove(id);
+        }
         if (destroyed || requestEpoch != commandEpoch) {
             DiagnosticLog.event(DiagnosticLog.Event.RESPONSE_DISCARDED, response.requestId,
                     destroyed ? "service_destroyed" : "epoch_changed");
             return;
         }
         boolean instanceChanged = acceptSync(response);
+        // 消息与执行权威无关；服务实例变化时仍保留 App 私有消息并继续确认。
+        mergeMessages(response.messages);
         // 响应内新执行的命令还未上报；只能确认发出请求时已带上的那一批结果。
         for (ServiceClient.CommandResult sent : request.results) {
             pendingResults.remove(sent.id, sent);
@@ -295,6 +322,99 @@ public final class ControlService extends Service {
                     instanceChanged ? "instance_changed" : "stop_pending");
         }
         publishState();
+    }
+
+    /** 冻结本拍要发送的确认，最多 32 条；未发送的留在队列中由后续拍次继续。 */
+    private List<String> messageAcksForRequest() {
+        ArrayList<String> acks = new ArrayList<>(Math.min(
+                pendingMessageAcks.size(), ServiceClient.MAX_MESSAGE_ACKS));
+        for (String id : pendingMessageAcks) {
+            if (acks.size() == ServiceClient.MAX_MESSAGE_ACKS) {
+                break;
+            }
+            acks.add(id);
+        }
+        return acks;
+    }
+
+    /**
+     * 把本次响应的消息并入 App 私有存储。只有落盘成功后才确认并通知；
+     * 落盘失败时保留待处理集合，下一次成功同步继续尝试，不产生服务端已读语义。
+     */
+    private void mergeMessages(List<ServiceClient.Message> delivered) {
+        if (messageStore == null) {
+            return;
+        }
+        ArrayList<String> deliveredIds = new ArrayList<>();
+        if (delivered != null && !delivered.isEmpty()) {
+            String receivedAt = MessageStore.receivedAtNow();
+            ArrayList<MessageList.Item> incoming = new ArrayList<>(delivered.size());
+            for (ServiceClient.Message message : delivered) {
+                incoming.add(new MessageList.Item(message.id, message.seq, message.text,
+                        message.createdAt, false, receivedAt));
+                deliveredIds.add(message.id);
+            }
+            for (MessageList.Item item : messageStore.merge(incoming)) {
+                pendingPersistMessages.put(item.id, item);
+            }
+        }
+        flushMessagePersistence();
+        // 服务会重发未确认消息。App 重启后内存确认队列为空，已落盘的重复投递也必须确认，
+        // 否则服务会一直重发；尚未落盘的新消息仍由 pendingPersistMessages 挡住。
+        for (String id : deliveredIds) {
+            if (messageStore.find(id) != null && !pendingPersistMessages.containsKey(id)) {
+                pendingMessageAcks.add(id);
+            }
+        }
+    }
+
+    private void flushMessagePersistence() {
+        if (messageStore == null || pendingPersistMessages.isEmpty()) {
+            return;
+        }
+        if (!messageStore.persist()) {
+            return;
+        }
+        for (MessageList.Item item : new ArrayList<>(pendingPersistMessages.values())) {
+            if (messageStore.find(item.id) == null) {
+                continue;
+            }
+            pendingMessageAcks.add(item.id);
+            notifyMessage(item);
+        }
+        pendingPersistMessages.clear();
+    }
+
+    /** 每条新消息一条独立通知；频道/权限不可用时静默跳过，正文不进入日志。 */
+    private void notifyMessage(MessageList.Item message) {
+        if (!notificationsEnabled(this, CHANNEL_ID_MESSAGES)) {
+            return;
+        }
+        String text = MessageList.oneLineSnippet(message.text, MAX_NOTIFICATION_CODE_POINTS);
+        Intent open = PrimaryDisplayUi.controlIntent(this)
+                .setAction(MainActivity.ACTION_OPEN_MESSAGE)
+                .putExtra(MainActivity.EXTRA_MESSAGE_ID, message.id)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        PendingIntent pending = PendingIntent.getActivity(this,
+                100000 + Math.floorMod(message.id.hashCode(), 100000), open,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE,
+                PrimaryDisplayUi.options());
+        Notification notification = new Notification.Builder(this, CHANNEL_ID_MESSAGES)
+                .setSmallIcon(R.drawable.ic_notification)
+                .setContentTitle(getString(R.string.message_notification_title))
+                .setContentText(text)
+                .setStyle(new Notification.BigTextStyle().bigText(text))
+                .setContentIntent(pending)
+                .setAutoCancel(true)
+                .setGroup(MESSAGE_GROUP)
+                .setCategory(Notification.CATEGORY_MESSAGE)
+                .setVisibility(Notification.VISIBILITY_PRIVATE)
+                .build();
+        try {
+            notifications.notify(message.id, MESSAGE_NOTIFICATION_ID, notification);
+        } catch (SecurityException unavailableAfterCheck) {
+            // 检查后权限被撤销：跳过本条通知，消息仍保存在 App 私有存储中。
+        }
     }
 
     private void sendStop() {
@@ -409,12 +529,21 @@ public final class ControlService extends Service {
             displayError = "本机服务实例已更换，旧虚拟屏幕与命令已清除；等待新的恢复结果。";
             lastRevision = -1;
             latestControl = null;
+            // App 私有消息与已读状态不随服务实例切换清除；确认队列仍可继续发送。
         }
         serviceInstanceId = response.serviceInstanceId;
         // 同实例 revision 单调；旧/重复视图不得覆盖新的当前事实。实例切换后以新视图重新起算。
         if (changed || latestControl == null || response.control.revision > lastRevision) {
             latestControl = response.control;
             lastRevision = response.control.revision;
+            // 历史摘要只用于展示，永远不参与主文案、授权或准入。
+            if (response.control.session != null
+                    && "ended".equals(response.control.session.state)) {
+                lastEndedSessionSummary = ControlState.historySession(response.control.session);
+            }
+            if (response.control.work != null) {
+                lastObservedWorkSummary = ControlState.historyWork(response.control.work);
+            }
             DiagnosticLog.event(DiagnosticLog.Event.CONTROL_UPDATED, response.serviceInstanceId,
                     response.control.availability.state, -1, -1, null);
         }
@@ -593,18 +722,19 @@ public final class ControlService extends Service {
         boolean visible = notificationsEnabled();
         overlay.refreshPermission();
         VirtualDisplayHost.Descriptor display = displays.descriptor();
+        // 持有当前会话的虚拟屏不是清理风险；只有尚未确认释放的旧尝试才算本地风险。
+        boolean cleanupPending = displays.cleanupPending();
+        int unreadMessages = messageStore == null ? 0 : messageStore.unreadCount();
         ControlState snapshot = new ControlState(foreground, visible, overlay.ready(), overlay.visible(),
                 overlay.issue(), foreground && visible, stopPending, stopSeq, stopError,
-                selectedMode, primaryDisplay(), display, displayError, displays.cleanupPending()
-                        || display != null, fresh, fresh ? age : -1,
-                connectionTitle, connectionDetail, serviceInstanceId,
-                fresh ? latestControl : null);
+                selectedMode, primaryDisplay(), display, displayError, cleanupPending,
+                fresh, fresh ? age : -1, connectionTitle, connectionDetail, serviceInstanceId,
+                fresh ? latestControl : null, unreadMessages,
+                lastEndedSessionSummary, lastObservedWorkSummary);
         application.publish(snapshot);
         overlay.render(snapshot);
-        // ready 要等首次窗口 attach；只有实际 issue 才表示权限/系统拒绝，避免首拍误报。
-        String overlayNotice = snapshot.overlayIssue != null ? " · 悬浮窗不可用，请打开 App 授权/设置"
-                : application.mainActivityVisible() ? " · 完整控制界面打开，悬浮入口暂时隐藏" : "";
-        notifications.notify(NOTIFICATION_ID, notification(snapshot.summary() + overlayNotice));
+        // 前台通知与 Activity、悬浮窗共用同一快照主文案。
+        notifications.notify(NOTIFICATION_ID, notification(snapshot.summary()));
     }
 
     /** Activity 生命周期变化时立即切换窗口，并由同一次发布同步界面与通知文案。 */
@@ -663,7 +793,8 @@ public final class ControlService extends Service {
         application.publish(new ControlState(false, notificationsEnabled(), false, false, null, false,
                 stopPending, stopSeq, stopError, selectedMode, null, null, null, true,
                 false, -1, "后台已结束",
-                "重新启动后台后恢复同步，并默认使用虚拟屏。", null, null));
+                "重新启动后台后恢复同步，并默认使用虚拟屏。", null, null,
+                messageStore == null ? 0 : messageStore.unreadCount(), null, null));
         super.onDestroy();
     }
 

@@ -36,6 +36,8 @@ final class DiagnosticLog {
         // 控制视图只记状态枚举与版本，不记节点、正文、命令或原始响应。
         CONTROL_UPDATED("control.view.updated"), CONTRACT_MISMATCH("control.contract_mismatch"),
         STOP_SEQ_ADVANCED("control.stop.seq_advanced"),
+        MESSAGE_STORE_LOAD_FAILED("message.store_load_failed"),
+        MESSAGE_STORE_SAVE_FAILED("message.store_save_failed"),
         REQUEST_FAILED("request.failed"), REQUEST_RECOVERED("request.recovered");
         final String wire;
         Event(String wire) { this.wire = wire; }

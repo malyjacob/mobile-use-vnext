@@ -15,7 +15,7 @@
 | 方法 | 所有业务端点只接受 `POST`；其他方法返回 `405`，错误码 `invalid_request` |
 | 认证 | `/api/*` 用 `agent_token`；`/v1/control/*` 用 `control_token`；`Authorization: Bearer <token>` |
 | 身份隔离 | agent token 不能访问 `/v1/control/*`，control token 不能访问 `/api/*`；错误为 `401 unauthorized` |
-| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 1`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
+| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 2`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
 | 预分配 P | `/api/*` 可带 `X-Mobile-Use-Operation: P…`；缺省由服务分配。`status` 不使用该头 |
 | 请求体 | 必须是一个 JSON 对象；大小上限：`start`/`status`/`end` 16 KiB，`observe` 32 KiB，`act` 64 KiB，`inspect`/`keepalive`/`diagnose`/`apps`/`open_app` 8 KiB，`notify` 16 KiB，`shell` 32 KiB，`sync` 32 KiB，`stop` 8 KiB |
 | 响应 | `Content-Type: application/json; charset=utf-8`，`Cache-Control: no-store` |
@@ -314,7 +314,7 @@ HTTP 状态映射（`protocol.Status`）：
 
 | 字段 | 必填 | 类型 | 说明 |
 | --- | --- | --- | --- |
-| `contract_version` | 是 | 字符串 | 必须为 `"1"`，否则 `409 contract_mismatch` |
+| `contract_version` | 是 | 字符串 | 必须为 `"2"`，否则 `409 contract_mismatch` |
 | `app_instance_id` | 是 | UUID | App 进程实例；变化会撤销旧归属 |
 | `app_version` | 是 | 字符串 | 仅发行标识 |
 | `selected_mode` | 是 | `virtual`/`primary` | 用户选择 |
@@ -327,20 +327,21 @@ HTTP 状态映射（`protocol.Status`）：
 | `keyguard_locked` | 否 | 布尔或 `null` | 未知为 `null`/省略 |
 | `primary_display` | 否 | 对象或 `null` | 出现时 `display_id` 必须为 0，宽/高/密度 >0，旋转 0–3，`generation` 非空 |
 | `display` | 否 | 对象或 `null` | 自有虚拟屏；出现时 `display_id` >0，其余同上 |
-| `command_results` | 是 | 数组 | 可为 `[]`；元素 `{command_id(1–64), ok(bool), error_code(string 或 null, ≤64)}` |
+| `command_results` | 否 | 数组 | 省略/null 按 `[]`；元素 `{command_id(1–64), ok(bool), error_code(string 或 null, ≤64)}` |
 | `stop_pending` | 否 | 对象或 `null` | `{seq(>0), reason(≤64)}`，表示未被服务受理的本地停止 |
+| `message_acks` | 否 | 数组 | 省略/null 按 `[]`；App 已保存的消息 ID，至多 32 个；ID 为 `M` + 正整数；未知/已释放 ID 忽略 |
 
 校验规则：显式校验 `contract_version`、`app_instance_id`、`selected_mode`、
-`mode_generation`、非 null 的 `primary_display`/`display`/`stop_pending` 与每条
-`command_results`；其余字段缺失时按 `false`/空值处理，可用性通常因此为 `blocked`，不返回
-`422`。`command_results` 省略或为 `null` 时按空数组处理。未知成员、重复键与类型混用由
-严格解码拒绝。
+`mode_generation`、非 null 的 `primary_display`/`display`/`stop_pending`、每条
+`command_results` 与 `message_acks`；其余字段缺失时按 `false`/空值处理，可用性通常因此为
+`blocked`，不返回 `422`。`command_results`/`message_acks` 省略或为 `null` 时按空数组处理。
+未知成员、重复键与类型混用由严格解码拒绝。
 
 响应：
 
 ```json
 {
-  "contract_version": "1",
+  "contract_version": "2",
   "service_instance_id": "…",
   "control": {
     "revision": 42,
@@ -352,6 +353,7 @@ HTTP 状态映射（`protocol.Status`）：
       "recents":"not_applicable","display":"confirmed"}
   },
   "commands": [{"id":"…","kind":"create_display","width":1080,"height":2400,"density_dpi":420}],
+  "messages": [{"id":"M12","seq":12,"text":"…","created_at":"…"}],
   "stop": {"seq":7,"state":"accepted"}
 }
 ```
@@ -362,6 +364,8 @@ HTTP 状态映射（`protocol.Status`）：
 - `cleanup`：`null` 或 `{state, execution?, tasks?, recents?, display?}`；
 - `commands`：数组，每拍至多一条显示命令；`create_display` 仅在有 `starting` 会话且显示助手
   已就绪时下发，`close_display` 在收尾/恢复需要精确释放时下发；
+- `messages`：数组，未确认的 Agent 消息，按创建顺序，每拍至多 8 条 / 32 KiB 正文；未在
+  `message_acks` 中确认的消息会在后续同步重发；App 按 `id` 去重；
 - `stop`：仅当本请求携带 `stop_pending` 且服务已绑定该边界时出现；`state` 为
   `accepted`/`duplicate`；
 - `control.revision` 只在可用性、会话、工作、收尾等实际控制事实变化时递增；同一
@@ -370,7 +374,7 @@ HTTP 状态映射（`protocol.Status`）：
 ## 9. `POST /v1/control/stop`
 
 ```json
-{"contract_version":"1","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
+{"contract_version":"2","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
 ```
 
 - **不校验普通契约**：`contract_version` 字段存在但不参与准入，服务与 App 契约版本
@@ -380,7 +384,7 @@ HTTP 状态映射（`protocol.Status`）：
 - 重复或过期 `seq` 不报错，只返回 `state=duplicate`。
 
 ```json
-{"contract_version":"1","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
+{"contract_version":"2","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
 ```
 
 `accepted` 恒为 `true`；`state` 为 `revoked`（绑定时撤销了活动会话）、`recorded`
@@ -393,7 +397,7 @@ HTTP 状态映射（`protocol.Status`）：
 无认证，只表示进程可应答，不代表设备就绪或资源干净：
 
 ```json
-{"status":"ok","contract_version":"1","service_instance_id":"…","release_version":"…"}
+{"status":"ok","contract_version":"2","service_instance_id":"…","release_version":"…"}
 ```
 
 ## 11. 数据对象
@@ -577,8 +581,9 @@ O/P 必须属于本 Agent 并定位一个仍 `active` 的原会话；只续租�
 
 无需会话；`text` 非空且不超过 4096 个 Unicode 码点。成功返回 `outcome=executed`、
 `message_id`、`saved=true` 与 `notification.state`。
-`executed` 只表示消息已保存，不表示已读或已完成通知交付。`notification.state` 为 `unavailable`，并带受控 `notification_unavailable` 错误；
-本契约不返回 `pending`/`submitted`。正文不进日志、错误或账本。
+`executed` 只表示消息已保存并进入控制同步队列，不表示已显示或已读。
+`notification.state` 固定为 `pending`，不带 `error`；消息正文通过控制同步的 `messages`
+投递给 App，App 本地标记已读且不回报。正文不进日志、错误或账本。
 
 ### `POST /api/shell`
 

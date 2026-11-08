@@ -45,7 +45,7 @@
             android:accessibilityHeading="true" />
         <Button android:id="@+id/open_messages"
             android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:minHeight="48dp" android:text="@string/message_center_empty_button" />
+            android:minHeight="48dp" android:text="@string/message_center_button_initial" />
         <TextView android:id="@+id/message_status" style="@style/DetailText"
             android:accessibilityLiveRegion="polite" />
 
