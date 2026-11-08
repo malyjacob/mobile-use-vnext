@@ -173,6 +173,35 @@ service health=ok contract_version=2; service can_start=true
 `observe`/`act` 的图片为 `image/jpeg`、540×1200、10793 字节，文本正文不含 base64。
 这验证的是本机 probe 作为 MCP 宿主重新发现工具；未接入外部宿主缓存，见第 10 节。
 
+### 8.1 手机 MCP 适配器默认部署（2026-11-09 补充）
+
+默认部署改为安装并启动手机侧 `device-mcp`（手机 `127.0.0.1:18882/mcp`，主机转发
+`18883`）。实际执行：
+
+```text
+scripts/deploy.ps1 -SkipBuild
+...
+phone MCP adapter: PASS listen=127.0.0.1:18882 url=http://127.0.0.1:18883/mcp
+
+scripts/verify-m6.ps1
+CHECK phone MCP adapter: PASS url=http://127.0.0.1:18883/mcp discover=supportedVersions
+RESULT PASS
+```
+
+补充手工检查：
+
+- `server/discover` 返回 `supportedVersions=["2026-07-28"]`；
+- `tools/list` 返回 12 个工具，名称与接口契约一致；
+- 无 token 的 `GET /mcp` 返回 `401`，带 token 的 `GET` 返回 `405`（客户端应 POST）；
+- chroot `/opt/mobile-use-vnext/mcp-config.json`、`/var/lib/mobile-use-vnext/device-mcp.log`
+  与 `device-mcp.pid` 均为 `0600`；
+- `/var/lib/mobile-use-vnext/device-mcp.pid` 为实际 `device-mcp` 进程 PID。
+
+边界：`service.sh` 仍只管理 `device-service`；重启手机后需要按
+[手机侧运维](../../docs/phone-operations.md)单独启动手机 MCP 适配器。
+代码提交：`e4a135e`（部署脚本与文档）；部署产物仍来自 manifest 的
+`source_commit=98645a7`。
+
 ## 9. 数据保留
 
 - 最终发布前后两次 `deploy.ps1` 均使用覆盖安装；App `files/messages.json`、未读状态、
