@@ -67,7 +67,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-p4.ps1 -Secti
   `display=confirmed`、`can_start=true`，SurfaceFlinger 无 `MobileUseAgent`；
   用户 STOP（显式组件 `-n com.mobileuse.vnext/.ControlService -a …STOP`）后同样
   `cleanup=complete` 且 `can_start` 恢复。
-- Shell（`-Section Shell`）：`shell: PASS`。正常命令 `exited/0` 且有 full 后观察；非零退出
+- Shell（`-Section Shell`）：`shell: PASS`。正常命令 `exited/0` 且有 full 后观察；`root=true`
+  的 `id -u` 返回 `exited/0`、输出 `0`（设备 root 身份），后观察 complete；非零退出
   `exited/7`；命令自行 `exit 124` 保持 `exited/124`（不是 timeout）；大输出返回恰好 65536
   字节、`truncated=true`；`sleep 40` 在约 30s 后 `termination=timeout`、`exit_code=null`、
   仍有后观察；STOP 在命令运行中返回 `executed/cancelled`（HTTP 200），STOP 调用本身
