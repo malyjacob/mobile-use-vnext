@@ -8,7 +8,7 @@
 
 | 项 | 值 |
 | --- | --- |
-| 代码提交 | 实现提交 `8e62b7c3b4c17f53dbc67bd20d79bed185bd1ce6`（基线 `631a18d`） |
+| 代码提交 | 实现提交 `8e62b7c3b4c17f53dbc67bd20d79bed185bd1ce6`（基线 `631a18d`）；后续修正 `68a0fb00e0b96be92c5d277f23fb791a3041bf3d`（只读服务错误的 `isError` 投影，不改变本页已实测路径） |
 | 服务构建 | `0.3.0`；`device-service` SHA-256 `97a2565b32349baba51b71f5c8c13591d55b25ce627e54860e7388983f9e57d9` |
 | MCP 适配构建 | `device-mcp` SHA-256 `5ede24179cc48ed5efc0f44070d076fba0ac0d6291f9da0423dfcc7545833e0f`（linux/arm64 构建产物） |
 | MCP SDK | `github.com/modelcontextprotocol/go-sdk v1.8.0` |
@@ -47,6 +47,7 @@ git diff --check
   `scripts/mcp-probe`；`internal/httpapi`/`store`/`eventlog`/`device` 无包内测试）。
 - `go vet ./...`：无输出。
 - `go test ./internal/engine/ -count=5`：`ok … 361.776s`（5 次全绿）。
+- 后续修正 `68a0fb0` 后重跑 `go test ./...` 与 `go vet ./...`：全部包 `ok`，`vet` 无输出。
 - linux/arm64、`CGO_ENABLED=0` 全量构建：通过；`-mod=readonly` 构建：通过。
 - `git diff --check`：无输出。
 - `go test -race` 未执行：本机无 C 编译器（cgo 不可用），不把普通构建写成 race 结论。
