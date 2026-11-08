@@ -8,7 +8,7 @@ pending”，不把设计推演或代码分支当作实机结论。原始日志�
 
 | 项 | 值 |
 | --- | --- |
-| 代码提交 | 未提交（工作区） |
+| 代码提交 | `4e507cc`（本记录对应的实现提交） |
 | 服务构建 | `0.1.0-p3`（`scripts/build.ps1 -Version 0.1.0-p3`，`-X internal/protocol.ReleaseVersion`；最终二进制 SHA-256 `af114af40660a3748c37e6b3d1cd018fba303f7b246a7b499db1d708291cd94f`） |
 | 契约 | `contract_version = 1` |
 | 设备 | `24117RK2CC` |

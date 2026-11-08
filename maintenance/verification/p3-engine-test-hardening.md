@@ -9,7 +9,7 @@
 | 项 | 值 |
 | --- | --- |
 | 工作区 | `E:\Code\Python\mobile-use-vnext` |
-| 代码提交 | 未提交（工作区；本轮不提交 git） |
+| 代码提交 | `4e507cc`（测试时点为工作区；实现随后由主代理集成提交） |
 | Go | `go1.27.1 windows/amd64` |
 | 构建标签 | `GOEXPERIMENT=jsonv2` |
 | CGO | `CGO_ENABLED=0`；PATH 中无 gcc |
