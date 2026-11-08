@@ -3,7 +3,8 @@
 面向已有一台 root 手机、已存在 Debian 13 chroot 的受控环境。所有路径与端口来自
 `scripts/deploy.ps1`、`scripts/service.sh` 与服务私有配置的默认值；换机型或 chroot 前先核对。
 本页覆盖环境、部署、启动停止、健康检查与故障处置。架构与契约分别见
-[架构](architecture.md)、[接口契约](interface.md)。
+[架构](architecture.md)、[接口契约](interface.md)；Agent 宿主接入见
+[Agent 接入指南](integration.md)；日常运维与容量/凭据见[手机侧运维](phone-operations.md)。
 
 ## 1. 环境
 

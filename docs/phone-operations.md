@@ -1,0 +1,191 @@
+# 手机侧运维
+
+本页覆盖手机内设备服务、固定运行制品与配对控制 App 的日常运行、文件、容量、重启、凭据与
+故障处置。整组发布与回退见[发布与回退](release.md)；部署命令与常见错误见[运行手册](runbook.md)；
+Agent 宿主接入见[Agent 接入指南](integration.md)。
+
+## 1. 组件与职责
+
+| 组件 | 运行位置/身份 | 职责 |
+| --- | --- | --- |
+| `device-service` | chroot `/opt/mobile-use-vnext/device-service`，root | 唯一业务权威：会话、O/P、工作位置、STOP、收尾、恢复、消息队列 |
+| `u2.jar` + `app_process` | Android 侧，服务按固定哈希推送并启动 | 层级采集与显示绑定文本 RPC |
+| `RootDisplayMain` 助手 | Android 侧，root，`nohup setsid` 脱离服务 | 虚拟屏创建/释放的 Binder 入口 |
+| 控制 App `com.mobileuse.vnext` | Android 前台服务 + Activity | 控制同步、模式选择、本地停止、虚拟屏、通知/悬浮与消息中心 |
+| Android 侧 adb 服务 | `127.0.0.1:5555` | 服务执行 ADB 命令的传输依赖 |
+| 手机内 MCP 适配器（可选） | chroot 或手机内进程 | 由运维显式安装；默认部署不安装 |
+
+- 服务进程在固定运行目录取得内核锁；第二个实例拿不到锁时退出码 `3`，不会接触账本、
+  App 或设备。
+- u2 server 与 root 显示助手只由服务管理。不要手工再启动第二个 u2/helper，也不要按包名
+  或宽泛 `pkill` 清理。
+- 控制 App 与设备服务是配对关系；App 不是第二份执行权威，只拥有自己的显示资源与停止通道。
+
+## 2. 文件、权限与容量
+
+| 路径 | 内容 | 权限/上限 |
+| --- | --- | --- |
+| `/opt/mobile-use-vnext/device-service` | 设备服务二进制 | `0755` |
+| `/opt/mobile-use-vnext/config.json` | 监听、状态目录、ADB、令牌、制品路径 | `0600` |
+| `/opt/mobile-use-vnext/u2.jar`、`applist.dex` | 固定制品 | `0600`，按哈希校验 |
+| `/opt/mobile-use-vnext/service.sh` | 启停脚本 | `0755` |
+| `/var/lib/mobile-use-vnext/recovery-ledger.json` | 恢复账本：归属与资源证据 | `0600`，≤64 KiB |
+| `/var/lib/mobile-use-vnext/messages.json` | 未确认 Agent 消息 | `0600`，≤2 MiB（256 条 / 1 MiB 正文） |
+| `/var/lib/mobile-use-vnext/device-service.log` | 服务事件日志（启动时轮转） | `0600`，无固定上限 |
+| `/var/lib/mobile-use-vnext/device-service.pid` | 进程记录 | `0600` |
+| `/data/data/com.mobileuse.vnext/files/connection.json` | App 的 `base_url` + control token | App UID 私有，`0600` |
+| `/data/data/com.mobileuse.vnext/files/messages.json` | App 消息、本地已读 | App UID 私有，`0600` |
+| `/data/data/com.mobileuse.vnext/files/diagnostics.log` | App 受控诊断 | App UID 私有，有界 |
+
+- 不要手工编辑账本、消息文件、`config.json` 或 App 私有文件；不要删除状态目录来“重置”。
+- 账本只保存归属与资源证据，不保存树、输入正文、命令或消息；消息正文只存在于消息文件与
+  App 私存。
+- 消息文件有界；账本损坏时服务进入 `blocked`，不以清空账本恢复准入。
+
+## 3. 启动、停止与检查
+
+```bash
+# 以下命令在主机执行，由 adb + su 送入 chroot
+adb shell su -c 'chroot /data/local/chroots/debian13 /bin/sh -c "export PATH=/usr/local/bin:/usr/bin:/bin; /opt/mobile-use-vnext/service.sh status"'
+adb shell su -c 'chroot /data/local/chroots/debian13 /bin/sh -c "export PATH=/usr/local/bin:/usr/bin:/bin; /opt/mobile-use-vnext/service.sh start"'
+adb shell su -c 'chroot /data/local/chroots/debian13 /bin/sh -c "export PATH=/usr/local/bin:/usr/bin:/bin; /opt/mobile-use-vnext/service.sh stop"'
+```
+
+- `start`：已有匹配进程则直接返回；否则轮转日志、后台启动，最多约 15 秒等 `/health`；
+  失败退出 1。
+- `stop`：先 `SIGTERM`，最多等 10 秒，再 `SIGKILL`；被强杀时退出 1。服务自身退出流程
+  最多等待已接纳的后台工作约 25 秒，因此脚本可能在服务仍在收尾时强杀；强杀不是清理完成。
+- 服务依赖 Android 侧 adb 服务与固定 u2 制品；`/health` 只证明进程能应答，不证明
+  `can_start=true` 或资源已释放。
+- App 未运行时服务仍可响应 `/health`/`/api/status`，但普通准入会被 `control_unavailable`
+  或 `control_sync_pending` 拦住。
+
+主机侧转发：
+
+```powershell
+adb forward --remove tcp:18881
+adb forward tcp:18881 tcp:18880
+curl.exe -s http://127.0.0.1:18881/health
+```
+
+## 4. 重启、开机与恢复
+
+- 本仓库不安装开机自启。手机重启后按顺序确认：chroot 可进入、Android 侧 adb 服务可用、
+  固定制品存在；然后 `service.sh start`、启动控制 App、重新建立主机转发。
+- 开机后首次 `/api/status` 往往为 `can_start=false`；App 同步新鲜、旧资源核验完成与恢复
+  屏障通过后才转为 true。这期间不要删除账本、不要强停 App 或重启服务来“清状态”。
+- 控制 App 重建默认虚拟屏，不恢复主屏共享；主屏需要用户在 Activity 中重新确认。
+- 服务实例变化后 App 会先使旧命令失效并释放自有显示；旧账本/资源证据仍由服务恢复流程
+  核验，不能改挂到新实例继续执行。
+- 设备重启或服务强杀后，旧虚拟屏、任务与受管 shell 链可能仍存在；以
+  `status.cleanup`/`blocking_code` 的原因为准，不用“重启即干净”判断。
+
+## 5. 电池、后台与权限
+
+- 控制 App 使用 `specialUse` 前台服务与部分唤醒锁，保证控制同步与停止通道在锁屏/离开
+  页面后仍运行；唤醒锁不亮屏、不持有主屏窗口。
+- 通知权限与 `agent-control` 频道是 `stop_ready` 的必要条件；系统通知关闭或频道被禁用时
+  普通准入会被 `stop_unavailable` 拦住，直到恢复。
+- 消息通知频道 `agent-messages` 独立；关闭它只影响新消息提示，不改变控制同步、消息列表或
+  停止通道。消息仍保存在 App 私存。
+- 悬浮窗权限影响悬浮入口，不影响常驻通知与 App 内停止按钮；部署会用 appops 授予，但用户
+  仍可在系统设置中撤销。
+- MIUI/Android 的后台限制、省电策略与“屏幕用时限制”可能挂起新装 App 或拦 Activity；
+  部署脚本会 `pm unsuspend` 并重试，但系统策略仍需用户/运维确认。
+- Doze、锁屏与熄屏没有被绕过；App 上报 `power_interactive`/`keyguard_locked`，服务按
+  `device_not_interactive`/`device_locked` 拒绝普通工作。
+
+## 6. 凭据与轮换
+
+| 凭据 | 位置 | 轮换方式 |
+| --- | --- | --- |
+| Agent token | 服务 `config.json`；部署机 `.state/deploy.json` | 修改部署机私有记录后重新部署；服务与 Agent/MCP 配置同步更新 |
+| Control token | 服务 `config.json`；App `connection.json` | 重新部署会重写 App 连接配置 |
+| MCP HTTP token | `.state/mcp-config.json` | 重新生成/编辑私有配置并重启 MCP 适配器 |
+
+- 令牌只出现在对应私有文件中；不要打印到终端历史、工单或日志。
+- 轮换后旧令牌立即失效；所有使用方必须同步更新，否则会得到 `401`。
+- 不要通过卸载 App、清空数据或删除 `.state/deploy.json` 解决认证/配对问题；后者会丢失
+  旧令牌与部署记录。
+
+## 7. 容量与清理
+
+- 账本、消息文件、App 消息与诊断均有界；增长主要来自服务日志与受管 shell 运行目录。
+- 服务日志只在 `service.sh start` 时轮转（`.log.1`、`.log.1.old`）；长期不重启时需外部
+  轮转或监控磁盘，不要删除正在写入的日志。
+- 受管 shell 的单次运行目录位于 `/data/local/tmp/mobile-use-shell/<run-id>/`；确认结束后
+  由服务收尾移除。`status` 仍显示 shell 未结束/未确认时不要手工删目录或杀进程。
+- 磁盘/权限导致账本写失败时，可用性转 `blocked`（`ledger_unavailable`）；消息文件写失败
+  只记录受控事件并继续运行期交付，不改变 STOP、清理或准入。先修文件系统/权限，不要删文件
+  绕过。
+- 不要清空 `messages.json` 来“解决”消息队列；队列有界，确认/淘汰会自动释放。
+
+## 8. 备份、迁移与回退
+
+- 需要一致备份时先停止服务，再以只读方式复制 `/var/lib/mobile-use-vnext/`。运行中复制
+  账本因原子替换通常可读，但可能对应某一时刻的中间状态。
+- 不要在服务运行时恢复旧账本；旧归属可能仍占用资源，服务会按记录保持不可准入，这是预期
+  行为，不是可删除的“脏状态”。
+- App 数据（消息、已读、连接、停止意图）属于 App 私有目录；默认 `allowBackup=false`，
+  仓库不提供自动备份/迁移工具。换机或重装前由运维决定是否 root 复制；不要用卸载/清库
+  解决签名或配对。
+- 升级/回退按[发布与回退](release.md)执行：整组产物、清单核验、覆盖安装、恢复屏障与
+  MCP 宿主重启；回退是另一轮受控部署，不自动回放旧操作。
+
+## 9. 故障处置
+
+| 现象 | 原因/检查 | 处置 |
+| --- | --- | --- |
+| `can_start=false`，`control_unavailable`/`control_sync_pending` | App 未运行、失鲜或未同步 | 启动 `com.mobileuse.vnext/.ControlService`，确认通知权限；等待同步 |
+| `stop_unavailable` | 通知权限/频道关闭、前台服务未运行 | 恢复通知权限与频道；App 内仍可请求停止 |
+| `mode_not_selected` | 虚拟屏未就绪或主屏未确认 | 在 App 选择虚拟屏或重新确认主屏共享 |
+| `device_not_interactive`/`device_locked` | 熄屏或锁屏 | 解锁点亮；服务不绕过锁屏 |
+| `cleanup_pending`/`cleanup_unconfirmed` | 旧显示/任务/执行链未确认 | 保持服务与 App 在线，看 `status.cleanup` 五项；不要删账本/强停 |
+| `recovery_pending`/`old_resource_unconfirmed` | 重启后旧归属未核验完 | 等 App 同步、精确 `close_display` 与 TaskList；旧显示不存在也不能只凭一次 absent 放行 |
+| `shell_pending`/`shell_chain_unconfirmed` | 受管命令未结束或终止未确认 | 等 `status.shell` 确认；不杀 runner、不删运行目录 |
+| `ledger_corrupt`/`ledger_unavailable` | 账本损坏或不可写 | 检查目录权限/磁盘；损坏账本需人工处置并重新部署，不能带病启动 |
+| `device_unavailable` | Android 侧 adb/u2 不可用 | 检查 `adb -s 127.0.0.1:5555 get-state`、u2 端口与固定制品哈希；重启服务触发 `EnsureU2` |
+| `display_probe_failed`/`old_resource_unconfirmed` | 显示探测或旧屏核验失败 | 确认 SurfaceFlinger/`dumpsys display` 与 App `display` 描述；不要手工关闭用户主屏 |
+| 控制 App 崩溃或反复重启 | 权限、系统挂起或旧版本缺陷 | 更新到配套 App；`pm unsuspend`；查看 App 诊断日志的受控事件 |
+| 主机 `/health` 不通 | adb 转发失效或服务未启动 | 重建 `adb forward`；`service.sh status`；核对端口 |
+| 消息中心无新消息 | 服务队列、App 同步或消息频道 | 看 `notify` 是否 `pending`、App 是否运行；消息频道关闭不影响私存 |
+| 通知栏没有停止按钮 | 通知权限/频道关闭或 FGS 未运行 | 恢复通知权限；App 内按钮与悬浮入口仍可用 |
+
+日志：
+
+```bash
+adb shell su -c 'tail -n 100 /data/local/chroots/debian13/var/lib/mobile-use-vnext/device-service.log'
+adb shell su -c 'tail -n 100 /data/data/com.mobileuse.vnext/files/diagnostics.log'
+```
+
+日志只含受控事件、ID、枚举、布尔与计数；不要在其中寻找树、输入正文、命令或消息正文。
+
+## 10. 紧急停止
+
+1. **首选 App 内停止按钮**：本地立即撤权并释放自有显示，再独立同步服务。
+2. **常驻通知或悬浮入口**：同一停止回调；悬浮入口不可用时通知仍应可用。
+3. **独立最小停止**（App 不可用时由运维使用 control token）：
+
+   ```powershell
+   $control = (Get-Content .state/deploy.json -Raw | ConvertFrom-Json).control_token
+   Invoke-RestMethod http://127.0.0.1:18881/v1/control/stop -Method Post `
+     -Headers @{ Authorization = "Bearer $control" } -ContentType 'application/json' `
+     -Body '{"contract_version":"2","app_instance_id":"<uuid>","stop_seq":1,"reason":"operator_stop"}'
+   ```
+
+   `accepted=true` 只表示停止边界已绑定；仍需用 App/`status.cleanup` 核验执行链、任务与
+   显示是否释放。合成停止请求会撤销当前活动会话，但不代替 App 本地停止意图；同一
+   `app_instance_id` 下重复使用同一 `stop_seq` 只会得到 `duplicate`，每次独立操作应使用
+   新 UUID，或在该 UUID 上递增序号。服务会在 App 下一次成功同步后重新评估准入。
+
+4. `service.sh stop` 只停止进程；服务退出会撤权并启动收尾，但收尾结果仍来自证据。不要用
+   `kill -9`、删除账本或重启 App 当作清理完成。
+
+## 11. 安全检查
+
+- 服务、u2 与 MCP 只使用回环地址；不把端口暴露到局域网/公网，不做反向代理。
+- root 私有文件保持 `0600`/`0700`；不复制令牌到 `/sdcard`、共享目录或其他应用可读位置。
+- 控制 App 只从私有 `connection.json` 读取 control token；Activity/通知/悬浮都只消费
+  同一份服务快照。
+- 不手工启动第二份服务、u2 或显示助手；不以清除数据、卸载 App 或删账本解决配对/恢复。
+- 日志、诊断与工单中不出现令牌、树、输入正文、命令、消息正文、截图或原始响应。

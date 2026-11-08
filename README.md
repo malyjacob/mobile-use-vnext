@@ -171,7 +171,9 @@ Agent 工具（`POST /api/<tool>`，`Authorization: Bearer <agent_token>`，
 
 - [架构](docs/architecture.md)：进程分层、唯一权威、O/P 生命周期、full/delta、图片附加材料、STOP 与收尾、恢复屏障、账本、消息与发布边界。
 - [接口契约](docs/interface.md)：逐端点 JSON、空值规则、错误码、图片与工具支持范围。
+- [Agent 接入指南](docs/integration.md)：主机/手机内宿主、HTTP 与 MCP、凭据、启动顺序与错误恢复。
 - [运行手册](docs/runbook.md)：手机环境、部署/启动/停止、健康检查、消息中心、MCP 入口与常见故障。
+- [手机侧运维](docs/phone-operations.md)：进程/文件/容量、重启、权限、凭据轮换、备份与手机侧故障处置。
 - [控制端协议](docs/control-protocol.md)：同步、消息投递、显示命令、独立 STOP。
 - [发布与回退](docs/release.md)：单一版本源、整组产物与清单、受控部署顺序、回退边界。
 - [MCP 入口](docs/mcp.md)：双传输、工具 schema、结果投影、取消与漏收边界。
