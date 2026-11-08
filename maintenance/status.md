@@ -64,4 +64,5 @@
 ## 5. 暂缓事项
 
 - 第 3 节的验证缺口暂不单独补测；待其后按真实使用路径补齐证据。
-- 当前部署为 `0.4.0`（`contract_version=2`），`can_start=true`；旧 0.3.0 服务与 App 仅保留为不匹配验证材料。
+- 当前部署为 `0.4.0`（`contract_version=2`），`can_start=true`；发布产物构建自提交
+  `98645a7`，`source_dirty=false`。旧 0.3.0 服务与 App 仅保留为不匹配验证材料。
