@@ -46,3 +46,8 @@
 - [P3 实机验证](verification/p3-real-device.md)
 - [P4 实机验证](verification/p4-real-device.md)
 - [工程决策](decisions.md)
+
+## 5. 暂缓事项
+
+- 第 3 节的验证缺口暂不单独补测；待 Agent 接入后，按其真实使用路径在真机补齐证据。
+- 在 Agent 实机使用反馈回来之前，不启动 M5/M6；当前保持 `0.2.0-m4` 部署与 `can_start=true`。
