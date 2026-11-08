@@ -498,9 +498,17 @@ func (e *Engine) driveRecovery(ctx context.Context) {
 			return
 		}
 		// A missing display is not proof that its old tasks/recents disappeared.
-		if len(e.tasksOnDisplay(ctx, displayID)) != 0 {
-			e.setRecoveryReason("old_resource_unconfirmed")
+		tasks, taskErr := e.tasksOnDisplayByTaskList(ctx, displayID)
+		if taskErr != nil {
+			e.setRecoveryReason("display_probe_failed")
 			return
+		}
+		if len(tasks) > 0 {
+			removed, removeErr := e.removeRecoveryTasks(ctx, displayID)
+			if removeErr != nil || !removed {
+				e.setRecoveryReason("old_resource_unconfirmed")
+				return
+			}
 		}
 	} else if virtual {
 		// A bounded create window alone is insufficient: require the original
@@ -582,6 +590,9 @@ func (e *Engine) restoreRecoveryLocked(record *Ledger) {
 			StartedAt: s.StartedAt, EndedAt: time.Now(), Reason: "service_restarted", Epoch: e.nextSession,
 			AppInstanceID: s.AppInstanceID, ModeGeneration: s.ModeGeneration, CleanupStarted: true,
 			Display: device.Display{ID: s.DisplayID, SFID: s.SFID, Width: s.Width, Height: s.Height, Density: s.Density, Rotation: s.Rotation, Generation: s.DisplayGeneration}}
+		if len(record.Tasks) > 0 {
+			e.session.Tasks = tasksFromLedger(record.Tasks)
+		}
 		e.operations[s.Origin] = &operationState{ID: s.Origin, Agent: s.Agent, Kind: "start", State: OperationFinished,
 			SessionOrigin: s.Origin, Outcome: OutcomeUncertain, Phase: "service_restarted", CreatedAt: s.StartedAt, FinishedAt: time.Now()}
 	}
@@ -640,6 +651,7 @@ func (e *Engine) ledgerRecordLocked() *Ledger {
 			Density: e.session.Display.Density, Rotation: e.session.Display.Rotation,
 			StartedAt: e.session.StartedAt,
 		}
+		record.Tasks = ledgerTasksOf(e.session.Tasks)
 	}
 	for _, command := range e.commands {
 		if command.Kind == "create_display" && record.PendingCreate == nil {

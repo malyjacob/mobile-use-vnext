@@ -17,6 +17,9 @@ type Ledger struct {
 	PendingCreate     *LedgerCommand `json:"pending_create,omitempty"`
 	PendingClose      *LedgerCommand `json:"pending_close,omitempty"`
 	Cleanup           *LedgerCleanup `json:"cleanup,omitempty"`
+	// Tasks are exact owned window identities for virtual sessions. The list
+	// is bounded and contains no window content.
+	Tasks []LedgerTask `json:"tasks,omitempty"`
 	// Stop carries the bound stop boundary so a restart keeps the admission
 	// barrier even when the original App instance is gone.
 	Stop *LedgerStop `json:"stop,omitempty"`
@@ -38,6 +41,14 @@ type LedgerSession struct {
 	Density           int       `json:"density"`
 	Rotation          int       `json:"rotation"`
 	StartedAt         time.Time `json:"started_at"`
+}
+
+// LedgerTask is one exact owned window identity. It carries no window content.
+type LedgerTask struct {
+	TaskID    int    `json:"task_id"`
+	Package   string `json:"package"`
+	DisplayID int    `json:"display_id"`
+	Proven    bool   `json:"proven"`
 }
 
 // LedgerCommand is one display create/close intent saved before it is sent.

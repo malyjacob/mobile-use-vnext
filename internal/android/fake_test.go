@@ -2,6 +2,7 @@ package android
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"os"
 	"path/filepath"
@@ -23,7 +24,7 @@ const fakeSentinelEnv = "MOBILE_USE_ADB_STUB"
 // fakeTranscripts is every replay the tests can select.
 var fakeTranscripts = []string{
 	"argv-record", "exit3", "remote-hash", "screenshot", "input",
-	"hang", "probe", "capture",
+	"hang", "probe", "capture", "applist", "launch", "shell",
 }
 
 // fakeDigestOf returns the sentinel value for one transcript.
@@ -131,6 +132,10 @@ func runStub(transcript string) int {
 		_, _ = os.Stdout.WriteString("device\n")
 		return 0
 	case "exec-out":
+		if transcript == "shell" {
+			_, _ = os.Stdout.WriteString("hi\n")
+			return 0
+		}
 		_, _ = os.Stdout.Write(pngFixture)
 		return 0
 	case "shell":
@@ -145,6 +150,36 @@ func replayShell(transcript, command string) int {
 		_, _ = os.Stdout.WriteString(answer.stdout)
 		_, _ = os.Stderr.WriteString(answer.stderr)
 		return answer.exit
+	}
+	if transcript == "shell" {
+		switch {
+		case strings.Contains(command, "sha256sum"):
+			_, _ = os.Stdout.WriteString(sha256Hex([]byte(runnerScript)) + "  " + defaultShellRunnerPath + "\n")
+			return 0
+		case strings.Contains(command, "wc -c <"):
+			_, _ = os.Stdout.WriteString("3\n")
+			return 0
+		case strings.Contains(command, "cat >"):
+			return 0
+		case strings.Contains(command, "setsid"):
+			return 0
+		case strings.Contains(command, "version:"):
+			_, _ = os.Stdout.WriteString("version:1\n" +
+				"start:start_v1\t123\t123\t456\tboot\n" +
+				"done:\npid:123\nalive:1\n")
+			return 0
+		case strings.Contains(command, "/proc/123/stat"):
+			_, _ = os.Stdout.WriteString("456\n")
+			return 0
+		case strings.Contains(command, "kill -"):
+			return 0
+		case strings.Contains(command, "id -u"):
+			_, _ = os.Stdout.WriteString("0\n")
+			return 0
+		case strings.Contains(command, "printf"):
+			return 0
+		}
+		return 0
 	}
 	switch transcript {
 	case "remote-hash":
@@ -181,6 +216,19 @@ type stubAnswer struct {
 
 // stubTranscripts maps a transcript to its recorded answers.
 var stubTranscripts = map[string][]stubAnswer{
+	"launch": {
+		{contains: "resolve-activity", stdout: "com.example.app/.MainActivity\n"},
+		{contains: "am start", stdout: "Starting: Intent { cmp=com.example.app/.MainActivity }\nStatus: ok\nActivity: com.example.app/.MainActivity\n"},
+		{contains: "am task focus", stdout: ""},
+		{contains: "am stack remove", stdout: ""},
+		{contains: "dumpsys activity recents", stdout: "  Recent #0: Task{abc #42 type=standard A=1:com.example.app}\n  Recent #1: Task{def #77 type=home}\n"},
+		{contains: "am stack list", stdout: launchStackListing},
+		{contains: "dumpsys activity activities", stdout: probeActivities},
+	},
+	"applist": {
+		{contains: "sha256sum", stdout: AppListDexSHA256 + "  " + defaultRemoteAppListDex + "\n"},
+		{contains: "com.mobileuse.applist.AppList", stdout: appListFixture},
+	},
 	"probe": {
 		{contains: "-U --user 0", stdout: "package:" + defaultControlPackage + " uid:10354\n"},
 		{contains: "pkill", exit: 1},
@@ -216,6 +264,14 @@ func transcriptShell(transcript, command string) (stubAnswer, bool) {
 	return best, found
 }
 
+// appListFixture is the helper's package<TAB>base64(label) output.
+var appListFixture = "com.example.two\t" +
+	base64.StdEncoding.EncodeToString([]byte("Example")) + "\n" +
+	"com.example.one\t" +
+	base64.StdEncoding.EncodeToString([]byte("示例")) + "\n" +
+	"com.example.two\t" +
+	base64.StdEncoding.EncodeToString([]byte("Duplicate")) + "\n"
+
 // pngFixture is the exec-out payload used to prove the screenshot path.
 var pngFixture = append([]byte("\x89PNG\r\n\x1a\n"), []byte("stub-bytes")...)
 
@@ -237,6 +293,8 @@ const (
 		"    mCurrentFocus=Window{61d0ce2 u0 com.example.home/.Launcher}\n"
 	probeStackListing = "RootTask id=42 bounds=[0,0][1080,2400] displayId=0 userId=0\n" +
 		"  taskId=42: com.example/com.example.Main bounds=[0,0][1080,2400] userId=0 visible=true\n"
+	launchStackListing = "RootTask id=2120 bounds=[0,0][1080,2400] displayId=61 userId=0\n" +
+		"  taskId=2120: com.example.app/com.example.app.Main bounds=[0,0][1080,2400] userId=0 visible=true\n"
 	captureXML = `<hierarchy rotation="0">` +
 		`<node class="android.widget.FrameLayout" package="com.example.app" display-id="0" visible-to-user="true" bounds="[0,0][1080,2400]">` +
 		`<node class="android.widget.EditText" package="com.example.app" text="Query" resource-id="com.example.app:id/q" focused="true" clickable="true" enabled="true" visible-to-user="true" bounds="[0,100][1080,220]" />` +

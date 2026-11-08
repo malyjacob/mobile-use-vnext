@@ -46,6 +46,9 @@ const (
 	WorkStart   = "start"
 	WorkObserve = "observe"
 	WorkAct     = "act"
+	WorkApps    = "apps"
+	WorkOpenApp = "open_app"
+	WorkShell   = "shell"
 )
 
 // Outcome values.
@@ -74,6 +77,8 @@ type Config struct {
 	MaxOperations       int           // bounded P records
 	MaxAcceptanceAge    time.Duration // 5min P acceptance window
 	ControlPackage      string        // paired control App package
+	MaxAppsBytes        int           // 32 KiB apps result budget
+	AppListTTL          time.Duration // 60s trusted app-list cache
 }
 
 // DefaultConfig returns the first-version policy values.
@@ -95,6 +100,8 @@ func DefaultConfig(instanceID, agentName string) Config {
 		MaxOperations:       256,
 		MaxAcceptanceAge:    5 * time.Minute,
 		ControlPackage:      "com.mobileuse.vnext",
+		MaxAppsBytes:        32 * 1024,
+		AppListTTL:          60 * time.Second,
 	}
 }
 
@@ -116,6 +123,13 @@ type Device interface {
 	GetTextOnDisplay(ctx context.Context, target device.TextTarget) (device.TextResult, error)
 	SetTextOnDisplay(ctx context.Context, target device.TextTarget, text string) (device.TextResult, error)
 	StartDisplayHelper(ctx context.Context, commandID, appInstanceID string) error
+	AppList(ctx context.Context) ([]device.AppEntry, error)
+	ResolveLauncher(ctx context.Context, pkg string) (string, bool, error)
+	LaunchApp(ctx context.Context, displayID int, component string) (device.LaunchResult, error)
+	FocusTask(ctx context.Context, taskID int) error
+	RemoveTask(ctx context.Context, taskID int) error
+	RecentTaskIDs(ctx context.Context) (map[int]bool, bool)
+	TasksOnDisplay(ctx context.Context, displayID int) ([]device.Task, bool)
 }
 
 // Store is the recovery ledger capability.
@@ -155,6 +169,7 @@ type Engine struct {
 	mu        sync.Mutex
 	persistMu sync.Mutex // serializes snapshot + Save, never held with state I/O
 
+	startedAt       time.Time
 	blockedReason   string // permanent blocker (corrupt ledger)
 	recovering      bool
 	recovery        *Ledger // original ledger evidence being resolved
@@ -186,6 +201,13 @@ type Engine struct {
 	nextOperation   int64
 	nextCommand     int64
 	nextSession     int64
+	nextMessage     int64
+
+	// messages is the bounded in-memory message store behind notify. It never
+	// reaches the ledger and holds no execution authority.
+	messages     []messageState
+	messageBytes int
+	appsCache    *appListCache
 
 	lastControl     *protocol.ControlView
 	lastFingerprint *controlComparable
@@ -238,6 +260,9 @@ type sessionState struct {
 	ExpireTimer      *time.Timer
 	CleanupStarted   bool
 	ExecutionUnknown bool // survives release of an uncertain ordinary work slot
+	// Tasks is the virtual-session window registry. It is a cache rebuilt from
+	// live task reads, keyed by task id; primary sessions never populate it.
+	Tasks []taskEntry
 }
 
 type baselineState struct {
@@ -344,6 +369,7 @@ func New(cfg Config, log *eventlog.Logger, dev Device, st Store, projector Proje
 		store:          st,
 		projector:      projector,
 		differ:         differ,
+		startedAt:      time.Now(),
 		appNotify:      make(chan struct{}),
 		closeAttempted: map[displayOwner]bool{},
 		stopSeqByApp:   map[string]int64{},

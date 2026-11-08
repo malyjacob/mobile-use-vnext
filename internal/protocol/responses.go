@@ -420,6 +420,12 @@ type Result struct {
 	Outcome             string
 	Phase               string
 	Observation         *Observation
+	Inspection          *InspectionView
+	Apps                *AppsView
+	App                 *AppView
+	Shell               *ShellView
+	Notification        *NotificationView
+	Diagnosis           *DiagnosisView
 	Session             *Session
 	IncludeSession      bool
 	Cleanup             *Cleanup
@@ -433,6 +439,8 @@ type Result struct {
 	StartOperation      string
 	ObservationState    string
 	InputState          string
+	MessageID           string
+	Saved               *bool
 }
 
 // MarshalJSONTo writes the result fields in the fixed public order.
@@ -536,6 +544,22 @@ func (r *Result) MarshalJSONTo(enc *jsontext.Encoder) error {
 			return err
 		}
 	}
+	if r.MessageID != "" {
+		if err := writeName(enc, "message_id"); err != nil {
+			return err
+		}
+		if err := writeString(enc, r.MessageID); err != nil {
+			return err
+		}
+	}
+	if r.Saved != nil {
+		if err := writeName(enc, "saved"); err != nil {
+			return err
+		}
+		if err := writeBool(enc, *r.Saved); err != nil {
+			return err
+		}
+	}
 	if r.IncludeSession {
 		if err := writeName(enc, "session"); err != nil {
 			return err
@@ -549,6 +573,54 @@ func (r *Result) MarshalJSONTo(enc *jsontext.Encoder) error {
 			return err
 		}
 		if err := MarshalJSONTo(enc, r.Observation); err != nil {
+			return err
+		}
+	}
+	if r.Inspection != nil {
+		if err := writeName(enc, "inspection"); err != nil {
+			return err
+		}
+		if err := MarshalJSONTo(enc, r.Inspection); err != nil {
+			return err
+		}
+	}
+	if r.Apps != nil {
+		if err := writeName(enc, "apps"); err != nil {
+			return err
+		}
+		if err := MarshalJSONTo(enc, r.Apps); err != nil {
+			return err
+		}
+	}
+	if r.App != nil {
+		if err := writeName(enc, "app"); err != nil {
+			return err
+		}
+		if err := MarshalJSONTo(enc, r.App); err != nil {
+			return err
+		}
+	}
+	if r.Shell != nil {
+		if err := writeName(enc, "shell"); err != nil {
+			return err
+		}
+		if err := MarshalJSONTo(enc, r.Shell); err != nil {
+			return err
+		}
+	}
+	if r.Notification != nil {
+		if err := writeName(enc, "notification"); err != nil {
+			return err
+		}
+		if err := MarshalJSONTo(enc, r.Notification); err != nil {
+			return err
+		}
+	}
+	if r.Diagnosis != nil {
+		if err := writeName(enc, "diagnosis"); err != nil {
+			return err
+		}
+		if err := MarshalJSONTo(enc, r.Diagnosis); err != nil {
 			return err
 		}
 	}

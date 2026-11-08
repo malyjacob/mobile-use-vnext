@@ -184,6 +184,83 @@ type Task struct {
 	Visible   bool
 }
 
+// AppEntry is one launchable application discovered through the fixed
+// app_process helper. Name is user-facing content and must never be logged.
+type AppEntry struct {
+	Name    string
+	Package string
+}
+
+// ShellStart is the managed runner's start evidence: the user command's
+// process identity and the boot/session facts used to avoid PID reuse.
+type ShellStart struct {
+	HasIdentity bool
+	PID         int
+	PGID        int
+	StartTicks  uint64
+	BootID      string
+}
+
+// ShellDone is the runner's natural-exit metadata. ExitCode is nil when the
+// command did not produce a reliable natural exit code (for example after a
+// supervisor timeout that killed the process group). Truncated is nil when the
+// byte count could not be established.
+type ShellDone struct {
+	ExitCode  *int
+	Reason    string
+	Bytes     int
+	HasBytes  bool
+	Truncated *bool
+}
+
+// ShellSnapshot is one bounded read of a managed runner directory. Has* flags
+// distinguish a missing fact from a zero value.
+type ShellSnapshot struct {
+	HasStart bool
+	Start    ShellStart
+	HasDone  bool
+	Done     ShellDone
+	Output   []byte
+	// OutputTruncated reports that the device kept more than the retained
+	// prefix (the runner file is bounded to one extra block).
+	OutputTruncated bool
+	Alive           bool
+}
+
+// ShellTermination is the result of an exact termination attempt. Confirmed is
+// true only when the recorded process identity is gone; identity_mismatch and
+// unknown are never treated as confirmed.
+type ShellTermination struct {
+	Confirmed     bool
+	IdentityMatch bool
+	AlreadyGone   bool
+	Signal        string
+	ExitCode      *int
+	Unknown       bool
+}
+
+// LaunchState is the controlled outcome of one app launch dispatch.
+type LaunchState string
+
+const (
+	// LaunchAccepted means am reported a successful start; a live task still
+	// has to be correlated by the engine.
+	LaunchAccepted LaunchState = "accepted"
+	// LaunchRejected means the device explicitly refused the start.
+	LaunchRejected LaunchState = "rejected"
+	// LaunchUnknown means the dispatch may have reached the device but no
+	// trusted completion was observed.
+	LaunchUnknown LaunchState = "unknown"
+	// LaunchNotStarted means the command was confirmed not to have started.
+	LaunchNotStarted LaunchState = "not_started"
+)
+
+// LaunchResult is one launch dispatch fact.
+type LaunchResult struct {
+	State    LaunchState
+	ExitCode int
+}
+
 func max(a, b int) int {
 	if a > b {
 		return a

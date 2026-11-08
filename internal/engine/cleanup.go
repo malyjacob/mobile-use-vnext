@@ -14,18 +14,25 @@ import (
 type cleanupTarget struct {
 	epoch        int64
 	origin       string
+	agent        string
 	mode         string
 	appInstance  string
 	display      device.Display
 	createResult *bool
 	createError  string
+	tasks        []taskEntry
 }
 
 func targetOf(session *sessionState) cleanupTarget {
+	tasks := append([]taskEntry(nil), session.Tasks...)
+	if len(tasks) > 16 {
+		tasks = tasks[:16]
+	}
 	target := cleanupTarget{
-		epoch: session.Epoch, origin: session.Origin, mode: session.Mode,
-		appInstance: session.AppInstanceID, display: session.Display,
+		epoch: session.Epoch, origin: session.Origin, agent: session.Agent,
+		mode: session.Mode, appInstance: session.AppInstanceID, display: session.Display,
 		createResult: session.CreateResult, createError: session.CreateError,
+		tasks: tasks,
 	}
 	return target
 }
@@ -149,15 +156,31 @@ func (e *Engine) performCleanup(target cleanupTarget, cleanup *cleanupState) {
 		e.enqueueCloseCommand(displayID, generation, appInstance)
 	}
 
-	// Tasks on the owned virtual display are the only tasks this session could
-	// own; the first-loop tool set never launches applications, so a non-empty
-	// list is unexpected and stays unconfirmed instead of being silently closed.
-	tasks := e.tasksOnDisplay(ctx, displayID)
-	if len(tasks) > 0 {
-		cleanup.Tasks = protocol.CleanupUnconfirmed
-		cleanup.Recents = protocol.CleanupUnconfirmed
-		cleanup.Error = &protocol.Error{Code: "owned_tasks_present",
-			Message: "原虚拟屏仍存在未清理的任务"}
+	// A virtual display is exclusively owned: every live task on it belongs to
+	// this session. Remove owned windows before destroying the display, then
+	// verify both the live task list and the RecentTasks index.
+	hadTasks := len(target.tasks) > 0
+	if live, known := e.dev.TasksOnDisplay(ctx, displayID); known && len(live) > 0 {
+		hadTasks = true
+	}
+	if hadTasks {
+		tasksOK, recentsOK := e.removeOwnedTasks(ctx, displayID)
+		if tasksOK {
+			cleanup.Tasks = protocol.CleanupConfirmed
+		} else {
+			cleanup.Tasks = protocol.CleanupUnconfirmed
+			cleanup.Error = &protocol.Error{Code: protocol.CodeAppTaskUnconfirmed,
+				Message: "原会话任务未能全部移除"}
+		}
+		if recentsOK {
+			cleanup.Recents = protocol.CleanupConfirmed
+		} else {
+			cleanup.Recents = protocol.CleanupUnconfirmed
+			if cleanup.Error == nil {
+				cleanup.Error = &protocol.Error{Code: "recents_cleanup_unconfirmed",
+					Message: "最近任务清理尚未确认"}
+			}
+		}
 	} else {
 		cleanup.Tasks = protocol.CleanupConfirmed
 		cleanup.Recents = protocol.CleanupNotApplicable
@@ -307,6 +330,106 @@ func (e *Engine) finishCleanup(target cleanupTarget, cleanup *cleanupState, resu
 		}
 	}
 	e.persistAsync()
+}
+
+// tasksOnDisplayByTaskList reads the complete task list and filters one
+// display. Recovery uses this path so an unreadable list stays unknown.
+func (e *Engine) tasksOnDisplayByTaskList(ctx context.Context, displayID int) ([]device.Task, error) {
+	all, err := e.dev.TaskList(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]device.Task, 0, len(all))
+	for _, task := range all {
+		if task.DisplayID == displayID {
+			out = append(out, task)
+		}
+	}
+	return out, nil
+}
+
+// removeRecoveryTasks removes exact tasks on the recorded display in bounded
+// sweeps. It never touches display 0.
+func (e *Engine) removeRecoveryTasks(ctx context.Context, displayID int) (bool, error) {
+	if displayID <= 0 {
+		return false, nil
+	}
+	for sweep := 0; sweep < 3; sweep++ {
+		tasks, err := e.tasksOnDisplayByTaskList(ctx, displayID)
+		if err != nil {
+			return false, err
+		}
+		if len(tasks) == 0 {
+			return true, nil
+		}
+		for _, task := range tasks {
+			if task.TaskID > 0 {
+				_ = e.dev.RemoveTask(ctx, task.TaskID)
+			}
+		}
+		timer := time.NewTimer(120 * time.Millisecond)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return false, ctx.Err()
+		}
+		timer.Stop()
+	}
+	tasks, err := e.tasksOnDisplayByTaskList(ctx, displayID)
+	if err != nil {
+		return false, err
+	}
+	return len(tasks) == 0, nil
+}
+
+// removeOwnedTasks removes every live task on the owned virtual display in at
+// most three bounded sweeps, then verifies the live task list and RecentTasks
+// index. It never touches display 0 or another session display.
+func (e *Engine) removeOwnedTasks(ctx context.Context, displayID int) (tasksOK, recentsOK bool) {
+	if displayID <= 0 {
+		return false, false
+	}
+	removed := make(map[int]bool)
+	for sweep := 0; sweep < 3; sweep++ {
+		tasks, known := e.dev.TasksOnDisplay(ctx, displayID)
+		if !known {
+			return false, false
+		}
+		if len(tasks) == 0 {
+			break
+		}
+		for _, task := range tasks {
+			if task.TaskID <= 0 {
+				continue
+			}
+			if err := e.dev.RemoveTask(ctx, task.TaskID); err == nil {
+				removed[task.TaskID] = true
+			}
+		}
+		timer := time.NewTimer(120 * time.Millisecond)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return false, false
+		}
+		timer.Stop()
+	}
+	tasks, known := e.dev.TasksOnDisplay(ctx, displayID)
+	if !known || len(tasks) > 0 {
+		return false, false
+	}
+	recent, recentsKnown := e.dev.RecentTaskIDs(ctx)
+	if !recentsKnown {
+		return true, false
+	}
+	for id := range removed {
+		if recent[id] {
+			return true, false
+		}
+	}
+	return true, true
 }
 
 func filterCommands(commands []*appCommand, target cleanupTarget) []*appCommand {

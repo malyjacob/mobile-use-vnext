@@ -59,6 +59,7 @@ func run() int {
 		U2Port:         cfg.ADB.U2Port,
 		LocalJarPath:   cfg.U2JarPath,
 		RemoteJarPath:  "/data/local/tmp/u2.jar",
+		AppListDexPath: cfg.AppListDexPath,
 		ControlPackage: cfg.ControlPackage,
 		Timeout:        cfg.adbTimeout(),
 	}, logger)

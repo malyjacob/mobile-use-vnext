@@ -32,6 +32,17 @@ func validOperationID(id string) bool {
 // registerOperation atomically admits one P before any device side effect. A
 // duplicate P returns the original operation view and never dispatches again.
 func (e *Engine) registerOperation(p, agent, kind string) (*operationState, *protocol.Result, *protocol.APIError) {
+	return e.registerOperationBound(p, agent, kind, true)
+}
+
+// registerDetachedOperation admits a P that is deliberately not bound to the
+// current session (apps/notify discovery calls). end(thatP) therefore cannot
+// terminate an unrelated active session.
+func (e *Engine) registerDetachedOperation(p, agent, kind string) (*operationState, *protocol.Result, *protocol.APIError) {
+	return e.registerOperationBound(p, agent, kind, false)
+}
+
+func (e *Engine) registerOperationBound(p, agent, kind string, bindSession bool) (*operationState, *protocol.Result, *protocol.APIError) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.shuttingDown {
@@ -75,7 +86,7 @@ func (e *Engine) registerOperation(p, agent, kind string) (*operationState, *pro
 		ID: p, Agent: agent, Kind: kind, State: OperationRunning,
 		Phase: "admitted", CreatedAt: time.Now(),
 	}
-	if e.session != nil {
+	if bindSession && e.session != nil {
 		op.SessionOrigin = e.session.Origin
 	}
 	e.operations[p] = op
@@ -160,6 +171,12 @@ func (e *Engine) acquireWork(op *operationState, kind string) (*workState, *prot
 		timeout = e.cfg.WorkTimeout + 15*time.Second
 	case WorkAct:
 		timeout = 2*e.cfg.WorkTimeout + 10*time.Second
+	case WorkApps:
+		timeout = e.cfg.WorkTimeout + 10*time.Second
+	case WorkOpenApp:
+		timeout = 2*e.cfg.WorkTimeout + 10*time.Second
+	case WorkShell:
+		timeout = 65 * time.Second
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	work := &workState{
@@ -204,6 +221,16 @@ func (e *Engine) workRevoked(work *workState) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return !e.workAuthorizedLocked(work, time.Now())
+}
+
+// detachedWorkRevoked is the session-free variant used by discovery work
+// (apps): it checks the work position, revocation, shutdown and context only.
+// It never requires an active session.
+func (e *Engine) detachedWorkRevoked(work *workState) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return work == nil || e.work != work || work.Revoked ||
+		e.shuttingDown || work.Ctx.Err() != nil
 }
 
 // sessionForWork returns the session fixed by this work, if still the same.

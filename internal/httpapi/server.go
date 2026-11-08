@@ -38,16 +38,17 @@ type Config struct {
 
 // Server wraps the engine behind the authenticated local HTTP boundary.
 type Server struct {
-	cfg     Config
-	engine  *engine.Engine
-	log     *eventlog.Logger
-	http    *http.Server
-	handler http.Handler
+	cfg      Config
+	engine   *engine.Engine
+	log      *eventlog.Logger
+	delivery *deliveryLimiter
+	http     *http.Server
+	handler  http.Handler
 }
 
 // New creates the HTTP server. The caller starts ListenAndServe.
 func New(cfg Config, eng *engine.Engine, log *eventlog.Logger) *Server {
-	s := &Server{cfg: cfg, engine: eng, log: log}
+	s := &Server{cfg: cfg, engine: eng, log: log, delivery: &deliveryLimiter{}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.health)
 	mux.HandleFunc("/api/start", s.agent(s.start))
@@ -55,6 +56,12 @@ func New(cfg Config, eng *engine.Engine, log *eventlog.Logger) *Server {
 	mux.HandleFunc("/api/observe", s.agent(s.observe))
 	mux.HandleFunc("/api/act", s.agent(s.act))
 	mux.HandleFunc("/api/end", s.agent(s.end))
+	mux.HandleFunc("/api/inspect", s.agent(s.inspect))
+	mux.HandleFunc("/api/keepalive", s.agent(s.keepalive))
+	mux.HandleFunc("/api/diagnose", s.agent(s.diagnose))
+	mux.HandleFunc("/api/notify", s.agent(s.notify))
+	mux.HandleFunc("/api/apps", s.agent(s.apps))
+	mux.HandleFunc("/api/open_app", s.agent(s.openApp))
 	mux.HandleFunc("/v1/control/sync", s.control(s.sync))
 	mux.HandleFunc("/v1/control/stop", s.control(s.stop))
 	s.handler = mux
@@ -171,6 +178,13 @@ func (s *Server) start(w http.ResponseWriter, r *http.Request, p string) {
 		writeAPIError(w, apiErr)
 		return
 	}
+	release, ok := s.delivery.acquire(deliveryReserveTree)
+	if !ok {
+		writeAPIError(w, protocol.NewError(503, protocol.CodeDeliveryUnavailable,
+			"结果交付容量不足，请在当前结果交付后再试"))
+		return
+	}
+	defer release()
 	result, apiErr := s.engine.Start(r.Context(), s.cfg.AgentName, p)
 	s.finish(w, result, apiErr)
 }
@@ -199,6 +213,13 @@ func (s *Server) observe(w http.ResponseWriter, r *http.Request, p string) {
 		writeAPIError(w, apiErr)
 		return
 	}
+	release, ok := s.delivery.acquire(deliveryReserveTree)
+	if !ok {
+		writeAPIError(w, protocol.NewError(503, protocol.CodeDeliveryUnavailable,
+			"结果交付容量不足，请在当前结果交付后再试"))
+		return
+	}
+	defer release()
 	result, apiErr := s.engine.Observe(r.Context(), s.cfg.AgentName, p, req)
 	s.finish(w, result, apiErr)
 }
@@ -213,6 +234,13 @@ func (s *Server) act(w http.ResponseWriter, r *http.Request, p string) {
 		writeAPIError(w, apiErr)
 		return
 	}
+	release, ok := s.delivery.acquire(deliveryReserveTree)
+	if !ok {
+		writeAPIError(w, protocol.NewError(503, protocol.CodeDeliveryUnavailable,
+			"结果交付容量不足，请在当前结果交付后再试"))
+		return
+	}
+	defer release()
 	result, apiErr := s.engine.Act(r.Context(), s.cfg.AgentName, p, req)
 	s.finish(w, result, apiErr)
 }
@@ -228,6 +256,118 @@ func (s *Server) end(w http.ResponseWriter, r *http.Request, p string) {
 		return
 	}
 	result, apiErr := s.engine.End(s.cfg.AgentName, p, req.Reference)
+	s.finish(w, result, apiErr)
+}
+
+func (s *Server) inspect(w http.ResponseWriter, r *http.Request, p string) {
+	body, ok := readBody(w, r, 8*1024)
+	if !ok {
+		return
+	}
+	req, apiErr := protocol.DecodeInspect(body)
+	if apiErr != nil {
+		writeAPIError(w, apiErr)
+		return
+	}
+	release, ok := s.delivery.acquire(deliveryReserveTree)
+	if !ok {
+		writeAPIError(w, protocol.NewError(503, protocol.CodeDeliveryUnavailable,
+			"结果交付容量不足，请在当前结果交付后再试"))
+		return
+	}
+	defer release()
+	result, apiErr := s.engine.Inspect(s.cfg.AgentName, req)
+	s.finish(w, result, apiErr)
+}
+
+func (s *Server) keepalive(w http.ResponseWriter, r *http.Request, p string) {
+	body, ok := readBody(w, r, 8*1024)
+	if !ok {
+		return
+	}
+	req, apiErr := protocol.DecodeKeepalive(body)
+	if apiErr != nil {
+		writeAPIError(w, apiErr)
+		return
+	}
+	result, apiErr := s.engine.Keepalive(s.cfg.AgentName, p, req)
+	s.finish(w, result, apiErr)
+}
+
+func (s *Server) diagnose(w http.ResponseWriter, r *http.Request, p string) {
+	body, ok := readBody(w, r, 8*1024)
+	if !ok {
+		return
+	}
+	req, apiErr := protocol.DecodeDiagnose(body)
+	if apiErr != nil {
+		writeAPIError(w, apiErr)
+		return
+	}
+	release, ok := s.delivery.acquire(deliveryReserveDiag)
+	if !ok {
+		writeAPIError(w, protocol.NewError(503, protocol.CodeDeliveryUnavailable,
+			"结果交付容量不足，请在当前结果交付后再试"))
+		return
+	}
+	defer release()
+	result, apiErr := s.engine.Diagnose(s.cfg.AgentName, req)
+	s.finish(w, result, apiErr)
+}
+
+func (s *Server) notify(w http.ResponseWriter, r *http.Request, p string) {
+	body, ok := readBody(w, r, 16*1024)
+	if !ok {
+		return
+	}
+	req, apiErr := protocol.DecodeNotify(body)
+	if apiErr != nil {
+		writeAPIError(w, apiErr)
+		return
+	}
+	result, apiErr := s.engine.Notify(s.cfg.AgentName, p, req)
+	s.finish(w, result, apiErr)
+}
+
+func (s *Server) apps(w http.ResponseWriter, r *http.Request, p string) {
+	body, ok := readBody(w, r, 8*1024)
+	if !ok {
+		return
+	}
+	req, apiErr := protocol.DecodeApps(body)
+	if apiErr != nil {
+		writeAPIError(w, apiErr)
+		return
+	}
+	release, ok := s.delivery.acquire(deliveryReserveApps)
+	if !ok {
+		writeAPIError(w, protocol.NewError(503, protocol.CodeDeliveryUnavailable,
+			"结果交付容量不足，请在当前结果交付后再试"))
+		return
+	}
+	defer release()
+	result, apiErr := s.engine.Apps(r.Context(), s.cfg.AgentName, p, req)
+	s.finish(w, result, apiErr)
+}
+
+func (s *Server) openApp(w http.ResponseWriter, r *http.Request, p string) {
+	body, ok := readBody(w, r, 8*1024)
+	if !ok {
+		return
+	}
+	req, apiErr := protocol.DecodeOpenApp(body)
+	if apiErr != nil {
+		writeAPIError(w, apiErr)
+		return
+	}
+	release, ok := s.delivery.acquire(deliveryReserveTree)
+	if !ok {
+		writeAPIError(w, protocol.NewError(503, protocol.CodeDeliveryUnavailable,
+			"结果交付容量不足，请在当前结果交付后再试"))
+		return
+	}
+	defer release()
+	result, apiErr := s.engine.OpenApp(r.Context(), s.cfg.AgentName, p, req)
 	s.finish(w, result, apiErr)
 }
 
@@ -288,7 +428,7 @@ func (s *Server) finish(w http.ResponseWriter, result *protocol.Result, apiErr *
 	} else if result.Observation != nil && result.Observation.Status == "failed" {
 		status = http.StatusServiceUnavailable
 	}
-	writeJSON(w, status, result)
+	writeJSONDelivery(w, status, result)
 }
 
 func readBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, bool) {

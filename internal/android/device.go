@@ -32,7 +32,7 @@ const (
 	defaultRemoteJar      = "/data/local/tmp/u2.jar"
 	defaultControlPackage = "com.mobileuse.vnext"
 	defaultTimeout        = 8 * time.Second
-	defaultMaxOutput      = 4 << 20
+	defaultMaxOutput      = 8 << 20
 	// U2JarSHA256 is the pinned patched server artifact. Any other local bytes
 	// are refused before the device is touched.
 	U2JarSHA256 = "28361193de3d13303543c13bdc7268c22edecabfa4e68e6fbdfc35fffe1406a3"
@@ -49,6 +49,8 @@ type Config struct {
 	U2Port         int           // default 9008
 	LocalJarPath   string        // artifact to verify and push
 	RemoteJarPath  string        // default /data/local/tmp/u2.jar
+	AppListDexPath string        // fixed app discovery helper to verify and push
+	RemoteAppList  string        // default /data/local/tmp/mobile-use-applist.dex
 	ControlPackage string        // default "com.mobileuse.vnext"
 	Timeout        time.Duration // per-command timeout
 }
@@ -64,14 +66,16 @@ type ShellResult struct {
 // Device is one configured phone transport. It performs no automatic display
 // selection and no retries.
 type Device struct {
-	adbPath        string
-	serial         string
-	u2Port         int
-	localJarPath   string
-	remoteJarPath  string
-	controlPackage string
-	timeout        time.Duration
-	maxOutput      int
+	adbPath           string
+	serial            string
+	u2Port            int
+	localJarPath      string
+	remoteJarPath     string
+	appListPath       string
+	remoteAppListPath string
+	controlPackage    string
+	timeout           time.Duration
+	maxOutput         int
 
 	log    *eventlog.Logger
 	client *http.Client
@@ -132,22 +136,31 @@ func New(cfg Config, log *eventlog.Logger) (*Device, error) {
 	if !validPackageName(control) {
 		return nil, newErr(CodeInvalidArgs, "invalid control package name", nil)
 	}
+	remoteAppList := cfg.RemoteAppList
+	if remoteAppList == "" {
+		remoteAppList = defaultRemoteAppListDex
+	}
+	if !strings.HasPrefix(remoteAppList, "/") || strings.ContainsAny(remoteAppList, " \t\r\n'\"`$;&|<>()") {
+		return nil, newErr(CodeInvalidArgs, "invalid remote app list path", nil)
+	}
 	timeout := cfg.Timeout
 	if timeout <= 0 {
 		timeout = defaultTimeout
 	}
 
 	d := &Device{
-		adbPath:        adb,
-		serial:         cfg.Serial,
-		u2Port:         port,
-		localJarPath:   cfg.LocalJarPath,
-		remoteJarPath:  remote,
-		controlPackage: control,
-		timeout:        timeout,
-		maxOutput:      defaultMaxOutput,
-		log:            log,
-		base:           fmt.Sprintf("http://127.0.0.1:%d", port),
+		adbPath:           adb,
+		serial:            cfg.Serial,
+		u2Port:            port,
+		localJarPath:      cfg.LocalJarPath,
+		remoteJarPath:     remote,
+		appListPath:       cfg.AppListDexPath,
+		remoteAppListPath: remoteAppList,
+		controlPackage:    control,
+		timeout:           timeout,
+		maxOutput:         defaultMaxOutput,
+		log:               log,
+		base:              fmt.Sprintf("http://127.0.0.1:%d", port),
 	}
 	d.client = &http.Client{Timeout: timeout}
 	return d, nil
@@ -245,6 +258,12 @@ func (b *boundedBuffer) Bytes() []byte { return b.buf.Bytes() }
 // run executes one bounded process and returns stdout, stderr and exit code.
 // stderr is kept only for the caller's evidence and never for errors or logs.
 func (d *Device) run(ctx context.Context, timeout time.Duration, exe string, args ...string) (ShellResult, error) {
+	return d.runInput(ctx, timeout, nil, exe, args...)
+}
+
+// runInput executes one bounded process with optional stdin bytes. Content
+// passed here is never logged and never appears in the argv.
+func (d *Device) runInput(ctx context.Context, timeout time.Duration, input []byte, exe string, args ...string) (ShellResult, error) {
 	var result ShellResult
 	if err := contextError(ctx); err != nil {
 		return result, err
@@ -262,6 +281,9 @@ func (d *Device) run(ctx context.Context, timeout time.Duration, exe string, arg
 	cmd := exec.CommandContext(ctx, exe, args...)
 	cmd.Stdout = outBuf
 	cmd.Stderr = errBuf
+	if input != nil {
+		cmd.Stdin = bytes.NewReader(input)
+	}
 	cmd.WaitDelay = time.Second
 	if len(d.testEnv) > 0 {
 		cmd.Env = append(os.Environ(), d.testEnv...)

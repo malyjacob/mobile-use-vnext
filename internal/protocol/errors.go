@@ -57,15 +57,20 @@ func NextForCode(code string) string { return nextFor(code) }
 
 func nextFor(code string) string {
 	switch code {
-	case "device_busy", "operation_running":
+	case "device_busy", "operation_running", "delivery_unavailable",
+		"app_launch_unconfirmed", "application_moved", "task_focus_unavailable",
+		"shell_result_unconfirmed", "task_remove_unconfirmed",
+		"app_list_unavailable":
 		return "status"
 	case "observation_expired", "observation_retired", "observation_claimed",
-		"observation_not_ready", "no_ready_observation", "tree_unavailable":
+		"observation_not_ready", "no_ready_observation", "tree_unavailable",
+		"content_unavailable":
 		return "observe"
 	case "session_ended", "session_expired", "control_revoked":
 		return "end"
 	case "device_locked", "device_not_interactive", "stop_unavailable",
-		"mode_not_selected", "control_unavailable":
+		"mode_not_selected", "control_unavailable", "app_not_found",
+		"root_unavailable":
 		return "user"
 	case "contract_mismatch":
 		return "update"
@@ -123,6 +128,25 @@ const (
 	CodeUnsupported        = "unsupported_feature"
 	CodeInternal           = "internal_error"
 	CodeForbidden          = "forbidden"
+
+	// M4 tool-surface codes. These describe controlled stages of the
+	// discovery, app launch and managed shell tools; no new code changes the
+	// meaning of the P3 codes above.
+	CodeAppNotFound             = "app_not_found"
+	CodeAppLaunchFailed         = "app_launch_failed"
+	CodeAppLaunchUnknown        = "app_launch_unconfirmed"
+	CodeAppMoved                = "application_moved"
+	CodeAppListUnavailable      = "app_list_unavailable"
+	CodeAppTaskUnconfirmed      = "task_remove_unconfirmed"
+	CodeTaskFocus               = "task_focus_unavailable"
+	CodeContentUnavailable      = "content_unavailable"
+	CodeInspectionTooLarge      = "inspection_too_large"
+	CodeShellUnknown            = "shell_result_unconfirmed"
+	CodeShellStartFailed        = "shell_start_failed"
+	CodeShellOutput             = "shell_output_unavailable"
+	CodeRootUnavailable         = "root_unavailable"
+	CodeDeliveryUnavailable     = "delivery_unavailable"
+	CodeNotificationUnavailable = "notification_unavailable"
 )
 
 // Err is a sentinel used by the engine to signal that the work position is
@@ -147,12 +171,16 @@ func Status(code string) int {
 		CodeNodeDisabled, CodeDisplayUnavailable, CodeStopped,
 		CodeRequestClosed, CodeCleanupUnconfirmed, CodeTextTargetUnknown,
 		CodeTextResultUnknown, CodeStaleScreen, CodeTargetChanged,
-		CodeForegroundChanged, CodeForegroundUnknown, CodeControlUI:
+		CodeForegroundChanged, CodeForegroundUnknown, CodeControlUI,
+		CodeAppNotFound, CodeAppMoved, CodeAppTaskUnconfirmed, CodeTaskFocus,
+		CodeContentUnavailable, CodeInspectionTooLarge, CodeRootUnavailable,
+		CodeNotificationUnavailable:
 		return http.StatusConflict
 	case CodeDeviceUnavailable, CodeDisplayCreate, CodeHierarchyFailed,
-		CodeTreeTooLarge:
+		CodeTreeTooLarge, CodeAppLaunchFailed, CodeAppListUnavailable,
+		CodeShellStartFailed, CodeShellOutput, CodeDeliveryUnavailable:
 		return http.StatusServiceUnavailable
-	case CodeActionUnknown:
+	case CodeActionUnknown, CodeAppLaunchUnknown, CodeShellUnknown:
 		return http.StatusGatewayTimeout
 	case CodeUnsupported:
 		return http.StatusNotImplemented

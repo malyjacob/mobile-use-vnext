@@ -30,6 +30,26 @@ type fakeDevice struct {
 	checked        bool
 	captureErrs    bool
 	closeDisplayID int
+
+	// M4 discovery and task facts. Tests set these before calling the engine.
+	appEntries       []device.AppEntry
+	appErr           error
+	appCalls         int
+	resolveComponent string
+	resolveErr       error
+	resolveMissing   bool
+	launchState      device.LaunchState
+	launchErr        error
+	launchCalls      int
+	launchTask       *device.Task
+	tasks            []device.Task
+	focusCalls       []int
+	focusErr         error
+	removeCalls      []int
+	removeErr        error
+	recentIDs        map[int]bool
+	recentKnown      bool
+	foreground       *device.Foreground
 }
 
 func newFakeDevice() *fakeDevice {
@@ -51,9 +71,18 @@ func (f *fakeDevice) ProbeDisplay(_ context.Context, id int) (device.DisplayStat
 	return device.DisplayState{Exists: f.displayExists, SFID: f.sfid}, nil
 }
 func (f *fakeDevice) Foreground(_ context.Context, displayID int) (device.Foreground, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.foreground != nil {
+		return *f.foreground, nil
+	}
 	return device.Foreground{State: device.ForegroundPresent, Package: "com.example", TaskID: intPtr(42)}, nil
 }
-func (f *fakeDevice) TaskList(context.Context) ([]device.Task, error) { return nil, nil }
+func (f *fakeDevice) TaskList(context.Context) ([]device.Task, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]device.Task(nil), f.tasks...), nil
+}
 func (f *fakeDevice) StartDisplayHelper(context.Context, string, string) error {
 	f.mu.Lock()
 	f.helperCalls++

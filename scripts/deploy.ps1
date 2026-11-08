@@ -104,6 +104,7 @@ $serviceBinary = [System.IO.Path]::GetFullPath((Join-Path $repository $DeviceSer
 $apkPath = [System.IO.Path]::GetFullPath((Join-Path $repository $Apk))
 foreach ($required in @($serviceBinary, $apkPath,
         (Join-Path $repository 'third_party/uiautomator/u2.jar'),
+        (Join-Path $repository 'third_party/android-applist/applist.dex'),
         (Join-Path $repository 'scripts/service.sh'))) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
         throw "Missing deployment artifact: $required"
@@ -175,12 +176,14 @@ $config = [ordered]@{
     agent_name      = $AgentName
     control_package = 'com.mobileuse.vnext'
     u2_jar_path     = '/opt/mobile-use-vnext/u2.jar'
+    applist_dex_path = '/opt/mobile-use-vnext/applist.dex'
     release_version = $ReleaseVersion
 }
 Write-Utf8NoBom -Path $configPath -Text ($config | ConvertTo-Json -Depth 5)
 & icacls $configPath /inheritance:r /grant:r "$($env:USERNAME):(R,W)" | Out-Null
 
 foreach ($file in @($serviceBinary, (Join-Path $repository 'third_party/uiautomator/u2.jar'),
+        (Join-Path $repository 'third_party/android-applist/applist.dex'),
         (Join-Path $repository 'scripts/service.sh'), $configPath)) {
     $null = Invoke-Adb -Arguments @('push', $file, "$staging/")
 }
@@ -191,10 +194,11 @@ $null = Invoke-DeviceScript -Script @"
 su -c 'mkdir -p $installDirectory $stateOnDevice'
 su -c 'cp $staging/device-service $installDirectory/device-service'
 su -c 'cp $staging/u2.jar $installDirectory/u2.jar'
+su -c 'cp $staging/applist.dex $installDirectory/applist.dex'
 su -c 'cp $staging/service.sh $installDirectory/service.sh'
 su -c 'cp $staging/config.json $installDirectory/config.json'
 su -c 'chmod 755 $installDirectory/device-service $installDirectory/service.sh'
-su -c 'chmod 600 $installDirectory/config.json $installDirectory/u2.jar'
+su -c 'chmod 600 $installDirectory/config.json $installDirectory/u2.jar $installDirectory/applist.dex'
 su -c 'chmod 700 $stateOnDevice'
 "@
 

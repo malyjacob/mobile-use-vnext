@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -33,6 +34,7 @@ type Config struct {
 	AgentName      string `json:"agent_name"`
 	ControlPackage string `json:"control_package"`
 	U2JarPath      string `json:"u2_jar_path"`
+	AppListDexPath string `json:"applist_dex_path"`
 	ReleaseVersion string `json:"release_version"`
 }
 
@@ -86,6 +88,12 @@ func loadConfig(path string) (*Config, error) {
 	}
 	if _, err := os.Stat(cfg.U2JarPath); err != nil {
 		return nil, errors.New("u2 jar artifact is missing")
+	}
+	if cfg.AppListDexPath == "" {
+		cfg.AppListDexPath = filepath.Join(filepath.Dir(cfg.U2JarPath), "applist.dex")
+	}
+	if _, err := os.Stat(cfg.AppListDexPath); err != nil {
+		return nil, errors.New("app list artifact is missing")
 	}
 	if cfg.ReleaseVersion == "" {
 		cfg.ReleaseVersion = protocol.ReleaseVersion

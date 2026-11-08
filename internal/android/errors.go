@@ -27,6 +27,7 @@ const (
 	CodeHelper         = "display_helper_failed"
 	CodeInvalidKey     = "invalid_key"
 	CodeInvalidArgs    = "invalid_argument"
+	CodeRootDenied     = "root_denied"
 )
 
 // Error is the controlled failure shape returned by this package. The code is
