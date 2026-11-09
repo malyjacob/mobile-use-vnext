@@ -35,6 +35,7 @@
 | 完整 control_view 呈现 | 已实现 | 已验证：Activity/通知/悬浮同源、失鲜、停止优先级、清理/权限/模式详情、主屏确认 |
 | 单一版本源与发布清单 | 已实现 | 已验证：生成常量、manifest、SHA-256/大小、工具目录指纹、按清单部署 |
 | 保留 App 数据的整组发布 | 已实现 | 已验证：0.3.0→0.4.0 破坏性发布、二次覆盖安装保留消息/已读/连接配置 |
+| 结构化 `recovery` 入口（契约 3） | 已实现 | 已验证：成功省略、静态拒绝 `retry` 与同 O 重试、会话结束 `end`、收尾 `cleanup_pending`、契约 `update/none`、未知观察 `observe/P`、后观察失败 `cause`；`act uncertain` 与 `start` 撤销分支未实机构造 |
 
 ## 3. 未验证 / 未实现
 
@@ -64,11 +65,13 @@
 - [P6 控制呈现、消息中心与整组交付](verification/p6-real-device.md)
 - [act 坐标目标点证明实机验证](verification/act-coordinate-point-proof.md)
 - [shell 保留当前观察实机验证](verification/shell-keeps-observation.md)
+- [结构化 recovery 入口实现与验证](verification/structured-recovery-entry.md)
 - [工程决策](decisions.md)
 - [工程流程](process.md)
 
 ## 5. 暂缓事项
 
 - 第 3 节的验证缺口暂不单独补测；待其后按真实使用路径补齐证据。
-- 当前部署为 `0.4.0`（`contract_version=2`），`can_start=true`；发布产物构建自提交
-  `8ee3eda`，`source_dirty=false`。旧 0.3.0 服务与 App 仅保留为不匹配验证材料。
+- 当前部署为 `0.4.1`（`contract_version=3`、`android_version_code=4`），`can_start=true`；
+  发布产物构建自提交 `d1ca0fb`，`source_dirty=false`。旧 0.3.0 服务与 App 仅保留为不匹配
+  验证材料。

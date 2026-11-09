@@ -1,11 +1,11 @@
 # 提案：用结构化 `recovery` 取代 `next`，作为唯一的恢复入口
 
-状态：提案，未实现。
+状态：已实现（实现提交 `d1ca0fb4b21d2e6af5dbe364acd3f30b8dd646b5`，2026-11-10）。
 基线提交：`1a6edd5edc8886817e67be06e051c3c6d84c8e58`（分支 `master`，2026-11-09）。
 适用范围：全部 `/api/*` 工具结果、HTTP 接入层错误与 MCP 文本投影；覆盖 `act`、`open_app`、
 `observe`、`start`、`end`、`status`、`keepalive`、`apps`、`shell`、`inspect`、`notify`、
 `diagnose`，以及控制同步响应里唯一一处 `contract_mismatch`
-（[control.go:18](../../internal/engine/control.go#L18)，不是工具结果，只把 `update` 换成同一个
+（[control.go:18](../../../internal/engine/control.go#L18)，不是工具结果，只把 `update` 换成同一个
 `recovery` 对象）。Android 控制 App 不解析工具结果，只随 `contract_version` 重建。
 影响范围：`internal/protocol`（`Result`/`APIError`/编码/解码/错误表）、`internal/engine`
 （`next` 写入点最集中）、`internal/httpapi`（接入层错误）、`internal/mcp`（文本投影与兜底）、
@@ -16,6 +16,7 @@
 `result.recovery{entry,reference,input_state,cause}`；`contract_version` `2` → `3`。
 发行单位（不是契约）：`release_version` `0.4.0` → `0.4.1`（patch）、`android_version_code`
 `3` → `4`；结论与理由见 §9.1。
+实现与验证记录：[structured-recovery-entry.md](../../verification/structured-recovery-entry.md)。
 
 本文引用的函数名、行号、常量与默认值均以该基线提交为准；实现落地前若代码已前进，须按当时的
 `HEAD` 重新核对（重点：`internal/protocol/responses.go` 的 `Result`、`internal/protocol/errors.go`
@@ -42,13 +43,13 @@
    根本不是恢复入口，而是“外部前置条件不满足”。调用方拿到一个字符串，无法判断自己在恢复
    哪一层。
 2. **信息不足**：只说入口，不说“带哪种引用”。`observe(P)` 与 `observe(O)` 是两条不同路径
-   （[observe.go:104-131](../../internal/engine/observe.go#L104-L131)），文档只能用散文写“应改用
-   `observe(P…)`”（[interface.md:108](../../docs/interface.md#L108)）。
+   （[observe.go:104-131](../../../internal/engine/observe.go#L104-L131)），文档只能用散文写“应改用
+   `observe(P…)`”（[interface.md:108](../../../docs/interface.md#L108)）。
 3. **恰好漏掉最常见的窗口**：静态拒绝（`node_not_found`、`ambiguous_point`、`unsupported_key`、
    `invalid_coordinates` 等）的 `next` 为空，而这正是唯一“换一个 P、拿同一个 O 立刻重试”的
-   零成本路径。测试已把这个空值写成断言（[act_point_test.go:294-295](../../internal/engine/act_point_test.go#L294-L295)），
+   零成本路径。测试已把这个空值写成断言（[act_point_test.go:294-295](../../../internal/engine/act_point_test.go#L294-L295)），
    说明是设计而非疏漏。
-4. **双源，而且已经漂移**：`nextFor` 静态表（[errors.go:58-79](../../internal/protocol/errors.go#L58-L79)）
+4. **双源，而且已经漂移**：`nextFor` 静态表（[errors.go:58-79](../../../internal/protocol/errors.go#L58-L79)）
    加 50 处手写 `.WithNext(...)`。表里的 `operation_running`、`observation_not_ready`、
    `tree_unavailable` 三个字符串已经没有对应 `Code*` 常量；反过来 `hierarchy_unavailable`、
    `display_unavailable`、`stale_screen`、`target_changed`、`foreground_changed` 不在表内，
@@ -56,58 +57,58 @@
    `grep -rn "\.Next = \|Next: " internal/ | wc -l` = 46（其中 2 处是 `NewError` 与
    `WithNext` 自身实现，不是调用点）。
 5. **手写覆盖会盖掉别的事实**：`revalidateActTarget` 会返回 `session_ended`/`control_revoked`
-   （[act.go:279-285](../../internal/engine/act.go#L279-L285)），但调用点在设置 `Next` 时无条件
-   写成 `observe`（[act.go:55-60](../../internal/engine/act.go#L55-L60)），于是“会话已撤销”被
+   （[act.go:279-285](../../../internal/engine/act.go#L279-L285)），但调用点在设置 `Next` 时无条件
+   写成 `observe`（[act.go:55-60](../../../internal/engine/act.go#L55-L60)），于是“会话已撤销”被
    改写成“重新观察”。`start` 也有同类问题：首个观察失败触发撤销、会话已结束，响应仍写
-   `next=observe`（[start.go:218-236](../../internal/engine/start.go#L218-L236)）。
+   `next=observe`（[start.go:218-236](../../../internal/engine/start.go#L218-L236)）。
 6. **不可验证**：现有断言只比较字符串本身，不验证“按提示走下一步”是否可行
-   （[image_test.go:545](../../internal/engine/image_test.go#L545)、
-   [openapp_test.go:169](../../internal/engine/openapp_test.go#L169)）。`next=observe` 在会话
+   （[image_test.go:545](../../../internal/engine/image_test.go#L545)、
+   [openapp_test.go:169](../../../internal/engine/openapp_test.go#L169)）。`next=observe` 在会话
    已结束时照样指向一次必然失败。
 7. **成功降级无信号**：后置观察失败时 `outcome=executed`、`op.Error=nil`
-   （[act.go:113-128](../../internal/engine/act.go#L113-L128)），阶段其实已经记进 `op.Phase`
-   （[act.go:126](../../internal/engine/act.go#L126)、
-   [operations.go:132-145](../../internal/engine/operations.go#L132-L145)），但 `diagnose` 只在
+   （[act.go:113-128](../../../internal/engine/act.go#L113-L128)），阶段其实已经记进 `op.Phase`
+   （[act.go:126](../../../internal/engine/act.go#L126)、
+   [operations.go:132-145](../../../internal/engine/operations.go#L132-L145)），但 `diagnose` 只在
    `op.Error != nil` 或 `outcome=uncertain` 时列问题
-   （[diagnose.go:196-210](../../internal/engine/diagnose.go#L196-L210)），于是“动作成功、
+   （[diagnose.go:196-210](../../../internal/engine/diagnose.go#L196-L210)），于是“动作成功、
    观察失败”在运维视图里完全隐形——缺的不是记录，是筛选条件。
 
 ### 1.2 证据链
 
-1. `Result.Next` 的定义与序列化：[responses.go:437](../../internal/protocol/responses.go#L437)、
-   [responses.go:647-654](../../internal/protocol/responses.go#L647-L654)（非空才写）。
-2. 客户端解码：[decode_response.go:345](../../internal/protocol/decode_response.go#L345)；
-   文本投影：[render.go:322-323](../../internal/mcp/render.go#L322-L323)。
-3. 静态映射表：[errors.go:58-79](../../internal/protocol/errors.go#L58-L79)；手写 `.WithNext(...)`
+1. `Result.Next` 的定义与序列化：[responses.go:437](../../../internal/protocol/responses.go#L437)、
+   [responses.go:647-654](../../../internal/protocol/responses.go#L647-L654)（非空才写）。
+2. 客户端解码：[decode_response.go:345](../../../internal/protocol/decode_response.go#L345)；
+   文本投影：[render.go:322-323](../../../internal/mcp/render.go#L322-L323)。
+3. 静态映射表：[errors.go:58-79](../../../internal/protocol/errors.go#L58-L79)；手写 `.WithNext(...)`
    50 处、`.Next =`/`Next:` 写入 46 处，逐文件分布见 §6.1。
 4. 静态拒绝不带 `next`（含 `ambiguous_point`）：
-   [act.go:186-220](../../internal/engine/act.go#L186-L220)、
-   [act_point_test.go:294-295](../../internal/engine/act_point_test.go#L294-L295)。
+   [act.go:186-220](../../../internal/engine/act.go#L186-L220)、
+   [act_point_test.go:294-295](../../../internal/engine/act_point_test.go#L294-L295)。
 5. 成功后置观察失败仍为 `executed` 且 `op.Error` 为空：
-   [act.go:113-128](../../internal/engine/act.go#L113-L128)、
-   [image_test.go:542-547](../../internal/engine/image_test.go#L542-L547)。
+   [act.go:113-128](../../../internal/engine/act.go#L113-L128)、
+   [image_test.go:542-547](../../../internal/engine/image_test.go#L542-L547)。
 6. `diagnose` 只看 `op.Error`/`uncertain`：
-   [diagnose.go:196-210](../../internal/engine/diagnose.go#L196-L210)；被排除的
+   [diagnose.go:196-210](../../../internal/engine/diagnose.go#L196-L210)；被排除的
    `post_observation_failed` 阶段本身已经落库
-   （[act.go:126](../../internal/engine/act.go#L126)、
-   [operations.go:139-140](../../internal/engine/operations.go#L139-L140)）。
-7. 接入层错误也带 `next`：[httpapi/server.go:489-498](../../internal/httpapi/server.go#L489-L498)；
-   MCP 传输层用 `NextForCode` 兜底：[mcp/server.go:293-305](../../internal/mcp/server.go#L293-L305)。
+   （[act.go:126](../../../internal/engine/act.go#L126)、
+   [operations.go:139-140](../../../internal/engine/operations.go#L139-L140)）。
+7. 接入层错误也带 `next`：[httpapi/server.go:489-498](../../../internal/httpapi/server.go#L489-L498)；
+   MCP 传输层用 `NextForCode` 兜底：[mcp/server.go:293-305](../../../internal/mcp/server.go#L293-L305)。
 8. `contract_version` 前进规则：“只在改变普通请求/响应必需形状、默认行为、核心枚举或执行语义时
-   前进”（[release.md:42-44](../../docs/release.md#L42-L44)）。本提案同时改变响应形状与核心
+   前进”（[release.md:42-44](../../../docs/release.md#L42-L44)）。本提案同时改变响应形状与核心
    枚举，故必须前进。
 9. 静态表已经漂移：`nextFor` 分支里的 `operation_running`、`observation_not_ready`、
-   `tree_unavailable` 没有对应 `Code*` 常量（[errors.go:60-77](../../internal/protocol/errors.go#L60-L77)
-   对照 [errors.go:82-158](../../internal/protocol/errors.go#L82-L158)）；`hierarchy_unavailable`
-   （[errors.go:123](../../internal/protocol/errors.go#L123)）、`display_unavailable`
-   （[errors.go:121](../../internal/protocol/errors.go#L121)）不在表内。
+   `tree_unavailable` 没有对应 `Code*` 常量（[errors.go:60-77](../../../internal/protocol/errors.go#L60-L77)
+   对照 [errors.go:82-158](../../../internal/protocol/errors.go#L82-L158)）；`hierarchy_unavailable`
+   （[errors.go:123](../../../internal/protocol/errors.go#L123)）、`display_unavailable`
+   （[errors.go:121](../../../internal/protocol/errors.go#L121)）不在表内。
 10. 同一个 code 在不同路径得到不同提示：`session_not_found` 在
-    [end.go:52-56](../../internal/engine/end.go#L52-L56) 省略、在
-    [end.go:140-143](../../internal/engine/end.go#L140-L143) 给 `status`；`app_launch_failed`
-    两处都不写 `Next`（[openapp.go:184-186](../../internal/engine/openapp.go#L184-L186)、
-    [openapp.go:234-236](../../internal/engine/openapp.go#L234-L236)），调用方只能看到空串。
-11. `Result` 的成员与序列化顺序：[responses.go:425-448](../../internal/protocol/responses.go#L425-L448)、
-    [responses.go:639-655](../../internal/protocol/responses.go#L639-L655)；`next` 是最后一个成员，
+    [end.go:52-56](../../../internal/engine/end.go#L52-L56) 省略、在
+    [end.go:140-143](../../../internal/engine/end.go#L140-L143) 给 `status`；`app_launch_failed`
+    两处都不写 `Next`（[openapp.go:184-186](../../../internal/engine/openapp.go#L184-L186)、
+    [openapp.go:234-236](../../../internal/engine/openapp.go#L234-L236)），调用方只能看到空串。
+11. `Result` 的成员与序列化顺序：[responses.go:425-448](../../../internal/protocol/responses.go#L425-L448)、
+    [responses.go:639-655](../../../internal/protocol/responses.go#L639-L655)；`next` 是最后一个成员，
     `recovery` 直接顶替该位置，其余成员顺序不动。
 
 ### 1.3 为什么直觉会出错
@@ -115,12 +116,12 @@
 - **“保留 `next`，再加几个字段就行”**：双源仍在，且 `next` 与 `recovery.entry` 会长期并存，
   产生第二个真相。本次明确删除，不留镜像。
 - **“把 `next` 扩成自然语言短句”**：不可判定、不可测、必然漂移，且与“`message` 是受控短句、
-  调用方只依赖 `code`”的既有分层冲突（[interface.md:60](../../docs/interface.md#L60)）。
+  调用方只依赖 `code`”的既有分层冲突（[interface.md:60](../../../docs/interface.md#L60)）。
 - **“让 `next` 表示服务端下一步动作”**：把决策权搬到服务端，等于引入隐式状态机，违背
   “设备同时只有一项普通工作、不建普通动作队列”。
 - **“`next` 为空就表示可以重试”**：空值已经表示“无恢复入口”，再叠一层会立即产生歧义。
 - **“只改 `act`/`open_app`”**：`status`、`end`、`keepalive`、`shell`、`apps`、`observe`、
-  `inspect`、控制同步（[control.go:18](../../internal/engine/control.go#L18)）与两个接入层都在写
+  `inspect`、控制同步（[control.go:18](../../../internal/engine/control.go#L18)）与两个接入层都在写
   `next`，只改两个工具会留下混合契约，调用方要同时理解两套语义。
 
 ## 2. 目标与非目标
@@ -188,9 +189,9 @@ R2/R3/R5 不是永久否决：任一被重新提出，都必须回到本提案�
 ```
 
 - `recovery` 出现在 `Result` 的固定顺序位置：`…, diagnosis, cleanup, error, recovery`（顶替原
-  `next` 的位置，[responses.go:639-655](../../internal/protocol/responses.go#L639-L655)）。
+  `next` 的位置，[responses.go:639-655](../../../internal/protocol/responses.go#L639-L655)）。
 - 省略的成员不写 `null`：`MarshalJSONTo` 只在非零时输出，`error` 缺失就没有 `error` 键
-  （[responses.go:451-655](../../internal/protocol/responses.go#L451-L655)）。
+  （[responses.go:451-655](../../../internal/protocol/responses.go#L451-L655)）。
 - `recovery` 对象缺失表示“本次结果没有待恢复事实”；它存在时 `entry` 与 `reference` 必出现，
   `input_state` 与 `cause` 各自按 §4.2 的条件出现。
 
@@ -210,7 +211,7 @@ R2/R3/R5 不是永久否决：任一被重新提出，都必须回到本提案�
   `blocking_operation_id`。
 - `entry=retry`/`observe`：`P`（或 `O`）属于**下一个请求**——`P` 是调用方新生成的幂等键。
   不能直接把本结果的 `operation_id` 当 `P` 再发一次：`registerOperation` 命中已有 P 时返回
-  重复视图而不重新执行（[operations.go:65-69](../../internal/engine/operations.go#L65-L69)）。
+  重复视图而不重新执行（[operations.go:65-69](../../../internal/engine/operations.go#L65-L69)）。
 
 `entry` 的语义边界：
 
@@ -218,15 +219,15 @@ R2/R3/R5 不是永久否决：任一被重新提出，都必须回到本提案�
   且未派发时出现。
 - `observe`：观察证据作废，必须重新采集。一律 `reference=P`，且这里的 `P` 是下一个请求的新
   幂等键；已消耗的 `O` 不可再用，而 `P` 只要不重复就能继续用
-  （[observe.go:122-130](../../internal/engine/observe.go#L122-L130)）。
+  （[observe.go:122-130](../../../internal/engine/observe.go#L122-L130)）。
 - `status`：结果未定或收尾未完成。
 - `end`：会话已结束/过期/被撤销。`reference` 用 `P`；只有 `status(O)` 的撤销分支用 `O`
-  （该结果里没有这个会话的 P，而 `end` 本来就接受 O，[end.go:107-118](../../internal/engine/end.go#L107-L118)）。
+  （该结果里没有这个会话的 P，而 `end` 本来就接受 O，[end.go:107-118](../../../internal/engine/end.go#L107-L118)）。
 - `user`：需要人介入，任何 API 调用都不会成功。
 - `update`：契约版本不匹配。
 
 `input_state` 与 `status(O)` 的顶层 `input_state` 同源同词汇
-（[status.go:88-118](../../internal/engine/status.go#L88-L118)）：会话结束 → `revoked`；`ready`
+（[status.go:88-118](../../../internal/engine/status.go#L88-L118)）：会话结束 → `revoked`；`ready`
 且在 `ActionableUntil` 内 → `effective`；`ready` 已超期 → `expired`；其余保留
 `claimed`/`retired`。本次请求没有引用 O、或引用的 O 完全不可解析时不出现（表格里的 `—`）。
 
@@ -236,7 +237,7 @@ R2/R3/R5 不是永久否决：任一被重新提出，都必须回到本提案�
 | --- | --- |
 | 动作成功且发布了新观察 | 省略 |
 | 只读工具成功（`observe`/`inspect`/`apps`/`status`/`diagnose`/`notify`/`keepalive`） | 省略 |
-| `diagnose` 的任何结果（它不返回 `error`，也没有可推进的引用，[diagnose.go:29-41](../../internal/engine/diagnose.go#L29-L41)） | 省略 |
+| `diagnose` 的任何结果（它不返回 `error`，也没有可推进的引用，[diagnose.go:29-41](../../../internal/engine/diagnose.go#L29-L41)） | 省略 |
 | 接入层参数错误（`invalid_request`、`unauthorized`、`forbidden`、方法不许、JSON 语法） | 省略 |
 | 确定性体积拒绝 `inspection_too_large`：同样的叶子单元再读一次仍超预算，出路是改 `node`/`query` | 省略 |
 | 重复 `P` 返回原视图 | 沿用按 `op` 重算的结果（I8），不另写 |
@@ -308,9 +309,9 @@ planRecovery(in):                                   # in 的成员见 §6.2
 
 要求：函数**全序**（任何输入都有确定输出或明确省略），纯 CPU，不读设备、不加锁外等待。
 `in.phase` 的两个特殊值分别来自 `act`/`open_app` 的 `post_observation_failed`
-（[act.go:126](../../internal/engine/act.go#L126)）与 `executed_revoked`
-（[act.go:88](../../internal/engine/act.go#L88)），`start` 的首个观察失败记的是
-`first_observation_failed`（[start.go:223](../../internal/engine/start.go#L223)），按同一
+（[act.go:126](../../../internal/engine/act.go#L126)）与 `executed_revoked`
+（[act.go:88](../../../internal/engine/act.go#L88)），`start` 的首个观察失败记的是
+`first_observation_failed`（[start.go:223](../../../internal/engine/start.go#L223)），按同一
 `cause` 处理。
 
 ### 5.2 全量映射表
@@ -336,11 +337,11 @@ planRecovery(in):                                   # in 的成员见 §6.2
 | 触发 | `entry` | `reference` | `input_state` | `cause` |
 | --- | --- | --- | --- | --- |
 | `session_*` / `observation_*` / `control_revoked` | 同 `act` | | | |
-| `invalid_request`（`app` 缺失，[openapp.go:41](../../internal/engine/openapp.go#L41)） | `retry` | O | effective | — |
+| `invalid_request`（`app` 缺失，[openapp.go:41](../../../internal/engine/openapp.go#L41)） | `retry` | O | effective | — |
 | `app_not_found` | `user` | none | effective | — |
-| 启动入口解析失败（503 `device_unavailable`，claim 前，[openapp.go:71-72](../../internal/engine/openapp.go#L71-L72)） | `retry` | O | effective | — |
-| 任务列表不可读（503 `device_unavailable`，claim 前，[openapp.go:79-82](../../internal/engine/openapp.go#L79-L82)） | `retry` | O | effective | — |
-| `display_unavailable`（claim 后，[openapp.go:100-103](../../internal/engine/openapp.go#L100-L103)） | `observe` | P | retired | — |
+| 启动入口解析失败（503 `device_unavailable`，claim 前，[openapp.go:71-72](../../../internal/engine/openapp.go#L71-L72)） | `retry` | O | effective | — |
+| 任务列表不可读（503 `device_unavailable`，claim 前，[openapp.go:79-82](../../../internal/engine/openapp.go#L79-L82)） | `retry` | O | effective | — |
+| `display_unavailable`（claim 后，[openapp.go:100-103](../../../internal/engine/openapp.go#L100-L103)） | `observe` | P | retired | — |
 | `app_launch_failed`（claim 后） | `observe` | P | retired | — |
 | `task_focus_unavailable`/`app_launch_unconfirmed`/`application_moved` | `status` | P | retired | — |
 | 成功后置观察失败（`control_ui_on_virtual_display` 只可能出现在这一步） | `observe` | P | retired | `post_observation_failed` |
@@ -370,38 +371,38 @@ planRecovery(in):                                   # in 的成员见 §6.2
 | 显示创建/绑定失败、`mode_not_selected`、`control_unavailable`、`device_locked`、`device_not_interactive` | `user` | none | — | — |
 | 设备或旧资源未就绪（`device_busy`、`recovering`、`cleanup_unconfirmed`、`ledger_*`） | `status` | P | — | — |
 | 首个观察失败但会话仍活动 | `observe` | P | retired | `post_observation_failed` |
-| 首个观察失败并触发撤销（`control_ui_on_virtual_display`/`display_unavailable`/`stale_screen`，[start.go:224-236](../../internal/engine/start.go#L224-L236)） | `status` | P | revoked | `cleanup_pending` |
+| 首个观察失败并触发撤销（`control_ui_on_virtual_display`/`display_unavailable`/`stale_screen`，[start.go:224-236](../../../internal/engine/start.go#L224-L236)） | `status` | P | revoked | `cleanup_pending` |
 | 成功 | 省略 | — | — | — |
 
 最后两行是同一段代码的两个分支：原来的实现两行都写 `next=observe`
-（[start.go:222](../../internal/engine/start.go#L222)），撤销分支因此指向一个已经不存在的会话。
+（[start.go:222](../../../internal/engine/start.go#L222)），撤销分支因此指向一个已经不存在的会话。
 
 **`end`**
 
 | 触发 | `entry` | `reference` | `input_state` | `cause` |
 | --- | --- | --- | --- | --- |
-| 收尾 `pending`/`unconfirmed`（[end.go:98-102](../../internal/engine/end.go#L98-L102)） | `status` | P | revoked | `cleanup_pending` |
-| 已封闭 P（[operations.go:74-77](../../internal/engine/operations.go#L74-L77)）/ 无会话（`session_not_found`、`reference_no_session`） | `status` | P | — | — |
+| 收尾 `pending`/`unconfirmed`（[end.go:98-102](../../../internal/engine/end.go#L98-L102)） | `status` | P | revoked | `cleanup_pending` |
+| 已封闭 P（[operations.go:74-77](../../../internal/engine/operations.go#L74-L77)）/ 无会话（`session_not_found`、`reference_no_session`） | `status` | P | — | — |
 | 引用不可解析（`observation_not_found`、`operation_not_found`、`invalid_request`） | 省略 | — | — | — |
 | 收尾 `complete` / `not_applicable` | 省略 | — | — | — |
 
 `end` 是唯一可能“会话已不活动但入口不是 `end`”的工具：它本身就是终点，重发只会得到同一份
-收尾视图。`session_not_found` 在 [end.go:52-56](../../internal/engine/end.go#L52-L56) 与
-[end.go:140-143](../../internal/engine/end.go#L140-L143) 两条路径上原本一个省略、一个给
+收尾视图。`session_not_found` 在 [end.go:52-56](../../../internal/engine/end.go#L52-L56) 与
+[end.go:140-143](../../../internal/engine/end.go#L140-L143) 两条路径上原本一个省略、一个给
 `status`，实现时统一到上表第二行。
 
 **`status`**
 
 | 触发 | `entry` | `reference` | `input_state` | `cause` |
 | --- | --- | --- | --- | --- |
-| 自身存在恢复记录（`e.recovery != nil`，[status.go:48-50](../../internal/engine/status.go#L48-L50)） | `status` | P（`start_operation_id`，无则 none） | — | — |
+| 自身存在恢复记录（`e.recovery != nil`，[status.go:48-50](../../../internal/engine/status.go#L48-L50)） | `status` | P（`start_operation_id`，无则 none） | — | — |
 | `status(O)`：`ready` 且未过期 | 省略 | — | （顶层 `input_state=effective` 已表达） | — |
 | `status(O)`：会话已结束 | `end` | O | revoked | — |
 | `status(O)`：过期 / 已消费 / 已退役 | `observe` | P | expired/retired/claimed | — |
 | `status(P)`：running | `status` | P | — | `running` |
 | `status(P)`：finished 且带 `error` | 按 `code` 走 §5.1 | P | — | — |
 | `status(P)`：finished 且 `outcome=uncertain` | `status` | P | — | — |
-| `status(P)`：会话已结束且收尾 `pending`/`unconfirmed`（[status.go:80-83](../../internal/engine/status.go#L80-L83)） | `status` | P | revoked | `cleanup_pending` |
+| `status(P)`：会话已结束且收尾 `pending`/`unconfirmed`（[status.go:80-83](../../../internal/engine/status.go#L80-L83)） | `status` | P | revoked | `cleanup_pending` |
 | 其余 | 省略 | — | — | — |
 
 第一行不写 `cause`：`cause` 只用于“看似成功/在跑”的降级，恢复记录本身是确定的轮询事实。
@@ -459,7 +460,7 @@ planRecovery(in):                                   # in 的成员见 §6.2
 | --- | --- |
 | `internal/protocol/responses.go` | 删除 `Result.Next`（:437）与序列化块（:647-654）；新增 `Recovery` 结构、`Result.Recovery` 与 `MarshalJSONTo` 分支（置于 `error` 之后，仍是最后一项） |
 | `internal/protocol/errors.go` | 删除 `APIError.Next`（:17）与 `WithNext`（:215-219）；`NewError` 不再预填（:45）；`NextForCode`/`nextFor`（:55-79）收窄为 `AccessRecovery(code) *Recovery`，只覆盖四个接入层码 |
-| `internal/protocol/decode_response.go` | 删除 `Next` 成员与赋值（:345、:376）；新增 `recovery` 对象解码。响应解码本来就忽略未知成员（[decode_response.go:86-96](../../internal/protocol/decode_response.go#L86-L96)），删字段不会让旧客户端报错 |
+| `internal/protocol/decode_response.go` | 删除 `Next` 成员与赋值（:345、:376）；新增 `recovery` 对象解码。响应解码本来就忽略未知成员（[decode_response.go:86-96](../../../internal/protocol/decode_response.go#L86-L96)），删字段不会让旧客户端报错 |
 | `internal/engine/recovery.go`（新增） | `planRecovery`、`recoveryInput`、`endPlan`/`statusPlan`/`startPlan`/`discoveryPlan`/`shellPlan` 与四张码表 |
 | `internal/engine/act.go` | 删除 7 处 `result.Next=`（:59/:71/:78/:87/:96/:108/:125）、3 处 `Next:` 字面量（:539/:546/:553）与 19 处 `WithNext`；失败分支走 `finishWithError`，不可判分支（:66-75）保留手写 `Result`，但 `recovery` 由同一个 `planRecovery` 生成 |
 | `internal/engine/openapp.go` | 删除 5 处 `result.Next=`（:407/:410/:417/:427/:448）与 9 处 `WithNext`；`finishOpenAppSuccess`/`finishOpenAppUncertain` 调用同一个 `planRecovery` |
@@ -483,7 +484,7 @@ planRecovery(in):                                   # in 的成员见 §6.2
 | 测试 | 10 个文件、32 处 `next` 相关引用（23 处 `.Next` 断言、7 处 JSON fixture、2 处 `NextForCode`）改为 `recovery`；新增 `recovery_test.go` |
 
 **通用路径怎么带 `recovery`**：不给 `APIError` 加字段，也不要求 50 个调用点各写一个入口。
-`finishWithError`（[operations.go:329-344](../../internal/engine/operations.go#L329-L344)）本身就是
+`finishWithError`（[operations.go:329-344](../../../internal/engine/operations.go#L329-L344)）本身就是
 所有工具失败的唯一漏斗：它手里有 `op`（含 `Kind` 与新增的 `Claimed`）、`phase`、
 `apiErr.Code`/`Outcome`，足以填满 `recoveryInput`，于是调用一次 `planRecovery`，把结果写进
 `Result.Recovery`，同时记到 `operationState.Recovery` 供 `status(P)` 重放（同一 `P` 前后必须
@@ -500,7 +501,7 @@ operation 记录，`reference=P` 没有锚点：这类错误由 `httpapi.writeAP
 `AccessRecovery` 处理，四个接入层码之外一律省略。
 
 **`claimed` 从哪来**：`operationState` 增加 `Claimed bool` 与 `Recovery *Recovery`，前者由
-`claimObservationLocked`（[act.go:244-269](../../internal/engine/act.go#L244-L269)）在
+`claimObservationLocked`（[act.go:244-269](../../../internal/engine/act.go#L244-L269)）在
 `ready → claimed` 成功时置位（该函数已经有 `work.ClaimedO`，但 `work` 在派发结束后即释放，
 不能用于 `status` 重放），后者由 `finishWithError` 或各 `finish*` 写入。`input_state` 不落库，
 按 `claimed`、`observation_expired`、会话状态即时推导。`planRecovery` 只读这些字段，不碰设备、
@@ -549,7 +550,7 @@ operation 记录，`reference=P` 没有锚点：这类错误由 `httpapi.writeAP
 | 严格接入 | 请求面零改动；响应面删除一个成员、新增一个对象 |
 | 三态与省略 | `recovery` 缺失即“无事实”，与 `omitempty` 无关，用手写 `MarshalJSONTo` 控制 |
 | 事实分层 | 新增第五层“下一步”，不与执行/观察/会话/收尾互相替代 |
-| 恢复屏障 | 响应里的 `recovery` 与引擎内部的 `e.recovery`（`*Ledger`，[engine.go:237](../../internal/engine/engine.go#L237)）不是同一事实：前者是下一步投影，后者是账本恢复态。两者不复用类型、不互相赋值 |
+| 恢复屏障 | 响应里的 `recovery` 与引擎内部的 `e.recovery`（`*Ledger`，[engine.go:237](../../../internal/engine/engine.go#L237)）不是同一事实：前者是下一步投影，后者是账本恢复态。两者不复用类型、不互相赋值 |
 
 ### 6.5 契约与文档影响
 
@@ -583,8 +584,8 @@ operation 记录，`reference=P` 没有锚点：这类错误由 `httpapi.writeAP
 | 动作是否真的生效 | `uncertain` 是信息论边界，`recovery` 只给 `status`，不改变结论 |
 | STOP 后已派发命令的撤回 | 不可能撤回，`recovery` 不伪称 |
 | 会话 UI 已变时旧 `O` 的复用 | 旧 `O` 依旧必须消耗；`recovery` 只把这件事说清楚 |
-| `P` 被 `MaxOperations` 淘汰后的恢复 | `reference=P` 会得到 `operation_unknown`；此时只能 `observe` 一个仍在保留窗口的 O，或先 `end` 再 `start`——直接 `start` 会撞 `session_exists`（[start.go:33-38](../../internal/engine/start.go#L33-L38)） |
-| 旧客户端读不到提示 | 删除 `next` 是破坏性变更；响应解码忽略未知成员（[decode_response.go:86-96](../../internal/protocol/decode_response.go#L86-L96)），旧客户端不会报错，只会静默丢掉 `recovery`，必须整组升级 |
+| `P` 被 `MaxOperations` 淘汰后的恢复 | `reference=P` 会得到 `operation_unknown`；此时只能 `observe` 一个仍在保留窗口的 O，或先 `end` 再 `start`——直接 `start` 会撞 `session_exists`（[start.go:33-38](../../../internal/engine/start.go#L33-L38)） |
+| 旧客户端读不到提示 | 删除 `next` 是破坏性变更；响应解码忽略未知成员（[decode_response.go:86-96](../../../internal/protocol/decode_response.go#L86-L96)），旧客户端不会报错，只会静默丢掉 `recovery`，必须整组升级 |
 | `diagnose` 里看见后置观察失败 | 本提案只在响应里给 `cause`，`diagnose` 聚合按 §9.1 留到实现提交后单独做 |
 
 ### 7.3 成本
@@ -648,16 +649,16 @@ T1 的表必须按 §6.1 的 50 个 `.WithNext(...)` 与 46 个 `.Next =`/`Next:
 | `reference` 取值 | `P`/`O`/`none`；`retry` 必须是 `O` |
 | `input_state` 词汇 | 与 `status(O)` 完全一致 |
 | `cause` 取值 | 四值，仅在无 `error` 时出现 |
-| `contract_version` | 2→3，规则强制（[release.md:42-44](../../docs/release.md#L42-L44)：响应形状与核心枚举同时改变） |
+| `contract_version` | 2→3，规则强制（[release.md:42-44](../../../docs/release.md#L42-L44)：响应形状与核心枚举同时改变） |
 | 控制 App | 不解析 `recovery`；仅随契约版本重建 |
 | `recovery` 是否进控制同步响应 | 否；控制协议不是工具结果，实现时加断言 |
 | `status(self)` 无 `start_operation_id` 时 | `reference=none`（I2 允许） |
 | `shell` | 不产生 `retry`；`root_unavailable` 是唯一 `user`，`control_revoked`/`session_ended`/`session_expired` 是 `end` |
-| `android_version_code` 为何前进 | [release.md:26-44](../../docs/release.md#L26-L44) 与 `scripts/generate-version.ps1`、`scripts/verify-manifest.ps1` 只要求 `versions.json` / `AndroidManifest.xml` / 清单三者一致，没有“契约前进就必须升 versionCode”的规则；本次 App 二进制与编译期 `CONTRACT_VERSION` 都变，升到 4 是为了让已安装产物可区分，不是契约要求 |
+| `android_version_code` 为何前进 | [release.md:26-44](../../../docs/release.md#L26-L44) 与 `scripts/generate-version.ps1`、`scripts/verify-manifest.ps1` 只要求 `versions.json` / `AndroidManifest.xml` / 清单三者一致，没有“契约前进就必须升 versionCode”的规则；本次 App 二进制与编译期 `CONTRACT_VERSION` 都变，升到 4 是为了让已安装产物可区分，不是契约要求 |
 | `inspection_too_large` 为何省略 | `inspect` 读的是已发布证据，O 可能已 `retired`，给 `retry/O` 会违反 I3；唯一出路是改 `node`/`query` |
-| `release_version` | 0.4.0 → 0.4.1（patch）。需求已指定 patch 级别；`release_version` 只标识产物，与整数契约号无关（[release.md:30-31](../../docs/release.md#L30-L31)） |
+| `release_version` | 0.4.0 → 0.4.1（patch）。需求已指定 patch 级别；`release_version` 只标识产物，与整数契约号无关（[release.md:30-31](../../../docs/release.md#L30-L31)） |
 | 迁移窗口 | 整组强制升级，不提供 `next` 兼容读取；回退只能整组回退 |
-| U1 `diagnose` 聚合 | 已由人确认不纳入本提案：`cause` 只进响应；`diagnose` 把 `op.Phase=post_observation_failed` 纳入 Issues 作为实现提交后的独立变更，唯一改动点是 [diagnose.go:207](../../internal/engine/diagnose.go#L207) 的筛选条件（该阶段已由 [operations.go:139-140](../../internal/engine/operations.go#L139-L140) 落库） |
+| U1 `diagnose` 聚合 | 已由人确认不纳入本提案：`cause` 只进响应；`diagnose` 把 `op.Phase=post_observation_failed` 纳入 Issues 作为实现提交后的独立变更，唯一改动点是 [diagnose.go:207](../../../internal/engine/diagnose.go#L207) 的筛选条件（该阶段已由 [operations.go:139-140](../../../internal/engine/operations.go#L139-L140) 落库） |
 
 ### 9.2 未决
 
@@ -677,19 +678,47 @@ T1 的表必须按 §6.1 的 50 个 `.WithNext(...)` 与 46 个 `.Next =`/`Next:
 
 1–3 可并行但必须同一次提交；4 与 5 依赖 1–3；6 依赖 4–5；7 依赖 6。
 
-## 11. 实现结果（归档时补写）
+## 11. 实现结果
 
-实现提交：`<hash>`。实现与验证记录：`../../verification/structured-recovery-entry.md`
+实现提交：`d1ca0fb4b21d2e6af5dbe364acd3f30b8dd646b5`（2026-11-10）。实现与验证记录：
+[structured-recovery-entry.md](../../verification/structured-recovery-entry.md)。
 
 ### 11.1 已落地
 
 | 提案条目 | 落点 |
 | --- | --- |
+| 删除 `Result.Next` 与序列化块；新增 `Recovery` 结构、常量、`Result.Recovery` 与末尾序列化 | `internal/protocol/responses.go`：`type Recovery`、`Result.MarshalJSONTo` |
+| 删除 `APIError.Next`/`WithNext`；`NewError` 不再预填；静态表收窄为 `AccessRecovery` | `internal/protocol/errors.go` |
+| 响应解码新增 `recovery` 对象、删除 `next` | `internal/protocol/decode_response.go` |
+| `planRecovery`、四张码表、`endPlan`/`statusPlan`/`startPlan`/`discoveryPlan`/`shellPlan` | `internal/engine/recovery.go` |
+| `act` 全部静态拒绝/认领/重验/派发/后观察分支 | `internal/engine/act.go`；`claimObservationLocked` 记录 `Claimed` |
+| `open_app` 全部预检/认领/启动/后观察分支 | `internal/engine/openapp.go` |
+| `observe` 的解析/采集失败与成功 | `internal/engine/observe.go` |
+| `start` 首个观察失败的两支（活动 → observe；撤销 → status/cleanup_pending） | `internal/engine/start.go` |
+| `end` 的收尾优先与引用不可解析省略 | `internal/engine/end.go` |
+| `status` 自身/O/P 三个视图 | `internal/engine/status.go` |
+| `keepalive`/`apps`/`shell` 的失败映射与成功省略 | 对应工具文件；`shell` 不产生 `retry` |
+| `finishOperation` 成为统一规划点并记录 `operationState.Recovery`；重复 P/`status(P)` 重放 | `internal/engine/operations.go`、`internal/engine/engine.go` |
+| 控制同步 `contract_mismatch` 走 `update/none` | `internal/engine/control.go`、`internal/httpapi/server.go` 的 `AccessRecovery` |
+| MCP 文本投影四行与传输失败/取消固定 `status/P` | `internal/mcp/render.go`、`internal/mcp/server.go` |
+| 版本：契约 3、发行 0.4.1、versionCode 4 | `release/versions.json` 与生成产物 |
+| 用例 T1–T12（含两个反向对照）与既有 11 个测试文件迁移 | `internal/engine/recovery_entry_test.go` 等 |
+| 文档 8 个文件 | `docs/interface.md`、`client.md`、`mcp.md`、`control-protocol.md`、`phone-operations.md`、`runbook.md`、`release.md`、`integration.md` |
 
 ### 11.2 与提案不同或未执行
 
 | 项 | 结论与理由 |
 | --- | --- |
+| `recoveryInput` 多一个 `Reference` 成员 | 提案 §6.2 的固定输入集无法区分 `status(O)` 与 `status(P)`，也无法表达“本次请求引用的是 O 还是 P”。`Reference` 只是请求已用引用的类型（O/P/空），纯事实，不参与判定；`planRecovery` 仍是纯函数 |
+| `status(P)` 重放 `operationState.Recovery` | 提案 §6.1 同时要求“落库供重放”与“改调 `planRecovery(op)`”。实现选择重放归档的规划结果，保证同一 P 前后一致（I8），并避免时间相关的 `input_state` 漂移；当前收尾为 `pending`/`unconfirmed` 且该 P 无 `error`、`outcome≠uncertain` 时，仍用 `planRecovery` 做实时覆盖 |
+| `open_app` 认领前的静态 `control_ui_on_virtual_display` | 提案把该码写成只可能出现在后观察；实际 `openapp.go` 在 claim 前也会返回。实现把 claim 前的 capture 类码当静态拒绝（`retry/O/effective`），claim 后仍为 `observe/P/retired` |
+| `inspect` 的失败行 | 提案 §5.2 的 inspect 行不可达：`Engine.Inspect` 返回 `(nil, apiErr)`，HTTP 接入层只走 `AccessRecovery`，四个接入层码之外一律省略（§4.3/§6.1）。`inspection_too_large` 因此不带 `recovery` |
+| `start` 的撤销错误（`control_revoked` + 收尾未完成） | 返回 `status/P/revoked` 而不带 `cause`：该结果是错误结果，I7 要求 `cause` 只在不带 `error` 时出现；首个观察失败（无 error）的撤销分支仍带 `cleanup_pending` |
+| `shell` 成功但执行期间撤销 | 返回 `status/P/revoked/cause=executed_revoked`（旧实现写 `next=status`）。提案 shell 表只列错误行；§5.1 的 phase 规则给出该投影，且与“看似成功仍需恢复”的 cause 语义一致 |
+| `input_state` 的适用范围 | 实现按 §5.2 表在 `start` 首个观察失败（无引用 O）与 `end`/`status(P)` 收尾分支（P 引用）也输出 `retired`/`revoked`；这比 §4.2 “仅当引用可解析 O”更宽。文档按实际行为写成“本次结果所涉观察” |
+| 测试文件名与数量 | 提案写新增 `internal/engine/recovery_test.go`，该文件已存在（账本恢复）；新用例落在 `internal/engine/recovery_entry_test.go`。另有 `scripts/mcp-probe/probe_test.go` 的 1 处旧 `Next` 字面量不在提案的 10 文件计数内，已同步删除 |
+| 文档 8 个而非 7 个 | `docs/integration.md` 另有 5 处 `X-Mobile-Use-Contract: 2`，属于同一契约前进，已一并改为 3；其余 7 个文件按 §6.5 |
+| 实机 `act uncertain` 与 `start` 撤销分支 | 未能稳定构造，映射由单元测试覆盖；原因与已实际观测到的相邻路径见验证记录 §6。`go test -race` 未执行（Windows 无 C 编译器） |
 
 ---
 
