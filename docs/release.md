@@ -91,9 +91,17 @@ PowerShell、docs 或 Manifest 中另写一份版本号；`contract_version` 只
 1. 准备并核验整组构建、清单、契约号、Android 版本与固定制品哈希。
 2. 暂停普通准入；用旧版本结束活动会话或 STOP，分别确认执行链、task/recents 与 display。
    任一未确认就停止推进，不强停 App 把缺少描述当作已清理。
-3. 停止旧服务与 App；安装整组产物。过渡期保持不可准入。
-4. 启动新服务、App 与手机侧 MCP 适配器：核验实例、release/contract、模式、STOP、恢复屏障
-   与安装后的 App versionName/versionCode；默认虚拟屏，主屏共享需要用户重新确认。
+3. 尝试停止旧服务与 App（停止失败不阻断安装）；安装整组产物。chroot 内的文件产物
+   与 `connection.json` 先写临时文件再原子替换，APK 用 `adb install -r` 覆盖安装；部署脚本
+   复核已部署文件：chroot 内清单产物对清单 SHA-256，生成的配置与 `connection.json` 对宿主
+   生成值；APK 以安装后的 versionName/versionCode 核验。不一致就停止。部署脚本不单独断言
+   旧进程已停止或准入已关闭；手机 MCP 适配器若在停止窗口后仍存活，脚本告警。操作者应在
+   部署窗口保持不可准入。
+4. 启动新服务、App 与手机侧 MCP 适配器：核验 release/contract 与 `can_start`（其成立覆盖
+   配对、STOP 与恢复屏障），以及安装后的 App versionName/versionCode；同时核验唯一 HTTP
+   MCP 适配器进程的 `/proc/<pid>/exe` SHA-256 与清单一致。脚本不读取实例身份或显示模式，
+   二者由控制端与运行手册另行确认。宿主托管的 stdio 适配器若仍持有旧二进制，部署脚本
+   明确告警，必须重启宿主 MCP 进程。默认虚拟屏，主屏共享需要用户重新确认。
 5. 重启实际 MCP 宿主进程/连接，使宿主重新发现工具目录；不能只替换磁盘文件或依赖
    `list_changed` 通知。手机适配器默认随部署安装并启动，主机自建适配器可选。
 6. 条件成立才报告完成；分别记录版本匹配、App 配对、恢复屏障、STOP 可用、MCP 宿主刷新与

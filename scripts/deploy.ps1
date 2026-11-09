@@ -97,6 +97,33 @@ function Invoke-DeviceScriptAllowFailure {
     try { return Invoke-DeviceScript -Script $Script } catch { return '' }
 }
 
+# Read one SHA-256 from the device without printing file content. Returns the
+# lowercase hex string, or '' when the file cannot be read.
+function Get-DeviceFileSha256 {
+    param([string]$Path)
+    $output = Invoke-DeviceScriptAllowFailure -Script "su -c 'sha256sum $Path 2>/dev/null'"
+    $match = [regex]::Match($output, '(?m)^([0-9a-fA-F]{64})\s')
+    if (-not $match.Success) { return '' }
+    return $match.Groups[1].Value.ToLowerInvariant()
+}
+
+# Fail the release when a deployed artifact does not match the verified
+# manifest. This is the post-copy proof that a silent cp/mv failure cannot be
+# reported as a successful deployment.
+function Assert-DeviceFileSha256 {
+    param([string]$Name, [string]$Path, [string]$Expected)
+    $expectedHash = $Expected.ToLowerInvariant()
+    if ($expectedHash -notmatch '^[0-9a-f]{64}$') {
+        throw "Manifest has no valid SHA-256 for deployed artifact '$Name'."
+    }
+    $actualHash = Get-DeviceFileSha256 -Path $Path
+    if ($actualHash -ne $expectedHash) {
+        throw ("Deployed artifact hash mismatch for {0}: expected {1}, actual {2} ({3})." -f
+            $Name, $expectedHash, $actualHash, $Path)
+    }
+    Write-Output ("deployed artifact: {0} sha256={1} (match)" -f $Name, $actualHash)
+}
+
 function Get-ManifestArtifactPath {
     param($ManifestObject, [string]$Root, [string]$Name)
     foreach ($artifact in @(Get-Field $ManifestObject 'artifacts')) {
@@ -180,6 +207,22 @@ if ($expectedPackage -eq '' -or $expectedVersionName -eq '' -or $expectedVersion
 }
 if ($sourceDirty) {
     Write-Warning "Release source tree was dirty at build time (source_commit=$sourceCommit); artifact hashes still match the manifest."
+}
+
+# The manifest hashes are the only accepted proof of what was deployed. Build
+# the map once and reject a manifest that lacks a required digest.
+$manifestHashes = @{}
+foreach ($artifact in @(Get-Field $manifestObject 'artifacts')) {
+    $artifactName = [string](Get-Field $artifact 'name')
+    $artifactHash = [string](Get-Field $artifact 'sha256')
+    if ($artifactName -ne '' -and $artifactHash -ne '') {
+        $manifestHashes[$artifactName] = $artifactHash.ToLowerInvariant()
+    }
+}
+foreach ($name in @('device-service', 'device-mcp', 'u2.jar', 'applist.dex', 'service.sh', 'control.apk')) {
+    if ($manifestHashes[$name] -notmatch '^[0-9a-f]{64}$') {
+        throw "Release manifest has no valid SHA-256 for required artifact '$name'."
+    }
 }
 
 $serviceBinary = Get-ManifestArtifactPath $manifestObject $manifestDirectory 'device-service'
@@ -276,8 +319,21 @@ su -c 'chroot $Chroot /bin/sh -c "export PATH=/usr/local/bin:/usr/bin:/bin; if [
 Write-Output 'Stopping the phone-side MCP adapter (if present)...'
 $null = Invoke-DeviceScriptAllowFailure -Script @"
 su -c 'pkill -f "^/opt/mobile-use-vnext/device-mcp " || true'
+su -c 'pkill -f "^device-mcp -transport " || true'
 su -c 'rm -f $stateOnDevice/device-mcp.pid'
 "@
+# A host-managed stdio adapter can be respawned by its supervisor between the
+# stop and the install. The install below is atomic and the post-install hash
+# checks prove the file; this bounded wait only reduces the chance of starting
+# the new HTTP adapter behind an old listener.
+for ($attempt = 0; $attempt -lt 10; $attempt++) {
+    $remaining = Invoke-DeviceScriptAllowFailure -Script 'pgrep -x device-mcp'
+    if ($remaining.Trim() -eq '') { break }
+    Start-Sleep -Milliseconds 300
+}
+if ($remaining.Trim() -ne '') {
+    Write-Warning ("phone-side MCP adapter still running after the stop attempt (pid(s): {0}); the install is atomic but the old process may keep the previous inode." -f ($remaining.Trim() -replace "\s+", ", "))
+}
 
 # ---------------------------------------------------------------- stage artifacts
 $staging = '/data/local/tmp/mobile-use-vnext-deploy'
@@ -323,25 +379,42 @@ foreach ($file in $stagedFiles) {
     $null = Invoke-Adb -Arguments @('push', $file, "$staging/")
 }
 
+# A host-managed stdio adapter can hold the old inode (or respawn) while the
+# release is being staged, so cp onto the live path fails with ETXTBSY. A
+# multi-command device shell used to mask that failure behind a later chmod.
+# Install beside the target and rename, run the shell with set -eu, and verify
+# every deployed artifact against the manifest before starting anything.
 $null = Invoke-DeviceScript -Script @"
+set -eu
 su -c 'mkdir -p $installDirectory $stateOnDevice'
-su -c 'cp $staging/device-service $installDirectory/device-service'
-su -c 'cp $staging/u2.jar $installDirectory/u2.jar'
-su -c 'cp $staging/applist.dex $installDirectory/applist.dex'
-su -c 'cp $staging/service.sh $installDirectory/service.sh'
-su -c 'cp $staging/config.json $installDirectory/config.json'
-su -c 'chmod 755 $installDirectory/device-service $installDirectory/service.sh'
-su -c 'chmod 600 $installDirectory/config.json $installDirectory/u2.jar $installDirectory/applist.dex'
+su -c 'cp $staging/device-service $installDirectory/device-service.new && chmod 755 $installDirectory/device-service.new && mv -f $installDirectory/device-service.new $installDirectory/device-service'
+su -c 'cp $staging/u2.jar $installDirectory/u2.jar.new && chmod 600 $installDirectory/u2.jar.new && mv -f $installDirectory/u2.jar.new $installDirectory/u2.jar'
+su -c 'cp $staging/applist.dex $installDirectory/applist.dex.new && chmod 600 $installDirectory/applist.dex.new && mv -f $installDirectory/applist.dex.new $installDirectory/applist.dex'
+su -c 'cp $staging/service.sh $installDirectory/service.sh.new && chmod 755 $installDirectory/service.sh.new && mv -f $installDirectory/service.sh.new $installDirectory/service.sh'
+su -c 'cp $staging/config.json $installDirectory/config.json.new && chmod 600 $installDirectory/config.json.new && mv -f $installDirectory/config.json.new $installDirectory/config.json'
 su -c 'chmod 700 $stateOnDevice'
 "@
 
 if (-not $SkipPhoneMcp) {
     $null = Invoke-DeviceScript -Script @"
-su -c 'cp $staging/device-mcp $installDirectory/device-mcp'
-su -c 'cp $staging/phone-mcp-config.json $installDirectory/mcp-config.json'
-su -c 'chmod 755 $installDirectory/device-mcp'
-su -c 'chmod 600 $installDirectory/mcp-config.json'
+set -eu
+su -c 'cp $staging/device-mcp $installDirectory/device-mcp.new && chmod 755 $installDirectory/device-mcp.new && mv -f $installDirectory/device-mcp.new $installDirectory/device-mcp'
+su -c 'cp $staging/phone-mcp-config.json $installDirectory/mcp-config.json.new && chmod 600 $installDirectory/mcp-config.json.new && mv -f $installDirectory/mcp-config.json.new $installDirectory/mcp-config.json'
 "@
+}
+
+# A successful mv only proves the directory entry changed. Compare what is
+# actually on disk with the verified manifest before starting any service.
+Assert-DeviceFileSha256 -Name 'device-service' -Path "$installDirectory/device-service" -Expected $manifestHashes['device-service']
+Assert-DeviceFileSha256 -Name 'u2.jar' -Path "$installDirectory/u2.jar" -Expected $manifestHashes['u2.jar']
+Assert-DeviceFileSha256 -Name 'applist.dex' -Path "$installDirectory/applist.dex" -Expected $manifestHashes['applist.dex']
+Assert-DeviceFileSha256 -Name 'service.sh' -Path "$installDirectory/service.sh" -Expected $manifestHashes['service.sh']
+$configHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $configPath).Hash.ToLowerInvariant()
+Assert-DeviceFileSha256 -Name 'config.json' -Path "$installDirectory/config.json" -Expected $configHash
+if (-not $SkipPhoneMcp) {
+    Assert-DeviceFileSha256 -Name 'device-mcp' -Path "$installDirectory/device-mcp" -Expected $manifestHashes['device-mcp']
+    $phoneMcpConfigHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $phoneMcpConfigPath).Hash.ToLowerInvariant()
+    Assert-DeviceFileSha256 -Name 'mcp-config.json' -Path "$installDirectory/mcp-config.json" -Expected $phoneMcpConfigHash
 }
 
 # ---------------------------------------------------------------- install control App
@@ -384,11 +457,14 @@ $connectionPath = Join-Path $stateDirectory 'connection.json'
 Write-Utf8NoBom -Path $connectionPath -Text ($connection | ConvertTo-Json)
 $null = Invoke-Adb -Arguments @('push', $connectionPath, "$staging/connection.json")
 $null = Invoke-DeviceScript -Script @"
+set -eu
 su -c 'mkdir -p /data/data/com.mobileuse.vnext/files'
-su -c 'cp $staging/connection.json /data/data/com.mobileuse.vnext/files/connection.json'
+su -c 'cp $staging/connection.json /data/data/com.mobileuse.vnext/files/connection.json.new && chmod 600 /data/data/com.mobileuse.vnext/files/connection.json.new && mv -f /data/data/com.mobileuse.vnext/files/connection.json.new /data/data/com.mobileuse.vnext/files/connection.json'
 su -c 'chown -R `$(stat -c %u /data/data/com.mobileuse.vnext):`$(stat -c %g /data/data/com.mobileuse.vnext) /data/data/com.mobileuse.vnext/files'
 su -c 'chmod 600 /data/data/com.mobileuse.vnext/files/connection.json'
 "@
+$connectionHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $connectionPath).Hash.ToLowerInvariant()
+Assert-DeviceFileSha256 -Name 'connection.json' -Path '/data/data/com.mobileuse.vnext/files/connection.json' -Expected $connectionHash
 $null = Invoke-Adb -Arguments @('shell', 'pm', 'grant', 'com.mobileuse.vnext', 'android.permission.POST_NOTIFICATIONS') -AllowFailure
 $null = Invoke-Adb -Arguments @('shell', 'appops', 'set', 'com.mobileuse.vnext', 'SYSTEM_ALERT_WINDOW', 'allow') -AllowFailure
 
@@ -417,13 +493,35 @@ su -c 'chroot $Chroot /bin/sh -c "export PATH=/usr/local/bin:/usr/bin:/bin; umas
         throw ("Phone-side MCP adapter did not answer 401 on 127.0.0.1:$PhoneMcpPort/mcp; " +
             "inspect /var/lib/mobile-use-vnext/device-mcp.log and do not report the release complete.")
     }
-    $mcpPid = Invoke-DeviceScriptAllowFailure -Script @"
-su -c 'pgrep -f "^/opt/mobile-use-vnext/device-mcp " | head -n 1'
-"@
-    if ($mcpPid.Trim() -match '^\d+$') {
-        $null = Invoke-DeviceScript -Script "su -c 'echo $($mcpPid.Trim()) > $stateOnDevice/device-mcp.pid'"
+    # The 401 probe only proves that some listener answers. An adapter left
+    # over from the previous release can still own the port, so require exactly
+    # one HTTP adapter and prove its executable is the manifest binary.
+    $httpPidOutput = Invoke-DeviceScriptAllowFailure -Script 'pgrep -f "^/opt/mobile-use-vnext/device-mcp -transport http "'
+    $httpPids = @($httpPidOutput -split "\s+" | Where-Object { $_ -match '^\d+$' })
+    if ($httpPids.Count -ne 1) {
+        throw ("Expected exactly one phone-side HTTP MCP adapter, found {0}. Inspect /var/lib/mobile-use-vnext/device-mcp.log and do not report the release complete." -f $httpPids.Count)
     }
+    $httpPid = [string]$httpPids[0]
+    Assert-DeviceFileSha256 -Name 'device-mcp (running http)' -Path "/proc/$httpPid/exe" -Expected $manifestHashes['device-mcp']
+    $null = Invoke-DeviceScript -Script "su -c 'echo $httpPid > $stateOnDevice/device-mcp.pid'"
     $null = Invoke-DeviceScript -Script "su -c 'chmod 600 $stateOnDevice/device-mcp.log $stateOnDevice/device-mcp.pid 2>/dev/null || true'"
+
+    # The managed HTTP adapter is now proven. A host-managed stdio adapter can
+    # have been respawned from the previous inode; it cannot be restarted by
+    # this script, so report it instead of claiming the whole MCP surface was
+    # refreshed.
+    $staleAdapters = 0
+    $allMcpPids = Invoke-DeviceScriptAllowFailure -Script 'pgrep -x device-mcp'
+    foreach ($pidText in @($allMcpPids -split "\s+")) {
+        if ($pidText -notmatch '^\d+$' -or $pidText -eq $httpPid) { continue }
+        $runningHash = Get-DeviceFileSha256 -Path "/proc/$pidText/exe"
+        if ($runningHash -ne '' -and $runningHash -ne $manifestHashes['device-mcp']) { $staleAdapters++ }
+    }
+    if ($staleAdapters -gt 0) {
+        Write-Warning ("phone MCP stdio adapter: previous binary still running in {0} process(es); restart the host MCP process to load the deployed device-mcp." -f $staleAdapters)
+    } else {
+        Write-Output 'phone MCP stdio adapter: no stale binary detected (host restart still required to rediscover tools)'
+    }
 }
 
 Write-Output 'Launching the control App service...'
@@ -514,7 +612,7 @@ Write-Output ("manifest: source_commit={0} source_dirty={1} tool_catalog_count={
 if ($SkipPhoneMcp) {
     Write-Warning 'Phone-side MCP adapter skipped: the deployment does not include phone-hosted MCP use.'
 } else {
-    Write-Output ("phone MCP adapter: PASS listen=127.0.0.1:$PhoneMcpPort url=http://127.0.0.1:$PhoneMcpHostPort/mcp")
+    Write-Output ("phone MCP HTTP adapter: PASS listen=127.0.0.1:$PhoneMcpPort url=http://127.0.0.1:$PhoneMcpHostPort/mcp sha256={0}" -f $manifestHashes['device-mcp'])
     Write-Output "phone MCP token: mcp_token in $deployStatePath (private, not printed)"
 }
 Write-Output "host verification URL: $baseUrl"
