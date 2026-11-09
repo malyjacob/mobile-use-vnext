@@ -1,7 +1,8 @@
 # 提案：MCP 文本结果附带确定性可读树块
 
-状态：提案，未实现。
+状态：已实现（实现提交 `e4867cd4f611217b8ea858f1cdfa4daa09e3acde`，2026-11-10）。
 基线提交：`dd503b19f0566be9a59fa49c425f4df667c1e098`（分支 `master`，2026-11-10）。
+实现与验证记录：[验证记录](../../verification/mcp-tree-text.md)。
 适用范围：`internal/mcp` 的结果投影（`TextContent`），影响 `start`、`observe`、`act`、`open_app`、`inspect` 五个工具的可读正文；`status`、`end`、`keepalive`、`apps`、`notify`、`shell`、`diagnose` 不产生树块。
 影响范围：`internal/mcp/render.go`、新增 `internal/mcp/tree_text.go`、`internal/mcp/server.go`、`internal/mcp/schema.go`、`internal/mcp/*_test.go`、`scripts/mcp-probe/checks.go`、`docs/mcp.md`、`docs/interface.md`、`maintenance/decisions.md`。
 契约（`/api/*` 字段与 `contract_version`）：不改变。MCP 工具的入参 schema 与 `structuredContent` 形状也不改变；只改变 `TextContent` 的内容，以及五个工具 description 的说明文字。
@@ -16,7 +17,7 @@
 ## 0. 摘要
 
 MCP 规范要求返回结构化内容的工具**同时**把序列化结果放进 `TextContent`，而当前适配器的
-可读正文按设计**不含任何节点**（[render.go:12-15](../../internal/mcp/render.go#L12)）。在不渲染
+可读正文按设计**不含任何节点**（[render.go:12-15](../../../internal/mcp/render.go#L12)）。在不渲染
 `structuredContent` 的宿主里，模型看不到页面：`observe`/`act` 的正文关于树只说明
 `format` 与 `base`，`inspect` 的正文只有观察头、计数与错误，没有命中内容。
 
@@ -37,7 +38,7 @@ MCP 规范要求返回结构化内容的工具**同时**把序列化结果放进
 - `observe` 的正文有观察头（`status`/`id`/`revision`/`screen`/`foreground`），但**关于树**
   只有 `observation.tree.format` 与 `observation.tree.base`，无法据此选择任何一个 `ref`。
 - `inspect` 的正文有 `observation_id`/`revision`/`scope`/`total`/`truncated`/`match_count`
-  （[render.go:190-211](../../internal/mcp/render.go#L190)），但**没有任何命中内容**。
+  （[render.go:190-211](../../../internal/mcp/render.go#L190)），但**没有任何命中内容**。
 - 直接后果：在只把 `TextContent` 交给模型的宿主里，`act` 的 `target.ref` 无从选择，只能
   盲试坐标；`inspect` 的命中内容完全不可见。
 - 这不是“体验差”，而是**工具在特定宿主上不可用**；且不可用与否取决于宿主实现，服务端
@@ -50,33 +51,33 @@ MCP 规范要求返回结构化内容的工具**同时**把序列化结果放进
 2. **宿主现实**：部分框架把 `structuredContent` 当应用侧数据，不交给模型
    （[LangChain 论坛讨论](https://forum.langchain.com/t/why-can-the-model-see-the-structured-content-returned-by-the-mcp-tool/3076)）。
 3. **当前实现**：`renderText` 只输出阶段事实，注释明确“never includes … tree nodes”
-   （[render.go:13-15](../../internal/mcp/render.go#L13)）；`structuredContent` 才是全量
-   （[server.go:129](../../internal/mcp/server.go#L129)）。
+   （[render.go:13-15](../../../internal/mcp/render.go#L13)）；`structuredContent` 才是全量
+   （[server.go:129](../../../internal/mcp/server.go#L129)）。
 4. **文档承诺**：`docs/mcp.md` §3 把可读正文定义为 `key=value` 行，并明确正文不含树
-   （[docs/mcp.md:35-44](../../docs/mcp.md#L35)）。
+   （[docs/mcp.md:35-44](../../../docs/mcp.md#L35)）。
 5. **体积**：按 `Node` 的默认省略规则手写一棵 50 节点的 Android 形态合成树估算：紧凑 JSON
    4350 B，行式文本 2236 B，约 **1.95×**，约 45 B/节点（合成样本估算，不是基准）。
-6. **delta 语义**：基线只能是 full 树（[capture.go:580-587](../../internal/engine/capture.go#L580)）；
-   差异永远相对该基线，不是相对上一次观察（[capture.go:187](../../internal/engine/capture.go#L187)）；
-   五个块是对最终状态的原子声明（[apply.go:20-25](../../internal/observation/apply.go#L20)）。
-7. **inspect 语义**：只读、不采集、不认领（[inspect.go:40-43](../../internal/engine/inspect.go#L40)）；
-   对 delta 观察返回解析后的完整投影树（[engine.go:879-884](../../internal/engine/engine.go#L879)、
-   [inspect.go:89-96](../../internal/engine/inspect.go#L89)）。
+6. **delta 语义**：基线只能是 full 树（[capture.go:580-587](../../../internal/engine/capture.go#L580)）；
+   差异永远相对该基线，不是相对上一次观察（[capture.go:187](../../../internal/engine/capture.go#L187)）；
+   五个块是对最终状态的原子声明（[apply.go:20-25](../../../internal/observation/apply.go#L20)）。
+7. **inspect 语义**：只读、不采集、不认领（[inspect.go:40-43](../../../internal/engine/inspect.go#L40)）；
+   对 delta 观察返回解析后的完整投影树（[engine.go:879-884](../../../internal/engine/engine.go#L879)、
+   [inspect.go:89-96](../../../internal/engine/inspect.go#L89)）。
 
 ### 1.3 为什么直觉会出错
 
 - **“把结构化 JSON 直接塞进 `TextContent`”**：规范允许，但对模型是纯噪声——重复的键名
   （`"ref"/"role"/"bounds"`）比节点内容还长；估算文本小一半（§1.2 第 5 条）。而且两份同构
   内容没有增量价值。
-- **“把 delta 展开成整树再渲染”**：适配器是无状态投影层（[server.go:75-80](../../internal/mcp/server.go#L75)），
+- **“把 delta 展开成整树再渲染”**：适配器是无状态投影层（[server.go:75-80](../../../internal/mcp/server.go#L75)），
   手里只有本次 `Result`，**没有 base 树**。展开要么再发一次 `inspect`（多一次往返，且需要
   自己实现 `Apply`），要么在适配器存第二份页面事实。两条都越界。
 - **“只改 `inspect`”**：主循环（`observe`/`act`）仍然看不见页面，等于止血贴贴在小腿上。
 - **“把 `structuredContent.observation.tree` 换成字符串”**：破坏与 HTTP 同形的 `Result`
-  （[docs/mcp.md:38](../../docs/mcp.md#L38)）、`protocol.Node` 的类型解码与所有机器消费方，
+  （[docs/mcp.md:38](../../../docs/mcp.md#L38)）、`protocol.Node` 的类型解码与所有机器消费方，
   且模型该读的文本仍要单独渲染。
 - **“给 delta 的 `~` 行加 role 以便识别节点”**：`Delta.Set` 是 `map[ref]SetNode`，
-  `SetNode` 没有 `role`（[node.go:587-600](../../internal/protocol/node.go#L587)）；适配器没有
+  `SetNode` 没有 `role`（[node.go:587-600](../../../internal/protocol/node.go#L587)）；适配器没有
   基线树，**拿不到这个字段**。要加只能改 `/api/*` 契约（见 §9.1）。
 
 ## 2. 目标与非目标
@@ -150,7 +151,7 @@ O(节点数) token，等于在文本通道放弃 delta 的全部收益；R5 是�
 **只增不减**。`structuredContent` 一字不改，机器消费方不受影响；`TextContent` 从“只有阶段
 事实”变成“阶段事实 + 树块”，属于投影内容扩展，不是契约版本变化。工具入参 schema 不变，
 因此不需要 `contract_version` 迁移。工具 description 会变长，这会改变
-`CatalogFingerprint`（[catalog.go:29-33](../../internal/mcp/catalog.go#L29)），发布清单在下次
+`CatalogFingerprint`（[catalog.go:29-33](../../../internal/mcp/catalog.go#L29)），发布清单在下次
 发布时重新生成，见 §6.5。
 
 ## 5. 算法
@@ -206,7 +207,7 @@ flag      := "enabled=" bool|"null" | "focused=" … | "checked=" … | "axis=" 
 ```
 
 字段映射（与 `Node.MarshalJSONTo` 的省略规则一一对应，
-[node.go:192-355](../../internal/protocol/node.go#L192)）：
+[node.go:192-355](../../../internal/protocol/node.go#L192)）：
 
 | `Node` 字段 | 文本 | 缺席含义 |
 | --- | --- | --- |
@@ -246,7 +247,7 @@ end tree
 多个字段也只计 1。上例为 2+1+1+1+1=6。delta 块没有 `nodes=`。
 
 块顺序固定 **set → add → remove → children → replace**，与 `protocol.Delta` 字段顺序一致
-（[node.go:610-618](../../internal/protocol/node.go#L610)）。
+（[node.go:610-618](../../../internal/protocol/node.go#L610)）。
 
 **`~` 行语法：**
 
@@ -269,11 +270,11 @@ string       := JSON 字符串字面量
 
 `label=null` / `actions=null` 表示“标签/动作变为未知”。当前 `Diff` 用
 `append([]string{}, …)` 只产出非 nil 空切片，因此生产路径给的是 `label=[]`
-（[diff.go:444-448](../../internal/observation/diff.go#L444)）；渲染器仍按 `Field` 的线上语义
+（[diff.go:444-448](../../../internal/observation/diff.go#L444)）；渲染器仍按 `Field` 的线上语义
 接受 null，保证与 `protocol.Delta` 逐字段等价。
 
 字段按 `SetNode` 声明顺序出现（label、actions、bounds、enabled、focused、selected、
-checked、value、hint、protected、axis、resource，[node.go:587-600](../../internal/protocol/node.go#L587)）。
+checked、value、hint、protected、axis、resource，[node.go:587-600](../../../internal/protocol/node.go#L587)）。
 **只出现实际变化的字段**；每个值都是完整新值，必须保留显式 `false`/`""`/`[]`/`null`
 （AGENTS.md 第 7 条）：
 
@@ -292,7 +293,7 @@ checked、value、hint、protected、axis、resource，[node.go:587-600](../../i
 | resource 变成未知 | `resource=null` |
 | 一行多个字段 | `~ n7 label=[] actions=[] enabled=null value=""` |
 
-**已知限制：`~` 行不带 `role`。** `SetNode` 没有该字段（[node.go:587-600](../../internal/protocol/node.go#L587)），
+**已知限制：`~` 行不带 `role`。** `SetNode` 没有该字段（[node.go:587-600](../../../internal/protocol/node.go#L587)），
 适配器也没有基线树；带上它只能改 `/api/*` 契约。因此 `~` 行的可读性依赖 `base` 在上下文中
 （§7.2）。`Label` 是有的，但只在它变化时以 `label=` 出现。
 
@@ -344,13 +345,13 @@ end inspect
 ```
 
 - `scope=` 是补看模式（`inspection.scope`）；`tree_scope=` 是树的可见性口径
-  （`inspection.tree.scope`；子树/查询用协议常量，[node.go:496](../../internal/protocol/node.go#L496)）。
+  （`inspection.tree.scope`；子树/查询用协议常量，[node.go:496](../../../internal/protocol/node.go#L496)）。
   两个“scope”不合并，避免语义混淆；
 - `observation=`、`revision=`、`captured_at=` 来自 `InspectionView`；
 - `root=` 仅子树；`matches=`/`total=`/`truncated=` 仅查询；`matches` 是**实际返回条数**，
   `total` 是预算前命中数；
 - `match i/N` 的 N 是本次返回条数；`path=[…]` 是 root..parent（不含命中节点，
-  [inspect.go:175-193](../../internal/engine/inspect.go#L175)）；
+  [inspect.go:175-193](../../../internal/engine/inspect.go#L175)）；
 - 命中允许嵌套，父命中已含子命中时仍会各自出现一次（与 JSON 一致，不去重）；
 - 根节点没有 `label`/`value`/`hint`/`resource`，因此 `path=[]` 在实践中不会出现；
   渲染器遇到空路径仍输出 `path=[]`（忠实于视图，不伪造祖先）；
@@ -442,7 +443,7 @@ inspect v1 omitted scope=tree observation=O2 revision=4 nodes=612 bytes=38211 li
 | `internal/mcp/render.go` | 更新文件头注释：正文现在可以包含树块；`renderText` 本身不改 |
 | `internal/mcp/schema.go` | `start`、`observe`、`act`、`open_app`、`inspect` 五个 description 追加同一段语法图例与使用规则 |
 | `internal/mcp/tree_text_test.go`（新增） | 见 §8.1 |
-| `internal/mcp/server_test.go` | 端到端断言；**把 [server_test.go:508](../../internal/mcp/server_test.go#L508) 的 `requireTestNotContains(text, "n1")` 改为断言含根节点行** |
+| `internal/mcp/server_test.go` | 端到端断言；**把 [server_test.go:508](../../../internal/mcp/server_test.go#L508) 的 `requireTestNotContains(text, "n1")` 改为断言含根节点行** |
 | `scripts/mcp-probe/checks.go` | 新增 observe/act 文本块断言，并新增一次 `inspect` 调用断言补看块（当前 `runChecks` 不调用 inspect） |
 | `docs/mcp.md` | §3 重写正文定义，新增 §3.1 树块语法与预算 |
 | `docs/interface.md` | §12 补两处补看预算口径（§6.5） |
@@ -484,15 +485,15 @@ inspect v1 omitted scope=tree observation=O2 revision=4 nodes=612 bytes=38211 li
    §3.1（节点行、delta 五块与 `~` 字段、inspect 三 scope、预算、三种“不完整”）。
 2. `docs/interface.md` §12 **补两处现有行为的口径**（不改行为）：
    - 查询的**总量**也受 32 KiB 限制，不只是“单个命中”
-     （[inspect.go:152-159](../../internal/engine/inspect.go#L152)）；
+     （[inspect.go:152-159](../../../internal/engine/inspect.go#L152)）；
    - 任一命中超 32 KiB 会让整次查询失败，即使它不在返回前缀内
-     （[inspect.go:140-150](../../internal/engine/inspect.go#L140)）。
-   整树 128 KiB 与代码默认值一致（[engine.go:114](../../internal/engine/engine.go#L114)），
-   该项不改；生产路径未开放外部配置（[main.go:77-79](../../cmd/device-service/main.go#L77)）。
+     （[inspect.go:140-150](../../../internal/engine/inspect.go#L140)）。
+   整树 128 KiB 与代码默认值一致（[engine.go:114](../../../internal/engine/engine.go#L114)），
+   该项不改；生产路径未开放外部配置（[main.go:77-79](../../../cmd/device-service/main.go#L77)）。
 3. `maintenance/decisions.md` D32：记录本次取舍，并**明写扩展 D21 的“可读 `key=value` 正文”
-   条款**（[decisions.md:208](../../maintenance/decisions.md#L208)），避免 D21 变为过期表述。
+   条款**（[decisions.md:208](../../../maintenance/decisions.md#L208)），避免 D21 变为过期表述。
 4. 五个工具的 description 变长会改变 `CatalogFingerprint`
-   （[catalog.go:29-33](../../internal/mcp/catalog.go#L29)）；`build/release/manifest.json`
+   （[catalog.go:29-33](../../../internal/mcp/catalog.go#L29)）；`build/release/manifest.json`
    在下次发布时由 `scripts/build-release.ps1` 重新生成，本提案不手改清单。
 
 ## 7. 预期效果与能力边界
@@ -620,7 +621,7 @@ inspect v1 omitted scope=tree observation=O2 revision=4 nodes=612 bytes=38211 li
 3. inspect 写入器（三 scope、`path`、`matches/total/truncated`）；三组 golden 与
    `TestTreeTextRoundTrip`。
 4. `server.go` 接线；端到端 `TestTextCarriesTreeBlock`；更新
-   [server_test.go:508](../../internal/mcp/server_test.go#L508)；三种超预算用例；反向对照 1。
+   [server_test.go:508](../../../internal/mcp/server_test.go#L508)；三种超预算用例；反向对照 1。
 5. `schema.go` 五个 description；`catalog_test.go` 全绿（指纹只校验长度与确定性）。
 6. `scripts/mcp-probe/checks.go`：observe/act 块断言 + 新增 inspect 调用。
 7. `docs/mcp.md`、`docs/interface.md`、`decisions.md` D32。
@@ -630,20 +631,34 @@ inspect v1 omitted scope=tree observation=O2 revision=4 nodes=612 bytes=38211 li
 
 步骤 1–3 可并行于 5–7 的文档草稿；4 依赖 1–3；8 依赖 7。
 
-## 11. 实现结果（归档时补写）
+## 11. 实现结果
 
-实现提交：`<hash>`。实现与验证记录：`../../verification/mcp-tree-text.md`
-（本节在归档移动之后补写，届时文件在 `implemented/` 下，故链接比新建时多一层）。
+实现提交：`e4867cd4f611217b8ea858f1cdfa4daa09e3acde`。实现与验证记录：[验证记录](../../verification/mcp-tree-text.md)。
 
 ### 11.1 已落地
 
 | 提案条目 | 落点 |
 | --- | --- |
+| §5.1 总流程与 §6.1 接线 | `internal/mcp/server.go` `handle`：`renderText` 之后追加 `renderTreeText`，正文与块之间恰好一个空行；admission 分支不变 |
+| §5.2 full 观察块 | `internal/mcp/tree_text.go` `renderFullTreeText`、`writeNodeContent`、`writeSubtree`、`writeJSONString` |
+| §5.3 delta 观察块 | `tree_text.go` `renderDeltaTreeText`、`writeDeltaBody`、`writeSetNode`；`changes` 为五块顶层声明数之和 |
+| §5.4 inspect 三 scope | `tree_text.go` `renderInspectionText`；tree/subtree/query 块头、`path`、`matches`/`total`/`truncated`、`nodes` |
+| §5.5 预算与省略 | `tree_text.go` `treeTextBuffer`、`treeTextBlock.finish`；观察 24 KiB、补看 32 KiB，超限只输出 `omitted` |
+| §5.6/§5.7 边界、转义、ref 校验与排序 | `tree_text.go` `validateNodeRefs`、`validateDeltaRefs`、`validateInspectionRefs`、`sortedDeltaKeys`、`lessPublicRef`、`writeJSONString` |
+| §6.1 render.go 注释 | `internal/mcp/render.go` 文件/函数注释更新，`renderText` 未改 |
+| §6.1 schema description | `internal/mcp/schema.go` `treeTextGuide` 追加到 `start`、`observe`、`act`、`open_app`、`inspect` |
+| §8.1 单元测试 | `internal/mcp/tree_text_test.go` 覆盖 golden、显式值、三种 inspect、纯函数、round-trip、计数、转义、预算、非法 ref、终止行、空树、无树；`server_test.go` 端到端断言 |
+| §6.1 probe | `scripts/mcp-probe/checks.go` observe/act 树块断言与一次 `inspect` 补看块断言；`probe_test.go` fake 服务同步 |
+| §6.5 文档与决策 | `docs/mcp.md` §3/§3.1、`docs/interface.md` §12、`maintenance/decisions.md` D32（并更新 D21 的正文表述） |
 
 ### 11.2 与提案不同或未执行
 
 | 项 | 结论与理由 |
 | --- | --- |
+| 实现行为 | 无偏离：树块语法、预算、ref 校验、排序、终止行与五个工具的 description 均按提案落地 |
+| 发布清单 | 未重新生成：提案 §6.5 明确由下次 `scripts/build-release.ps1` 重新生成 `CatalogFingerprint`，本实现不手改清单 |
+| 外部模型宿主、token 对比、实机 24 KiB 省略、宿主截断、实机 query 32 KiB 截断 | 未执行：缺少对应宿主或实际树未达预算；单元测试覆盖判据，验证记录 §6 逐项标注原因 |
+| Streamable HTTP 回归、`go test -race` | 未执行：树块与传输无关，本次只跑 stdio；Windows 宿主无 C 编译器，cgo 不可用 |
 
 ---
 
