@@ -727,6 +727,8 @@ func TestWorkToolProjections(t *testing.T) {
 		requireTestContains(t, text, "shell.output_bytes=4")
 		requireTestContains(t, text, "shell.truncated=false")
 		requireTestNotContains(t, text, "boom")
+		// A managed command publishes no observation.
+		requireTestNotContains(t, text, "observation")
 	})
 
 	t.Run("notify unavailable", func(t *testing.T) {

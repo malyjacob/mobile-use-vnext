@@ -157,7 +157,7 @@ Agent 工具（`POST /api/<tool>`，`Authorization: Bearer <agent_token>`，
 | `apps` | 可选 `query`；发现可启动应用 |
 | `open_app` | `observation_id` + `app`；在会话屏打开/复用应用并返回新观察 |
 | `notify` | `text`；保存一条 Agent 消息，经控制同步投递到 App 消息中心 |
-| `shell` | `reference` + `command` + 可选 `root`；受管命令执行与后观察 |
+| `shell` | `reference` + `command` + 可选 `root`；受管命令执行（不发布观察，原 O 仍可用） |
 | `diagnose` | 可选 `reference`；有界诊断事实 |
 
 控制端（`POST /v1/control/sync|stop`，`Authorization: Bearer <control_token>`）：心跳同步

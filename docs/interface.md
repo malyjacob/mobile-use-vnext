@@ -35,7 +35,8 @@
 总预算按阶段固定（`docs/architecture.md` §4），不是请求字段，也不改变任何端点的字段与错误
 码；页面持续动画时这三次观察最多多花该阶段的预算（`act(image=true)` 另加一次刷新读取）。
 `observe` 由调用方决定节奏（`wait_ms` 与
-`full`），`shell` 的后观察只读取一次树（不取图），两者都不等待收敛。
+`full`），不做收敛采样；`shell` 不发布观察，命令是否改变屏幕由下一次 `act` 的实时重验或一次
+`observe` 回答。
 
 ## 2. 结果分层与错误
 
@@ -615,14 +616,15 @@ O/P 必须属于本 Agent 并定位一个仍 `active` 的原会话；只续租�
 `command` 非空、≤4096 个 Unicode 码点且不含 NUL；`root=false` 使用设备 shell 身份，
 `root=true` 明确请求 root，不自动降级/提权重试。命令在 Android shell 环境执行，不进入 chroot。
 
-派发前服务原子地撤销原会话当前 O 的输入授权、清除已确认基线并置全量恢复边界；旧树可继续
-`inspect`，但旧 full 的迟到确认不能解除该边界。受管链确认结束、原作用域复核通过后，默认
-后置一次 full 观察（不取图）。
+派发前服务只置执行未知边界（命令可能已经发出，恢复与收尾按此保守处理）；当前 O 的输入授权
+与已确认基线都不改变，旧树可继续 `inspect`。受管链确认结束后不采集、不发布观察：同一个 O
+仍是 `ready`，可继续用于 `act` 或 `observe`。命令可能改变界面，屏幕是否仍与 O 一致由下一次
+`act` 的实时重验回答；需要新树时用 `observe`（基线仍在，按 §5 的 delta 规则）。撤销
+（STOP/`end`）仍按会话撤销退休 O。
 
 ```json
 {"operation_id":"P30","outcome":"executed",
- "shell":{"termination":"exited","exit_code":0,"output":"…","truncated":false},
- "observation":{"status":"complete","id":"O31","origin":"P_start","tree":{"format":"full","scope":"reported_visible_with_context","root":{…}}}}
+ "shell":{"termination":"exited","exit_code":0,"output":"…","truncated":false}}
 ```
 
 `shell` 字段总是包含 `termination`、`exit_code`、`output`、`truncated`：
@@ -642,8 +644,9 @@ O/P 必须属于本 Agent 并定位一个仍 `active` 的原会话；只续租�
 
 常见失败：`409 root_unavailable`、`503 shell_start_failed`、`504 shell_result_unconfirmed`、
 `409 session_ended`/`reference_has_no_session`/`operation_unknown`、`409 device_busy`。
-已结束但仅输出缺失时响应仍为 `executed`，错误在嵌套 `shell.output_error`；后观察失败不改写
-命令执行事实，`next=observe`。命令正文、输出与异常文本不进入日志或账本。
+已结束但仅输出缺失时响应仍为 `executed`，错误在嵌套 `shell.output_error`；成功结果不含
+`observation`，`next` 为空。撤销后确认停止的结果 `next=status` 并带会话视图。命令正文、输出
+与异常文本不进入日志或账本。
 
 ## 13. 端点与能力边界
 

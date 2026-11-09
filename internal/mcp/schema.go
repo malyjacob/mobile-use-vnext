@@ -317,7 +317,8 @@ var toolCatalog = []toolDefinition{
 	{
 		name: "shell",
 		description: "在给定 O/P 原会话的 Android shell 作用域内执行一条受管命令并返回终止事实。" +
-			"命令不进入 chroot；root=true 明确请求 root，不自动降级或提权重试。",
+			"命令不进入 chroot；root=true 明确请求 root，不自动降级或提权重试。" +
+			"命令可能改变界面且不会返回新树；若预期会改屏，随后应 observe。",
 		schema: json.RawMessage(`{
   "type": "object",
   "properties": {

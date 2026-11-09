@@ -46,7 +46,7 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
 
 | 事实 | isError |
 | --- | --- |
-| 主动作 `executed`，仅后树/图片/清理独立失败（含 shell 自然非零） | `false` |
+| 主动作 `executed`，仅后树/图片/清理独立失败（`act`/`open_app` 的后树；含 shell 自然非零） | `false` |
 | 主动作 `not_executed` / `uncertain` | `true` |
 | 纯 `observe` 有合法核心 O，仅缺图 | `false` |
 | 纯 `observe` 没有合法核心 O（含只有只读图） | `true` |

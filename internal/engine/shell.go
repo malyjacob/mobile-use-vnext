@@ -207,11 +207,12 @@ func (e *Engine) Shell(ctx context.Context, agent, p string, req *protocol.Shell
 			protocol.NewError(503, protocol.CodeDeviceUnavailable, "恢复账本不可写，命令未派发")), nil
 	}
 
-	// Dispatch boundary. One lock acquisition retires the ready observation
-	// WITHOUT claiming it, drops the confirmed baseline so the next capture is
-	// a full tree, and records the unknown dispatch before any device write.
-	// The projector is deliberately not reset: leaving its ref counter alone
-	// keeps conservatively allocated refs.
+	// Dispatch boundary. One lock acquisition records the unknown dispatch
+	// before any device write. The ready observation keeps its status and the
+	// confirmed baseline is kept, so the next act revalidates the live target
+	// against that O and the next observe still has its delta reference. The
+	// projector is deliberately not reset: leaving its ref counter alone keeps
+	// conservatively allocated refs.
 	dispatchAt := time.Now()
 	e.mu.Lock()
 	if !e.workAuthorizedLocked(work, dispatchAt) || e.session == nil ||
@@ -224,11 +225,6 @@ func (e *Engine) Shell(ctx context.Context, agent, p string, req *protocol.Shell
 		return e.finishWithError(op, "admission",
 			protocol.NewError(409, protocol.CodeStopped, "命令未派发：原会话已撤销")), nil
 	}
-	if e.current != nil && e.current.Status == ObservationReady {
-		e.current.Status = ObservationRetired
-		e.current.RetiredAt = dispatchAt
-	}
-	e.baseline = nil
 	work.DispatchUnknown = true
 	e.session.ExecutionUnknown = true
 	run.State, run.Phase = ShellDispatched, "dispatch"
@@ -243,7 +239,7 @@ func (e *Engine) Shell(ctx context.Context, agent, p string, req *protocol.Shell
 	// started and is reported as such (never as a dispatched unknown).
 	if e.workRevoked(work) {
 		return e.finishShellNotStarted(op, work, run, protocol.CodeStopped,
-			"命令未启动：原会话已撤销", false), nil
+			"命令未启动：原会话已撤销"), nil
 	}
 
 	prepareCtx, cancelPrepare := context.WithTimeout(work.Ctx, 30*time.Second)
@@ -252,10 +248,10 @@ func (e *Engine) Shell(ctx context.Context, agent, p string, req *protocol.Shell
 	if prepareErr != nil {
 		if e.workRevoked(work) {
 			return e.finishShellNotStarted(op, work, run, protocol.CodeStopped,
-				"命令未启动：原会话已撤销", false), nil
+				"命令未启动：原会话已撤销"), nil
 		}
 		return e.finishShellNotStarted(op, work, run, protocol.CodeShellStartFailed,
-			"命令未能启动", true), nil
+			"命令未能启动"), nil
 	}
 
 	startCtx, cancelStart := context.WithTimeout(work.Ctx, e.cfg.ShellStartTimeout+20*time.Second)
@@ -265,10 +261,10 @@ func (e *Engine) Shell(ctx context.Context, agent, p string, req *protocol.Shell
 		if errors.Is(startErr, device.ErrShellNotStarted) {
 			if e.workRevoked(work) {
 				return e.finishShellNotStarted(op, work, run, protocol.CodeStopped,
-					"命令未启动：原会话已撤销", false), nil
+					"命令未启动：原会话已撤销"), nil
 			}
 			return e.finishShellNotStarted(op, work, run, protocol.CodeShellStartFailed,
-				"命令未能启动", true), nil
+				"命令未能启动"), nil
 		}
 		if e.workRevoked(work) {
 			// The dispatch may still have reached the runner; only a confirmed
@@ -452,10 +448,10 @@ func (e *Engine) finishShellRevoked(op *operationState, work *workState, run *sh
 }
 
 // finishShellNotStarted records a provably unstarted command. The dispatch
-// boundary was crossed, so the response carries termination=not_started and a
-// healthy scope still receives one full observation.
+// boundary was crossed, so the response carries termination=not_started. The
+// ready observation was never touched and no observation is published.
 func (e *Engine) finishShellNotStarted(op *operationState, work *workState, run *shellState,
-	code, message string, observe bool) *protocol.Result {
+	code, message string) *protocol.Result {
 	e.mu.Lock()
 	run.State, run.Phase = ShellAborted, "not_started"
 	run.Termination = terminationNotStarted
@@ -478,7 +474,7 @@ func (e *Engine) finishShellNotStarted(op *operationState, work *workState, run 
 		Outcome: OutcomeNotExecuted,
 		Shell:   &protocol.ShellView{Termination: terminationNotStarted},
 	}
-	return e.finishShellResult(op, work, result, OutcomeNotExecuted, apiErr, observe)
+	return e.finishShellResult(op, work, result, OutcomeNotExecuted, apiErr)
 }
 
 // finishShellUncertain keeps the exact-chain barrier closed. No observation is
@@ -496,11 +492,12 @@ func (e *Engine) finishShellUncertain(op *operationState, run *shellState, messa
 	}
 	e.logShell("shell.uncertain", run,
 		eventlog.Str("phase", "uncertain"), eventlog.Str("state", run.State))
-	return e.finishShellResult(op, nil, result, OutcomeUncertain, apiErr, false)
+	return e.finishShellResult(op, nil, result, OutcomeUncertain, apiErr)
 }
 
 // finishShellConfirmed records one confirmed end, reads the bounded output
-// once, promotes the cleanup barrier and performs the post-full observation.
+// once and promotes the cleanup barrier. It publishes no observation: the
+// screen is only inspected again by the caller's next read.
 func (e *Engine) finishShellConfirmed(op *operationState, work *workState, run *shellState,
 	termination string, exitCode *int, phase string) *protocol.Result {
 	output, truncated, outputErr := e.readShellOutput(run)
@@ -527,7 +524,7 @@ func (e *Engine) finishShellConfirmed(op *operationState, work *workState, run *
 		extra = append(extra, eventlog.Bool("truncated", *truncated))
 	}
 	e.logShell("shell.finish", run, extra...)
-	return e.finishShellResult(op, work, result, OutcomeExecuted, nil, true)
+	return e.finishShellResult(op, work, result, OutcomeExecuted, nil)
 }
 
 // confirmShellBarrier marks the exact runner gone and clears the barrier. It is
@@ -620,16 +617,18 @@ func (e *Engine) removeManagedShellDir(run *shellState) {
 	_ = e.dev.RemoveManagedShell(ctx, run.RunnerID, run.Root)
 }
 
-// finishShellResult records the operation and, when allowed, performs exactly
-// one forced-full post observation. A post failure never rewrites the shell
-// outcome.
+// finishShellResult records the operation facts. A managed command never
+// captures, publishes or retires an observation: the ready O keeps its status
+// and the confirmed baseline stays, so the next act revalidates the live target
+// against that O and the next observe still has its delta reference. A command
+// that changes the screen is answered by that revalidation, not by this result.
 func (e *Engine) finishShellResult(op *operationState, work *workState, result *protocol.Result,
-	outcome string, apiErr *protocol.APIError, attemptPost bool) *protocol.Result {
+	outcome string, apiErr *protocol.APIError) *protocol.Result {
 	if apiErr != nil {
 		result.Error = apiErr.Public()
 		result.Next = apiErr.Next
 	}
-	if !attemptPost || work == nil || e.workRevoked(work) {
+	if work == nil || e.workRevoked(work) {
 		if result.Next == "" {
 			result.Next = "status"
 		}
@@ -637,23 +636,6 @@ func (e *Engine) finishShellResult(op *operationState, work *workState, result *
 		e.addShellSession(op, result)
 		return result
 	}
-	session := e.sessionForWork(work)
-	if session == nil {
-		result.Next = "status"
-		e.finishOperation(op, outcome, "executed_revoked", apiErr)
-		e.addShellSession(op, result)
-		return result
-	}
-	public, _, postErr := e.captureAndPublish(work.Ctx, work, session, true, false, "shell")
-	if postErr != nil {
-		result.Observation = &protocol.Observation{
-			Status: "failed", Missing: []string{"tree"}, Error: postErr.Public(),
-		}
-		result.Next = "observe"
-		e.finishOperation(op, outcome, "post_observation_failed", apiErr)
-		return result
-	}
-	result.Observation = public
 	e.finishOperation(op, outcome, "finished", apiErr)
 	return result
 }

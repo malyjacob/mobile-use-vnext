@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json/v2"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -45,18 +46,34 @@ func requireShellView(t *testing.T, result *protocol.Result, termination string,
 	}
 }
 
-// Case 1: a normal exit publishes exactly one forced-full observation, retires
-// (never claims) the old O and leaves one new ready full O.
-func TestShellNormalExitPublishesFullObservation(t *testing.T) {
+// Case 1: a healthy exit reports the command facts only. The ready observation
+// and the confirmed baseline stay untouched, and the flow performs no capture.
+func TestShellKeepsReadyObservation(t *testing.T) {
 	h := newHarness(t)
 	first := h.startSession()
+	// Acknowledging the first full candidate confirms the delta baseline, so
+	// the case can prove that a command does not drop it.
+	if _, apiErr := h.engine.Observe(context.Background(), "agent", "Pobserve",
+		&protocol.ObserveRequest{Reference: first.Observation.ID}); apiErr != nil {
+		t.Fatalf("Observe: %v", apiErr)
+	}
+	h.engine.mu.Lock()
+	ready := h.engine.current
+	baseline := h.engine.baseline
+	observations := len(h.engine.observations)
+	h.engine.mu.Unlock()
+	if ready == nil || ready.Status != ObservationReady || baseline == nil {
+		t.Fatalf("precondition: ready=%+v baseline=%+v", ready, baseline)
+	}
+	captures := h.device.captureCount()
+
 	h.device.setShellDone(exitedDone(0, 6, false))
 	h.device.shell.mu.Lock()
 	h.device.shell.output = []byte("hello\n")
 	h.device.shell.mu.Unlock()
 
 	result, apiErr := h.engine.Shell(context.Background(), "agent", "Psh",
-		shellRequestFor(first.Observation, "echo hello"))
+		shellRequestFor(&protocol.Observation{ID: ready.ID}, "echo hello"))
 	if apiErr != nil {
 		t.Fatalf("Shell: %v", apiErr)
 	}
@@ -71,30 +88,169 @@ func TestShellNormalExitPublishesFullObservation(t *testing.T) {
 	if result.Shell.Truncated == nil || *result.Shell.Truncated {
 		t.Fatalf("truncated=%v", result.Shell.Truncated)
 	}
-	if result.Observation == nil || result.Observation.Status != "complete" ||
-		result.Observation.Tree == nil || result.Observation.Tree.Full == nil {
-		t.Fatalf("post observation=%+v", result.Observation)
+	if result.Observation != nil {
+		t.Fatalf("shell must not publish an observation: %+v", result.Observation)
 	}
 	if result.Next != "" {
 		t.Fatalf("next=%q", result.Next)
 	}
+	if got := h.device.captureCount(); got != captures {
+		t.Fatalf("shell performed %d captures, want none", got-captures)
+	}
 
 	h.engine.mu.Lock()
-	old := h.engine.observations[first.Observation.ID]
-	full := h.engine.current
+	after, afterBaseline := h.engine.current, h.engine.baseline
+	afterStatus := h.engine.observations[ready.ID].Status
+	afterObservations := len(h.engine.observations)
+	afterWork := h.engine.work
 	h.engine.mu.Unlock()
-	if old == nil || old.Status != ObservationRetired || old.ClaimedBy != "" {
-		t.Fatalf("old O must be retired without a claim: %+v", old)
+	if after != ready || afterStatus != ObservationReady || after.ClaimedBy != "" {
+		t.Fatalf("current=%+v status=%s claimed_by=%q", after, afterStatus, after.ClaimedBy)
 	}
-	if full == nil || full.Status != ObservationReady || !full.Full || full.ID == first.Observation.ID {
-		t.Fatalf("new O must be a ready full observation: %+v", full)
+	if afterBaseline != baseline {
+		t.Fatalf("confirmed baseline changed: %+v", afterBaseline)
 	}
+	if afterObservations != observations {
+		t.Fatalf("observations=%d want %d", afterObservations, observations)
+	}
+	if afterWork != nil {
+		t.Fatalf("device work position was not released: %+v", afterWork)
+	}
+
 	prepare, start, _, _, _, remove := h.device.shellCalls()
 	if prepare != 1 || start != 1 || remove != 1 {
 		t.Fatalf("calls prepare=%d start=%d remove=%d", prepare, start, remove)
 	}
 	if string(h.device.lastShellCommand()) != "echo hello" {
 		t.Fatalf("command bytes were not passed exactly")
+	}
+}
+
+// A chain of commands performs no capture and allocates no observation: the
+// same ready O carries every result.
+func TestShellChainPerformsNoCapture(t *testing.T) {
+	h := newHarness(t)
+	first := h.startSession()
+	captures := h.device.captureCount()
+	h.device.setShellDone(exitedDone(0, 0, false))
+	for index := 0; index < 3; index++ {
+		result, apiErr := h.engine.Shell(context.Background(), "agent",
+			"Pchain"+strconv.Itoa(index), shellRequestFor(first.Observation, "true"))
+		if apiErr != nil {
+			t.Fatalf("Shell %d: %v", index, apiErr)
+		}
+		if result.Outcome != OutcomeExecuted || result.Observation != nil || result.Next != "" {
+			t.Fatalf("run %d: %+v", index, result)
+		}
+	}
+	if got := h.device.captureCount(); got != captures {
+		t.Fatalf("shell chain performed %d captures, want none", got-captures)
+	}
+	h.engine.mu.Lock()
+	observations := len(h.engine.observations)
+	status := h.engine.observations[first.Observation.ID].Status
+	current := h.engine.current
+	h.engine.mu.Unlock()
+	if observations != 1 || status != ObservationReady || current == nil ||
+		current.ID != first.Observation.ID {
+		t.Fatalf("observations=%d status=%s current=%+v", observations, status, current)
+	}
+}
+
+// A command that does not change the screen leaves the O usable: the next act
+// revalidates the live target and dispatches without an extra observe.
+func TestShellThenActRevalidatesTheSameObservation(t *testing.T) {
+	h := newHarness(t)
+	first := h.startSession()
+	button := findRole(currentTree(t, h.engine).Root, protocol.RoleButton)
+	if button == nil {
+		t.Fatalf("button not found in tree")
+	}
+	h.device.setShellDone(exitedDone(0, 0, false))
+	if result, apiErr := h.engine.Shell(context.Background(), "agent", "Psh",
+		shellRequestFor(first.Observation, "true")); apiErr != nil || result.Observation != nil {
+		t.Fatalf("Shell: result=%+v err=%v", result, apiErr)
+	}
+	result, apiErr := h.engine.Act(context.Background(), "agent", "Pact", &protocol.ActRequest{
+		ObservationID: first.Observation.ID,
+		Operation: protocol.Operation{Type: "tap",
+			Target: &protocol.Target{UseRef: true, Ref: button.Ref}},
+	})
+	if apiErr != nil {
+		t.Fatalf("act rejected: %v", apiErr)
+	}
+	if result.Outcome != OutcomeExecuted {
+		t.Fatalf("act outcome=%s error=%+v", result.Outcome, result.Error)
+	}
+	if len(h.device.taps) != 1 {
+		t.Fatalf("taps=%v", h.device.taps)
+	}
+}
+
+// A command that changes the screen is caught by the next act's live
+// revalidation, before any input is dispatched.
+func TestShellThenActRejectsAChangedTarget(t *testing.T) {
+	h := newHarness(t)
+	first := h.startSession()
+	button := findRole(currentTree(t, h.engine).Root, protocol.RoleButton)
+	if button == nil {
+		t.Fatalf("button not found in tree")
+	}
+	h.device.setShellDone(exitedDone(0, 0, false))
+	// The command changes the page; the ready O still describes the old one.
+	h.device.scriptCaptures(markerCapture("after-shell"))
+	if result, apiErr := h.engine.Shell(context.Background(), "agent", "Psh",
+		shellRequestFor(first.Observation, "true")); apiErr != nil || result.Observation != nil {
+		t.Fatalf("Shell: result=%+v err=%v", result, apiErr)
+	}
+	result, apiErr := h.engine.Act(context.Background(), "agent", "Pact", &protocol.ActRequest{
+		ObservationID: first.Observation.ID,
+		Operation: protocol.Operation{Type: "tap",
+			Target: &protocol.Target{UseRef: true, Ref: button.Ref}},
+	})
+	if apiErr != nil {
+		t.Fatalf("a changed target must be a result, not an API error: %v", apiErr)
+	}
+	if result.Outcome != OutcomeNotExecuted || result.Error == nil ||
+		result.Error.Code != protocol.CodeTargetChanged || result.Next != "observe" {
+		t.Fatalf("result=%+v error=%+v", result, result.Error)
+	}
+	if len(h.device.taps) != 0 {
+		t.Fatalf("a changed target was dispatched: %v", h.device.taps)
+	}
+}
+
+// A command never extends the input deadline: an O that ran out of time during
+// the command is rejected by the next act.
+func TestShellThenActRejectsExpiredObservation(t *testing.T) {
+	h := newHarness(t)
+	first := h.startSession()
+	button := findRole(currentTree(t, h.engine).Root, protocol.RoleButton)
+	if button == nil {
+		t.Fatalf("button not found in tree")
+	}
+	h.device.setShellDone(exitedDone(0, 0, false))
+	if result, apiErr := h.engine.Shell(context.Background(), "agent", "Psh",
+		shellRequestFor(first.Observation, "true")); apiErr != nil || result.Observation != nil {
+		t.Fatalf("Shell: result=%+v err=%v", result, apiErr)
+	}
+	h.engine.mu.Lock()
+	h.engine.current.ActionableUntil = time.Now().Add(-time.Second)
+	h.engine.mu.Unlock()
+	result, apiErr := h.engine.Act(context.Background(), "agent", "Pact", &protocol.ActRequest{
+		ObservationID: first.Observation.ID,
+		Operation: protocol.Operation{Type: "tap",
+			Target: &protocol.Target{UseRef: true, Ref: button.Ref}},
+	})
+	if apiErr != nil {
+		t.Fatalf("expiry must be a result, not an API error: %v", apiErr)
+	}
+	if result.Outcome != OutcomeNotExecuted || result.Error == nil ||
+		result.Error.Code != protocol.CodeObservationExpired {
+		t.Fatalf("result=%+v error=%+v", result, result.Error)
+	}
+	if len(h.device.taps) != 0 {
+		t.Fatalf("an expired observation dispatched input: %v", h.device.taps)
 	}
 }
 
@@ -201,6 +357,7 @@ func TestShellStartOutcomes(t *testing.T) {
 	t.Run("not_started", func(t *testing.T) {
 		h := newHarness(t)
 		first := h.startSession()
+		captures := h.device.captureCount()
 		h.device.shell.mu.Lock()
 		h.device.shell.startErr = device.ErrShellNotStarted
 		h.device.shell.mu.Unlock()
@@ -214,8 +371,18 @@ func TestShellStartOutcomes(t *testing.T) {
 		if result.Shell.Output != nil || result.Shell.Truncated != nil {
 			t.Fatalf("unstarted command must not claim output: %+v", result.Shell)
 		}
-		if result.Observation == nil || result.Observation.Status != "complete" {
-			t.Fatalf("healthy scope still needs one full: %+v", result.Observation)
+		if result.Observation != nil {
+			t.Fatalf("unstarted command must not publish an observation: %+v", result.Observation)
+		}
+		if got := h.device.captureCount(); got != captures {
+			t.Fatalf("unstarted command performed %d captures", got-captures)
+		}
+		h.engine.mu.Lock()
+		status := h.engine.observations[first.Observation.ID].Status
+		current := h.engine.current
+		h.engine.mu.Unlock()
+		if status != ObservationReady || current == nil || current.ID != first.Observation.ID {
+			t.Fatalf("status=%s current=%+v", status, current)
 		}
 		_, _, _, _, _, remove := h.device.shellCalls()
 		if remove != 1 {
@@ -382,8 +549,10 @@ func TestShellDuplicatePDispatchOnce(t *testing.T) {
 	}
 }
 
-// Case 10: a failed post observation keeps the confirmed shell fact.
-func TestShellPostObservationFailureKeepsExecuted(t *testing.T) {
+// Case 10: an unreadable hierarchy never reaches the shell result. The escape
+// hatch (repairing a broken tree with a command) still reports a clean fact,
+// and the ready O stays usable.
+func TestShellNeedsNoTreeForItsResult(t *testing.T) {
 	h := newHarness(t)
 	first := h.startSession()
 	h.device.setShellDone(exitedDone(1, 0, false))
@@ -392,11 +561,19 @@ func TestShellPostObservationFailureKeepsExecuted(t *testing.T) {
 	h.device.mu.Unlock()
 	result, _ := h.engine.Shell(context.Background(), "agent", "Psh",
 		shellRequestFor(first.Observation, "exit 1"))
-	if result.Outcome != OutcomeExecuted || result.Observation == nil ||
-		result.Observation.Status != "failed" || result.Next != "observe" {
+	if result.Outcome != OutcomeExecuted || result.Error != nil {
 		t.Fatalf("result=%+v", result)
 	}
 	requireShellView(t, result, terminationExited, intPtr(1))
+	if result.Observation != nil || result.Next != "" {
+		t.Fatalf("a broken tree changed the shell result: %+v", result)
+	}
+	h.engine.mu.Lock()
+	status := h.engine.observations[first.Observation.ID].Status
+	h.engine.mu.Unlock()
+	if status != ObservationReady {
+		t.Fatalf("shell consumed the observation: %s", status)
+	}
 }
 
 // Case 11: ownership is durable before Prepare and never contains the command.

@@ -490,10 +490,13 @@ function Test-Shell {
     Assert-True (([int](Get-Field $normalShell 'exit_code')) -eq 0) 'shell normal exit code'
     Assert-True (-not [bool](Get-Field $normalShell 'truncated')) 'shell normal truncated'
     Assert-True ([string](Get-Field $normalShell 'output') -like '*shell-ok*') 'shell normal output'
-    $post = Get-Field $normal 'observation'
-    Assert-True ([string](Get-Field $post 'status') -eq 'complete') 'shell normal post observation'
-    Assert-True ([string](Get-Field (Get-Field $post 'tree') 'format') -eq 'full') 'shell normal post tree is not full'
-    $oid = [string](Get-Field $post 'id')
+    Assert-True ($null -eq (Get-Field $normal 'observation')) 'shell must not publish an observation'
+    Assert-True ([string](Get-Field $normal 'next') -eq '') 'shell normal next must be empty'
+    # The ready O survives the command and stays actionable without a new read.
+    $ready = Invoke-Api -Path '/api/status' -Body ('{"reference":"' + $oid + '"}') `
+        -Operation ('Pverify-shell-ready-' + $script:runId)
+    Assert-True ([string](Get-Field $ready 'observation_state') -eq 'ready') 'shell retired the ready O'
+    Assert-True ([string](Get-Field $ready 'input_state') -eq 'effective') 'shell revoked the input authorization'
 
     $big = Invoke-Api -Path '/api/shell' `
         -Body ('{"reference":"' + $oid + '","command":"i=0; while [ $i -lt 20000 ]; do echo 0123456789; i=$((i+1)); done"}') `
@@ -504,9 +507,7 @@ function Test-Shell {
     Assert-True ([string](Get-Field $bigShell 'termination') -eq 'exited') 'shell big termination'
     Assert-True ($bigOutput.Length -eq 65536) ("shell big output length=" + $bigOutput.Length)
     Assert-True ([bool](Get-Field $bigShell 'truncated')) 'shell big truncated'
-    $post = Get-Field $big 'observation'
-    Assert-True ([string](Get-Field $post 'status') -eq 'complete') 'shell big post observation'
-    $oid = [string](Get-Field $post 'id')
+    Assert-True ($null -eq (Get-Field $big 'observation')) 'shell big must not publish an observation'
 
     $self124 = Invoke-Api -Path '/api/shell' `
         -Body ('{"reference":"' + $oid + '","command":"exit 124"}') `
@@ -515,9 +516,7 @@ function Test-Shell {
     Assert-True ([string](Get-Field $self124 'outcome') -eq 'executed') 'shell self124 outcome'
     Assert-True ([string](Get-Field $s124 'termination') -eq 'exited') 'shell self124 must not be timeout'
     Assert-True (([int](Get-Field $s124 'exit_code')) -eq 124) 'shell self124 exit code'
-    $post = Get-Field $self124 'observation'
-    Assert-True ([string](Get-Field $post 'status') -eq 'complete') 'shell self124 post observation'
-    $oid = [string](Get-Field $post 'id')
+    Assert-True ($null -eq (Get-Field $self124 'observation')) 'shell self124 must not publish an observation'
 
     $timeout = Invoke-Api -Path '/api/shell' `
         -Body ('{"reference":"' + $oid + '","command":"sleep 40"}') `
@@ -526,9 +525,7 @@ function Test-Shell {
     Assert-True ([string](Get-Field $timeout 'outcome') -eq 'executed') 'shell timeout outcome'
     Assert-True ([string](Get-Field $timeoutShell 'termination') -eq 'timeout') 'shell timeout termination'
     Assert-True ($null -eq (Get-Field $timeoutShell 'exit_code')) 'shell timeout exit code must be null'
-    $post = Get-Field $timeout 'observation'
-    Assert-True ([string](Get-Field $post 'status') -eq 'complete') 'shell timeout post observation'
-    $oid = [string](Get-Field $post 'id')
+    Assert-True ($null -eq (Get-Field $timeout 'observation')) 'shell timeout must not publish an observation'
 
     $end = Invoke-Api -Path '/api/end' -Body ('{"reference":"' + [string](Get-Field $start 'operation_id') + '"}') `
         -Operation ('Pverify-shell-end-' + $script:runId)
