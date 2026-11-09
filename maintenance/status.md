@@ -27,7 +27,7 @@
 | `keepalive` | 已实现 | 已验证：续租/结束会话拒绝 |
 | `notify` | 已实现 | 已验证：保存/重复/空正文；经控制同步进入 App 消息中心、系统通知与本地已读，确认后释放服务端队列 |
 | `diagnose` | 已实现 | 已验证：无参/指定 O |
-| `shell` | 已实现 | 已验证：正常/非零/自行124/超时/输出截断/STOP/重启恢复 |
+| `shell` | 已实现 | 已验证：正常/非零/自行124/超时/输出截断/STOP/重启恢复；命令结束不发布观察、同一 O 仍可用（`shell` 后 `act` 未变屏成功、改屏 `target_changed`、过期 `observation_expired`），实机 delta 回退见[记录](verification/shell-keeps-observation.md) |
 | `observe`/`act` 的 `image=true` | 已实现（HTTP + MCP） | 已验证：JPEG 540×1200、MIME、无 base64、只读图分支由单元测试覆盖 |
 | MCP stdio / Streamable HTTP | 已实现（`cmd/device-mcp`） | 已验证：工具目录/schema、认证/Origin、图片、取消、P 恢复；P6 回归重新拉起实际适配进程。默认部署同时安装并启动手机 `device-mcp`（手机 `18882/mcp`，主机转发 `18883`），`verify-m6` 检查 `server/discover`；主机侧适配器仍可选 |
 | Go client（`internal/client`） | 已实现 | 已验证：P 保留、断线、重复 P、取消、只读取消、图片 |
@@ -63,6 +63,7 @@
 - [P5 实机验证](verification/p5-real-device.md)
 - [P6 控制呈现、消息中心与整组交付](verification/p6-real-device.md)
 - [act 坐标目标点证明实机验证](verification/act-coordinate-point-proof.md)
+- [shell 保留当前观察实机验证](verification/shell-keeps-observation.md)
 - [工程决策](decisions.md)
 - [工程流程](process.md)
 
@@ -70,4 +71,4 @@
 
 - 第 3 节的验证缺口暂不单独补测；待其后按真实使用路径补齐证据。
 - 当前部署为 `0.4.0`（`contract_version=2`），`can_start=true`；发布产物构建自提交
-  `2f43ef1`，`source_dirty=false`。旧 0.3.0 服务与 App 仅保留为不匹配验证材料。
+  `8ee3eda`，`source_dirty=false`。旧 0.3.0 服务与 App 仅保留为不匹配验证材料。

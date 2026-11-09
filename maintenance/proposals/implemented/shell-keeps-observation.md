@@ -1,10 +1,11 @@
 # 提案：shell 不再作废当前观察，也不再后置观察
 
-状态：提案，未实现。
+状态：已实现（实现提交 `8ee3eda76fb253cdcd54cd80e67e6b40734ffcca`，2026-11-09）。
 基线提交：`742937fc97d0f60d892b8368ed30ce8cb3e8e7a2`（分支 `master`，2026-11-09）。
 适用范围：`shell` 的派发边界与结束路径；依赖 [act-coordinate-point-proof.md](act-coordinate-point-proof.md) 先落地（坐标目标在 shell 之后的安全证明）。
 影响范围：`internal/engine`（`shell.go` 为主、shell 用例）、`docs/interface.md`、`docs/mcp.md`（isError 表一行，可选）、`internal/mcp/schema.go`（可选描述）。
 契约（`/api/*` 字段与 `contract_version`）：改变——`shell` 不再发布后置观察，成功结果不含 `observation`、`next` 为空；字段定义与 `contract_version` 不变。
+实现与验证记录：[shell-keeps-observation.md](../../verification/shell-keeps-observation.md)。
 
 本文引用的函数名、行号、常量与默认值均以该基线提交为准；实现落地前若代码已前进，须按当时的
 `HEAD` 重新核对（重点：`internal/engine/shell.go` 的派发边界、`finishShellResult`、
@@ -49,13 +50,13 @@ C 的赌注是“命令大多不改屏”：赢了省一次采集和一份全树
 1. 派发边界退休 O 并清基线：`shell.go:227-231`（`current.Status = retired`；`baseline = nil`）。
 2. 结束路径补发一次强制 full：`finishShellResult` 的 `captureAndPublish(..., true, false, "shell")`
    （`shell.go:647`）。基线已被清，`useDelta` 也不会成立（`capture.go:183-184`），所以必然是 full。
-3. 命令**根本没启动**时也会补：[shell.go:257](../../internal/engine/shell.go#L257) 的
+3. 命令**根本没启动**时也会补：[shell.go:257](../../../internal/engine/shell.go#L257) 的
    `finishShellNotStarted(..., observe=true)`；测试明确断言 “healthy scope still needs one full”
-   （[shell_test.go:217](../../internal/engine/shell_test.go#L217)）。
+   （[shell_test.go:217](../../../internal/engine/shell_test.go#L217)）。
 4. `act` 要求当前 O 仍 `ready`：`act.go:250-251`。所以只删补发、保留退休，下一次 `act` 必被
    `observation_retired` 挡住。
 5. full 树进 `structuredContent`：`server.go:129`（`StructuredContent: structuredContent(...)`）、
-   `server.go:369-375`；上限见 [architecture.md:123](../../docs/architecture.md#L123)。
+   `server.go:369-375`；上限见 [architecture.md:123](../../../docs/architecture.md#L123)。
 6. 代码自己的分类已经把 `shell` 归为“不是 UI 获取”：`settle.go:34` 的注释与 settle 提案都
    把 `shell` 排除在收敛采样之外；但结果里仍然带一棵 UI 树。
 7. 后置观察只在“健康确认结束”时发生：`finishShellResult` 在 `workRevoked` 时跳过
@@ -222,7 +223,7 @@ t4 agent 选择：
 - 屏幕未变时，下一条 `act` 可以直接使用旧 O，由实时重验兜底；
 - 需要新树时，`observe` 仍按既有基线规则返回 delta 或 full。基线只是 delta 的编码参照，描述的
   是客户端已持有的树，不是当前屏幕，所以跨过一条命令仍然成立；差异过大或不可表达时，既有的
-  70% 门禁会退回 full（[architecture.md:150-156](../../docs/architecture.md#L150-L156)）。
+  70% 门禁会退回 full（[architecture.md:150-156](../../../docs/architecture.md#L150-L156)）。
 
 ### 7.2 不能治什么
 
@@ -307,20 +308,44 @@ t4 agent 选择：
 4. 实机验证记录。
 5. 两份提案分别归档（先实现、后归档；归档头写实现提交 hash）。
 
-## 11. 实现结果（归档时补写）
+## 11. 实现结果
 
-实现提交：`<hash>`。实现与验证记录：`maintenance/verification/shell-keeps-observation.md`
-（归档移动后链接为 `../../verification/shell-keeps-observation.md`；§11 在归档时补写）。
+实现提交：`8ee3eda76fb253cdcd54cd80e67e6b40734ffcca`。实现与验证记录：
+[shell-keeps-observation.md](../../verification/shell-keeps-observation.md)。
 
 ### 11.1 已落地
 
 | 提案条目 | 落点 |
 | --- | --- |
+| 派发边界不退休 O、不清已确认基线，只置执行未知 | `internal/engine/shell.go`：`Shell` 的派发边界（`work.DispatchUnknown`、`session.ExecutionUnknown`） |
+| 结束不采集、不发布观察、不分配 O、不写 `Observation`、不设 `next=observe` | `internal/engine/shell.go`：`finishShellResult`；`finishShellConfirmed` 只读输出并提升收尾屏障 |
+| 未启动路径去掉后置观察 | `internal/engine/shell.go`：`finishShellNotStarted` 去掉 `observe` 参数与五个调用点 |
+| 不确定性/撤销路径保持既有事实分层 | `finishShellUncertain` 不发布观察、保持受管链屏障；`revokeSessionLocked` 仍退休 O |
+| 结果形状：成功无 `observation`、`next` 为空；撤销后 `next=status` 并带会话视图 | `internal/engine/shell.go` 的 `finishShellResult` 分支；`protocol.Result` 省略空 `next` |
+| 不延长输入时钟 | `internal/engine/capture.go` 的 `ActionableUntil` 未改；`shell` 只续租会话 |
+| 反向对照：keeps-ready 用例在基线上红 | `internal/engine/shell_test.go`：`TestShellKeepsReadyObservation` 等 7 个用例在实现前红，实现后绿 |
+| 用例：正常结束/未启动/改屏/过期/N 条链 | `internal/engine/shell_test.go`：`TestShellKeepsReadyObservation`、`TestShellChainPerformsNoCapture`、`TestShellThenActRevalidatesTheSameObservation`、`TestShellThenActRejectsAChangedTarget`、`TestShellThenActRejectsExpiredObservation`、`TestShellNeedsNoTreeForItsResult`、`TestShellStartOutcomes/not_started` |
+| 未启动断言改写（原“healthy scope still needs one full”） | 同上，改为“O 仍 `ready`、无观察、零采集” |
+| 后置观察失败用例改写 | 原 Case 10 改为 `TestShellNeedsNoTreeForItsResult`：树不可读时命令结果仍干净 |
+| MCP 结果形状断言 | `internal/mcp/server_test.go` 的 `shell` 用例补“正文不含 `observation`” |
+| 文档：§1 后观察清单、§12 派发边界/示例/失败说明 | `docs/interface.md` §1、§12 |
+| 文档：§3 的 isError 行 | `docs/mcp.md` §3（后树仅 `act`/`open_app`） |
+| MCP `shell` 描述（§9.2 默认加） | `internal/mcp/schema.go`：“命令可能改变界面且不会返回新树；若预期会改屏，随后应 observe” |
+| 实机验证 | [实现与验证记录](../../verification/shell-keeps-observation.md) §4/§5：单条与链式命令、`shell` 后 `act`、改屏 `target_changed`、过期 `observation_expired`、大树、`end` |
 
 ### 11.2 与提案不同或未执行
 
 | 项 | 结论与理由 |
 | --- | --- |
+| 实施顺序 | 提案 §10 写作“文档 + 审计 + 实现提交 → 实机验证记录”；实际为“实现提交 → 干净发布构建 → 实机验证 → 归档”。理由：发布清单必须记录 `source_dirty=false`，只能从实现提交构建；实现提交仍先于归档，符合流程。判据、契约与时序未变 |
+| 改动面新增两个文件 | 提案 §6.1 未列 `scripts/verify-p4.ps1` 与 `README.md`：前者原来的 shell 段断言后置 full 观察，不改就与新行为矛盾；后者在同一行写了“后观察”。两者都只同步事实，不新增契约 |
+| `internal/mcp/server_test.go` | 提案写“若已有 shell 结果形状断言，补无 `observation`”。原用例的假响应本就不含 `observation`，因此只补一条“正文不含 `observation`”的断言，没有新增假数据分支 |
+| 实机“`shell` 后 `observe` 返回 delta” | 未观察到：本机连续采集之间既有保号会给容器节点重新分配 ref（`n4`→`n10`，子节点不变），既有 delta 编码属“不可表达”而回退 full；无 `shell` 的对照序列同样复现，与本次改动无关。基线保留由单元测试断言，实机只证明 `observe` 仍返回 `complete` |
+| 实机“树坏时 `shell`”（逃生出口） | 未构造：需要破坏 u2/层级读取，而 `EnsureU2` 只在服务启动时调用，恢复只能重启服务；单元测试用 `captureErrs` 覆盖“树不可读、命令结果仍干净、O 仍 `ready`” |
+| 实机响应字节/延迟 A/B | 未执行：需要回退部署旧构建。记录只给当前值，并以同页 full 树字节（1274 B / 11533 B）作为被删除后置观察的成本参照 |
+| 实机 `422 ambiguous_point` 之外的新增拒绝 | 本提案不新增错误码；`target_changed`/`observation_expired` 都已在实机构造并验证 |
+| MCP 传输层 `shell` | 未单独通过 MCP 宿主发起；行为在引擎/HTTP 路径完成，MCP 只做投影，`server_test` 覆盖“无 `observation`”的正文 |
+| `go test -race` | 未执行：Windows 宿主无 C 编译器，`CGO_ENABLED=0` 目标下不可用；与既有记录一致 |
 
 ---
 
