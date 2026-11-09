@@ -95,9 +95,10 @@ func TestAppsHelperFailureIs503(t *testing.T) {
 	if apiErr != nil {
 		t.Fatalf("Apps: %v", apiErr)
 	}
-	if result.Error == nil || result.Error.Code != protocol.CodeAppListUnavailable || result.Next != "status" {
+	if result.Error == nil || result.Error.Code != protocol.CodeAppListUnavailable {
 		t.Fatalf("result=%+v", result)
 	}
+	requireRecovery(t, result, protocol.RecoveryEntryStatus, protocol.RecoveryReferenceP, "", "")
 	if result.Outcome != "" {
 		t.Fatalf("apps must not report an action outcome: %+v", result)
 	}

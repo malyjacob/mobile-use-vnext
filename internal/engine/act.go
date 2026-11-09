@@ -20,6 +20,7 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 	if duplicate != nil {
 		return duplicate, nil
 	}
+	e.setOperationReference(op, protocol.RecoveryReferenceO)
 
 	e.mu.Lock()
 	staticErr := e.staticActCheckLocked(agent, req.ObservationID, &req.Operation, time.Now())
@@ -43,7 +44,7 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 	e.mu.Lock()
 	session := e.session
 	obs := e.observations[req.ObservationID]
-	claimErr := e.claimObservationLocked(agent, work, obs, session, time.Now())
+	claimErr := e.claimObservationLocked(op, agent, work, obs, session, time.Now())
 	if claimErr != nil {
 		e.mu.Unlock()
 		return e.finishWithError(op, "claim", claimErr), nil
@@ -56,7 +57,6 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 	if revalidateErr != nil {
 		e.logActPoint(point, false)
 		revalidateErr.Outcome = OutcomeNotExecuted
-		revalidateErr.Next = "observe"
 		return e.finishWithError(op, "revalidate", revalidateErr), nil
 	}
 	e.logActPoint(point, point != nil && point.state == pointUnique)
@@ -68,14 +68,12 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 		result := newResult(op)
 		result.Outcome = OutcomeUncertain
 		result.Error = dispatchErr.Public()
-		result.Next = "status"
-		e.finishOperation(op, OutcomeUncertain, "dispatch", dispatchErr)
+		result.Recovery = e.finishOperation(op, OutcomeUncertain, "dispatch", dispatchErr)
 		e.addSessionIfEnded(result)
 		return result, nil
 	}
 	if outcome == OutcomeNotExecuted {
 		dispatchErr.Outcome = OutcomeNotExecuted
-		dispatchErr.Next = "status"
 		return e.finishWithError(op, "dispatch", dispatchErr), nil
 	}
 
@@ -84,8 +82,7 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 	if e.workRevoked(work) {
 		result := newResult(op)
 		result.Outcome = OutcomeExecuted
-		result.Next = "status"
-		e.finishOperation(op, OutcomeExecuted, "executed_revoked", nil)
+		result.Recovery = e.finishOperation(op, OutcomeExecuted, "executed_revoked", nil)
 		e.addSessionIfEnded(result)
 		return result, nil
 	}
@@ -93,8 +90,7 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 	if session == nil {
 		result := newResult(op)
 		result.Outcome = OutcomeExecuted
-		result.Next = "status"
-		e.finishOperation(op, OutcomeExecuted, "executed_revoked", nil)
+		result.Recovery = e.finishOperation(op, OutcomeExecuted, "executed_revoked", nil)
 		e.addSessionIfEnded(result)
 		return result, nil
 	}
@@ -105,8 +101,7 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 		// revocation check above, only observed one step later.
 		result := newResult(op)
 		result.Outcome = OutcomeExecuted
-		result.Next = "status"
-		e.finishOperation(op, OutcomeExecuted, "executed_revoked", nil)
+		result.Recovery = e.finishOperation(op, OutcomeExecuted, "executed_revoked", nil)
 		e.addSessionIfEnded(result)
 		return result, nil
 	}
@@ -122,13 +117,12 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 				Status: "failed", Missing: []string{"tree"}, Error: postErr.Public(),
 			}
 		}
-		result.Next = "observe"
-		e.finishOperation(op, OutcomeExecuted, "post_observation_failed", nil)
+		result.Recovery = e.finishOperation(op, OutcomeExecuted, "post_observation_failed", nil)
 		return result, nil
 	}
 	result.Outcome = OutcomeExecuted
 	result.Observation = public
-	e.finishOperation(op, OutcomeExecuted, "finished", nil)
+	result.Recovery = e.finishOperation(op, OutcomeExecuted, "finished", nil)
 	return result, nil
 }
 
@@ -146,30 +140,30 @@ func (e *Engine) addSessionIfEnded(result *protocol.Result) {
 func (e *Engine) staticActCheckLocked(agent, observationID string, operation *protocol.Operation, now time.Time) *protocol.APIError {
 	session := e.session
 	if session == nil || session.State != SessionActive {
-		return protocol.NewError(409, protocol.CodeSessionEnded, "原会话已结束").WithNext("end")
+		return protocol.NewError(409, protocol.CodeSessionEnded, "原会话已结束")
 	}
 	if !sessionBeforeDeadline(session, now) {
-		return protocol.NewError(409, protocol.CodeSessionExpired, "原会话已过期").WithNext("end")
+		return protocol.NewError(409, protocol.CodeSessionExpired, "原会话已过期")
 	}
 	obs := e.observations[observationID]
 	if obs == nil || obs.Agent != agent || obs.SessionEpoch != session.Epoch {
 		return protocol.NewError(409, protocol.CodeObservationGone, "原观察不可用")
 	}
 	if e.current != obs {
-		return protocol.NewError(409, protocol.CodeObservationRetired, "观察已被替换").WithNext("observe")
+		return protocol.NewError(409, protocol.CodeObservationRetired, "观察已被替换")
 	}
 	switch obs.Status {
 	case ObservationReady:
 	case ObservationClaimed:
-		return protocol.NewError(409, protocol.CodeObservationClaimed, "观察已被消费").WithNext("observe")
+		return protocol.NewError(409, protocol.CodeObservationClaimed, "观察已被消费")
 	case ObservationExpired:
-		return protocol.NewError(409, protocol.CodeObservationExpired, "观察已过期").WithNext("observe")
+		return protocol.NewError(409, protocol.CodeObservationExpired, "观察已过期")
 	default:
-		return protocol.NewError(409, protocol.CodeObservationRetired, "观察已退役").WithNext("observe")
+		return protocol.NewError(409, protocol.CodeObservationRetired, "观察已退役")
 	}
 	if now.After(obs.ActionableUntil) {
 		obs.Status = ObservationExpired
-		return protocol.NewError(409, protocol.CodeObservationExpired, "观察已过期").WithNext("observe")
+		return protocol.NewError(409, protocol.CodeObservationExpired, "观察已过期")
 	}
 	return nil
 }
@@ -241,27 +235,30 @@ func staticActContentCheck(obs *observationState, operation *protocol.Operation)
 
 // claimObservationLocked performs the one-way ready->claimed transition and
 // processes the reading acknowledgement of a full candidate.
-func (e *Engine) claimObservationLocked(agent string, work *workState, obs *observationState,
+func (e *Engine) claimObservationLocked(op *operationState, agent string, work *workState, obs *observationState,
 	session *sessionState, now time.Time) *protocol.APIError {
 	if session == nil || session.State != SessionActive || e.session != session {
-		return protocol.NewError(409, protocol.CodeSessionEnded, "原会话已结束").WithNext("end")
+		return protocol.NewError(409, protocol.CodeSessionEnded, "原会话已结束")
 	}
 	if !e.workAuthorizedLocked(work, now) {
-		return protocol.NewError(409, protocol.CodeStopped, "原会话已撤销").WithNext("end")
+		return protocol.NewError(409, protocol.CodeStopped, "原会话已撤销")
 	}
 	if obs == nil || obs.Agent != agent || obs.SessionEpoch != session.Epoch {
 		return protocol.NewError(409, protocol.CodeObservationGone, "原观察不可用")
 	}
 	if e.current != obs || obs.Status != ObservationReady {
-		return protocol.NewError(409, protocol.CodeObservationRetired, "观察已被替换").WithNext("observe")
+		return protocol.NewError(409, protocol.CodeObservationRetired, "观察已被替换")
 	}
 	if now.After(obs.ActionableUntil) {
 		obs.Status = ObservationExpired
-		return protocol.NewError(409, protocol.CodeObservationExpired, "观察已过期").WithNext("observe")
+		return protocol.NewError(409, protocol.CodeObservationExpired, "观察已过期")
 	}
 	obs.Status = ObservationClaimed
 	obs.ClaimedBy = work.OperationID
 	work.ClaimedO = obs.ID
+	if op != nil {
+		op.Claimed = true
+	}
 	if obs.Full {
 		e.confirmBaselineLocked(obs)
 	}
@@ -311,7 +308,7 @@ func (e *Engine) revalidateActTarget(work *workState, obs *observationState,
 	fresh, ok := matchFreshNode(&capture, obs.Projection.Capture, raw)
 	if !ok {
 		return nil, nil, protocol.NewError(409, protocol.CodeTargetChanged,
-			"目标元素已变化，请重新观察").WithNext("observe")
+			"目标元素已变化，请重新观察")
 	}
 	return &capture, fresh, nil
 }
@@ -350,7 +347,7 @@ func (e *Engine) provePointTarget(fresh *device.Capture, obs *observationState,
 
 func targetChangedAtPoint() *protocol.APIError {
 	return protocol.NewError(409, protocol.CodeTargetChanged,
-		"目标点上的节点已变化，请重新观察").WithNext("observe")
+		"目标点上的节点已变化，请重新观察")
 }
 
 // logActPoint records one coordinate-target decision. Only the resolution
@@ -371,22 +368,22 @@ func foregroundMatches(observed, fresh device.Foreground) *protocol.APIError {
 	case device.ForegroundPresent:
 		if fresh.State != device.ForegroundPresent || fresh.Package != observed.Package {
 			return protocol.NewError(409, protocol.CodeForegroundChanged,
-				"前台窗口已变化，请重新观察").WithNext("observe")
+				"前台窗口已变化，请重新观察")
 		}
 		if observed.TaskID != nil && fresh.TaskID != nil && *observed.TaskID != *fresh.TaskID {
 			return protocol.NewError(409, protocol.CodeForegroundChanged,
-				"前台任务已变化，请重新观察").WithNext("observe")
+				"前台任务已变化，请重新观察")
 		}
 		return nil
 	case device.ForegroundNone:
 		if fresh.State != device.ForegroundNone {
 			return protocol.NewError(409, protocol.CodeForegroundChanged,
-				"前台窗口已变化，请重新观察").WithNext("observe")
+				"前台窗口已变化，请重新观察")
 		}
 		return nil
 	default:
 		return protocol.NewError(409, protocol.CodeForegroundUnknown,
-			"无法确认目标窗口归属，请重新观察").WithNext("observe")
+			"无法确认目标窗口归属，请重新观察")
 	}
 }
 
@@ -410,7 +407,7 @@ func (e *Engine) dispatchAct(work *workState, obs *observationState,
 	if operation.Target != nil && operation.Target.UseRef {
 		if raw == nil || raw.Bounds.Empty() {
 			return OutcomeNotExecuted, protocol.NewError(409, protocol.CodeTargetChanged,
-				"目标元素没有可用几何").WithNext("observe")
+				"目标元素没有可用几何")
 		}
 		x, y = raw.Bounds.Center()
 	}
@@ -453,7 +450,7 @@ func (e *Engine) dispatchText(work *workState, session *sessionState, obs *obser
 	if operation.Target.UseRef {
 		if raw == nil || raw.Bounds.Empty() {
 			return OutcomeNotExecuted, protocol.NewError(409, protocol.CodeTargetChanged,
-				"目标元素没有可用几何").WithNext("observe")
+				"目标元素没有可用几何")
 		}
 		tapX, tapY = raw.Bounds.Center()
 	}
@@ -536,21 +533,21 @@ func (e *Engine) dispatchText(work *workState, session *sessionState, obs *obser
 func actionUncertain() *protocol.APIError {
 	return &protocol.APIError{
 		Code: protocol.CodeActionUnknown, Message: "输入已派发，但完成结果无法确认",
-		HTTPStatus: 504, Outcome: OutcomeUncertain, Next: "status",
+		HTTPStatus: 504, Outcome: OutcomeUncertain,
 	}
 }
 
 func textTargetUncertain() *protocol.APIError {
 	return &protocol.APIError{
 		Code: protocol.CodeTextTargetUnknown, Message: "无法唯一绑定目标输入对象",
-		HTTPStatus: 409, Outcome: OutcomeUncertain, Next: "status",
+		HTTPStatus: 409, Outcome: OutcomeUncertain,
 	}
 }
 
 func textResultUncertain() *protocol.APIError {
 	return &protocol.APIError{
 		Code: protocol.CodeTextResultUnknown, Message: "文字写入结果无法确认",
-		HTTPStatus: 409, Outcome: OutcomeUncertain, Next: "status",
+		HTTPStatus: 409, Outcome: OutcomeUncertain,
 	}
 }
 

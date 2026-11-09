@@ -73,7 +73,10 @@ func (e *Engine) registerOperationBound(p, agent, kind string, bindSession bool)
 		closed := true
 		return nil, &protocol.Result{
 			OperationID: p, OperationState: OperationFinished, Outcome: OutcomeNotExecuted,
-			RequestClosed: &closed, Next: "status",
+			RequestClosed: &closed,
+			Recovery: planRecovery(recoveryInput{
+				Reference: protocol.RecoveryReferenceP, Code: protocol.CodeRequestClosed,
+			}),
 		}, nil
 	}
 	if len(e.operations) >= e.cfg.MaxOperations {
@@ -129,9 +132,9 @@ func (e *Engine) setOperationPhase(op *operationState, phase string) {
 	e.mu.Unlock()
 }
 
-func (e *Engine) finishOperation(op *operationState, outcome, phase string, apiErr *protocol.APIError) {
+func (e *Engine) finishOperation(op *operationState, outcome, phase string, apiErr *protocol.APIError) *protocol.Recovery {
 	if op == nil {
-		return
+		return nil
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -139,9 +142,32 @@ func (e *Engine) finishOperation(op *operationState, outcome, phase string, apiE
 	op.Outcome = outcome
 	op.Phase = phase
 	op.FinishedAt = time.Now()
+	code := ""
 	if apiErr != nil {
 		op.Error = apiErr.Public()
+		code = apiErr.Code
 	}
+	inputState := op.InputState
+	if inputState == "" {
+		inputState = inputStateFor(op.Kind, op.Reference, code, op.Claimed)
+	}
+	op.Recovery = planRecovery(recoveryInput{
+		Tool: op.Kind, Reference: op.Reference, Code: code, Phase: phase,
+		Outcome: outcome, Claimed: op.Claimed, InputState: inputState,
+		Cleanup: cleanupValue(e.cleanup),
+	})
+	return op.Recovery
+}
+
+// setOperationReference records the reference kind the request already used.
+// It is a planning fact only and never grants authority.
+func (e *Engine) setOperationReference(op *operationState, reference string) {
+	if op == nil {
+		return
+	}
+	e.mu.Lock()
+	op.Reference = reference
+	e.mu.Unlock()
 }
 
 // acquireWork takes the single ordinary device work position. Device I/O and
@@ -159,7 +185,7 @@ func (e *Engine) acquireWork(op *operationState, kind string) (*workState, *prot
 		}
 		return nil, &protocol.APIError{
 			Code: protocol.CodeDeviceBusy, Message: "设备工作尚未完成",
-			HTTPStatus: 409, Outcome: OutcomeNotExecuted, Next: "status",
+			HTTPStatus: 409, Outcome: OutcomeNotExecuted,
 			Details: map[string]any{"blocking_operation_id": blocking},
 		}
 	}
@@ -309,7 +335,7 @@ func (e *Engine) busyError(op *operationState) *protocol.APIError {
 	defer e.mu.Unlock()
 	apiErr := &protocol.APIError{
 		Code: protocol.CodeDeviceBusy, Message: "设备工作尚未完成",
-		HTTPStatus: 409, Outcome: OutcomeNotExecuted, Next: "status",
+		HTTPStatus: 409, Outcome: OutcomeNotExecuted,
 	}
 	if e.work != nil && op != nil && e.work.Agent == op.Agent {
 		apiErr.Details = map[string]any{"blocking_operation_id": e.work.OperationID}
@@ -325,16 +351,17 @@ func newResult(op *operationState) *protocol.Result {
 	return &protocol.Result{OperationID: op.ID}
 }
 
-// finishWithError marks the operation and returns the public error result.
+// finishWithError marks the operation and returns the public error result. It
+// is the single funnel for every tool failure: the recovery projection is
+// planned once from the operation's own facts.
 func (e *Engine) finishWithError(op *operationState, phase string, apiErr *protocol.APIError) *protocol.Result {
 	if apiErr.Outcome == "" {
 		apiErr.Outcome = OutcomeNotExecuted
 	}
-	e.finishOperation(op, apiErr.Outcome, phase, apiErr)
 	result := newResult(op)
 	result.Outcome = apiErr.Outcome
 	result.Error = apiErr.Public()
-	result.Next = apiErr.Next
+	result.Recovery = e.finishOperation(op, apiErr.Outcome, phase, apiErr)
 	if apiErr.Details != nil {
 		if blocking, ok := apiErr.Details["blocking_operation_id"].(string); ok {
 			result.BlockingOperationID = blocking

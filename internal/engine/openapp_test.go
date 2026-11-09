@@ -87,9 +87,11 @@ func TestOpenAppUnknownAppDoesNotConsumeObservation(t *testing.T) {
 		t.Fatalf("OpenApp: %v", apiErr)
 	}
 	if result.Error == nil || result.Error.Code != protocol.CodeAppNotFound ||
-		result.Outcome != OutcomeNotExecuted || result.Next != "user" {
+		result.Outcome != OutcomeNotExecuted {
 		t.Fatalf("result=%+v", result)
 	}
+	requireRecovery(t, result, protocol.RecoveryEntryUser, protocol.RecoveryReferenceNone,
+		protocol.RecoveryInputEffective, "")
 	h.engine.mu.Lock()
 	defer h.engine.mu.Unlock()
 	if h.engine.observations[first.Observation.ID].Status != ObservationReady {
@@ -146,9 +148,11 @@ func TestOpenAppLaunchUnknownIsUncertain(t *testing.T) {
 	result, _ := h.engine.OpenApp(context.Background(), "agent", "Papp",
 		openAppRequest(first.Observation, "com.example.app"))
 	if result.Outcome != OutcomeUncertain || result.Error == nil ||
-		result.Error.Code != protocol.CodeAppLaunchUnknown || result.Next != "status" {
+		result.Error.Code != protocol.CodeAppLaunchUnknown {
 		t.Fatalf("result=%+v", result)
 	}
+	requireRecovery(t, result, protocol.RecoveryEntryStatus, protocol.RecoveryReferenceP,
+		protocol.RecoveryInputRetired, "")
 	h.engine.mu.Lock()
 	defer h.engine.mu.Unlock()
 	if !h.engine.session.ExecutionUnknown {
@@ -166,9 +170,11 @@ func TestOpenAppPostObservationFailureKeepsExecuted(t *testing.T) {
 	result, _ := h.engine.OpenApp(context.Background(), "agent", "Papp",
 		openAppRequest(first.Observation, "com.example.app"))
 	if result.Outcome != OutcomeExecuted || result.Observation == nil ||
-		result.Observation.Status != "failed" || result.Next != "observe" {
+		result.Observation.Status != "failed" {
 		t.Fatalf("result=%+v", result)
 	}
+	requireRecovery(t, result, protocol.RecoveryEntryObserve, protocol.RecoveryReferenceP,
+		protocol.RecoveryInputRetired, protocol.RecoveryCausePostObservationFailed)
 	if result.Observation.Error == nil {
 		t.Fatalf("post observation failure must keep its own error")
 	}

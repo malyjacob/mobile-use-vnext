@@ -143,16 +143,15 @@ func appsUnavailable(reason string) *protocol.APIError {
 	if status == 500 {
 		status = 409
 	}
-	return protocol.NewError(status, reason, "当前不可读取应用清单").WithNext("status")
+	return protocol.NewError(status, reason, "当前不可读取应用清单")
 }
 
 // finishAppsError records a discovery failure without inventing an action
 // outcome: apps observes no action to execute or not execute.
 func (e *Engine) finishAppsError(op *operationState, phase string, apiErr *protocol.APIError) *protocol.Result {
-	e.finishOperation(op, "", phase, apiErr)
 	result := newResult(op)
 	result.Error = apiErr.Public()
-	result.Next = apiErr.Next
+	result.Recovery = e.finishOperation(op, "", phase, apiErr)
 	if apiErr.Details != nil {
 		if blocking, ok := apiErr.Details["blocking_operation_id"].(string); ok {
 			result.BlockingOperationID = blocking

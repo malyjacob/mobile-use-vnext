@@ -570,7 +570,8 @@ func TestObserveFailedWithoutObservation(t *testing.T) {
 			`{"operation_id":`+fmt.Sprintf("%q", testOperationHeader(request))+
 				`,"observation":{"status":"failed","missing":["tree"],`+
 				`"error":{"code":"hierarchy_unavailable","message":"层级不可用"}},`+
-				`"error":{"code":"hierarchy_unavailable","message":"层级不可用"},"next":"observe"}`)
+				`"error":{"code":"hierarchy_unavailable","message":"层级不可用"},`+
+				`"recovery":{"entry":"observe","reference":"P"}}`)
 	})
 	session := connectTestInMemory(t, newTestMCPServer(t, fake))
 
@@ -590,7 +591,9 @@ func TestActOutcomes(t *testing.T) {
 			writeTestJSON(writer, http.StatusServiceUnavailable, fmt.Sprintf(
 				`{"operation_id":%q,"outcome":"executed","observation":{"status":"failed",`+
 					`"missing":["tree"],"error":{"code":"hierarchy_unavailable","message":"层级不可用"}},`+
-					`"error":{"code":"hierarchy_unavailable","message":"层级不可用"},"next":"observe"}`,
+					`"error":{"code":"hierarchy_unavailable","message":"层级不可用"},`+
+					`"recovery":{"entry":"observe","reference":"P","input_state":"retired",`+
+					`"cause":"post_observation_failed"}}`,
 				testOperationHeader(request)))
 		})
 		session := connectTestInMemory(t, newTestMCPServer(t, fake))
@@ -669,7 +672,8 @@ func TestReadOnlyToolProjections(t *testing.T) {
 				t.Errorf("inspect used an operation ID")
 			}
 			writeTestJSON(writer, http.StatusConflict,
-				`{"error":{"code":"content_unavailable","message":"树已被淘汰"},"next":"observe"}`)
+				`{"error":{"code":"content_unavailable","message":"树已被淘汰"},`+
+					`"recovery":{"entry":"observe","reference":"P","input_state":"retired"}}`)
 		})
 		session := connectTestInMemory(t, newTestMCPServer(t, fake))
 		result := callTestTool(t, session, "inspect", map[string]any{"observation_id": "O2"})
@@ -690,7 +694,9 @@ func TestWorkToolProjections(t *testing.T) {
 					`"started_at":"2026-11-09T00:00:00Z","ended_at":"2026-11-09T00:03:00Z","reason":"client_end"},`+
 					`"cleanup":{"state":"unconfirmed","execution":"confirmed","tasks":"confirmed",`+
 					`"recents":"not_applicable","display":"unconfirmed",`+
-					`"error":{"code":"display_release_unconfirmed","message":"显示释放未确认"}},"next":"status"}`,
+					`"error":{"code":"display_release_unconfirmed","message":"显示释放未确认"}},`+
+					`"recovery":{"entry":"status","reference":"P","input_state":"revoked",`+
+					`"cause":"cleanup_pending"}}`,
 				testOperationHeader(request)))
 		})
 		session := connectTestInMemory(t, newTestMCPServer(t, fake))
@@ -781,7 +787,9 @@ func testEndHandler() func(http.ResponseWriter, *http.Request, string) {
 				`"mode":"virtual","agent":"local-agent","started_at":"2026-11-09T00:00:00Z",`+
 				`"ended_at":"2026-11-09T00:03:00Z","reason":"client_end"},`+
 				`"cleanup":{"state":"pending","execution":"confirmed","tasks":"pending",`+
-				`"recents":"pending","display":"pending"},"next":"status"}`,
+				`"recents":"pending","display":"pending"},`+
+				`"recovery":{"entry":"status","reference":"P","input_state":"revoked",`+
+				`"cause":"cleanup_pending"}}`,
 			testOperationHeader(request)))
 	}
 }

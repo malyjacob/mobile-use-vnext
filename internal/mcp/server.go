@@ -137,7 +137,10 @@ func (a *adapter) run(ctx context.Context, definition toolDefinition, arguments 
 	prepared, apiErr := prepareCall(a.client, definition, arguments)
 	if apiErr != nil {
 		return &execution{
-			result:    &protocol.Result{Error: apiErr.Public(), Next: apiErr.Next},
+			result: &protocol.Result{
+				Error:    apiErr.Public(),
+				Recovery: protocol.AccessRecovery(apiErr.Code),
+			},
 			admission: true,
 			code:      apiErr.Code,
 		}
@@ -153,7 +156,6 @@ func (a *adapter) run(ctx context.Context, definition toolDefinition, arguments 
 					Code:    protocol.CodeInternal,
 					Message: "操作编号生成失败",
 				},
-				Next: protocol.NextForCode(protocol.CodeInternal),
 			},
 			code: protocol.CodeInternal,
 		}
@@ -227,7 +229,7 @@ func (a *adapter) cancelled(call *preparedCall, operationID string, done <-chan 
 	base := pickResult(known.response, known.err)
 	service := base != nil
 	if base == nil {
-		base = &protocol.Result{Next: "status"}
+		base = &protocol.Result{Recovery: adapterRecovery("call_cancelled")}
 	}
 	if call.readOnly {
 		if !service && base.Error == nil {
@@ -253,6 +255,9 @@ func (a *adapter) cancelled(call *preparedCall, operationID string, done <-chan 
 		if base.Cleanup == nil {
 			base.Cleanup = endResult.Cleanup
 		}
+	}
+	if base.Recovery == nil && base.Error != nil {
+		base.Recovery = adapterRecovery(base.Error.Code)
 	}
 	clearImageBase64(base)
 
@@ -289,9 +294,7 @@ func projectCall(response *client.Response, err error, operationID string) *exec
 		result = &protocol.Result{
 			OperationID: operationID,
 			Error:       &protocol.Error{Code: code, Message: message},
-		}
-		if next := protocol.NextForCode(code); next != "" {
-			result.Next = next
+			Recovery:    adapterRecovery(code),
 		}
 	} else {
 		if result.OperationID == "" && operationID != "" {
@@ -300,8 +303,8 @@ func projectCall(response *client.Response, err error, operationID string) *exec
 		if err != nil && result.Error == nil {
 			code, message := controlledError(err)
 			result.Error = &protocol.Error{Code: code, Message: message}
-			if result.Next == "" {
-				result.Next = protocol.NextForCode(code)
+			if result.Recovery == nil {
+				result.Recovery = adapterRecovery(code)
 			}
 		}
 	}
@@ -331,6 +334,19 @@ func pickResult(response *client.Response, err error) *protocol.Result {
 
 func hasServiceResult(outcome callOutcome) bool {
 	return pickResult(outcome.response, outcome.err) != nil
+}
+
+// adapterRecovery is the adapter's own projection for failures that never
+// reached a tool result. A transport failure or a cancelled call has one next
+// step: poll status with the operation's P. Admission errors stay bare.
+func adapterRecovery(code string) *protocol.Recovery {
+	switch code {
+	case "call_cancelled", client.ErrorTransport:
+		return &protocol.Recovery{
+			Entry: protocol.RecoveryEntryStatus, Reference: protocol.RecoveryReferenceP,
+		}
+	}
+	return nil
 }
 
 // controlledError reduces any adapter failure to a stable code and a

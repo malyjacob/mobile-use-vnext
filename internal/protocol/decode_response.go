@@ -342,7 +342,7 @@ func (r *Result) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 		Diagnosis           *DiagnosisView           `json:"diagnosis"`
 		Cleanup             *Cleanup                 `json:"cleanup"`
 		Error               *Error                   `json:"error"`
-		Next                member[string]           `json:"next"`
+		Recovery            *Recovery                `json:"recovery"`
 	}
 	if err := readObject(dec, "result", &wire); err != nil {
 		return err
@@ -373,7 +373,30 @@ func (r *Result) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 		Diagnosis:           wire.Diagnosis,
 		Cleanup:             wire.Cleanup,
 		Error:               wire.Error,
-		Next:                wire.Next.Value,
+		Recovery:            wire.Recovery,
+	}
+	return nil
+}
+
+// UnmarshalJSONFrom decodes the recovery object. Every member is optional at
+// decode time: the service always writes entry and reference when the object is
+// present, and this decoder keeps unknown future combinations readable instead
+// of failing a whole result.
+func (r *Recovery) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	var wire struct {
+		Entry      member[string] `json:"entry"`
+		Reference  member[string] `json:"reference"`
+		InputState member[string] `json:"input_state"`
+		Cause      member[string] `json:"cause"`
+	}
+	if err := readObject(dec, "recovery", &wire); err != nil {
+		return err
+	}
+	*r = Recovery{
+		Entry:      wire.Entry.Value,
+		Reference:  wire.Reference.Value,
+		InputState: wire.InputState.Value,
+		Cause:      wire.Cause.Value,
 	}
 	return nil
 }

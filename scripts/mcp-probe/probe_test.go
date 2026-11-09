@@ -841,7 +841,7 @@ func (f *fakeRecoveryService) writeEnd(writer http.ResponseWriter, operationID s
 	result := &protocol.Result{
 		OperationID: operationID, Outcome: outcomeExecuted,
 		TargetReference: endBody.Reference, IncludeSession: f.session != nil, Session: f.session,
-		Cleanup: &protocol.Cleanup{State: protocol.CleanupComplete}, Next: "status",
+		Cleanup: &protocol.Cleanup{State: protocol.CleanupComplete},
 	}
 	f.mutex.Unlock()
 	f.writeResult(writer, result)

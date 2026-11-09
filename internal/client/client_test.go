@@ -299,7 +299,7 @@ func TestServiceStructuredErrorIsReturnedWithResult(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		captures <- captureRequest(t, request)
 		writeResponse(w, http.StatusConflict,
-			`{"operation_id":"Pservice409","outcome":"not_executed","error":{"code":"session_exists","message":"会话已存在"},"next":"status"}`)
+			`{"operation_id":"Pservice409","outcome":"not_executed","error":{"code":"session_exists","message":"会话已存在"},"recovery":{"entry":"end","reference":"P"}}`)
 	}))
 	defer server.Close()
 
@@ -342,7 +342,7 @@ func TestServiceStructuredErrorIsReturnedWithResult(t *testing.T) {
 func TestFailedObservationIsReturnedWithoutError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		writeResponse(w, http.StatusServiceUnavailable,
-			`{"operation_id":"Pfailed503","outcome":"executed","observation":{"status":"failed","id":"O1","origin":"Pfailed503","missing":["tree"]},"next":"observe"}`)
+			`{"operation_id":"Pfailed503","outcome":"executed","observation":{"status":"failed","id":"O1","origin":"Pfailed503","missing":["tree"]},"recovery":{"entry":"observe","reference":"P"}}`)
 	}))
 	defer server.Close()
 

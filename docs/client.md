@@ -54,9 +54,9 @@ type Response struct {
 ```
 
 `Result` 与服务 HTTP 结果同形：`outcome`、`phase`、`session`、`observation`、`inspection`、
-`apps`、`app`、`shell`、`notification`、`diagnosis`、`cleanup`、`error`、`next` 等字段只在
-本次确有该事实时出现。客户端不改写主事实：`observation.status=failed` 的 503 仍是带
-`Result` 的正常响应，不降成无归属异常。
+`apps`、`app`、`shell`、`notification`、`diagnosis`、`cleanup`、`error`、`recovery` 等字段
+只在本次确有该事实时出现；`recovery` 缺失表示本次结果没有待恢复事实。客户端不改写主事实：
+`observation.status=failed` 的 503 仍是带 `Result` 的正常响应，不降成无归属异常。
 
 | 方法 | 请求参数 | P |
 | --- | --- | --- |

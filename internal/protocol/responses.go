@@ -417,6 +417,81 @@ func (c *Cleanup) MarshalJSONTo(enc *jsontext.Encoder) error {
 	return enc.WriteToken(jsontext.EndObject)
 }
 
+// Recovery is the single "what to do next" projection of one tool result. It
+// never changes the action outcome, the observation status, the session state
+// or the cleanup facts; it only names the next entry, the reference kind that
+// entry takes, the usability of the observation this request already
+// referenced, and — only when the result carries no error — why an apparently
+// successful or running result still needs recovery.
+type Recovery struct {
+	Entry      string
+	Reference  string
+	InputState string
+	Cause      string
+}
+
+// Entry values. Exactly one names the next request to make.
+const (
+	RecoveryEntryRetry   = "retry"
+	RecoveryEntryObserve = "observe"
+	RecoveryEntryStatus  = "status"
+	RecoveryEntryEnd     = "end"
+	RecoveryEntryUser    = "user"
+	RecoveryEntryUpdate  = "update"
+)
+
+// Reference values. They name the kind of reference, never an ID.
+const (
+	RecoveryReferenceP    = "P"
+	RecoveryReferenceO    = "O"
+	RecoveryReferenceNone = "none"
+)
+
+// Input-state values reuse the status(O) vocabulary exactly.
+const (
+	RecoveryInputEffective = "effective"
+	RecoveryInputExpired   = "expired"
+	RecoveryInputRevoked   = "revoked"
+	RecoveryInputClaimed   = "claimed"
+	RecoveryInputRetired   = "retired"
+)
+
+// Cause values explain a degraded success or a running result. A cause never
+// appears together with an error.
+const (
+	RecoveryCausePostObservationFailed = "post_observation_failed"
+	RecoveryCauseExecutedRevoked       = "executed_revoked"
+	RecoveryCauseCleanupPending        = "cleanup_pending"
+	RecoveryCauseRunning               = "running"
+)
+
+// MarshalJSONTo writes the recovery object in its fixed member order. Entry and
+// reference are always present when the object is present; input_state and cause
+// only when they name a fact.
+func (r *Recovery) MarshalJSONTo(enc *jsontext.Encoder) error {
+	if r == nil {
+		return writeNull(enc)
+	}
+	if err := enc.WriteToken(jsontext.BeginObject); err != nil {
+		return err
+	}
+	for _, field := range []struct{ name, value string }{
+		{"entry", r.Entry}, {"reference", r.Reference},
+		{"input_state", r.InputState}, {"cause", r.Cause},
+	} {
+		if field.value == "" {
+			continue
+		}
+		if err := writeName(enc, field.name); err != nil {
+			return err
+		}
+		if err := writeString(enc, field.value); err != nil {
+			return err
+		}
+	}
+	return enc.WriteToken(jsontext.EndObject)
+}
+
 // Result is the operation/tool report. Only fields known for this call appear.
 type Result struct {
 	OperationID         string
@@ -434,7 +509,7 @@ type Result struct {
 	IncludeSession      bool
 	Cleanup             *Cleanup
 	Error               *Error
-	Next                string
+	Recovery            *Recovery
 	TargetReference     string
 	RequestClosed       *bool
 	BlockingOperationID string
@@ -644,11 +719,11 @@ func (r *Result) MarshalJSONTo(enc *jsontext.Encoder) error {
 			return err
 		}
 	}
-	if r.Next != "" {
-		if err := writeName(enc, "next"); err != nil {
+	if r.Recovery != nil {
+		if err := writeName(enc, "recovery"); err != nil {
 			return err
 		}
-		if err := writeString(enc, r.Next); err != nil {
+		if err := MarshalJSONTo(enc, r.Recovery); err != nil {
 			return err
 		}
 	}

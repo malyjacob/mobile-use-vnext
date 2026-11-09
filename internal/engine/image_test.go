@@ -542,9 +542,8 @@ func TestActPostTreeFailureKeepsExecutedWithReadOnlyImage(t *testing.T) {
 	if result.Outcome != OutcomeExecuted {
 		t.Fatalf("outcome = %q, want executed", result.Outcome)
 	}
-	if result.Next != "observe" {
-		t.Fatalf("next = %q, want observe", result.Next)
-	}
+	requireRecovery(t, result, protocol.RecoveryEntryObserve, protocol.RecoveryReferenceP,
+		protocol.RecoveryInputRetired, protocol.RecoveryCausePostObservationFailed)
 	obs := result.Observation
 	if obs == nil || obs.ID != "" {
 		t.Fatalf("post failure returned %+v, want no observation id", obs)

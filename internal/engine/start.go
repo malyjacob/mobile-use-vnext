@@ -219,8 +219,6 @@ func (e *Engine) Start(ctx context.Context, agent, p string) (*protocol.Result, 
 		result.Observation = &protocol.Observation{
 			Status: "failed", Missing: []string{"tree"}, Error: obsErr.Public(),
 		}
-		result.Next = "observe"
-		e.finishOperation(op, OutcomeExecuted, "first_observation_failed", nil)
 		switch obsErr.Code {
 		case "control_ui_on_virtual_display", protocol.CodeDisplayUnavailable, protocol.CodeStaleScreen:
 			e.mu.Lock()
@@ -234,10 +232,21 @@ func (e *Engine) Start(ctx context.Context, agent, p string) (*protocol.Result, 
 			result.Cleanup = e.cleanupViewLocked()
 			e.mu.Unlock()
 		}
+		// The two first-observation branches share the phase but not the next
+		// step: an active session recovers with observe(P), a revoked one is a
+		// closure/status fact. Record which fact this is before planning.
+		e.mu.Lock()
+		if e.session != nil && e.session.State == SessionEnded {
+			op.InputState = protocol.RecoveryInputRevoked
+		} else {
+			op.InputState = protocol.RecoveryInputRetired
+		}
+		e.mu.Unlock()
+		result.Recovery = e.finishOperation(op, OutcomeExecuted, "first_observation_failed", nil)
 		return result, nil
 	}
 	result.Observation = public
-	e.finishOperation(op, OutcomeExecuted, "active", nil)
+	result.Recovery = e.finishOperation(op, OutcomeExecuted, "active", nil)
 	return result, nil
 }
 

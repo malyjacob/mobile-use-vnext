@@ -249,8 +249,10 @@ func TestInspectRejectsForeignMissingAndEvictedContent(t *testing.T) {
 	if _, apiErr := h.engine.Inspect("agent", &protocol.InspectRequest{
 		ObservationID: "O902",
 	}); apiErr == nil || apiErr.Code != protocol.CodeContentUnavailable ||
-		apiErr.HTTPStatus != 409 || apiErr.Next != "observe" {
-		t.Fatalf("evicted content must be content_unavailable/observe: %+v", apiErr)
+		apiErr.HTTPStatus != 409 {
+		// inspect returns no operation, so its errors are access-layer errors:
+		// they carry no recovery projection at all.
+		t.Fatalf("evicted content must be content_unavailable/409: %+v", apiErr)
 	}
 }
 
@@ -538,10 +540,10 @@ func TestKeepaliveRejectsForeignUnknownAndNoSession(t *testing.T) {
 		if apiErr != nil {
 			t.Fatalf("no-session keepalive %s: %v", reference, apiErr)
 		}
-		if res.Error == nil || res.Error.Code != protocol.CodeReferenceNoSession ||
-			res.Next != "status" {
+		if res.Error == nil || res.Error.Code != protocol.CodeReferenceNoSession {
 			t.Fatalf("no-session keepalive %s: %+v", reference, res)
 		}
+		requireRecovery(t, res, protocol.RecoveryEntryStatus, protocol.RecoveryReferenceP, "", "")
 	}
 }
 
@@ -558,10 +560,10 @@ func TestKeepaliveRejectsEndedAndExpiredSession(t *testing.T) {
 		if apiErr != nil {
 			t.Fatalf("keepalive transport error: %v", apiErr)
 		}
-		if result.Error == nil || result.Error.Code != protocol.CodeSessionEnded ||
-			result.Next != "end" {
+		if result.Error == nil || result.Error.Code != protocol.CodeSessionEnded {
 			t.Fatalf("ended session keepalive: %+v", result)
 		}
+		requireRecovery(t, result, protocol.RecoveryEntryEnd, protocol.RecoveryReferenceP, "", "")
 		if result.Session == nil || result.Session.State != SessionEnded {
 			t.Fatalf("ended session view: %+v", result.Session)
 		}

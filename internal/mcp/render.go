@@ -319,8 +319,19 @@ func renderText(result *protocol.Result, cancelled bool, cancellation string) st
 			}
 		}
 	}
-	if result.Next != "" {
-		line("next", result.Next)
+	if recovery := result.Recovery; recovery != nil {
+		if recovery.Entry != "" {
+			line("recovery.entry", recovery.Entry)
+		}
+		if recovery.Reference != "" {
+			line("recovery.reference", recovery.Reference)
+		}
+		if recovery.InputState != "" {
+			line("recovery.input_state", recovery.InputState)
+		}
+		if recovery.Cause != "" {
+			line("recovery.cause", recovery.Cause)
+		}
 	}
 	if cancelled {
 		line("cancelled", "true")

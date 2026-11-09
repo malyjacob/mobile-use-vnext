@@ -371,6 +371,19 @@ type operationState struct {
 	SessionOrigin string
 	CreatedAt     time.Time
 	FinishedAt    time.Time
+	// Reference is the kind of reference the request already used ("O"/"P").
+	// It is a planning fact only: it never grants authority.
+	Reference string
+	// Claimed records the one-way ready->claimed transition of this operation.
+	// It outlives the work position so status(P) can replay the same plan.
+	Claimed bool
+	// InputState is the explicit observation usability a path knows but cannot
+	// derive from code and claim alone (start's first observation). It is
+	// consumed once, when the operation finishes.
+	InputState string
+	// Recovery is the projection returned with this operation, kept so a
+	// duplicate P or status(P) reports exactly the same next step.
+	Recovery *protocol.Recovery
 }
 
 type workState struct {
@@ -933,8 +946,10 @@ func (e *Engine) operationViewLocked(op *operationState) *protocol.Result {
 	}
 	if op.Error != nil {
 		result.Error = op.Error
-		result.Next = protocol.NextForCode(op.Error.Code)
 	}
+	// A finished operation replays the projection it already returned; the
+	// status tool applies its own live cleanup override on top.
+	result.Recovery = op.Recovery
 	if session := e.sessionByOriginLocked(op.SessionOrigin); session != nil {
 		result.Session = e.sessionViewLocked(session)
 		result.IncludeSession = true

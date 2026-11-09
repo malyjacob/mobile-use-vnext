@@ -25,6 +25,7 @@ func (e *Engine) End(agent, p, reference string) (*protocol.Result, *protocol.AP
 	if duplicate != nil {
 		return duplicate, nil
 	}
+	e.setOperationReference(op, referenceKind(reference))
 	now := time.Now()
 	e.mu.Lock()
 	resolution := e.resolveEndLocked(agent, reference, now)
@@ -95,12 +96,9 @@ func (e *Engine) End(agent, p, reference string) (*protocol.Result, *protocol.AP
 		e.log.Event(eventlog.Info, "session.end", eventlog.Str("origin", session.Origin),
 			eventlog.Str("reason", "client_end"))
 	}
-	if result.Cleanup != nil && result.Cleanup.State == protocol.CleanupPending {
-		result.Next = "status"
-	} else if result.Cleanup != nil && result.Cleanup.State == protocol.CleanupUnconfirmed {
-		result.Next = "status"
-	}
-	e.finishOperation(op, OutcomeExecuted, "ended", nil)
+	// The projection is planned from the cleanup state read under the same
+	// lock; a complete/not-applicable closure is deliberately omitted.
+	result.Recovery = e.finishOperation(op, OutcomeExecuted, "ended", nil)
 	return result, nil
 }
 
@@ -131,7 +129,7 @@ func (e *Engine) resolveEndLocked(agent, reference string, now time.Time) endRes
 		}
 		if op.SessionOrigin == "" {
 			return endResolution{apiErr: protocol.NewError(409, protocol.CodeReferenceNoSession,
-				"原操作没有可用的会话").WithNext("status")}
+				"原操作没有可用的会话")}
 		}
 		session := e.sessionByOriginLocked(op.SessionOrigin)
 		if session == nil {
@@ -139,7 +137,7 @@ func (e *Engine) resolveEndLocked(agent, reference string, now time.Time) endRes
 				return endResolution{alreadyClosed: true}
 			}
 			return endResolution{apiErr: protocol.NewError(409, protocol.CodeSessionNotFound,
-				"原会话不可用").WithNext("status")}
+				"原会话不可用")}
 		}
 		return endResolution{session: session}
 	default:

@@ -143,13 +143,6 @@ func requireNotExecuted(t *testing.T, result *protocol.Result, code string) {
 	}
 }
 
-func requireNext(t *testing.T, result *protocol.Result, next string) {
-	t.Helper()
-	if result.Next != next {
-		t.Fatalf("next = %q, want %q", result.Next, next)
-	}
-}
-
 func observationStatus(h *harness, id string) string {
 	h.engine.mu.Lock()
 	defer h.engine.mu.Unlock()
@@ -173,7 +166,7 @@ func TestActCoordinatePointRejectsOverlayOnFreshFrame(t *testing.T) {
 		Type: "tap", Target: &protocol.Target{X: 500, Y: 150},
 	})
 	requireNotExecuted(t, result, protocol.CodeTargetChanged)
-	requireNext(t, result, "observe")
+	requireRecovery(t, result, protocol.RecoveryEntryObserve, protocol.RecoveryReferenceP, protocol.RecoveryInputRetired, "")
 	if len(h.device.taps) != 0 {
 		t.Fatalf("tap was dispatched: %v", h.device.taps)
 	}
@@ -191,7 +184,7 @@ func TestActCoordinatePointRejectsDeeperNodeOnFreshFrame(t *testing.T) {
 		Type: "long_press", Target: &protocol.Target{X: 500, Y: 150},
 	})
 	requireNotExecuted(t, result, protocol.CodeTargetChanged)
-	requireNext(t, result, "observe")
+	requireRecovery(t, result, protocol.RecoveryEntryObserve, protocol.RecoveryReferenceP, protocol.RecoveryInputRetired, "")
 	if len(h.device.taps) != 0 {
 		t.Fatalf("long press was dispatched: %v", h.device.taps)
 	}
@@ -206,7 +199,7 @@ func TestActCoordinatePointRejectsMovedBounds(t *testing.T) {
 		Type: "tap", Target: &protocol.Target{X: 500, Y: 150},
 	})
 	requireNotExecuted(t, result, protocol.CodeTargetChanged)
-	requireNext(t, result, "observe")
+	requireRecovery(t, result, protocol.RecoveryEntryObserve, protocol.RecoveryReferenceP, protocol.RecoveryInputRetired, "")
 	if len(h.device.taps) != 0 {
 		t.Fatalf("tap was dispatched: %v", h.device.taps)
 	}
@@ -221,7 +214,7 @@ func TestActCoordinatePointRejectsUnpublishedTarget(t *testing.T) {
 		Type: "tap", Target: &protocol.Target{X: 500, Y: 150},
 	})
 	requireNotExecuted(t, result, protocol.CodeTargetChanged)
-	requireNext(t, result, "observe")
+	requireRecovery(t, result, protocol.RecoveryEntryObserve, protocol.RecoveryReferenceP, protocol.RecoveryInputRetired, "")
 	if len(h.device.taps) != 0 {
 		t.Fatalf("tap was dispatched: %v", h.device.taps)
 	}
@@ -238,7 +231,7 @@ func TestActCoordinatePointRequiresUniqueFreshIdentity(t *testing.T) {
 		Type: "tap", Target: &protocol.Target{X: 500, Y: 150},
 	})
 	requireNotExecuted(t, result, protocol.CodeTargetChanged)
-	requireNext(t, result, "observe")
+	requireRecovery(t, result, protocol.RecoveryEntryObserve, protocol.RecoveryReferenceP, protocol.RecoveryInputRetired, "")
 	if len(h.device.taps) != 0 {
 		t.Fatalf("tap was dispatched: %v", h.device.taps)
 	}
@@ -254,7 +247,7 @@ func TestActCoordinatePointRejectsUnreadableFreshProjection(t *testing.T) {
 		Type: "tap", Target: &protocol.Target{X: 500, Y: 150},
 	})
 	requireNotExecuted(t, result, protocol.CodeHierarchyFailed)
-	requireNext(t, result, "observe")
+	requireRecovery(t, result, protocol.RecoveryEntryObserve, protocol.RecoveryReferenceP, protocol.RecoveryInputRetired, "")
 	if len(h.device.taps) != 0 {
 		t.Fatalf("tap was dispatched: %v", h.device.taps)
 	}
@@ -291,9 +284,10 @@ func TestActCoordinatePointRejectsAmbiguousObservation(t *testing.T) {
 	} {
 		result := h.actCoordinate(t, start.Observation.ID, operation)
 		requireNotExecuted(t, result, ambiguousPointCode)
-		if result.Next != "" {
-			t.Fatalf("ambiguous point next = %q, want omitted", result.Next)
-		}
+		// The point is ambiguous for this O, but nothing was claimed or
+		// dispatched: the caller may retry with the same O and a new P.
+		requireRecovery(t, result, protocol.RecoveryEntryRetry, protocol.RecoveryReferenceO,
+			protocol.RecoveryInputEffective, "")
 		if status := observationStatus(h, start.Observation.ID); status != ObservationReady {
 			t.Fatalf("observation status = %q after static rejection, want ready", status)
 		}
@@ -390,7 +384,7 @@ func TestActCoordinatePointKeepsObservationWhenProofFails(t *testing.T) {
 		Type: "tap", Target: &protocol.Target{X: 500, Y: 150},
 	})
 	requireNotExecuted(t, first, protocol.CodeTargetChanged)
-	requireNext(t, first, "observe")
+	requireRecovery(t, first, protocol.RecoveryEntryObserve, protocol.RecoveryReferenceP, protocol.RecoveryInputRetired, "")
 
 	second, apiErr := h.engine.Act(context.Background(), "agent", "", &protocol.ActRequest{
 		ObservationID: start.Observation.ID,
@@ -438,7 +432,7 @@ func TestActCoordinatePointRejectsChangedTextFocusPoint(t *testing.T) {
 		Type: "text", Target: &protocol.Target{X: 500, Y: 350}, Text: "hello",
 	})
 	requireNotExecuted(t, result, protocol.CodeTargetChanged)
-	requireNext(t, result, "observe")
+	requireRecovery(t, result, protocol.RecoveryEntryObserve, protocol.RecoveryReferenceP, protocol.RecoveryInputRetired, "")
 	if len(h.device.taps) != 0 {
 		t.Fatalf("focus tap was dispatched: %v", h.device.taps)
 	}

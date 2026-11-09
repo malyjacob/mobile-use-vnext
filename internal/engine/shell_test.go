@@ -91,9 +91,7 @@ func TestShellKeepsReadyObservation(t *testing.T) {
 	if result.Observation != nil {
 		t.Fatalf("shell must not publish an observation: %+v", result.Observation)
 	}
-	if result.Next != "" {
-		t.Fatalf("next=%q", result.Next)
-	}
+	requireNoRecovery(t, result)
 	if got := h.device.captureCount(); got != captures {
 		t.Fatalf("shell performed %d captures, want none", got-captures)
 	}
@@ -139,9 +137,10 @@ func TestShellChainPerformsNoCapture(t *testing.T) {
 		if apiErr != nil {
 			t.Fatalf("Shell %d: %v", index, apiErr)
 		}
-		if result.Outcome != OutcomeExecuted || result.Observation != nil || result.Next != "" {
+		if result.Outcome != OutcomeExecuted || result.Observation != nil {
 			t.Fatalf("run %d: %+v", index, result)
 		}
+		requireNoRecovery(t, result)
 	}
 	if got := h.device.captureCount(); got != captures {
 		t.Fatalf("shell chain performed %d captures, want none", got-captures)
@@ -212,9 +211,11 @@ func TestShellThenActRejectsAChangedTarget(t *testing.T) {
 		t.Fatalf("a changed target must be a result, not an API error: %v", apiErr)
 	}
 	if result.Outcome != OutcomeNotExecuted || result.Error == nil ||
-		result.Error.Code != protocol.CodeTargetChanged || result.Next != "observe" {
+		result.Error.Code != protocol.CodeTargetChanged {
 		t.Fatalf("result=%+v error=%+v", result, result.Error)
 	}
+	requireRecovery(t, result, protocol.RecoveryEntryObserve, protocol.RecoveryReferenceP,
+		protocol.RecoveryInputRetired, "")
 	if len(h.device.taps) != 0 {
 		t.Fatalf("a changed target was dispatched: %v", h.device.taps)
 	}
@@ -364,9 +365,10 @@ func TestShellStartOutcomes(t *testing.T) {
 		result, _ := h.engine.Shell(context.Background(), "agent", "Psh",
 			shellRequestFor(first.Observation, "false"))
 		if result.Outcome != OutcomeNotExecuted || result.Error == nil ||
-			result.Error.Code != protocol.CodeShellStartFailed || result.Next != "status" {
+			result.Error.Code != protocol.CodeShellStartFailed {
 			t.Fatalf("result=%+v", result)
 		}
+		requireRecovery(t, result, protocol.RecoveryEntryStatus, protocol.RecoveryReferenceP, "", "")
 		requireShellView(t, result, terminationNotStarted, nil)
 		if result.Shell.Output != nil || result.Shell.Truncated != nil {
 			t.Fatalf("unstarted command must not claim output: %+v", result.Shell)
@@ -399,9 +401,10 @@ func TestShellStartOutcomes(t *testing.T) {
 		result, _ := h.engine.Shell(context.Background(), "agent", "Psh",
 			shellRequestFor(first.Observation, "maybe"))
 		if result.Outcome != OutcomeUncertain || result.Error == nil ||
-			result.Error.Code != protocol.CodeShellUnknown || result.Next != "status" {
+			result.Error.Code != protocol.CodeShellUnknown {
 			t.Fatalf("result=%+v", result)
 		}
+		requireRecovery(t, result, protocol.RecoveryEntryStatus, protocol.RecoveryReferenceP, "", "")
 		requireShellView(t, result, terminationUnknown, nil)
 		if result.Shell.Output != nil || result.Shell.Truncated != nil {
 			t.Fatalf("unknown end must not claim output: %+v", result.Shell)
@@ -478,9 +481,10 @@ func TestShellRootDeniedDoesNotDispatch(t *testing.T) {
 		Reference: first.Observation.ID, Command: "id", Root: true,
 	})
 	if result.Outcome != OutcomeNotExecuted || result.Error == nil ||
-		result.Error.Code != protocol.CodeRootUnavailable || result.Next != "user" {
+		result.Error.Code != protocol.CodeRootUnavailable {
 		t.Fatalf("result=%+v", result)
 	}
+	requireRecovery(t, result, protocol.RecoveryEntryUser, protocol.RecoveryReferenceNone, "", "")
 	if result.Shell != nil {
 		t.Fatalf("pre-boundary rejection must omit shell: %+v", result.Shell)
 	}
@@ -565,9 +569,10 @@ func TestShellNeedsNoTreeForItsResult(t *testing.T) {
 		t.Fatalf("result=%+v", result)
 	}
 	requireShellView(t, result, terminationExited, intPtr(1))
-	if result.Observation != nil || result.Next != "" {
+	if result.Observation != nil {
 		t.Fatalf("a broken tree changed the shell result: %+v", result)
 	}
+	requireNoRecovery(t, result)
 	h.engine.mu.Lock()
 	status := h.engine.observations[first.Observation.ID].Status
 	h.engine.mu.Unlock()

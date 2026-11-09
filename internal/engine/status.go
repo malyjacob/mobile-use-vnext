@@ -46,7 +46,14 @@ func (e *Engine) statusSelfLocked(agent string, now time.Time) *protocol.Result 
 		result.Cleanup = e.cleanupViewLocked()
 	}
 	if e.recovery != nil {
-		result.Next = "status"
+		reference := protocol.RecoveryReferenceNone
+		if result.StartOperation != "" {
+			reference = protocol.RecoveryReferenceP
+		}
+		result.Recovery = planRecovery(recoveryInput{
+			Tool: "status", Reference: reference, Phase: "self",
+			Code: protocol.CodeRecovering,
+		})
 	}
 	return result
 }
@@ -71,16 +78,20 @@ func (e *Engine) statusOperationLocked(agent, reference string,
 	result.OperationID = reference
 	if op.State == OperationRunning {
 		result.Phase = op.Phase
-		result.Next = "status"
+		result.Recovery = planRecovery(recoveryInput{
+			Tool: "status", Reference: protocol.RecoveryReferenceP, Phase: "running",
+		})
 		return result, nil
 	}
-	if op.Outcome == OutcomeUncertain {
-		result.Next = "status"
-	}
-	if result.Next == "" && op.Error == nil && result.Session != nil &&
+	// A live closure outranks the operation's own projection: while cleanup is
+	// still pending, status(P) is the only useful next step.
+	if op.Error == nil && op.Outcome != OutcomeUncertain && result.Session != nil &&
 		result.Session.State == SessionEnded && e.cleanup != nil &&
 		e.cleanup.State != protocol.CleanupComplete {
-		result.Next = "status"
+		result.Recovery = planRecovery(recoveryInput{
+			Tool: "status", Reference: protocol.RecoveryReferenceP, Phase: "operation",
+			Cleanup: cleanupValue(e.cleanup),
+		})
 	}
 	return result, nil
 }
@@ -103,16 +114,37 @@ func (e *Engine) statusObservationLocked(agent, reference string,
 	}
 	switch {
 	case session == nil || session.State == SessionEnded:
-		result.InputState = "revoked"
-		result.Next = "status"
+		result.InputState = protocol.RecoveryInputRevoked
+		result.Recovery = planRecovery(recoveryInput{
+			Tool: "status", Reference: protocol.RecoveryReferenceO, Phase: "observation",
+			Code: protocol.CodeSessionEnded, InputState: protocol.RecoveryInputRevoked,
+		})
 	case state == ObservationReady && now.Before(obs.ActionableUntil):
-		result.InputState = "effective"
+		result.InputState = protocol.RecoveryInputEffective
 	case state == ObservationReady:
-		result.InputState = "expired"
-		result.Next = "observe"
+		result.InputState = protocol.RecoveryInputExpired
+		result.Recovery = planRecovery(recoveryInput{
+			Tool: "status", Reference: protocol.RecoveryReferenceO, Phase: "observation",
+			Code: protocol.CodeObservationExpired, InputState: protocol.RecoveryInputExpired,
+		})
+	case state == ObservationExpired:
+		result.InputState = protocol.RecoveryInputExpired
+		result.Recovery = planRecovery(recoveryInput{
+			Tool: "status", Reference: protocol.RecoveryReferenceO, Phase: "observation",
+			Code: protocol.CodeObservationExpired, InputState: protocol.RecoveryInputExpired,
+		})
+	case state == ObservationClaimed:
+		result.InputState = protocol.RecoveryInputClaimed
+		result.Recovery = planRecovery(recoveryInput{
+			Tool: "status", Reference: protocol.RecoveryReferenceO, Phase: "observation",
+			Code: protocol.CodeObservationClaimed, InputState: protocol.RecoveryInputClaimed,
+		})
 	default:
-		result.InputState = state
-		result.Next = "observe"
+		result.InputState = protocol.RecoveryInputRetired
+		result.Recovery = planRecovery(recoveryInput{
+			Tool: "status", Reference: protocol.RecoveryReferenceO, Phase: "observation",
+			Code: protocol.CodeObservationRetired, InputState: protocol.RecoveryInputRetired,
+		})
 	}
 	return result, nil
 }

@@ -26,6 +26,7 @@ func (e *Engine) Observe(ctx context.Context, agent, p string, req *protocol.Obs
 	if duplicate != nil {
 		return duplicate, nil
 	}
+	e.setOperationReference(op, referenceKind(req.Reference))
 	target, resolveErr := e.resolveObserveTarget(agent, req.Reference)
 	if resolveErr != nil {
 		return e.finishObserveError(op, "admission", resolveErr), nil
@@ -77,16 +78,13 @@ func (e *Engine) Observe(ctx context.Context, agent, p string, req *protocol.Obs
 				Status: "failed", Missing: []string{"tree"}, Error: captureErr.Public(),
 			}
 		}
-		e.finishOperation(op, "", "failed", captureErr)
 		e.mu.Lock()
 		if e.session != nil && e.session.State == SessionEnded {
 			result.IncludeSession = true
 			result.Session = e.sessionViewLocked(e.session)
-			result.Next = "status"
-		} else {
-			result.Next = "observe"
 		}
 		e.mu.Unlock()
+		result.Recovery = e.finishOperation(op, "", "failed", captureErr)
 		return result, nil
 	}
 	result.Observation = public
@@ -110,12 +108,12 @@ func (e *Engine) resolveObserveTarget(agent, reference string) (*observeTarget, 
 		}
 		if session == nil || session.State == SessionEnded ||
 			obs.SessionEpoch != session.Epoch {
-			return nil, protocol.NewError(409, protocol.CodeSessionEnded, "原会话已结束").WithNext("end")
+			return nil, protocol.NewError(409, protocol.CodeSessionEnded, "原会话已结束")
 		}
 	case "P":
 		if p == nil {
 			if _, closed := e.closed[reference]; closed {
-				return nil, protocol.NewError(409, protocol.CodeRequestClosed, "原请求已封闭").WithNext("status")
+				return nil, protocol.NewError(409, protocol.CodeRequestClosed, "原请求已封闭")
 			}
 			return nil, protocol.NewError(409, protocol.CodeOperationUnknown, "原操作不可用")
 		}
@@ -125,14 +123,14 @@ func (e *Engine) resolveObserveTarget(agent, reference string) (*observeTarget, 
 		if session == nil || session.State == SessionEnded ||
 			p.SessionOrigin != session.Origin {
 			return nil, protocol.NewError(409, protocol.CodeReferenceNoSession,
-				"原操作没有可用的活动会话").WithNext("status")
+				"原操作没有可用的活动会话")
 		}
 		target.forceFull = true
 	default:
 		return nil, protocol.Invalid("reference 类型无效")
 	}
 	if session == nil || session.State == SessionEnded {
-		return nil, protocol.NewError(409, protocol.CodeSessionEnded, "原会话已结束").WithNext("end")
+		return nil, protocol.NewError(409, protocol.CodeSessionEnded, "原会话已结束")
 	}
 	return target, nil
 }
@@ -140,10 +138,9 @@ func (e *Engine) resolveObserveTarget(agent, reference string) (*observeTarget, 
 // finishObserveError marks a read-only request failed without inventing an
 // action outcome.
 func (e *Engine) finishObserveError(op *operationState, phase string, apiErr *protocol.APIError) *protocol.Result {
-	e.finishOperation(op, "", phase, apiErr)
 	result := newResult(op)
 	result.Error = apiErr.Public()
-	result.Next = apiErr.Next
+	result.Recovery = e.finishOperation(op, "", phase, apiErr)
 	if apiErr.Details != nil {
 		if blocking, ok := apiErr.Details["blocking_operation_id"].(string); ok {
 			result.BlockingOperationID = blocking

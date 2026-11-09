@@ -29,6 +29,7 @@ func (e *Engine) Keepalive(agent, p string, req *protocol.KeepaliveRequest) (*pr
 		// second time and never replays device work.
 		return duplicate, nil
 	}
+	e.setOperationReference(op, referenceKind(req.Reference))
 	now := time.Now()
 	e.mu.Lock()
 	resolution := e.resolveKeepaliveLocked(agent, req.Reference, now)
@@ -62,7 +63,7 @@ func (e *Engine) resolveKeepaliveLocked(agent, reference string, now time.Time) 
 		session = e.sessionByEpochLocked(obs.SessionEpoch)
 		if session == nil {
 			return keepaliveResolution{apiErr: protocol.NewError(409, protocol.CodeReferenceNoSession,
-				"原观察没有可用的会话").WithNext("status")}
+				"原观察没有可用的会话")}
 		}
 	case "P":
 		if op == nil {
@@ -73,12 +74,12 @@ func (e *Engine) resolveKeepaliveLocked(agent, reference string, now time.Time) 
 		}
 		if op.SessionOrigin == "" {
 			return keepaliveResolution{apiErr: protocol.NewError(409, protocol.CodeReferenceNoSession,
-				"原操作没有可用的会话").WithNext("status")}
+				"原操作没有可用的会话")}
 		}
 		session = e.sessionByOriginLocked(op.SessionOrigin)
 		if session == nil {
 			return keepaliveResolution{apiErr: protocol.NewError(409, protocol.CodeReferenceNoSession,
-				"原操作没有可用的会话").WithNext("status")}
+				"原操作没有可用的会话")}
 		}
 	default:
 		return keepaliveResolution{apiErr: protocol.Invalid("reference 类型无效")}
@@ -92,14 +93,14 @@ func (e *Engine) resolveKeepaliveLocked(agent, reference string, now time.Time) 
 		// A starting session has no sliding activity lease to renew yet.
 		return keepaliveResolution{session: session, view: view,
 			apiErr: protocol.NewError(409, protocol.CodeReferenceNoSession,
-				"原会话尚未活动").WithNext("status")}
+				"原会话尚未活动")}
 	case !sessionBeforeDeadline(session, now):
 		return keepaliveResolution{session: session, view: view,
 			apiErr: protocol.NewError(409, protocol.CodeSessionExpired, "原会话已过期")}
 	case session != e.session:
 		return keepaliveResolution{session: session, view: view,
 			apiErr: protocol.NewError(409, protocol.CodeReferenceNoSession,
-				"原会话不是当前会话").WithNext("status")}
+				"原会话不是当前会话")}
 	}
 	return keepaliveResolution{session: session, view: view}
 }
@@ -108,11 +109,10 @@ func (e *Engine) resolveKeepaliveLocked(agent, reference string, now time.Time) 
 // with its controlled recovery entry point.
 func (e *Engine) finishKeepaliveError(op *operationState, resolution keepaliveResolution) *protocol.Result {
 	apiErr := resolution.apiErr
-	e.finishOperation(op, OutcomeNotExecuted, "admission", apiErr)
 	result := newResult(op)
 	result.Outcome = OutcomeNotExecuted
 	result.Error = apiErr.Public()
-	result.Next = apiErr.Next
+	result.Recovery = e.finishOperation(op, OutcomeNotExecuted, "admission", apiErr)
 	if resolution.view != nil {
 		result.IncludeSession = true
 		result.Session = resolution.view

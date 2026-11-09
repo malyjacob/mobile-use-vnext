@@ -33,7 +33,8 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
 一次工具调用的结果包含：
 
 - 一份可读正文：`key=value` 行，保留本次已知的阶段事实（操作号、状态、outcome、会话、
-  观察头、树格式、图片元数据、收尾五项、错误与 `next` 等）；
+  观察头、树格式、图片元数据、收尾五项、错误与 `recovery.entry`、`recovery.reference`、
+  `recovery.input_state`、`recovery.cause` 等）；
 - 一份 `structuredContent`：与服务同形的 `Result` JSON；图片字段只保留元数据；
 - 请求图片且本次取得时，额外一个 `ImageContent`：`data` 为图片字节的 base64 载体，
   `mimeType` 为 `image/jpeg`。

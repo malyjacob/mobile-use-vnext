@@ -130,7 +130,7 @@ func (s *Server) agent(next agentHandler) http.HandlerFunc {
 		}
 		if r.Header.Get(ContractHeader) != protocol.ContractVersion {
 			writeAPIError(w, protocol.NewError(http.StatusConflict, protocol.CodeContractMismatch,
-				"普通契约版本不匹配").WithNext("update"))
+				"普通契约版本不匹配"))
 			return
 		}
 		p := r.Header.Get(OperationHeader)
@@ -491,7 +491,12 @@ func writeAPIError(w http.ResponseWriter, apiErr *protocol.APIError) {
 	if status == 0 {
 		status = protocol.Status(apiErr.Code)
 	}
-	result := &protocol.Result{Error: apiErr.Public(), Next: apiErr.Next}
+	// Access-layer errors have no operation and no observation; only the
+	// contract-mismatch code carries a next step.
+	result := &protocol.Result{
+		Error:    apiErr.Public(),
+		Recovery: protocol.AccessRecovery(apiErr.Code),
+	}
 	if apiErr.Outcome != "" {
 		result.Outcome = apiErr.Outcome
 	}

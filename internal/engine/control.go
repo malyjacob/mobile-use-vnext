@@ -15,7 +15,7 @@ import (
 func (e *Engine) SyncApp(ctx context.Context, req *protocol.AppSyncRequest) (*protocol.AppSyncResponse, *protocol.APIError) {
 	if req.ContractVersion != protocol.ContractVersion {
 		return nil, protocol.NewError(409, protocol.CodeContractMismatch,
-			"控制端与服务的普通契约版本不匹配").WithNext("update")
+			"控制端与服务的普通契约版本不匹配")
 	}
 	if !ValidateUUID(req.AppInstanceID) {
 		return nil, protocol.Invalid("app_instance_id 必须是 UUID")

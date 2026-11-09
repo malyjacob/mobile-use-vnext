@@ -147,6 +147,7 @@ func (e *Engine) Shell(ctx context.Context, agent, p string, req *protocol.Shell
 	if req == nil || req.Command == "" {
 		return e.finishWithError(op, "admission", protocol.Invalid("shell 需要非空 command")), nil
 	}
+	e.setOperationReference(op, referenceKind(req.Reference))
 
 	session, admissionErr := e.shellAdmissionLocked(agent, req.Reference)
 	if admissionErr != nil {
@@ -309,13 +310,13 @@ func (e *Engine) shellAdmissionLocked(agent, reference string) (*sessionState, *
 		session = e.sessionByEpochLocked(obs.SessionEpoch)
 		if session == nil {
 			return nil, protocol.NewError(409, protocol.CodeReferenceNoSession,
-				"原观察没有可用的会话").WithNext("status")
+				"原观察没有可用的会话")
 		}
 	case "P":
 		if op == nil {
 			if _, closed := e.closed[reference]; closed {
 				return nil, protocol.NewError(409, protocol.CodeRequestClosed,
-					"原请求已封闭且未执行").WithNext("status")
+					"原请求已封闭且未执行")
 			}
 			return nil, protocol.NewError(409, protocol.CodeOperationUnknown, "原操作不可用")
 		}
@@ -324,22 +325,22 @@ func (e *Engine) shellAdmissionLocked(agent, reference string) (*sessionState, *
 		}
 		if op.SessionOrigin == "" {
 			return nil, protocol.NewError(409, protocol.CodeReferenceNoSession,
-				"原操作没有可用的会话").WithNext("status")
+				"原操作没有可用的会话")
 		}
 		session = e.sessionByOriginLocked(op.SessionOrigin)
 		if session == nil {
 			return nil, protocol.NewError(409, protocol.CodeReferenceNoSession,
-				"原操作没有可用的会话").WithNext("status")
+				"原操作没有可用的会话")
 		}
 	default:
 		return nil, protocol.Invalid("reference 类型无效")
 	}
 	switch {
 	case session.State == SessionEnded:
-		return nil, protocol.NewError(409, protocol.CodeSessionEnded, "原会话已结束").WithNext("end")
+		return nil, protocol.NewError(409, protocol.CodeSessionEnded, "原会话已结束")
 	case session != e.session || session.State != SessionActive:
 		return nil, protocol.NewError(409, protocol.CodeReferenceNoSession,
-			"原会话不是当前活动会话").WithNext("status")
+			"原会话不是当前活动会话")
 	case !sessionBeforeDeadline(session, now):
 		return nil, protocol.NewError(409, protocol.CodeSessionExpired, "原会话已过期")
 	}
@@ -468,7 +469,7 @@ func (e *Engine) finishShellNotStarted(op *operationState, work *workState, run 
 	e.persistAsync()
 	e.removeManagedShellDir(run)
 
-	apiErr := protocol.NewError(protocol.Status(code), code, message).WithNext(protocol.NextForCode(code))
+	apiErr := protocol.NewError(protocol.Status(code), code, message)
 	apiErr.Outcome = OutcomeNotExecuted
 	result := &protocol.Result{
 		Outcome: OutcomeNotExecuted,
@@ -484,7 +485,7 @@ func (e *Engine) finishShellUncertain(op *operationState, run *shellState, messa
 	run.Phase = "unconfirmed"
 	e.mu.Unlock()
 	e.persistAsync()
-	apiErr := protocol.NewError(504, protocol.CodeShellUnknown, message).WithNext("status")
+	apiErr := protocol.NewError(504, protocol.CodeShellUnknown, message)
 	apiErr.Outcome = OutcomeUncertain
 	result := &protocol.Result{
 		Outcome: OutcomeUncertain,
@@ -626,17 +627,13 @@ func (e *Engine) finishShellResult(op *operationState, work *workState, result *
 	outcome string, apiErr *protocol.APIError) *protocol.Result {
 	if apiErr != nil {
 		result.Error = apiErr.Public()
-		result.Next = apiErr.Next
 	}
 	if work == nil || e.workRevoked(work) {
-		if result.Next == "" {
-			result.Next = "status"
-		}
-		e.finishOperation(op, outcome, "executed_revoked", apiErr)
+		result.Recovery = e.finishOperation(op, outcome, "executed_revoked", apiErr)
 		e.addShellSession(op, result)
 		return result
 	}
-	e.finishOperation(op, outcome, "finished", apiErr)
+	result.Recovery = e.finishOperation(op, outcome, "finished", apiErr)
 	return result
 }
 

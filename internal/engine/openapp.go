@@ -38,6 +38,7 @@ func (e *Engine) OpenApp(ctx context.Context, agent, p string, req *protocol.Ope
 	if duplicate != nil {
 		return duplicate, nil
 	}
+	e.setOperationReference(op, protocol.RecoveryReferenceO)
 	if req == nil || req.App == "" {
 		return e.finishWithError(op, "admission", protocol.Invalid("open_app 需要 app 包名")), nil
 	}
@@ -73,7 +74,7 @@ func (e *Engine) OpenApp(ctx context.Context, agent, p string, req *protocol.Ope
 	}
 	if !found {
 		return e.finishWithError(op, "admission",
-			protocol.NewError(409, protocol.CodeAppNotFound, "手机上找不到可启动的该应用").WithNext("user")), nil
+			protocol.NewError(409, protocol.CodeAppNotFound, "手机上找不到可启动的该应用")), nil
 	}
 	preTasks, tasksKnown := e.dev.TasksOnDisplay(work.Ctx, session.Display.ID)
 	if !tasksKnown {
@@ -87,7 +88,7 @@ func (e *Engine) OpenApp(ctx context.Context, agent, p string, req *protocol.Ope
 		return e.finishWithError(op, "admission",
 			protocol.NewError(409, protocol.CodeStopped, "应用启动已撤销")), nil
 	}
-	claimErr := e.claimObservationLocked(agent, work, e.observations[req.ObservationID],
+	claimErr := e.claimObservationLocked(op, agent, work, e.observations[req.ObservationID],
 		e.session, time.Now())
 	e.mu.Unlock()
 	if claimErr != nil {
@@ -116,30 +117,30 @@ func (e *Engine) OpenApp(ctx context.Context, agent, p string, req *protocol.Ope
 func (e *Engine) openAppStaticCheckLocked(agent, observationID string, now time.Time) (*observationState, *sessionState, *protocol.APIError) {
 	session := e.session
 	if session == nil || session.State != SessionActive {
-		return nil, nil, protocol.NewError(409, protocol.CodeSessionEnded, "原会话已结束").WithNext("end")
+		return nil, nil, protocol.NewError(409, protocol.CodeSessionEnded, "原会话已结束")
 	}
 	if !sessionBeforeDeadline(session, now) {
-		return nil, nil, protocol.NewError(409, protocol.CodeSessionExpired, "原会话已过期").WithNext("end")
+		return nil, nil, protocol.NewError(409, protocol.CodeSessionExpired, "原会话已过期")
 	}
 	obs := e.observations[observationID]
 	if obs == nil || obs.Agent != agent || obs.SessionEpoch != session.Epoch {
 		return nil, nil, protocol.NewError(409, protocol.CodeObservationGone, "原观察不可用")
 	}
 	if e.current != obs {
-		return nil, nil, protocol.NewError(409, protocol.CodeObservationRetired, "观察已被替换").WithNext("observe")
+		return nil, nil, protocol.NewError(409, protocol.CodeObservationRetired, "观察已被替换")
 	}
 	switch obs.Status {
 	case ObservationReady:
 	case ObservationClaimed:
-		return nil, nil, protocol.NewError(409, protocol.CodeObservationClaimed, "观察已被消费").WithNext("observe")
+		return nil, nil, protocol.NewError(409, protocol.CodeObservationClaimed, "观察已被消费")
 	case ObservationExpired:
-		return nil, nil, protocol.NewError(409, protocol.CodeObservationExpired, "观察已过期").WithNext("observe")
+		return nil, nil, protocol.NewError(409, protocol.CodeObservationExpired, "观察已过期")
 	default:
-		return nil, nil, protocol.NewError(409, protocol.CodeObservationRetired, "观察已退役").WithNext("observe")
+		return nil, nil, protocol.NewError(409, protocol.CodeObservationRetired, "观察已退役")
 	}
 	if now.After(obs.ActionableUntil) {
 		obs.Status = ObservationExpired
-		return nil, nil, protocol.NewError(409, protocol.CodeObservationExpired, "观察已过期").WithNext("observe")
+		return nil, nil, protocol.NewError(409, protocol.CodeObservationExpired, "观察已过期")
 	}
 	return obs, session, nil
 }
@@ -404,18 +405,15 @@ func (e *Engine) finishOpenAppSuccess(work *workState, op *operationState, sessi
 	}
 	if apiErr != nil {
 		result.Error = apiErr.Public()
-		result.Next = apiErr.Next
 	}
 	if e.detachedWorkRevoked(work) {
-		result.Next = "status"
-		e.finishOperation(op, outcome, "executed_revoked", nil)
+		result.Recovery = e.finishOperation(op, outcome, "executed_revoked", nil)
 		e.addSessionIfEnded(result)
 		return result, nil
 	}
 	current := e.sessionForWork(work)
 	if current == nil {
-		result.Next = "status"
-		e.finishOperation(op, outcome, "executed_revoked", nil)
+		result.Recovery = e.finishOperation(op, outcome, "executed_revoked", nil)
 		e.addSessionIfEnded(result)
 		return result, nil
 	}
@@ -424,17 +422,16 @@ func (e *Engine) finishOpenAppSuccess(work *workState, op *operationState, sessi
 		result.Observation = &protocol.Observation{
 			Status: "failed", Missing: []string{"tree"}, Error: postErr.Public(),
 		}
-		result.Next = "observe"
-		e.finishOperation(op, outcome, "post_observation_failed", nil)
+		result.Recovery = e.finishOperation(op, outcome, "post_observation_failed", nil)
 		return result, nil
 	}
 	result.Observation = public
-	e.finishOperation(op, outcome, "finished", nil)
+	result.Recovery = e.finishOperation(op, outcome, "finished", nil)
 	return result, nil
 }
 
 func (e *Engine) finishOpenAppUncertain(op *operationState, code, message string, details map[string]any) (*protocol.Result, *protocol.APIError) {
-	apiErr := protocol.NewError(504, code, message).WithNext("status")
+	apiErr := protocol.NewError(504, code, message)
 	if code == protocol.CodeAppMoved || code == protocol.CodeTaskFocus {
 		apiErr.HTTPStatus = 409
 	}
@@ -445,8 +442,7 @@ func (e *Engine) finishOpenAppUncertain(op *operationState, code, message string
 	result := newResult(op)
 	result.Outcome = OutcomeUncertain
 	result.Error = apiErr.Public()
-	result.Next = "status"
-	e.finishOperation(op, OutcomeUncertain, "dispatch", apiErr)
+	result.Recovery = e.finishOperation(op, OutcomeUncertain, "dispatch", apiErr)
 	e.addSessionIfEnded(result)
 	return result, nil
 }

@@ -85,9 +85,8 @@ func TestShellStopDuringRunIsBoundedAndPromotesCleanup(t *testing.T) {
 	if call.result.Observation != nil {
 		t.Fatalf("STOP must not publish a new observation: %+v", call.result.Observation)
 	}
-	if call.result.Next != "status" {
-		t.Fatalf("next=%q", call.result.Next)
-	}
+	requireRecovery(t, call.result, protocol.RecoveryEntryStatus, protocol.RecoveryReferenceP,
+		protocol.RecoveryInputRevoked, protocol.RecoveryCauseExecutedRevoked)
 	if !call.result.IncludeSession || call.result.Session == nil ||
 		call.result.Session.State != SessionEnded {
 		t.Fatalf("ended session must be included: %+v", call.result.Session)

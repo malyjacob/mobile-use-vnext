@@ -12,6 +12,9 @@
   只能访问 `/api/*`。两者互不代替。
 - 普通同步必须精确匹配 `contract_version`。不匹配返回 `409 contract_mismatch`，不解析
   普通命令、不建立准备事实。最小 STOP 不要求普通契约匹配。
+- 普通同步的契约不匹配错误体带 `recovery`（`entry=update`、`reference=none`）；同步成功响应
+  不是工具结果，不增加 `recovery` 成员。控制 App 不解析工具结果，只按 `contract_version`
+  重建。
 
 ## 2. 心跳/控制同步
 
@@ -19,9 +22,9 @@
 
 ```json
 {
-  "contract_version": "2",
+  "contract_version": "3",
   "app_instance_id": "0b0b8c0e-...",
-  "app_version": "0.4.0",
+  "app_version": "0.4.1",
   "selected_mode": "virtual",
   "mode_generation": "8f0b2e2e-...",
   "mode_ready": true,
@@ -42,7 +45,7 @@
 
 | 字段 | 必填 | 含义 |
 | --- | --- | --- |
-| contract_version | 是 | 共同普通契约；必须等于 `"2"` |
+| contract_version | 是 | 共同普通契约；必须等于 `"3"` |
 | app_instance_id | 是 | 本次 App 进程实例，UUID；重建即变化 |
 | app_version | 是 | 仅发行标识，不参与能力协商 |
 | selected_mode | 是 | `virtual` 或 `primary`；App 重建默认 virtual |
@@ -65,7 +68,7 @@
 
 ```json
 {
-  "contract_version": "2",
+  "contract_version": "3",
   "service_instance_id": "d0e...",
   "control": {
     "revision": 42,
@@ -129,13 +132,13 @@ App 必须拒绝无法解析、未知 kind、缺字段或 `contract_version` 不
 `POST /v1/control/stop`
 
 ```json
-{"contract_version":"2","app_instance_id":"...","stop_seq":7,"reason":"user_stop"}
+{"contract_version":"3","app_instance_id":"...","stop_seq":7,"reason":"user_stop"}
 ```
 
 响应（最小，不含普通服务状态、消息或设备命令）：
 
 ```json
-{"contract_version":"2","service_instance_id":"...","accepted":true,"stop_seq":7,"state":"revoked"}
+{"contract_version":"3","service_instance_id":"...","accepted":true,"stop_seq":7,"state":"revoked"}
 ```
 
 - App 先在本地提高停止代次、拒绝旧命令/回调恢复权限，再在独立线程发起本请求；不等待

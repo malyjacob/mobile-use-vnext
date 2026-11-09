@@ -41,7 +41,7 @@ adb forward          主机 18881 → 服务；主机 18883 → 手机 MCP
    `adb forward`，也不需要 Agent token。
 
 只需要直连 HTTP 的 Agent 则使用 `http://127.0.0.1:18881/api/<tool>`、`agent_token` 与
-`X-Mobile-Use-Contract: 2`。
+`X-Mobile-Use-Contract: 3`。
 
 ## 1. 默认部署后的网络与进程
 
@@ -205,7 +205,7 @@ Header: Authorization: Bearer <mcp_token>
 
 ```text
 Authorization: Bearer <agent_token>
-X-Mobile-Use-Contract: 2
+X-Mobile-Use-Contract: 3
 Content-Type: application/json; charset=utf-8
 ```
 
@@ -213,7 +213,7 @@ Content-Type: application/json; charset=utf-8
 $deploy = Get-Content .state/deploy.json -Raw | ConvertFrom-Json
 $headers = @{
     Authorization           = "Bearer $($deploy.agent_token)"
-    'X-Mobile-Use-Contract' = '2'
+    'X-Mobile-Use-Contract' = '3'
 }
 Invoke-RestMethod http://127.0.0.1:18881/api/status -Method Post `
   -Headers $headers -ContentType 'application/json' -Body '{}'
@@ -277,9 +277,6 @@ $json = $config | ConvertTo-Json -Depth 5
 | `http.listen` | `127.0.0.1:18882` | 仅 HTTP 模式使用；只允许回环 |
 | `http.token` | 上面生成的 `hostMcpToken` | MCP HTTP Bearer；不得等于 agent token |
 | `http.allowed_origins` | `[]` 或精确 Origin | 仅浏览器类客户端需要 |
-
-也可以用 `./scripts/verify-m5.ps1` 生成/刷新该配置并验证两种传输；注意它会重新生成
-`http.token`，之后要重新读取并更新宿主配置。
 
 ### 6.3 stdio 宿主配置
 
@@ -346,7 +343,7 @@ Header: Authorization: Bearer <mcp_token>
 两种选择：
 
 ```text
-直连 HTTP:  http://127.0.0.1:18880/api/<tool>   + agent_token + X-Mobile-Use-Contract: 2
+直连 HTTP:  http://127.0.0.1:18880/api/<tool>   + agent_token + X-Mobile-Use-Contract: 3
 MCP HTTP:   http://127.0.0.1:18882/mcp          + mcp_token
 ```
 
@@ -512,7 +509,7 @@ GET 判断工具是否可用。
 $deploy = Get-Content .state/deploy.json -Raw | ConvertFrom-Json
 $headers = @{
     Authorization           = "Bearer $($deploy.agent_token)"
-    'X-Mobile-Use-Contract' = '2'
+    'X-Mobile-Use-Contract' = '3'
 }
 $start = Invoke-RestMethod http://127.0.0.1:18881/api/start -Method Post `
   -Headers $headers -ContentType 'application/json' -Body '{}'

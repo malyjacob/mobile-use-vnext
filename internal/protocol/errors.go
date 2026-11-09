@@ -14,7 +14,6 @@ type APIError struct {
 	Details    map[string]any
 	HTTPStatus int
 	Outcome    string // not_executed / uncertain / "" (no active action)
-	Next       string // status / observe / end / user / update
 }
 
 // Error implements error.
@@ -40,9 +39,11 @@ type Error struct {
 	Details map[string]any `json:"details,omitempty"`
 }
 
-// NewError builds an APIError with the given status and outcome.
+// NewError builds an APIError with the given status and outcome. It never
+// derives a recovery projection: tool results are planned once by the engine
+// and access-layer errors only by AccessRecovery.
 func NewError(status int, code, message string) *APIError {
-	return &APIError{Code: code, Message: message, HTTPStatus: status, Next: nextFor(code)}
+	return &APIError{Code: code, Message: message, HTTPStatus: status}
 }
 
 // NewErrorOutcome builds an APIError that also states the action outcome.
@@ -52,30 +53,16 @@ func NewErrorOutcome(status int, code, message, outcome string) *APIError {
 	return e
 }
 
-// NextForCode returns the controlled recovery entry point for a code.
-func NextForCode(code string) string { return nextFor(code) }
-
-func nextFor(code string) string {
-	switch code {
-	case "device_busy", "operation_running", "delivery_unavailable",
-		"app_launch_unconfirmed", "application_moved", "task_focus_unavailable",
-		"shell_result_unconfirmed", "task_remove_unconfirmed",
-		"shell_start_failed", "app_list_unavailable":
-		return "status"
-	case "observation_expired", "observation_retired", "observation_claimed",
-		"observation_not_ready", "no_ready_observation", "tree_unavailable",
-		"content_unavailable":
-		return "observe"
-	case "session_ended", "session_expired", "control_revoked":
-		return "end"
-	case "device_locked", "device_not_interactive", "stop_unavailable",
-		"mode_not_selected", "control_unavailable", "app_not_found",
-		"root_unavailable":
-		return "user"
-	case "contract_mismatch":
-		return "update"
+// AccessRecovery returns the recovery projection of one HTTP access-layer
+// error. It is the only recovery mapping outside the engine, and its scope is
+// deliberately tiny: access admission can only produce a contract mismatch with
+// a non-empty projection. Tool-level codes are planned by the engine; the
+// engine never calls this function to build a tool result.
+func AccessRecovery(code string) *Recovery {
+	if code == CodeContractMismatch {
+		return &Recovery{Entry: RecoveryEntryUpdate, Reference: RecoveryReferenceNone}
 	}
-	return ""
+	return nil
 }
 
 // Stable error codes used by the first implemented tool subset.
@@ -209,12 +196,6 @@ func (e *APIError) WithDetail(key string, value any) *APIError {
 		e.Details = map[string]any{}
 	}
 	e.Details[key] = value
-	return e
-}
-
-// WithNext sets the controlled recovery entry point.
-func (e *APIError) WithNext(next string) *APIError {
-	e.Next = next
 	return e
 }
 
