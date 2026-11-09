@@ -5,6 +5,7 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"strconv"
+	"strings"
 	"time"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -65,6 +66,9 @@ func (p *probe) runChecks(ctx context.Context) bool {
 	}
 	observedID, ok := p.observeCheck(ctx, oID)
 	if !ok {
+		return false
+	}
+	if !p.inspectCheck(ctx, observedID) {
 		return false
 	}
 	if !p.actCheck(ctx, observedID) {
@@ -287,6 +291,10 @@ func (p *probe) observeCheck(ctx context.Context, reference string) (string, boo
 		p.reporter.fail("observe", failure.reason, failure.fields...)
 		return "", false
 	}
+	if failure := checkObservationTreeBlock(projected, observation); failure != nil {
+		p.reporter.fail("observe", failure.reason, failure.fields...)
+		return "", false
+	}
 	p.reporter.pass("observe",
 		field("reference", reference), field("id", observation.ID),
 		field("status", observation.Status), field("tree_format", format),
@@ -294,6 +302,60 @@ func (p *probe) observeCheck(ctx context.Context, reference string) (string, boo
 		field("width", strconv.Itoa(observation.Image.Width)),
 		field("height", strconv.Itoa(observation.Image.Height)))
 	return observation.ID, true
+}
+
+// checkObservationTreeBlock asserts that the readable projection carries one
+// complete observation tree block with the matching format and id.
+func checkObservationTreeBlock(projected *callResult, observation *observationView) *checkError {
+	format := treeFormatOf(observation)
+	block, failure := treeBlockText(projected, "tree v1 format="+format+" id="+observation.ID)
+	if failure != nil {
+		return failure
+	}
+	if strings.Contains(block, " omitted ") {
+		return failf("tree_block_omitted", field("tree_format", format))
+	}
+	if !strings.HasSuffix(block, "end tree\n") {
+		return failf("tree_block_unterminated", field("tree_format", format))
+	}
+	return nil
+}
+
+// inspectCheck reads the observed tree through inspect and asserts the
+// readable inspection block carries a header and a trailer.
+func (p *probe) inspectCheck(ctx context.Context, observationID string) bool {
+	projected, failure := p.call(ctx, "inspect", map[string]any{"observation_id": observationID})
+	if failure != nil {
+		p.reporter.fail("inspect", failure.reason, failure.fields...)
+		return false
+	}
+	view := projected.view
+	if projected.result.IsError {
+		p.reporter.fail("inspect", "tool_is_error", field("code", codeOf(view)))
+		return false
+	}
+	if view.Inspection == nil || view.Inspection.ObservationID != observationID {
+		p.reporter.fail("inspect", "inspection_missing")
+		return false
+	}
+	prefix := "inspect v1 scope=" + view.Inspection.Scope + " observation=" + observationID
+	block, failure := treeBlockText(projected, prefix)
+	if failure != nil {
+		p.reporter.fail("inspect", failure.reason, failure.fields...)
+		return false
+	}
+	if strings.Contains(block, " omitted ") {
+		p.reporter.fail("inspect", "inspect_block_omitted", field("scope", view.Inspection.Scope))
+		return false
+	}
+	if !strings.HasSuffix(block, "end inspect\n") {
+		p.reporter.fail("inspect", "inspect_block_unterminated", field("scope", view.Inspection.Scope))
+		return false
+	}
+	p.reporter.pass("inspect",
+		field("scope", view.Inspection.Scope), field("observation", observationID),
+		"tree_block=complete")
+	return true
 }
 
 // actCheck consumes the observed O with a key action and asserts the post
@@ -338,6 +400,10 @@ func (p *probe) actCheck(ctx context.Context, observationID string) bool {
 		return false
 	}
 	if failure := checkNoImageCarrier(projected, raw); failure != nil {
+		p.reporter.fail("act", failure.reason, failure.fields...)
+		return false
+	}
+	if failure := checkObservationTreeBlock(projected, observation); failure != nil {
 		p.reporter.fail("act", failure.reason, failure.fields...)
 		return false
 	}

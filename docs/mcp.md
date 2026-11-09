@@ -32,12 +32,16 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
 
 一次工具调用的结果包含：
 
-- 一份可读正文：`key=value` 行，保留本次已知的阶段事实（操作号、状态、outcome、会话、
-  观察头、树格式、图片元数据、收尾五项、错误与 `recovery.entry`、`recovery.reference`、
-  `recovery.input_state`、`recovery.cause` 等）；
+- 一份可读正文：`key=value` 阶段事实，以及（本次有观察树或补看内容时）一个确定性树块；
 - 一份 `structuredContent`：与服务同形的 `Result` JSON；图片字段只保留元数据；
 - 请求图片且本次取得时，额外一个 `ImageContent`：`data` 为图片字节的 base64 载体，
   `mimeType` 为 `image/jpeg`。
+
+`key=value` 行保留本次已知的阶段事实（操作号、状态、outcome、会话、观察头、树格式、
+图片元数据、收尾五项、错误与 `recovery.entry`、`recovery.reference`、
+`recovery.input_state`、`recovery.cause` 等）。`start`、`observe`、`act`、`open_app`
+的结果带观察树块，`inspect` 的结果带补看块；其余工具不产生树块。树块与 `key=value`
+正文之间恰好一个空行，`structuredContent` 与树块同源。
 
 树、图片与 shell 输出的事实来源都是服务的同一份结果。base64 只出现在 HTTP 载体
 `observation.image.base64` 与 MCP `ImageContent.data`；可读正文与 `structuredContent`
@@ -56,6 +60,81 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
 | `inspect` 内容不可用、准入/协议/传输错误 | `true` |
 | `start` 已建立会话但首个观察失败 | `false`（主操作 `executed`） |
 | `act` 已派发但完成未知 | `true`（`uncertain`） |
+
+### 3.1 树块
+
+树块只投影本次 `Result` 中已有的树或补看内容：不新增采集、不展开 delta、不缓存基线，
+也不读取请求参数、时间或随机数；同一个 `Result` 重复渲染逐字节相同。
+
+**观察块。** 块头之后是一个空行、节点行，最后是终止行：
+
+```text
+tree v1 format=full id=O3 scope=reported_visible_with_context nodes=7
+
+n1 root [0,0,1080,2400]
+  n2 group [0,0,1080,220]
+    n3 button [24,60,144,180] "返回" tap
+    n4 text [300,80,780,160] "设置"
+  n5 scroll [0,220,1080,2400] axis=y
+    n12 group -
+      n13 input [48,1850,1032,1990] "搜索设置" value="" hint="输入关键词" tap text
+end tree
+```
+
+节点行固定列序：2 空格/层缩进、`n<ref>`、`role`、`[l,t,r,b]`（未知为 `-`）、每个
+`label` 一个 JSON 字符串、`value=` / `hint=`、动作词、标志。动作词为 `tap`、
+`long_press`、`text`、`swipe`；标志为 `enabled=false|null`、
+`focused`/`selected`/`protected` 的 `true|null`、`checked=true|false`、
+`axis=x|y|both`、`resource="…"` 与 `context`。设备来源字符串按 JSON 字符串字面量转义，
+`<`、`>`、`&` 保持原样；缺省值按协议省略规则不输出。
+
+delta 块头为
+`tree v1 format=delta id=<O> base=<O2> scope=<scope> changes=<n>`，正文按
+`set → add → remove → children → replace` 顺序输出。`changes` 是五个块的顶层声明条数
+之和：一个 `set` 条目即使改了多个字段也只计 1。
+
+```text
+tree v1 format=delta id=O4 base=O3 scope=reported_visible_with_context changes=6
+
+~ n7 label=["WLAN 已关闭"] actions=["tap"]
+~ n8 checked=false
++ n14 group [0,460,1080,580]
+  n15 text [48,490,700,550] "移动网络" tap
+- n16
+children n5 = [n6 n9 n14]
+= n12 group [0,1800,1080,2100]
+  n91 input [48,1850,1032,1990] "搜索设置" value="" hint="输入关键词" tap text
+end tree
+```
+
+`~` 行只列实际变化的字段，字段值保留显式 `false`、`""`、`[]` 与 `null`；字段顺序为
+`label`、`actions`、`bounds`、`enabled`、`focused`、`selected`、`checked`、`value`、
+`hint`、`protected`、`axis`、`resource`。`SetNode` 没有 `role`，`~` 行也不输出 `role`。
+`add` / `remove` 保持结果中的顺序；`set`、`children`、`replace` 按 ref 数值升序输出。
+同一个 `base` 下的新 delta 覆盖旧 delta，不叠加；块头 `base=` 是唯一锚点。
+
+**补看块。** 块头为
+`inspect v1 scope=<tree|subtree|query> observation=<O> revision=<n> captured_at=<RFC3339> tree_scope=<scope> [root=<ref>] [matches=<n> total=<n> truncated=<bool>] nodes=<n>`。
+`tree` 输出整树，`subtree` 额外带 `root=`，`query` 按命中顺序输出
+`match i/N path=[…]` 与完整命中子树，命中之间以空行分隔。`matches` 是本次返回条数，
+`total` 是预算前命中数，`truncated=true` 表示引擎只返回了完整条目前缀。`nodes` 是正文
+节点行数之和；查询的嵌套命中按各自子树重复计数。`path` 是 root..parent 的 ref 序列，
+不含命中节点本身。
+
+**预算与完整性。** 观察块总字节上限 24 KiB，补看块 32 KiB，均含块头、正文与终止行。
+超过上限时整块省略，只输出一行 `omitted`：
+
+```text
+tree v1 omitted format=full id=O3 nodes=612 bytes=27112 limit=24576 use=inspect
+tree v1 omitted format=delta id=O4 base=O3 changes=120 bytes=24880 limit=24576 use=inspect
+inspect v1 omitted scope=tree observation=O2 revision=4 nodes=612 bytes=38211 limit=32768 use=query
+```
+
+`omitted` 与 `truncated` 不同：前者是 MCP 文本块整块未渲染，后者是引擎按 32 KiB 总预算
+截断了查询命中条数。非省略块分别以 `end tree` / `end inspect` 结尾；缺少终止行表示输出
+在宿主侧被切断。ref 不满足 `n` 加非零十进制数字时，整块以
+`tree v1 omitted reason=ref_format …` / `inspect v1 omitted reason=ref_format …` 省略，
+不输出可能撕裂语法的半棵树。
 
 ## 4. stdio
 

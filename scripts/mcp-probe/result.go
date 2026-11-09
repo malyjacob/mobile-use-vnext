@@ -58,6 +58,13 @@ type treeView struct {
 	Base   string `json:"base"`
 }
 
+// inspectionView keeps only the inspect header fields the probe asserts.
+type inspectionView struct {
+	ObservationID string `json:"observation_id"`
+	Scope         string `json:"scope"`
+	Revision      int    `json:"revision"`
+}
+
 // observationView is the observation header; tree bodies are not interpreted.
 type observationView struct {
 	Status   string     `json:"status"`
@@ -92,6 +99,7 @@ type resultView struct {
 	ObservationState string           `json:"observation_state"`
 	Session          *sessionView     `json:"session"`
 	Observation      *observationView `json:"observation"`
+	Inspection       *inspectionView  `json:"inspection"`
 	Cleanup          *cleanupView     `json:"cleanup"`
 	Error            *errorView       `json:"error"`
 }
@@ -237,6 +245,24 @@ func imageBytes(projected *callResult, observation *observationView) ([]byte, *c
 		return nil, failf("image_metadata_missing_captured_at")
 	}
 	return raw, nil
+}
+
+// treeBlockText returns the readable tree block that starts with headerPrefix.
+// The adapter puts the block after a blank line, so the header must start a
+// line, not merely appear inside a label.
+func treeBlockText(projected *callResult, headerPrefix string) (string, *checkError) {
+	for _, text := range projected.texts {
+		offset := 0
+		if !strings.HasPrefix(text, headerPrefix) {
+			index := strings.Index(text, "\n"+headerPrefix)
+			if index < 0 {
+				continue
+			}
+			offset = index + 1
+		}
+		return text[offset:], nil
+	}
+	return "", failf("text_tree_block_missing")
 }
 
 // checkNoImageCarrier asserts the text projection and structuredContent carry

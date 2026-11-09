@@ -205,7 +205,8 @@
 - **选择**：`internal/mcp` 使用 `github.com/modelcontextprotocol/go-sdk v1.8.0`，锁定
   MCP `2026-07-28`，注册固定 12 工具的低层 handler（显式 JSON Schema +
   `additionalProperties=false`）。参数由 `internal/protocol` 的严格解码器接入；结果投影
-  为可读 `key=value` 正文、去 base64 的规范 `Result` 结构化内容与可选 `ImageContent`。
+  为可读 `key=value` 阶段事实正文（D32 追加可选树块）、去 base64 的规范 `Result`
+  结构化内容与可选 `ImageContent`。
   `isError` 按“主动作是否达成”分工具投影：`executed` 不因后树/图片/清理失败改判为错误；
   `not_executed`/`uncertain` 为真；`status`/`diagnose` 的正常查询事实为假；无有效 O 的
   `observe` 与不可用 `inspect` 为真。
@@ -350,3 +351,19 @@
   中注明。审计期间可以并行处理与审计文件无关的工作，但不得改动正在审计的 `docs/` 文件。
 - **影响**：审计结论成为提交门禁的一部分；中断/重启必须有可解释的原因；减少重复启动与
   无结论的审计。
+
+## D32 MCP 文本结果附带确定性树块
+
+- **背景**：MCP 规范要求返回结构化内容的工具同时把序列化结果放进 `TextContent`；部分
+  宿主只把 `TextContent` 交给模型。原投影的正文只有阶段事实，模型在主循环里看不到树，
+  无法从 `observe`/`act` 的结果选择 `ref`，`inspect` 的命中内容也不可见。
+- **选择**：`internal/mcp` 在既有 `key=value` 正文之后追加一个纯函数渲染的树块：观察结果
+  渲染 full/delta，`inspect` 渲染 tree/subtree/query；`structuredContent` 与 `/api/*`
+  不变。树块使用行式语法、2 空格缩进、JSON 字符串字面量转义与显式 `false`/`""`/`[]`/
+  `null`；块尾 `end tree`/`end inspect` 暴露宿主截断。delta 不展开：适配器没有基线树，
+  块头 `base=` 是唯一锚点，新 delta 覆盖旧 delta。观察块上限 24 KiB、补看块 32 KiB，
+  超限整块省略并输出 `omitted`，不输出半棵树。该选择扩展 D21 的可读正文条款：正文不再
+  只有 `key=value`，但仍只是本次 `Result` 的投影，不新增状态、工具、参数或契约版本。
+- **影响**：树块只进响应，不进日志；工具 description 变化会改变 `CatalogFingerprint`，
+  发布清单在下次发布时重新生成。`docs/mcp.md` §3/§3.1 承载语法与预算，
+  `docs/interface.md` §12 补记 `inspect` 的两处既有预算口径。

@@ -13,13 +13,28 @@ type toolDefinition struct {
 	readOnly    bool
 }
 
+// treeTextGuide is appended to the five tool descriptions whose results may
+// carry a tree block. It is shared verbatim so the catalog has one syntax
+// legend, not five drifting variants.
+const treeTextGuide = "可读正文在 key=value 阶段事实之后附带一个确定性树块：" +
+	"full 块以 `tree v1 format=full id=<O> scope=<scope> nodes=<n>` 开头，后接节点行；" +
+	"delta 块以 `tree v1 format=delta id=<O> base=<O2> scope=<scope> changes=<n>` 开头，" +
+	"后接 `~`/`+`/`-`/`children`/`=` 变更行；两者均以 `end tree` 结尾。" +
+	"节点行为 `缩进 n<ref> <role> <bounds> \"label\"… value=\"…\" hint=\"…\" " +
+	"tap|long_press|text|swipe enabled=… focused=… checked=… axis=… resource=\"…\" context`，" +
+	"`n<ref>` 可直接用作 target.ref。delta 相对 base 累计，新 delta 覆盖旧 delta，不叠加。" +
+	"补看块以 `inspect v1 scope=<tree|subtree|query> observation=<O> revision=<n> … nodes=<n>` " +
+	"开头，tree/subtree 后接节点行，query 后接 `match i/N path=[…]` 与命中子树，并以 " +
+	"`end inspect` 结尾。`omitted` 表示整块超过文本上限未渲染，可用 inspect 的 node/query 收窄。"
+
 // toolCatalog is the complete public tool surface. Order is stable for tests
 // and for clients that display tools in registration order.
 var toolCatalog = []toolDefinition{
 	{
 		name: "start",
 		description: "建立新会话并返回第一个 full 观察。请求体必须是空对象；" +
-			"目标屏幕与模式来自控制端当前选择，不接受尺寸、模式或凭据参数。",
+			"目标屏幕与模式来自控制端当前选择，不接受尺寸、模式或凭据参数。" +
+			treeTextGuide,
 		schema: json.RawMessage(`{
   "type": "object",
   "properties": {},
@@ -53,7 +68,8 @@ var toolCatalog = []toolDefinition{
 		name: "observe",
 		description: "对给定 O/P 的原会话执行一次新采集并返回新观察。full=true 强制 full；" +
 			"image=true 在同一次采集中附加一个 ImageContent（与树事实同源）；" +
-			"wait_ms 是采集前等待毫秒数（0–10000，默认 0）。",
+			"wait_ms 是采集前等待毫秒数（0–10000，默认 0）。" +
+			treeTextGuide,
 		schema: json.RawMessage(`{
   "type": "object",
   "properties": {
@@ -91,7 +107,8 @@ var toolCatalog = []toolDefinition{
 		name: "act",
 		description: "消费一个 ready 观察并派发 tap、long_press、text、swipe 或 key。" +
 			"operation 只接受对应分支的成员；image=true 在动作后的同一次采集中附加 ImageContent。" +
-			"坐标目标会在派发前按点解析节点并证明未变化，变化时返回 target_changed。",
+			"坐标目标会在派发前按点解析节点并证明未变化，变化时返回 target_changed。" +
+			treeTextGuide,
 		schema: json.RawMessage(`{
   "type": "object",
   "properties": {
@@ -181,7 +198,8 @@ var toolCatalog = []toolDefinition{
 	{
 		name: "inspect",
 		description: "只读查看保留中的历史观察树，不采集、不续租、不确认基线、不认领 O。" +
-			"node 与 query 互斥；query 是字面 Unicode 折叠子串匹配。",
+			"node 与 query 互斥；query 是字面 Unicode 折叠子串匹配。" +
+			treeTextGuide,
 		schema: json.RawMessage(`{
   "type": "object",
   "properties": {
@@ -271,7 +289,8 @@ var toolCatalog = []toolDefinition{
 	{
 		name: "open_app",
 		description: "消费一个 ready 观察并在其会话的显示上打开指定包名的应用。" +
-			"app 只接受明确包名；返回 app 身份与后置观察。",
+			"app 只接受明确包名；返回 app 身份与后置观察。" +
+			treeTextGuide,
 		schema: json.RawMessage(`{
   "type": "object",
   "properties": {

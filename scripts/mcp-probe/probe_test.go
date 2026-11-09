@@ -369,6 +369,13 @@ func (f *fakeAdapter) result(payload map[string]any, text string) *sdk.CallToolR
 
 func (f *fakeAdapter) imageResult(payload map[string]any) *sdk.CallToolResult {
 	text := "observation.status=complete\n"
+	if observation, ok := payload["observation"].(map[string]any); ok {
+		if id, ok := observation["id"].(string); ok {
+			text += "\ntree v1 format=full id=" + id +
+				" scope=reported_visible_with_context nodes=1\n\n" +
+				"n1 root [0,0,1080,2400]\nend tree\n"
+		}
+	}
 	if f.leakImage {
 		text = "observation.image.base64=" + base64.StdEncoding.EncodeToString(f.image)
 	}
@@ -432,6 +439,29 @@ func (f *fakeAdapter) handle(ctx context.Context, name string, request *sdk.Call
 			"outcome":      outcomeExecuted,
 			"observation":  f.observation(o, "P1", 3, true),
 		}), nil
+	case "inspect":
+		observationID, _ := arguments["observation_id"].(string)
+		text := "inspection.observation_id=" + observationID +
+			"\n\ninspect v1 scope=tree observation=" + observationID +
+			" revision=2 captured_at=2026-01-01T00:00:00Z" +
+			" tree_scope=reported_visible_with_context nodes=1\n\n" +
+			"n1 root [0,0,1080,2400]\nend inspect\n"
+		return f.result(map[string]any{
+			"inspection": map[string]any{
+				"observation_id": observationID,
+				"origin":         "P1",
+				"revision":       2,
+				"captured_at":    "2026-01-01T00:00:00Z",
+				"scope":          "tree",
+				"tree": map[string]any{
+					"format": treeFull,
+					"scope":  "reported_visible_with_context",
+					"root": map[string]any{
+						"ref": "n1", "role": "root", "bounds": []int{0, 0, 1080, 2400},
+					},
+				},
+			},
+		}, text), nil
 	case "end":
 		f.endCalls++
 		reference, _ := arguments["reference"].(string)
@@ -554,6 +584,7 @@ func TestAdapterChecksAgainstFakeAdapter(t *testing.T) {
 		"PASS status can_start=true",
 		"PASS start",
 		"PASS observe",
+		"PASS inspect",
 		"PASS act",
 		"PASS end",
 		"PASS cancel",
@@ -683,6 +714,8 @@ func (f *fakeRecoveryService) serve(writer http.ResponseWriter, request *http.Re
 		f.writeObserve(writer, request, operationID, body)
 	case "/api/act":
 		f.writeAct(writer, operationID, body)
+	case "/api/inspect":
+		f.writeInspect(writer, body)
 	case "/api/end":
 		f.writeEnd(writer, operationID, body)
 	default:
@@ -799,6 +832,29 @@ func (f *fakeRecoveryService) writeAct(writer http.ResponseWriter, operationID s
 	}
 	f.mutex.Unlock()
 	f.writeResult(writer, result)
+}
+
+// writeInspect returns one complete historical tree for the inspect probe.
+func (f *fakeRecoveryService) writeInspect(writer http.ResponseWriter, body []byte) {
+	var inspectBody struct {
+		ObservationID string `json:"observation_id"`
+	}
+	_ = json.Unmarshal(body, &inspectBody)
+	f.mutex.Lock()
+	observationID := inspectBody.ObservationID
+	if observationID == "" {
+		observationID = fmt.Sprintf("O%d", f.revision)
+	}
+	view := &protocol.InspectionView{
+		ObservationID: observationID,
+		Origin:        f.sessionOrigin,
+		Revision:      f.revision,
+		CapturedAt:    time.Now().UTC().Format(time.RFC3339Nano),
+		Scope:         "tree",
+		Tree:          testFullTree().Full,
+	}
+	f.mutex.Unlock()
+	f.writeResult(writer, &protocol.Result{Inspection: view})
 }
 
 // observationLocked builds one complete observation. Image bytes travel only
@@ -986,6 +1042,7 @@ func TestProbeAgainstRealAdapter(t *testing.T) {
 		"PASS schema",
 		"PASS start",
 		"PASS observe",
+		"PASS inspect",
 		"PASS act",
 		"PASS end",
 		"PASS cancel",

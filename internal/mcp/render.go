@@ -12,7 +12,8 @@ import (
 // renderText builds the deterministic readable projection carried in the
 // single TextContent. It preserves stage facts as key=value lines and never
 // includes image bytes, tree nodes, shell output text, notification text or
-// application name lists.
+// application name lists. The adapter appends the optional tree block from
+// renderTreeText after these lines.
 func renderText(result *protocol.Result, cancelled bool, cancellation string) string {
 	if result == nil {
 		if cancelled {

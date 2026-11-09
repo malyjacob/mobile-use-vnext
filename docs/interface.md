@@ -573,10 +573,12 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 `node` 与 `query` 互斥。`inspect` 只读保留中的历史树，不采集、不续租、不确认基线、
 不认领 O，也不需要 O 仍可输入。
 
-- 整树补看受完整公开树上限（128 KiB）；`node` 子树与 `query` 单个命中受 32 KiB 上限；
+- 整树补看受完整公开树上限（128 KiB）；`node` 子树受 32 KiB 上限；
+- `query` 的单个命中与返回命中总量都受 32 KiB 上限：任一命中超过 32 KiB 时整次查询以
+  `409 inspection_too_large` 失败（即使它不在返回前缀内）；总量预算只决定完整命中的
+  返回前缀，前缀不足全部命中时置 `truncated=true`；
 - `query` 在 `label`/`value`/`hint`/`resource` 上做字面 Unicode 折叠子串匹配，按原树顺序
-  返回完整命中子树和祖先 `ref` 路径；`total` 为预算前命中数，只给完整单位时显式
-  `truncated`；
+  返回完整命中子树和祖先 `ref` 路径；`total` 为预算前命中数，返回值只含完整命中子树；
 - 常见失败：`409 observation_not_found`（不存在或不属于本 Agent）、
   `409 content_unavailable`（树已被淘汰）、`409 node_not_found`、
   `409 inspection_too_large`（`details.limit` 为字节上限）。这些失败不携带 `recovery`。

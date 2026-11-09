@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -104,6 +105,12 @@ func (a *adapter) handle(ctx context.Context, definition toolDefinition, argumen
 		}
 	} else {
 		text = renderText(execution.result, execution.cancelled, execution.cancellation)
+		if block := renderTreeText(execution.result); block != "" {
+			if text != "" {
+				text = strings.TrimRight(text, "\n") + "\n\n"
+			}
+			text += block
+		}
 	}
 	content := []sdk.Content{&sdk.TextContent{Text: text}}
 	if execution.image != nil && len(execution.image.Data) > 0 && execution.image.MediaType != "" {
