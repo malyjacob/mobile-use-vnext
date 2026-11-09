@@ -20,6 +20,7 @@
 | 工具 | 实现 | 实机 |
 | --- | --- | --- |
 | `start`/`status`/`observe`/`act`/`end` | 已实现 | 已验证（P3、P5、P6 记录） |
+| `act` 坐标目标的点→节点证明 | 已实现 | 已实测：正常坐标动作 8/8 成功；同包状态变化、几何变化与导航 3/3 拒绝；真实 422 歧义、无节点回退、同包浮层、WebView 未构造（[记录](verification/act-coordinate-point-proof.md)） |
 | `apps` | 已实现 | 已验证（Core 脚本） |
 | `open_app` | 已实现 | 已验证：创建/复用/未知包/end/STOP 清理 |
 | `inspect` | 已实现 | 已验证：整树/子树/查询 |
@@ -53,6 +54,7 @@
 | 旧 App + 新服务下的旧 App 界面 | 旧版本在控制视图为空时自身 `NullPointerException`（`ControlState.cleanupRisk`），旧 App 服务仍可发送独立 STOP；新版本已修复该空指针 |
 | 通知频道关闭/权限撤销下的消息中心 | 代码路径检查；实机仅验证通知可用路径 |
 | 后观察收敛采样（`start`/`act`/`open_app`） | 已实现并由单元测试覆盖判据、预算、撤销与图片读序；实机 A/B 未执行：`target_changed` 率、按档 `samples`/`stable` 分布与 P50/P95 需真机采样后才能校准三档取值（[提案](proposals/implemented/act-post-observation-settle.md)、[记录](verification/act-post-observation-settle.md)） |
+| act 坐标目标点证明的真实歧义/无节点/同包浮层/WebView | 单元测试覆盖判据；实机未构造，原因见[记录](verification/act-coordinate-point-proof.md) §6 |
 
 ## 4. 证据入口
 
@@ -60,6 +62,7 @@
 - [P4 实机验证](verification/p4-real-device.md)
 - [P5 实机验证](verification/p5-real-device.md)
 - [P6 控制呈现、消息中心与整组交付](verification/p6-real-device.md)
+- [act 坐标目标点证明实机验证](verification/act-coordinate-point-proof.md)
 - [工程决策](decisions.md)
 - [工程流程](process.md)
 
@@ -67,4 +70,4 @@
 
 - 第 3 节的验证缺口暂不单独补测；待其后按真实使用路径补齐证据。
 - 当前部署为 `0.4.0`（`contract_version=2`），`can_start=true`；发布产物构建自提交
-  `98645a7`，`source_dirty=false`。旧 0.3.0 服务与 App 仅保留为不匹配验证材料。
+  `2f43ef1`，`source_dirty=false`。旧 0.3.0 服务与 App 仅保留为不匹配验证材料。

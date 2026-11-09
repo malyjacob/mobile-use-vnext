@@ -1,10 +1,11 @@
 # 提案：act 的坐标目标按“点解析节点”证明派发前未变化
 
-状态：提案，未实现。
+状态：已实现（实现提交 `2f43ef1d8c6150dde3d1038ce5ed2d31caeecfac`，2026-11-09）。
 基线提交：`742937fc97d0f60d892b8368ed30ce8cb3e8e7a2`（分支 `master`，2026-11-09）。
 适用范围：`act` 的坐标目标——`tap`/`long_press`/`text` 的 `{x,y}` 目标，以及 `swipe` 的起点；不改 `ref` 目标、`observe`、`shell`。
 影响范围：`internal/engine`（`act.go`、新增 `point.go` 与用例）、`internal/protocol`（新增错误码）、`docs/interface.md`。
 契约（`/api/*` 字段与 `contract_version`）：改变——新增 422 错误码 `ambiguous_point`；请求/结果字段不变，`contract_version` 不变。
+实现与验证记录：[act-coordinate-point-proof.md](../../verification/act-coordinate-point-proof.md)。
 
 本文引用的函数名、行号、常量与默认值均以该基线提交为准；实现落地前若代码已前进，须按当时的
 `HEAD` 重新核对（重点：`internal/engine/act.go` 的 `Act`、`staticActContentCheck`、
@@ -36,23 +37,23 @@
 
 ### 1.2 证据链
 
-1. 坐标目标只比前台：`revalidateActTarget`（[act.go:269](../../internal/engine/act.go#L269)）在
+1. 坐标目标只比前台：`revalidateActTarget`（[act.go:269](../../../internal/engine/act.go#L269)）在
    `foregroundMatches` 之后直接返回（`act.go:292-294`）；`foregroundMatches`
    （`act.go:307-329`）只比 State/Package/TaskID，`device.Foreground` 没有 Activity 或窗口字段
-   （[types.go:69-74](../../internal/device/types.go#L69-L74)）。
+   （[types.go:69-74](../../../internal/device/types.go#L69-L74)）。
 2. 坐标合法性用的是观察时的屏幕：`staticActContentCheck` 里 `screen := obs.Screen`
    （`act.go:174`）；重验只确认显示存在（`act.go:279-284`），`DisplayState` 只有 `Exists`/`SFID`
-   （[types.go:153-156](../../internal/device/types.go#L153-L156)）。
+   （[types.go:153-156](../../../internal/device/types.go#L153-L156)）。
 3. 派发用的是请求里的字面坐标：`dispatchAct` 只对 `ref` 目标改用新鲜节点的 bounds 中心
    （`act.go:344-354`）。
-4. 节点身份不含可见性与 z 序：[identity.go:24-34](../../internal/engine/identity.go#L24-L34)。
+4. 节点身份不含可见性与 z 序：[identity.go:24-34](../../../internal/engine/identity.go#L24-L34)。
    所以即使走 `ref`，浮层也不会改变底下节点的 identity（这是另一个洞，见 §7.2）。
 5. 现有机制只有“目标节点”这一种证明：`matchFreshNode`
-   （[act.go:588-616](../../internal/engine/act.go#L588-L616)）与 `lineageOf`/`sameLineage`
+   （[act.go:588-616](../../../internal/engine/act.go#L588-L616)）与 `lineageOf`/`sameLineage`
    （`act.go:566-584`）。坐标没有节点可证，于是什么都没做。
 6. 这个失败模式不是理论上的：settle 提案 §1.4 已记录，agent 在被 `target_changed` 拒绝后会
    倾向改用坐标目标；坐标路径正是“跳过 ref 唯一性证明”的那条路
-   （[act-post-observation-settle.md §1.4](implemented/act-post-observation-settle.md)）。
+   （[act-post-observation-settle.md §1.4](act-post-observation-settle.md)）。
 
 ### 1.3 为什么直觉会出错
 
@@ -98,16 +99,16 @@ R1 是基线；R2 只是把问题推迟；R3 的误拒不可接受；R5 越界�
 ### 4.1 定义
 
 - `T`：一次观察的公开投影（`engine.Projection`：`Tree`、`Capture`、`Source`，
-  [engine.go:181-185](../../internal/engine/engine.go#L181-L185)）。
+  [engine.go:181-185](../../../internal/engine/engine.go#L181-L185)）。
 - `resolve(T.Tree, x, y)`：在公开树上取“包含 `(x,y)` 的、非 root、非 context、`Bounds != nil`
   的节点里最深的那一个”。
-  - 半开区间：`Bounds.Contains`（[node.go:86-88](../../internal/protocol/node.go#L86-L88)）。
+  - 半开区间：`Bounds.Contains`（[node.go:86-88](../../../internal/protocol/node.go#L86-L88)）。
   - “最深”按树深度；后代严格更深。
   - 若最深的候选不止一个（它们必然互不为祖先），结果为 `ambiguous`；没有候选为 `none`。
 - 观察侧：`R_obs = resolve(T_obs.Tree, x, y)`；`T_obs` 是 agent 实际读到的那次投影。
 - 新鲜侧：`R_new = resolve(Preview(T_new).Tree, x, y)`；`Preview` 是不推进保号的投影
-  （[engine.go:187-194](../../internal/engine/engine.go#L187-L194)，settle 采样同款用法
-  [settle.go:143-159](../../internal/engine/settle.go#L143-L159)）。
+  （[engine.go:187-194](../../../internal/engine/engine.go#L187-L194)，settle 采样同款用法
+  [settle.go:143-159](../../../internal/engine/settle.go#L143-L159)）。
 
 ### 4.2 通过条件
 
@@ -134,7 +135,7 @@ R1 是基线；R2 只是把问题推迟；R3 的误拒不可接受；R5 越界�
 
 - 进：`identityOf` 的全部字段（含 `Bounds`，因此位移会失败）、祖先链、点解析的唯一性。
 - 不进：`Visible`（公开树里非 context 节点本来就只在 `raw.Visible` 时发布，见
-  [build.go:201-208](../../internal/observation/build.go#L201-L208)）、z 序（树里没有）、像素、
+  [build.go:201-208](../../../internal/observation/build.go#L201-L208)）、z 序（树里没有）、像素、
   前台（继续保留，不替代）。
 - 明确不把 `Visible` 加进 `identityOf`：那会同时改变 `ref` 重验与 settle 判据，范围远大于本提案。
 
@@ -148,7 +149,7 @@ R1 是基线；R2 只是把问题推迟；R3 的误拒不可接受；R5 越界�
 - `swipe`：只证明起点 `from`。手势的语义目标是起点；终点是方向/幅度，不是节点身份。若起点
   无节点，维持现状。
 - `text` 的坐标目标：证明焦点点击的那个点；之后 `getTextOnDisplay`/`setTextOnDisplay` 的绑定与
-  读回不变（[act.go:409-471](../../internal/engine/act.go#L409-L471)）。
+  读回不变（[act.go:409-471](../../../internal/engine/act.go#L409-L471)）。
 
 ## 5. 算法
 
@@ -331,20 +332,37 @@ t6 dispatch：x/y
 
 （1–2 可以同一提交；3 独立；4 在最后。）
 
-## 11. 实现结果（归档时补写）
+## 11. 实现结果
 
-实现提交：`<hash>`。实现与验证记录：`maintenance/verification/act-coordinate-point-proof.md`
-（归档移动后链接为 `../../verification/act-coordinate-point-proof.md`；§11 在归档时补写）。
+实现提交：`2f43ef1d8c6150dde3d1038ce5ed2d31caeecfac`。实现与验证记录：
+[act-coordinate-point-proof.md](../../verification/act-coordinate-point-proof.md)。
 
 ### 11.1 已落地
 
 | 提案条目 | 落点 |
 | --- | --- |
+| 点解析：最深、非 root、非 context、有 bounds；同级并列 = 歧义；无候选 = 无节点 | `internal/engine/point.go`：`resolvePoint`、`pointState`、`coordinatePoint`；`internal/engine/point_test.go` |
+| 观察侧三种结果；歧义在静态检查阶段返回 422，不认领、不采集 | `internal/engine/act.go`：`staticActContentCheck`、`resolveObservedPoint`；`internal/protocol/errors.go`：`CodeAmbiguousPoint` 与 422 映射；`docs/interface.md` §2/§6 |
+| 新鲜侧证明：`matchFreshNode` 唯一匹配后，同一坐标在 `Preview` 的新鲜公开树中仍解析到同一 raw 节点 | `internal/engine/act.go`：`revalidateActTarget`、`provePointTarget`、`indexOf`；复用 `Projector.Preview` |
+| `swipe` 只证起点；`text` 证焦点点击点；`ref` 判据不变 | `internal/engine/point.go`：`coordinatePoint`；`internal/engine/act.go` 的 ref 分支之前执行点证明；`act_point_test.go` |
+| 白名单事件 `act.point`：`state`/`proven`/`ms`，不记坐标、ref、文本或树 | `internal/engine/act.go`：`logActPoint`；`internal/eventlog/log.go` 新增 `proven` 键；`TestActCoordinatePointRecordsDecisionFacts` |
+| 文档与 MCP 描述 | `docs/interface.md` §2/§6；`internal/mcp/schema.go` 的 `act` 描述 |
+| 反向对照与回归 | 变化场景在基线返回 `executed`、无 `act.point`；实现后转绿。`go test ./...`、`go vet ./...`、Linux/arm64 构建通过 |
+| 实机验证 | `maintenance/verification/act-coordinate-point-proof.md`：正常坐标动作、同包状态变化、同包几何变化、同包导航变化、`ref` 回归、`text`/`swipe`/`long_press`、`act.point` 耗时 |
 
 ### 11.2 与提案不同或未执行
 
 | 项 | 结论与理由 |
 | --- | --- |
+| 实施顺序 | 提案 §10 写作“实机验证 → 文档审计 → 实现提交”；实际为“实现提交 → 干净发布构建 → 实机验证 → 归档”。理由：发布清单要记录 `source_dirty=false`，必须从实现提交构建；实现提交仍先于归档，符合流程。判据、契约与时序未变 |
+| 实机 `422 ambiguous_point` | 未执行：探测 App（9 个公开节点）与设置首页（128 个公开节点）没有同级重叠的最深候选，现有界面无法构造观察时歧义。单元测试覆盖三态、静态拒绝、O 仍 ready 且无额外采集 |
+| 实机“点无节点”回退 | 未执行：探测 App 的公开树有覆盖全屏的非 root 容器，屏幕内每个点都会解析到节点；设置首页未做逐点回退扫描。单元测试覆盖 `state=none` 与前台级派发 |
+| 实机同包 Dialog/BottomSheet | 未执行：探测 App 没有此类表面，未用生产 App 或破坏性操作构造；单元测试用全屏同级浮层与按钮内深层新节点覆盖拒绝路径 |
+| 实机 WebView/canvas 内部内容 | 未执行：没有 WebView 测试页；这是提案 §7.2 的已知边界，判据只到容器身份 |
+| 大树 p95 | 只测了 9 与 128 个公开节点的树；实机 `act.point` 均落在整数毫秒的 0，低于事件分辨率，未对更大树采样 |
+| 放宽到“同子树” | 不需要：实机正常坐标动作 8/8 成功、0 误拒，没有出现需要放宽判据的误拒 |
+| MCP 传输层坐标动作 | 未单独通过 MCP 宿主发起；坐标证明在引擎/HTTP 路径完成，MCP 只做工具投影与描述。发布清单的工具目录指纹已随描述更新并核验 |
+| `go test -race` | 未执行：Windows 宿主无 C 编译器，`CGO_ENABLED=0` 目标下不可用；与既有记录一致 |
 
 ---
 
