@@ -113,20 +113,38 @@ func (e *Engine) captureAndPublish(ctx context.Context, work *workState, session
 		return failedObservation(coreErr, imageFailure(imageErr), nil), nil, coreErr
 	}
 
-	attempt := &imageAttempt{}
-	if wantImage {
-		attempt = e.readImage(ctx, work, phase, probe.SFID)
-		// The second probe keeps the image and the tree bound to the same
-		// target surface. A changed identity discards the image material.
-		if attempt.read && !e.verifyImageTarget(ctx, session, probe.SFID) {
-			coreErr := protocol.NewError(503, protocol.CodeDisplayUnavailable, "目标屏幕不可用")
-			attempt.meta, attempt.data, attempt.read = nil, nil, false
-			attempt.err = protocol.NewError(503, protocol.CodeImageCapture, "截图期间目标屏幕身份已变化")
-			return failedObservation(coreErr, imageFailure(attempt.err), nil), nil, coreErr
+	// A phase with a settle policy waits for a converged tree before anything
+	// else is read. The settle loop must not sit between the image read and the
+	// tree read: it would stretch the fixed image/tree span and turn a valid
+	// acquisition into image_stale.
+	policy := e.settlePolicy(phase)
+	var (
+		attempt = &imageAttempt{}
+		run     *settleRun
+		tree    *treeAttempt
+		coreErr *protocol.APIError
+	)
+	if policy.Enabled {
+		run, coreErr = e.settleCapture(ctx, work, session, phase, policy)
+		if coreErr != nil && coreErr.Code == protocol.CodeStopped {
+			// Revoked work never publishes an observation.
+			return nil, nil, coreErr
 		}
 	}
-
-	tree, coreErr := e.captureTree(ctx, work, session, phase)
+	if wantImage {
+		var imageErr *protocol.APIError
+		attempt, imageErr = e.readImageForAcquisition(ctx, work, session, phase, probe.SFID)
+		if imageErr != nil {
+			return failedObservation(imageErr, imageFailure(attempt.err), nil), nil, imageErr
+		}
+	}
+	if coreErr == nil {
+		if run != nil {
+			tree, coreErr = e.captureSettledTree(ctx, work, session, phase, policy, run, wantImage)
+		} else {
+			tree, coreErr = e.captureTree(ctx, work, session, phase)
+		}
+	}
 	if tree == nil {
 		// The tree attempt failed. An already read image is still encoded once
 		// and may be returned as read-only material of this acquisition.
@@ -267,10 +285,56 @@ func (e *Engine) captureAndPublish(ctx context.Context, work *workState, session
 // candidate. It performs no commit and no image work.
 func (e *Engine) captureTree(ctx context.Context, work *workState, session *sessionState,
 	phase string) (*treeAttempt, *protocol.APIError) {
+	cap, apiErr := e.readCapture(ctx, work, session, phase)
+	if apiErr != nil {
+		return nil, apiErr
+	}
+	return e.projectCapture(work, phase, cap)
+}
+
+// captureSettledTree turns a converged frame into the acquisition's tree.
+// When an image was read after the settle loop one more read refreshes the
+// tree so both materials describe nearly the same moment. A changed tree
+// continues the loop inside the remaining budget; when nothing is left it
+// publishes the newest frame as unstable evidence instead of failing.
+func (e *Engine) captureSettledTree(ctx context.Context, work *workState, session *sessionState,
+	phase string, policy SettlePolicy, run *settleRun, imageRead bool) (*treeAttempt, *protocol.APIError) {
+	if imageRead {
+		frame, apiErr := e.captureSample(ctx, work, session, phase)
+		switch {
+		case apiErr != nil && apiErr.Code == protocol.CodeStopped:
+			return nil, apiErr
+		case apiErr != nil:
+			// The refresh failed; the settled frame remains valid evidence and
+			// the image stays paired with the tree that gets published.
+		case frame.digest == run.frame.digest && run.samples+1 >= policy.MinSamples:
+			// The page did not move while the image was read: publish the later
+			// of the two equal frames, never the earlier one after a wait.
+			run.frame = frame
+			run.samples++
+		default:
+			run.frame = frame
+			run.samples++
+			run.lastTook = frame.took
+			run.stable = false
+			if apiErr := e.settleUntilStable(ctx, work, session, phase, policy, run); apiErr != nil {
+				return nil, apiErr
+			}
+		}
+	}
+	e.logSettle(phase, run)
+	return e.projectCapture(work, phase, run.frame.capture)
+}
+
+// readCapture reads one target hierarchy and applies the fixed per-capture
+// validation that every acquisition path shares. It projects and commits
+// nothing.
+func (e *Engine) readCapture(ctx context.Context, work *workState, session *sessionState,
+	phase string) (device.Capture, *protocol.APIError) {
 	e.setWorkPhase(work, phase+".tree")
 	cap, err := e.dev.Capture(ctx, session.Display)
 	if err != nil {
-		return nil, protocol.NewError(503, protocol.CodeHierarchyFailed, "未能取得节点树")
+		return device.Capture{}, protocol.NewError(503, protocol.CodeHierarchyFailed, "未能取得节点树")
 	}
 	now := time.Now()
 	if cap.CapturedAt.IsZero() {
@@ -278,16 +342,22 @@ func (e *Engine) captureTree(ctx context.Context, work *workState, session *sess
 	}
 	cap.Display = session.Display
 	if now.Sub(cap.CapturedAt) > e.cfg.CaptureMaxAge {
-		return nil, protocol.NewError(409, protocol.CodeStaleScreen, "节点采集已过期")
+		return device.Capture{}, protocol.NewError(409, protocol.CodeStaleScreen, "节点采集已过期")
 	}
 	if session.Display.ID != 0 {
 		for _, node := range cap.Nodes {
 			if node.Package == e.cfg.ControlPackage && node.Visible {
-				return nil, protocol.NewError(409, "control_ui_on_virtual_display",
+				return device.Capture{}, protocol.NewError(409, "control_ui_on_virtual_display",
 					"控制界面出现在目标虚拟屏上")
 			}
 		}
 	}
+	return cap, nil
+}
+
+// projectCapture builds the public tree and its canonical full encoding. It is
+// the single projection step of a published tree.
+func (e *Engine) projectCapture(work *workState, phase string, cap device.Capture) (*treeAttempt, *protocol.APIError) {
 	e.setWorkPhase(work, phase+".project")
 	projection, err := e.projector.Build(&cap)
 	if err != nil {
@@ -301,6 +371,21 @@ func (e *Engine) captureTree(ctx context.Context, work *workState, session *sess
 		return nil, protocol.NewError(503, protocol.CodeTreeTooLarge, "完整公开树超过服务上限")
 	}
 	return &treeAttempt{capture: cap, projection: projection, full: fullTree, fullBytes: fullBytes}, nil
+}
+
+// readImageForAcquisition reads the requested image and confirms that the
+// target surface did not change during the read. A changed surface discards
+// the material and fails the whole acquisition: image and tree would belong to
+// different surfaces.
+func (e *Engine) readImageForAcquisition(ctx context.Context, work *workState,
+	session *sessionState, phase string, sfid uint64) (*imageAttempt, *protocol.APIError) {
+	attempt := e.readImage(ctx, work, phase, sfid)
+	if attempt.read && !e.verifyImageTarget(ctx, session, sfid) {
+		attempt.meta, attempt.data, attempt.read = nil, nil, false
+		attempt.err = protocol.NewError(503, protocol.CodeImageCapture, "截图期间目标屏幕身份已变化")
+		return attempt, protocol.NewError(503, protocol.CodeDisplayUnavailable, "目标屏幕不可用")
+	}
+	return attempt, nil
 }
 
 // readImage performs the bounded source read for one acquisition using the

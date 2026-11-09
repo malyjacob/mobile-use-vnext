@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/malyjacob/mobile-use-vnext/internal/device"
+	"github.com/malyjacob/mobile-use-vnext/internal/eventlog"
 	"github.com/malyjacob/mobile-use-vnext/internal/observation"
 	"github.com/malyjacob/mobile-use-vnext/internal/protocol"
 )
@@ -30,6 +31,15 @@ type fakeDevice struct {
 	checked        bool
 	captureErrs    bool
 	closeDisplayID int
+
+	// Capture scripting. A non-empty script is consumed one step per call and
+	// the last step repeats, so a test can describe the frames a settle run
+	// sees without depending on how many reads the flow performs.
+	captureSteps []captureStep
+	captureCalls int
+	// trace records the order of hierarchy reads and image reads, so a test can
+	// prove the acquisition order without inspecting timestamps.
+	trace []string
 
 	// Discovery and task facts. Tests set these before calling the engine.
 	appEntries       []device.AppEntry
@@ -80,6 +90,7 @@ func (f *fakeDevice) CaptureImage(_ context.Context, sfid uint64) (device.ImageS
 	defer f.mu.Unlock()
 	f.imageCalls++
 	f.imageSFID = sfid
+	f.trace = append(f.trace, "image")
 	if f.imageErr != nil {
 		return device.ImageSource{}, f.imageErr
 	}
@@ -145,9 +156,23 @@ func (f *fakeDevice) SetTextOnDisplay(_ context.Context, target device.TextTarge
 func (f *fakeDevice) Capture(_ context.Context, display device.Display) (device.Capture, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.captureCalls++
+	f.trace = append(f.trace, "capture")
 	if f.captureErrs {
 		return device.Capture{}, errors.New("capture failed")
 	}
+	if len(f.captureSteps) > 0 {
+		step := f.captureSteps[0]
+		if len(f.captureSteps) > 1 {
+			f.captureSteps = f.captureSteps[1:]
+		}
+		return step(f, display)
+	}
+	return f.captureLocked(display)
+}
+
+// captureLocked builds the default synthetic page. The caller holds the lock.
+func (f *fakeDevice) captureLocked(display device.Display) (device.Capture, error) {
 	focused, password, text := false, false, ""
 	if f.inputFocused {
 		focused = true
@@ -192,6 +217,56 @@ func (f *fakeDevice) Capture(_ context.Context, display device.Display) (device.
 
 func intPtr(v int) *int { return &v }
 
+// captureStep scripts one Capture result. It runs with the device lock held and
+// must not call back into the device.
+type captureStep func(device *fakeDevice, display device.Display) (device.Capture, error)
+
+// markerCapture returns the default page with the button label replaced, which
+// makes the frame distinguishable in both the raw identity and the public tree.
+func markerCapture(marker string) captureStep {
+	return func(f *fakeDevice, display device.Display) (device.Capture, error) {
+		capture, err := f.captureLocked(display)
+		if err != nil {
+			return capture, err
+		}
+		for index := range capture.Nodes {
+			if capture.Nodes[index].ClassName == "android.widget.Button" {
+				capture.Nodes[index].Text = marker
+				capture.Nodes[index].TextSet = true
+			}
+		}
+		return capture, nil
+	}
+}
+
+// failingCapture scripts one unreadable hierarchy.
+func failingCapture() captureStep {
+	return func(*fakeDevice, device.Display) (device.Capture, error) {
+		return device.Capture{}, errors.New("capture failed")
+	}
+}
+
+func (f *fakeDevice) scriptCaptures(steps ...captureStep) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.captureSteps = steps
+}
+
+func (f *fakeDevice) captureCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.captureCalls
+}
+
+// readTrace returns the recorded read order and clears it.
+func (f *fakeDevice) readTrace() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	trace := append([]string(nil), f.trace...)
+	f.trace = nil
+	return trace
+}
+
 // ---------------------------------------------------------------- fake store
 
 type fakeStore struct {
@@ -222,6 +297,14 @@ type testProjector struct{ builder *observation.Builder }
 
 func (p *testProjector) Build(capture *device.Capture) (*Projection, error) {
 	snapshot, err := p.builder.Build(capture)
+	if err != nil {
+		return nil, err
+	}
+	return &Projection{Tree: snapshot.Tree, Capture: snapshot.Capture, Source: snapshot.Source}, nil
+}
+
+func (p *testProjector) Preview(capture *device.Capture) (*Projection, error) {
+	snapshot, err := p.builder.Preview(capture)
 	if err != nil {
 		return nil, err
 	}
@@ -261,13 +344,20 @@ func newHarness(t *testing.T) *harness {
 // until the request itself observes it.
 func newHarnessWithClock(t *testing.T, startClock bool) *harness {
 	t.Helper()
+	return newHarnessWithLogger(t, startClock, nil)
+}
+
+// newHarnessWithLogger builds the same harness with a real event log, so a test
+// can assert what the service records without touching public results.
+func newHarnessWithLogger(t *testing.T, startClock bool, log *eventlog.Logger) *harness {
+	t.Helper()
 	dev := newFakeDevice()
 	cfg := DefaultConfig("instance-test", "agent")
 	cfg.CleanupTimeout = 700 * time.Millisecond
 	cfg.LedgerTimeout = 200 * time.Millisecond
 	projector := &testProjector{builder: observation.NewBuilder()}
 	store := &fakeStore{}
-	eng := New(cfg, nil, dev, store, projector, testDiffer{})
+	eng := New(cfg, log, dev, store, projector, testDiffer{})
 	eng.SetDeviceReady(true)
 	if startClock {
 		eng.StartClock()

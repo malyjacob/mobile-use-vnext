@@ -90,6 +90,11 @@ type Config struct {
 	ImageQuality     int           // JPEG quality for the single output encode
 	MaxImageBytes    int           // encoded image byte budget
 	ImageMaxSpan     time.Duration // allowed image-read start to tree-read start span
+
+	// Settle policy. A post observation waits for a converged tree before it
+	// is published; the per-phase values are service policy, never per-call
+	// options.
+	Settle SettlePolicies
 }
 
 // DefaultConfig returns the first-version policy values.
@@ -121,6 +126,7 @@ func DefaultConfig(instanceID, agentName string) Config {
 		ImageQuality:        80,
 		MaxImageBytes:       512 * 1024,
 		ImageMaxSpan:        3 * time.Second,
+		Settle:              DefaultSettlePolicies(),
 	}
 }
 
@@ -181,6 +187,9 @@ type Projection struct {
 // Projector builds the public tree and keeps conservative ref continuity.
 type Projector interface {
 	Build(capture *device.Capture) (*Projection, error)
+	// Preview projects a candidate frame without advancing ref continuity, so
+	// a settle sample never shifts the refs of already published observations.
+	Preview(capture *device.Capture) (*Projection, error)
 	Reset()
 }
 

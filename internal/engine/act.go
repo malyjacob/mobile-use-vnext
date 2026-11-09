@@ -94,6 +94,17 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 		return result, nil
 	}
 	public, _, postErr := e.captureAndPublish(work.Ctx, work, session, false, req.Image, "act")
+	if postErr != nil && postErr.Code == protocol.CodeStopped {
+		// A revoked session has no post observation to publish; the action
+		// itself stays executed. This is the same fact as the pre-capture
+		// revocation check above, only observed one step later.
+		result := newResult(op)
+		result.Outcome = OutcomeExecuted
+		result.Next = "status"
+		e.finishOperation(op, OutcomeExecuted, "executed_revoked", nil)
+		e.addSessionIfEnded(result)
+		return result, nil
+	}
 	result := newResult(op)
 	result.Outcome = OutcomeExecuted
 	if postErr != nil {
@@ -549,31 +560,8 @@ func textTargetOf(node *device.RawNode, display device.Display) device.TextTarge
 	}
 }
 
-// rawIdentity is the complete source identity used for live revalidation; it
-// deliberately excludes the snapshot index.
-type rawIdentity struct {
-	Package, Class, ResourceID, Text, Description string
-	Bounds                                        device.Rect
-	Clickable, LongClickable, Scrollable          bool
-	Editable, Password                            bool
-	HasEnabled, Enabled                           bool
-	HasChecked, Checked                           bool
-	HasSelected, Selected                         bool
-	HasFocused, Focused                           bool
-}
-
-func identityOf(node *device.RawNode) rawIdentity {
-	return rawIdentity{
-		Package: node.Package, Class: node.ClassName, ResourceID: node.ResourceID,
-		Text: node.Text, Description: node.Description, Bounds: node.Bounds,
-		Clickable: node.Clickable, LongClickable: node.LongClickable,
-		Scrollable: node.Scrollable, Editable: node.Editable, Password: node.Password,
-		HasEnabled: node.HasEnabled, Enabled: node.Enabled,
-		HasChecked: node.HasChecked, Checked: node.Checked,
-		HasSelected: node.HasSelected, Selected: node.Selected,
-		HasFocused: node.HasFocused, Focused: node.Focused,
-	}
-}
+// rawIdentity and identityOf live in identity.go: live revalidation and the
+// settle criterion must share exactly one identity function.
 
 func lineageOf(capture *device.Capture, index int) []rawIdentity {
 	var lineage []rawIdentity

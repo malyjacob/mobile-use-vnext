@@ -73,6 +73,9 @@ var allowedKeys = map[string]struct{}{
 	// Managed shell execution facts. They are enums, booleans and counters;
 	// commands, output text and paths are never whitelisted.
 	"root": {}, "termination": {}, "exit_code": {}, "truncated": {},
+	// Settle facts. They are a frame count and a completion flag, never tree
+	// content.
+	"samples": {}, "stable": {},
 }
 
 // Logger is a bounded, drop-counting event sink.

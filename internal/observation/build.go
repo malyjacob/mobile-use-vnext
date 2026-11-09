@@ -124,6 +124,16 @@ func (b *Builder) Build(cap *device.Capture) (*Snapshot, error) {
 	return snap, nil
 }
 
+// Preview projects one capture without advancing continuity state. The settle
+// loop needs the public tree of a candidate frame, but only the published frame
+// may keep the ref numbering of the next observation: advancing it on every
+// sample would shift the refs of already published observations.
+func (b *Builder) Preview(cap *device.Capture) (*Snapshot, error) {
+	prev, nextRef := b.prev, b.nextRef
+	defer func() { b.prev, b.nextRef = prev, nextRef }()
+	return b.Build(cap)
+}
+
 // invalidTree builds the plain error for an unusable capture. It is not a
 // protocol error: the engine decides how to report a failed tree acquisition
 // (observation status/error code) and this package must not invent one.

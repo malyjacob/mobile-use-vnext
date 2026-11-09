@@ -30,6 +30,13 @@
 - 请求体为空、只有空白或不是对象 → `422 invalid_request`；
 - 编号规则：`O…` 为观察，`P…` 为操作；长度 1–64，首字符必须是 `O` 或 `P`。
 
+会话内做收敛采样的三个自动观察点——`start` 的首个观察、`act` 与 `open_app` 的后观察——在
+目标树收敛后发布：连续两帧的节点内容身份、公开树与前台/显示语境一致才停止采样。静默窗口与
+总预算按阶段固定（`docs/architecture.md` §4），不是请求字段，也不改变任何端点的字段与错误
+码；页面持续动画时这三次观察最多多花该阶段的预算（`act(image=true)` 另加一次刷新读取）。
+`observe` 由调用方决定节奏（`wait_ms` 与
+`full`），`shell` 的后观察只读取一次树（不取图），两者都不等待收敛。
+
 ## 2. 结果分层与错误
 
 工具响应是一个 `Result` 对象，字段只在本次调用确有该事实时出现，固定顺序为：
@@ -208,7 +215,8 @@ HTTP 状态映射（`protocol.Status`）：
 
 ### 图片
 
-`image=true` 时服务在同一项设备工作内先读取目标屏源图，再读取层级；图片只是本次观察的
+`image=true` 时服务在同一项设备工作内先读取目标屏源图，再取得发布用层级；`act` 的收敛采样
+更早完成，因此它在源图之后还会再读一次树（见 `docs/architecture.md` §4）。图片只是本次观察的
 附加材料，不进入树或差异正文，也不构成第二份页面事实或图片身份协议。
 
 - 核心树有效、图片成功：`observation.status=complete`，`observation.image` 含
@@ -270,6 +278,8 @@ HTTP 状态映射（`protocol.Status`）：
 | `uncertain` | 已派发但无法确认完成（传输失败、读回失败、超时） | `error`（`action_result_uncertain` / `text_target_uncertain` / `text_result_uncertain`）、`next="status"` |
 
 - 输入派发后即使 `text` 读回失败也不回滚、不重放；原 O 不再归还。
+- 后观察在树收敛后采集（见 §1）；收敛期间被撤销时 `outcome` 仍是 `executed`、
+  `next="status"`、无后观察。收敛预算耗尽不算后观察失败：照常发布最后一帧。
 - `text` 先点击目标取得焦点，再做显示绑定的 `getTextOnDisplay` 唯一性确认、
   `setTextOnDisplay`，最后以独立采集重新绑定并读回；读回值必须精确等于写入值才判
   `executed`。

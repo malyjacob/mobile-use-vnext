@@ -76,6 +76,10 @@ func run() int {
 
 	engineConfig := engine.DefaultConfig(instanceID, cfg.AgentName)
 	engineConfig.ControlPackage = cfg.ControlPackage
+	if err := engineConfig.Settle.Validate(); err != nil {
+		fmt.Fprintf(os.Stderr, "device-service: settle policy rejected: %v\n", err)
+		return 2
+	}
 	eng := engine.New(engineConfig, logger,
 		deviceAdapter, ledger,
 		&observationProjector{builder: observation.NewBuilder()}, treeDiffer{},
@@ -173,9 +177,22 @@ func (p *observationProjector) Build(capture *device.Capture) (*engine.Projectio
 	if err != nil {
 		return nil, err
 	}
+	return engineProjection(snapshot), nil
+}
+
+// Preview projects a settle sample without moving ref continuity.
+func (p *observationProjector) Preview(capture *device.Capture) (*engine.Projection, error) {
+	snapshot, err := p.builder.Preview(capture)
+	if err != nil {
+		return nil, err
+	}
+	return engineProjection(snapshot), nil
+}
+
+func engineProjection(snapshot *observation.Snapshot) *engine.Projection {
 	return &engine.Projection{
 		Tree: snapshot.Tree, Capture: snapshot.Capture, Source: snapshot.Source,
-	}, nil
+	}
 }
 
 func (p *observationProjector) Reset() { p.builder.Reset() }
