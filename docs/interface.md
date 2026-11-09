@@ -67,7 +67,7 @@ HTTP 状态映射（`protocol.Status`）：
 | 200 | 成功；含 `end`/`start` 的 `cleanup=pending`（收尾未完成不是 HTTP 错误） |
 | 401 | `unauthorized` |
 | 409 | `contract_mismatch`、`device_busy`、`session_*`、`reference_*`、`operation_*`、`observation_*`、`node_not_found`、`node_disabled`、`stale_screen`、`target_changed`、`foreground_changed`、`foreground_unknown`、`control_revoked`、`request_closed`、`cleanup_unconfirmed`、`control_unavailable`、`stop_unavailable`、`mode_not_selected`、`device_locked`、`device_not_interactive`、`recovering`、`no_ready_observation`、`display_unavailable`、`text_target_uncertain`、`text_result_uncertain`、`control_ui_on_virtual_display`、`app_not_found`、`application_moved`、`task_focus_unavailable`、`task_remove_unconfirmed`、`content_unavailable`、`inspection_too_large`、`root_unavailable` |
-| 422 | `invalid_request`、`invalid_coordinates`、`unsupported_key`、`unsupported_node_action`、`text_too_long`、`reference_invalid` |
+| 422 | `invalid_request`、`invalid_coordinates`、`ambiguous_point`、`unsupported_key`、`unsupported_node_action`、`text_too_long`、`reference_invalid` |
 | 503 | `device_unavailable`、`display_create_failed`、`hierarchy_unavailable`、`tree_too_large`、`app_launch_failed`、`app_list_unavailable`、`shell_start_failed`、`delivery_unavailable`；以及 `observation.status=failed` 或没有新 O 的 `partial` 结果 |
 | 504 | `action_result_uncertain`（输入已派发但无法确认完成）、`app_launch_unconfirmed`、`shell_result_unconfirmed` |
 | 500 | `internal_error`（接入层自身失败）；工具结果中的 500 会被改写为 409 |
@@ -263,11 +263,19 @@ HTTP 状态映射（`protocol.Status`）：
 静态检查（不认领、不派发）：会话必须 `active`；O 必须为 `ready` 且未过期；ref 节点存在、
 非 root、非 context、有 bounds、`enabled` 不为已知 `false`，并具备对应动作能力；`text` 还要
 求 `role=input`、`actions` 含 `text`、`protected` 明确为 `false`；坐标必须落在目标逻辑屏内；
-`HOME`/`APP_SWITCH` 仅在主屏（`display.ID==0`）可用。
+`HOME`/`APP_SWITCH` 仅在主屏（`display.ID==0`）可用。坐标目标（`tap`/`long_press`/`text`
+的 `target`、`swipe` 的 `from`）还要在观察的公开树中解析到唯一节点：取包含该点、有 bounds、
+非 root、非 context 的最深节点；同级并列候选返回 `422 ambiguous_point`，不认领、不采集；
+解析不到节点时维持前台级检查。
 
 通过后：取得唯一工作位置 → O 单向 `ready→claimed` → 延长租约 → 实时重验（目标显示仍存在、
-重新采集、前台包/任务与观察时一致、ref 在新鲜树中按“完整内容身份 + 祖先链”唯一匹配）→
-派发本次动作所需的输入（`text` 为焦点点击 + 显示绑定写入，任何一步失败都不重放）。
+重新采集、前台包/任务与观察时一致；ref 在新鲜树中按“完整内容身份 + 祖先链”唯一匹配；
+坐标目标解析到唯一节点时，该节点也必须按同一身份与祖先链唯一匹配，且同一坐标在不推进
+ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动作所需的输入（`text` 为焦点点击 +
+显示绑定写入，任何一步失败都不重放）。
+
+坐标证明不成立时返回 `409 target_changed`（`next=observe`）；新鲜公开树构造失败返回
+`503 hierarchy_unavailable`；两者均不派发。
 
 结果分支：
 
@@ -283,10 +291,12 @@ HTTP 状态映射（`protocol.Status`）：
 - `text` 先点击目标取得焦点，再做显示绑定的 `getTextOnDisplay` 唯一性确认、
   `setTextOnDisplay`，最后以独立采集重新绑定并读回；读回值必须精确等于写入值才判
   `executed`。
+- 坐标目标只证明一个点：`tap`/`long_press`/`text` 证明其 `target`，`swipe` 只证明起点
+  `from`；终点是方向与幅度，不参与节点身份。观察时点解析不到节点时按前台级派发。
 - 后观察失败时：HTTP 503，但 `outcome` 仍是 `executed`，`observation.status=failed`，
   `next="observe"`；不能因后观察失败改判未执行。
 - 失败码：`node_not_found`、`node_disabled`、`unsupported_node_action`、
-  `invalid_coordinates`、`unsupported_key`、`invalid_request`（含超长文本）、
+  `invalid_coordinates`、`ambiguous_point`、`unsupported_key`、`invalid_request`（含超长文本）、
   `text_target_uncertain`、`target_changed`、`foreground_changed`、`foreground_unknown`、
   `display_unavailable`、`hierarchy_unavailable`、`stale_screen`、`device_busy`、
   `session_ended`、`observation_retired`、`observation_expired`、`observation_claimed`、

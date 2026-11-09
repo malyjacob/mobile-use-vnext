@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/malyjacob/mobile-use-vnext/internal/device"
+	"github.com/malyjacob/mobile-use-vnext/internal/eventlog"
 	"github.com/malyjacob/mobile-use-vnext/internal/protocol"
 )
 
@@ -24,10 +25,12 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 	staticErr := e.staticActCheckLocked(agent, req.ObservationID, &req.Operation, time.Now())
 	staticObs := e.observations[req.ObservationID]
 	e.mu.Unlock()
+	var point *pointCheck
 	if staticErr == nil {
-		staticErr = staticActContentCheck(staticObs, &req.Operation)
+		point, staticErr = staticActContentCheck(staticObs, &req.Operation)
 	}
 	if staticErr != nil {
+		e.logActPoint(point, false)
 		return e.finishWithError(op, "admission", staticErr), nil
 	}
 
@@ -49,12 +52,14 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 	e.mu.Unlock()
 
 	e.setOperationPhase(op, "revalidate")
-	fresh, raw, revalidateErr := e.revalidateActTarget(work, obs, &req.Operation)
+	fresh, raw, revalidateErr := e.revalidateActTarget(work, obs, &req.Operation, point)
 	if revalidateErr != nil {
+		e.logActPoint(point, false)
 		revalidateErr.Outcome = OutcomeNotExecuted
 		revalidateErr.Next = "observe"
 		return e.finishWithError(op, "revalidate", revalidateErr), nil
 	}
+	e.logActPoint(point, point != nil && point.state == pointUnique)
 
 	e.setOperationPhase(op, "dispatch")
 	outcome, dispatchErr := e.dispatchAct(work, obs, &req.Operation, fresh, raw)
@@ -170,68 +175,68 @@ func (e *Engine) staticActCheckLocked(agent, observationID string, operation *pr
 }
 
 // The projection is immutable; all node traversal happens outside e.mu.
-func staticActContentCheck(obs *observationState, operation *protocol.Operation) *protocol.APIError {
+func staticActContentCheck(obs *observationState, operation *protocol.Operation) (*pointCheck, *protocol.APIError) {
 	screen := obs.Screen
 	switch operation.Type {
 	case "tap", "long_press", "text":
 		if operation.Target == nil {
-			return protocol.Invalid("操作缺少 target")
+			return nil, protocol.Invalid("操作缺少 target")
 		}
 		if operation.Target.UseRef {
 			node := findPublicNode(obs.Projection.Tree.Root, operation.Target.Ref)
 			if node == nil {
-				return protocol.NewError(409, protocol.CodeNodeNotFound, "目标节点不存在")
+				return nil, protocol.NewError(409, protocol.CodeNodeNotFound, "目标节点不存在")
 			}
 			if node.Role == protocol.RoleRoot || node.Context || node.Bounds == nil {
-				return protocol.NewError(422, protocol.CodeNodeUnsupported, "该节点不能作为操作目标")
+				return nil, protocol.NewError(422, protocol.CodeNodeUnsupported, "该节点不能作为操作目标")
 			}
 			if node.Enabled != nil && !*node.Enabled {
-				return protocol.NewError(409, protocol.CodeNodeDisabled, "目标节点已禁用")
+				return nil, protocol.NewError(409, protocol.CodeNodeDisabled, "目标节点已禁用")
 			}
 			switch operation.Type {
 			case "tap":
 				if !hasAction(node, protocol.ActionTap) {
-					return protocol.NewError(422, protocol.CodeNodeUnsupported, "目标节点不支持点击")
+					return nil, protocol.NewError(422, protocol.CodeNodeUnsupported, "目标节点不支持点击")
 				}
 			case "long_press":
 				if !hasAction(node, protocol.ActionLongPress) {
-					return protocol.NewError(422, protocol.CodeNodeUnsupported, "目标节点不支持长按")
+					return nil, protocol.NewError(422, protocol.CodeNodeUnsupported, "目标节点不支持长按")
 				}
 			case "text":
 				if node.Role != protocol.RoleInput || !hasAction(node, protocol.ActionText) {
-					return protocol.NewError(422, protocol.CodeTextTargetUnknown,
+					return nil, protocol.NewError(422, protocol.CodeTextTargetUnknown,
 						"文字操作需要可确认的真实输入对象")
 				}
 				if node.Protected == nil || *node.Protected {
-					return protocol.NewError(422, protocol.CodeTextTargetUnknown,
+					return nil, protocol.NewError(422, protocol.CodeTextTargetUnknown,
 						"无法确认该输入对象不受保护")
 				}
 			}
-		} else if operation.Type != "text" {
-			if !inScreen(operation.Target.X, operation.Target.Y, screen) {
-				return protocol.NewError(422, protocol.CodeInvalidCoordinates, "坐标超出目标屏幕")
-			}
-		} else if !inScreen(operation.Target.X, operation.Target.Y, screen) {
-			return protocol.NewError(422, protocol.CodeInvalidCoordinates, "坐标超出目标屏幕")
+			return nil, nil
 		}
+		if !inScreen(operation.Target.X, operation.Target.Y, screen) {
+			return nil, protocol.NewError(422, protocol.CodeInvalidCoordinates, "坐标超出目标屏幕")
+		}
+		return resolveObservedPoint(obs, operation)
 	case "swipe":
 		if operation.From == nil || operation.To == nil {
-			return protocol.Invalid("swipe 缺少起终点")
+			return nil, protocol.Invalid("swipe 缺少起终点")
 		}
 		if !inScreen(operation.From.X, operation.From.Y, screen) ||
 			!inScreen(operation.To.X, operation.To.Y, screen) {
-			return protocol.NewError(422, protocol.CodeInvalidCoordinates, "坐标超出目标屏幕")
+			return nil, protocol.NewError(422, protocol.CodeInvalidCoordinates, "坐标超出目标屏幕")
 		}
+		return resolveObservedPoint(obs, operation)
 	case "key":
 		if screen.Rotation < 0 {
-			return protocol.Invalid("屏幕信息无效")
+			return nil, protocol.Invalid("屏幕信息无效")
 		}
 		if screen.ID != 0 && (operation.Key == "HOME" || operation.Key == "APP_SWITCH") {
-			return protocol.NewError(422, protocol.CodeInvalidKey,
+			return nil, protocol.NewError(422, protocol.CodeInvalidKey,
 				"HOME/APP_SWITCH 需要共享主屏")
 		}
 	}
-	return nil
+	return nil, nil
 }
 
 // claimObservationLocked performs the one-way ready->claimed transition and
@@ -264,10 +269,12 @@ func (e *Engine) claimObservationLocked(agent string, work *workState, obs *obse
 }
 
 // revalidateActTarget re-reads the live display, proves the foreground still
-// belongs to the observed window, and maps the public ref to a unique fresh
-// source node before any input is dispatched.
+// belongs to the observed window, and maps the public target to a unique fresh
+// source node before any input is dispatched. A coordinate target proves that
+// the fresh tree resolves the same point to the same node; a ref target keeps
+// the existing complete-identity plus ancestry proof.
 func (e *Engine) revalidateActTarget(work *workState, obs *observationState,
-	operation *protocol.Operation) (*device.Capture, *device.RawNode, *protocol.APIError) {
+	operation *protocol.Operation, point *pointCheck) (*device.Capture, *device.RawNode, *protocol.APIError) {
 	ctx := work.Ctx
 	if e.workRevoked(work) {
 		return nil, nil, protocol.NewError(409, protocol.CodeStopped, "会话已撤销")
@@ -289,6 +296,11 @@ func (e *Engine) revalidateActTarget(work *workState, obs *observationState,
 	if err := foregroundMatches(obs.Foreground, capture.Foreground); err != nil {
 		return nil, nil, err
 	}
+	if point != nil && point.state == pointUnique {
+		if apiErr := e.provePointTarget(&capture, obs, point); apiErr != nil {
+			return nil, nil, apiErr
+		}
+	}
 	if operation.Target == nil || !operation.Target.UseRef {
 		return &capture, nil, nil
 	}
@@ -302,6 +314,56 @@ func (e *Engine) revalidateActTarget(work *workState, obs *observationState,
 			"目标元素已变化，请重新观察").WithNext("observe")
 	}
 	return &capture, fresh, nil
+}
+
+// provePointTarget requires the observed node to match exactly one fresh node
+// by complete content identity and ancestry, and then requires the fresh public
+// tree to resolve the same point to that same source node. Any other result is
+// a rejection: ambiguity, a missing node and a different node are all "the
+// meaning of this point changed". The projection is pure CPU and never
+// advances ref continuity.
+func (e *Engine) provePointTarget(fresh *device.Capture, obs *observationState,
+	point *pointCheck) *protocol.APIError {
+	if point.index < 0 || point.index >= len(obs.Projection.Capture.Nodes) {
+		return targetChangedAtPoint()
+	}
+	original := &obs.Projection.Capture.Nodes[point.index]
+	matched, ok := matchFreshNode(fresh, obs.Projection.Capture, original)
+	if !ok {
+		return targetChangedAtPoint()
+	}
+	started := time.Now()
+	projection, err := e.projector.Preview(fresh)
+	if err != nil {
+		point.took += time.Since(started)
+		return protocol.NewError(503, protocol.CodeHierarchyFailed, "公开树构造失败")
+	}
+	ref, state := resolvePoint(projection.Tree.Root, point.x, point.y)
+	freshIndex, mapped := projection.Source[ref]
+	matchedIndex := indexOf(fresh, matched)
+	point.took += time.Since(started)
+	if state != pointUnique || !mapped || freshIndex != matchedIndex {
+		return targetChangedAtPoint()
+	}
+	return nil
+}
+
+func targetChangedAtPoint() *protocol.APIError {
+	return protocol.NewError(409, protocol.CodeTargetChanged,
+		"目标点上的节点已变化，请重新观察").WithNext("observe")
+}
+
+// logActPoint records one coordinate-target decision. Only the resolution
+// state, whether the node-level proof succeeded and the pure-CPU cost are
+// written; the point, refs, labels and tree content never are.
+func (e *Engine) logActPoint(point *pointCheck, proven bool) {
+	if point == nil {
+		return
+	}
+	e.log.Event(eventlog.Debug, "act.point",
+		eventlog.Str("state", string(point.state)),
+		eventlog.Bool("proven", proven),
+		eventlog.Duration("ms", point.took))
 }
 
 func foregroundMatches(observed, fresh device.Foreground) *protocol.APIError {

@@ -76,6 +76,10 @@ var allowedKeys = map[string]struct{}{
 	// Settle facts. They are a frame count and a completion flag, never tree
 	// content.
 	"samples": {}, "stable": {},
+	// Coordinate point proof facts. The resolution state and completion flag
+	// describe one pure-CPU decision; points, refs and labels are never
+	// whitelisted.
+	"proven": {},
 }
 
 // Logger is a bounded, drop-counting event sink.

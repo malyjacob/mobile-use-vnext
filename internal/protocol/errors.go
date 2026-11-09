@@ -108,6 +108,7 @@ const (
 	CodeNodeDisabled       = "node_disabled"
 	CodeNodeUnsupported    = "unsupported_node_action"
 	CodeInvalidCoordinates = "invalid_coordinates"
+	CodeAmbiguousPoint     = "ambiguous_point"
 	CodeInvalidKey         = "unsupported_key"
 	CodeTextTooLong        = "text_too_long"
 	CodeTextTargetUnknown  = "text_target_uncertain"
@@ -151,8 +152,8 @@ const (
 	// Observation image stage codes. They describe the additional visual
 	// material of one acquisition; they never replace a confirmed core tree or
 	// the main action outcome.
-	CodeImageCapture = "image_capture_failed"
-	CodeImageEncode  = "image_encode_failed"
+	CodeImageCapture  = "image_capture_failed"
+	CodeImageEncode   = "image_encode_failed"
 	CodeImageTooLarge = "image_too_large"
 	CodeImageStale    = "image_stale"
 )
@@ -165,7 +166,7 @@ var ErrBusy = errors.New("device work position is occupied")
 func Status(code string) int {
 	switch code {
 	case CodeInvalidRequest, CodeReferenceInvalid, CodeInvalidCoordinates,
-		CodeInvalidKey, CodeTextTooLong, CodeNodeUnsupported:
+		CodeAmbiguousPoint, CodeInvalidKey, CodeTextTooLong, CodeNodeUnsupported:
 		return http.StatusUnprocessableEntity
 	case CodeUnauthorized, CodeForbidden:
 		return http.StatusUnauthorized

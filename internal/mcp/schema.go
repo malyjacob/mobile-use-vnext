@@ -90,7 +90,8 @@ var toolCatalog = []toolDefinition{
 	{
 		name: "act",
 		description: "消费一个 ready 观察并派发 tap、long_press、text、swipe 或 key。" +
-			"operation 只接受对应分支的成员；image=true 在动作后的同一次采集中附加 ImageContent。",
+			"operation 只接受对应分支的成员；image=true 在动作后的同一次采集中附加 ImageContent。" +
+			"坐标目标会在派发前按点解析节点并证明未变化，变化时返回 target_changed。",
 		schema: json.RawMessage(`{
   "type": "object",
   "properties": {
