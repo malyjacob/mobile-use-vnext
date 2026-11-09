@@ -61,6 +61,7 @@
 - [P5 实机验证](verification/p5-real-device.md)
 - [P6 控制呈现、消息中心与整组交付](verification/p6-real-device.md)
 - [工程决策](decisions.md)
+- [工程流程](process.md)
 
 ## 5. 暂缓事项
 
