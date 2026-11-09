@@ -1,6 +1,6 @@
 # MCP 树块实现与验证
 
-状态：已实现、已单测、已实机（MCP stdio 探针）。
+状态：已实现、已单测、已实机（主机 stdio 探针与手机 HTTP MCP）。
 实现提交：`e4867cd4f611217b8ea858f1cdfa4daa09e3acde`。
 提案：[MCP 文本结果附带确定性可读树块](../proposals/implemented/mcp-tree-text.md)。
 
@@ -101,11 +101,32 @@ RESULT PASS
 | 适配器 24 KiB 省略的实机构造 | 未执行：实际页面未达到上限；超预算路径由 `TestTreeTextOmitsWholeBlock` 覆盖 |
 | 宿主截断（略低于 24 KiB、输出上限更小） | 未执行：需要可配置截断的宿主；测试只证明缺少终止行可被识别 |
 | 引擎 32 KiB 查询截断/超限的实机构造 | 未执行：实际树未达到查询预算；判据由引擎单元测试覆盖 |
-| Streamable HTTP 传输回归 | 未执行：树块与传输无关，本次只跑 stdio；P5/P6 已覆盖 HTTP 入口 |
 | `go test -race` | 未执行：Windows 宿主无 C 编译器，cgo 不可用 |
-| 发布清单重新生成 | 未执行：本提案不改清单；下次发布由 `scripts/build-release.ps1` 重新生成 `CatalogFingerprint` |
 
 ## 7. 与提案的差异
 
 无实现差异。提案 §8.2 中列出的外部宿主、token 对比、宿主截断与实机超预算场景未执行，
 原因见上表；未把单元测试结论写成实机结论。
+
+## 8. 0.4.2 整组部署与手机 HTTP MCP
+
+实现归档后按发布流程补齐了手机侧部署：
+
+- `release/versions.json` 前进为 `0.4.2`、`contract_version=3`、`android_version_code=5`，
+  版本提交为 `d4cedfd`；生成常量与 AndroidManifest 同步，`generate-version.ps1 -Check` 通过。
+- `scripts/build-release.ps1` 产出完整清单：`release=0.4.2`，`source_commit=d4cedfd`，
+  `source_dirty=false`，`device-mcp` SHA-256 为
+  `f7892335eb30087fe5fad7ac91854de242efc03c52ee657c9fa7ebe2696fc7bc`。
+- `scripts/verify-manifest.ps1` 返回 PASS：6 个产物、工具目录 12 项、Android `0.4.2/5`。
+- `scripts/deploy.ps1` 返回 PASS：覆盖安装保留 App 私有数据，服务、App 与手机 HTTP MCP
+  适配器均按清单哈希核验；手机侧 MCP HTTP 进程的 `/proc/<pid>/exe` 哈希与清单一致，
+  手机 MCP URL 为 `http://127.0.0.1:18883/mcp`。
+- `scripts/verify-m6.ps1` 返回 `RESULT PASS`：发布清单、服务身份、App `0.4.2/5`、工具目录、
+  手机 MCP `server/discover`、契约配对、最小 STOP、消息/通知/消息中心、重启与 SIGTERM
+  恢复屏障均通过。
+- 手机 HTTP MCP 文本块：临时验证客户端（令牌从私有部署状态读取，不打印）调用 `start`
+  与 `inspect`；`start` 文本 806 字节，含 full 树块与 `end tree`；`inspect` 文本 374 字节，
+  含 inspect tree 块与 `end inspect`；随后 `end` 返回成功。树内容与令牌均未输出。
+- 仍有一个既有 DSH 宿主的 **stdio** connector 进程运行旧二进制（`a54e955…`），
+  因为宿主仅在启动时 spawn 子进程；重启该宿主 MCP 进程后才会加载 0.4.2。手机默认
+  HTTP MCP 已是最新；手机侧 HTTP 适配器不受此影响。

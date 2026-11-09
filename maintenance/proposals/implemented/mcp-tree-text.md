@@ -656,9 +656,9 @@ inspect v1 omitted scope=tree observation=O2 revision=4 nodes=612 bytes=38211 li
 | 项 | 结论与理由 |
 | --- | --- |
 | 实现行为 | 无偏离：树块语法、预算、ref 校验、排序、终止行与五个工具的 description 均按提案落地 |
-| 发布清单 | 未重新生成：提案 §6.5 明确由下次 `scripts/build-release.ps1` 重新生成 `CatalogFingerprint`，本实现不手改清单 |
+| 发布清单 | 归档时未重新生成；0.4.2 部署已由 `scripts/build-release.ps1` 重新生成清单与 `CatalogFingerprint`，见验证记录 §8 |
 | 外部模型宿主、token 对比、实机 24 KiB 省略、宿主截断、实机 query 32 KiB 截断 | 未执行：缺少对应宿主或实际树未达预算；单元测试覆盖判据，验证记录 §6 逐项标注原因 |
-| Streamable HTTP 回归、`go test -race` | 未执行：树块与传输无关，本次只跑 stdio；Windows 宿主无 C 编译器，cgo 不可用 |
+| Streamable HTTP 回归、`go test -race` | 手机 HTTP MCP 已在 0.4.2 部署后用临时客户端验证 `start`/`inspect` 文本块（验证记录 §8）；`go test -race` 未执行：Windows 宿主无 C 编译器，cgo 不可用 |
 
 ---
 
