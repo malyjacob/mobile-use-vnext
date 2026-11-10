@@ -1,10 +1,11 @@
 # 提案：MCP 结果模式与文本/结构化信息等价
 
-状态：提案，未实现。
+状态：已实现（实现提交 `09d6b5306cc8c688d37784a78f0088b63c64395f`，2026-11-10）。
 基线提交：`4cb11dbcdf319ea445c9be3a97e3b34deff32664`（分支 `master`，2026-11-10）。
 适用范围：`internal/mcp` 的 12 个公开工具及未来工具的 MCP 结果投影；`cmd/device-mcp` 的 stdio 模式选择；Streamable HTTP 的每请求模式头。影响所有 MCP 工具调用方，但不改变工具目录、入参 schema、`/api/*` 字段或 `contract_version`。
 影响范围：`internal/mcp/server.go`、`render.go`、`tree_text.go`、`http.go`，新增 `result_mode.go`、`result_value.go`、`result_text.go` 及对应测试；`cmd/device-mcp/main.go`；`docs/mcp.md`、`docs/runbook.md`、`docs/interface.md`；`maintenance/decisions.md`、`maintenance/verification/`；`scripts/mcp-probe/*`。
 契约（`/api/*` 字段与 `contract_version`）：不改变。MCP 结果投影新增 `both`/`text`/`structured` 三种模式；`structuredContent` 仍为 `Result` JSON，取消事实通过 `error.details` 的保留键承载；`both`/`text` 的文本格式版本化为 `result v1`。`both` 的文本格式变化是 MCP 文本投影的 breaking change（通道组合不变）。
+实现与验证记录：[mcp-result-modes](../../verification/mcp-result-modes.md)。删除或改写的基线代码证据使用该基线提交的永久链接。
 
 本文引用的函数名、行号、常量与默认值均以该基线提交为准；实现落地前若代码已前进，
 须按当时的 `HEAD` 重新核对（重点：`internal/mcp/server.go`、`internal/mcp/render.go`、
@@ -69,7 +70,7 @@ agent 得到的事实集合完全相同，格式可以不同；任何后续工�
   正文就不再是可安全解析的行式语法。只有树块做了 JSON 字符串转义。
 - 调用方无法选择“只要文本”或“只要结构化”：只读文本的宿主仍会收到 `structuredContent`
   （冗余），支持结构化的宿主仍会收到文本（冗余）；反过来，前者需要的内容又缺失。
-- admission 错误走 `invalid_request: …` 特判（[server.go:99–105](../../internal/mcp/server.go#L99-L105)），
+- admission 错误走 `invalid_request: …` 特判（[server.go:99–105](https://github.com/malyjacob/mobile-use-vnext/blob/4cb11dbcdf319ea445c9be3a97e3b34deff32664/internal/mcp/server.go#L99-L105)），
   不在现有 `renderText`/树块路径；它也没有模式选择。
 
 代价不是“展示不好看”，而是工具在特定调用方上不可用：`shell` 只剩退出码，`apps` 只剩
@@ -78,70 +79,70 @@ agent 得到的事实集合完全相同，格式可以不同；任何后续工�
 ### 1.2 证据链
 
 1. **文本投影只写阶段事实。** `renderText` 的注释明确不包含树节点、shell 输出和应用名列表
-   （[render.go:12–16](../../internal/mcp/render.go#L12-L16)）；`apps` 分支只写计数与时间
-   （[render.go:214–221](../../internal/mcp/render.go#L214-L221)），`shell` 分支只写终止
-   元数据与 `output_bytes`（[render.go:235–255](../../internal/mcp/render.go#L235-L255)），
-   `diagnose` 分支不写 `Timeline`（[render.go:264–289](../../internal/mcp/render.go#L264-L289)）。
+   （[render.go:12–16](https://github.com/malyjacob/mobile-use-vnext/blob/4cb11dbcdf319ea445c9be3a97e3b34deff32664/internal/mcp/render.go#L12-L16)）；`apps` 分支只写计数与时间
+   （[render.go:214–221](https://github.com/malyjacob/mobile-use-vnext/blob/4cb11dbcdf319ea445c9be3a97e3b34deff32664/internal/mcp/render.go#L214-L221)），`shell` 分支只写终止
+   元数据与 `output_bytes`（[render.go:235–255](https://github.com/malyjacob/mobile-use-vnext/blob/4cb11dbcdf319ea445c9be3a97e3b34deff32664/internal/mcp/render.go#L235-L255)），
+   `diagnose` 分支不写 `Timeline`（[render.go:264–289](https://github.com/malyjacob/mobile-use-vnext/blob/4cb11dbcdf319ea445c9be3a97e3b34deff32664/internal/mcp/render.go#L264-L289)）。
 2. **结构化投影才是完整 `Result`。** `handle` 只把 `renderText` 的结果放进
-   `TextContent`（[server.go:107–114](../../internal/mcp/server.go#L107-L114)），完整
-   `Result` 走 `StructuredContent`（[server.go:134–137](../../internal/mcp/server.go#L134-L137)），
-   编码函数是 `structuredContent`（[server.go:390–402](../../internal/mcp/server.go#L390-L402)）。
+   `TextContent`（[server.go:107–114](https://github.com/malyjacob/mobile-use-vnext/blob/4cb11dbcdf319ea445c9be3a97e3b34deff32664/internal/mcp/server.go#L107-L114)），完整
+   `Result` 走 `StructuredContent`（[server.go:134–137](https://github.com/malyjacob/mobile-use-vnext/blob/4cb11dbcdf319ea445c9be3a97e3b34deff32664/internal/mcp/server.go#L134-L137)），
+   编码函数是 `structuredContent`（[server.go:390–402](https://github.com/malyjacob/mobile-use-vnext/blob/4cb11dbcdf319ea445c9be3a97e3b34deff32664/internal/mcp/server.go#L390-L402)）。
 3. **适配器侧存在主动省略。** 观察树块上限 24 KiB、补看块上限 32 KiB
-   （[tree_text.go:12–21](../../internal/mcp/tree_text.go#L12-L21)）；超限整块省略
-   （[tree_text.go:109–130](../../internal/mcp/tree_text.go#L109-L130)、
-   [tree_text.go:132–156](../../internal/mcp/tree_text.go#L132-L156)、
-   [tree_text.go:158–227](../../internal/mcp/tree_text.go#L158-L227)）；ref 校验失败也整块
-   省略（[tree_text.go:236–256](../../internal/mcp/tree_text.go#L236-L256)）。这些省略只影响
+   （[tree_text.go:12–21](https://github.com/malyjacob/mobile-use-vnext/blob/4cb11dbcdf319ea445c9be3a97e3b34deff32664/internal/mcp/tree_text.go#L12-L21)）；超限整块省略
+   （[tree_text.go:109–130](https://github.com/malyjacob/mobile-use-vnext/blob/4cb11dbcdf319ea445c9be3a97e3b34deff32664/internal/mcp/tree_text.go#L109-L130)、
+   [tree_text.go:132–156](https://github.com/malyjacob/mobile-use-vnext/blob/4cb11dbcdf319ea445c9be3a97e3b34deff32664/internal/mcp/tree_text.go#L132-L156)、
+   [tree_text.go:158–227](https://github.com/malyjacob/mobile-use-vnext/blob/4cb11dbcdf319ea445c9be3a97e3b34deff32664/internal/mcp/tree_text.go#L158-L227)）；ref 校验失败也整块
+   省略（[tree_text.go:236–256](https://github.com/malyjacob/mobile-use-vnext/blob/4cb11dbcdf319ea445c9be3a97e3b34deff32664/internal/mcp/tree_text.go#L236-L256)）。这些省略只影响
    正文，`StructuredContent` 仍有完整树。`treeTextBlock.finish` 在超限时返回 `omitted`
-   字符串，`renderTreeText` 没有“是否省略”的返回信号（[tree_text.go:94–107](../../internal/mcp/tree_text.go#L94-L107)）。
+   字符串，`renderTreeText` 没有“是否省略”的返回信号（[tree_text.go:94–107](https://github.com/malyjacob/mobile-use-vnext/blob/4cb11dbcdf319ea445c9be3a97e3b34deff32664/internal/mcp/tree_text.go#L94-L107)）。
 4. **取消事实只在正文。** `cancelled`/`cancellation` 由 `renderText` 追加
-   （[render.go:337–342](../../internal/mcp/render.go#L337-L342)），但 `execution.cancelled`
+   （[render.go:337–342](https://github.com/malyjacob/mobile-use-vnext/blob/4cb11dbcdf319ea445c9be3a97e3b34deff32664/internal/mcp/render.go#L337-L342)），但 `execution.cancelled`
    不进入 `Result`；`structuredContent` 只看到 `Result`，服务错误存在时没有这两个事实。
    只读调用若已取得服务结果且结果无错误，`cancelled()` 不会补 `call_cancelled`
-   （[server.go:241–256](../../internal/mcp/server.go#L241-L256)），canonical 结果需要显式
+   （[server.go:241–256](https://github.com/malyjacob/mobile-use-vnext/blob/4cb11dbcdf319ea445c9be3a97e3b34deff32664/internal/mcp/server.go#L241-L256)），canonical 结果需要显式
    定义该分支。
 5. **正文不是可安全解析的语法。** `line` 直接写字符串
-   （[render.go:25–30](../../internal/mcp/render.go#L25-L30)）；`error.message`、`diagnosis`
+   （[render.go:25–30](https://github.com/malyjacob/mobile-use-vnext/blob/4cb11dbcdf319ea445c9be3a97e3b34deff32664/internal/mcp/render.go#L25-L30)）；`error.message`、`diagnosis`
    摘要等没有统一 JSON 转义。树块单独使用 JSON 字符串字面量
-   （[tree_text.go:543–599](../../internal/mcp/tree_text.go#L543-L599)），标量行没有。
+   （[tree_text.go:543–599](https://github.com/malyjacob/mobile-use-vnext/blob/4cb11dbcdf319ea445c9be3a97e3b34deff32664/internal/mcp/tree_text.go#L543-L599)），标量行没有。
 6. **测试把缺口固定成契约。** `shell` 测试断言正文不含 `boom`
-   （[server_test.go:737](../../internal/mcp/server_test.go#L737)），`apps` 测试断言正文不含
-   `设置`（[server_test.go:780](../../internal/mcp/server_test.go#L780)）；admission 断言
-   `invalid_request: ` 前缀（[server_test.go:429](../../internal/mcp/server_test.go#L429)）。
+   （[server_test.go:737](https://github.com/malyjacob/mobile-use-vnext/blob/4cb11dbcdf319ea445c9be3a97e3b34deff32664/internal/mcp/server_test.go#L737)），`apps` 测试断言正文不含
+   `设置`（[server_test.go:780](https://github.com/malyjacob/mobile-use-vnext/blob/4cb11dbcdf319ea445c9be3a97e3b34deff32664/internal/mcp/server_test.go#L780)）；admission 断言
+   `invalid_request: ` 前缀（[server_test.go:429](https://github.com/malyjacob/mobile-use-vnext/blob/4cb11dbcdf319ea445c9be3a97e3b34deff32664/internal/mcp/server_test.go#L429)）。
 7. **文档把正文定义为阶段事实。** `docs/mcp.md` §3 只承诺 `key=value` 阶段事实与树块
-   （[mcp.md:33–48](../../docs/mcp.md#L33-L48)），没有承诺 shell/apps 内容；`/api/*` 的
+   （[mcp.md:33–48](https://github.com/malyjacob/mobile-use-vnext/blob/4cb11dbcdf319ea445c9be3a97e3b34deff32664/docs/mcp.md#L33-L48)），没有承诺 shell/apps 内容；`/api/*` 的
    `shell`/`apps` 结果却明确包含 `output`/`items`
-   （[interface.md:665–706](../../docs/interface.md#L665-L706)、
-   [interface.md:611–629](../../docs/interface.md#L611-L629)）。
+   （[interface.md:665–706](https://github.com/malyjacob/mobile-use-vnext/blob/4cb11dbcdf319ea445c9be3a97e3b34deff32664/docs/interface.md#L665-L706)、
+   [interface.md:611–629](https://github.com/malyjacob/mobile-use-vnext/blob/4cb11dbcdf319ea445c9be3a97e3b34deff32664/docs/interface.md#L611-L629)）。
 8. **这是既有设计选择，不是偶然回归。** D32 只覆盖树块
-   （[decisions.md:355–366](../../maintenance/decisions.md#L355-L366)），树提案明确把 shell
-   输出排除在非目标外（[mcp-tree-text.md:104](implemented/mcp-tree-text.md#L104)），范围也
-   不含 `apps`（[mcp-tree-text.md:6](implemented/mcp-tree-text.md#L6)）。
+   （[decisions.md:355–366](../../../maintenance/decisions.md#L355-L366)），树提案明确把 shell
+   输出排除在非目标外（[mcp-tree-text.md:104](mcp-tree-text.md#L104)），范围也
+   不含 `apps`（[mcp-tree-text.md:6](mcp-tree-text.md#L6)）。
 9. **上游规范要求文本兼容。** MCP Tools 规范规定返回 structured content 的工具 SHOULD 在
    `TextContent` 中同时返回序列化结果
    （[MCP Tools · Structured Content](https://modelcontextprotocol.io/specification/draft/server/tools#structured-content)）；
-   树提案也引用了这条（[mcp-tree-text.md:49–52](implemented/mcp-tree-text.md#L49-L52)）。树块
+   树提案也引用了这条（[mcp-tree-text.md:49–52](mcp-tree-text.md#L49-L52)）。树块
    补上了树，但没有补 shell/apps/timeline，也没有消除已有的省略。
 10. **`/api/*` 数据本身是完整的。** `protocol.Result` 定义了 `Apps.Items`、`Shell.Output`、
-    `Diagnosis.Timeline` 等字段（[responses.go:496–523](../../internal/protocol/responses.go#L496-L523)），
+    `Diagnosis.Timeline` 等字段（[responses.go:496–523](https://github.com/malyjacob/mobile-use-vnext/blob/4cb11dbcdf319ea445c9be3a97e3b34deff32664/internal/protocol/responses.go#L496-L523)），
     `AppsView`/`ShellView`/`DiagnosisView` 的 marshaler 也写出这些字段
-    （[surface.go:291–354](../../internal/protocol/surface.go#L291-L354)、
-    [surface.go:411–472](../../internal/protocol/surface.go#L411-L472)、
-    [surface.go:648–807](../../internal/protocol/surface.go#L648-L807)）。缺失发生在 MCP
+    （[surface.go:291–354](https://github.com/malyjacob/mobile-use-vnext/blob/4cb11dbcdf319ea445c9be3a97e3b34deff32664/internal/protocol/surface.go#L291-L354)、
+    [surface.go:411–472](https://github.com/malyjacob/mobile-use-vnext/blob/4cb11dbcdf319ea445c9be3a97e3b34deff32664/internal/protocol/surface.go#L411-L472)、
+    [surface.go:648–807](https://github.com/malyjacob/mobile-use-vnext/blob/4cb11dbcdf319ea445c9be3a97e3b34deff32664/internal/protocol/surface.go#L648-L807)）。缺失发生在 MCP
     投影层，不在服务契约。
 11. **未来字段不会自动出现。** `Result` 与嵌套类型都是手工 `MarshalJSONTo`
-    （[responses.go:526](../../internal/protocol/responses.go#L526)、
-    [surface.go:299](../../internal/protocol/surface.go#L299)、
-    [surface.go:672](../../internal/protocol/surface.go#L672)、
-    [node.go:627](../../internal/protocol/node.go#L627)）；`AppEntry`/`DiagnosisEvent` 没有
-    自定义 marshaler（[surface.go:284–287](../../internal/protocol/surface.go#L284-L287)、
-    [surface.go:665–670](../../internal/protocol/surface.go#L665-L670)）。新增 agent-visible
+    （[responses.go:526](https://github.com/malyjacob/mobile-use-vnext/blob/4cb11dbcdf319ea445c9be3a97e3b34deff32664/internal/protocol/responses.go#L526)、
+    [surface.go:299](https://github.com/malyjacob/mobile-use-vnext/blob/4cb11dbcdf319ea445c9be3a97e3b34deff32664/internal/protocol/surface.go#L299)、
+    [surface.go:672](https://github.com/malyjacob/mobile-use-vnext/blob/4cb11dbcdf319ea445c9be3a97e3b34deff32664/internal/protocol/surface.go#L672)、
+    [node.go:627](https://github.com/malyjacob/mobile-use-vnext/blob/4cb11dbcdf319ea445c9be3a97e3b34deff32664/internal/protocol/node.go#L627)）；`AppEntry`/`DiagnosisEvent` 没有
+    自定义 marshaler（[surface.go:284–287](https://github.com/malyjacob/mobile-use-vnext/blob/4cb11dbcdf319ea445c9be3a97e3b34deff32664/internal/protocol/surface.go#L284-L287)、
+    [surface.go:665–670](https://github.com/malyjacob/mobile-use-vnext/blob/4cb11dbcdf319ea445c9be3a97e3b34deff32664/internal/protocol/surface.go#L665-L670)）。新增 agent-visible
     字段必须同时改 marshaler、canonical 清单、文本 codec 与 fixture，否则 canonical JSON
     本身就不会包含它。
 12. **`error.details` 的文档边界目前只按 `/api/*` 写。** `docs/interface.md` 说
-    `details` 仅可能出现白名单事实（[interface.md:62](../../docs/interface.md#L62)），
+    `details` 仅可能出现白名单事实（[interface.md:62](https://github.com/malyjacob/mobile-use-vnext/blob/4cb11dbcdf319ea445c9be3a97e3b34deff32664/docs/interface.md#L62)），
     `docs/mcp.md` 说 `structuredContent` 是“与服务同形的 `Result` JSON”
-    （[mcp.md:36](../../docs/mcp.md#L36)）；新增 `mcp.*` 保留键必须把这两处边界写清。
+    （[mcp.md:36](https://github.com/malyjacob/mobile-use-vnext/blob/4cb11dbcdf319ea445c9be3a97e3b34deff32664/docs/mcp.md#L36)）；新增 `mcp.*` 保留键必须把这两处边界写清。
 
 当前文本与结构化结果的差异（同一 `Result`）：
 
@@ -208,7 +209,7 @@ agent 得到的事实集合完全相同，格式可以不同；任何后续工�
 
 - 不新增 MCP 工具、不新增工具参数、不改变工具名称/描述/入参 schema/工具数量。
 - 不改变 `/api/*` 字段、错误码、`contract_version` 或引擎/会话/O/P/设备行为。
-- 不改变 `isError` 的非取消 per-tool 判据（[server.go:408–424](../../internal/mcp/server.go#L408-L424)）；取消是 execution-level override（G13）。
+- 不改变 `isError` 的非取消 per-tool 判据（[server.go:408–424](https://github.com/malyjacob/mobile-use-vnext/blob/4cb11dbcdf319ea445c9be3a97e3b34deff32664/internal/mcp/server.go#L408-L424)）；取消是 execution-level override（G13）。
 - 不改变图片载体：图片字节只在 `ImageContent`，不进入文本或结构化内容。
 - 不新增 `outputSchema`。
 - 不提供公开的文本解析 API；`DecodeText` 只作为测试 oracle 存在。
@@ -264,7 +265,7 @@ A = deterministic_json(result_without_image_base64)
 - `result_without_image_base64`：把 `observation.image.base64` 清空；其余 `Result` 字段保持。
 - `ensure result.error`：若 `Result.Error != nil`，保留其 `code`/`message`/其他 `details`；
   若 `Result.Error == nil`，合成 `Error{Code: "call_cancelled", Message: execution.cancellation}`。
-  这覆盖“只读取消 + 已取得服务结果 + 服务结果无错误”的分支（[server.go:241–256](../../internal/mcp/server.go#L241-L256)）。
+  这覆盖“只读取消 + 已取得服务结果 + 服务结果无错误”的分支（[server.go:241–256](https://github.com/malyjacob/mobile-use-vnext/blob/4cb11dbcdf319ea445c9be3a97e3b34deff32664/internal/mcp/server.go#L241-L256)）。
 - **取消的 `isError` override**：`isError = execution.isError(tool) || execution.cancelled`。只要
   取消，`is_error`/`CallToolResult.IsError` 为 true，和 canonical 合成的 `call_cancelled` error
   一致；非取消分支仍按 per-tool 判据。这个 override 只改变取消结果，不改变正常结果。
@@ -581,14 +582,14 @@ DecodeText(text):
 - 解码器只用于测试，不发布；严格拒绝未知语法/重复路径/缺尾。
 - `DecodeText` 只接受 `result v1`；`diagnostic v1` 由 `TestStructuredMinimalErrorText` 做最小
   检查，不进入 `A` parity（它本来就不是完整 A）。
-- 树/补看块复用现有测试解析器（[tree_text_test.go:675–1298](../../internal/mcp/tree_text_test.go#L675-L1298)）。
+- 树/补看块复用现有测试解析器（[tree_text_test.go:675–1298](https://github.com/malyjacob/mobile-use-vnext/blob/4cb11dbcdf319ea445c9be3a97e3b34deff32664/internal/mcp/tree_text_test.go#L675-L1298)）。
 - shell/apps/timeline 块解析器新增；JSON Pointer 解析支持对象与数组（`/apps/items/<i>`、
   `/diagnosis/timeline/<i>`）与 `~0`/`~1` 转义。
 - 解码后的对象与 canonical JSON 按 §4.1 比较；`is_error` 与 `CallToolResult.IsError` 比较。
 
 ### 5.4 admission
 
-- 删除 `handle` 的 `invalid_request: …` 文本特判（[server.go:99–105](../../internal/mcp/server.go#L99-L105)）；
+- 删除 `handle` 的 `invalid_request: …` 文本特判（[server.go:99–105](https://github.com/malyjacob/mobile-use-vnext/blob/4cb11dbcdf319ea445c9be3a97e3b34deff32664/internal/mcp/server.go#L99-L105)）；
   admission 结果与普通结果一样进入 canonical `A` 与模式投影。
 - `text`/`both`：`result v1 is_error=true`，`error.code=invalid_request`，
   `error.message=<json-string>`；`structured`：`structuredContent` + 最小诊断文本。
@@ -1019,20 +1020,40 @@ structured:
 8. **验证**：全量 Go 测试、构建、HTTP/stdio 实机、模式/边界/取消；写验证记录；按流程
    先实现提交、再归档提案；发布版本按发行流程递增。
 
-## 11. 实现结果（归档时补写）
+## 11. 实现结果
 
-实现提交：`<hash>`。实现与验证记录：`../../verification/mcp-result-modes.md`（归档到
-`implemented/` 后该相对链接生效；当前为占位）。
+实现提交：`09d6b5306cc8c688d37784a78f0088b63c64395f`。
+实现与验证记录：[mcp-result-modes](../../verification/mcp-result-modes.md)。
 
 ### 11.1 已落地
 
 | 提案条目 | 落点 |
 | --- | --- |
+| 全部实现提交 | `09d6b5306cc8c688d37784a78f0088b63c64395f`；本归档提交只移动提案、补验证记录与状态 |
+| G0/G5/G9 无损硬契约与字段门禁 | `internal/mcp/result_value.go:canonicalResult`；`result_text.go:encodeResultText`；`result_parity_test.go:TestAgentResultLosslessParity`；`result_manifest_test.go` 的反射、显式 composite inventory、base canonical fixture |
+| G1–G4 三模式与入口 | `result_mode.go`、`result_projection.go:projectExecution`；`server.go` 从 `Extra.Header` 逐请求选择；`http.go` 执行前校验；`cmd/device-mcp/main.go` 的 flag/env/default |
+| G6/G7/G12 完整文本、尾部、转义 | `result_text.go` 的单一 resultFields、shell/apps/timeline、JSON Pointer；`tree_text.go` 的 `(block,ok)` 与无大小省略；独立测试 decoder |
+| G8/G10 图片与目录边界 | canonical 只清 transport base64；三模式携带同一 ImageContent；`TestCatalogFingerprintUnchanged` 锁定基线且无 outputSchema |
+| G11 最小错误文本 | `encodeResultDiagnostic`；structured 成功非 nil `Content=[]`，错误独立 diagnostic envelope |
+| G13 取消事实与竞态 | canonical 注入 `error.details.mcp.*`、缺错合成、IsError override；`invoke` 在结果和取消同时就绪时仍进入取消路径，保留已确认执行事实；工作有界 end，只读不 end |
+| 确定性与三态 | Error/Delta/TimingMS map 确定性、presence/null/整数精度往返；typed guard 禁止 JCS 数字舍入；无法表示的树整体 JSON 兜底 |
+| 反向对照与大值 | 6 类临时实现变异全部被运行时断言检出；128 KiB/32 KiB 树与补看、64 KiB shell、32 KiB apps 的完整字节数见验证记录 |
+| 探针 | `scripts/mcp-probe` 的模式透传、私有 decoder、文本内容检查；默认 both 保留既有 structured 检查，不重复派发动作 |
+| 日志与正式文档 | mcp.start/mcp.tool 的 result_mode 枚举；`docs/mcp.md`、`docs/runbook.md`、`docs/interface.md`；D33；独立只读文档复检 clean |
+| 构建与实机 | 全量 Go 测试、相关包 vet、linux/arm64 构建；完整 manifest 核验与覆盖部署；stdio 三模式闭环；手机 HTTP 三模式各 12 工具、非法头与取消恢复 |
 
 ### 11.2 与提案不同或未执行
 
 | 项 | 结论与理由 |
 | --- | --- |
+| 文件组织 | 另拆 `result_projection.go`，集中按模式组装；分类、事实集与契约不变 |
+| 取消竞态 | 补齐提案要求的“有服务结果且已取消”真实入口路径；旧实现两个 select 分支绕过取消包装，先红复现后修正，不改变已批准 G13 |
+| 目录 description 的旧 omitted 提示 | 按提案要求保留目录字节与指纹，正式文档明确其旧格式边界；新 codec 不输出 omitted |
+| 发行号与可选 manifest 字段 | 按 §6.1 不立即递增发行号，manifest 不增加可选 result_modes；手机使用按清单核验的开发验证包，source_dirty=true 如实记录，未宣称新版本发行 |
+| 外部宿主/实际截断/token 成本 | 未执行：无适用外部宿主与 tokenizer；SDK 接受空 content，单测证明缺尾可检测，字节成本有记录 |
+| 手机服务上限与只读同时完成取消竞态 | 未执行确定性实机构造：当前页面未达上限且无法稳定注入该竞态；合成/直接 invoke 单测覆盖，未写成实机结论 |
+| race | 未执行：Windows 无 C 编译器，未启用 cgo |
+| 外部旧 stdio 宿主刷新 | 未执行：存在由外部宿主管理的旧进程，需所有者重启；手机 HTTP 已换为清单二进制并重新连线发现目录 |
 
 ---
 
