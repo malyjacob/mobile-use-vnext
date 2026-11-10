@@ -289,6 +289,31 @@ func assertResultTextParity(t *testing.T, raw []byte, isError bool) string {
 	return text
 }
 
+// TestTextCodecDeliveredObservationOnError pins the contract-6 combination: an
+// error result may carry the observation a rejected act delivered, and the tree
+// block is projected together with is_error=true.
+func TestTextCodecDeliveredObservationOnError(t *testing.T) {
+	raw := []byte(`{"operation_id":"P7","operation_state":"finished","outcome":"not_executed","phase":"revalidate",` +
+		`"observation":{"status":"complete","id":"O2","origin":"P1","revision":2,"tree":{"format":"full",` +
+		`"scope":"reported_visible_with_context","root":{"ref":"n1","role":"root","bounds":[0,0,1080,2400]}}},` +
+		`"error":{"code":"target_changed","message":"目标元素已变化，本次未派发"},` +
+		`"recovery":{"entry":"retry","reference":"O","input_state":"effective"}}`)
+	text := assertResultTextParity(t, raw, true)
+	for _, want := range []string{
+		"result v1 is_error=true",
+		"observation.status=complete",
+		"observation.id=O2",
+		"tree v1 format=full id=O2",
+		"recovery.entry=retry",
+		"recovery.reference=O",
+		"end result",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("text lacks %q:\n%s", want, text)
+		}
+	}
+}
+
 func TestTextCodecGolden(t *testing.T) {
 	raw := []byte(`{"operation_id":"P1","outcome":"executed","shell":{"termination":"exited","exit_code":0,"output":"hello\r\n世界\n","truncated":false},"error":{"code":"example","message":"a=b\n\"quoted\""}}`)
 	text := assertResultTextParity(t, raw, false)
