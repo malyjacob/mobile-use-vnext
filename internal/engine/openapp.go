@@ -151,11 +151,16 @@ func (e *Engine) openAppStaticCheckLocked(agent, observationID string, now time.
 func (e *Engine) openAppVirtual(work *workState, op *operationState, session *sessionState,
 	app, component string, preTasks []device.Task) (*protocol.Result, *protocol.APIError) {
 	if task := reusableTask(preTasks, app, session.Display.ID); task != nil {
-		if !e.beginDispatch(work) {
+		if dispatchErr := e.beginUIDispatch(work, "focus"); dispatchErr != nil {
 			return e.finishWithError(op, "dispatch",
-				protocol.NewError(409, protocol.CodeStopped, "应用启动已撤销")), nil
+				dispatchErr), nil
 		}
-		if err := e.dev.FocusTask(work.Ctx, task.TaskID); err != nil {
+		receipt, focusErr := e.dev.FocusTask(work.Ctx, task.TaskID)
+		e.recordUIReceipt(work, receipt)
+		if receipt == device.DispatchNotDispatched {
+			return e.finishOpenAppNotDispatched(work, op), nil
+		}
+		if focusErr != nil || receipt != device.DispatchTerminated {
 			e.markDispatchUnknown(work)
 			return e.finishOpenAppUncertain(op, protocol.CodeTaskFocus,
 				"已请求复用窗口，但无法确认置前", nil)
@@ -171,12 +176,16 @@ func (e *Engine) openAppVirtual(work *workState, op *operationState, session *se
 			true, true, OutcomeExecuted, nil)
 	}
 
-	if !e.beginDispatch(work) {
+	if dispatchErr := e.beginUIDispatch(work, "launch"); dispatchErr != nil {
 		return e.finishWithError(op, "dispatch",
-			protocol.NewError(409, protocol.CodeStopped, "应用启动已撤销")), nil
+			dispatchErr), nil
 	}
 	launch, launchErr := e.dev.LaunchApp(work.Ctx, session.Display.ID, component)
-	if launchErr != nil || launch.State == device.LaunchUnknown {
+	e.recordUIReceipt(work, launch.Receipt)
+	if launch.Receipt == device.DispatchNotDispatched {
+		return e.finishOpenAppNotDispatched(work, op), nil
+	}
+	if launchErr != nil || launch.State == device.LaunchUnknown || launch.Receipt == device.DispatchUnknown {
 		e.markDispatchUnknown(work)
 		return e.finishOpenAppUncertain(op, protocol.CodeAppLaunchUnknown,
 			"已派发应用启动，但无法确认结果", nil)
@@ -208,25 +217,37 @@ func (e *Engine) openAppVirtual(work *workState, op *operationState, session *se
 func (e *Engine) openAppPrimary(work *workState, op *operationState, session *sessionState,
 	app, component string, preTasks []device.Task) (*protocol.Result, *protocol.APIError) {
 	if task := reusableTask(preTasks, app, 0); task != nil {
-		if !e.beginDispatch(work) {
+		if dispatchErr := e.beginUIDispatch(work, "focus"); dispatchErr != nil {
 			return e.finishWithError(op, "dispatch",
-				protocol.NewError(409, protocol.CodeStopped, "应用启动已撤销")), nil
+				dispatchErr), nil
 		}
-		if err := e.dev.FocusTask(work.Ctx, task.TaskID); err != nil {
+		receipt, focusErr := e.dev.FocusTask(work.Ctx, task.TaskID)
+		e.recordUIReceipt(work, receipt)
+		if receipt == device.DispatchNotDispatched {
+			return e.finishOpenAppNotDispatched(work, op), nil
+		}
+		if focusErr != nil || receipt != device.DispatchTerminated {
 			e.markDispatchUnknown(work)
 			return e.finishOpenAppUncertain(op, protocol.CodeTaskFocus,
 				"已请求复用窗口，但无法确认置前", nil)
+		}
+		if !e.verifyForeground(work, 0, app, task.TaskID) {
+			return e.finishOpenAppUncertain(op, protocol.CodeTaskFocus, "已请求复用窗口，但无法确认置前", nil)
 		}
 		e.clearDispatchUnknown(work)
 		return e.finishOpenAppSuccess(work, op, session, app, task.TaskID,
 			true, true, OutcomeExecuted, nil)
 	}
-	if !e.beginDispatch(work) {
+	if dispatchErr := e.beginUIDispatch(work, "launch"); dispatchErr != nil {
 		return e.finishWithError(op, "dispatch",
-			protocol.NewError(409, protocol.CodeStopped, "应用启动已撤销")), nil
+			dispatchErr), nil
 	}
 	launch, launchErr := e.dev.LaunchApp(work.Ctx, 0, component)
-	if launchErr != nil || launch.State == device.LaunchUnknown {
+	e.recordUIReceipt(work, launch.Receipt)
+	if launch.Receipt == device.DispatchNotDispatched {
+		return e.finishOpenAppNotDispatched(work, op), nil
+	}
+	if launchErr != nil || launch.State == device.LaunchUnknown || launch.Receipt == device.DispatchUnknown {
 		e.markDispatchUnknown(work)
 		return e.finishOpenAppUncertain(op, protocol.CodeAppLaunchUnknown,
 			"已派发应用启动，但无法确认结果", nil)
@@ -445,4 +466,13 @@ func (e *Engine) finishOpenAppUncertain(op *operationState, code, message string
 	result.Recovery = e.finishOperation(op, OutcomeUncertain, "dispatch", apiErr)
 	e.addSessionIfEnded(result)
 	return result, nil
+}
+
+// A definite non-dispatch is independent of a transport/semantic error.
+func (e *Engine) finishOpenAppNotDispatched(work *workState, op *operationState) *protocol.Result {
+	code, message := protocol.CodeAppLaunchFailed, "应用启动或置前未派发"
+	if e.workRevoked(work) {
+		code, message = protocol.CodeStopped, "应用启动已撤销，未派发"
+	}
+	return e.finishWithError(op, "dispatch", protocol.NewError(protocol.Status(code), code, message))
 }

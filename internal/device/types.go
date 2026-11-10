@@ -146,6 +146,7 @@ type TextResult struct {
 	Value          *string
 	Issued         bool
 	Accepted       bool
+	Receipt        DispatchReceipt
 }
 
 // DisplayState is the read-only display existence fact. SurfaceFlinger layer
@@ -172,6 +173,23 @@ const (
 	InputSwipe     InputKind = "swipe"
 	InputKey       InputKind = "key"
 )
+
+// DispatchReceipt is the adapter's fact about whether one mutating call may
+// still be in flight. The zero value is unknown.
+type DispatchReceipt uint8
+
+const (
+	DispatchUnknown DispatchReceipt = iota
+	DispatchNotDispatched
+	DispatchTerminated
+)
+
+// BootIdentity binds one private stable device identity to one Android boot.
+// ExecutionIdentity returns it only after the input transport is verified.
+type BootIdentity struct {
+	DeviceID string
+	BootID   string
+}
 
 // Input is one device input primitive. It is dispatched only after the engine
 // has claimed the observation and revalidated the live target.
@@ -267,6 +285,7 @@ const (
 type LaunchResult struct {
 	State    LaunchState
 	ExitCode int
+	Receipt  DispatchReceipt
 }
 
 func max(a, b int) int {

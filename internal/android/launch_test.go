@@ -27,23 +27,81 @@ func TestResolveLauncherRejectsInvalidPackage(t *testing.T) {
 
 func TestLaunchFocusAndRemoveDispatch(t *testing.T) {
 	d := newStubDevice(t, "launch")
+	d.setShellV2(true)
 	ctx := context.Background()
 	result, err := d.LaunchApp(ctx, 82, "com.example.app/.MainActivity")
 	if err != nil || result.State != device.LaunchAccepted {
 		t.Fatalf("LaunchApp: %v %+v", err, result)
 	}
-	if err := d.FocusTask(ctx, 42); err != nil {
-		t.Fatalf("FocusTask: %v", err)
+	if result.Receipt != device.DispatchTerminated {
+		t.Fatalf("LaunchApp receipt=%d", result.Receipt)
+	}
+	receipt, err := d.FocusTask(ctx, 42)
+	if err != nil || receipt != device.DispatchTerminated {
+		t.Fatalf("FocusTask: receipt=%d err=%v", receipt, err)
 	}
 	if err := d.RemoveTask(ctx, 42); err != nil {
 		t.Fatalf("RemoveTask: %v", err)
 	}
-	if _, err := d.LaunchApp(ctx, 82, "not a component"); err == nil {
-		t.Fatal("expected a component rejection")
+	invalid, err := d.LaunchApp(ctx, 82, "not a component")
+	if err == nil || invalid.Receipt != device.DispatchNotDispatched {
+		t.Fatalf("component rejection=%+v err=%v", invalid, err)
 	}
-	if err := d.FocusTask(ctx, 0); err == nil {
-		t.Fatal("expected a task id rejection")
+	receipt, err = d.FocusTask(ctx, 0)
+	if err == nil || receipt != device.DispatchNotDispatched {
+		t.Fatalf("task rejection receipt=%d err=%v", receipt, err)
 	}
+}
+
+func TestLaunchAndFocusReceiptsSeparateDispatchFromResult(t *testing.T) {
+	t.Run("launch semantic rejection", func(t *testing.T) {
+		d := newStubDevice(t, "launch-rejected")
+		d.setShellV2(true)
+		result, err := d.LaunchApp(t.Context(), 82, "com.example.app/.MainActivity")
+		if err != nil || result.State != device.LaunchRejected ||
+			result.Receipt != device.DispatchTerminated {
+			t.Fatalf("result=%+v err=%v", result, err)
+		}
+	})
+
+	t.Run("launch remote exit", func(t *testing.T) {
+		d := newStubDevice(t, "launch-exit")
+		d.setShellV2(true)
+		result, err := d.LaunchApp(t.Context(), 82, "com.example.app/.MainActivity")
+		if err != nil || result.State != device.LaunchRejected ||
+			result.Receipt != device.DispatchTerminated || result.ExitCode != 5 {
+			t.Fatalf("result=%+v err=%v", result, err)
+		}
+	})
+
+	t.Run("launch missing status", func(t *testing.T) {
+		d := newStubDevice(t, "launch-missing")
+		d.setShellV2(true)
+		result, err := d.LaunchApp(t.Context(), 82, "com.example.app/.MainActivity")
+		if err != nil || result.State != device.LaunchUnknown ||
+			result.Receipt != device.DispatchTerminated {
+			t.Fatalf("result=%+v err=%v", result, err)
+		}
+	})
+
+	t.Run("launch transport", func(t *testing.T) {
+		d := newStubDevice(t, "launch-transport")
+		d.setShellV2(true)
+		result, err := d.LaunchApp(t.Context(), 82, "com.example.app/.MainActivity")
+		if CodeOf(err) != CodeTransport || result.State != device.LaunchUnknown ||
+			result.Receipt != device.DispatchUnknown {
+			t.Fatalf("result=%+v code=%q err=%v", result, CodeOf(err), err)
+		}
+	})
+
+	t.Run("focus remote exit", func(t *testing.T) {
+		d := newStubDevice(t, "focus-exit")
+		d.setShellV2(true)
+		receipt, err := d.FocusTask(t.Context(), 42)
+		if receipt != device.DispatchTerminated || CodeOf(err) != CodeExitCode {
+			t.Fatalf("receipt=%d code=%q err=%v", receipt, CodeOf(err), err)
+		}
+	})
 }
 
 func TestRecentTaskIDs(t *testing.T) {

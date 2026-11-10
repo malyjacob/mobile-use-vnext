@@ -1,0 +1,32 @@
+package engine
+
+import (
+    "context"
+    "testing"
+)
+
+// Diagnostic reproduction for a separate control-instance ordering issue.
+// This intentionally fails until that issue receives its own implementation.
+func TestIssueLateAppInstanceCannotRevokeCurrentSession(t *testing.T) {
+    h := newHarnessWithClock(t, false)
+    original := readySync()
+    next := readySync()
+    next.AppInstanceID = "44444444-4444-4444-8444-444444444444"
+    next.ModeGeneration = "55555555-5555-4555-8555-555555555555"
+    next.PrimaryDisplay.Generation = next.ModeGeneration
+    if _, apiErr := h.engine.SyncApp(context.Background(), next); apiErr != nil {
+        t.Fatal("new instance sync was rejected")
+    }
+    h.appInstance, h.modeGen = next.AppInstanceID, next.ModeGeneration
+    first := h.startSession()
+    if _, apiErr := h.engine.SyncApp(context.Background(), original); apiErr != nil {
+        return // Rejecting the known retired instance is a valid disposition.
+    }
+    h.engine.mu.Lock()
+    active := h.engine.session != nil && h.engine.session.Origin == first.OperationID &&
+        h.engine.session.State == SessionActive && h.engine.app.InstanceID == next.AppInstanceID
+    h.engine.mu.Unlock()
+    if !active {
+        t.Fatal("late retired instance replaced current App facts and revoked the new session")
+    }
+}

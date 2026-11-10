@@ -55,6 +55,16 @@ func (e *Engine) statusSelfLocked(agent string, now time.Time) *protocol.Result 
 			Code: protocol.CodeRecovering,
 		})
 	}
+	if reason == "ui_input_reboot_required" {
+		result.Recovery = &protocol.Recovery{Entry: protocol.RecoveryEntryUser, Reference: protocol.RecoveryReferenceNone}
+	}
+	if reason == "ledger_unavailable" {
+		reference := protocol.RecoveryReferenceNone
+		if result.StartOperation != "" {
+			reference = protocol.RecoveryReferenceP
+		}
+		result.Recovery = e.durabilityRecoveryLocked(reference, "", result.Recovery)
+	}
 	return result
 }
 
@@ -93,6 +103,7 @@ func (e *Engine) statusOperationLocked(agent, reference string,
 			Cleanup: cleanupValue(e.cleanup),
 		})
 	}
+	result.Recovery = e.durabilityRecoveryLocked(protocol.RecoveryReferenceP, inputStateFor(op.Kind, op.Reference, "", op.Claimed), result.Recovery)
 	return result, nil
 }
 

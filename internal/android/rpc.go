@@ -17,6 +17,7 @@ import (
 // maxRPCResponse bounds one JSON-RPC body. A hierarchy dump of a very deep tree
 // stays well below this; anything larger is a transport anomaly.
 const maxRPCResponse = 64 << 20
+const rpcRequestID = 1
 
 // rpcRequest is the fixed JSON-RPC 2.0 envelope the pinned server expects.
 type rpcRequest struct {
@@ -29,8 +30,10 @@ type rpcRequest struct {
 // rpcResponse carries the envelope only. error.data may contain device
 // internals and is never surfaced.
 type rpcResponse struct {
-	Result json.RawMessage `json:"result"`
-	Error  *rpcError       `json:"error"`
+	JSONRPC string          `json:"jsonrpc"`
+	ID      int             `json:"id"`
+	Result  json.RawMessage `json:"result"`
+	Error   *rpcError       `json:"error"`
 }
 
 type rpcError struct {
@@ -67,7 +70,9 @@ func (d *Device) rpcWith(ctx context.Context, client *http.Client, base, method 
 	if timeout <= 0 {
 		timeout = d.timeout
 	}
-	body, marshalErr := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: 1, Method: method, Params: params})
+	body, marshalErr := json.Marshal(rpcRequest{
+		JSONRPC: "2.0", ID: rpcRequestID, Method: method, Params: params,
+	})
 	if marshalErr != nil {
 		return nil, newErr(CodeInvalidArgs, "the request parameters are not encodable", nil)
 	}
@@ -112,11 +117,12 @@ func (d *Device) rpcWith(ctx context.Context, client *http.Client, base, method 
 		return nil, errRPCMalformed
 	}
 	payload = nil // the raw body is never retained or logged.
+	if decoded.JSONRPC != "2.0" || decoded.ID != rpcRequestID ||
+		(len(decoded.Result) == 0) == (decoded.Error == nil) {
+		return nil, errRPCMalformed
+	}
 	if decoded.Error != nil {
 		return nil, classifyRPCError(decoded.Error)
-	}
-	if len(decoded.Result) == 0 {
-		return nil, errRPCMalformed
 	}
 	var result any
 	if decodeErr := json.Unmarshal(decoded.Result, &result); decodeErr != nil {

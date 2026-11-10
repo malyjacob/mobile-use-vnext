@@ -494,6 +494,18 @@ func (e *Engine) driveRecovery(ctx context.Context) {
 	// A shell_chain execution uncertainty whose runner ownership is already
 	// gone was released in an earlier pass; only the closure write was lost.
 	e.promoteOrphanShellCleanup(record)
+	resolvedUI, bootChanged, uiReason := e.resolveRecoveryUI(ctx, record)
+	if !resolvedUI {
+		e.setRecoveryReason(uiReason)
+		return
+	}
+	e.mu.Lock()
+	needsRecheck := e.cleanup != nil && e.cleanup.needsExecutionRecheck
+	e.mu.Unlock()
+	if bootChanged || needsRecheck {
+		e.finishExecutionRecovery(ctx, record, app)
+		return
+	}
 
 	displayID, generation, owner := 0, "", record.AppInstanceID
 	virtual := record.PendingCreate != nil || record.PendingClose != nil
@@ -574,9 +586,14 @@ func (e *Engine) finishRecovery(record *Ledger, app appState, displayID int, rea
 		return
 	}
 	e.recovery = nil
+	e.ui, e.legacyUI = nil, nil
+	e.uiCheckpointReady = false
 	e.recovering = false
 	e.recoveryReason = ""
 	execution, recents := protocol.CleanupNotApplicable, protocol.CleanupNotApplicable
+	if record.UI != nil && record.UI.State != "may_dispatch" {
+		execution = protocol.CleanupConfirmed
+	}
 	if record.Cleanup != nil {
 		if record.Cleanup.Execution != "" {
 			execution = record.Cleanup.Execution
@@ -643,8 +660,10 @@ func (e *Engine) restoreRecoveryLocked(record *Ledger) {
 			State: c.State, Execution: c.Execution, Tasks: c.Tasks,
 			Recents: c.Recents, Display: c.Display, Reason: c.Reason,
 			ExecReason: c.ExecReason, StartedAt: c.StartedAt,
+			checkedTaskIDs: append([]int(nil), c.CheckedTaskIDs...),
 		}
 	}
+	e.restoreUIRecoveryLocked(record)
 }
 
 // enqueueCloseCommand adds one precise close command for the original display.
@@ -720,7 +739,8 @@ func (e *Engine) ledgerRecordLocked() *Ledger {
 			State: e.cleanup.State, Execution: e.cleanup.Execution, Tasks: e.cleanup.Tasks,
 			Recents: e.cleanup.Recents, Display: e.cleanup.Display,
 			Reason: e.cleanup.Reason, ExecReason: e.cleanup.ExecReason,
-			StartedAt: e.cleanup.StartedAt,
+			StartedAt:      e.cleanup.StartedAt,
+			CheckedTaskIDs: append([]int(nil), e.cleanup.checkedTaskIDs...),
 		}
 	}
 	if e.stopBoundary != nil {
@@ -733,6 +753,19 @@ func (e *Engine) ledgerRecordLocked() *Ledger {
 	// an unresolved shell chain after a restart. It carries no command text and
 	// no output.
 	record.Shell = e.shell.ledger()
+	record.UI, record.LegacyUI = nil, nil
+	if e.ui != nil {
+		copyUI := e.ui.record
+		record.UI = &copyUI
+	}
+	if e.legacyUI != nil {
+		copyCheckpoint := *e.legacyUI
+		record.LegacyUI = &copyCheckpoint
+	}
+	record.Tasks = append([]LedgerTask(nil), record.Tasks...)
+	if _, pending := legacyUIResponsibility(e.recovery); pending {
+		record.LegacyUIPending = true
+	}
 	return record
 }
 

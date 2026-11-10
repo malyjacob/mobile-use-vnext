@@ -411,29 +411,30 @@ func (e *Engine) dispatchAct(work *workState, obs *observationState,
 		}
 		x, y = raw.Bounds.Center()
 	}
-	if !e.beginDispatch(work) {
-		return OutcomeNotExecuted, protocol.NewError(409, protocol.CodeStopped, "会话已撤销")
+	if apiErr := e.beginUIDispatch(work, operation.Type); apiErr != nil {
+		return OutcomeNotExecuted, apiErr
 	}
+	var receipt device.DispatchReceipt
+	var dispatchErr error
 	switch operation.Type {
 	case "key":
-		if err := e.dev.Key(work.Ctx, displayID, operation.Key); err != nil {
-			return OutcomeUncertain, actionUncertain()
-		}
+		receipt, dispatchErr = e.dev.Key(work.Ctx, displayID, operation.Key)
 	case "tap":
-		if err := e.dev.Tap(work.Ctx, displayID, x, y); err != nil {
-			return OutcomeUncertain, actionUncertain()
-		}
+		receipt, dispatchErr = e.dev.Tap(work.Ctx, displayID, x, y)
 	case "long_press":
-		if err := e.dev.LongPress(work.Ctx, displayID, x, y); err != nil {
-			return OutcomeUncertain, actionUncertain()
-		}
+		receipt, dispatchErr = e.dev.LongPress(work.Ctx, displayID, x, y)
 	case "swipe":
-		if err := e.dev.Swipe(work.Ctx, displayID, operation.From.X, operation.From.Y,
-			operation.To.X, operation.To.Y); err != nil {
-			return OutcomeUncertain, actionUncertain()
-		}
+		receipt, dispatchErr = e.dev.Swipe(work.Ctx, displayID, operation.From.X, operation.From.Y, operation.To.X, operation.To.Y)
 	default:
-		return OutcomeNotExecuted, protocol.Invalid("不支持的操作")
+		receipt = device.DispatchNotDispatched
+		dispatchErr = protocol.Invalid("不支持的操作")
+	}
+	e.recordUIReceipt(work, receipt)
+	if receipt == device.DispatchNotDispatched {
+		return OutcomeNotExecuted, protocol.NewError(503, protocol.CodeDeviceUnavailable, "输入未派发")
+	}
+	if dispatchErr != nil || receipt != device.DispatchTerminated {
+		return OutcomeUncertain, actionUncertain()
 	}
 	if !e.confirmDispatch(work) {
 		return OutcomeUncertain, actionUncertain()
@@ -454,10 +455,15 @@ func (e *Engine) dispatchText(work *workState, session *sessionState, obs *obser
 		}
 		tapX, tapY = raw.Bounds.Center()
 	}
-	if !e.beginDispatch(work) {
-		return OutcomeNotExecuted, protocol.NewError(409, protocol.CodeStopped, "会话已撤销")
+	if apiErr := e.beginUIDispatch(work, "tap"); apiErr != nil {
+		return OutcomeNotExecuted, apiErr
 	}
-	if err := e.dev.Tap(work.Ctx, displayID, tapX, tapY); err != nil {
+	receipt, tapErr := e.dev.Tap(work.Ctx, displayID, tapX, tapY)
+	e.recordUIReceipt(work, receipt)
+	if receipt == device.DispatchNotDispatched {
+		return OutcomeNotExecuted, protocol.NewError(503, protocol.CodeDeviceUnavailable, "输入未派发")
+	}
+	if tapErr != nil || receipt != device.DispatchTerminated {
 		return OutcomeUncertain, actionUncertain()
 	}
 	// The tap is a dispatched input side effect: from here every unknown is
@@ -478,11 +484,12 @@ func (e *Engine) dispatchText(work *workState, session *sessionState, obs *obser
 	if err != nil || current.CandidateCount != 1 {
 		return OutcomeUncertain, textTargetUncertain()
 	}
-	if !e.beginDispatch(work) {
-		return OutcomeUncertain, actionUncertain()
+	if apiErr := e.beginUIDispatch(work, "text"); apiErr != nil {
+		return OutcomeUncertain, apiErr
 	}
 	result, err := e.dev.SetTextOnDisplay(work.Ctx, target, operation.Text)
-	if err != nil {
+	e.recordUIReceipt(work, result.Receipt)
+	if err != nil || result.Receipt != device.DispatchTerminated {
 		return OutcomeUncertain, textResultUncertain()
 	}
 	if result.CandidateCount != 1 || !result.Issued || !result.Accepted {

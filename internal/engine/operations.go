@@ -156,6 +156,7 @@ func (e *Engine) finishOperation(op *operationState, outcome, phase string, apiE
 		Outcome: outcome, Claimed: op.Claimed, InputState: inputState,
 		Cleanup: cleanupValue(e.cleanup),
 	})
+	op.Recovery = e.durabilityRecoveryLocked(protocol.RecoveryReferenceP, inputState, op.Recovery)
 	return op.Recovery
 }
 
@@ -177,6 +178,9 @@ func (e *Engine) acquireWork(op *operationState, kind string) (*workState, *prot
 	defer e.mu.Unlock()
 	if e.shuttingDown {
 		return nil, protocol.NewError(503, protocol.CodeDeviceUnavailable, "服务正在退出")
+	}
+	if barrier := e.ordinaryBarrierLocked(op); barrier != nil {
+		return nil, barrier
 	}
 	if e.work != nil {
 		var blocking string
@@ -240,6 +244,7 @@ func (e *Engine) releaseWork(work *workState) {
 		e.broadcastAppLocked()
 	}
 	e.mu.Unlock()
+	e.launchExecutionCleanupRecheck()
 }
 
 // workRevoked reports whether STOP/end cancelled this work or its session.
@@ -277,23 +282,11 @@ func sessionBeforeDeadline(session *sessionState, now time.Time) bool {
 }
 
 func (e *Engine) workAuthorizedLocked(work *workState, now time.Time) bool {
-	return work != nil && e.work == work && !work.Revoked && !e.shuttingDown &&
+	return work != nil && e.work == work && !work.Revoked && !e.shuttingDown && e.deviceReady &&
 		work.Ctx.Err() == nil && e.session != nil && e.session.State != SessionEnded &&
 		e.session.Epoch == work.SessionEpoch && sessionBeforeDeadline(e.session, now) &&
 		e.session.AppInstanceID == e.app.InstanceID && e.session.ModeGeneration == e.app.ModeGeneration &&
 		e.session.Mode == e.app.Mode
-}
-
-// beginDispatch is the linearization point shared with STOP. Once it wins,
-// Android may receive the input even if STOP immediately cancels its context.
-func (e *Engine) beginDispatch(work *workState) bool {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if !e.workAuthorizedLocked(work, time.Now()) {
-		return false
-	}
-	work.DispatchUnknown = true
-	return true
 }
 
 // confirmDispatch accepts timely completion evidence only. A late adapter
@@ -314,11 +307,10 @@ func (e *Engine) markDispatchUnknown(work *workState) {
 	if work == nil {
 		return
 	}
-	work.DispatchUnknown = true
-	// The uncertainty must outlive the ordinary work slot so a later STOP/end
-	// still records cleanup.execution=unconfirmed.
+	// Semantic uncertainty never recreates a completed input responsibility.
+	work.DispatchUnknown = work.UI != nil && e.ui == work.UI && e.uiPendingLocked()
 	if e.session != nil && e.session.Epoch == work.SessionEpoch {
-		e.session.ExecutionUnknown = true
+		e.session.ExecutionUnknown = e.uiPendingLocked() || e.shell != nil && !e.shell.settled()
 	}
 }
 

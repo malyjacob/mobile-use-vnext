@@ -92,17 +92,17 @@ func (d *Device) TaskList(ctx context.Context) ([]device.Task, error) {
 }
 
 // Tap issues one display-bound tap. It never retries or changes display.
-func (d *Device) Tap(ctx context.Context, displayID, x, y int) error {
+func (d *Device) Tap(ctx context.Context, displayID, x, y int) (device.DispatchReceipt, error) {
 	return d.dispatchInput(ctx, device.InputTap, displayID, x, y, x, y, "")
 }
 
 // LongPress issues one 700 ms swipe at the point.
-func (d *Device) LongPress(ctx context.Context, displayID, x, y int) error {
+func (d *Device) LongPress(ctx context.Context, displayID, x, y int) (device.DispatchReceipt, error) {
 	return d.dispatchInput(ctx, device.InputLongPress, displayID, x, y, x, y, "")
 }
 
 // Swipe issues one display-bound swipe gesture.
-func (d *Device) Swipe(ctx context.Context, displayID, x1, y1, x2, y2 int) error {
+func (d *Device) Swipe(ctx context.Context, displayID, x1, y1, x2, y2 int) (device.DispatchReceipt, error) {
 	return d.dispatchInput(ctx, device.InputSwipe, displayID, x1, y1, x2, y2, "")
 }
 
@@ -114,15 +114,16 @@ var keyPattern = regexp.MustCompile(`^[A-Z0-9_]{1,64}$`)
 
 // Key issues one display-bound key event. The key is a KEYCODE name such as
 // BACK or KEYCODE_BACK.
-func (d *Device) Key(ctx context.Context, displayID int, key string) error {
+func (d *Device) Key(ctx context.Context, displayID int, key string) (device.DispatchReceipt, error) {
 	if d == nil {
-		return errNilDevice
+		return device.DispatchNotDispatched, errNilDevice
 	}
 	if displayID < 0 {
-		return newErr(CodeInvalidArgs, "invalid display id", nil)
+		return device.DispatchNotDispatched, newErr(CodeInvalidArgs, "invalid display id", nil)
 	}
 	if !keyPattern.MatchString(key) {
-		return newErr(CodeInvalidKey, "the key token is not a supported key name", nil)
+		return device.DispatchNotDispatched,
+			newErr(CodeInvalidKey, "the key token is not a supported key name", nil)
 	}
 	return d.dispatchInput(ctx, device.InputKey, displayID, 0, 0, 0, 0, key)
 }
@@ -141,36 +142,40 @@ func (d *Device) validatePoint(displayID, x, y int) error {
 }
 
 // dispatchInput validates one primitive, builds its exact argv and runs it.
-func (d *Device) dispatchInput(ctx context.Context, kind device.InputKind, displayID, x, y, toX, toY int, key string) error {
+func (d *Device) dispatchInput(ctx context.Context, kind device.InputKind,
+	displayID, x, y, toX, toY int, key string,
+) (device.DispatchReceipt, error) {
 	if kind != device.InputKey {
 		if err := d.validatePoint(displayID, x, y); err != nil {
-			return err
+			return device.DispatchNotDispatched, err
 		}
 		if kind == device.InputSwipe {
 			if err := d.validatePoint(displayID, toX, toY); err != nil {
-				return err
+				return device.DispatchNotDispatched, err
 			}
 		}
 	}
 	argv, err := inputArgv(kind, displayID, x, y, toX, toY, key)
 	if err != nil {
-		return err
+		return device.DispatchNotDispatched, err
 	}
 	return d.inputCommand(ctx, kind, displayID, argv...)
 }
 
 // inputCommand runs one already-validated input argv. Any non-zero status or
 // transport failure is returned as an error and never retried.
-func (d *Device) inputCommand(ctx context.Context, kind device.InputKind, displayID int, argv ...string) error {
+func (d *Device) inputCommand(ctx context.Context, kind device.InputKind,
+	displayID int, argv ...string,
+) (device.DispatchReceipt, error) {
 	started := time.Now()
-	result, err := d.Shell(ctx, strings.Join(argv, " "))
+	result, receipt, err := d.runShellV2(ctx, d.timeout, strings.Join(argv, " "))
 	if err != nil {
 		d.logEvent(eventlog.Warn, "android.input.failed",
 			eventlog.Str("kind", string(kind)),
 			eventlog.Int("display_id", displayID),
 			eventlog.Str("code", CodeOf(err)),
 			eventlog.Duration("ms", time.Since(started)))
-		return err
+		return receipt, err
 	}
 	if result.ExitCode != 0 {
 		d.logEvent(eventlog.Warn, "android.input.failed",
@@ -178,13 +183,13 @@ func (d *Device) inputCommand(ctx context.Context, kind device.InputKind, displa
 			eventlog.Int("display_id", displayID),
 			eventlog.Str("code", "exit_code"),
 			eventlog.Duration("ms", time.Since(started)))
-		return exitDetail(result.ExitCode)
+		return receipt, exitDetail(result.ExitCode)
 	}
 	d.logEvent(eventlog.Debug, "android.input.done",
 		eventlog.Str("kind", string(kind)),
 		eventlog.Int("display_id", displayID),
 		eventlog.Duration("ms", time.Since(started)))
-	return nil
+	return receipt, nil
 }
 
 // inputArgv builds the argv for one input primitive. It exists so the command

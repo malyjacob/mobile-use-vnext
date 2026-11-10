@@ -1,0 +1,145 @@
+package engine
+
+import (
+	"context"
+	"errors"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/malyjacob/mobile-use-vnext/internal/device"
+	"github.com/malyjacob/mobile-use-vnext/internal/protocol"
+)
+
+// These overlays are diagnostic experiments, not an approved contract change.
+// The availability assertions deliberately fail on the reported baseline.
+func TestIssueOpenAppPhysicalCleanupDoesNotReleaseUIBarrier(t *testing.T) {
+	for _, evidence := range []string{"missing_task", "multiple_tasks"} {
+		t.Run(evidence, func(t *testing.T) {
+			h := newHarnessWithClock(t, false)
+			first := h.startSession()
+			h.device.mu.Lock()
+			h.device.launchTask = &device.Task{TaskID: 77, Package: "com.example"}
+			h.device.recentKnown = true
+			h.device.recentIDs = map[int]bool{77: true}
+			h.device.mu.Unlock()
+			var hide atomic.Bool
+			hide.Store(true)
+			h.engine.dev = &hookedDevice{Device: h.device,
+				tasks: func(ctx context.Context) ([]device.Task, error) {
+					if !hide.Load() {
+						return h.device.TaskList(ctx)
+					}
+					if evidence == "multiple_tasks" {
+						return []device.Task{
+							{TaskID: 77, DisplayID: 12, Package: "com.example"},
+							{TaskID: 78, DisplayID: 12, Package: "com.example"},
+						}, nil
+					}
+					return nil, nil
+				},
+			}
+			opened, apiErr := h.engine.OpenApp(context.Background(), "agent", "Pissueopen",
+				openAppRequest(first.Observation, "com.example"))
+			if apiErr != nil || opened.Error == nil || opened.Error.Code != protocol.CodeAppLaunchUnknown || opened.Outcome != OutcomeUncertain {
+				t.Fatal("precondition: launch did not reach task-attribution uncertainty")
+			}
+			hide.Store(false)
+			h.device.scriptCaptures(func(f *fakeDevice, display device.Display) (device.Capture, error) {
+				capture, err := f.captureLocked(display)
+				capture.Foreground = device.Foreground{State: device.ForegroundPresent, Package: "com.example", TaskID: intPtr(77)}
+				return capture, err
+			})
+			observed, apiErr := h.engine.Observe(context.Background(), "agent", "Pissueobserve",
+				&protocol.ObserveRequest{Reference: opened.OperationID, Full: true})
+			if apiErr != nil || observed.Observation == nil || observed.Observation.Tree == nil || observed.Observation.Foreground == nil || observed.Observation.Foreground.TaskID == nil || *observed.Observation.Foreground.TaskID != 77 {
+				t.Fatal("precondition: later foreground observation was not readable")
+			}
+			h.device.mu.Lock()
+			h.device.displayExists = false
+			h.device.mu.Unlock()
+			if _, apiErr := h.engine.End("agent", "Pissueend", opened.OperationID); apiErr != nil {
+				t.Fatal("precondition: end failed")
+			}
+			h.engine.mu.Lock()
+			done := h.engine.cleanup.done
+			h.engine.mu.Unlock()
+			select {
+			case <-done:
+			case <-time.After(3 * time.Second):
+				t.Fatal("physical cleanup did not settle")
+			}
+			h.sync(nil, nil)
+			status, apiErr := h.engine.Status("agent", "")
+			if apiErr != nil || status.Cleanup == nil {
+				t.Fatal("status unavailable")
+			}
+			cleanup := status.Cleanup
+			if cleanup.Tasks != protocol.CleanupConfirmed || cleanup.Recents != protocol.CleanupConfirmed || cleanup.Display != protocol.CleanupConfirmed {
+				t.Fatal("precondition: physical resources were not all confirmed")
+			}
+			t.Logf("live: can_start=%t blocking_code=%s execution=%s tasks=%s recents=%s display=%s",
+				*status.CanStart, status.BlockingCode, cleanup.Execution, cleanup.Tasks, cleanup.Recents, cleanup.Display)
+			prior, apiErr := h.engine.Status("agent", opened.OperationID)
+			if apiErr != nil || prior.Outcome != OutcomeUncertain {
+				t.Fatal("original uncertain outcome was rewritten")
+			}
+			if status.CanStart == nil || !*status.CanStart {
+				t.Error("availability expectation: no release path after completed launch call and confirmed physical cleanup")
+			}
+			h.engine.mu.Lock()
+			record := h.engine.ledgerRecordLocked()
+			h.engine.mu.Unlock()
+			if record.Cleanup == nil || record.Cleanup.ExecReason != "ui_input" {
+				t.Fatal("precondition: UI execution barrier was not captured in ledger")
+			}
+			restarted := recoveryEngine(t, record, h.device)
+			if err := restarted.StartRecovery(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			syncRecovery(t, restarted, readySync())
+			waitRecoveryAttempt(t, restarted)
+			recovered, apiErr := restarted.Status("agent", "")
+			if apiErr != nil || recovered.CanStart == nil {
+				t.Fatal("restart status unavailable")
+			}
+			t.Logf("restart: can_start=%t blocking_code=%s", *recovered.CanStart, recovered.BlockingCode)
+			if !*recovered.CanStart {
+				t.Error("availability expectation: restart replays the same unresolved UI barrier")
+			}
+		})
+	}
+}
+
+// This assertion follows the current sticky-UI policy: confirming a later shell
+// runner is not evidence that an earlier UI input has finished.
+func TestIssueShellMustNotEraseEarlierUIUncertainty(t *testing.T) {
+	h := newHarnessWithClock(t, false)
+	first := h.startSession()
+	h.engine.dev = &hookedDevice{Device: h.device,
+		tap: func(context.Context, int, int, int) error { return errors.New("synthetic transport failure") },
+	}
+	acted, apiErr := h.engine.Act(context.Background(), "agent", "Pissueui", tapRequest(first.Observation.ID))
+	if apiErr != nil || acted.Outcome != OutcomeUncertain {
+		t.Fatal("precondition: uncertain UI input not recorded")
+	}
+	h.engine.mu.Lock()
+	before := h.engine.session.ExecutionUnknown
+	h.engine.mu.Unlock()
+	if !before {
+		t.Fatal("precondition: UI input uncertainty missing")
+	}
+	h.device.setShellDone(exitedDone(0, 0, false))
+	shelled, apiErr := h.engine.Shell(context.Background(), "agent", "Pissueshell",
+		&protocol.ShellRequest{Reference: acted.OperationID, Command: "true"})
+	if apiErr != nil || shelled.Outcome != OutcomeExecuted {
+		t.Fatal("precondition: subsequent shell did not finish")
+	}
+	h.engine.mu.Lock()
+	after := h.engine.session.ExecutionUnknown
+	h.engine.mu.Unlock()
+	t.Logf("UI uncertainty before_shell=%t after_shell=%t", before, after)
+	if !after {
+		t.Error("shell completion erased unrelated earlier UI uncertainty")
+	}
+}

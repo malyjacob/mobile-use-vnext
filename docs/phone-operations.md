@@ -171,6 +171,8 @@ curl.exe -s http://127.0.0.1:18881/health
 | `mode_not_selected` | 虚拟屏未就绪或主屏未确认 | 在 App 选择虚拟屏或重新确认主屏共享 |
 | `device_not_interactive`/`device_locked` | 熄屏或锁屏 | 解锁点亮；服务不绕过锁屏 |
 | `cleanup_pending`/`cleanup_unconfirmed` | 旧显示/任务/执行链未确认 | 保持服务与 App 在线，看 `status.cleanup` 五项；不要删账本/强停 |
+| `ui_input_unconfirmed` | 原 UI 调用缺少结束证据 | 普通工作 busy，保留原 P，不重放输入；status/STOP/end 可用 |
+| `ui_input_reboot_required` | 启动身份恢复记录已耐久保存 | 安排一次手机重启并保留账本/App 数据；启动身份变化只解决对应 execution，仍核验其它资源 |
 | `recovery_pending`/`old_resource_unconfirmed` | 重启后旧归属未核验完 | 等 App 同步、精确 `close_display` 与 TaskList；旧显示不存在也不能只凭一次 absent 放行 |
 | `shell_pending`/`shell_chain_unconfirmed` | 受管命令未结束或终止未确认 | 等 `status.shell` 确认；不杀 runner、不删运行目录 |
 | `ledger_corrupt`/`ledger_unavailable` | 账本损坏或不可写 | 检查目录权限/磁盘；损坏账本需人工处置并重新部署，不能带病启动 |
@@ -205,7 +207,7 @@ adb shell su -c 'tail -n 100 /data/data/com.mobileuse.vnext/files/diagnostics.lo
    $control = (Get-Content .state/deploy.json -Raw | ConvertFrom-Json).control_token
    Invoke-RestMethod http://127.0.0.1:18881/v1/control/stop -Method Post `
      -Headers @{ Authorization = "Bearer $control" } -ContentType 'application/json' `
-     -Body '{"contract_version":"3","app_instance_id":"<uuid>","stop_seq":1,"reason":"operator_stop"}'
+     -Body '{"contract_version":"4","app_instance_id":"<uuid>","stop_seq":1,"reason":"operator_stop"}'
    ```
 
    `accepted=true` 只表示停止边界已绑定；仍需用 App/`status.cleanup` 核验执行链、任务与

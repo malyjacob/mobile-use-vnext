@@ -75,6 +75,64 @@ func textResult(value any) (device.TextResult, error) {
 	return result, nil
 }
 
+// textSetResult requires every member documented by the pinned set RPC. A
+// complete method result proves that this call is no longer in flight even if
+// its semantic issued/accepted values are false.
+func textSetResult(value any) (device.TextResult, error) {
+	mapping, ok := value.(map[string]any)
+	if !ok {
+		return device.TextResult{}, errRPCMalformed
+	}
+	var result device.TextResult
+
+	rawCount, present := mapping["candidateCount"]
+	if !present {
+		return device.TextResult{}, errRPCMalformed
+	}
+	number, ok := rawCount.(float64)
+	if !ok {
+		return device.TextResult{}, errRPCMalformed
+	}
+	count := int(number)
+	if float64(count) != number {
+		return device.TextResult{}, errRPCMalformed
+	}
+	result.CandidateCount = count
+
+	rawValue, present := mapping["value"]
+	if !present {
+		return device.TextResult{}, errRPCMalformed
+	}
+	if rawValue != nil {
+		text, ok := rawValue.(string)
+		if !ok {
+			return device.TextResult{}, errRPCMalformed
+		}
+		result.Value = &text
+	}
+
+	rawIssued, present := mapping["issued"]
+	if !present {
+		return device.TextResult{}, errRPCMalformed
+	}
+	issued, ok := rawIssued.(bool)
+	if !ok {
+		return device.TextResult{}, errRPCMalformed
+	}
+	result.Issued = issued
+
+	rawAccepted, present := mapping["accepted"]
+	if !present {
+		return device.TextResult{}, errRPCMalformed
+	}
+	accepted, ok := rawAccepted.(bool)
+	if !ok {
+		return device.TextResult{}, errRPCMalformed
+	}
+	result.Accepted = accepted
+	return result, nil
+}
+
 // asInt accepts the JSON number forms a Java Map can produce.
 func asInt(value any) (int, bool) {
 	switch typed := value.(type) {
@@ -151,10 +209,10 @@ func (d *Device) GetTextOnDisplay(ctx context.Context, target device.TextTarget)
 // it. Argument order matches the fixed server patch exactly.
 func (d *Device) SetTextOnDisplay(ctx context.Context, target device.TextTarget, text string) (device.TextResult, error) {
 	if d == nil {
-		return device.TextResult{}, errNilDevice
+		return device.TextResult{Receipt: device.DispatchNotDispatched}, errNilDevice
 	}
 	if err := validateTextTarget(target); err != nil {
-		return device.TextResult{}, err
+		return device.TextResult{Receipt: device.DispatchNotDispatched}, err
 	}
 	started := time.Now()
 	value, err := d.rpc(ctx, "setTextOnDisplay", textArguments(target, &text), d.timeout)
@@ -163,12 +221,17 @@ func (d *Device) SetTextOnDisplay(ctx context.Context, target device.TextTarget,
 			eventlog.Int("display_id", target.DisplayID),
 			eventlog.Str("code", CodeOf(err)),
 			eventlog.Duration("ms", time.Since(started)))
-		return device.TextResult{}, err
+		receipt := device.DispatchUnknown
+		if CodeOf(err) == CodeInvalidArgs {
+			receipt = device.DispatchNotDispatched
+		}
+		return device.TextResult{Receipt: receipt}, err
 	}
-	result, decodeErr := textResult(value)
+	result, decodeErr := textSetResult(value)
 	if decodeErr != nil {
-		return device.TextResult{}, decodeErr
+		return device.TextResult{Receipt: device.DispatchUnknown}, decodeErr
 	}
+	result.Receipt = device.DispatchTerminated
 	d.logEvent(eventlog.Debug, "android.text.set_done",
 		eventlog.Int("display_id", target.DisplayID),
 		eventlog.Int("count", result.CandidateCount),

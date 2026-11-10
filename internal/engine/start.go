@@ -99,6 +99,8 @@ func (e *Engine) Start(ctx context.Context, agent, p string) (*protocol.Result, 
 		}
 	}
 	e.session = session
+	e.ui, e.legacyUI = nil, nil
+	e.uiCheckpointReady = false
 	op.SessionOrigin = op.ID
 	work.SessionEpoch = session.Epoch
 	e.baseline = nil
@@ -362,6 +364,9 @@ func (e *Engine) startCleanup(session *sessionState, reason string) {
 }
 
 func startBlockedError(reason string) *protocol.APIError {
+	if reason == "ui_input_unconfirmed" || reason == "ui_input_reboot_required" {
+		return protocol.NewError(409, protocol.CodeDeviceBusy, "原输入调用结束未确认")
+	}
 	message := "当前不可开始会话"
 	code := reason
 	switch reason {

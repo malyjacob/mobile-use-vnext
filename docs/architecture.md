@@ -166,6 +166,9 @@ delta 的五类块：`set`（逐字段完整新值，显式保留 `false`/`0`/`"
 
 - 设备同时只有一项普通工作（`start`/`observe`/`act`/`apps`/`open_app`/`shell`）。冲突立即返回
   `409 device_busy`，不建普通动作队列；同一 Agent 会得到 `blocking_operation_id`。
+- 原 UI 输入子步骤缺少结束证据时，即使原普通工作已返回，也继续拒绝这些普通工作；
+  `status`、`inspect`、`diagnose`、`end` 与 STOP 保持可用。任务归属或读回失败本身不会重新
+  打开已经取得终结回执的输入责任。
 - 工作上下文按类型设上限：`start` = `StartTimeout + WorkTimeout`（40s）、`observe` =
   `WorkTimeout + 15s`（35s）、`act`/`open_app` 约 50s、`apps` 约 30s、`shell` 约 65s；具体超时是服务策略，不是请求参数。
 - `end`、STOP、`status` 不占普通工作位置，也不等待普通工作完成。
@@ -206,9 +209,13 @@ delta 的五类块：`set`（逐字段完整新值，显式保留 `false`/`0`/`"
 `cleanup` 固定五元组：`state`（`pending`/`complete`/`unconfirmed`）、`execution`、
 `tasks`、`recents`、`display`（每项可为 `pending`/`confirmed`/`unconfirmed`/`not_applicable`）。
 
-- `execution`：若结束瞬间仍有本会话已派发但结果未知的输入（`DispatchUnknown`），记
-  `unconfirmed`；否则 `confirmed`。受管执行链（`shell`）在取得精确终止证据后可将这一项
-  从 `unconfirmed` 提升为 `confirmed`；UI 输入的不确定性保持不可改判。
+- `execution`：所有可能派发的 UI 子步骤与受管 shell 链均有自身结束/未派发证据时为
+  `confirmed`，缺证据时为 `unconfirmed`。每个 UI 子步骤由引擎绑定原会话、P、step 和
+  设备启动身份；远端 shell v2 退出结果或完整匹配的同步文字 RPC 返回是调用终结证据。
+  主 outcome、任务归属、文字读回与调用终结分别判定，原 P 的 `uncertain` 不追认。
+  shell 只解除自己的 runner 责任；迟到 UI 终结只补原执行事实，不发布 O 或恢复输入权。
+- 迟到终结晚于原物理核验时，对同一原归属补做有界只读核验。旧任务 ID 留作 recents 核验
+  证据，不创建第二条破坏性链；任务、recents 或显示仍不能确认时不放行。
 - `primary` 模式：`tasks`/`recents`/`display` 全为 `not_applicable`，从不关闭用户应用。
 - 虚拟屏且显示身份未知：给 App 至多 4s 上报描述；仍无描述时，若创建明确失败或 App 明确
   报告无自有显示，则 `display=confirmed`，否则 `unconfirmed`。
@@ -259,21 +266,31 @@ delta 的五类块：`set`（逐字段完整新值，显式保留 `false`/`0`/`"
 交互且未锁屏、无未确认停止意图。任一不满足都返回 `can_start=false` 与 `blocking_code`。
 端口已监听、`/health` 返回 `ok` 都不是干净证明。
 
+UI 责任按自身回执恢复。缺回执但有旧设备/boot 身份时，同设备启动身份变化只解除对应
+execution；版本 1 的 `ui_input` 未确认记录或缺完整终结记录的活动会话，先追加并耐久保存
+`legacy_ui_checkpoint`。保存成功才报告 `ui_input_reboot_required` 与 `recovery.entry=user`；
+用户安排手机重启后仍须核验配对 App、模式/STOP、原资源与账本可写。checkpoint 不随同步或
+服务重启覆盖；不清账本或 App 数据。跨 boot 只读核验旧目标，不用旧裸 ID 清理新归属。
+
 ## 8. 账本
 
 `internal/store` 把单个 JSON 对象写在 `<state_dir>/recovery-ledger.json`：
 
-- 预算 64 KiB；格式名 `mobile-use-vnext-ledger`，版本 1，修订号单调递增；
+- 预算 64 KiB；格式名 `mobile-use-vnext-ledger`，读版本 1/2、写版本 2，修订号单调递增；
 - 单写者：包内互斥 + 进程锁；`Save` 先 fsync 临时文件，再 rename 覆盖，再 fsync 父目录
   （Windows 跳过目录 fsync，因此 Windows 不提供同等耐久证据）；
 - 内容只有归属与资源证据：会话（origin/agent/mode/state/App 实例/模式代次/显示 ID/SFID/
   generation/尺寸/密度/旋转/开始时间）、待创建/待关闭命令、收尾五元组、停止边界、虚拟屏
-  受管任务 id 登记（≤16）、受管 shell runner 身份与阶段；
+  受管任务 id 登记（≤16）、受管 shell runner 身份与阶段、一个 UI 子步骤责任、legacy
+  checkpoint 与收尾核验过的任务 ID（≤256）；
 - 明确不含：请求体、节点树、图片、输入正文、命令输出、异常字符串；
 - `start` 在启动显示助手前同步写一次（原归属 + 创建意图），会话激活后再写一次；其余进度
-  异步写。写失败置 `ledgerUnsafe`，可用性转 `blocked`（原因 `ledger_unavailable`）；
-- 输入派发本身不进入账本；“已派发但结果未知”只存在于进程内的工作状态，进程退出后以
-  资源探测与收尾记录为准。
+  异步写。每个 UI 输入子步骤额外预写 `may_dispatch`，成功后重新竞争派发边界；终结证据
+  保存成功前不开放后续普通工作。写失败置 `ledgerUnsafe`，可用性为 `blocked`
+  （原因 `ledger_unavailable`）；STOP 不等这些写入。
+- 版本 1 升级保留原 Session/Cleanup/Stop/Shell/task 事实；缺失的新字段不充当结束证据。
+  `legacy_ui_pending` 保留尚未建立 checkpoint 的旧责任，避免普通同步的格式升级抹掉迁移条件。
+  旧二进制不能读取版本 2，不通过降级覆盖或清库恢复。
 
 账本只由 engine 读取与生成，HTTP 层与 App 都不写账本。
 

@@ -160,19 +160,21 @@ func TestInputArgvOnTheWire(t *testing.T) {
 		record := filepath.Join(t.TempDir(), "argv.txt")
 		d.testEnv = append(d.testEnv, "MOBILE_USE_FAKE_ADB_ARGV="+record)
 		ctx := t.Context()
+		d.setShellV2(true)
+		var receipt device.DispatchReceipt
 		var err error
 		switch testCase.command {
 		case "tap":
-			err = d.Tap(ctx, 61, 100, 200)
+			receipt, err = d.Tap(ctx, 61, 100, 200)
 		case "long_press":
-			err = d.LongPress(ctx, 61, 100, 200)
+			receipt, err = d.LongPress(ctx, 61, 100, 200)
 		case "swipe":
-			err = d.Swipe(ctx, 61, 10, 20, 30, 40)
+			receipt, err = d.Swipe(ctx, 61, 10, 20, 30, 40)
 		case "key":
-			err = d.Key(ctx, 61, "BACK")
+			receipt, err = d.Key(ctx, 61, "BACK")
 		}
-		if err != nil {
-			t.Fatalf("%s: %v", testCase.command, err)
+		if err != nil || receipt != device.DispatchTerminated {
+			t.Fatalf("%s: receipt=%d err=%v", testCase.command, receipt, err)
 		}
 		raw, readErr := os.ReadFile(record)
 		if readErr != nil {

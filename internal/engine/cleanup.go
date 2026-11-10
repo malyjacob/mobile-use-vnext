@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"sort"
 	"time"
 
 	"github.com/malyjacob/mobile-use-vnext/internal/device"
@@ -46,12 +47,13 @@ func (e *Engine) beginCleanupLocked(session *sessionState, reason string) *clean
 	if e.cleanup != nil && e.cleanup.State == protocol.CleanupPending {
 		return nil
 	}
-	execUnknown := session.ExecutionUnknown ||
+	execUnknown := e.uiPendingLocked() || (e.shell != nil && !e.shell.settled()) ||
 		(e.work != nil && e.work.SessionEpoch == session.Epoch && e.work.DispatchUnknown)
 	cleanup := &cleanupState{
 		State: protocol.CleanupPending, Execution: protocol.CleanupConfirmed,
 		Tasks: protocol.CleanupPending, Recents: protocol.CleanupPending,
 		Display: protocol.CleanupPending, Reason: reason, StartedAt: time.Now(),
+		evidenceRevision: e.executionEvidenceRevision,
 	}
 	if execUnknown {
 		cleanup.Execution = protocol.CleanupUnconfirmed
@@ -71,11 +73,12 @@ func (e *Engine) beginCleanupLocked(session *sessionState, reason string) *clean
 	return cleanup
 }
 
-// cleanupExecReasonLocked attributes the execution uncertainty. A managed shell
-// chain can later be confirmed gone by its own termination evidence, which is
-// release-of-barrier evidence; UI input uncertainty keeps today's sticky
-// behavior and is never rewritten by a later observation.
+// cleanupExecReasonLocked attributes the barrier; termination is accepted
+// only for its own UI token or managed shell identity.
 func (e *Engine) cleanupExecReasonLocked() string {
+	if e.uiPendingLocked() {
+		return "ui_input"
+	}
 	if e.work != nil && e.work.Kind == WorkShell {
 		return "shell_chain"
 	}
@@ -179,7 +182,8 @@ func (e *Engine) performCleanup(target cleanupTarget, cleanup *cleanupState) {
 		hadTasks = true
 	}
 	if hadTasks {
-		tasksOK, recentsOK := e.removeOwnedTasks(ctx, displayID)
+		tasksOK, recentsOK, checked := e.removeOwnedTasks(ctx, displayID, target.tasks)
+		cleanup.checkedTaskIDs = checked
 		if tasksOK {
 			cleanup.Tasks = protocol.CleanupConfirmed
 		} else {
@@ -309,7 +313,8 @@ func (e *Engine) finishCleanup(target cleanupTarget, cleanup *cleanupState, resu
 		// begin-time error must not survive in the public closure record.
 		result.Error = nil
 	}
-	complete := result.Execution != protocol.CleanupUnconfirmed &&
+	result.needsExecutionRecheck = result.needsExecutionRecheck || result.evidenceRevision != e.executionEvidenceRevision
+	complete := !result.needsExecutionRecheck && !e.uiPendingLocked() && result.Execution != protocol.CleanupUnconfirmed &&
 		result.Display != protocol.CleanupUnconfirmed &&
 		result.Tasks != protocol.CleanupUnconfirmed &&
 		result.Recents != protocol.CleanupUnconfirmed &&
@@ -317,13 +322,18 @@ func (e *Engine) finishCleanup(target cleanupTarget, cleanup *cleanupState, resu
 		result.Tasks != protocol.CleanupPending &&
 		result.Recents != protocol.CleanupPending
 	if complete {
+		result.Error = nil
 		result.State = protocol.CleanupComplete
 	} else {
 		result.State = protocol.CleanupUnconfirmed
 	}
 	*cleanup = result
 	if cleanup.done != nil {
-		close(cleanup.done)
+		select {
+		case <-cleanup.done:
+		default:
+			close(cleanup.done)
+		}
 	}
 	if complete {
 		if e.session != nil && e.session.Epoch == target.epoch {
@@ -356,6 +366,7 @@ func (e *Engine) finishCleanup(target cleanupTarget, cleanup *cleanupState, resu
 		}
 	}
 	e.persistAsync()
+	e.launchExecutionCleanupRecheck()
 }
 
 // tasksOnDisplayByTaskList reads the complete task list and filters one
@@ -412,15 +423,26 @@ func (e *Engine) removeRecoveryTasks(ctx context.Context, displayID int) (bool, 
 // removeOwnedTasks removes every live task on the owned virtual display in at
 // most three bounded sweeps, then verifies the live task list and RecentTasks
 // index. It never touches display 0 or another session display.
-func (e *Engine) removeOwnedTasks(ctx context.Context, displayID int) (tasksOK, recentsOK bool) {
+func (e *Engine) removeOwnedTasks(ctx context.Context, displayID int, original []taskEntry) (tasksOK, recentsOK bool, checked []int) {
 	if displayID <= 0 {
-		return false, false
+		return false, false, nil
 	}
 	removed := make(map[int]bool)
+	for _, task := range original {
+		if task.TaskID > 0 {
+			removed[task.TaskID] = true
+		}
+	}
+	defer func() {
+		for id := range removed {
+			checked = append(checked, id)
+		}
+		sort.Ints(checked)
+	}()
 	for sweep := 0; sweep < 3; sweep++ {
 		tasks, known := e.dev.TasksOnDisplay(ctx, displayID)
 		if !known {
-			return false, false
+			return false, false, nil
 		}
 		if len(tasks) == 0 {
 			break
@@ -429,33 +451,35 @@ func (e *Engine) removeOwnedTasks(ctx context.Context, displayID int) (tasksOK, 
 			if task.TaskID <= 0 {
 				continue
 			}
-			if err := e.dev.RemoveTask(ctx, task.TaskID); err == nil {
-				removed[task.TaskID] = true
+			if !removed[task.TaskID] && len(removed) >= 256 {
+				return false, false, nil
 			}
+			removed[task.TaskID] = true
+			_ = e.dev.RemoveTask(ctx, task.TaskID)
 		}
 		timer := time.NewTimer(120 * time.Millisecond)
 		select {
 		case <-timer.C:
 		case <-ctx.Done():
 			timer.Stop()
-			return false, false
+			return false, false, nil
 		}
 		timer.Stop()
 	}
 	tasks, known := e.dev.TasksOnDisplay(ctx, displayID)
 	if !known || len(tasks) > 0 {
-		return false, false
+		return false, false, nil
 	}
 	recent, recentsKnown := e.dev.RecentTaskIDs(ctx)
 	if !recentsKnown {
-		return true, false
+		return true, false, nil
 	}
 	for id := range removed {
 		if recent[id] {
-			return true, false
+			return true, false, nil
 		}
 	}
-	return true, true
+	return true, true, nil
 }
 
 func filterCommands(commands []*appCommand, target cleanupTarget) []*appCommand {

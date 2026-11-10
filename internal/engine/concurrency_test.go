@@ -29,9 +29,13 @@ func (d *hookedDevice) StartDisplayHelper(ctx context.Context, commandID, appIns
 	return d.Device.StartDisplayHelper(ctx, commandID, appInstanceID)
 }
 
-func (d *hookedDevice) Tap(ctx context.Context, id, x, y int) error {
+func (d *hookedDevice) Tap(ctx context.Context, id, x, y int) (device.DispatchReceipt, error) {
 	if d.tap != nil {
-		return d.tap(ctx, id, x, y)
+		err := d.tap(ctx, id, x, y)
+		if err != nil {
+			return device.DispatchUnknown, err
+		}
+		return device.DispatchTerminated, nil
 	}
 	return d.Device.Tap(ctx, id, x, y)
 }
@@ -238,7 +242,8 @@ func TestConcurrentClaimHasSingleWinner(t *testing.T) {
 	h.engine.dev = &hookedDevice{Device: h.device, tap: func(ctx context.Context, id, x, y int) error {
 		close(entered)
 		<-release
-		return h.device.Tap(ctx, id, x, y)
+		_, err := h.device.Tap(ctx, id, x, y)
+		return err
 	}}
 	done := make(chan callResult, 1)
 	go func() {

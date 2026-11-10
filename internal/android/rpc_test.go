@@ -272,12 +272,18 @@ func TestTextRPCArgumentOrder(t *testing.T) {
 	if read.CandidateCount != 1 || read.Value == nil || *read.Value != "old" || read.Issued || read.Accepted {
 		t.Fatalf("read=%+v", read)
 	}
+	if read.Receipt != device.DispatchUnknown {
+		t.Fatalf("read receipt=%d", read.Receipt)
+	}
 	written, err := d.SetTextOnDisplay(context.Background(), target, "hello")
 	if err != nil {
 		t.Fatalf("SetTextOnDisplay: %v", err)
 	}
 	if written.CandidateCount != 1 || !written.Issued || !written.Accepted || written.Value != nil {
 		t.Fatalf("written=%+v", written)
+	}
+	if written.Receipt != device.DispatchTerminated {
+		t.Fatalf("written receipt=%d", written.Receipt)
 	}
 	if len(calls) != 2 {
 		t.Fatalf("calls=%d", len(calls))
@@ -317,11 +323,75 @@ func TestTextRPCRejectsIncompleteTargetBeforeDevice(t *testing.T) {
 	}))
 	defer server.Close()
 	d := rpcDevice(t, server)
-	if _, err := d.GetTextOnDisplay(context.Background(), device.TextTarget{DisplayID: 1, Width: 10, Height: 10}); CodeOf(err) != CodeInvalidArgs {
+	target := device.TextTarget{DisplayID: 1, Width: 10, Height: 10}
+	if _, err := d.GetTextOnDisplay(context.Background(), target); CodeOf(err) != CodeInvalidArgs {
 		t.Fatalf("code=%q", CodeOf(err))
+	}
+	result, err := d.SetTextOnDisplay(context.Background(), target, "hello")
+	if CodeOf(err) != CodeInvalidArgs || result.Receipt != device.DispatchNotDispatched {
+		t.Fatalf("set result=%+v code=%q err=%v", result, CodeOf(err), err)
 	}
 	if hits != 0 {
 		t.Fatal("an incomplete target must not reach the server")
+	}
+}
+
+func TestSetTextRequiresCompleteMatchingResult(t *testing.T) {
+	target := device.TextTarget{
+		DisplayID: 61,
+		Package:   "com.example.app",
+		Bounds:    device.Rect{Left: 0, Top: 100, Right: 1080, Bottom: 220},
+		Width:     1080,
+		Height:    2400,
+	}
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"wrong jsonrpc", `{"jsonrpc":"1.0","id":1,"result":{"candidateCount":1,"value":null,"issued":true,"accepted":true}}`},
+		{"wrong id", `{"jsonrpc":"2.0","id":2,"result":{"candidateCount":1,"value":null,"issued":true,"accepted":true}}`},
+		{"missing count", `{"jsonrpc":"2.0","id":1,"result":{"value":null,"issued":true,"accepted":true}}`},
+		{"count type", `{"jsonrpc":"2.0","id":1,"result":{"candidateCount":"1","value":null,"issued":true,"accepted":true}}`},
+		{"missing value", `{"jsonrpc":"2.0","id":1,"result":{"candidateCount":1,"issued":true,"accepted":true}}`},
+		{"value type", `{"jsonrpc":"2.0","id":1,"result":{"candidateCount":1,"value":7,"issued":true,"accepted":true}}`},
+		{"missing issued", `{"jsonrpc":"2.0","id":1,"result":{"candidateCount":1,"value":null,"accepted":true}}`},
+		{"issued type", `{"jsonrpc":"2.0","id":1,"result":{"candidateCount":1,"value":null,"issued":1,"accepted":true}}`},
+		{"missing accepted", `{"jsonrpc":"2.0","id":1,"result":{"candidateCount":1,"value":null,"issued":true}}`},
+		{"accepted type", `{"jsonrpc":"2.0","id":1,"result":{"candidateCount":1,"value":null,"issued":true,"accepted":"true"}}`},
+		{"jsonrpc error", `{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"failed"}}`},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.WriteString(w, testCase.body)
+			}))
+			defer server.Close()
+			d := rpcDevice(t, server)
+			result, err := d.SetTextOnDisplay(t.Context(), target, "hello")
+			if err == nil || result.Receipt != device.DispatchUnknown {
+				t.Fatalf("result=%+v err=%v", result, err)
+			}
+		})
+	}
+}
+
+func TestSetTextSemanticRejectionStillTerminates(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{"candidateCount":0,"value":null,"issued":false,"accepted":false}}`)
+	}))
+	defer server.Close()
+	d := rpcDevice(t, server)
+	target := device.TextTarget{
+		DisplayID: 61,
+		Package:   "com.example.app",
+		Bounds:    device.Rect{Left: 0, Top: 100, Right: 1080, Bottom: 220},
+		Width:     1080,
+		Height:    2400,
+	}
+	result, err := d.SetTextOnDisplay(t.Context(), target, "hello")
+	if err != nil || result.Receipt != device.DispatchTerminated ||
+		result.Issued || result.Accepted || result.CandidateCount != 0 {
+		t.Fatalf("result=%+v err=%v", result, err)
 	}
 }
 

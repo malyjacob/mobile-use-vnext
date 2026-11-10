@@ -9,7 +9,8 @@ param(
     [string[]]$McpAllowedOrigins = @(),
     [switch]$SkipPhoneMcp,
     [switch]$SkipBuild,
-    [switch]$SkipOldServiceStop
+    [switch]$SkipOldServiceStop,
+    [switch]$PrepareUIRecovery
 )
 
 $ErrorActionPreference = 'Stop'
@@ -557,6 +558,7 @@ $headers = @{
 }
 $deadline = (Get-Date).AddSeconds(90)
 $ready = $false
+$checkpointPrepared = $false
 $lastStatus = $null
 $health = $null
 $versionMismatch = ''
@@ -575,6 +577,21 @@ while ((Get-Date) -lt $deadline) {
         $versionMismatch = "health release=$healthRelease contract=$healthContract; manifest release=$releaseVersion contract=$contractVersion"
         break
     }
+    $recoveryView = Get-Field $lastStatus 'recovery'
+    if ($PrepareUIRecovery) {
+        if (-not [bool](Get-Field $lastStatus 'can_start') -and
+            [string](Get-Field $lastStatus 'blocking_code') -eq 'ui_input_reboot_required' -and
+            [string](Get-Field $recoveryView 'entry') -eq 'user' -and
+            [string](Get-Field $recoveryView 'reference') -eq 'none') {
+            $checkpointPrepared = $true
+            break
+        }
+        if ([bool](Get-Field $lastStatus 'can_start')) {
+            throw 'UI checkpoint preparation was requested, but no UI recovery checkpoint is pending. Run normal deployment.'
+        }
+        Start-Sleep -Milliseconds 500
+        continue
+    }
     if ([bool](Get-Field $lastStatus 'can_start')) {
         $ready = $true
         break
@@ -584,10 +601,19 @@ while ((Get-Date) -lt $deadline) {
 if ($versionMismatch -ne '') {
     throw "Deployed service does not match the verified manifest: $versionMismatch"
 }
+if ($checkpointPrepared) {
+    Write-Output "UI recovery checkpoint: SAVED (release=$releaseVersion contract=$contractVersion)"
+    Write-Output 'Deployment staged; can_start=false. Arrange one phone reboot, then run deploy.ps1 -SkipBuild without -PrepareUIRecovery.'
+    Write-Output 'Recovery barrier and deployment readiness: NOT CONFIRMED'
+    return
+}
 if (-not $ready) {
     $diagnostic = ''
     if ($null -ne $lastStatus) {
-        $diagnostic = $lastStatus | ConvertTo-Json -Depth 8
+        $cleanupView = Get-Field $lastStatus 'cleanup'
+        $diagnostic = 'blocking_code={0} cleanup_state={1} execution={2}' -f
+            (Get-Field $lastStatus 'blocking_code'), (Get-Field $cleanupView 'state'),
+            (Get-Field $cleanupView 'execution')
     }
     throw "Service did not become start-ready. Last status: $diagnostic"
 }

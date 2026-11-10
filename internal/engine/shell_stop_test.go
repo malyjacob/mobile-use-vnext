@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,6 +16,12 @@ import (
 func TestShellStopDuringRunIsBoundedAndPromotesCleanup(t *testing.T) {
 	h := newHarness(t)
 	first := h.startSession()
+	var physicalRechecks atomic.Int32
+	h.engine.dev = &hookedDevice{Device: h.device, tasks: func(ctx context.Context) ([]device.Task, error) {
+		physicalRechecks.Add(1)
+		return h.device.TaskList(ctx)
+	}}
+	h.device.recentKnown = true
 	h.engine.cfg.ShellTimeout = 5 * time.Second
 	h.engine.cfg.ShellConfirmTimeout = 300 * time.Millisecond
 
@@ -68,6 +75,8 @@ func TestShellStopDuringRunIsBoundedAndPromotesCleanup(t *testing.T) {
 			h.engine.cleanup.ExecReason == "shell_chain"
 	})
 
+	readsBeforeTermination := physicalRechecks.Load()
+	h.sync(nil, nil)
 	close(gate)
 	var call shellCall
 	select {
@@ -107,6 +116,9 @@ func TestShellStopDuringRunIsBoundedAndPromotesCleanup(t *testing.T) {
 	h.engine.mu.Unlock()
 	if cleanupError != nil {
 		t.Fatalf("promoted cleanup kept a stale error: %+v", cleanupError)
+	}
+	if physicalRechecks.Load() <= readsBeforeTermination {
+		t.Fatal("shell termination reused physical facts from before its end boundary")
 	}
 
 	h.engine.mu.Lock()

@@ -15,7 +15,7 @@
 | 方法 | 所有业务端点只接受 `POST`；其他方法返回 `405`，错误码 `invalid_request` |
 | 认证 | `/api/*` 用 `agent_token`；`/v1/control/*` 用 `control_token`；`Authorization: Bearer <token>` |
 | 身份隔离 | agent token 不能访问 `/v1/control/*`，control token 不能访问 `/api/*`；错误为 `401 unauthorized` |
-| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 3`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
+| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 4`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
 | 预分配 P | `/api/*` 可带 `X-Mobile-Use-Operation: P…`；缺省由服务分配。`status` 不使用该头 |
 | 请求体 | 必须是一个 JSON 对象；大小上限：`start`/`status`/`end` 16 KiB，`observe` 32 KiB，`act` 64 KiB，`inspect`/`keepalive`/`diagnose`/`apps`/`open_app` 8 KiB，`notify` 16 KiB，`shell` 32 KiB，`sync` 32 KiB，`stop` 8 KiB |
 | 响应 | `Content-Type: application/json; charset=utf-8`，`Cache-Control: no-store` |
@@ -180,11 +180,13 @@ HTTP 状态映射（`protocol.Status`）：
 
 - `can_start` 必出；`false` 时必有 `blocking_code`（可能是稳定错误码，也可能是内部原因串：
   `recovery_pending`、`old_resource_unconfirmed`、`control_sync_pending`、
-  `ledger_unavailable`、`ledger_corrupt`、`no_display_recorded`、`cleanup_pending`）；
+  `ledger_unavailable`、`ledger_corrupt`、`no_display_recorded`、`cleanup_pending`、
+  `ui_input_unconfirmed`、`ui_input_reboot_required`）；
 - 会话属于本 Agent 时带 `session` 与 `start_operation_id`；会话已结束但收尾未完成时，
   同一 Agent 也会看到 `lastSession`；
-- 有收尾记录时带 `cleanup`；存在待处理的恢复记录时带 `recovery`（`entry=status`；有
-  `start_operation_id` 时 `reference=P`，否则 `reference=none`）。
+- 有收尾记录时带 `cleanup`；一般遗留资源恢复记录的 `recovery` 为 `entry=status`，有
+  `start_operation_id` 时 `reference=P`，否则 `reference=none`。
+  `ui_input_reboot_required` 则使用 `entry=user/reference=none`。
 
 **观察状态（reference=O）**
 
@@ -390,7 +392,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 
 | 字段 | 必填 | 类型 | 说明 |
 | --- | --- | --- | --- |
-| `contract_version` | 是 | 字符串 | 必须为 `"3"`，否则 `409 contract_mismatch` |
+| `contract_version` | 是 | 字符串 | 必须为 `"4"`，否则 `409 contract_mismatch` |
 | `app_instance_id` | 是 | UUID | App 进程实例；变化会撤销旧归属 |
 | `app_version` | 是 | 字符串 | 仅发行标识 |
 | `selected_mode` | 是 | `virtual`/`primary` | 用户选择 |
@@ -417,7 +419,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 
 ```json
 {
-  "contract_version": "3",
+  "contract_version": "4",
   "service_instance_id": "…",
   "control": {
     "revision": 42,
@@ -450,7 +452,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 ## 9. `POST /v1/control/stop`
 
 ```json
-{"contract_version":"3","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
+{"contract_version":"4","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
 ```
 
 - **不校验普通契约**：`contract_version` 字段存在但不参与准入，服务与 App 契约版本
@@ -460,7 +462,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 - 重复或过期 `seq` 不报错，只返回 `state=duplicate`。
 
 ```json
-{"contract_version":"3","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
+{"contract_version":"4","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
 ```
 
 `accepted` 恒为 `true`；`state` 为 `revoked`（绑定时撤销了活动会话）、`recorded`
@@ -473,7 +475,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 无认证，只表示进程可应答，不代表设备就绪或资源干净：
 
 ```json
-{"status":"ok","contract_version":"3","service_instance_id":"…","release_version":"…"}
+{"status":"ok","contract_version":"4","service_instance_id":"…","release_version":"…"}
 ```
 
 ## 11. 数据对象
@@ -553,12 +555,19 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 "session": {"origin":"P1","state":"ended","mode":"virtual","agent":"local-agent",
   "started_at":"…","ended_at":"…","reason":"user_stop"}
 "cleanup": {"state":"complete","execution":"confirmed","tasks":"confirmed",
-  "recents":"not_applicable","display":"confirmed","error":{"code":"…","message":"…"}}
+  "recents":"not_applicable","display":"confirmed"}
 ```
 
 `cleanup.error` 只在存在未确认项时出现（`pending` 或 `unconfirmed` 都可能带），`code` 可能是
 内部原因串：`execution_unconfirmed`、`display_create_unconfirmed`、`task_remove_unconfirmed`、
 `recents_cleanup_unconfirmed`、`display_release_unconfirmed`。
+
+`execution` 表达输入调用/执行链的终结证据，独立于原操作的 `outcome`。启动调用已经结束但
+任务归属未确认时，原 P 保持 `uncertain`，不会因此持续占用 execution 屏障。真实缺回执时
+普通工作立即 `device_busy`；后观察、显示消失或另一 shell 完成都不能代替原调用证据。
+旧记录的启动 checkpoint 耐久保存后，`status.blocking_code=ui_input_reboot_required`、
+`recovery.entry=user/reference=none`；用户重启手机后仍须通过其余恢复门。保存失败优先报告
+账本不安全，不能以 checkpoint 已准备完成指引重启。
 
 ## 12. 发现、应用、只读、通知与受管执行工具
 

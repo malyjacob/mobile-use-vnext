@@ -145,17 +145,18 @@ type Device interface {
 	CaptureImage(ctx context.Context, sfid uint64) (device.ImageSource, error)
 	Foreground(ctx context.Context, displayID int) (device.Foreground, error)
 	TaskList(ctx context.Context) ([]device.Task, error)
-	Tap(ctx context.Context, displayID, x, y int) error
-	LongPress(ctx context.Context, displayID, x, y int) error
-	Swipe(ctx context.Context, displayID, x1, y1, x2, y2 int) error
-	Key(ctx context.Context, displayID int, key string) error
+	ExecutionIdentity(ctx context.Context) (device.BootIdentity, error)
+	Tap(ctx context.Context, displayID, x, y int) (device.DispatchReceipt, error)
+	LongPress(ctx context.Context, displayID, x, y int) (device.DispatchReceipt, error)
+	Swipe(ctx context.Context, displayID, x1, y1, x2, y2 int) (device.DispatchReceipt, error)
+	Key(ctx context.Context, displayID int, key string) (device.DispatchReceipt, error)
 	GetTextOnDisplay(ctx context.Context, target device.TextTarget) (device.TextResult, error)
 	SetTextOnDisplay(ctx context.Context, target device.TextTarget, text string) (device.TextResult, error)
 	StartDisplayHelper(ctx context.Context, commandID, appInstanceID string) error
 	AppList(ctx context.Context) ([]device.AppEntry, error)
 	ResolveLauncher(ctx context.Context, pkg string) (string, bool, error)
 	LaunchApp(ctx context.Context, displayID int, component string) (device.LaunchResult, error)
-	FocusTask(ctx context.Context, taskID int) error
+	FocusTask(ctx context.Context, taskID int) (device.DispatchReceipt, error)
 	RemoveTask(ctx context.Context, taskID int) error
 	RecentTaskIDs(ctx context.Context) (map[int]bool, bool)
 	TasksOnDisplay(ctx context.Context, displayID int) ([]device.Task, bool)
@@ -231,14 +232,20 @@ type Engine struct {
 	messagePersistMu sync.Mutex // serializes message-box snapshot + Save
 	messageStore     MessageStore
 
-	startedAt       time.Time
-	blockedReason   string // permanent blocker (corrupt ledger)
-	recovering      bool
-	recovery        *Ledger // original ledger evidence being resolved
-	recoveryReason  string
-	recoveryLoading bool
-	recoveryRunning bool
-	deviceReady     bool
+	startedAt                 time.Time
+	blockedReason             string // permanent blocker (corrupt ledger)
+	recovering                bool
+	recovery                  *Ledger // original ledger evidence being resolved
+	recoveryReason            string
+	recoveryLoading           bool
+	recoveryRunning           bool
+	deviceReady               bool
+	deviceIdentityRevision    uint64
+	ui                        *uiDispatchState
+	legacyUI                  *LedgerUICheckpoint
+	uiCheckpointReady         bool
+	executionEvidenceRevision uint64
+	uiReconciling             bool
 
 	app       appState
 	appNotify chan struct{}
@@ -326,7 +333,8 @@ type sessionState struct {
 	CreateError      string
 	ExpireTimer      *time.Timer
 	CleanupStarted   bool
-	ExecutionUnknown bool // survives release of an uncertain ordinary work slot
+	ExecutionUnknown bool // diagnostic projection; UI tokens and shell identities own the barrier
+	InputIdentity    device.BootIdentity
 	// Tasks is the virtual-session window registry. It is a cache rebuilt from
 	// live task reads, keyed by task id; primary sessions never populate it.
 	Tasks []taskEntry
@@ -400,6 +408,8 @@ type workState struct {
 	// DispatchUnknown records input that may have reached Android without a
 	// confirmed completion. Session cleanup stays unconfirmed while set.
 	DispatchUnknown bool
+	UIStep          uint64
+	UI              *uiDispatchState
 }
 
 type displayOwner struct {
@@ -435,13 +445,15 @@ type cleanupState struct {
 	Recents   string
 	Display   string
 	Reason    string
-	// ExecReason records where the execution uncertainty came from:
-	// ui_input (sticky, as before) or shell_chain (release-of-barrier
-	// evidence can later confirm it). It is not a public field.
-	ExecReason string
-	StartedAt  time.Time
-	Error      *protocol.Error
-	done       chan struct{}
+	// ExecReason attributes uncertainty without allowing one source to clear
+	// another. Checked task IDs carry only original physical closure evidence.
+	ExecReason            string
+	StartedAt             time.Time
+	Error                 *protocol.Error
+	done                  chan struct{}
+	checkedTaskIDs        []int
+	evidenceRevision      uint64
+	needsExecutionRecheck bool
 }
 
 // New constructs an engine with the real monotonic clock.
@@ -485,11 +497,20 @@ func (e *Engine) availabilityLocked(now time.Time) (string, string) {
 	if e.blockedReason != "" {
 		return AvailabilityBlocked, e.blockedReason
 	}
+	if e.ledgerUnsafe {
+		return AvailabilityBlocked, "ledger_unavailable"
+	}
 	if e.recovering || e.recovery != nil {
 		if e.recoveryReason != "" {
 			return AvailabilityRecovering, e.recoveryReason
 		}
 		return AvailabilityRecovering, "recovery_pending"
+	}
+	if e.uiRebootRequiredLocked() {
+		return AvailabilityBlocked, "ui_input_reboot_required"
+	}
+	if e.uiPendingLocked() {
+		return AvailabilityRecovering, "ui_input_unconfirmed"
 	}
 	if e.cleanup != nil {
 		switch e.cleanup.State {
@@ -508,9 +529,6 @@ func (e *Engine) availabilityLocked(now time.Time) (string, string) {
 			return AvailabilityRecovering, "shell_chain_unconfirmed"
 		}
 		return AvailabilityRecovering, "shell_pending"
-	}
-	if e.ledgerUnsafe {
-		return AvailabilityBlocked, "ledger_unavailable"
 	}
 	if !e.deviceReady {
 		return AvailabilityRecovering, protocol.CodeDeviceUnavailable
@@ -539,7 +557,13 @@ func (e *Engine) availabilityLocked(now time.Time) (string, string) {
 // keeps ordinary admission closed while control sync and status stay available.
 func (e *Engine) SetDeviceReady(ready bool) {
 	e.mu.Lock()
+	if e.deviceReady != ready {
+		e.deviceIdentityRevision++
+	}
 	e.deviceReady = ready
+	if !ready && e.session != nil {
+		e.session.InputIdentity = device.BootIdentity{}
+	}
 	e.broadcastAppLocked()
 	e.mu.Unlock()
 }
@@ -687,6 +711,17 @@ func (e *Engine) housekeeping(ctx context.Context) {
 	if needsRecovery {
 		e.driveRecovery(ctx)
 	}
+	e.mu.Lock()
+	token := e.ui
+	retryUI := token != nil && token.record.State != "may_dispatch" && !token.durable && !token.saving && e.work == nil && !e.shuttingDown
+	if retryUI {
+		e.wg.Add(1)
+	}
+	e.mu.Unlock()
+	if retryUI {
+		go func() { defer e.wg.Done(); e.persistUIReceipt(token) }()
+	}
+	e.launchExecutionCleanupRecheck()
 }
 
 // Shutdown closes ordinary admission, revokes the original session, starts the

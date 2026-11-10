@@ -82,7 +82,7 @@ SDK/JDK（构建 App 用）；chroot 已存在且可 `su` 进入。
    并重试）；
 8. 建立 `adb forward tcp:18881 tcp:18880` 与 `tcp:18883 tcp:18882`，轮询 `/health` 与
    `/api/status`，要求 `/health` 的 release/contract 与清单一致且 `can_start=true`；90 秒
-   未就绪则失败并打印最后一次 `status`。安装后的 App versionName/versionCode 必须与清单
+   未就绪则失败并打印受控阻塞枚举。安装后的 App versionName/versionCode 必须与清单
    一致。默认部署安装并启动手机 MCP 适配器；`-SkipPhoneMcp` 只用于显式跳过（此时部署不
    完整，手机内 MCP 不可用）。
 
@@ -92,6 +92,13 @@ STOP 可用与 MCP 宿主已重新发现工具。手机适配器的安装/监听
 
 部署不会创建 chroot、不会安装 Magisk、不会修改系统 IME 设置。升级服务或 App 后必须让新
 进程重新启动，旧进程会继续使用旧二进制与旧配置。
+
+旧 UI 执行记录要求启动 checkpoint 时，分两步升级：先运行
+`./scripts/deploy.ps1 -SkipBuild -PrepareUIRecovery`，要求清单核验和版本匹配后报告
+`UI recovery checkpoint: SAVED`。这一步保持 `can_start=false`，不表示发布就绪。
+用户安排一次手机重启，恢复设备连接与 chroot 服务后，再运行
+`./scripts/deploy.ps1 -SkipBuild` 完成正常就绪验证。checkpoint、账本、App 私有数据均保留；
+若阻塞原因不同，准备模式也不会把它视为成功。旧二进制拒绝 v2 账本，回滚须使用兼容 v2 的构建。
 
 ## 4. 启动、停止、状态
 
@@ -140,7 +147,7 @@ adb -s 127.0.0.1:5555 forward tcp:18881 tcp:18880
 curl -s http://127.0.0.1:18881/health
 ```
 
-`/health` 无认证，返回 `status`、`contract_version`（当前 `"3"`）、`service_instance_id`、
+`/health` 无认证，返回 `status`、`contract_version`（当前 `"4"`）、`service_instance_id`、
 `release_version`。它只证明进程能应答，**不是** `can_start`。
 
 就绪以 `POST /api/status` 为准（令牌从 `.state/deploy.json` 读取，下面用占位符）：
@@ -148,7 +155,7 @@ curl -s http://127.0.0.1:18881/health
 ```bash
 curl -s -X POST http://127.0.0.1:18881/api/status \
   -H "Authorization: Bearer $AGENT_TOKEN" \
-  -H "X-Mobile-Use-Contract: 3" \
+  -H "X-Mobile-Use-Contract: 4" \
   -H "Content-Type: application/json" -d '{}'
 ```
 
@@ -193,13 +200,15 @@ adb -s 127.0.0.1:5555 shell su -c 'tail -n 100 /data/data/com.mobileuse.vnext/fi
 | `can_start=false`、`blocking_code=shell_pending`/`shell_chain_unconfirmed` | 受管命令仍在执行或终止未确认 | 等 `shell` 返回或 `status` 的 `shell.termination` 确认；不要 kill 进程或删运行目录 |
 | `can_start=false`、`blocking_code=cleanup_unconfirmed` | 上一个会话的显示/任务/执行链未确认释放 | 保持服务运行，用 `status` 看 `cleanup` 五项；确认 App 在线并收到 `close_display`、`dumpsys` 中旧屏已消失；必要时 `end` 原会话等待收尾。不要删账本、不要用重启绕过门禁 |
 | `can_start=false`、`blocking_code=cleanup_pending` | 收尾仍在进行 | 等待收尾；此期间同步仍会投递 `close_display`，但 `start` 被阻塞 |
+| `can_start=false`、`blocking_code=ui_input_unconfirmed` | 原 UI 调用仍缺终结证据 | 普通工作保持 busy；status/STOP/end 可用，不重放原动作 |
+| `can_start=false`、`blocking_code=ui_input_reboot_required` | UI 责任或 legacy checkpoint 已耐久保存，等待设备启动边界证据 | 安排一次手机重启并保留账本；随后核验 App/任务/recents/显示，不能只重启适配器或服务 |
 | `can_start=false`、`blocking_code=old_resource_unconfirmed` / `recovery_pending` | 重启后旧归属未核验完 | 等 App 恢复心跳与模式；恢复先要求 App 同步，再核验旧 display、`close_display` 回执/消失与 TaskList；显示仍在但 App 实例不匹配、TaskList 失败或旧 display 仍有任务时保持阻塞，不能强行 `start`。旧显示不存在也不能只凭一次 absent 放行 |
 | `can_start=false`、`blocking_code=ledger_corrupt` / `ledger_unavailable` | 账本损坏或不可写 | 检查 `/var/lib/mobile-use-vnext` 权限与磁盘；损坏账本需要明确的人工处置（移走并重新部署），不能带病启动 |
 | `can_start=false`、`blocking_code=device_busy` | 已有普通工作（start/observe/act/apps/open_app/shell）在进行 | 等该操作完成或用 `status` 查 `blocking_operation_id`；不建队列，不重试并发动作 |
 | `can_start=false`、`blocking_code=device_locked` / `device_not_interactive` | 锁屏或熄屏 | 解锁并点亮屏幕；服务不绕过锁屏 |
 | `can_start=false`、`blocking_code=control_revoked` | 收到 STOP 后未完成一次新同步 | 等 App 下一拍同步（不再携带 `stop_pending`）后再 `start` |
 | `can_start=false`、`blocking_code=mode_not_selected`/`stop_unavailable` | App 模式/通知/停止通道不可用 | 在 App 选择虚拟屏或确认主屏共享；授予通知权限并确认通知频道可用 |
-| `409 contract_mismatch` | `X-Mobile-Use-Contract` 缺失/不是 `3`，或 App 契约版本不符；错误体带 `recovery`（`entry=update`、`reference=none`） | 服务与客户端必须同为 `contract_version=3`；升级整组产物，不要只升一侧 |
+| `409 contract_mismatch` | `X-Mobile-Use-Contract` 缺失/不是 `4`，或 App 契约版本不符；错误体带 `recovery`（`entry=update`、`reference=none`） | 服务与客户端必须同为 `contract_version=4`；升级整组产物，不要只升一侧 |
 | `401 unauthorized` | Bearer 令牌错误，或用了另一身份的令牌 | 从私有配置核对 agent/control 令牌；两者不能互换 |
 | 主机 `18883/mcp` 不通或 401 | 手机适配器未运行、转发失效、填错 token | 看 `device-mcp.log` 与 `pgrep`；重建 `adb forward tcp:18883 tcp:18882`；手机路径填 `.state/deploy.json` 的 `mcp_token` |
 | MCP 客户端 403 | `Origin` 未在 `allowed_origins` | 部署时用 `-McpAllowedOrigins` 精确放行并重启适配器；不要填 `*` |

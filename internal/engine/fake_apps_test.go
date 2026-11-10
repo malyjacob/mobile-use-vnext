@@ -52,14 +52,21 @@ func (f *fakeDevice) LaunchApp(_ context.Context, displayID int, component strin
 		}
 		f.tasks = append(f.tasks, task)
 	}
-	return device.LaunchResult{State: state}, nil
+	receipt := device.DispatchTerminated
+	if state == device.LaunchUnknown {
+		receipt = device.DispatchUnknown
+	}
+	if state == device.LaunchNotStarted {
+		receipt = device.DispatchNotDispatched
+	}
+	return device.LaunchResult{State: state, Receipt: receipt}, nil
 }
 
-func (f *fakeDevice) FocusTask(_ context.Context, taskID int) error {
+func (f *fakeDevice) FocusTask(_ context.Context, taskID int) (device.DispatchReceipt, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.focusCalls = append(f.focusCalls, taskID)
-	return f.focusErr
+	return device.DispatchTerminated, f.focusErr
 }
 
 func (f *fakeDevice) RemoveTask(_ context.Context, taskID int) error {

@@ -65,8 +65,8 @@ PowerShell、docs 或 Manifest 中另写一份版本号；`contract_version` 只
 {
   "format": "mobile-use-vnext-release",
   "version": 1,
-  "release_version": "0.4.1",
-  "contract_version": 3,
+  "release_version": "0.4.3",
+  "contract_version": 4,
   "source_commit": "<40 位提交>",
   "source_dirty": false,
   "built_at": "…",
@@ -74,7 +74,7 @@ PowerShell、docs 或 Manifest 中另写一份版本号；`contract_version` 只
   "go_experiment": "jsonv2",
   "build_target": {"goos": "linux", "goarch": "arm64", "cgo_enabled": false},
   "mcp": {"sdk": "github.com/modelcontextprotocol/go-sdk v1.8.0", "protocol": "2026-07-28"},
-  "android": {"package": "com.mobileuse.vnext", "version_name": "0.4.1", "version_code": 4},
+  "android": {"package": "com.mobileuse.vnext", "version_name": "0.4.3", "version_code": 6},
   "tool_catalog": {"count": 12, "sha256": "…"},
   "artifacts": [{"name": "device-service", "path": "device-service", "sha256": "…", "bytes": 0}]
 }
@@ -102,6 +102,8 @@ PowerShell、docs 或 Manifest 中另写一份版本号；`contract_version` 只
    MCP 适配器进程的 `/proc/<pid>/exe` SHA-256 与清单一致。脚本不读取实例身份或显示模式，
    二者由控制端与运行手册另行确认。宿主托管的 stdio 适配器若仍持有旧二进制，部署脚本
    明确告警，必须重启宿主 MCP 进程。默认虚拟屏，主屏共享需要用户重新确认。
+   `-PrepareUIRecovery` 只接受已保存的 UI checkpoint 与 `user/none` 指引，保持不可准入，
+   不完成发布；用户安排手机重启后再运行正常部署验证。
 5. 重启实际 MCP 宿主进程/连接，使宿主重新发现工具目录；不能只替换磁盘文件或依赖
    `list_changed` 通知。手机适配器默认随部署安装并启动，主机自建适配器可选。
 6. 条件成立才报告完成；分别记录版本匹配、App 配对、恢复屏障、STOP 可用、MCP 宿主刷新与

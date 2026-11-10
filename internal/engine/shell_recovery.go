@@ -75,6 +75,7 @@ func (e *Engine) completeShellRecovery(run *shellState, termination string,
 	}
 	now := time.Now()
 	e.mu.Lock()
+	e.noteShellTerminalLocked(run)
 	run.State, run.Phase = ShellConfirmed, "previous_instance"
 	run.Termination, run.ExitCode = termination, exitCode
 	run.ConfirmedAt = now
@@ -115,7 +116,7 @@ func (e *Engine) completeShellRecovery(run *shellState, termination string,
 // an absent Shell record together with exec_reason=shell_chain is release
 // evidence recorded by a previous pass; only the closure write was lost.
 func (e *Engine) promoteOrphanShellCleanup(record *Ledger) {
-	if record == nil || record.Cleanup == nil || record.Shell != nil {
+	if record == nil || record.Cleanup == nil || record.Shell != nil || record.LegacyUI != nil || record.UI != nil && record.UI.State == "may_dispatch" {
 		return
 	}
 	if record.Cleanup.ExecReason != "shell_chain" ||
@@ -130,6 +131,9 @@ func (e *Engine) promoteOrphanShellCleanup(record *Ledger) {
 	if e.cleanup != nil && e.cleanup.ExecReason == "shell_chain" &&
 		e.cleanup.Execution == protocol.CleanupUnconfirmed {
 		e.cleanup.Execution = protocol.CleanupConfirmed
+		e.executionEvidenceRevision++
+		e.cleanup.needsExecutionRecheck = e.cleanup.needsExecutionRecheck || e.session != nil ||
+			record.PendingClose != nil || record.PendingCreate != nil || len(record.Tasks) > 0
 		if e.cleanup.Error != nil && e.cleanup.Error.Code == "execution_unconfirmed" {
 			e.cleanup.Error = nil
 		}

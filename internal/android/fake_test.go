@@ -20,11 +20,17 @@ import (
 // recorded transcript instead of running the suite. The sentinel carries a
 // short digest of the transcript name and never any user text.
 const fakeSentinelEnv = "MOBILE_USE_ADB_STUB"
+const fakeCallCountEnv = "MOBILE_USE_FAKE_ADB_CALLS"
 
 // fakeTranscripts is every replay the tests can select.
 var fakeTranscripts = []string{
 	"argv-record", "exit3", "remote-hash", "screenshot", "input",
-	"hang", "probe", "capture", "applist", "launch", "shell",
+	"input-exit", "input-transport", "hang", "probe", "capture",
+	"applist", "launch", "launch-rejected", "launch-exit",
+	"launch-missing", "launch-transport",
+	"focus-exit", "shell", "identity-comma", "identity-lines",
+	"features-missing", "features-partial", "identity-bad-device",
+	"identity-bad-boot",
 }
 
 // fakeDigestOf returns the sentinel value for one transcript.
@@ -56,7 +62,8 @@ func fakeEnv(transcript string) []string {
 	env := make([]string, 0, len(os.Environ())+2)
 	for _, entry := range os.Environ() {
 		if strings.HasPrefix(entry, fakeSentinelEnv+"=") ||
-			strings.HasPrefix(entry, "MOBILE_USE_FAKE_ADB_ARGV=") {
+			strings.HasPrefix(entry, "MOBILE_USE_FAKE_ADB_ARGV=") ||
+			strings.HasPrefix(entry, fakeCallCountEnv+"=") {
 			continue
 		}
 		env = append(env, entry)
@@ -118,6 +125,13 @@ func runStub(transcript string) int {
 	if path := os.Getenv("MOBILE_USE_FAKE_ADB_ARGV"); path != "" && invocation.verb == "shell" {
 		_ = os.WriteFile(path, []byte(strings.Join(os.Args[1:], "\n")+"\n"), 0o644)
 	}
+	if path := os.Getenv(fakeCallCountEnv); path != "" {
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if err == nil {
+			_, _ = file.WriteString("1")
+			_ = file.Close()
+		}
+	}
 	if !invocation.ok {
 		return 2
 	}
@@ -130,6 +144,22 @@ func runStub(transcript string) int {
 		return 0
 	case "get-state":
 		_, _ = os.Stdout.WriteString("device\n")
+		return 0
+	case "features":
+		switch transcript {
+		case "identity-comma":
+			_, _ = os.Stdout.WriteString("cmd,shell_v2,stat_v2\n")
+		case "identity-lines":
+			_, _ = os.Stdout.WriteString("cmd\nshell_v2\nstat_v2\n")
+		case "features-missing":
+			_, _ = os.Stdout.WriteString("cmd,stat_v2\n")
+		case "features-partial":
+			_, _ = os.Stdout.WriteString("cmd,shell_v2_extra\n")
+		case "identity-bad-device", "identity-bad-boot":
+			_, _ = os.Stdout.WriteString("shell_v2\n")
+		default:
+			_, _ = os.Stdout.WriteString("shell_v2\n")
+		}
 		return 0
 	case "exec-out":
 		if transcript == "shell" {
@@ -248,6 +278,40 @@ var stubTranscripts = map[string][]stubAnswer{
 		{contains: "dumpsys activity activities", stdout: probeActivities},
 		{contains: "dumpsys window displays", stdout: probeWindows},
 	},
+	"identity-comma":      identityTranscript("device-test", testBootID),
+	"identity-lines":      identityTranscript("device-test", testBootID),
+	"identity-bad-device": identityTranscript("device test", testBootID),
+	"identity-bad-boot":   identityTranscript("device-test", "not-a-boot-id"),
+	"input-exit": {
+		{contains: "input -d", stderr: "error: permission denied\n", exit: 7},
+	},
+	"input-transport": {
+		{contains: "input -d", stderr: "adb: device offline\n", exit: 1},
+	},
+	"launch-rejected": {
+		{contains: "am start", stdout: "Error: Activity not started\n"},
+	},
+	"launch-exit": {
+		{contains: "am start", stderr: "error: launch denied\n", exit: 5},
+	},
+	"launch-missing": {
+		{contains: "am start", stdout: "Activity: com.example.app/.MainActivity\n"},
+	},
+	"launch-transport": {
+		{contains: "am start", stderr: "adb: device offline\n", exit: 1},
+	},
+	"focus-exit": {
+		{contains: "am task focus", stderr: "error: task focus denied\n", exit: 5},
+	},
+}
+
+const testBootID = "01234567-89ab-4cde-8fab-0123456789ab"
+
+func identityTranscript(deviceID, bootID string) []stubAnswer {
+	return []stubAnswer{
+		{contains: "getprop ro.serialno", stdout: deviceID + "\n"},
+		{contains: "/proc/sys/kernel/random/boot_id", stdout: bootID + "\n"},
+	}
 }
 
 // transcriptShell returns the recorded answer for command, preferring the

@@ -90,6 +90,8 @@ type Device struct {
 	// caller-provided capture or input path.
 	mu      sync.Mutex
 	server  *serverProcess
+	execMu  sync.RWMutex
+	shellV2 bool
 	helperA struct {
 		path string
 		uid  int
@@ -264,9 +266,28 @@ func (d *Device) run(ctx context.Context, timeout time.Duration, exe string, arg
 // runInput executes one bounded process with optional stdin bytes. Content
 // passed here is never logged and never appears in the argv.
 func (d *Device) runInput(ctx context.Context, timeout time.Duration, input []byte, exe string, args ...string) (ShellResult, error) {
+	return d.runInputMode(ctx, timeout, input, false, exe, args...)
+}
+
+// runInputMode executes one process. remoteExitKnown is set only after shell v2
+// has been negotiated, where a completed adb shell process carries the remote
+// command's exit status. Transport diagnostics remain errors and therefore
+// never become termination evidence.
+func (d *Device) runInputMode(ctx context.Context, timeout time.Duration, input []byte,
+	remoteExitKnown bool, exe string, args ...string) (ShellResult, error) {
+	result, _, err := d.runInputModeStarted(ctx, timeout, input, remoteExitKnown, exe, args...)
+	return result, err
+}
+
+// runInputModeStarted also reports whether the local process crossed Start.
+// Callers use that boundary to distinguish provably undispatched work from a
+// transport failure after the adb call may have reached the device.
+func (d *Device) runInputModeStarted(ctx context.Context, timeout time.Duration, input []byte,
+	remoteExitKnown bool, exe string, args ...string,
+) (ShellResult, bool, error) {
 	var result ShellResult
 	if err := contextError(ctx); err != nil {
-		return result, err
+		return result, false, err
 	}
 	if timeout <= 0 {
 		timeout = d.timeout
@@ -288,29 +309,61 @@ func (d *Device) runInput(ctx context.Context, timeout time.Duration, input []by
 	if len(d.testEnv) > 0 {
 		cmd.Env = append(os.Environ(), d.testEnv...)
 	}
-	err := cmd.Run()
+	if err := cmd.Start(); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return result, false, contextError(ctx)
+		}
+		return result, false, execFailure(err, false)
+	}
+	err := cmd.Wait()
 	result.Stdout = outBuf.Bytes()
 	result.Stderr = errBuf.Bytes()
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return result, contextError(ctx)
+		return result, true, contextError(ctx)
 	}
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			code := exitErr.ExitCode()
 			result.ExitCode = code
+			if remoteExitKnown {
+				if code < 0 || isADBTransportStderr(result.Stderr) {
+					return result, true,
+						newErr(CodeTransport, "the adb shell transport failed", err)
+				}
+				return result, true, nil
+			}
 			if (code == 1 || code == 2) && len(result.Stdout) == 0 &&
 				len(result.Stderr) > 0 && isADBFailureStderr(result.Stderr) {
 				// adb itself reports device selection and transport failures with
 				// status 1 or 2. Device stdout is never inspected for text and no
 				// byte of it is retained in the error.
-				return result, newErr(CodeTransport, "the adb command failed", err)
+				return result, true, newErr(CodeTransport, "the adb command failed", err)
 			}
-			return result, nil
+			return result, true, nil
 		}
-		return result, execFailure(err, false)
+		return result, true, execFailure(err, false)
 	}
-	return result, nil
+	return result, true, nil
+}
+
+// isADBTransportStderr recognises diagnostics emitted by the adb client before
+// or while establishing a device shell. It deliberately does not match generic
+// device-side "Error:" text, which is useful semantic output after a terminated
+// remote command.
+func isADBTransportStderr(stderr []byte) bool {
+	lower := strings.ToLower(string(stderr))
+	for _, marker := range []string{
+		"adb: ", "cannot connect to daemon", "failed to get feature set",
+		"device not found", "no devices/emulators found",
+		"more than one device/emulator", "device offline",
+		"device unauthorized",
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // isADBFailureStderr recognises adb's own diagnostics.

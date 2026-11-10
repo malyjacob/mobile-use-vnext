@@ -62,49 +62,71 @@ func (d *Device) ResolveLauncher(ctx context.Context, pkg string) (string, bool,
 // task list and foreground record.
 func (d *Device) LaunchApp(ctx context.Context, displayID int, component string) (device.LaunchResult, error) {
 	if d == nil {
-		return device.LaunchResult{State: device.LaunchNotStarted}, errNilDevice
+		return device.LaunchResult{
+			State: device.LaunchNotStarted, Receipt: device.DispatchNotDispatched,
+		}, errNilDevice
 	}
 	if displayID < 0 {
-		return device.LaunchResult{State: device.LaunchNotStarted}, newErr(CodeInvalidArgs, "invalid display id", nil)
+		return device.LaunchResult{
+			State: device.LaunchNotStarted, Receipt: device.DispatchNotDispatched,
+		}, newErr(CodeInvalidArgs, "invalid display id", nil)
 	}
 	if !launcherComponent.MatchString(component) {
-		return device.LaunchResult{State: device.LaunchNotStarted}, newErr(CodeInvalidArgs, "invalid launch component", nil)
+		return device.LaunchResult{
+			State: device.LaunchNotStarted, Receipt: device.DispatchNotDispatched,
+		}, newErr(CodeInvalidArgs, "invalid launch component", nil)
 	}
 	command := "am start -W --display " + strconv.Itoa(displayID) +
 		" -n " + component + " -f " + launchFlags
-	result, err := d.shellWith(ctx, launchTimeout, command)
+	result, receipt, err := d.runShellV2(ctx, launchTimeout, command)
 	if err != nil {
-		return device.LaunchResult{State: device.LaunchUnknown}, err
+		state := device.LaunchUnknown
+		if receipt == device.DispatchNotDispatched {
+			state = device.LaunchNotStarted
+		}
+		return device.LaunchResult{State: state, Receipt: receipt}, err
+	}
+	if receipt != device.DispatchTerminated {
+		return device.LaunchResult{State: device.LaunchUnknown, Receipt: receipt}, nil
 	}
 	if result.ExitCode != 0 {
-		return device.LaunchResult{State: device.LaunchRejected, ExitCode: result.ExitCode}, nil
+		return device.LaunchResult{
+			State: device.LaunchRejected, ExitCode: result.ExitCode,
+			Receipt: device.DispatchTerminated,
+		}, nil
 	}
 	text := string(result.Stdout)
 	if strings.Contains(text, "Error:") || strings.Contains(text, "Permission Denial") {
-		return device.LaunchResult{State: device.LaunchRejected}, nil
+		return device.LaunchResult{
+			State: device.LaunchRejected, Receipt: device.DispatchTerminated,
+		}, nil
 	}
 	if strings.Contains(text, "Status: ok") {
-		return device.LaunchResult{State: device.LaunchAccepted}, nil
+		return device.LaunchResult{
+			State: device.LaunchAccepted, Receipt: device.DispatchTerminated,
+		}, nil
 	}
-	return device.LaunchResult{State: device.LaunchUnknown}, nil
+	return device.LaunchResult{
+		State: device.LaunchUnknown, Receipt: device.DispatchTerminated,
+	}, nil
 }
 
 // FocusTask brings one live leaf task to the front on its own display.
-func (d *Device) FocusTask(ctx context.Context, taskID int) error {
+func (d *Device) FocusTask(ctx context.Context, taskID int) (device.DispatchReceipt, error) {
 	if d == nil {
-		return errNilDevice
+		return device.DispatchNotDispatched, errNilDevice
 	}
 	if taskID <= 0 {
-		return newErr(CodeInvalidArgs, "invalid task id", nil)
+		return device.DispatchNotDispatched, newErr(CodeInvalidArgs, "invalid task id", nil)
 	}
-	result, err := d.shellWith(ctx, taskTimeout, "am task focus "+strconv.Itoa(taskID))
+	result, receipt, err := d.runShellV2(ctx, taskTimeout, "am task focus "+strconv.Itoa(taskID))
 	if err != nil {
-		return err
+		return receipt, err
 	}
 	if result.ExitCode != 0 {
-		return newErr(CodeAvailability, "the task could not be focused", nil)
+		return receipt, exitDetail(result.ExitCode)
 	}
-	return nil
+	return receipt, nil
 }
 
 // RemoveTask removes one leaf task and its RecentTasks entry.

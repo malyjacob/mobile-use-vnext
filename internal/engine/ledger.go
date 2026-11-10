@@ -27,6 +27,16 @@ type Ledger struct {
 	// new ordinary work is admitted. It carries identity, phase and bounded
 	// counters only: never the command, its output, hashes or error strings.
 	Shell *LedgerShell `json:"shell,omitempty"`
+	// UI is the durable identity and minimum end receipt of one UI input
+	// dispatch. It carries ownership and evidence state only, never input text
+	// or command content.
+	UI *LedgerUI `json:"ui,omitempty"`
+	// LegacyUI records the original device and boot identity used to resolve a
+	// version 1 UI execution responsibility.
+	LegacyUI *LedgerUICheckpoint `json:"legacy_ui_checkpoint,omitempty"`
+	// LegacyUIPending preserves the need to establish a legacy UI checkpoint
+	// before any later save can erase the original version-one evidence.
+	LegacyUIPending bool `json:"legacy_ui_pending,omitempty"`
 }
 
 // LedgerShell is the durable identity and minimum end receipt of one managed
@@ -88,6 +98,30 @@ type LedgerTask struct {
 	Proven    bool   `json:"proven"`
 }
 
+// LedgerUI is one durable UI input responsibility. State records only whether
+// dispatch may have occurred or has ended; it never represents the tool's
+// primary outcome.
+type LedgerUI struct {
+	OperationID       string `json:"operation_id"`
+	Origin            string `json:"origin"`
+	Epoch             int64  `json:"epoch"`
+	Step              uint64 `json:"step"`
+	Kind              string `json:"kind"`
+	DisplayID         int    `json:"display_id"`
+	DisplayGeneration string `json:"display_generation"`
+	DeviceID          string `json:"device_id"`
+	BootID            string `json:"boot_id"`
+	State             string `json:"state"`
+}
+
+// LedgerUICheckpoint is the immutable startup boundary for resolving a
+// version 1 UI execution responsibility that lacks dispatch-end evidence.
+type LedgerUICheckpoint struct {
+	Origin   string `json:"origin"`
+	DeviceID string `json:"device_id"`
+	BootID   string `json:"boot_id"`
+}
+
 // LedgerCommand is one display create/close intent saved before it is sent.
 type LedgerCommand struct {
 	ID                string    `json:"id"`
@@ -111,6 +145,9 @@ type LedgerCleanup struct {
 	// release evidence may promote it.
 	ExecReason string    `json:"exec_reason,omitempty"`
 	StartedAt  time.Time `json:"started_at"`
+	// CheckedTaskIDs is bounded cleanup evidence discovered on the original
+	// display. It is not authority or a live task registry.
+	CheckedTaskIDs []int `json:"checked_task_ids,omitempty"`
 }
 
 // LedgerStop is the bound minimal-STOP boundary.
@@ -123,5 +160,5 @@ type LedgerStop struct {
 // Ledger format constants.
 const (
 	ledgerFormat  = "mobile-use-vnext-ledger"
-	ledgerVersion = 1
+	ledgerVersion = 2
 )

@@ -17,6 +17,9 @@ import (
 // ---------------------------------------------------------------- fake device
 
 type fakeDevice struct {
+	bootID         string
+	deviceID       string
+	identityErr    error
 	mu             sync.Mutex
 	width, height  int
 	density        int
@@ -118,7 +121,23 @@ func (f *fakeDevice) StartDisplayHelper(context.Context, string, string) error {
 	f.mu.Unlock()
 	return nil
 }
-func (f *fakeDevice) Tap(_ context.Context, displayID, x, y int) error {
+func (f *fakeDevice) ExecutionIdentity(context.Context) (device.BootIdentity, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.identityErr != nil {
+		return device.BootIdentity{}, f.identityErr
+	}
+	id, boot := f.deviceID, f.bootID
+	if id == "" {
+		id = "device-test"
+	}
+	if boot == "" {
+		boot = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	}
+	return device.BootIdentity{DeviceID: id, BootID: boot}, nil
+}
+
+func (f *fakeDevice) Tap(_ context.Context, displayID, x, y int) (device.DispatchReceipt, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.taps = append(f.taps, [2]int{x, y})
@@ -128,17 +147,19 @@ func (f *fakeDevice) Tap(_ context.Context, displayID, x, y int) error {
 	if x >= 900 && x < 1000 && y >= 100 && y < 200 {
 		f.checked = !f.checked
 	}
-	return nil
+	return device.DispatchTerminated, nil
 }
-func (f *fakeDevice) LongPress(_ context.Context, displayID, x, y int) error {
+func (f *fakeDevice) LongPress(_ context.Context, displayID, x, y int) (device.DispatchReceipt, error) {
 	return f.Tap(nil, displayID, x, y)
 }
-func (f *fakeDevice) Swipe(context.Context, int, int, int, int, int) error { return nil }
-func (f *fakeDevice) Key(_ context.Context, displayID int, key string) error {
+func (f *fakeDevice) Swipe(context.Context, int, int, int, int, int) (device.DispatchReceipt, error) {
+	return device.DispatchTerminated, nil
+}
+func (f *fakeDevice) Key(_ context.Context, displayID int, key string) (device.DispatchReceipt, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.keys = append(f.keys, key)
-	return nil
+	return device.DispatchTerminated, nil
 }
 func (f *fakeDevice) GetTextOnDisplay(context.Context, device.TextTarget) (device.TextResult, error) {
 	f.mu.Lock()
@@ -151,7 +172,7 @@ func (f *fakeDevice) SetTextOnDisplay(_ context.Context, target device.TextTarge
 	defer f.mu.Unlock()
 	f.inputText = text
 	f.texts = append(f.texts, text)
-	return device.TextResult{CandidateCount: 1, Issued: true, Accepted: true}, nil
+	return device.TextResult{CandidateCount: 1, Issued: true, Accepted: true, Receipt: device.DispatchTerminated}, nil
 }
 func (f *fakeDevice) Capture(_ context.Context, display device.Display) (device.Capture, error) {
 	f.mu.Lock()

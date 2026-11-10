@@ -38,6 +38,10 @@ func (e *Engine) Apps(ctx context.Context, agent, p string, req *protocol.AppsRe
 		ttl = 60 * time.Second
 	}
 	e.mu.Lock()
+	if barrier := e.ordinaryBarrierLocked(op); barrier != nil {
+		e.mu.Unlock()
+		return e.finishWithError(op, "admission", barrier), nil
+	}
 	if e.appsCache != nil && e.appsCache.appInstance == e.app.InstanceID &&
 		!e.appsCache.capturedAt.IsZero() && now.Sub(e.appsCache.capturedAt) <= ttl {
 		entries := append([]device.AppEntry(nil), e.appsCache.entries...)

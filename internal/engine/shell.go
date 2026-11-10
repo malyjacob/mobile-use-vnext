@@ -228,6 +228,7 @@ func (e *Engine) Shell(ctx context.Context, agent, p string, req *protocol.Shell
 	}
 	work.DispatchUnknown = true
 	e.session.ExecutionUnknown = true
+	e.executionEvidenceRevision++
 	run.State, run.Phase = ShellDispatched, "dispatch"
 	run.StartedAt = dispatchAt
 	run.DeadlineAt = dispatchAt.Add(e.cfg.ShellTimeout)
@@ -454,12 +455,13 @@ func (e *Engine) finishShellRevoked(op *operationState, work *workState, run *sh
 func (e *Engine) finishShellNotStarted(op *operationState, work *workState, run *shellState,
 	code, message string) *protocol.Result {
 	e.mu.Lock()
+	e.noteShellTerminalLocked(run)
 	run.State, run.Phase = ShellAborted, "not_started"
 	run.Termination = terminationNotStarted
 	run.ConfirmedAt = time.Now()
 	work.DispatchUnknown = false
 	if e.session != nil && e.session.Epoch == run.Epoch {
-		e.session.ExecutionUnknown = false
+		e.session.ExecutionUnknown = e.uiPendingLocked()
 	}
 	if e.shell == run {
 		e.shell = nil
@@ -532,6 +534,7 @@ func (e *Engine) finishShellConfirmed(op *operationState, work *workState, run *
 // release-of-barrier evidence only: the action outcome is never rewritten.
 func (e *Engine) confirmShellBarrier(run *shellState, termination string, exitCode *int) {
 	e.mu.Lock()
+	e.noteShellTerminalLocked(run)
 	run.State, run.Phase = ShellConfirmed, "confirmed"
 	run.Termination, run.ExitCode = termination, exitCode
 	if run.HasDone {
@@ -542,7 +545,7 @@ func (e *Engine) confirmShellBarrier(run *shellState, termination string, exitCo
 	}
 	run.ConfirmedAt = time.Now()
 	if e.session != nil && e.session.Epoch == run.Epoch {
-		e.session.ExecutionUnknown = false
+		e.session.ExecutionUnknown = e.uiPendingLocked()
 	}
 	if e.work != nil && e.work.OperationID == run.OperationID {
 		e.work.DispatchUnknown = false
@@ -552,6 +555,7 @@ func (e *Engine) confirmShellBarrier(run *shellState, termination string, exitCo
 	}
 	e.confirmCleanupBarrierLocked()
 	e.mu.Unlock()
+	e.launchExecutionCleanupRecheck()
 }
 
 // readShellOutput reads the retained prefix exactly once. An unreadable output
@@ -659,7 +663,10 @@ func (e *Engine) addShellSession(op *operationState, result *protocol.Result) {
 // outcome, the session state or any observation.
 func (e *Engine) confirmCleanupBarrierLocked() {
 	cleanup := e.cleanup
-	if cleanup == nil || cleanup.ExecReason != "shell_chain" {
+	if cleanup == nil || e.uiPendingLocked() || e.legacyUI != nil || e.shell != nil && !e.shell.settled() {
+		return
+	}
+	if cleanup.ExecReason == "ui_input" && e.ui == nil {
 		return
 	}
 	if cleanup.Execution != protocol.CleanupUnconfirmed {
@@ -668,19 +675,6 @@ func (e *Engine) confirmCleanupBarrierLocked() {
 	cleanup.Execution = protocol.CleanupConfirmed
 	if cleanup.Error != nil && cleanup.Error.Code == "execution_unconfirmed" {
 		cleanup.Error = nil
-	}
-	if closureComplete(cleanup) {
-		cleanup.State = protocol.CleanupComplete
-		if e.session != nil && e.session.State == SessionEnded {
-			ended := e.session
-			e.lastSession, e.session = ended, nil
-			if e.current != nil && e.current.SessionEpoch == ended.Epoch {
-				e.current = nil
-			}
-			if e.baseline != nil && e.baseline.Origin == ended.Origin {
-				e.baseline = nil
-			}
-		}
 	}
 	// Recovery keeps its own copy of the durable closure facts; mirror the
 	// promotion so the same pass may complete instead of blocking forever.
@@ -693,7 +687,7 @@ func (e *Engine) confirmCleanupBarrierLocked() {
 
 // closureComplete is the single completeness rule for the cleanup five-tuple.
 func closureComplete(cleanup *cleanupState) bool {
-	if cleanup == nil {
+	if cleanup == nil || cleanup.needsExecutionRecheck {
 		return false
 	}
 	return cleanup.Execution != protocol.CleanupPending &&
