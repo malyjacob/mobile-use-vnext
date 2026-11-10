@@ -1,8 +1,9 @@
 # 提案：修复 recents 漏清，并取消旧会话清理失败造成的永久准入封锁
 
-状态：提案，未实现。
+状态：已实现（实现提交 `a6507cc4cec67e6e22b7799ddf93c9315f051caa`，2026-11-11）。
 确认：2026-11-11 用户明确要求按本提案及项目规范实现、发布 0.5.0 并部署手机；范围、风险及数值整体确认。追加约束：实现和部署不重启手机，不卸载、不清 App 数据。
 基线提交：`33241c57080ce4667b0b168f309358b4bd1d9959`（分支 `master`，2026-11-11）。
+实现与验证记录：[cleanup-without-permanent-gate.md](../../verification/cleanup-without-permanent-gate.md)。
 适用范围：虚拟屏/主屏会话的 end、STOP、到期、取消、启动失败和进程恢复；新会话准入、旧执行责任与物理收尾。
 影响范围：`internal/engine`、`internal/android`、`internal/device`、`internal/store`、`internal/protocol`、`internal/mcp`、`internal/client`、`cmd/device-service`、控制 App、发行版本与相关正式文档。
 契约（`/api/*` 字段与 `contract_version`）：改变。建议共同 `contract_version=5`；12 个工具和 Agent 请求/响应字段不增加，改变准入、清理状态、历史引用和恢复语义；内部控制增加精确取消创建命令，私有账本升级为版本 3。
@@ -38,8 +39,8 @@ execution/tasks/display confirmed，recents unconfirmed；新 start 返回 `clea
 
 ### 1.2 证据链
 
-复用[归因与实机恢复记录](../verification/recents-cleanup-lock-investigation.md)和
-[先红 fixture](../verification/fixtures/recents-cleanup-lock-repro.go.txt)，不把推演当作新的验证结论。
+复用[归因与实机恢复记录](../../verification/recents-cleanup-lock-investigation.md)和
+[先红 fixture](../../verification/fixtures/recents-cleanup-lock-repro.go.txt)，不把推演当作新的验证结论。
 
 | 基线位置 | 事实及影响 |
 | --- | --- |
@@ -63,7 +64,7 @@ execution/tasks/display confirmed，recents unconfirmed；新 start 返回 `clea
 旧成功路径和保留未知的三个对照测试通过。Android 原事故最初为何失败仍未唯一定位。
 
 同类核查覆盖 end、STOP、到期、退出、App 实例切换、启动恢复、UI 终结复核和 shell 恢复。
-旧实机验证已经遇到 recents 残留，见[既有记录 §5](../verification/ui-input-execution-evidence.md#5-附加输入检查与最终状态)。
+旧实机验证已经遇到 recents 残留，见[既有记录 §5](../../verification/ui-input-execution-evidence.md#5-附加输入检查与最终状态)。
 
 ### 1.3 为什么直觉会出错
 
@@ -516,19 +517,28 @@ AGENTS.md 第 5/9 条的独占/恢复门禁与本提案一致修订，在 mainte
 
 ## 11. 实现结果（归档时补写）
 
-尚无实现提交；本节不声明任何实现或验收完成。归档时填写实现 hash 和实际验证记录链接。
+实现提交为 `a6507cc4cec67e6e22b7799ddf93c9315f051caa`。发布核验与手机闭环见
+[实现验证记录](../../verification/cleanup-without-permanent-gate.md)。
 
 ### 11.1 已落地
 
 | 提案条目 | 代码落点 |
 | --- | --- |
-| — | 提案阶段，未实现 |
+| 当前会话与退休记录分离，5 秒逻辑交接不等待物理收尾 | `internal/engine/retirement.go`、`internal/engine/engine.go`、`internal/engine/ordinary_admission.go` |
+| recent-only 精确删除与重读、失败分类和每次删除前身份重验 | `internal/android/launch.go`、`internal/device/cleanup.go`、`internal/engine/cleanup.go` |
+| 12 秒、最多三轮、单 I/O 2 秒的有限补偿与停止事实 | `internal/engine/cleanup.go`、`internal/engine/retirement.go` |
+| ledger v3 迁移、8 条/24 KiB 退休详情与 64 KiB 总预算 | `internal/store/ledger.go`、`internal/engine/ledger.go` |
+| current/retired App attempt 分离、异步 CREATE/VERIFY 与精确关闭/取消 | `VirtualDisplayHost.java`、`RootDisplayConnection.java`、`RootDisplayMain.java`、`ControlService.java` |
+| 历史 O/P 投影、未知引用语义、MCP 取消投影与新不透明编号 | `internal/engine/engine.go`、`internal/engine/status.go`、`internal/mcp/server.go` |
+| release `0.5.0`、contract `5`、Android versionCode `7` 与正式文档 | `release/versions.json`、生成常量、`docs/` |
 
 ### 11.2 与提案不同或未执行
 
 | 项 | 结论与理由 |
 | --- | --- |
-| 实现、发布与本提案验收 | 未执行；当前仅获授权起草提案 |
+| 手机 recent-only 窗口构造 | 未能在本次受控验收中稳定构造；recent-only 删除由专项代码测试覆盖，验证记录未把 fake 结果写成手机实测。 |
+| 旧显示未让出资源时的首次新 start | 手机实测第一次立即创建返回当前错误 `display_create_failed`，有限重试成功；提案允许“新会话可尝试”而不保证底层资源立即分配成功，旧 cleanup 未形成永久门禁。 |
+| 任意 root 迟到命令与完全物理沙箱 | 按提案非目标未执行；未知旧设备调用不保证撤回，物理重叠风险仍保留。 |
 
 ---
 

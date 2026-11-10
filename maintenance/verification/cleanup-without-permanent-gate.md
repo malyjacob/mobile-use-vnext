@@ -1,12 +1,12 @@
 # Issue #2：有限善后与取消永久准入门禁
 
-日期：2026-11-11。此记录区分主机测试、源码审查、发布构建和手机实测。
-实现提交与手机结果在实施提交落盘、设备验收后补记；本记录不以计划代替结果。
+日期：2026-11-11。实现提交：`a6507cc4cec67e6e22b7799ddf93c9315f051caa`。
+此记录区分主机测试、源码审查、发布构建和手机实测；不以计划代替结果。
 
 ## 1. 分诊、授权与源头
 
 recent-only 未删除和恢复不推进属于实现缺陷；旧资源未知永久封锁准入属于已批准的设计取舍。
-用户整体确认 [提案](../proposals/cleanup-without-permanent-gate.md)，授权实现、发布、更新 build 并部署；
+用户整体确认 [提案](../proposals/implemented/cleanup-without-permanent-gate.md)，授权实现、发布、更新 build 并部署；
 明确禁止实现和部署过程重启手机。覆盖安装保留 App 私有数据，不卸载、不清库。
 
 原始三条先红与事故归因见 [调查记录](recents-cleanup-lock-investigation.md)，历史 fixture 保持不变。
@@ -39,6 +39,7 @@ recent-only 未删除和恢复不推进属于实现缺陷；旧资源未知永�
 | `go test ./internal/engine -run '^TestV2UIRecoveryCrossBootPromotesOnlyExecution$' -count=1 -v -timeout 15s` | 合成 boot-boundary 仅提升 execution，保留原 UI may_dispatch 与物理复核义务 |
 | `go test ./internal/store ./internal/protocol ./internal/client ./internal/mcp -count=1 -timeout 60s` | 通过；限于账本/契约与受影响投影的包级回归 |
 | `go test ./internal/android -run '^(TestRecents\|TestRecentTaskIDs\|TestTasksOnDisplay\|TestLaunchFocusAndRemoveDispatch)' -count=1 -timeout 30s` | 通过；索引空/不可识别/截断与删除适配路径 |
+| `go test ./internal/engine -count=1 -timeout 240s` | 全量 engine 回归通过，耗时 `172.083s` |
 | `GOOS=linux GOARCH=arm64 go build ./...` | 通过 |
 | `./android-control/test.ps1` | DisplayAttemptGateTest、MessageListTest 通过 |
 | `./android-control/build.ps1` | 编译、对齐和 APK v3 签名核验通过 |
@@ -49,13 +50,35 @@ recent-only 未删除和恢复不推进属于实现缺陷；旧资源未知永�
 
 ## 3. 发布与手机验证
 
-发布、最终引擎回归、正式文档审计与手机验收结果在实际执行后补记。
-设备验收限定：可控 probe 的 start/open/操作/end、recents 读取故障期间新 start、原归属隔离、带退休记录的服务重启。
-不在用户主屏制造未知迟到点击，不运行任意 root 业务命令，不重启手机。
+- 独立只读文档审计首轮给出 `NEEDS_FIX`；修正 `mode_ready` 的字段说明后由同一审计者复检为
+  `CLEAN`。实现提交后才重建发布清单。
+- 从实现提交执行 `./scripts/build-release.ps1`，生成 release `0.5.0`、contract `5`、
+  Android `0.5.0` / versionCode `7`，`source_dirty=false`。`verify-manifest.ps1` 通过：
+  6 个产物的 SHA-256/大小与清单一致，工具目录为 12 个工具、指纹
+  `a42fc3247361d1dadadce49a28214053947cd8ecacc967f81ec756a81d7a325b`。
+- 通过 `./scripts/deploy.ps1 -SkipBuild` 部署到 `17efb04a`；使用 `adb install -r` 覆盖安装并保留
+  App 私有数据，未卸载、未清库、未重启手机。安装后的 App 为 `versionName=0.5.0`、
+  `versionCode=7`；服务及手机 HTTP MCP 进程的 `/proc/<pid>/exe` 均与清单中的
+  `device-mcp` / `device-service` 哈希一致。
+- 部署后手机侧 stdio MCP 仍持有旧二进制；重启该适配器子进程后，新进程和 HTTP 进程的
+  SHA-256 均为 `2bf0bc771498bbf3b48c0d80d49ba9e804ee24aadb4381e36b453f1fdcf8c828`。
+  重启对象仅为 MCP 适配器进程。
+- 正常手机闭环通过：`start`、打开可控 probe、点击和 `end` 均成功；cleanup 的
+  execution/tasks/recents/display 均为 `confirmed`，旧任务的 live 与 recents 命中均为 false，
+  `can_start=true`。
+- recents 故障注入通过：end 在 33ms 内撤权并返回；注入的 recents 读取执行 1 次失败后，
+  原 cleanup 保持 `state=unconfirmed` 与 `error.code=cleanup_budget_exhausted`，没有被改写成
+  confirmed。旧物理显示尚未确认释放时，第一次新 start 以当前 `display_create_failed` 失败，
+  紧接着的有限重试成功；新会话为 active，旧 cleanup 完成回执未改写新会话。原配置恢复后
+  再执行服务重启、start/end，`can_start=true`。
+- 整个过程中的手机 boot ID 始终等于部署前保存值；没有手机重启操作。
 
 ## 4. 证明边界
 
-- 原始 ROM recent-only 窗口能否稳定构造须据实记录；fake 删除不替代手机结果。
+- 原始 ROM recent-only 窗口未能在本次受控验收中稳定构造；live 已消失而 recents 仍命中的
+  recent-only 删除由专项代码测试证明，当前记录不把它冒充为手机实测。
 - Windows 与合成 boot identity 不证明手机重启、断电或真实在途 Binder 的物理隔离。
+- 旧显示尚未让出底层资源时，本次新 start 仍可能以当前创建失败结束；随后重试可准入。
+  这符合提案允许的“允许尝试不保证系统资源分配成功”，永久历史债务门禁未复现。
 - 新会话可准入不意味着旧 Android 命令被撤回；主屏/root 的迟到影响仍是批准取舍的代价。
 - 原始设备响应、树、截图、凭据、生产账本和私有辅助脚本不进入仓库。
