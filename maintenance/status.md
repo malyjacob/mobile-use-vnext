@@ -54,7 +54,7 @@
 | 页面明显变化后的图片内容差异 | 未构造；实机为同屏静态帧 |
 | 倒序/迟到 `control_view.revision` 注入 | 实机未构造；App 只接受同实例更大的 revision，旧响应按代次丢弃（代码路径与单元测试覆盖，未单独实机注入） |
 | 长时间 recovering/blocked 窗口 | 已确认 SIGKILL/SIGTERM 后 `can_start=false` 且无旧会话恢复；恢复通常在 App 实例变化释放显示后约 1–2 秒完成，未构造分钟级阻塞 |
-| 外部 MCP 宿主缓存刷新 | 未验证：本机以 `scripts/verify-m5.ps1` 拉起实际 `device-mcp.exe` 并重新 `tools/list`；未接入外部宿主 |
+| 外部 MCP 宿主缓存刷新 | 已验证：Codex 宿主实际重启后加载 `build/device-mcp.exe`，新进程路径与配置一致；12 工具 stdio 探针通过 |
 | 旧 App + 新服务下的旧 App 界面 | 旧版本在控制视图为空时自身 `NullPointerException`（`ControlState.cleanupRisk`），旧 App 服务仍可发送独立 STOP；新版本已修复该空指针 |
 | 通知频道关闭/权限撤销下的消息中心 | 代码路径检查；实机仅验证通知可用路径 |
 | 后观察收敛采样（`start`/`act`/`open_app`） | 已实现并由单元测试覆盖判据、预算、撤销与图片读序；实机 A/B 未执行：`target_changed` 率、按档 `samples`/`stable` 分布与 P50/P95 需真机采样后才能校准三档取值（[提案](proposals/implemented/act-post-observation-settle.md)、[记录](verification/act-post-observation-settle.md)） |
@@ -70,12 +70,14 @@
 - [shell 保留当前观察实机验证](verification/shell-keeps-observation.md)
 - [结构化 recovery 入口实现与验证](verification/structured-recovery-entry.md)
 - [MCP 文本树块实现、0.4.2 部署与实机验证](verification/mcp-tree-text.md)
+- [主屏多窗口层级修复与实机验证](verification/primary-display-multi-window.md)
 - [工程决策](decisions.md)
 - [工程流程](process.md)
 
 ## 5. 暂缓事项
 
 - 第 3 节的验证缺口暂不单独补测；待其后按真实使用路径补齐证据。
-- 当前部署为 `0.4.2`（`contract_version=3`、`android_version_code=5`），`can_start=true`；
-  发布产物构建自提交 `d4cedfd`，`source_dirty=false`；手机 HTTP MCP 适配器二进制与清单
-  一致，`verify-m6` 全绿。旧 0.3.0 产物仍作为不匹配验证材料；0.4.1 已被本版覆盖。
+- 当前部署为 `0.4.3`（`contract_version=4`、`android_version_code=6`），`can_start=true`；
+  发布产物构建自提交 `28cc6ef`，`source_dirty=false`；手机 HTTP MCP 适配器二进制与清单
+  一致，主机 stdio 适配器已由 Codex 重启加载；主屏多窗口层级已实机验证。旧 0.3.0 产物
+  仍作为不匹配验证材料。

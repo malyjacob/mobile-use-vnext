@@ -85,15 +85,32 @@ go build ./...
 - `internal/android/device.go` 的 `Capture` 对非空结果调用上述连接；空屏分支复用
   `displayRootNode`，不改变空屏语义。
 - 未修改公开字段、错误码、契约版本、发行版本、Android 产物、恢复账本或 `docs/`。
-- 已实现：是，当前工作区。
+- 已实现：是，提交 `28cc6ef7214d94a1cbb981e7d2995397dee660d2`。
 - 已单测：是，定向用例、相关包与全仓测试均通过。
-- 已实测：仅在仍运行旧二进制的服务上复现了主屏缺陷；修复后的二进制尚未部署，不能声明
-  主屏实机已恢复。
-- 修复提交：本记录所在提交。
+- 已实测：0.4.3 整组产物按清单部署到手机，`source_commit` 为上述提交、
+  `source_dirty=false`，`device-service` SHA-256 为
+  `bcbb5e7952aafb3fc07ea94c69b54ff6b863661048eb03c328cb0b9e205fc6e1`。
+  主屏 `start` 的公开树有 97 个节点；打开设置后为 129 个节点，`WLAN` 等应用内容可见；
+  点击 WLAN 后的后观察为 70 个节点；`HOME` 返回桌面的后观察为 97 个节点。结束会话后
+  `cleanup.state=complete`、`can_start=true`。
+- 主机适配器已重建为 `build/device-mcp.exe`，SHA-256 为
+  `B2CCEBA71E98842D066A5C6DA1E98BD3269EFDD76CF49666B61049B151FE16F6`；Codex 宿主重启
+  后的实际进程路径已指向该文件。
+- 修复提交：`28cc6ef7214d94a1cbb981e7d2995397dee660d2`；本记录在后一次维护提交中补充
+  部署与实机验证。
 
-独立 stdio MCP 探针另行确认适配器边界未受影响：12 个工具、schema、`start`、`observe`、
-`apps`、`shell`、`inspect`、`act`、`end` 与取消清理全部 `PASS`，最终 `RESULT PASS`；
-该探针不覆盖主屏多窗口修复。
+部署与主机适配器构建命令：
+
+```powershell
+.\scripts\build-release.ps1
+.\scripts\verify-manifest.ps1 -Manifest build/release/manifest.json
+.\scripts\deploy.ps1 -SkipBuild
+$env:GOEXPERIMENT = 'jsonv2'; $env:CGO_ENABLED = '0'
+go build -trimpath -buildvcs=false -o build/device-mcp.exe ./cmd/device-mcp
+```
+
+部署前和部署后均运行独立 stdio MCP 探针：12 个工具、schema、`start`、`observe`、
+`apps`、`shell`、`inspect`、`act`、`end` 与取消清理全部 `PASS`，最终 `RESULT PASS`。
 
 ## 5. 同类核查
 
@@ -107,9 +124,6 @@ go build ./...
 
 ## 6. 未覆盖项与原因
 
-- 修复后的 `device-service` 未重新构建发布、部署到手机 chroot，也未重启 Codex 宿主；
-  因此没有用新二进制重新验证主屏公开树。部署会替换运行中的整组产物并要求宿主重新发现
-  MCP，不能以单元测试结果代替。
 - 未在分屏、自由窗口、输入法或其它厂商 ROM 上逐项构造多窗口样本；本次逻辑按顶层节点
   数量而非窗口类型连接，但没有这些环境的实机证据。
 - 没有保留原始层级 XML、截图或窗口包名，无法用现场数据做离线回放；复现改为仓库内的
