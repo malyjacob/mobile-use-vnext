@@ -853,13 +853,12 @@ func (d *Device) Capture(ctx context.Context, display device.Display) (device.Ca
 	if len(nodes) == 0 {
 		// A valid dump with no window on the target display is a legal empty
 		// screen. Publish one synthetic display root; never invent descendants.
-		bounds := device.Rect{Left: 0, Top: 0, Right: display.Width, Bottom: display.Height}
-		nodes = []device.RawNode{{
-			Index: 0, Parent: -1, DisplayID: display.ID, Visible: true,
-			RawBounds: bounds, Bounds: bounds,
-			HasEnabled: true, Enabled: true,
-		}}
+		node := displayRootNode(display.ID, display.Width, display.Height)
+		node.Index = 0
+		nodes = []device.RawNode{node}
 		root = 0
+	} else {
+		nodes, root = connectDisplayWindows(nodes, root, display.ID, display.Width, display.Height)
 	}
 	if display.ID != 0 && containsPackage(nodes, d.controlPackage) {
 		// The control App must never be reachable through a virtual display tree;

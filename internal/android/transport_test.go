@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/malyjacob/mobile-use-vnext/internal/device"
+	"github.com/malyjacob/mobile-use-vnext/internal/observation"
+	"github.com/malyjacob/mobile-use-vnext/internal/protocol"
 )
 
 // These tests run the real os/exec transport against the stubbed adb process so
@@ -118,6 +120,58 @@ func TestCaptureIsReadOnlyAndFiltered(t *testing.T) {
 	if _, err := d.Capture(t.Context(), device.Display{ID: 61, Width: 1080, Height: 2400}); CodeOf(err) != CodeDisplayAbsent {
 		t.Fatalf("code=%q err=%v", CodeOf(err), err)
 	}
+}
+
+func TestCaptureConnectsMultipleTopLevelWindows(t *testing.T) {
+	d := newStubDevice(t, "capture")
+	server := newCaptureServer(t, `<hierarchy rotation="0">`+
+		`<node class="android.widget.FrameLayout" package="com.example.status" display-id="0" visible-to-user="true" bounds="[0,0][1080,120]">`+
+		`<node class="android.widget.TextView" package="com.example.status" text="status" visible-to-user="true" bounds="[0,0][1080,120]" />`+
+		`</node>`+
+		`<node class="android.widget.FrameLayout" package="com.example.app" display-id="0" visible-to-user="true" bounds="[0,0][1080,2400]">`+
+		`<node class="android.widget.TextView" package="com.example.app" text="WLAN" visible-to-user="true" bounds="[0,100][1080,200]" />`+
+		`</node>`+
+		`</hierarchy>`)
+	defer server.Close()
+	d.testBase = server.URL
+
+	capture, err := d.Capture(t.Context(), device.Display{ID: 0, Width: 1080, Height: 2400})
+	if err != nil {
+		t.Fatalf("Capture: %v", err)
+	}
+	if capture.Root < 0 || capture.Root >= len(capture.Nodes) {
+		t.Fatalf("root=%d nodes=%d", capture.Root, len(capture.Nodes))
+	}
+	reached := make([]bool, len(capture.Nodes))
+	queue := []int{capture.Root}
+	for len(queue) > 0 {
+		index := queue[0]
+		queue = queue[1:]
+		if index < 0 || index >= len(reached) || reached[index] {
+			continue
+		}
+		reached[index] = true
+		queue = append(queue, capture.Nodes[index].Children...)
+	}
+	for index := range reached {
+		if reached[index] && capture.Nodes[index].Text == "WLAN" {
+			snap, err := observation.NewBuilder().Build(&capture)
+			if err != nil {
+				t.Fatalf("Build: %v", err)
+			}
+			queue := []*protocol.Node{snap.Tree.Root}
+			for len(queue) > 0 {
+				node := queue[0]
+				queue = queue[1:]
+				if len(node.Label) > 0 && node.Label[0] == "WLAN" {
+					return
+				}
+				queue = append(queue, node.Children...)
+			}
+			t.Fatal("the second top-level window is absent from the public tree")
+		}
+	}
+	t.Fatalf("the second top-level window is not reachable from capture root %d", capture.Root)
 }
 
 func TestTaskListUsesCurrentTasks(t *testing.T) {

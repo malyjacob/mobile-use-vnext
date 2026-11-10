@@ -249,6 +249,44 @@ func linkChildren(nodes []device.RawNode) {
 	}
 }
 
+// displayRootNode builds the single traversal root of a display capture. The
+// public projection always replaces it with its own synthetic root, so this
+// node carries only display identity, bounds and the known enabled state.
+func displayRootNode(displayID, width, height int) device.RawNode {
+	bounds := device.Rect{Left: 0, Top: 0, Right: width, Bottom: height}
+	return device.RawNode{
+		Parent: -1, DisplayID: displayID, Visible: true,
+		RawBounds: bounds, Bounds: bounds,
+		HasEnabled: true, Enabled: true,
+	}
+}
+
+// connectDisplayWindows attaches every top-level window of one display to a
+// single synthetic root. A u2 dump on the primary display may contain several
+// top-level windows (status bar, app, IME, overlays); they are one display, not
+// separate trees. A dump with one top-level window keeps that window as root.
+func connectDisplayWindows(nodes []device.RawNode, root, displayID, width, height int) ([]device.RawNode, int) {
+	topLevel := 0
+	for index := range nodes {
+		if nodes[index].Parent < 0 {
+			topLevel++
+		}
+	}
+	if topLevel <= 1 {
+		return nodes, root
+	}
+	synthetic := displayRootNode(displayID, width, height)
+	synthetic.Index = len(nodes)
+	nodes = append(nodes, synthetic)
+	for index := range nodes {
+		if index != synthetic.Index && nodes[index].Parent < 0 {
+			nodes[index].Parent = synthetic.Index
+		}
+	}
+	linkChildren(nodes)
+	return nodes, synthetic.Index
+}
+
 // applyFlag writes one presence flag and its value into the raw node.
 func applyFlag(has, value *bool, attrs map[string]string, name string) {
 	attr := boolAttr(attrs, name)
