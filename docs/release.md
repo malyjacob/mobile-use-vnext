@@ -65,8 +65,8 @@ PowerShell、docs 或 Manifest 中另写一份版本号；`contract_version` 只
 {
   "format": "mobile-use-vnext-release",
   "version": 1,
-  "release_version": "0.5.0",
-  "contract_version": 5,
+  "release_version": "0.6.0",
+  "contract_version": 6,
   "source_commit": "<40 位提交>",
   "source_dirty": false,
   "built_at": "…",
@@ -74,7 +74,7 @@ PowerShell、docs 或 Manifest 中另写一份版本号；`contract_version` 只
   "go_experiment": "jsonv2",
   "build_target": {"goos": "linux", "goarch": "arm64", "cgo_enabled": false},
   "mcp": {"sdk": "github.com/modelcontextprotocol/go-sdk v1.8.0", "protocol": "2026-07-28"},
-  "android": {"package": "com.mobileuse.vnext", "version_name": "0.5.0", "version_code": 7},
+  "android": {"package": "com.mobileuse.vnext", "version_name": "0.6.0", "version_code": 8},
   "tool_catalog": {"count": 12, "sha256": "…"},
   "artifacts": [{"name": "device-service", "path": "device-service", "sha256": "…", "bytes": 0}]
 }

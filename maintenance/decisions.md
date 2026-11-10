@@ -397,3 +397,21 @@
   UI 或容量不足不再作为永久准入理由，运维也不以手机重启、清账本或清 App 数据作为出口。
   共同契约使用版本 5，App 的 retired attempt 不成为 current descriptor，也不决定
   `mode_ready`。
+
+## D35 契约 6：act 重验失败交付新观察
+
+- **背景**：`act` 在认领观察之后、派发输入之前做实时重验；失败时它已经读取过一帧，但该帧被
+  丢弃，调用方只能再 `observe` 一次、再发一个新的 `act`。一次重验拒绝因此消耗三次调用、三个
+  新 P 与三次采集。
+- **选择**：批准 `act-revalidation-observation-delivery` 取舍。重验失败且已取得可用新帧时，
+  服务把该帧发布为新的 ready 观察随失败结果返回，并把 `recovery` 从
+  `observe/P/retired` 改为 `retry/O/effective`。交付只在 `target_changed`、
+  `foreground_changed` 与重验阶段 `node_not_found` 发生；无帧、前台不可确认、撤销、树超限、
+  帧龄超限或控制 UI 出现在目标虚拟屏时保持原行为。交付复用同一帧，不重新采集、不做收敛采样、
+  不确认基线、不派发输入。delta 基准由 `forceFull = !obs.Full` 决定：满足 delta 条件时，引用
+  full O 的交付 delta 其 `base` 就是刚刚失败的那棵树，引用 delta O 时改发 full。
+- **影响**：同一错误码的响应形状与 `recovery` 取值改变，按 `docs/release.md` 的判据
+  `contract_version` 前进为 `6`；共享同一发布闸门，未新增请求字段、未新增恢复入口取值。
+  MCP 的入参 schema 与投影机制不变，但 `act` 的描述与目录指纹随本次契约变更，错误结果现在
+  可以带树块。`retry` 的含义改为“结果指向的那个 ready O 可用”，不再以“本次请求未认领观察”
+  为前提。
