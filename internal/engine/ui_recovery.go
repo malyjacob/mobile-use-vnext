@@ -136,6 +136,7 @@ func (e *Engine) resolveRecoveryUI(ctx context.Context, record *Ledger) (resolve
 	needsSave := false
 	if releaseUIExecution && !shellPending && uiExecutionNeedsPromotion(candidate) {
 		candidate.Cleanup.Execution = protocol.CleanupConfirmed
+		candidate.Cleanup.ExecutionRecheckRequired = true
 		needsSave = true
 	}
 	// A terminal receipt and a checkpoint observed during a failed save must
@@ -188,6 +189,7 @@ func (e *Engine) saveUIRecoveryCandidate(ctx context.Context, record *Ledger, ca
 			snapshot.Cleanup = &cleanup
 		} else {
 			snapshot.Cleanup.Execution = candidate.Cleanup.Execution
+			snapshot.Cleanup.ExecutionRecheckRequired = snapshot.Cleanup.ExecutionRecheckRequired || candidate.Cleanup.ExecutionRecheckRequired
 		}
 	}
 	e.mu.Unlock()
@@ -247,6 +249,7 @@ func (e *Engine) commitUIRecoveryCandidateLocked(record, candidate *Ledger) {
 	e.uiCheckpointReady = snapshot.LegacyUI != nil
 	if e.cleanup != nil && snapshot.Cleanup != nil {
 		e.cleanup.Execution = snapshot.Cleanup.Execution
+		e.cleanup.needsExecutionRecheck = snapshot.Cleanup.ExecutionRecheckRequired
 	}
 	e.executionEvidenceRevision++
 }

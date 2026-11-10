@@ -402,6 +402,7 @@ func TestV2UIRecoveryCrossBootPromotesOnlyExecution(t *testing.T) {
 	}
 	wantCleanup := *before.Cleanup
 	wantCleanup.Execution = protocol.CleanupConfirmed
+	wantCleanup.ExecutionRecheckRequired = true
 	if !reflect.DeepEqual(saved.Cleanup, &wantCleanup) {
 		t.Fatalf("cross boot changed cleanup beyond execution:\ngot  %+v\nwant %+v", saved.Cleanup, &wantCleanup)
 	}

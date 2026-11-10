@@ -236,6 +236,29 @@ func TestLedgerRejectsV2NullLegacyUIPending(t *testing.T) {
 	}
 }
 
+func TestLedgerPhysicalRecheckEvidence(t *testing.T) {
+	ledger := newTestLedgerStore(t)
+	record := validTestLedger(2)
+	record.Cleanup.ExecutionRecheckRequired = true
+	if _, err := ledger.Save(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := ledger.Load()
+	if err != nil || !loaded.Cleanup.ExecutionRecheckRequired {
+		t.Fatal("physical recheck obligation did not survive a store round trip")
+	}
+	for _, body := range []string{
+		`{"format":"mobile-use-vnext-ledger","version":2,"revision":0,"cleanup":{"execution_recheck_required":null}}`,
+		`{"format":"mobile-use-vnext-ledger","version":1,"revision":0,"cleanup":{"execution_recheck_required":false}}`,
+	} {
+		ledger := newTestLedgerStore(t)
+		writeLedgerBytes(t, ledger, []byte(body))
+		if _, err := ledger.Load(); err == nil {
+			t.Fatal("invalid physical recheck evidence was accepted")
+		}
+	}
+}
+
 func TestLedgerV1UpgradePreservesResponsibilities(t *testing.T) {
 	ledger := newTestLedgerStore(t)
 	want := validTestLedger(1)

@@ -97,8 +97,8 @@ func (l *Ledger) readLocked() (*engine.Ledger, error) {
 			return nil, errors.New("version 1 ledger contains version 2 evidence")
 		}
 	} else {
-		if hasExplicitLegacyUIPendingNull(data) {
-			return nil, errors.New("ledger legacy ui pending cannot be null")
+		if hasExplicitEvidenceBooleanNull(data) {
+			return nil, errors.New("ledger evidence boolean cannot be null")
 		}
 		if err := validateEvidence(&record); err != nil {
 			return nil, err
@@ -113,7 +113,8 @@ func hasVersionOneEvidence(data []byte) bool {
 		LegacyUI        jsontext.Value `json:"legacy_ui_checkpoint"`
 		LegacyUIPending jsontext.Value `json:"legacy_ui_pending"`
 		Cleanup         *struct {
-			CheckedTaskIDs jsontext.Value `json:"checked_task_ids"`
+			CheckedTaskIDs           jsontext.Value `json:"checked_task_ids"`
+			ExecutionRecheckRequired jsontext.Value `json:"execution_recheck_required"`
 		} `json:"cleanup"`
 	}
 	if err := json.Unmarshal(data, &presence); err != nil {
@@ -121,17 +122,21 @@ func hasVersionOneEvidence(data []byte) bool {
 	}
 	return len(presence.UI) > 0 || len(presence.LegacyUI) > 0 ||
 		len(presence.LegacyUIPending) > 0 ||
-		(presence.Cleanup != nil && len(presence.Cleanup.CheckedTaskIDs) > 0)
+		(presence.Cleanup != nil && (len(presence.Cleanup.CheckedTaskIDs) > 0 || len(presence.Cleanup.ExecutionRecheckRequired) > 0))
 }
 
-func hasExplicitLegacyUIPendingNull(data []byte) bool {
+func hasExplicitEvidenceBooleanNull(data []byte) bool {
 	var presence struct {
 		LegacyUIPending jsontext.Value `json:"legacy_ui_pending"`
+		Cleanup         *struct {
+			ExecutionRecheckRequired jsontext.Value `json:"execution_recheck_required"`
+		} `json:"cleanup"`
 	}
 	if err := json.Unmarshal(data, &presence); err != nil {
 		return true
 	}
-	return bytes.Equal(bytes.TrimSpace(presence.LegacyUIPending), []byte("null"))
+	return bytes.Equal(bytes.TrimSpace(presence.LegacyUIPending), []byte("null")) ||
+		presence.Cleanup != nil && bytes.Equal(bytes.TrimSpace(presence.Cleanup.ExecutionRecheckRequired), []byte("null"))
 }
 
 func validateEvidence(record *engine.Ledger) error {

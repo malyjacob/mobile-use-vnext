@@ -148,6 +148,9 @@ type LedgerCleanup struct {
 	// CheckedTaskIDs is bounded cleanup evidence discovered on the original
 	// display. It is not authority or a live task registry.
 	CheckedTaskIDs []int `json:"checked_task_ids,omitempty"`
+	// ExecutionRecheckRequired invalidates physical evidence collected before
+	// the last execution boundary. Only a later physical recheck clears it.
+	ExecutionRecheckRequired bool `json:"execution_recheck_required,omitzero"`
 }
 
 // LedgerStop is the bound minimal-STOP boundary.

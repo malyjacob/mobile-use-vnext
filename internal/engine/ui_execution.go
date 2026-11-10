@@ -145,6 +145,18 @@ func (e *Engine) persistUIReceipt(token *uiDispatchState) {
 		return
 	}
 	token.saving = true
+	// Persist the physical recheck obligation in the same snapshot as the
+	// terminal receipt. A crash cannot leave only the old confirmed facts.
+	if e.cleanup != nil && e.session != nil && e.session.Origin == token.record.Origin &&
+		e.session.State == SessionEnded {
+		e.cleanup.needsExecutionRecheck = true
+		if e.shell == nil || e.shell.settled() {
+			e.cleanup.Execution = protocol.CleanupConfirmed
+			if e.cleanup.Error != nil && e.cleanup.Error.Code == "execution_unconfirmed" {
+				e.cleanup.Error = nil
+			}
+		}
+	}
 	e.mu.Unlock()
 	err := e.persistSync(context.Background())
 	e.mu.Lock()
@@ -153,14 +165,6 @@ func (e *Engine) persistUIReceipt(token *uiDispatchState) {
 		token.durable = true
 		if e.session != nil && e.session.Origin == token.record.Origin {
 			e.session.ExecutionUnknown = e.shell != nil && !e.shell.settled()
-		}
-		if e.cleanup != nil && e.session != nil && e.session.Origin == token.record.Origin &&
-			e.session.State == SessionEnded && (e.shell == nil || e.shell.settled()) {
-			e.cleanup.Execution = protocol.CleanupConfirmed
-			e.cleanup.needsExecutionRecheck = true
-			if e.cleanup.Error != nil && e.cleanup.Error.Code == "execution_unconfirmed" {
-				e.cleanup.Error = nil
-			}
 		}
 	}
 	e.broadcastAppLocked()
@@ -295,6 +299,7 @@ func (e *Engine) finishExecutionRecovery(ctx context.Context, record *Ledger, ap
 	}
 	closure.Execution = protocol.CleanupConfirmed
 	closure.Tasks, closure.Recents, closure.Display = tasks, recents, display
+	closure.ExecutionRecheckRequired = false
 	record.Cleanup = &closure
 	e.mu.Unlock()
 	e.finishRecovery(record, app, target.display.ID, "old_resources_resolved")

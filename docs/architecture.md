@@ -215,7 +215,8 @@ delta 的五类块：`set`（逐字段完整新值，显式保留 `false`/`0`/`"
   主 outcome、任务归属、文字读回与调用终结分别判定，原 P 的 `uncertain` 不追认。
   shell 只解除自己的 runner 责任；迟到 UI 终结只补原执行事实，不发布 O 或恢复输入权。
 - 迟到终结晚于原物理核验时，对同一原归属补做有界只读核验。旧任务 ID 留作 recents 核验
-  证据，不创建第二条破坏性链；任务、recents 或显示仍不能确认时不放行。
+  证据，不创建第二条破坏性链；任务、recents 或显示仍不能确认时不放行。复核义务随终结
+  证据持久化，服务重启也不接受终结边界之前的物理确认。
 - `primary` 模式：`tasks`/`recents`/`display` 全为 `not_applicable`，从不关闭用户应用。
 - 虚拟屏且显示身份未知：给 App 至多 4s 上报描述；仍无描述时，若创建明确失败或 App 明确
   报告无自有显示，则 `display=confirmed`，否则 `unconfirmed`。
@@ -282,7 +283,7 @@ execution；版本 1 的 `ui_input` 未确认记录或缺完整终结记录的�
 - 内容只有归属与资源证据：会话（origin/agent/mode/state/App 实例/模式代次/显示 ID/SFID/
   generation/尺寸/密度/旋转/开始时间）、待创建/待关闭命令、收尾五元组、停止边界、虚拟屏
   受管任务 id 登记（≤16）、受管 shell runner 身份与阶段、一个 UI 子步骤责任、legacy
-  checkpoint 与收尾核验过的任务 ID（≤256）；
+  checkpoint、收尾核验过的任务 ID（≤256）与物理复核义务 `execution_recheck_required`；
 - 明确不含：请求体、节点树、图片、输入正文、命令输出、异常字符串；
 - `start` 在启动显示助手前同步写一次（原归属 + 创建意图），会话激活后再写一次；其余进度
   异步写。每个 UI 输入子步骤额外预写 `may_dispatch`，成功后重新竞争派发边界；终结证据

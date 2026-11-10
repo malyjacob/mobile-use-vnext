@@ -660,7 +660,8 @@ func (e *Engine) restoreRecoveryLocked(record *Ledger) {
 			State: c.State, Execution: c.Execution, Tasks: c.Tasks,
 			Recents: c.Recents, Display: c.Display, Reason: c.Reason,
 			ExecReason: c.ExecReason, StartedAt: c.StartedAt,
-			checkedTaskIDs: append([]int(nil), c.CheckedTaskIDs...),
+			checkedTaskIDs:        append([]int(nil), c.CheckedTaskIDs...),
+			needsExecutionRecheck: c.ExecutionRecheckRequired,
 		}
 	}
 	e.restoreUIRecoveryLocked(record)
@@ -739,8 +740,9 @@ func (e *Engine) ledgerRecordLocked() *Ledger {
 			State: e.cleanup.State, Execution: e.cleanup.Execution, Tasks: e.cleanup.Tasks,
 			Recents: e.cleanup.Recents, Display: e.cleanup.Display,
 			Reason: e.cleanup.Reason, ExecReason: e.cleanup.ExecReason,
-			StartedAt:      e.cleanup.StartedAt,
-			CheckedTaskIDs: append([]int(nil), e.cleanup.checkedTaskIDs...),
+			StartedAt:                e.cleanup.StartedAt,
+			CheckedTaskIDs:           append([]int(nil), e.cleanup.checkedTaskIDs...),
+			ExecutionRecheckRequired: e.cleanup.needsExecutionRecheck,
 		}
 	}
 	if e.stopBoundary != nil {

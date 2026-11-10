@@ -199,13 +199,8 @@ func (e *Engine) Shell(ctx context.Context, agent, p string, req *protocol.Shell
 	e.mu.Unlock()
 
 	if err := e.persistSync(context.Background()); err != nil {
-		e.mu.Lock()
-		if e.shell == run {
-			e.shell = nil
-		}
-		e.mu.Unlock()
-		return e.finishWithError(op, "admission",
-			protocol.NewError(503, protocol.CodeDeviceUnavailable, "恢复账本不可写，命令未派发")), nil
+		return e.finishShellNotStarted(op, work, run,
+			protocol.CodeDeviceUnavailable, "恢复账本不可写，命令未派发"), nil
 	}
 
 	// Dispatch boundary. One lock acquisition records the unknown dispatch
@@ -218,13 +213,9 @@ func (e *Engine) Shell(ctx context.Context, agent, p string, req *protocol.Shell
 	e.mu.Lock()
 	if !e.workAuthorizedLocked(work, dispatchAt) || e.session == nil ||
 		e.session.Epoch != run.Epoch || e.session.State != SessionActive {
-		if e.shell == run {
-			e.shell = nil
-		}
 		e.mu.Unlock()
-		e.persistAsync()
-		return e.finishWithError(op, "admission",
-			protocol.NewError(409, protocol.CodeStopped, "命令未派发：原会话已撤销")), nil
+		return e.finishShellNotStarted(op, work, run,
+			protocol.CodeStopped, "命令未派发：原会话已撤销"), nil
 	}
 	work.DispatchUnknown = true
 	e.session.ExecutionUnknown = true
