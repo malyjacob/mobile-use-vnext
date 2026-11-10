@@ -1,0 +1,53 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+
+	"github.com/malyjacob/mobile-use-vnext/internal/engine"
+	"github.com/malyjacob/mobile-use-vnext/internal/store"
+)
+
+func main() {
+	if len(os.Args) != 3 {
+		os.Exit(2)
+	}
+	ledger, err := store.New(os.Args[2])
+	check(err)
+	if os.Args[1] == "read" {
+		record, err := ledger.Load()
+		check(err)
+		if record == nil || record.UI == nil {
+			os.Exit(3)
+		}
+		data, _ := json.Marshal(map[string]any{"state": record.UI.State, "version": record.Version, "revision": record.Revision})
+		fmt.Println(string(data))
+		return
+	}
+	record := &engine.Ledger{UI: &engine.LedgerUI{
+		OperationID: "Pcrashproof", Origin: "Psyntheticsession", Epoch: 1, Step: 1,
+		Kind: "tap", DisplayID: 12, DisplayGeneration: "synthetic-generation",
+		DeviceID: "synthetic-device", BootID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		State: "may_dispatch",
+	}}
+	if os.Args[1] == "terminal" {
+		record, err = ledger.Load()
+		check(err)
+		if record == nil || record.UI == nil || record.UI.State != "may_dispatch" {
+			os.Exit(4)
+		}
+		record.UI.State = "terminated"
+	}
+	_, err = ledger.Save(context.Background(), record)
+	check(err)
+	// os.Exit bypasses deferred cleanup: the next process must use the file.
+	os.Exit(77)
+}
+
+func check(err error) {
+	if err != nil {
+		os.Exit(5)
+	}
+}

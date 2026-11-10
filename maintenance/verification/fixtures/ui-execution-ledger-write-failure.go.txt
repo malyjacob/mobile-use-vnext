@@ -1,0 +1,37 @@
+package main
+
+import (
+    "bytes"
+    "context"
+    "fmt"
+    "os"
+    "path/filepath"
+    "github.com/malyjacob/mobile-use-vnext/internal/engine"
+    "github.com/malyjacob/mobile-use-vnext/internal/store"
+)
+func main() {
+    parent := "/var/lib/mobile-use-vnext/verification-ui-evidence"
+    dir, err := os.MkdirTemp(parent, "save-failure-"); must(err)
+    ledger, err := store.New(dir); must(err)
+    record := &engine.Ledger{UI: &engine.LedgerUI{
+        OperationID:"Psyntheticfailure", Origin:"Psyntheticorigin", Epoch:1, Step:1,
+        Kind:"tap", DisplayID:1, DisplayGeneration:"synthetic-generation",
+        DeviceID:"synthetic-device", BootID:"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", State:"may_dispatch",
+    }}
+    _,err=ledger.Save(context.Background(),record); must(err)
+    path:=filepath.Join(dir,"recovery-ledger.json")
+    baseline,err:=os.ReadFile(path); must(err)
+    backup:=filepath.Join(dir,"previous-ledger")
+    must(os.Rename(path,backup)); must(os.Mkdir(path,0700))
+    record.UI.State="terminated"
+    _,err=ledger.Save(context.Background(),record)
+    if err==nil {os.Exit(6)}
+    previous,err:=os.ReadFile(backup);must(err)
+    if !bytes.Equal(previous,baseline) {os.Exit(7)}
+    must(os.Remove(path));must(os.Rename(backup,path))
+    fresh,err:=store.New(dir);must(err)
+    loaded,err:=fresh.Load();must(err)
+    if loaded.UI.State!="may_dispatch" {os.Exit(8)}
+    fmt.Println(`{"actual_rename_failure":true,"previous_may_dispatch_preserved":true}`)
+}
+func must(err error){if err!=nil{os.Exit(5)}}

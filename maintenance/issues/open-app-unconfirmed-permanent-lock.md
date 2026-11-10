@@ -1,6 +1,9 @@
 # Issue：虚拟显示下 `open_app` 实际成功却被判 `unconfirmed`，并使整机 `can_start` 永久锁死
 
-状态：问题报告（仅描述现象与可能原因，未实现修复）。
+状态：已解决（实现 `884adf44ee12b24edf82efb10368ca68d46a4b48`，2026-11-11）。
+处理：[执行结束证据提案](../proposals/implemented/ui-input-execution-evidence.md)、[验证记录](../verification/ui-input-execution-evidence.md)。
+原生产 v1 账本保留并经 checkpoint/手机重启恢复；真实关联失败注入验证原 P 仍 uncertain，但 end 后不再留下已结束输入的永久屏障。
+下文保留基线报告与调查线索；任务关联成功判据没有放宽，不承诺消除所有 `app_launch_unconfirmed`。
 基线提交：`ae1fbbc35f32e0dbeb2eda7a519e825f936601e9`（分支 `master`，2026-11-10）。
 触发环境：设备 `virtual`（虚拟显示）模式，经主机 stdio MCP 适配器调用。
 

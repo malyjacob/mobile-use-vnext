@@ -1,10 +1,12 @@
 # 提案：分开记录 UI 动作结果与执行结束证据，并为旧账本提供恢复路径
 
-状态：提案，未实现。
+状态：已实现（实现提交 `884adf44ee12b24edf82efb10368ca68d46a4b48`，2026-11-11）。
 基线提交：`ae1fbbc35f32e0dbeb2eda7a519e825f936601e9`（分支 `master`，2026-11-10）。
 适用范围：`act`、`open_app`、shell 与 UI 屏障隔离、STOP/end、启动恢复与旧账本迁移。
 影响范围：`internal/device`、`internal/android`、`internal/engine`、`internal/store`、恢复投影与测试；正式文档、版本生成与发布材料随实现同步。
 契约（`/api/*` 字段与 `contract_version`）：请求与响应的 JSON 结构不变；改变 `cleanup.execution` 的解除判据、普通工作准入和恢复指引，拟将共同 `contract_version` 从 3 升至 4。
+
+实现与验证：[验证记录](../../verification/ui-input-execution-evidence.md)。以下方案正文保留批准时的未来时态，落地结论以 §11 为准。
 
 函数名、行号、常量与默认值均以基线为准；代码前进后须重新核对，重点是 `openapp.go`、
 `act.go`、`operations.go`、`cleanup.go`、`shell.go`、`control.go` 与账本读写。
@@ -23,8 +25,8 @@
 
 ### 1.1 现象与代价
 
-原报告与先红用例见 [issue](../issues/open-app-unconfirmed-permanent-lock.md) 和
-[归因记录](../verification/ui-input-execution-barrier-investigation.md)。
+原报告与先红用例见 [issue](../../issues/open-app-unconfirmed-permanent-lock.md) 和
+[归因记录](../../verification/ui-input-execution-barrier-investigation.md)。
 `open_app` 的启动调用返回 accepted，随后任务关联失败时，会留下跨工作位和重启的
 `ui_input` execution 屏障。即使后观察可读、物理三项确认，新 `start` 仍被拒。
 
@@ -101,7 +103,7 @@ ADB 后端必须确认设备支持 shell v2，并对传输错误和设备命令�
 
 文字 RPC 的完成证据只来自本次 HTTP 交换的同步方法返回：校验 JSON-RPC 标识、响应 ID 与
 必需结果成员的实际存在/类型。固定 JAR 的 `issued/accepted` 含义以
-[制品说明](../../third_party/uiautomator/README.md) 为准；正文不进入证据账本。
+[制品说明](../../../third_party/uiautomator/README.md) 为准；正文不进入证据账本。
 报文缺失或不完整继续 unknown，不用读回正文、树或后发 RPC 补造旧调用回执。
 
 ### 4.2 屏障与所有权
@@ -379,17 +381,38 @@ shell 覆盖用例失败；去掉 checkpoint 持久化/同设备/boot 变化任�
 8. 独立只读审计涉及的 `docs/`，修正并复检；提交实现，提案状态仍保持未实现。
 9. 实现提交存在后归档提案并补 §11 与实现 hash；单独提交归档与分层验证记录。
 
-## 11. 实现结果（归档时补写）
+## 11. 实现结果
 
-尚无实现提交；本节在实现提交存在并移入 `implemented/` 后补写。
+实现提交依次为 `993c39e9dc8cec89e2b9519da237c0be6540267f`、
+`884adf44ee12b24edf82efb10368ca68d46a4b48`；设计源头先行提交为
+`10718fd58ddbe2e2b858a4b008deadae3692a5cf`。归档晚于实现提交；详细命令、实机证据和限制见验证记录。
 
 ### 11.1 已落地
 
-归档时列出提案条目与实际代码落点。
+| 提案条目 | 实际代码落点 |
+| --- | --- |
+| §4.1 子步骤回执、shell v2 能力与私有启动身份 | `internal/device/types.go`；`internal/android/execution.go` 的 `ExecutionIdentity/runShellV2`；launch/focus/input/text/RPC 适配路径 |
+| §4.2 UI/shell 来源隔离与普通准入 | `internal/engine/ui_execution.go` 的 `beginUIDispatch/recordUIReceipt`；`ordinary_admission.go` 的 `ordinaryBarrierLocked`；`apps.go/operations.go/start.go` |
+| §4.3 STOP 后迟到终结、物理复核 | `ui_execution.go` 的 `launchExecutionCleanupRecheck/verifyClosedExecutionTarget`；`cleanup.go` 的 `finishCleanup`；`shell.go` 的统一终结出口 |
+| §4.4 新旧账本与 boot checkpoint | `ui_recovery.go` 的 `legacyUIResponsibility/resolveRecoveryUI/saveUIRecoveryCandidate`；`control.go` 的恢复驱动与快照；`store/ledger.go` 的 v1/v2 接入 |
+| §5 派发预写、落盘失败与原 P 保持 | `act.go/openapp.go` 的分步调用；`ui_execution.go` 的 durable gate；`status.go` 的恢复投影；相关门控 Save 用例 |
+| §6 契约与发布 | `release/versions.json` 单源生成 0.4.3 / contract 4 / versionCode 6；`deploy.ps1 -PrepareUIRecovery` 只报告检查点保存 |
+| §8 自动、系统级与实机验证 | engine/store/android 专项及全量回归；三项 overlay 反向验证；Linux/arm64 隔离文件系统；原 v1 账本恢复；真实 launch 关联失败注入 |
+| 最终文档审计 | 首次全部 7 份 docs 与补丁 architecture.md 均经 Mencius 独立只读复检 clean；Goodall 实现复检 clean |
 
 ### 11.2 与提案不同或未执行
 
-归档时逐项记录差异与未执行验证的理由；涉及判据、契约或时序的变化先重新确认。
+| 项目 | 结论与理由 |
+| --- | --- |
+| 批准判据、契约与时序 | 无偏离；未放宽主动作成功条件、未新增 force API、未重放输入 |
+| `legacy_ui_pending` | 具体持久化细化：普通同步先写 v2 时仍保留 v1 迁移义务，避免格式升级抹掉旧责任 |
+| `execution_recheck_required` | 具体持久化细化：与终结证据同快照保存，解决终结后、物理复核前崩溃的证据窗口；复核前不沿用旧 confirmed 事实 |
+| shell 预写期间 STOP | 同类缺陷修复：确定未派发的两出口统一 not_started，避免原 shell_chain 屏障失去终结入口 |
+| 实机断连/丢回执/in-flight STOP | 未执行：避免人为再次锁住运行设备；门控模拟验证撤权、无派发和屏障保留，不冒充设备结论 |
+| 真实输入中途崩溃/掉电 | 未执行：只做隔离合成账本的进程退出和写失败，不提供输入中途崩溃或掉电耐久结论 |
+| 额外落盘耗时与 STOP 延迟分布 | 未执行：缺少同环境前后基线，附加输入样本未完成正常收尾；不发布无依据的性能结论 |
+| 附加测试 App 的 recents 残留 | 如实记录并仅做测试清理；用户要求不扩大范围，未修改通用物理收尾 |
+| 当前 Codex 宿主刷新 | 新适配器独立 stdio 验证通过且配置已更新；当前会话旧进程仍 contract_mismatch，需用户重启 Codex |
 
 ---
 
