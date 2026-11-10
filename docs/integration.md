@@ -186,7 +186,68 @@ Header: Authorization: Bearer <mcp_token>
 只替换手机上的二进制或重启设备服务，不会让已连接的宿主自动刷新工具；必须重启宿主进程/
 连接。MCP 适配器本身不保存会话，重启后重新发现即可。
 
-### 4.5 Origin 限制
+### 4.5 结果模式
+
+MCP 适配器对每次工具调用提供 `both`、`text`、`structured` 三种结果模式。模式只选择表示
+形式；三种模式承载同一份事实与同一张图片，不用于脱敏或截断：
+
+| 模式 | `content` | `structuredContent` | 适用 |
+| --- | --- | --- | --- |
+| `both`（默认） | 完整 `result v1` 文本与图片 | 完整 `Result` JSON | 兼容默认；同时需要两种形式 |
+| `text` | 完整 `result v1` 文本与图片 | 不发送 | 只读取文本通道的宿主 |
+| `structured` | 图片；`isError=true` 时附最小 `diagnostic v1` 文本 | 完整 `Result` JSON | 会把结构化结果交给模型或程序的宿主 |
+
+- `both` 同时发送两份完整编码，传输与上下文占用更大；宿主明确只消费一种形式时使用对应
+  单向模式。
+- `text` 完整文本以 `result v1 is_error=<true|false>` 开头、`end result` 结束，不产生
+  `omitted` 块；缺少终止行表示文本被宿主截断，应改用 `structured` 或通过 `inspect` 的
+  node/query 收窄。
+- `structured` 成功且无图时 `content=[]`；不接受空 content 的宿主使用 `both` 或 `text`。
+  错误附带的 `diagnostic v1` 以 `diagnostic v1 is_error=true` 开头、`end diagnostic`
+  结束，只用于解释，不代表完整结果。
+- 模式不改变工具目录、入参 schema、认证、归属或 `/api/*` 契约；不发布 `outputSchema`。
+
+选择方式：
+
+- **进程默认（stdio 与 HTTP 进程均适用）**：显式 `-result-mode` >
+  `MOBILE_USE_MCP_RESULT_MODE` > `both`。
+  值只接受 `both`、`text`、`structured`；显式空值、前后空白、大小写变体或非法值启动失败，
+  退出码为 `2`，不回退到环境变量。
+- **HTTP 每请求**：`X-Mobile-Use-Result-Mode: both|text|structured` 覆盖进程默认。该头必须
+  恰好一个精确值；空值、多值、逗号、前后空白与大小写变体在工具执行前返回 `400`。无此头
+  时使用默认。
+- 该头只在适配器内使用，不发送给设备服务，也不影响认证、会话归属或 STOP。
+
+```powershell
+./build/device-mcp.exe -transport stdio -config .state/mcp-config.json -result-mode text
+$env:MOBILE_USE_MCP_RESULT_MODE = 'structured'
+./build/device-mcp.exe -transport stdio -config .state/mcp-config.json
+Remove-Item Env:MOBILE_USE_MCP_RESULT_MODE
+```
+
+HTTP 宿主在原有 `Authorization` 头之外按需添加：
+
+```json
+{
+  "mcpServers": {
+    "mobile-use-vnext": {
+      "url": "http://127.0.0.1:18883/mcp",
+      "headers": {
+        "Authorization": "Bearer <mcp_token>",
+        "X-Mobile-Use-Result-Mode": "text"
+      }
+    }
+  }
+}
+```
+
+结果模式不是 `mcp-config.json` 的成员；适配器配置是严格 JSON，加入 `result_mode` 等未知
+成员会被拒绝。默认部署启动的手机适配器使用 `both`，且部署参数中没有单独的结果模式选项；
+客户端用每请求头覆盖。若要在该进程上改变启动默认值，需按其启动方式传入
+`-result-mode` 或在进程环境中设置 `MOBILE_USE_MCP_RESULT_MODE`，然后重启适配器。逐块
+语法、取消保留键与图片规则见 [MCP 入口](mcp.md)。
+
+### 4.6 Origin 限制
 
 只有浏览器/Electron 等会发送 `Origin` 的客户端才需要配置允许来源。默认手机适配器的
 `allowed_origins` 为空数组，带 `Origin` 的请求会被拒绝（403）。
@@ -295,6 +356,8 @@ $json = $config | ConvertTo-Json -Depth 5
 ```
 
 宿主只引用二进制和配置路径，不把 token 写进宿主文件。重启宿主后应看到 12 个工具。
+只读文本的 stdio 宿主在 `args` 中追加 `"-result-mode", "text"`；结构化宿主可用
+`structured`；不写时默认 `both`。结果模式不是 JSON 配置成员，选择规则见第 4.5 节。
 
 ### 6.4 主机 HTTP 适配器
 
@@ -306,6 +369,9 @@ $json = $config | ConvertTo-Json -Depth 5
 URL:    http://127.0.0.1:18882/mcp
 Header: Authorization: Bearer <hostMcpToken>
 ```
+
+需要非默认模式时，在请求头中加 `X-Mobile-Use-Result-Mode: text|structured`；该头按请求
+生效，不写入配置（见第 4.5 节）。
 
 主机 HTTP 适配器使用主机 `18882`；手机适配器已转发到主机 `18883`，两者不冲突。不要把
 手机 `18882` 再转发到主机 `18882`，否则主机适配器无法绑定该端口。
@@ -319,6 +385,7 @@ Header: Authorization: Bearer <hostMcpToken>
 | HTTP 入口 | 手机 `18882/mcp`；主机转发 `18883/mcp` | 主机 `18882/mcp` |
 | Token | `.state/deploy.json` 的 `mcp_token` | `.state/mcp-config.json` 的 `http.token` |
 | stdio | Android 宿主需自行提供拉起封装 | 宿主直接拉起 `device-mcp.exe` |
+| 结果模式 | 默认 `both`；HTTP 每请求头覆盖 | 默认 `both`；启动参数/环境变量与每请求头 |
 | 适用 | 主机/手机 HTTP MCP 客户端 | 只支持 stdio 的宿主，或主机本地 HTTP |
 
 ## 7. 路径 D：手机内宿主
@@ -330,6 +397,7 @@ Header: Authorization: Bearer <hostMcpToken>
 ```text
 URL:    http://127.0.0.1:18882/mcp
 Header: Authorization: Bearer <mcp_token>
+可选:   X-Mobile-Use-Result-Mode: text|structured（默认 both）
 ```
 
 - 不需要 `agent_token`，也不需要 `control_token`；适配器在 chroot 内读取服务凭据。
@@ -460,6 +528,10 @@ adb shell su -c 'tail -n 50 /data/local/chroots/debian13/var/lib/mobile-use-vnex
 配置是严格 JSON：未知成员、重复键、类型错误会被拒绝。手机适配器配置由部署生成，
 通常不需要手改；主机适配器配置由运维创建。
 
+结果模式不属于适配器 JSON 配置：`result_mode` 等成员会被严格 JSON 拒绝。启动默认值用
+`-result-mode` 或 `MOBILE_USE_MCP_RESULT_MODE`；HTTP 每请求用
+`X-Mobile-Use-Result-Mode` 覆盖。见第 4.5 节。
+
 ## 11. 常见困惑
 
 **Q：`http.token` 要写进设备服务的 `config.json` 吗？**
@@ -482,6 +554,11 @@ GET 判断工具是否可用。
 手机路径要重新读取 `.state/deploy.json` 的 `mcp_token` 并重启客户端；主机适配器要重新读取
 `.state/mcp-config.json` 的 `http.token` 并重启适配器/客户端。旧 token 不会继续有效。
 
+**Q：为什么 `text` 模式没有 `structuredContent`，或 `structured` 模式没有文本？**
+这是模式定义，不是缺少字段。`text` 只发送完整文本与图片；`structured` 发送完整结构化结果
+与图片，成功且无图时 `content=[]`，错误时只附最小诊断文本。两种模式承载同一份事实；需要
+同时取得两份完整编码时使用 `both`。
+
 ## 12. 错误与恢复映射
 
 | 现象 | 含义 | 处理 |
@@ -490,6 +567,7 @@ GET 判断工具是否可用。
 | `/mcp` 带 token 用 GET 返回 `405` | 正常：MCP 客户端应使用 POST | 用 MCP 客户端连接，不用 GET 判断 |
 | 带 token 仍 `401` | token 填错，或用了主机/手机另一侧的 token | 手机用 `mcp_token`；主机适配器用其 `http.token` |
 | `403 forbidden` | `Origin` 不在 `allowed_origins` | 精确加入来源并重启适配器 |
+| `400 invalid result mode` | 模式头不是单个精确的 `both`/`text`/`structured` | 去掉多值、逗号、前后空白与大小写变体；不设置则使用默认 |
 | 适配器启动即退出 | 端口被占用、配置错误或二进制不匹配 | 看 `device-mcp.log`；确认手机 `18882` 只有一个进程 |
 | `409 contract_mismatch` | 普通契约版本不一致 | 整组更新服务/App/客户端，不要只升一侧 |
 | `409 device_busy` | 已有普通工作 | 读 `blocking_operation_id`，串行化后重试 |
