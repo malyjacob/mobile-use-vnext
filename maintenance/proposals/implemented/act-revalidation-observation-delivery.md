@@ -1,6 +1,7 @@
 # 提案：act 重验失败时交付一个新观察，并把 recovery 改为 retry
 
-状态：提案，未实现。
+状态：已实现（实现提交 `6095a09922d4a3ddfcee97184718abd6ec224be9`，2026-11-11）。
+实现与验证记录：[act-revalidation-observation-delivery.md](../../verification/act-revalidation-observation-delivery.md)。
 基线提交：`1d5d71350677f526e32a04ed73c29078b512ed26`（分支 `master`，2026-11-11）。
 适用范围：`POST /api/act` 与经 MCP `act` 投影的同一条路径，在**认领后、派发前**的重验阶段失败，且失败前已取得一帧可用于发布的树。
 影响范围：`internal/engine`（`act.go`、`capture.go`、`recovery.go`、`engine.go`、`operations.go`）、`internal/eventlog` 白名单、`internal/engine` 测试、`docs/interface.md`、`docs/architecture.md`、`docs/client.md`、`docs/mcp.md`、`maintenance/decisions.md`、`release/versions.json` 与生成常量。
@@ -243,9 +244,36 @@ act(observation_id, operation, image):
 10. 重建主机 `build/device-mcp.exe`，跑探针与实机验证；
 11. 归档提案、写验证记录、更新 `maintenance/status.md` 并提交。
 
-## 11. 实现结果（归档时补写）
+## 11. 实现结果
 
-（归档时补写实现提交、§11.1 落点与 §11.2 偏离。）
+实现提交：`6095a09922d4a3ddfcee97184718abd6ec224be9`（2026-11-11）。版本提交：
+`d7e1f76`（0.6.0 / 契约 6 / versionCode 8）。实现与验证记录：
+[act-revalidation-observation-delivery.md](../../verification/act-revalidation-observation-delivery.md)。
+
+### 11.1 已落地
+
+| 提案条目 | 落点 |
+| --- | --- |
+| §4 交付判据（码集、前台已知、无控制 UI、投影与体积、提交闸门） | `internal/engine/delivery.go` 的 `deliverRejectedObservation`、`deliverableRejection`；提交闸门由 `internal/engine/capture.go` 的 `publishTreeAttempt` 提供 |
+| §4 `forceFull = !obs.Full` | `internal/engine/delivery.go` |
+| §5 重验失败时保留已读取的帧并在交付成功后挂 `observation` | `internal/engine/act.go` 的重验失败分支、`markDelivered` |
+| §6.1 投影：`Delivered` 事实 → `retry/O/effective` | `internal/engine/recovery.go` 的 `planRecoveryFor`、`internal/engine/operations.go`、`internal/engine/engine.go` |
+| §6.1 复用重验已读取的那一帧，不重新采集、不做收敛采样、不确认基线 | `revalidateActTarget` 在失败时返回该帧；交付路径直接 `projectCapture` + `publishTreeAttempt` |
+| §6.3 日志 | `internal/eventlog/log.go` 增加 `format` 枚举键；`act.delivered` 只写 `state`/`code`/`format` |
+| §6.5 文档 | `docs/interface.md`、`docs/architecture.md`、`docs/client.md`、`docs/mcp.md`、`docs/integration.md`、`docs/runbook.md`；`maintenance/decisions.md` 的 D35 |
+| §8.1 测试 | `internal/engine/act_delivery_test.go`（T13–T20）、`recovery_entry_test.go` 的投影表与 T3、`internal/mcp/result_text_test.go` 的交付观察文本投影 |
+| MCP 描述与目录指纹 | `internal/mcp/schema.go` 的 act 描述；`internal/mcp/result_parity_test.go` 的指纹基线随契约 6 前进 |
+
+### 11.2 与提案不同或未执行
+
+| 项 | 结论与理由 |
+| --- | --- |
+| 提案 §2/§4 的不交付清单把“撤销”并入 `observe/P/retired` | 实现保持原投影：`control_revoked`/`session_ended` 仍为 `end/P/revoked`，只有取得帧后的交付门禁拒绝才是 `observe/P/retired`。`docs/interface.md` §6 已按代码写明；属提案措辞的精度问题，判据未变。 |
+| 提案 §6.1 把交付逻辑放在 `act.go` | 拆到新文件 `internal/engine/delivery.go`，判据不变，便于与 `capture.go` 的发布闸门并列阅读。 |
+| 提案 §4 的 forceFull 说明未限定 delta 条件 | delta 仍受“确认基线 + 基线龄/修订差 + 可编码 + 70% 收益”约束（`publishTreeAttempt`），不满足时交付 full；文档已补“满足上述条件时”。 |
+| 提案 §8.1 的“交付过程中 STOP”测试 | 未加测试注入点；直接调用 `deliverRejectedObservation` 并在读取帧后置 `work.Revoked`，断言不发布（T18）。 |
+| 提案未列：已完成视图的降级 | 重复 `P`、`status(P)` 与冻结结果的视图不带 `observation`，不能承诺 `retry`；`recoveryReplay` 把它降级为 `observe/P/retired`（T19/T20），`docs/architecture.md` 与 `docs/interface.md` 已写明。 |
+| 提案 §8.1 的“交付过程中 STOP”与实机 delta 样本 | STOP 由 T18 覆盖；实机两次场景（9 节点与 128 节点）交付均为 `full`，未取得 delta 样本，delta 与 `base` 规则由 T13/T17 覆盖，原因见验证记录 §6。 |
 
 ---
 
