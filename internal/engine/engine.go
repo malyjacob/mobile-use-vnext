@@ -401,6 +401,11 @@ type operationState struct {
 	// Claimed records the one-way ready->claimed transition of this operation.
 	// It outlives the work position so status(P) can replay the same plan.
 	Claimed bool
+	// Delivered records that this operation published the frame its rejected
+	// revalidation had already read. Nothing was dispatched; the delivered
+	// observation is what makes the next step retry instead of observe. It is a
+	// planning fact only and never grants authority.
+	Delivered bool
 	// InputState is the explicit observation usability a path knows but cannot
 	// derive from code and claim alone (start's first observation). It is
 	// consumed once, when the operation finishes.
@@ -1017,8 +1022,14 @@ func (e *Engine) operationViewLocked(op *operationState) *protocol.Result {
 		result.Error = op.Error
 	}
 	// A finished operation replays the projection it already returned; the
-	// status tool applies its own live cleanup override on top.
-	result.Recovery = op.Recovery
+	// status tool applies its own live cleanup override on top. Only a delivered
+	// frame is downgraded: a reply never carries that observation, so it cannot
+	// promise it. A static rejection's retry still names the request's own O.
+	if op.Delivered {
+		result.Recovery = recoveryReplay(op.Recovery)
+	} else {
+		result.Recovery = op.Recovery
+	}
 	if session := e.sessionByOriginLocked(op.SessionOrigin); session != nil {
 		result.Session = e.sessionViewLocked(session)
 		result.IncludeSession = true

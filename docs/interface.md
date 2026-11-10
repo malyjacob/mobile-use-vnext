@@ -36,9 +36,11 @@
 目标树收敛后发布：连续两帧的节点内容身份、公开树与前台/显示语境一致才停止采样。静默窗口与
 总预算按阶段固定（`docs/architecture.md` §4），不是请求字段，也不改变任何端点的字段与错误
 码；页面持续动画时这三次观察最多多花该阶段的预算（`act(image=true)` 另加一次刷新读取）。
-`observe` 由调用方决定节奏（`wait_ms` 与
-`full`），不做收敛采样；`shell` 不发布观察，命令是否改变屏幕由下一次 `act` 的实时重验或一次
-`observe` 回答。
+
+`act` 的重验在派发前失败时另有一个交付观察点：重验已经读取的那一帧直接发布为新的 `ready`
+观察，随失败结果返回（见 §6）。该点不做收敛采样，也不重新采集。`observe` 由调用方决定节奏
+（`wait_ms` 与 `full`），不做收敛采样；`shell` 不发布观察，命令是否改变屏幕由下一次 `act` 的
+实时重验或一次 `observe` 回答。
 
 ## 2. 结果分层与错误
 
@@ -66,6 +68,9 @@ apps, app, shell, notification, diagnosis, cleanup, error, recovery
   `/api/*` 永不产生这些键；
 - `recovery` 是下一个请求的投影：本次结果没有待恢复事实时整个对象省略；出现时 `entry` 与
   `reference` 必出，`input_state` 与 `cause` 按需出现。它不改变上面四层事实。
+- `observation` 不是成功专属：`act` 的重验在派发前失败且已完成交付时，失败结果同样携带
+  `observation`（新 O）。交付时它表示本次调用提交了一个新 O；`observation.status=failed` 的
+  失败结果没有新 O。
 
 `recovery` 的成员：
 
@@ -73,13 +78,16 @@ apps, app, shell, notification, diagnosis, cleanup, error, recovery
 | --- | --- | --- |
 | `entry` | `retry` / `observe` / `status` / `end` / `user` / `update` | 下一个请求应调用的入口 |
 | `reference` | `P` / `O` / `none` | 该入口要带的引用类型，不带 ID |
-| `input_state` | `effective` / `expired` / `revoked` / `claimed` / `retired` | 本次结果所涉观察的输入可用性：引用 O 时为该 O，`start` 为首个观察，`end`/`status(P)` 的收尾分支为原会话；词汇与 `status(O)` 顶层 `input_state` 一致 |
+| `input_state` | `effective` / `expired` / `revoked` / `claimed` / `retired` | `recovery` 所指观察的输入可用性。`act` 重验失败交付新 O 时指该新观察；`observation.status=failed` 的降级结果与其余分支指该操作原请求引用的 O（`status(P)` 与重放视图即该操作原请求的 O），`start` 为首个观察，`end`/`status(P)` 的收尾分支为原会话。词汇与 `status(O)` 顶层 `input_state` 一致 |
 | `cause` | `post_observation_failed` / `executed_revoked` / `cleanup_pending` / `running` | 仅在本次结果不带顶层 `error` 时出现，说明看似成功或仍在运行却仍需恢复的原因 |
 
 `entry` 的含义：
 
-- `retry`：什么都没派发，观察也未被认领；换一个新的 P、复用同一个 O 调用同一工具。
-  该入口总是 `reference=O`、`input_state=effective`。
+- `retry`：什么都没派发，且存在一个 `ready` 且可用的 O 可作为下一次同一工具的输入；换一个
+  新的 P 调用同一工具。这里可用的 O 是结果携带的 `observation`（`act` 重验失败交付的新观察）；
+  没有该成员时是该操作原请求引用的 O，重复 `P` 时即本次请求体里的 O。重复 `P`、`status(P)` 与
+  冻结结果的视图不携带 O 编号，调用方须使用自己原先持有的 O。该入口总是 `reference=O`、
+  `input_state=effective`。
 - `observe`：观察证据作废，需要重新采集；`reference=P`，这里的 P 是下一个请求的新幂等键，
   不能复用本结果的 `operation_id`。
 - `status`：结果未定或收尾未完成；轮询对象按工具取本结果的 `operation_id`、
@@ -213,6 +221,8 @@ HTTP 状态映射（`protocol.Status`）：
 
 - `running` 时带 `phase` 与 `recovery`（`entry=status`、`reference=P`、`cause=running`）；
 - `finished` 时带 `outcome`、`phase`，操作错误在 `error`，`recovery` 由错误码与结果事实决定；
+  该视图不带 `observation`，原操作交付过新观察时 `recovery` 为 `entry=observe`、`reference=P`、
+  `input_state=retired`；
 - 不存在的 P：`409 operation_unknown`，不返回 `not_seen`；
 - 有正面“未接纳”证据的已封闭 P：`request_closed=true`、`outcome=not_executed`、`session=null`；
 - 仅保留“未来接纳已封闭”证据的 P：仍为 `409 operation_unknown`；`end(P)` 会带
@@ -330,15 +340,26 @@ HTTP 状态映射（`protocol.Status`）：
 ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动作所需的输入（`text` 为焦点点击 +
 显示绑定写入，任何一步失败都不重放）。
 
-坐标证明不成立时返回 `409 target_changed`（`recovery` 为 `entry=observe`、`reference=P`、
-`input_state=retired`）；新鲜公开树构造失败返回 `503 hierarchy_unavailable`；两者均不派发。
+重验失败且已取得可用新帧并完成交付时，服务把该帧发布为新的 `ready` 观察随结果返回：
+`target_changed`、`foreground_changed` 与重验阶段的 `node_not_found` 返回 `409`，结果带
+`observation`（`status=complete`）与 `recovery`（`entry=retry`、`reference=O`、
+`input_state=effective`）；调用方用该新 O 与新 `P` 重试同一工具。交付复用同一次读取的帧，
+不额外采集、不做收敛采样，也不确认基线。未交付时结果不带 `observation`，见下段。
+
+重验失败时的 `recovery` 按错误码保持：`display_unavailable`、`hierarchy_unavailable`、
+`foreground_unknown` 为 `entry=observe`、`reference=P`、`input_state=retired`；
+`control_revoked`、`session_ended` 为 `entry=end`、`reference=P`、`input_state=revoked`。
+取得帧后交付门禁拒绝（`tree_too_large`、采集帧龄超限、目标虚拟屏上出现控制 App 的可见节点、
+提交时工作已撤销，或新帧前台无法确认）不改变本次 `error`：仍是
+`target_changed`/`foreground_changed`/`node_not_found`，只是不带 `observation`，`recovery` 为
+`entry=observe`、`reference=P`、`input_state=retired`。所有失败都不派发输入。
 
 结果分支：
 
 | `outcome` | 含义 | 附带 |
 | --- | --- | --- |
 | `executed` | 输入已派发且有完成证据（`text` 以独立读回确认） | 后观察（full 或 delta）；若期间被撤销，则 `recovery` 为 `entry=status`、`reference=P`、`input_state=revoked`、`cause=executed_revoked`，且无后观察 |
-| `not_executed` | 未派发（静态拒绝、重验失败、工作被撤销等） | `error`、`recovery` |
+| `not_executed` | 未派发（静态拒绝、重验失败、工作被撤销等） | `error`、`recovery`；重验失败且已交付新帧时另带 `observation` |
 | `uncertain` | 已派发但无法确认完成（传输失败、读回失败、超时） | `error`（`action_result_uncertain` / `text_target_uncertain` / `text_result_uncertain`）、`recovery` 为 `entry=status`、`reference=P`、`input_state=retired` |
 
 - 输入派发后即使 `text` 读回失败也不回滚、不重放；原 O 不再归还。

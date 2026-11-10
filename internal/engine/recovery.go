@@ -23,6 +23,10 @@ type recoveryInput struct {
 	Phase     string
 	Outcome   string
 	Claimed   bool
+	// Delivered records that this result carries the observation a rejected act
+	// published. When nothing was dispatched, it makes the next call an
+	// immediate retry against the delivered O instead of a new acquisition.
+	Delivered bool
 	// InputState is the usability of the observation this request referenced.
 	// It is not persisted; callers derive it from the facts they already hold.
 	InputState string
@@ -93,6 +97,14 @@ func planRecoveryFor(in recoveryInput) *protocol.Recovery {
 		// state was, its input authority is gone.
 		return newRecovery(protocol.RecoveryEntryStatus, protocol.RecoveryReferenceP,
 			protocol.RecoveryInputRevoked, protocol.RecoveryCauseExecutedRevoked)
+	}
+	if in.Delivered && in.Outcome == OutcomeNotExecuted {
+		// The rejected act published the frame it had already read, so an
+		// unclaimed, ready observation exists even though this operation claimed
+		// one. Nothing was dispatched: retry the same tool against the delivered
+		// O with a new P.
+		return newRecovery(protocol.RecoveryEntryRetry, protocol.RecoveryReferenceO,
+			protocol.RecoveryInputEffective, "")
 	}
 	if in.Claimed && in.Code != "" {
 		return newRecovery(protocol.RecoveryEntryObserve, protocol.RecoveryReferenceP, in.InputState, "")
@@ -263,6 +275,18 @@ func shellPlan(in recoveryInput) *protocol.Recovery {
 }
 
 const shellTool = "shell"
+
+// recoveryReplay drops a delivery promise a replayed view cannot keep. A view
+// built from the operation record never carries the delivered observation, so
+// retry would name an O the caller cannot resolve from that response; the honest
+// next step is one new acquisition.
+func recoveryReplay(r *protocol.Recovery) *protocol.Recovery {
+	if r == nil || r.Entry != protocol.RecoveryEntryRetry {
+		return r
+	}
+	return newRecovery(protocol.RecoveryEntryObserve, protocol.RecoveryReferenceP,
+		protocol.RecoveryInputRetired, "")
+}
 
 // referenceKind classifies an admitted reference by its first byte. The caller
 // has already proven the reference is owned and well formed; this helper only

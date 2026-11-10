@@ -64,7 +64,8 @@ json v1 path="/observation/tree" value={"format":"full","scope":"","root":null}
 错误与恢复等存在的解释字段；它不代表完整 `A`。所有字段均从同一份 `A` 生成。
 
 文本格式的兼容边界：`result v1` 取代旧摘要格式，取消统一标为 `isError=true`；依赖旧文本
-字节的调用方须固定旧适配器版本或迁移。工具名称、描述、入参 schema 与目录指纹保持不变；
+字节的调用方须固定旧适配器版本或迁移。引入 `result v1` 的迁移本身未改变工具名称、描述、入参
+schema 与目录指纹；后续契约变更可以改描述并改变指纹，部署按清单核验；
 目录描述中关于 `omitted` 的旧格式提示不适用于 `result v1`。
 
 树、图片与 shell 输出的事实来源都是服务的同一份结果。base64 只出现在 HTTP 载体
@@ -91,6 +92,11 @@ json v1 path="/observation/tree" value={"format":"full","scope":"","root":null}
 
 树块只投影本次 `Result` 中已有的树或补看内容：不新增采集、不展开 delta、不缓存基线，
 也不读取请求参数、时间或随机数；同一个 `Result` 重复渲染逐字节相同。
+
+在 `result v1` 文本里（`text`/`both` 模式），错误结果同样按成员投影：`act` 重验失败交付的
+新观察会带树块，`is_error=true` 与树块可以出现在同一个结果里。交付与否不改变 `is_error` 的
+判定：`act` 看 `outcome` 是否为 `executed`，其余工具按 `error` 与各自的查询事实。
+`structured` 模式的错误文本是 `diagnostic v1`，不含树块。
 
 **观察块。** 块头之后是一个空行、节点行，最后是终止行：
 

@@ -169,34 +169,6 @@ func (e *Engine) captureAndPublish(ctx context.Context, work *workState, session
 		return failedObservation(coreErr, imageFailure(attempt.err), nil), nil, coreErr
 	}
 
-	e.mu.Lock()
-	currentSession := e.session
-	if currentSession == nil || currentSession.State != SessionActive ||
-		!e.workAuthorizedLocked(work, time.Now()) {
-		e.mu.Unlock()
-		return nil, nil, protocol.NewError(409, protocol.CodeStopped, "原会话已撤销")
-	}
-	baseline := e.baseline
-	revision := currentSession.Revision
-	e.mu.Unlock()
-
-	useDelta := !forceFull && baseline != nil && baseline.Origin == session.Origin &&
-		revision-baseline.Revision < 12 && time.Since(baseline.CapturedAt) < 180*time.Second
-	var delta *protocol.Delta
-	if useDelta {
-		diff, diffErr := e.differ.Diff(baseline.ObservationID, baseline.Tree, tree.projection.Tree)
-		if diffErr != nil {
-			useDelta = false
-		} else {
-			encoded, encodeErr := json.Marshal(diff)
-			if encodeErr == nil && len(encoded) < int(float64(len(tree.fullBytes))*0.70) {
-				delta = diff
-			} else {
-				useDelta = false
-			}
-		}
-	}
-
 	// The image is encoded exactly once, after the tree attempt, whatever its
 	// outcome. Only an image read from the verified target surface and close in
 	// time to the tree may be attached.
@@ -231,12 +203,62 @@ func (e *Engine) captureAndPublish(ctx context.Context, work *workState, session
 			eventlog.Str("code", attempt.err.Code), eventlog.Bool("available", attempt.read))
 	}
 
+	// The observation is actionable only while both attached materials are: the
+	// earlier of the tree read start and the image read start.
+	base := tree.capture.CapturedAt
+	if attempt.meta != nil && attempt.source.CapturedAt.Before(base) {
+		base = attempt.source.CapturedAt
+	}
+	return e.publishTreeAttempt(work, session, phase, tree, base, forceFull, status, image)
+}
+
+// publishTreeAttempt commits exactly one already-read frame as the session's
+// current observation and returns its public projection. Delta selection and
+// every commit gate live here, so the ordinary acquisition and the frame a
+// rejected act delivers share one funnel: a candidate never reaches the public
+// state unless the session, the work ownership, the display generation and the
+// capture age all still hold at this moment.
+func (e *Engine) publishTreeAttempt(work *workState, session *sessionState, phase string,
+	tree *treeAttempt, base time.Time, forceFull bool, status string,
+	image *protocol.ImageMeta) (*protocol.Observation, *observationState, *protocol.APIError) {
+	stopped := protocol.NewError(409, protocol.CodeStopped, "原会话已撤销")
+	if tree == nil || tree.projection == nil || session == nil {
+		return nil, nil, protocol.NewError(503, protocol.CodeHierarchyFailed, "公开树构造失败")
+	}
+	e.mu.Lock()
+	currentSession := e.session
+	if currentSession == nil || currentSession.State != SessionActive ||
+		!e.workAuthorizedLocked(work, time.Now()) {
+		e.mu.Unlock()
+		return nil, nil, stopped
+	}
+	baseline := e.baseline
+	revision := currentSession.Revision
+	e.mu.Unlock()
+
+	useDelta := !forceFull && baseline != nil && baseline.Origin == session.Origin &&
+		revision-baseline.Revision < 12 && time.Since(baseline.CapturedAt) < 180*time.Second
+	var delta *protocol.Delta
+	if useDelta {
+		diff, diffErr := e.differ.Diff(baseline.ObservationID, baseline.Tree, tree.projection.Tree)
+		if diffErr != nil {
+			useDelta = false
+		} else {
+			encoded, encodeErr := json.Marshal(diff)
+			if encodeErr == nil && len(encoded) < int(float64(len(tree.fullBytes))*0.70) {
+				delta = diff
+			} else {
+				useDelta = false
+			}
+		}
+	}
+
 	e.setWorkPhase(work, phase+".commit")
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.session == nil || e.session.State != SessionActive ||
 		!e.workAuthorizedLocked(work, time.Now()) {
-		return nil, nil, protocol.NewError(409, protocol.CodeStopped, "原会话已撤销")
+		return nil, nil, stopped
 	}
 	if e.session.Display.Generation != session.Display.Generation ||
 		e.session.Display.ID != session.Display.ID {
@@ -247,13 +269,9 @@ func (e *Engine) captureAndPublish(ctx context.Context, work *workState, session
 	}
 	e.session.Revision++
 	observationID := e.nextObservationIDLocked()
-	// The observation is actionable only while both attached materials are:
-	// the earlier of the tree read start and the image read start, never before
-	// that base and never past the session lease.
-	base := tree.capture.CapturedAt
-	if attempt.meta != nil && attempt.source.CapturedAt.Before(base) {
-		base = attempt.source.CapturedAt
-	}
+	// The observation keeps the actionable window of the caller-provided base,
+	// which is the earliest material read of one acquisition, and never extends
+	// past the session lease.
 	actionableUntil := base.Add(e.cfg.ObservationLifetime)
 	if actionableUntil.After(e.session.ExpiresAt) {
 		actionableUntil = e.session.ExpiresAt

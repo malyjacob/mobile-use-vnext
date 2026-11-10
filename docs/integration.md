@@ -573,7 +573,7 @@ GET 判断工具是否可用。
 | 适配器启动即退出 | 端口被占用、配置错误或二进制不匹配 | 看 `device-mcp.log`；确认手机 `18882` 只有一个进程 |
 | `409 contract_mismatch` | 普通契约版本不一致 | 整组更新服务/App/客户端，不要只升一侧 |
 | `409 device_busy` | 已有普通工作 | 读 `blocking_operation_id`，串行化后重试 |
-| `409 observation_expired`/`target_changed` | O 过期或目标变化 | 重新 `observe`，不要重放旧动作 |
+| `409 observation_expired`/`target_changed` | O 过期或目标变化 | `target_changed` 的重验失败结果通常已带新观察：用它的 O 加新 P 重试；没有 `observation` 时再 `observe`。不要重放旧动作 |
 | `503 delivery_unavailable` | 慢交付额度不足 | 等待既有结果交付后再试，不排队 |
 | `504 action_result_uncertain` | 输入已派发但结果未知 | `status(P)`/重新观察，不重放 |
 | `409 session_not_found`/`operation_not_found` | 引用不属于当前身份或已淘汰 | 重新建立会话，不猜测旧引用 |

@@ -274,7 +274,9 @@ func TestHTTPModesSelectProjectionPerCall(t *testing.T) {
 }
 
 func TestCatalogFingerprintUnchanged(t *testing.T) {
-	const baseline = "a42fc3247361d1dadadce49a28214053947cd8ecacc967f81ec756a81d7a325b"
+	// Contract 6 added the delivered-observation sentence to the act
+	// description; every other tool keeps its contract-5 text.
+	const baseline = "cebf1afa33e694c2bdaecb768e31f0ebdd8f370d82a935150224bd4025b5b2f3"
 	if got := CatalogFingerprint(); got != baseline {
 		t.Fatalf("catalog changed: %s", got)
 	}

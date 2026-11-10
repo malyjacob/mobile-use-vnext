@@ -214,8 +214,8 @@ func TestShellThenActRejectsAChangedTarget(t *testing.T) {
 		result.Error.Code != protocol.CodeTargetChanged {
 		t.Fatalf("result=%+v error=%+v", result, result.Error)
 	}
-	requireRecovery(t, result, protocol.RecoveryEntryObserve, protocol.RecoveryReferenceP,
-		protocol.RecoveryInputRetired, "")
+	requireRecovery(t, result, protocol.RecoveryEntryRetry, protocol.RecoveryReferenceO,
+		protocol.RecoveryInputEffective, "")
 	if len(h.device.taps) != 0 {
 		t.Fatalf("a changed target was dispatched: %v", h.device.taps)
 	}

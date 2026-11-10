@@ -108,6 +108,7 @@ var toolCatalog = []toolDefinition{
 		description: "消费一个 ready 观察并派发 tap、long_press、text、swipe 或 key。" +
 			"operation 只接受对应分支的成员；image=true 在动作后的同一次采集中附加 ImageContent。" +
 			"坐标目标会在派发前按点解析节点并证明未变化，变化时返回 target_changed。" +
+			"重验失败且已取得新帧时，结果另带一个新观察与 retry 入口：用该 O 加新 P 重试，不必再 observe。" +
 			treeTextGuide,
 		schema: json.RawMessage(`{
   "type": "object",

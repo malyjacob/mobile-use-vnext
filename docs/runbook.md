@@ -215,7 +215,7 @@ adb -s 127.0.0.1:5555 shell su -c 'tail -n 100 /data/data/com.mobileuse.vnext/fi
 | MCP 客户端 403 | `Origin` 未在 `allowed_origins` | 部署时用 `-McpAllowedOrigins` 精确放行并重启适配器；不要填 `*` |
 | 手机 `18882` 启动失败 | 端口被占用或配置/二进制不匹配 | 只保留一个适配器进程；检查 `mcp-config.json` 与日志 |
 | `409 device_busy` | 已有普通工作占用工作位置 | 读 `blocking_operation_id`；串行化调用 |
-| `409 observation_expired`/`target_changed`/`foreground_changed` | 观察已过期（60 秒）或界面变化 | 重新 `observe`，用新 O 再 `act`；不要重放旧动作 |
+| `409 observation_expired`/`target_changed`/`foreground_changed` | 观察已过期（60 秒）或界面变化 | `target_changed`/`foreground_changed` 的重验失败结果通常已带新观察：用它的 O 与新 P 再 `act`；没有 `observation` 时先 `observe`。不要重放旧动作 |
 | `504 action_result_uncertain` | 输入已派发但结果无法确认 | 用 `status(P)`/重新观察判断现状，不重放；结束会话时该事实会反映到 `cleanup.execution` |
 | App 进程重建或服务重启 | 服务实例变化、App 实例变化 | 服务实例变化后 App 会作废旧命令；App 实例变化会按 `app_restarted` 撤销旧会话，服务正常退出按 `service_shutdown` 撤权。等待新的恢复结果，不沿用缓存状态 |
 

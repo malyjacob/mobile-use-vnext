@@ -81,6 +81,9 @@ var allowedKeys = map[string]struct{}{
 	// describe one pure-CPU decision; points, refs and labels are never
 	// whitelisted.
 	"proven": {},
+	// Tree encoding facts. The format is the closed enum full/delta, never tree
+	// content or a ref.
+	"format": {},
 }
 
 // Logger is a bounded, drop-counting event sink.

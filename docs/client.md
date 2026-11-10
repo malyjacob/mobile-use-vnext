@@ -62,6 +62,12 @@ type Response struct {
 只在本次确有该事实时出现；`recovery` 缺失表示本次结果没有待恢复事实。客户端不改写主事实：
 `observation.status=failed` 的 503 仍是带 `Result` 的正常响应，不降成无归属异常。
 
+失败结果可以携带 `observation`：`act` 的重验在派发前失败且已发布新帧时，`not_executed` 结果带
+一个新 O 与 `recovery`（`entry=retry`、`reference=O`、`input_state=effective`）。客户端必须在
+错误响应上同样解码 `observation`（本仓库客户端已如此），不得丢弃；`retry` 指向的 O 以结果里的
+`observation.id` 为准，没有该成员时用该操作原请求引用的 O（重复 `P` 时即请求体里的 O）。
+重复 `P`、`status(P)` 与冻结结果的视图不带 O 编号。
+
 | 方法 | 请求参数 | P |
 | --- | --- | --- |
 | `Start` | 无 | 是 |

@@ -145,6 +145,14 @@ func recoveryCases() []planCase {
 			wantRecovery(protocol.RecoveryEntryObserve, p, retired, "")},
 		{"act target changed", act(protocol.CodeTargetChanged, "revalidate", notExecuted, true, retired),
 			wantRecovery(protocol.RecoveryEntryObserve, p, retired, "")},
+		{"act target changed delivered", recoveryInput{Tool: "act", Reference: o,
+			Code: protocol.CodeTargetChanged, Phase: "revalidate", Outcome: notExecuted,
+			Claimed: true, Delivered: true, InputState: eff},
+			wantRecovery(protocol.RecoveryEntryRetry, o, eff, "")},
+		{"act delivered but uncertain", recoveryInput{Tool: "act", Reference: o,
+			Code: protocol.CodeTargetChanged, Phase: "dispatch", Outcome: uncertain,
+			Claimed: true, Delivered: true, InputState: retired},
+			wantRecovery(protocol.RecoveryEntryStatus, p, retired, "")},
 		{"act foreground changed", act(protocol.CodeForegroundChanged, "revalidate", notExecuted, true, retired),
 			wantRecovery(protocol.RecoveryEntryObserve, p, retired, "")},
 		{"act foreground unknown", act(protocol.CodeForegroundUnknown, "revalidate", notExecuted, true, retired),
@@ -507,9 +515,10 @@ func TestRecoveryRetryKeepsObservation(t *testing.T) {
 	requireNoRecovery(t, retry)
 }
 
-// TestRecoveryObserveAfterClaim is T3: a post-claim target change consumes the
-// O and points at a fresh observe(P).
-func TestRecoveryObserveAfterClaim(t *testing.T) {
+// TestRecoveryDeliveryAfterClaim is T3: a post-claim target change consumes the
+// O, publishes the frame the rejected revalidation already read, and points at
+// retry over that delivered observation instead of a new acquisition.
+func TestRecoveryDeliveryAfterClaim(t *testing.T) {
 	h := newHarness(t)
 	start := h.startSession()
 	button := findRole(currentTree(t, h.engine).Root, protocol.RoleButton)
@@ -526,8 +535,11 @@ func TestRecoveryObserveAfterClaim(t *testing.T) {
 		t.Fatalf("act rejected: %v", apiErr)
 	}
 	requireNotExecuted(t, result, protocol.CodeTargetChanged)
-	requireRecovery(t, result, protocol.RecoveryEntryObserve, protocol.RecoveryReferenceP,
-		protocol.RecoveryInputRetired, "")
+	requireRecovery(t, result, protocol.RecoveryEntryRetry, protocol.RecoveryReferenceO,
+		protocol.RecoveryInputEffective, "")
+	if result.Observation == nil || result.Observation.ID == start.Observation.ID {
+		t.Fatalf("delivered observation = %+v, want a new ready observation", result.Observation)
+	}
 	if status := observationStatus(h, start.Observation.ID); status != ObservationRetired {
 		t.Fatalf("claimed observation status = %q, want retired", status)
 	}

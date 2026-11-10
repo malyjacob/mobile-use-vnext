@@ -156,8 +156,9 @@ func (e *Engine) finishOperation(op *operationState, outcome, phase string, apiE
 	}
 	op.Recovery = planRecovery(recoveryInput{
 		Tool: op.Kind, Reference: op.Reference, Code: code, Phase: phase,
-		Outcome: outcome, Claimed: op.Claimed, InputState: inputState,
-		Cleanup: cleanupValue(e.cleanupForOriginLocked(op.SessionOrigin)),
+		Outcome: outcome, Claimed: op.Claimed, Delivered: op.Delivered,
+		InputState: inputState,
+		Cleanup:    cleanupValue(e.cleanupForOriginLocked(op.SessionOrigin)),
 	})
 	op.Recovery = e.durabilityRecoveryLocked(protocol.RecoveryReferenceP, inputState, op.Recovery)
 	return op.Recovery

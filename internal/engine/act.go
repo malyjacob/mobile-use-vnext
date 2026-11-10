@@ -58,7 +58,18 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 	if revalidateErr != nil {
 		e.logActPoint(point, false)
 		revalidateErr.Outcome = OutcomeNotExecuted
-		return e.finishWithError(op, "revalidate", revalidateErr), nil
+		// The rejected revalidation has already read one frame. Publishing it
+		// hands the caller fresh evidence instead of making it observe again;
+		// nothing was dispatched, so the recovery becomes retry against that O.
+		public := deliverRejection(e, work, session, obs, fresh, revalidateErr.Code)
+		if public != nil {
+			e.markDelivered(op)
+		}
+		result := e.finishWithError(op, "revalidate", revalidateErr)
+		if public != nil {
+			result.Observation = public
+		}
+		return result, nil
 	}
 	e.logActPoint(point, point != nil && point.state == pointUnique)
 
@@ -275,7 +286,9 @@ func (e *Engine) claimObservationLocked(op *operationState, agent string, work *
 // belongs to the observed window, and maps the public target to a unique fresh
 // source node before any input is dispatched. A coordinate target proves that
 // the fresh tree resolves the same point to the same node; a ref target keeps
-// the existing complete-identity plus ancestry proof.
+// the existing complete-identity plus ancestry proof. A content rejection
+// returns the fresh capture it already read, so the caller path may publish it
+// as evidence instead of discarding it.
 func (e *Engine) revalidateActTarget(work *workState, obs *observationState,
 	operation *protocol.Operation, point *pointCheck) (*device.Capture, *device.RawNode, *protocol.APIError) {
 	ctx := work.Ctx
@@ -297,11 +310,11 @@ func (e *Engine) revalidateActTarget(work *workState, obs *observationState,
 		return nil, nil, protocol.NewError(503, protocol.CodeHierarchyFailed, "实时目标重验失败")
 	}
 	if err := foregroundMatches(obs.Foreground, capture.Foreground); err != nil {
-		return nil, nil, err
+		return &capture, nil, err
 	}
 	if point != nil && point.state == pointUnique {
 		if apiErr := e.provePointTarget(&capture, obs, point); apiErr != nil {
-			return nil, nil, apiErr
+			return &capture, nil, apiErr
 		}
 	}
 	if operation.Target == nil || !operation.Target.UseRef {
@@ -309,12 +322,12 @@ func (e *Engine) revalidateActTarget(work *workState, obs *observationState,
 	}
 	raw := sourceNode(obs, operation.Target.Ref)
 	if raw == nil {
-		return nil, nil, protocol.NewError(409, protocol.CodeNodeNotFound, "目标节点来源不可用")
+		return &capture, nil, protocol.NewError(409, protocol.CodeNodeNotFound, "目标节点来源不可用")
 	}
 	fresh, ok := matchFreshNode(&capture, obs.Projection.Capture, raw)
 	if !ok {
-		return nil, nil, protocol.NewError(409, protocol.CodeTargetChanged,
-			"目标元素已变化，请重新观察")
+		return &capture, nil, protocol.NewError(409, protocol.CodeTargetChanged,
+			"目标元素已变化，本次未派发")
 	}
 	return &capture, fresh, nil
 }
@@ -357,7 +370,7 @@ func (e *Engine) provePointTarget(fresh *device.Capture, obs *observationState,
 
 func targetChangedAtPoint() *protocol.APIError {
 	return protocol.NewError(409, protocol.CodeTargetChanged,
-		"目标点上的节点已变化，请重新观察")
+		"目标点上的节点已变化，本次未派发")
 }
 
 // logActPoint records one coordinate-target decision. Only the resolution
@@ -378,22 +391,22 @@ func foregroundMatches(observed, fresh device.Foreground) *protocol.APIError {
 	case device.ForegroundPresent:
 		if fresh.State != device.ForegroundPresent || fresh.Package != observed.Package {
 			return protocol.NewError(409, protocol.CodeForegroundChanged,
-				"前台窗口已变化，请重新观察")
+				"前台窗口已变化，本次未派发")
 		}
 		if observed.TaskID != nil && fresh.TaskID != nil && *observed.TaskID != *fresh.TaskID {
 			return protocol.NewError(409, protocol.CodeForegroundChanged,
-				"前台任务已变化，请重新观察")
+				"前台任务已变化，本次未派发")
 		}
 		return nil
 	case device.ForegroundNone:
 		if fresh.State != device.ForegroundNone {
 			return protocol.NewError(409, protocol.CodeForegroundChanged,
-				"前台窗口已变化，请重新观察")
+				"前台窗口已变化，本次未派发")
 		}
 		return nil
 	default:
 		return protocol.NewError(409, protocol.CodeForegroundUnknown,
-			"无法确认目标窗口归属，请重新观察")
+			"无法确认目标窗口归属，本次未派发")
 	}
 }
 
