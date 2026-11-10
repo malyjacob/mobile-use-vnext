@@ -94,9 +94,29 @@ harness，不入库，只输出代码、格式与计数，不输出树、坐标�
 - **交付为 delta 的实机样本**：两次场景交付都是 `full`（9 节点小树与整体滚动的差分不满足
   “可编码且收益 < 70%”的既有规则）。delta 与 `base` 规则由 T13/T17 覆盖，未在实机取得样本。
 - **`foreground_changed` 的实机交付**：未构造前台切换场景；由 T17 覆盖。
-- **MCP 文本模式“错误结果带树块”的实机样本**：探针不制造 `target_changed`；由
-  `TestTextCodecDeliveredObservationOnError` 覆盖。
-- **主机侧 agent 宿主重启**：按要求只重建适配器，未重启 DSH/Codex 等宿主进程，也未改动其配置；
-  旧 stdio 宿主进程仍会使用旧二进制，直到下次重启。
+- **MCP 文本模式“错误结果带树块”的实机样本**：本条最初未覆盖；DSH 宿主重载适配器后的
+  端到端运行已补齐，见 §7。
+- **主机侧 agent 宿主重启**：适配器重建后，DSH 宿主已自行重载并实测（§7）；Codex 宿主未重启，
+  仍是旧二进制，未改动任何宿主配置。
 - **交付路径的工作截止冻结竞态**：未构造分钟级工作超时；`applyFrozenResult` 只在
   `phase=work_deadline` 时替换结果并清空 `observation`，属既有超时路径。
+
+## 7. 已实测：DSH → 主机适配器 → 服务的端到端链路
+
+DSH 宿主重载重建后的 `build/device-mcp.exe` 后，经 MCP 工具走完一次完整闭环（2026-11-11）：
+
+| 步骤 | 实际结果 |
+| --- | --- |
+| `status()` | `can_start=true`，上一会话 `ended` 且 `cleanup.state=complete` |
+| `start()` | `executed`，会话 `virtual`，首个观察 `O…_24`（空屏，1 节点，`foreground.state=none`） |
+| `open_app(observation_id=O…_24, app=com.mobileuse.probe)` | `outcome=uncertain`、`app_launch_unconfirmed`（既有实机不确定性路径）；`status(P)` 复述同一终态；应用实际已在前台 |
+| `keepalive` + `observe(O…_24, full)` | 新观察 `O…_25`（9 节点；`checkbox` 未选中；`taps: 0`；前台 `com.mobileuse.probe`） |
+| `adb shell input -d 17 tap`（会话显示） | 注入一次 checkbox 点击，服务不知情 |
+| `act(O…_25, tap@坐标)` | `is_error=true`、`outcome=not_executed`、`target_changed`（消息“目标点上的节点已变化，本次未派发”）；结果带交付观察 `O…_26` 的完整树块（`status=complete`，`checkbox checked=true`）与 `recovery=retry/O/effective` |
+| `act(O…_26, tap@同一坐标)`（新 P，中间无 `observe`） | `executed`；后观察 `O…_27`（`checkbox checked=false`、`taps: 0`）⇒ 交付的 O 立即可用且只派发一次 |
+| `end(origin)` | `executed`、`cleanup.state=pending`、`recovery=status/P/revoked/cause=cleanup_pending` |
+| `status(end P)` | `cleanup.state=complete`，`execution/tasks/recents/display` 全为 `confirmed` |
+
+结论：`result v1 is_error=true` 与树块可以同时出现；交付的新 O 无需再次观察即可重试；被拒的
+`act` 零派发（checkbox 只从注入那一次变为 `checked=true`，重试再翻回 `false`），点击计数保持
+`0`；收尾与准入按既有契约恢复。
