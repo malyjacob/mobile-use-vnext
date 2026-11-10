@@ -15,6 +15,7 @@ const (
 	connectTimeout   = 30 * time.Second
 	listenerTimeout  = 10 * time.Second
 	childStopTimeout = 5 * time.Second
+	resultModeHeader = "X-Mobile-Use-Result-Mode"
 )
 
 // newMCPClient builds the probe's MCP client identity.
@@ -28,8 +29,9 @@ func newMCPClient() *sdk.Client {
 // connectStdioAdapter starts the adapter with the stdio transport and performs
 // the MCP initialize handshake. The returned stop function closes the session
 // and guarantees the child process is gone.
-func connectStdioAdapter(ctx context.Context, binaryPath, configPath string) (*sdk.ClientSession, func(), *checkError) {
-	command := exec.Command(binaryPath, "-transport", "stdio", "-config", configPath)
+func connectStdioAdapter(ctx context.Context, binaryPath, configPath,
+	resultMode string) (*sdk.ClientSession, func(), *checkError) {
+	command := exec.Command(binaryPath, stdioAdapterArgs(configPath, resultMode)...)
 	command.Stderr = io.Discard
 	connectCtx, cancel := context.WithTimeout(ctx, connectTimeout)
 	defer cancel()
@@ -49,15 +51,25 @@ func connectStdioAdapter(ctx context.Context, binaryPath, configPath string) (*s
 	return session, stop, nil
 }
 
+func stdioAdapterArgs(configPath, resultMode string) []string {
+	return []string{
+		"-transport", "stdio",
+		"-config", configPath,
+		"-result-mode", resultMode,
+	}
+}
+
 // bearerTransport adds the private host-side MCP credential to every request.
 type bearerTransport struct {
-	base  http.RoundTripper
-	token string
+	base       http.RoundTripper
+	token      string
+	resultMode string
 }
 
 func (t *bearerTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	clone := request.Clone(request.Context())
 	clone.Header.Set("Authorization", "Bearer "+t.token)
+	clone.Header.Set(resultModeHeader, t.resultMode)
 	base := t.base
 	if base == nil {
 		base = http.DefaultTransport
@@ -129,10 +141,15 @@ func (c *childProcess) stop() {
 // connectHTTPAdapter connects the MCP client to the already listening HTTP
 // adapter. The endpoint is loopback-only and the private bearer token is added
 // by the transport, never by a URL.
-func connectHTTPAdapter(ctx context.Context, cfg *config) (*sdk.ClientSession, func(), *checkError) {
+func connectHTTPAdapter(ctx context.Context, cfg *config,
+	resultMode string) (*sdk.ClientSession, func(), *checkError) {
 	endpoint := "http://" + cfg.HTTP.Listen + "/mcp"
 	httpClient := &http.Client{
-		Transport: &bearerTransport{base: http.DefaultTransport, token: cfg.HTTP.Token},
+		Transport: &bearerTransport{
+			base:       http.DefaultTransport,
+			token:      cfg.HTTP.Token,
+			resultMode: resultMode,
+		},
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},

@@ -26,22 +26,46 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
 
 调用参数在进入客户端前由 `internal/protocol` 的严格解码器接入：未知成员、重复键、大小写
 变体、尾随第二个 JSON 值、类型混用与未声明 `null` 都被拒绝，且不产生设备调用。参数错误
-返回 `IsError=true` 的结构化结果与 `invalid_request`。
+返回 `IsError=true` 与 `invalid_request`，按所选结果模式投影。
 
 ## 3. 结果投影
 
-一次工具调用的结果包含：
+结果模式只选择表示形式，三种模式承载同一份事实与相同图片：
 
-- 一份可读正文：`key=value` 阶段事实，以及（本次有观察树或补看内容时）一个确定性树块；
-- 一份 `structuredContent`：与服务同形的 `Result` JSON；图片字段只保留元数据；
-- 请求图片且本次取得时，额外一个 `ImageContent`：`data` 为图片字节的 base64 载体，
-  `mimeType` 为 `image/jpeg`。
+| 模式 | `content` | `structuredContent` |
+| --- | --- | --- |
+| `both`（默认） | 完整 `result v1` 文本与图片 | 完整 `Result` JSON |
+| `text` | 完整 `result v1` 文本与图片 | 不发送 |
+| `structured` | 图片；`isError=true` 时附最小 `diagnostic v1` 文本 | 完整 `Result` JSON |
 
-`key=value` 行保留本次已知的阶段事实（操作号、状态、outcome、会话、观察头、树格式、
-图片元数据、收尾五项、错误与 `recovery.entry`、`recovery.reference`、
-`recovery.input_state`、`recovery.cause` 等）。`start`、`observe`、`act`、`open_app`
-的结果带观察树块，`inspect` 的结果带补看块；其余工具不产生树块。树块与 `key=value`
-正文之间恰好一个空行，`structuredContent` 与树块同源。
+完整结果是 `(canonical A, CallToolResult.IsError, ImageContent)`。`A` 是去除图片 base64
+载体后的确定性 `Result` JSON；取消时还包含本节规定的 `error.details.mcp.*`。文本和结构化
+编码必须无损还原同一结果：缺失、`null`、`false`、`0`、`""`、`[]` 与数组顺序均保留。
+图片只在 `ImageContent` 中发送。`structured` 成功且无图时 `content=[]`；不接受空 content
+的宿主应使用 `both` 或 `text`。模式不用于脱敏或截断，不发布 `outputSchema`。
+
+完整文本第一行为 `result v1 is_error=<true|false>`，最后为 `end result`。已知字段按
+`Result` 的公共顺序输出，字段行和块可以交错；例如 shell 块之后仍可有错误与恢复字段。
+字段行为 `key=value`，受控 ID、枚举、时间戳、整数、布尔可用无空白、`=`、引号、反斜杠的
+ASCII token；任意文本与设备来源字符串使用 JSON 字符串，空串和非法 token 也使用 JSON
+字符串；复合值使用紧凑 JSON。未知成员或不可表示的复合值使用完整兜底：
+
+```text
+json v1 path="/observation/tree" value={"format":"full","scope":"","root":null}
+```
+
+`path` 为 RFC 6901 JSON Pointer，`~`、`/` 分别转义为 `~0`、`~1`。每个事实路径只编码
+一次。块前恰好一个空行，块后接字段或结果终止行时没有额外空行；相邻块之间恰好一个空行。
+块头的 `nodes`、`changes`、`items`、`events`、`output_bytes` 仅为派生计数；delta 的
+`scope`、subtree/query 的 `tree_scope` 也是派生显示，不新增 `A` 的成员。
+
+`structured` 的错误文本使用 `diagnostic v1 is_error=true` / `end diagnostic`，只包含
+操作号、操作状态、outcome、phase、目标引用、准入/消息状态、观察 status/id、会话、收尾、
+错误与恢复等存在的解释字段；它不代表完整 `A`。所有字段均从同一份 `A` 生成。
+
+文本格式的兼容边界：`result v1` 取代旧摘要格式，取消统一标为 `isError=true`；依赖旧文本
+字节的调用方须固定旧适配器版本或迁移。工具名称、描述、入参 schema 与目录指纹保持不变；
+目录描述中关于 `omitted` 的旧格式提示不适用于 `result v1`。
 
 树、图片与 shell 输出的事实来源都是服务的同一份结果。base64 只出现在 HTTP 载体
 `observation.image.base64` 与 MCP `ImageContent.data`；可读正文与 `structuredContent`
@@ -60,6 +84,7 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
 | `inspect` 内容不可用、准入/协议/传输错误 | `true` |
 | `start` 已建立会话但首个观察失败 | `false`（主操作 `executed`） |
 | `act` 已派发但完成未知 | `true`（`uncertain`） |
+| MCP 调用取消（含已确认 `executed` 的结果） | `true`，保留原执行事实 |
 
 ### 3.1 树块
 
@@ -121,30 +146,49 @@ end tree
 节点行数之和；查询的嵌套命中按各自子树重复计数。`path` 是 root..parent 的 ref 序列，
 不含命中节点本身。
 
-**预算与完整性。** 观察块总字节上限 24 KiB，补看块 32 KiB，均含块头、正文与终止行。
-超过上限时整块省略，只输出一行 `omitted`：
+**预算与完整性。** MCP 不设文本大小上限，不产生 `omitted`。可读块能无损表示时完整输出；
+非法 ref、缺少必要元数据、未知成员或其他不可表示情况以完整 `json v1` 兜底。树 ref 必须
+满足 `n` 加非零十进制数字。服务的观察树/inspect 全树上限为 128 KiB，subtree/query 为
+32 KiB；引擎返回的 `truncated` 仍保留。块分别以 `end tree` / `end inspect` 结束。
+缺失 `end result` 或 `end diagnostic` 表示对应文本被宿主截断；应改用宿主支持的
+`structured`，或通过 `inspect` 的 node/query 收窄。`both` 同时发送两种完整编码，会增加
+传输与上下文占用。
+
+### 3.2 shell、apps 与 timeline 块
 
 ```text
-tree v1 omitted format=full id=O3 nodes=612 bytes=27112 limit=24576 use=inspect
-tree v1 omitted format=delta id=O4 base=O3 changes=120 bytes=24880 limit=24576 use=inspect
-inspect v1 omitted scope=tree observation=O2 revision=4 nodes=612 bytes=38211 limit=32768 use=query
+shell v1 termination=exited exit_code=0 truncated=false output_bytes=6
+output "hello\n"
+end shell
+
+apps v1 items=1 total=1 truncated=false captured_at=2026-11-10T03:00:00Z
+item {"name":"设置","package":"com.android.settings"}
+end apps
+
+timeline v1 events=1
+event {"at":"2026-11-10T03:00:00Z","phase":"dispatch","code":"executed"}
+end timeline
 ```
 
-`omitted` 与 `truncated` 不同：前者是 MCP 文本块整块未渲染，后者是引擎按 32 KiB 总预算
-截断了查询命中条数。非省略块分别以 `end tree` / `end inspect` 结尾；缺少终止行表示输出
-在宿主侧被切断。ref 不满足 `n` 加非零十进制数字时，整块以
-`tree v1 omitted reason=ref_format …` / `inspect v1 omitted reason=ref_format …` 省略，
-不输出可能撕裂语法的半棵树。
+shell 的 `output` 按换行分块，每块包含原换行并编码为 JSON 字符串，拼接后保留原输出；空串
+有一行 `output ""`，`null` 对应 `output_bytes=null` 且无 output 行。`output_error` 使用
+完整 JSON。apps 的 item 与 timeline 的 event 均为完整 canonical 对象，保持数组顺序与
+未来成员；timeline 为空时按 JSON 兜底。shell/apps 的额外成员按 JSON Pointer 输出。
+这些内容只进入响应，不写日志。
 
 ## 4. stdio
 
 ```text
 device-mcp -transport stdio -config <private-config>
+device-mcp -transport stdio -config <private-config> -result-mode text
 ```
 
 - 每条工具调用在独立请求上下文中执行；宿主发送 `notifications/cancelled` 时，本次调用
   上下文被取消，由取消包装按第 6 节处理。
 - 进程退出、stdin 关闭与连接断开都不证明设备动作已撤回或原执行链已结束。
+- 默认模式按显式 `-result-mode` > `MOBILE_USE_MCP_RESULT_MODE` > `both` 选择；
+  值仅接受 `both`、`text`、`structured`。显式空值、前后空白、大小写变体或非法值启动失败，
+  退出码为 `2`，不会回退到环境变量。
 
 ## 5. Streamable HTTP
 
@@ -156,10 +200,14 @@ device-mcp -transport http -config <private-config>
   跨请求的 MCP 会话。进程只监听私有配置中的 loopback 地址，路径不作为授权依据。
 - 每个请求必须携带 `Authorization: Bearer <mcp_token>`；缺失或错误返回 `401`，不进入
   工具调用。该令牌是宿主侧 MCP 凭据，与服务 `agent_token` 分离。
-- 携带 `Origin` 的请求必须精确匹配私有配置的 `allowed_origins`（`scheme://host[:port]`）；
-  不匹配返回 `403`。不含 `Origin` 的非浏览器客户端按已认证请求处理。
+- 携带 `Origin` 的请求与私有配置的 `allowed_origins`（`scheme://host[:port]`）在忽略末尾
+  一个或多个 `/` 后精确比较；其余差异返回 `403`。不含 `Origin` 的非浏览器客户端按
+  已认证请求处理。
 - 每请求使用独立临时 MCP 会话，不继承其他调用方的 MCP 会话、工具参数或结果；不跨 Agent
   串用归属。
+- 每请求可用 `X-Mobile-Use-Result-Mode: both|text|structured` 覆盖进程默认模式；无此头时
+  使用默认值。该头必须恰好一个值，空值、多值、逗号、前后空白与大小写变体返回 `400`，在
+  工具执行前拒绝。它只在适配器内使用，不发送给设备服务，也不影响认证与归属。
 - `2026-07-28` 的一次 POST 就是完整请求生命周期。客户端关闭响应的 SSE 流时，服务请求
   上下文被取消，按第 6 节处理；SSE 断开本身不证明设备动作已撤回。
 
@@ -176,6 +224,11 @@ device-mcp -transport http -config <private-config>
 
 `status`、`inspect`、`diagnose` 只取消本次读取，不登记 P、不调用 `end`。调用参数中的
 `reference` 是原观察/操作定位，不是本次取消的 P；不得把它当成本次调用的操作编号。
+
+取消结果一律 `isError=true`。适配器保留已有服务错误，缺少错误时合成 `call_cancelled`，并
+在 `error.details` 注入保留键 `mcp.cancelled=true`、`mcp.cancellation=<受控说明>`，两种
+完整编码均包含它们。此命名空间只由 MCP 适配器使用，`/api/*` 永不产生。文本无额外顶层
+`cancelled` 行；取消不改写原 `outcome`、观察与收尾证据。
 
 漏收分两段：
 

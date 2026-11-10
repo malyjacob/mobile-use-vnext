@@ -10,17 +10,6 @@ import (
 )
 
 const (
-	// maxObservationTreeTextBytes bounds one full/delta tree block, including
-	// its header, blank separator and trailer. It is a fixed projection policy,
-	// not a per-call option.
-	maxObservationTreeTextBytes = 24 * 1024
-	// maxInspectionTextBytes bounds one inspect block. Inspection is the cold
-	// recovery path for a block omitted by the observation budget, so it is
-	// slightly wider.
-	maxInspectionTextBytes = 32 * 1024
-)
-
-const (
 	treeTextIndentUnit = "                                                                "
 	treeTextHexDigits  = "0123456789abcdef"
 )
@@ -28,45 +17,36 @@ const (
 // renderTreeText projects the tree or inspection material already present in
 // one result as a deterministic line-oriented block. It never captures, never
 // expands a delta and keeps no state: the same result always renders to the
-// same bytes. It returns the empty string when the result carries no tree.
-func renderTreeText(result *protocol.Result) string {
+// same bytes. A false result means the caller must use canonical JSON.
+func renderTreeText(result *protocol.Result) (string, bool) {
 	if result == nil {
-		return ""
+		return "", false
 	}
 	if observation := result.Observation; observation != nil && observation.Tree != nil {
 		switch {
-		case observation.Tree.Full != nil:
+		case observation.Tree.Full != nil && observation.Tree.Delta == nil:
 			return renderFullTreeText(observation.ID, observation.Tree.Full)
-		case observation.Tree.Delta != nil:
+		case observation.Tree.Delta != nil && observation.Tree.Full == nil:
 			return renderDeltaTreeText(observation.ID, observation.Tree.Delta)
+		default:
+			return "", false
 		}
 	}
 	if result.Inspection != nil {
 		return renderInspectionText(result.Inspection)
 	}
-	return ""
+	return "", false
 }
 
-// treeTextBuffer accumulates one block while counting every byte even after it
-// stops retaining content. A block that crosses its limit is discarded whole;
-// the caller only publishes the counted size in an omitted line.
+// treeTextBuffer accumulates one complete block. The total is retained for one
+// allocation in finish; content is never discarded based on size.
 type treeTextBuffer struct {
-	limit   int
-	total   int
-	store   []byte
-	dropped bool
+	total int
+	store []byte
 }
 
 func (b *treeTextBuffer) write(value string) {
 	b.total += len(value)
-	if b.dropped {
-		return
-	}
-	if b.total > b.limit {
-		b.dropped = true
-		b.store = nil
-		return
-	}
 	b.store = append(b.store, value...)
 }
 
@@ -88,14 +68,10 @@ type treeTextBlock struct {
 	header  string
 	body    treeTextBuffer
 	trailer string
-	limit   int
 }
 
-func (b *treeTextBlock) finish(omitted func(total int) string) string {
+func (b *treeTextBlock) finish() (string, bool) {
 	total := len(b.header) + 2 + b.body.total + len(b.trailer) + 1
-	if b.body.dropped || total > b.limit {
-		return omitted(total)
-	}
 	var builder strings.Builder
 	builder.Grow(total)
 	builder.WriteString(b.header)
@@ -103,82 +79,51 @@ func (b *treeTextBlock) finish(omitted func(total int) string) string {
 	builder.WriteString(string(b.body.store))
 	builder.WriteString(b.trailer)
 	builder.WriteByte('\n')
-	return builder.String()
+	return builder.String(), true
 }
 
-func renderFullTreeText(id string, tree *protocol.Tree) string {
-	if tree == nil || !validateNodeRefs(tree.Root) {
-		return observationRefFormatLine(id, "")
+func renderFullTreeText(id string, tree *protocol.Tree) (string, bool) {
+	if !validateTreeTextToken(id) || !validateFullTree(tree) {
+		return "", false
 	}
-	scope := tree.Scope
-	if scope == "" {
-		scope = protocol.Scope
-	}
-	body := treeTextBuffer{limit: maxObservationTreeTextBytes}
+	body := treeTextBuffer{}
 	nodes := writeSubtree(&body, tree.Root, "")
 	header := "tree v1 format=full id=" + id +
-		" scope=" + scope + " nodes=" + strconv.Itoa(nodes)
-	block := treeTextBlock{
-		header: header, body: body, trailer: "end tree", limit: maxObservationTreeTextBytes,
-	}
-	return block.finish(func(total int) string {
-		return "tree v1 omitted format=full id=" + id +
-			" nodes=" + strconv.Itoa(nodes) +
-			" bytes=" + strconv.Itoa(total) +
-			" limit=" + strconv.Itoa(maxObservationTreeTextBytes) + " use=inspect\n"
-	})
+		" scope=" + tree.Scope + " nodes=" + strconv.Itoa(nodes)
+	block := treeTextBlock{header: header, body: body, trailer: "end tree"}
+	return block.finish()
 }
 
-func renderDeltaTreeText(id string, delta *protocol.Delta) string {
-	base := ""
-	if delta != nil {
-		base = delta.Base
-	}
-	if delta == nil || !validateDeltaRefs(delta) {
-		return observationRefFormatLine(id, base)
+func renderDeltaTreeText(id string, delta *protocol.Delta) (string, bool) {
+	if !validateTreeTextToken(id) || !validateDelta(delta) {
+		return "", false
 	}
 	changes := len(delta.Set) + len(delta.Add) + len(delta.Remove) +
 		len(delta.Children) + len(delta.Replace)
-	body := treeTextBuffer{limit: maxObservationTreeTextBytes}
+	body := treeTextBuffer{}
 	writeDeltaBody(&body, delta)
 	header := "tree v1 format=delta id=" + id +
 		" base=" + delta.Base +
 		" scope=" + protocol.Scope + " changes=" + strconv.Itoa(changes)
-	block := treeTextBlock{
-		header: header, body: body, trailer: "end tree", limit: maxObservationTreeTextBytes,
-	}
-	return block.finish(func(total int) string {
-		return "tree v1 omitted format=delta id=" + id +
-			" base=" + base + " changes=" + strconv.Itoa(changes) +
-			" bytes=" + strconv.Itoa(total) +
-			" limit=" + strconv.Itoa(maxObservationTreeTextBytes) + " use=inspect\n"
-	})
+	block := treeTextBlock{header: header, body: body, trailer: "end tree"}
+	return block.finish()
 }
 
-func renderInspectionText(view *protocol.InspectionView) string {
-	if view == nil {
-		return ""
+func renderInspectionText(view *protocol.InspectionView) (string, bool) {
+	if !validateInspection(view) {
+		return "", false
 	}
-	if !validateInspectionRefs(view) {
-		return inspectionRefFormatLine(view)
-	}
-	body := treeTextBuffer{limit: maxInspectionTextBytes}
+	body := treeTextBuffer{}
 	nodes := 0
 	treeScope := protocol.Scope
 	extra := ""
 	switch view.Scope {
 	case "tree":
-		if view.Tree != nil {
-			if view.Tree.Scope != "" {
-				treeScope = view.Tree.Scope
-			}
-			nodes = writeSubtree(&body, view.Tree.Root, "")
-		}
+		treeScope = view.Tree.Scope
+		nodes = writeSubtree(&body, view.Tree.Root, "")
 	case "subtree":
-		if view.Root != nil {
-			extra = " root=" + view.Root.Ref
-			nodes = writeSubtree(&body, view.Root, "")
-		}
+		extra = " root=" + view.Root.Ref
+		nodes = writeSubtree(&body, view.Root, "")
 	case "query":
 		matches := len(view.Matches)
 		extra = " matches=" + strconv.Itoa(matches)
@@ -213,17 +158,8 @@ func renderInspectionText(view *protocol.InspectionView) string {
 		" captured_at=" + view.CapturedAt +
 		" tree_scope=" + treeScope + extra +
 		" nodes=" + strconv.Itoa(nodes)
-	block := treeTextBlock{
-		header: header, body: body, trailer: "end inspect", limit: maxInspectionTextBytes,
-	}
-	return block.finish(func(total int) string {
-		return "inspect v1 omitted scope=" + view.Scope +
-			" observation=" + view.ObservationID +
-			" revision=" + strconv.Itoa(view.Revision) +
-			" nodes=" + strconv.Itoa(nodes) +
-			" bytes=" + strconv.Itoa(total) +
-			" limit=" + strconv.Itoa(maxInspectionTextBytes) + " use=query\n"
-	})
+	block := treeTextBlock{header: header, body: body, trailer: "end inspect"}
+	return block.finish()
 }
 
 func boolText(value bool) string {
@@ -231,28 +167,6 @@ func boolText(value bool) string {
 		return "true"
 	}
 	return "false"
-}
-
-func observationRefFormatLine(id, base string) string {
-	line := "tree v1 omitted reason=ref_format"
-	if id != "" {
-		line += " id=" + id
-	}
-	if base != "" {
-		line += " base=" + base
-	}
-	return line + "\n"
-}
-
-func inspectionRefFormatLine(view *protocol.InspectionView) string {
-	line := "inspect v1 omitted reason=ref_format"
-	if view.ObservationID != "" {
-		line += " observation=" + view.ObservationID
-	}
-	if view.Scope != "" {
-		line += " scope=" + view.Scope
-	}
-	return line + "\n"
 }
 
 // writeDeltaBody writes the five change blocks in protocol.Delta field order:
@@ -610,31 +524,79 @@ func validatePublicRef(ref string) bool {
 	return true
 }
 
-// validateNodeRefs checks every node in one subtree iteratively.
-func validateNodeRefs(root *protocol.Node) bool {
+func validateTreeTextToken(value string) bool {
+	return resultToken(value)
+}
+
+func validateBounds(bounds *protocol.Bounds) bool {
+	return bounds == nil ||
+		(bounds.Right >= bounds.Left && bounds.Bottom >= bounds.Top)
+}
+
+// validateNodeTree checks every node in one subtree iteratively.
+func validateNodeTree(root *protocol.Node, requireRoot bool) bool {
 	if root == nil {
 		return false
 	}
-	stack := []*protocol.Node{root}
+	type pendingNode struct {
+		node       *protocol.Node
+		mustBeRoot bool
+	}
+	stack := []pendingNode{{node: root, mustBeRoot: requireRoot}}
 	for len(stack) > 0 {
-		node := stack[len(stack)-1]
+		entry := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
-		if node == nil || !validatePublicRef(node.Ref) {
+		node := entry.node
+		if node == nil || !validatePublicRef(node.Ref) || !node.Role.Valid() ||
+			(entry.mustBeRoot && node.Role != protocol.RoleRoot) ||
+			!validateBounds(node.Bounds) || (node.Axis != "" && !node.Axis.Valid()) {
 			return false
 		}
-		stack = append(stack, node.Children...)
+		for _, action := range node.Actions {
+			if !action.Valid() {
+				return false
+			}
+		}
+		for _, child := range node.Children {
+			stack = append(stack, pendingNode{node: child})
+		}
 	}
 	return true
 }
 
-func validateDeltaRefs(delta *protocol.Delta) bool {
+func validateSetNode(set protocol.SetNode) bool {
+	if set.Actions.Set && set.Actions.Value != nil {
+		for _, action := range set.Actions.Value {
+			if !action.Valid() {
+				return false
+			}
+		}
+	}
+	if set.Bounds.Set && !validateBounds(set.Bounds.Value) {
+		return false
+	}
+	if set.Axis.Set && set.Axis.Value != nil && !set.Axis.Value.Valid() {
+		return false
+	}
+	return true
+}
+
+func validateFullTree(tree *protocol.Tree) bool {
+	return tree != nil && tree.Format == "full" && tree.Scope == protocol.Scope &&
+		validateNodeTree(tree.Root, true)
+}
+
+func validateDelta(delta *protocol.Delta) bool {
+	if delta == nil || delta.Format != "delta" || !validateTreeTextToken(delta.Base) {
+		return false
+	}
 	for ref := range delta.Set {
-		if !validatePublicRef(ref) {
+		if !validatePublicRef(ref) || !validateSetNode(delta.Set[ref]) {
 			return false
 		}
 	}
 	for _, node := range delta.Add {
-		if !validateNodeRefs(node) {
+		if !validateNodeTree(node, false) {
 			return false
 		}
 	}
@@ -654,23 +616,23 @@ func validateDeltaRefs(delta *protocol.Delta) bool {
 		}
 	}
 	for ref, node := range delta.Replace {
-		if !validatePublicRef(ref) || !validateNodeRefs(node) {
+		if !validatePublicRef(ref) || !validateNodeTree(node, false) || node.Ref != ref {
 			return false
 		}
 	}
 	return true
 }
 
-func validateInspectionRefs(view *protocol.InspectionView) bool {
+func validateInspection(view *protocol.InspectionView) bool {
+	if view == nil || !validateTreeTextToken(view.ObservationID) ||
+		!validateTreeTextToken(view.CapturedAt) {
+		return false
+	}
 	switch view.Scope {
 	case "tree":
-		if view.Tree != nil && view.Tree.Root != nil && !validateNodeRefs(view.Tree.Root) {
-			return false
-		}
+		return validateFullTree(view.Tree)
 	case "subtree":
-		if view.Root != nil && !validateNodeRefs(view.Root) {
-			return false
-		}
+		return validateNodeTree(view.Root, false)
 	case "query":
 		for _, match := range view.Matches {
 			for _, ref := range match.Path {
@@ -678,12 +640,13 @@ func validateInspectionRefs(view *protocol.InspectionView) bool {
 					return false
 				}
 			}
-			if match.Node == nil || !validateNodeRefs(match.Node) {
+			if !validateNodeTree(match.Node, false) {
 				return false
 			}
 		}
+		return true
 	}
-	return true
+	return false
 }
 
 func sortedDeltaKeys[T any](values map[string]T) []string {

@@ -7,11 +7,9 @@ package mcp
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -33,9 +31,10 @@ const (
 // normal operation; Client must address the device service with an Agent
 // credential held in private configuration.
 type Options struct {
-	Client  *client.Client
-	Logger  *slog.Logger
-	Version string
+	Client            *client.Client
+	Logger            *slog.Logger
+	Version           string
+	DefaultResultMode ResultMode
 }
 
 // NewServer registers exactly the public tool catalog and returns the SDK
@@ -44,6 +43,9 @@ type Options struct {
 func NewServer(opts Options) (*sdk.Server, error) {
 	if opts.Client == nil {
 		return nil, errors.New("mcp: device service client is required")
+	}
+	if !opts.DefaultResultMode.valid() {
+		return nil, errInvalidResultMode
 	}
 	logger := opts.Logger
 	if logger == nil {
@@ -59,7 +61,7 @@ func NewServer(opts Options) (*sdk.Server, error) {
 	}, &sdk.ServerOptions{
 		SupportedProtocolVersions: []string{protocolVersion},
 	})
-	adapter := &adapter{client: opts.Client, logger: logger}
+	adapter := &adapter{client: opts.Client, logger: logger, defaultResultMode: opts.DefaultResultMode}
 	for _, definition := range toolCatalog {
 		definition := definition
 		server.AddTool(&sdk.Tool{
@@ -67,7 +69,15 @@ func NewServer(opts Options) (*sdk.Server, error) {
 			Description: definition.description,
 			InputSchema: definition.schema,
 		}, func(ctx context.Context, request *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
-			return adapter.handle(ctx, definition, requestArguments(request)), nil
+			mode := adapter.defaultResultMode
+			if request != nil && request.Extra != nil {
+				var err error
+				mode, err = ResultModeFromHeader(request.Extra.Header, mode)
+				if err != nil {
+					return projectExecution(&execution{result: &protocol.Result{Error: &protocol.Error{Code: protocol.CodeInvalidRequest, Message: "结果模式无效"}}}, definition.name, adapter.defaultResultMode), nil
+				}
+			}
+			return adapter.handle(ctx, definition, requestArguments(request), mode), nil
 		})
 	}
 	return server, nil
@@ -76,8 +86,9 @@ func NewServer(opts Options) (*sdk.Server, error) {
 // adapter is stateless beyond its service client and logger. It never keeps
 // operation IDs, observations or sessions across calls.
 type adapter struct {
-	client *client.Client
-	logger *slog.Logger
+	client            *client.Client
+	logger            *slog.Logger
+	defaultResultMode ResultMode
 }
 
 // execution is one fully projected tool call.
@@ -91,34 +102,14 @@ type execution struct {
 	code         string
 }
 
-func (a *adapter) handle(ctx context.Context, definition toolDefinition, arguments []byte) *sdk.CallToolResult {
+func (a *adapter) handle(ctx context.Context, definition toolDefinition, arguments []byte, modes ...ResultMode) *sdk.CallToolResult {
 	started := time.Now()
+	mode := a.defaultResultMode
+	if len(modes) > 0 {
+		mode = modes[0]
+	}
 	execution := a.run(ctx, definition, arguments)
-	isError := execution.isError(definition.name)
-
-	text := ""
-	if execution.admission {
-		if execution.result != nil && execution.result.Error != nil {
-			text = "invalid_request: " + execution.result.Error.Message
-		} else {
-			text = "invalid_request: 请求参数不符合工具契约"
-		}
-	} else {
-		text = renderText(execution.result, execution.cancelled, execution.cancellation)
-		if block := renderTreeText(execution.result); block != "" {
-			if text != "" {
-				text = strings.TrimRight(text, "\n") + "\n\n"
-			}
-			text += block
-		}
-	}
-	content := []sdk.Content{&sdk.TextContent{Text: text}}
-	if execution.image != nil && len(execution.image.Data) > 0 && execution.image.MediaType != "" {
-		content = append(content, &sdk.ImageContent{
-			Data:     execution.image.Data,
-			MIMEType: execution.image.MediaType,
-		})
-	}
+	projected := projectExecution(execution, definition.name, mode)
 
 	logger := a.logger
 	if logger == nil {
@@ -127,15 +118,11 @@ func (a *adapter) handle(ctx context.Context, definition toolDefinition, argumen
 	logger.Info("mcp.tool",
 		"tool", definition.name,
 		"duration_ms", time.Since(started).Milliseconds(),
-		"is_error", isError,
+		"is_error", projected.IsError,
 		"code", execution.code,
+		"result_mode", mode.String(),
 	)
-
-	return &sdk.CallToolResult{
-		Content:           content,
-		StructuredContent: structuredContent(execution.result),
-		IsError:           isError,
-	}
+	return projected
 }
 
 // run performs admission, allocates the operation ID for work tools, then
@@ -193,16 +180,13 @@ func (a *adapter) invoke(ctx context.Context, call *preparedCall, operationID st
 
 	select {
 	case outcome := <-done:
-		if ctx.Err() != nil && outcome.err != nil && !hasServiceResult(outcome) {
+		if ctx.Err() != nil {
 			return a.cancelled(call, operationID, done, outcome, true)
 		}
 		return projectCall(outcome.response, outcome.err, operationID)
 	case <-ctx.Done():
 		select {
 		case outcome := <-done:
-			if hasServiceResult(outcome) {
-				return projectCall(outcome.response, outcome.err, operationID)
-			}
 			return a.cancelled(call, operationID, done, outcome, true)
 		default:
 			return a.cancelled(call, operationID, done, callOutcome{}, false)
@@ -339,10 +323,6 @@ func pickResult(response *client.Response, err error) *protocol.Result {
 	return nil
 }
 
-func hasServiceResult(outcome callOutcome) bool {
-	return pickResult(outcome.response, outcome.err) != nil
-}
-
 // adapterRecovery is the adapter's own projection for failures that never
 // reached a tool result. A transport failure or a cancelled call has one next
 // step: poll status with the operation's P. Admission errors stay bare.
@@ -385,20 +365,6 @@ func clearImageBase64(result *protocol.Result) {
 		return
 	}
 	result.Observation.Image.Base64 = ""
-}
-
-// structuredContent is the canonical result JSON with the transport image
-// carrier removed. It is always an object so clients can rely on the shape.
-func structuredContent(result *protocol.Result) json.RawMessage {
-	if result == nil {
-		result = &protocol.Result{}
-	}
-	clearImageBase64(result)
-	encoded, err := protocol.JSON(result)
-	if err != nil {
-		return json.RawMessage(`{"error":{"code":"internal_error","message":"结果编码失败"}}`)
-	}
-	return json.RawMessage(encoded)
 }
 
 // isError applies the per-tool success rule. It distinguishes a served query

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json/v2"
+	"reflect"
 	"strconv"
 	"strings"
 
@@ -12,6 +13,10 @@ import (
 
 // The probe compares stable public values only.
 const (
+	resultModeBoth       = "both"
+	resultModeText       = "text"
+	resultModeStructured = "structured"
+
 	outcomeExecuted     = "executed"
 	sessionActive       = "active"
 	sessionStarting     = "starting"
@@ -50,6 +55,36 @@ type imageView struct {
 	MediaType  string     `json:"media_type"`
 	ReadOnly   bool       `json:"read_only"`
 	Error      *errorView `json:"error"`
+}
+
+type appView struct {
+	Name    string `json:"name"`
+	Package string `json:"package"`
+}
+
+type appsView struct {
+	Items      []appView `json:"items"`
+	Total      int       `json:"total"`
+	Truncated  bool      `json:"truncated"`
+	CapturedAt string    `json:"captured_at"`
+}
+
+type shellView struct {
+	Termination string     `json:"termination"`
+	ExitCode    *int       `json:"exit_code"`
+	Output      *string    `json:"output"`
+	Truncated   *bool      `json:"truncated"`
+	OutputError *errorView `json:"output_error"`
+}
+
+type diagnosisEvent struct {
+	At    string `json:"at"`
+	Phase string `json:"phase"`
+	Code  string `json:"code"`
+}
+
+type diagnosisView struct {
+	Timeline []diagnosisEvent `json:"timeline"`
 }
 
 // treeView keeps only the tree format and delta base.
@@ -100,6 +135,9 @@ type resultView struct {
 	Session          *sessionView     `json:"session"`
 	Observation      *observationView `json:"observation"`
 	Inspection       *inspectionView  `json:"inspection"`
+	Apps             *appsView        `json:"apps"`
+	Shell            *shellView       `json:"shell"`
+	Diagnosis        *diagnosisView   `json:"diagnosis"`
 	Cleanup          *cleanupView     `json:"cleanup"`
 	Error            *errorView       `json:"error"`
 }
@@ -125,10 +163,14 @@ type callResult struct {
 }
 
 // project decodes a tool result into the probe's projection without printing
-// any content.
-func project(result *sdk.CallToolResult) (*callResult, *checkError) {
+// any content. The selected result mode is checked at the same time so an
+// ordinary probe never accepts a channel that the mode must omit.
+func project(result *sdk.CallToolResult, mode string) (*callResult, *checkError) {
 	if result == nil {
 		return nil, failf("empty_result")
+	}
+	if mode != resultModeBoth && mode != resultModeText && mode != resultModeStructured {
+		return nil, failf("invalid_result_mode")
 	}
 	projected := &callResult{result: result}
 	for _, content := range result.Content {
@@ -139,17 +181,95 @@ func project(result *sdk.CallToolResult) (*callResult, *checkError) {
 			projected.images = append(projected.images, value)
 		}
 	}
+	var structuredView resultView
 	if result.StructuredContent != nil {
 		encoded, err := json.Marshal(result.StructuredContent)
-		if err != nil {
+		if err != nil || string(encoded) == "null" {
 			return nil, failf("structured_content_unusable")
 		}
 		projected.structured = encoded
-		if err := json.Unmarshal(encoded, &projected.view); err != nil {
+		if err := json.Unmarshal(encoded, &structuredView); err != nil {
 			return nil, failf("structured_content_unusable")
 		}
 	}
+
+	switch mode {
+	case resultModeText:
+		if result.StructuredContent != nil {
+			return nil, failf("text_mode_has_structured_content")
+		}
+		if len(projected.texts) != 1 {
+			return nil, failf("text_mode_result_text_count")
+		}
+		decoded, failure := decodeResultText(projected.texts[0])
+		if failure != nil {
+			return nil, failure
+		}
+		if decoded.isError != result.IsError {
+			return nil, failf("text_mode_is_error_mismatch")
+		}
+		projected.view = decoded.view
+	case resultModeStructured:
+		if result.StructuredContent == nil {
+			return nil, failf("structured_mode_content_missing")
+		}
+		if result.IsError {
+			if failure := checkDiagnosticText(projected.texts); failure != nil {
+				return nil, failure
+			}
+		} else {
+			if result.Content == nil {
+				return nil, failf("structured_mode_content_null")
+			}
+			if len(projected.texts) != 0 {
+				return nil, failf("structured_mode_has_result_text")
+			}
+		}
+		projected.view = structuredView
+	case resultModeBoth:
+		if result.StructuredContent == nil {
+			return nil, failf("both_mode_content_missing")
+		}
+		if len(projected.texts) != 1 {
+			return nil, failf("both_mode_result_text_count")
+		}
+		decoded, failure := decodeResultText(projected.texts[0])
+		if failure != nil {
+			return nil, failure
+		}
+		if decoded.isError != result.IsError {
+			return nil, failf("both_mode_is_error_mismatch")
+		}
+		if !reflect.DeepEqual(decoded.view, structuredView) {
+			return nil, failf("both_mode_projection_mismatch")
+		}
+		projected.view = structuredView
+	}
 	return projected, nil
+}
+
+func checkDiagnosticText(values []string) *checkError {
+	if len(values) != 1 {
+		return failf("diagnostic_text_count")
+	}
+	text := strings.TrimSuffix(values[0], "\n")
+	if strings.Contains(text, "\r") {
+		return failf("diagnostic_text_naked_cr")
+	}
+	lines := strings.Split(text, "\n")
+	if len(lines) < 3 || lines[0] != "diagnostic v1 is_error=true" {
+		return failf("diagnostic_text_header_invalid")
+	}
+	if lines[len(lines)-1] != "end diagnostic" {
+		return failf("diagnostic_text_unterminated")
+	}
+	for _, line := range lines[1 : len(lines)-1] {
+		if line != "" && !strings.Contains(line, "=") &&
+			!strings.HasPrefix(line, "json v1 ") {
+			return failf("diagnostic_text_item_invalid")
+		}
+	}
+	return nil
 }
 
 func codeOf(view resultView) string {
@@ -251,18 +371,31 @@ func imageBytes(projected *callResult, observation *observationView) ([]byte, *c
 // The adapter puts the block after a blank line, so the header must start a
 // line, not merely appear inside a label.
 func treeBlockText(projected *callResult, headerPrefix string) (string, *checkError) {
+	end := "end inspect"
+	reason := "text_inspect_block_missing"
+	if strings.HasPrefix(headerPrefix, "tree v1 ") {
+		end = "end tree"
+		reason = "text_tree_block_missing"
+	}
+	return resultBlockText(projected, headerPrefix, end, reason)
+}
+
+func resultBlockText(projected *callResult, headerPrefix, end, reason string) (string, *checkError) {
 	for _, text := range projected.texts {
-		offset := 0
-		if !strings.HasPrefix(text, headerPrefix) {
-			index := strings.Index(text, "\n"+headerPrefix)
-			if index < 0 {
+		lines := strings.Split(strings.TrimSuffix(text, "\n"), "\n")
+		for start, line := range lines {
+			if !strings.HasPrefix(line, headerPrefix) {
 				continue
 			}
-			offset = index + 1
+			for finish := start + 1; finish < len(lines); finish++ {
+				if lines[finish] == end {
+					return strings.Join(lines[start:finish+1], "\n") + "\n", nil
+				}
+			}
+			return "", failf("text_block_unterminated")
 		}
-		return text[offset:], nil
 	}
-	return "", failf("text_tree_block_missing")
+	return "", failf(reason)
 }
 
 // checkNoImageCarrier asserts the text projection and structuredContent carry

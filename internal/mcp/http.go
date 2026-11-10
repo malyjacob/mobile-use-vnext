@@ -40,6 +40,10 @@ func NewHTTPHandler(server *sdk.Server, cfg HTTPConfig) http.Handler {
 			http.Error(writer, "forbidden", http.StatusForbidden)
 			return
 		}
+		if _, err := ResultModeFromHeader(request.Header, ResultModeBoth); err != nil {
+			http.Error(writer, "invalid result mode", http.StatusBadRequest)
+			return
+		}
 		streamable.ServeHTTP(writer, request)
 	})
 }

@@ -59,7 +59,9 @@ apps, app, shell, notification, diagnosis, cleanup, error, recovery
 ```
 
 - `code` 稳定，`message` 是受控中文短句，调用方只依赖 `code`；
-- `details` 仅可能出现白名单事实（如 `limit`、`limit_ms`、`app_code`）；
+- `/api/*` 的 `details` 仅可能出现白名单事实（如 `limit`、`limit_ms`、`app_code`）；
+  `mcp.*` 是 [MCP 适配器](mcp.md) 的保留命名空间，仅由该适配器向结果投影注入，服务端
+  `/api/*` 永不产生这些键；
 - `recovery` 是下一个请求的投影：本次结果没有待恢复事实时整个对象省略；出现时 `entry` 与
   `reference` 必出，`input_state` 与 `cause` 按需出现。它不改变上面四层事实。
 

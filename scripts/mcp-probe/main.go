@@ -39,6 +39,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	configPath := flags.String("config", "", "private MCP configuration (required)")
 	binaryPath := flags.String("binary", "build/device-mcp.exe", "MCP adapter executable")
 	transport := flags.String("transport", modeStdio, "stdio, http or p-recovery")
+	resultMode := flags.String("result-mode", resultModeBoth, "both, text or structured")
 	timeoutSeconds := flags.Int("timeout", 180, "overall probe timeout in seconds")
 	if err := flags.Parse(args); err != nil {
 		return 1
@@ -58,6 +59,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "mcp-probe: -transport must be stdio, http or p-recovery")
 		return 1
 	}
+	selectedResultMode, ok := parseResultMode(*resultMode)
+	if !ok {
+		fmt.Fprintln(stderr, "mcp-probe: -result-mode must be both, text or structured")
+		return 1
+	}
 
 	cfg, err := loadConfig(*configPath, mode)
 	reporter := newReporter(stdout)
@@ -72,13 +78,23 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if mode == modePRecovery {
 		return runPRecovery(ctx, cfg, reporter)
 	}
-	return runAdapterMode(ctx, cfg, reporter, mode, *binaryPath, *configPath)
+	return runAdapterMode(ctx, cfg, reporter, mode, *binaryPath, *configPath, selectedResultMode)
+}
+
+func parseResultMode(value string) (string, bool) {
+	switch value {
+	case resultModeBoth, resultModeText, resultModeStructured:
+		return value, true
+	default:
+		return "", false
+	}
 }
 
 // runAdapterMode connects to the adapter over the requested transport and runs
 // the shared MCP checks. The HTTP entry additionally proves its bearer and
 // Origin boundary with raw requests before any tool call.
-func runAdapterMode(ctx context.Context, cfg *config, reporter *reporter, mode, binaryPath, configPath string) int {
+func runAdapterMode(ctx context.Context, cfg *config, reporter *reporter,
+	mode, binaryPath, configPath, resultMode string) int {
 	service, err := client.New(client.Config{
 		BaseURL:    cfg.Service.BaseURL,
 		AgentToken: cfg.Service.AgentToken,
@@ -87,7 +103,7 @@ func runAdapterMode(ctx context.Context, cfg *config, reporter *reporter, mode, 
 		reporter.fail("config", "service_client_invalid")
 		return reporter.finish(false)
 	}
-	probe := &probe{reporter: reporter, service: service}
+	probe := &probe{reporter: reporter, service: service, resultMode: resultMode}
 
 	if mode == modeHTTP {
 		child, childErr := startHTTPChild(ctx, binaryPath, configPath, cfg.HTTP.Listen)
@@ -99,23 +115,23 @@ func runAdapterMode(ctx context.Context, cfg *config, reporter *reporter, mode, 
 		if !runNegativeHTTPChecks(ctx, cfg, reporter) {
 			return reporter.finish(false)
 		}
-		session, stop, connectErr := connectHTTPAdapter(ctx, cfg)
+		session, stop, connectErr := connectHTTPAdapter(ctx, cfg, resultMode)
 		if connectErr != nil {
 			reporter.fail("connect", connectErr.reason, connectErr.fields...)
 			return reporter.finish(false)
 		}
 		defer stop()
 		probe.session = session
-		reporter.pass("connect", "transport=http")
+		reporter.pass("connect", "transport=http", field("result_mode", resultMode))
 	} else {
-		session, stop, connectErr := connectStdioAdapter(ctx, binaryPath, configPath)
+		session, stop, connectErr := connectStdioAdapter(ctx, binaryPath, configPath, resultMode)
 		if connectErr != nil {
 			reporter.fail("connect", connectErr.reason, connectErr.fields...)
 			return reporter.finish(false)
 		}
 		defer stop()
 		probe.session = session
-		reporter.pass("connect", "transport=stdio")
+		reporter.pass("connect", "transport=stdio", field("result_mode", resultMode))
 	}
 
 	return reporter.finish(probe.runChecks(ctx))

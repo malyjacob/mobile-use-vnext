@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -329,10 +330,16 @@ type fakeAdapter struct {
 	leakImage  bool
 	startCalls int
 	endCalls   int
+	resultMode string
 }
 
 func newFakeAdapter() *fakeAdapter {
-	return &fakeAdapter{canStart: true, sessions: make(map[string]bool), image: testJPEG(4096)}
+	return &fakeAdapter{
+		canStart:   true,
+		sessions:   make(map[string]bool),
+		image:      testJPEG(4096),
+		resultMode: resultModeBoth,
+	}
 }
 
 func (f *fakeAdapter) nextID(prefix string) string {
@@ -360,32 +367,56 @@ func (f *fakeAdapter) observation(id, origin string, revision int, withImage boo
 }
 
 func (f *fakeAdapter) result(payload map[string]any, text string) *sdk.CallToolResult {
-	result := &sdk.CallToolResult{StructuredContent: payload}
-	if text != "" {
-		result.Content = []sdk.Content{&sdk.TextContent{Text: text}}
-	}
-	return result
+	_ = text
+	return f.render(payload, false, false)
 }
 
 func (f *fakeAdapter) imageResult(payload map[string]any) *sdk.CallToolResult {
-	text := "observation.status=complete\n"
-	if observation, ok := payload["observation"].(map[string]any); ok {
-		if id, ok := observation["id"].(string); ok {
-			text += "\ntree v1 format=full id=" + id +
-				" scope=reported_visible_with_context nodes=1\n\n" +
-				"n1 root [0,0,1080,2400]\nend tree\n"
+	return f.render(payload, false, true)
+}
+
+func (f *fakeAdapter) errorResult(payload map[string]any) *sdk.CallToolResult {
+	return f.render(payload, true, false)
+}
+
+func (f *fakeAdapter) render(payload map[string]any, isError, withImage bool) *sdk.CallToolResult {
+	textPayload := payload
+	if withImage && f.leakImage && (f.resultMode == resultModeBoth || f.resultMode == resultModeText) {
+		textPayload = cloneStringMap(payload)
+		observation, _ := textPayload["observation"].(map[string]any)
+		if observation != nil {
+			observation = cloneStringMap(observation)
+			image, _ := observation["image"].(map[string]any)
+			if image == nil {
+				image = make(map[string]any)
+			} else {
+				image = cloneStringMap(image)
+			}
+			image["base64"] = base64.StdEncoding.EncodeToString(f.image)
+			observation["image"] = image
+			textPayload["observation"] = observation
 		}
 	}
-	if f.leakImage {
-		text = "observation.image.base64=" + base64.StdEncoding.EncodeToString(f.image)
+	text := fakeResultText(textPayload, isError)
+	content := make([]sdk.Content, 0, 2)
+	switch f.resultMode {
+	case resultModeText:
+		content = append(content, &sdk.TextContent{Text: text})
+	case resultModeStructured:
+		if isError {
+			content = append(content, &sdk.TextContent{Text: fakeDiagnosticText(payload)})
+		}
+	default:
+		content = append(content, &sdk.TextContent{Text: text})
 	}
-	return &sdk.CallToolResult{
-		Content: []sdk.Content{
-			&sdk.TextContent{Text: text},
-			&sdk.ImageContent{Data: f.image, MIMEType: imageJPEG},
-		},
-		StructuredContent: payload,
+	if withImage {
+		content = append(content, &sdk.ImageContent{Data: f.image, MIMEType: imageJPEG})
 	}
+	result := &sdk.CallToolResult{Content: content, IsError: isError}
+	if f.resultMode == resultModeBoth || f.resultMode == resultModeStructured {
+		result.StructuredContent = payload
+	}
+	return result
 }
 
 func (f *fakeAdapter) handle(ctx context.Context, name string, request *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
@@ -411,6 +442,11 @@ func (f *fakeAdapter) handle(ctx context.Context, name string, request *sdk.Call
 		}, "operation_id="+p+"\n"), nil
 	case "observe":
 		reference, _ := arguments["reference"].(string)
+		if !validReference(reference, 'P') && !validReference(reference, 'O') {
+			return f.errorResult(map[string]any{
+				"error": map[string]any{"code": "invalid_request"},
+			}), nil
+		}
 		if wait, ok := arguments["wait_ms"].(float64); ok && wait > 0 {
 			f.mutex.Unlock()
 			select {
@@ -418,14 +454,10 @@ func (f *fakeAdapter) handle(ctx context.Context, name string, request *sdk.Call
 			case <-time.After(10 * time.Second):
 			}
 			f.mutex.Lock()
-			return &sdk.CallToolResult{
-				Content: []sdk.Content{&sdk.TextContent{Text: "cancelled=true\n"}},
-				StructuredContent: map[string]any{
-					"operation_id": f.nextID("P"),
-					"error":        map[string]any{"code": "call_cancelled"},
-				},
-				IsError: true,
-			}, nil
+			return f.render(map[string]any{
+				"operation_id": f.nextID("P"),
+				"error":        map[string]any{"code": "call_cancelled"},
+			}, true, false), nil
 		}
 		o := f.nextID("O")
 		return f.imageResult(map[string]any{
@@ -441,6 +473,11 @@ func (f *fakeAdapter) handle(ctx context.Context, name string, request *sdk.Call
 		}), nil
 	case "inspect":
 		observationID, _ := arguments["observation_id"].(string)
+		if observationID == probeUnknownObservation {
+			return f.errorResult(map[string]any{
+				"error": map[string]any{"code": "observation_not_found"},
+			}), nil
+		}
 		text := "inspection.observation_id=" + observationID +
 			"\n\ninspect v1 scope=tree observation=" + observationID +
 			" revision=2 captured_at=2026-01-01T00:00:00Z" +
@@ -462,6 +499,40 @@ func (f *fakeAdapter) handle(ctx context.Context, name string, request *sdk.Call
 				},
 			},
 		}, text), nil
+	case "apps":
+		return f.result(map[string]any{
+			"operation_id": f.nextID("P"),
+			"apps": map[string]any{
+				"items": []any{
+					map[string]any{"name": "Probe App", "package": "com.example.probe"},
+				},
+				"total": 1, "truncated": false, "captured_at": "2026-01-01T00:00:00Z",
+			},
+		}, ""), nil
+	case "shell":
+		return f.result(map[string]any{
+			"operation_id": f.nextID("P"),
+			"outcome":      outcomeExecuted,
+			"shell": map[string]any{
+				"termination": "exited",
+				"exit_code":   0,
+				"output":      probeShellOutput + "\n",
+				"truncated":   false,
+			},
+		}, ""), nil
+	case "diagnose":
+		return f.result(map[string]any{
+			"diagnosis": map[string]any{
+				"summary": "probe diagnosis",
+				"issues":  []any{},
+				"timeline": []any{
+					map[string]any{
+						"at": "2026-01-01T00:00:00Z", "phase": "session", "code": sessionActive,
+					},
+				},
+				"coverage": "original_record", "truncated": false,
+			},
+		}, ""), nil
 	case "end":
 		f.endCalls++
 		reference, _ := arguments["reference"].(string)
@@ -475,6 +546,244 @@ func (f *fakeAdapter) handle(ctx context.Context, name string, request *sdk.Call
 	default:
 		return f.result(map[string]any{}, ""), nil
 	}
+}
+
+func cloneStringMap(source map[string]any) map[string]any {
+	clone := make(map[string]any, len(source))
+	for key, value := range source {
+		clone[key] = value
+	}
+	return clone
+}
+
+func fakeDiagnosticText(payload map[string]any) string {
+	code := "internal"
+	if value, ok := payload["error"].(map[string]any); ok {
+		if text, ok := value["code"].(string); ok && text != "" {
+			code = text
+		}
+	}
+	return "diagnostic v1 is_error=true\nerror.code=\"" + code + "\"\nend diagnostic\n"
+}
+
+func fakeResultText(payload map[string]any, isError bool) string {
+	var builder strings.Builder
+	builder.WriteString("result v1 is_error=")
+	builder.WriteString(strconv.FormatBool(isError))
+	builder.WriteByte('\n')
+	for key, value := range payload {
+		switch key {
+		case "session", "cleanup", "error", "recovery":
+			if object, ok := value.(map[string]any); ok {
+				for childKey, childValue := range object {
+					writeFakeField(&builder, key+"."+childKey, childValue)
+				}
+			} else {
+				writeFakeField(&builder, key, value)
+			}
+		case "observation":
+			writeFakeObservation(&builder, value)
+		case "inspection":
+			writeFakeInspection(&builder, value)
+		case "apps":
+			writeFakeApps(&builder, value)
+		case "shell":
+			writeFakeShell(&builder, value)
+		case "diagnosis":
+			writeFakeDiagnosis(&builder, value)
+		default:
+			writeFakeField(&builder, key, value)
+		}
+	}
+	builder.WriteString("end result\n")
+	return builder.String()
+}
+
+func writeFakeField(builder *strings.Builder, key string, value any) {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		encoded = []byte(`null`)
+	}
+	builder.WriteString(key)
+	builder.WriteByte('=')
+	builder.Write(encoded)
+	builder.WriteByte('\n')
+}
+
+func writeFakeBlock(builder *strings.Builder, block string) {
+	builder.WriteByte('\n')
+	builder.WriteString(strings.TrimSuffix(block, "\n"))
+	builder.WriteByte('\n')
+}
+
+func writeFakeObservation(builder *strings.Builder, value any) {
+	observation, _ := value.(map[string]any)
+	if observation == nil {
+		writeFakeField(builder, "observation", value)
+		return
+	}
+	for _, key := range []string{
+		"status", "id", "origin", "revision", "captured_at",
+		"actionable_until", "screen", "foreground", "missing", "image", "error",
+	} {
+		if child, ok := observation[key]; ok {
+			writeFakeField(builder, "observation."+key, child)
+		}
+	}
+	tree, _ := observation["tree"].(map[string]any)
+	if tree == nil {
+		return
+	}
+	format, _ := tree["format"].(string)
+	id, _ := observation["id"].(string)
+	scope, _ := tree["scope"].(string)
+	if scope == "" {
+		scope = "reported_visible_with_context"
+	}
+	base, _ := tree["base"].(string)
+	block := "tree v1 format=" + format + " id=" + id + " scope=" + scope
+	if format == treeDelta && base != "" {
+		block += " base=" + base
+	}
+	block += " nodes=1 changes=0\n\n"
+	block += "n1 root [0,0,1080,2400]\nend tree\n"
+	writeFakeBlock(builder, block)
+}
+
+func writeFakeInspection(builder *strings.Builder, value any) {
+	inspection, _ := value.(map[string]any)
+	if inspection == nil {
+		writeFakeField(builder, "inspection", value)
+		return
+	}
+	if origin, ok := inspection["origin"]; ok {
+		writeFakeField(builder, "inspection.origin", origin)
+	}
+	observationID, _ := inspection["observation_id"].(string)
+	scope, _ := inspection["scope"].(string)
+	revision, _ := inspection["revision"].(int)
+	capturedAt, _ := inspection["captured_at"].(string)
+	block := "inspect v1 scope=" + scope +
+		" observation=" + observationID +
+		" revision=" + strconv.Itoa(revision) +
+		" captured_at=" + capturedAt +
+		" nodes=1\n\nn1 root [0,0,1080,2400]\nend inspect\n"
+	writeFakeBlock(builder, block)
+}
+
+func writeFakeApps(builder *strings.Builder, value any) {
+	apps, _ := value.(map[string]any)
+	if apps == nil {
+		writeFakeField(builder, "apps", value)
+		return
+	}
+	items, _ := apps["items"].([]any)
+	total, _ := apps["total"].(int)
+	truncated, _ := apps["truncated"].(bool)
+	capturedAt, _ := apps["captured_at"].(string)
+	var block strings.Builder
+	block.WriteString("apps v1 items=")
+	block.WriteString(strconv.Itoa(len(items)))
+	block.WriteString(" total=")
+	block.WriteString(strconv.Itoa(total))
+	block.WriteString(" truncated=")
+	block.WriteString(strconv.FormatBool(truncated))
+	block.WriteString(" captured_at=")
+	block.WriteString(capturedAt)
+	block.WriteByte('\n')
+	for _, item := range items {
+		encoded, _ := json.Marshal(item)
+		block.WriteString("item ")
+		block.Write(encoded)
+		block.WriteByte('\n')
+	}
+	block.WriteString("end apps\n")
+	writeFakeBlock(builder, block.String())
+}
+
+func writeFakeShell(builder *strings.Builder, value any) {
+	shell, _ := value.(map[string]any)
+	if shell == nil {
+		writeFakeField(builder, "shell", value)
+		return
+	}
+	termination, _ := shell["termination"].(string)
+	exitCode, _ := shell["exit_code"].(int)
+	truncated, _ := shell["truncated"].(bool)
+	output, outputPresent := shell["output"].(string)
+	var block strings.Builder
+	block.WriteString("shell v1 termination=")
+	block.WriteString(termination)
+	block.WriteString(" exit_code=")
+	block.WriteString(strconv.Itoa(exitCode))
+	block.WriteString(" truncated=")
+	block.WriteString(strconv.FormatBool(truncated))
+	block.WriteString(" output_bytes=")
+	if outputPresent {
+		block.WriteString(strconv.Itoa(len(output)))
+	} else {
+		block.WriteString("null")
+	}
+	block.WriteByte('\n')
+	if outputPresent {
+		if output == "" {
+			block.WriteString("output \"\"\n")
+		} else {
+			for len(output) > 0 {
+				end := strings.IndexByte(output, '\n')
+				chunk := output
+				if end >= 0 {
+					chunk = output[:end+1]
+					output = output[end+1:]
+				} else {
+					output = ""
+				}
+				encoded, _ := json.Marshal(chunk)
+				block.WriteString("output ")
+				block.Write(encoded)
+				block.WriteByte('\n')
+			}
+		}
+	}
+	if outputError, ok := shell["output_error"]; ok {
+		encoded, _ := json.Marshal(outputError)
+		block.WriteString("output_error ")
+		block.Write(encoded)
+		block.WriteByte('\n')
+	}
+	block.WriteString("end shell\n")
+	writeFakeBlock(builder, block.String())
+}
+
+func writeFakeDiagnosis(builder *strings.Builder, value any) {
+	diagnosis, _ := value.(map[string]any)
+	if diagnosis == nil {
+		writeFakeField(builder, "diagnosis", value)
+		return
+	}
+	for _, key := range []string{
+		"summary", "issues", "timing_ms", "coverage", "truncated", "operation_id", "outcome",
+	} {
+		if child, ok := diagnosis[key]; ok {
+			writeFakeField(builder, "diagnosis."+key, child)
+		}
+	}
+	events, _ := diagnosis["timeline"].([]any)
+	if len(events) == 0 {
+		return
+	}
+	var block strings.Builder
+	block.WriteString("timeline v1 events=")
+	block.WriteString(strconv.Itoa(len(events)))
+	block.WriteByte('\n')
+	for _, event := range events {
+		encoded, _ := json.Marshal(event)
+		block.WriteString("event ")
+		block.Write(encoded)
+		block.WriteByte('\n')
+	}
+	block.WriteString("end timeline\n")
+	writeFakeBlock(builder, block.String())
 }
 
 // startFakeAdapter serves the 12 tools over the SDK in-memory transport.
@@ -564,38 +873,49 @@ func newTestServiceClient(t *testing.T, server *httptest.Server) *client.Client 
 // ---------------------------------------------------------------- MCP checks
 
 func TestAdapterChecksAgainstFakeAdapter(t *testing.T) {
-	adapter := newFakeAdapter()
-	session := startFakeAdapter(t, adapter)
-	serviceServer := startFakeStatusService(t, true)
-	service := newTestServiceClient(t, serviceServer)
+	for _, mode := range []string{resultModeBoth, resultModeText, resultModeStructured} {
+		t.Run(mode, func(t *testing.T) {
+			adapter := newFakeAdapter()
+			adapter.resultMode = mode
+			session := startFakeAdapter(t, adapter)
+			serviceServer := startFakeStatusService(t, true)
+			service := newTestServiceClient(t, serviceServer)
 
-	var output bytes.Buffer
-	reporter := newReporter(&output)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	probe := &probe{reporter: reporter, session: session, service: service}
-	blocked := probe.runChecks(ctx)
-	if code := reporter.finish(blocked); code != 0 {
-		t.Fatalf("checks failed (exit %d):\n%s", code, output.String())
-	}
-	for _, want := range []string{
-		"PASS tools count=12",
-		"PASS schema objects=12",
-		"PASS status can_start=true",
-		"PASS start",
-		"PASS observe",
-		"PASS inspect",
-		"PASS act",
-		"PASS end",
-		"PASS cancel",
-		"RESULT PASS",
-	} {
-		if !strings.Contains(output.String(), want) {
-			t.Fatalf("missing %q in:\n%s", want, output.String())
-		}
-	}
-	if adapter.startCalls != 2 || adapter.endCalls != 1 {
-		t.Fatalf("startCalls=%d endCalls=%d", adapter.startCalls, adapter.endCalls)
+			var output bytes.Buffer
+			reporter := newReporter(&output)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			probe := &probe{
+				reporter: reporter, session: session, service: service, resultMode: mode,
+			}
+			blocked := probe.runChecks(ctx)
+			if code := reporter.finish(blocked); code != 0 {
+				t.Fatalf("checks failed (exit %d):\n%s", code, output.String())
+			}
+			for _, want := range []string{
+				"PASS tools count=12",
+				"PASS schema objects=12",
+				"PASS result_error",
+				"PASS status can_start=true",
+				"PASS start",
+				"PASS observe",
+				"PASS apps_projection",
+				"PASS shell_projection",
+				"PASS timeline_projection",
+				"PASS inspect",
+				"PASS act",
+				"PASS end",
+				"PASS cancel",
+				"RESULT PASS",
+			} {
+				if !strings.Contains(output.String(), want) {
+					t.Fatalf("missing %q in:\n%s", want, output.String())
+				}
+			}
+			if adapter.startCalls != 2 || adapter.endCalls != 1 {
+				t.Fatalf("startCalls=%d endCalls=%d", adapter.startCalls, adapter.endCalls)
+			}
+		})
 	}
 }
 
@@ -660,6 +980,7 @@ type fakeRecoveryService struct {
 	canStart      bool
 	startCount    int
 	endCount      int
+	shellCount    int
 	revision      int
 	session       *protocol.Session
 	sessionOrigin string
@@ -718,6 +1039,12 @@ func (f *fakeRecoveryService) serve(writer http.ResponseWriter, request *http.Re
 		f.writeInspect(writer, body)
 	case "/api/end":
 		f.writeEnd(writer, operationID, body)
+	case "/api/apps":
+		f.writeApps(writer, operationID)
+	case "/api/shell":
+		f.writeShell(writer, operationID, body)
+	case "/api/diagnose":
+		f.writeDiagnosis(writer)
 	default:
 		writer.WriteHeader(http.StatusNotFound)
 	}
@@ -841,6 +1168,15 @@ func (f *fakeRecoveryService) writeInspect(writer http.ResponseWriter, body []by
 	}
 	_ = json.Unmarshal(body, &inspectBody)
 	f.mutex.Lock()
+	if f.session == nil {
+		f.mutex.Unlock()
+		f.writeResult(writer, &protocol.Result{
+			Error: &protocol.Error{
+				Code: "observation_not_found", Message: "probe observation unavailable",
+			},
+		})
+		return
+	}
 	observationID := inspectBody.ObservationID
 	if observationID == "" {
 		observationID = fmt.Sprintf("O%d", f.revision)
@@ -855,6 +1191,66 @@ func (f *fakeRecoveryService) writeInspect(writer http.ResponseWriter, body []by
 	}
 	f.mutex.Unlock()
 	f.writeResult(writer, &protocol.Result{Inspection: view})
+}
+
+func (f *fakeRecoveryService) writeApps(writer http.ResponseWriter, operationID string) {
+	f.mutex.Lock()
+	f.operations[operationID] = operationFinished
+	f.outcomes[operationID] = outcomeExecuted
+	result := &protocol.Result{
+		OperationID: operationID,
+		Apps: &protocol.AppsView{
+			Items: []protocol.AppEntry{
+				{Name: "Probe App", Package: "com.example.probe"},
+			},
+			Total:      1,
+			Truncated:  false,
+			CapturedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		},
+	}
+	f.mutex.Unlock()
+	f.writeResult(writer, result)
+}
+
+func (f *fakeRecoveryService) writeShell(writer http.ResponseWriter, operationID string, body []byte) {
+	var shellBody struct {
+		Reference string `json:"reference"`
+		Command   string `json:"command"`
+	}
+	_ = json.Unmarshal(body, &shellBody)
+	f.mutex.Lock()
+	f.shellCount++
+	f.operations[operationID] = operationFinished
+	f.outcomes[operationID] = outcomeExecuted
+	exitCode := 0
+	output := probeShellOutput + "\n"
+	truncated := false
+	result := &protocol.Result{
+		OperationID: operationID,
+		Outcome:     outcomeExecuted,
+		Shell: &protocol.ShellView{
+			Termination: "exited",
+			ExitCode:    &exitCode,
+			Output:      &output,
+			Truncated:   &truncated,
+		},
+	}
+	f.mutex.Unlock()
+	f.writeResult(writer, result)
+}
+
+func (f *fakeRecoveryService) writeDiagnosis(writer http.ResponseWriter) {
+	f.writeResult(writer, &protocol.Result{
+		Diagnosis: &protocol.DiagnosisView{
+			Summary: "probe diagnosis",
+			Issues:  []protocol.DiagnosisIssue{},
+			Timeline: []protocol.DiagnosisEvent{{
+				At: time.Now().UTC().Format(time.RFC3339Nano), Phase: "session", Code: sessionActive,
+			}},
+			Coverage:  "original_record",
+			Truncated: false,
+		},
+	})
 }
 
 // observationLocked builds one complete observation. Image bytes travel only
@@ -997,15 +1393,28 @@ func TestPRecoveryBlocked(t *testing.T) {
 // in-memory transport, backed by the fake service. It exercises the published
 // schemas, result projection, image carrier and cancellation wrapper without a
 // device.
-func newRealAdapterSession(t *testing.T, fake *fakeRecoveryService) (*sdk.ClientSession, *client.Client) {
+func sdkResultMode(mode string) mcpserver.ResultMode {
+	switch mode {
+	case resultModeText:
+		return mcpserver.ResultModeText
+	case resultModeStructured:
+		return mcpserver.ResultModeStructured
+	default:
+		return mcpserver.ResultModeBoth
+	}
+}
+
+func newRealAdapterSession(t *testing.T, fake *fakeRecoveryService,
+	mode string) (*sdk.ClientSession, *client.Client) {
 	t.Helper()
 	service, err := client.New(client.Config{BaseURL: fake.server.URL, AgentToken: fake.token})
 	if err != nil {
 		t.Fatalf("client.New: %v", err)
 	}
 	server, err := mcpserver.NewServer(mcpserver.Options{
-		Client: service,
-		Logger: slog.New(slog.DiscardHandler),
+		Client:            service,
+		Logger:            slog.New(slog.DiscardHandler),
+		DefaultResultMode: sdkResultMode(mode),
 	})
 	if err != nil {
 		t.Fatalf("adapter server: %v", err)
@@ -1025,90 +1434,112 @@ func newRealAdapterSession(t *testing.T, fake *fakeRecoveryService) (*sdk.Client
 }
 
 func TestProbeAgainstRealAdapter(t *testing.T) {
-	fake := startFakeRecoveryService(t)
-	session, service := newRealAdapterSession(t, fake)
+	for _, mode := range []string{resultModeBoth, resultModeText, resultModeStructured} {
+		t.Run(mode, func(t *testing.T) {
+			fake := startFakeRecoveryService(t)
+			session, service := newRealAdapterSession(t, fake, mode)
 
-	var output bytes.Buffer
-	reporter := newReporter(&output)
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	probe := &probe{reporter: reporter, session: session, service: service}
-	blocked := probe.runChecks(ctx)
-	if code := reporter.finish(blocked); code != 0 {
-		t.Fatalf("checks failed (exit %d):\n%s", code, output.String())
-	}
-	for _, want := range []string{
-		"PASS tools count=12",
-		"PASS schema",
-		"PASS start",
-		"PASS observe",
-		"PASS inspect",
-		"PASS act",
-		"PASS end",
-		"PASS cancel",
-	} {
-		if !strings.Contains(output.String(), want) {
-			t.Fatalf("missing %q in:\n%s", want, output.String())
-		}
-	}
-	fake.mutex.Lock()
-	starts, ends := fake.startCount, fake.endCount
-	fake.mutex.Unlock()
-	if starts != 2 {
-		t.Fatalf("start dispatched %d times, want 2", starts)
-	}
-	if ends != 2 {
-		t.Fatalf("end issued %d times, want 2 (explicit and cancellation)", ends)
+			var output bytes.Buffer
+			reporter := newReporter(&output)
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			probe := &probe{
+				reporter: reporter, session: session, service: service, resultMode: mode,
+			}
+			blocked := probe.runChecks(ctx)
+			if code := reporter.finish(blocked); code != 0 {
+				t.Fatalf("checks failed (exit %d):\n%s", code, output.String())
+			}
+			for _, want := range []string{
+				"PASS tools count=12",
+				"PASS schema",
+				"PASS result_error",
+				"PASS start",
+				"PASS observe",
+				"PASS apps_projection",
+				"PASS shell_projection",
+				"PASS timeline_projection",
+				"PASS inspect",
+				"PASS act",
+				"PASS end",
+				"PASS cancel",
+			} {
+				if !strings.Contains(output.String(), want) {
+					t.Fatalf("missing %q in:\n%s", want, output.String())
+				}
+			}
+			fake.mutex.Lock()
+			starts, ends, shells := fake.startCount, fake.endCount, fake.shellCount
+			fake.mutex.Unlock()
+			if starts != 2 {
+				t.Fatalf("start dispatched %d times, want 2", starts)
+			}
+			if ends != 2 {
+				t.Fatalf("end issued %d times, want 2 (explicit and cancellation)", ends)
+			}
+			if shells != 1 {
+				t.Fatalf("shell dispatched %d times, want 1", shells)
+			}
+		})
 	}
 }
 
 func TestProbeAgainstRealHTTPAdapter(t *testing.T) {
-	fake := startFakeRecoveryService(t)
-	service, err := client.New(client.Config{BaseURL: fake.server.URL, AgentToken: fake.token})
-	if err != nil {
-		t.Fatalf("client.New: %v", err)
-	}
-	server, err := mcpserver.NewServer(mcpserver.Options{
-		Client: service,
-		Logger: slog.New(slog.DiscardHandler),
-	})
-	if err != nil {
-		t.Fatalf("adapter server: %v", err)
-	}
-	const mcpToken = "mcp-token"
-	handler := mcpserver.NewHTTPHandler(server, mcpserver.HTTPConfig{
-		Token:          mcpToken,
-		AllowedOrigins: []string{"http://127.0.0.1:3000"},
-	})
-	httpServer := httptest.NewServer(handler)
-	t.Cleanup(httpServer.Close)
+	for _, mode := range []string{resultModeBoth, resultModeText, resultModeStructured} {
+		t.Run(mode, func(t *testing.T) {
+			fake := startFakeRecoveryService(t)
+			service, err := client.New(client.Config{BaseURL: fake.server.URL, AgentToken: fake.token})
+			if err != nil {
+				t.Fatalf("client.New: %v", err)
+			}
+			server, err := mcpserver.NewServer(mcpserver.Options{
+				Client: service,
+				Logger: slog.New(slog.DiscardHandler),
+			})
+			if err != nil {
+				t.Fatalf("adapter server: %v", err)
+			}
+			const mcpToken = "mcp-token"
+			handler := mcpserver.NewHTTPHandler(server, mcpserver.HTTPConfig{
+				Token:          mcpToken,
+				AllowedOrigins: []string{"http://127.0.0.1:3000"},
+			})
+			httpServer := httptest.NewServer(handler)
+			t.Cleanup(httpServer.Close)
 
-	cfg := recoveryConfig(fake.server)
-	cfg.HTTP.Listen = strings.TrimPrefix(httpServer.URL, "http://")
-	cfg.HTTP.Token = mcpToken
+			cfg := recoveryConfig(fake.server)
+			cfg.HTTP.Listen = strings.TrimPrefix(httpServer.URL, "http://")
+			cfg.HTTP.Token = mcpToken
 
-	var output bytes.Buffer
-	reporter := newReporter(&output)
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	if !runNegativeHTTPChecks(ctx, cfg, reporter) {
-		t.Fatalf("negative checks failed:\n%s", output.String())
-	}
-	session, stop, failure := connectHTTPAdapter(ctx, cfg)
-	if failure != nil {
-		t.Fatalf("HTTP connect failed: %s %v", failure.reason, failure.fields)
-	}
-	defer stop()
-	reporter.pass("connect", "transport=http")
-	probe := &probe{reporter: reporter, session: session, service: service}
-	blocked := probe.runChecks(ctx)
-	if code := reporter.finish(blocked); code != 0 {
-		t.Fatalf("checks failed (exit %d):\n%s", code, output.String())
-	}
-	fake.mutex.Lock()
-	starts, ends := fake.startCount, fake.endCount
-	fake.mutex.Unlock()
-	if starts != 2 || ends != 2 {
-		t.Fatalf("starts=%d ends=%d, want 2/2", starts, ends)
+			var output bytes.Buffer
+			reporter := newReporter(&output)
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			if !runNegativeHTTPChecks(ctx, cfg, reporter) {
+				t.Fatalf("negative checks failed:\n%s", output.String())
+			}
+			session, stop, failure := connectHTTPAdapter(ctx, cfg, mode)
+			if failure != nil {
+				t.Fatalf("HTTP connect failed: %s %v", failure.reason, failure.fields)
+			}
+			defer stop()
+			reporter.pass("connect", "transport=http")
+			probe := &probe{
+				reporter: reporter, session: session, service: service, resultMode: mode,
+			}
+			blocked := probe.runChecks(ctx)
+			if code := reporter.finish(blocked); code != 0 {
+				t.Fatalf("checks failed (exit %d):\n%s", code, output.String())
+			}
+			fake.mutex.Lock()
+			starts, ends, shells := fake.startCount, fake.endCount, fake.shellCount
+			fake.mutex.Unlock()
+			if starts != 2 || ends != 2 {
+				t.Fatalf("starts=%d ends=%d, want 2/2", starts, ends)
+			}
+			if shells != 1 {
+				t.Fatalf("shell dispatched %d times, want 1", shells)
+			}
+		})
 	}
 }

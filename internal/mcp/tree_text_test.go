@@ -34,6 +34,33 @@ func testNode(ref string, role protocol.Role, bounds *protocol.Bounds) *protocol
 	}
 }
 
+func testLargeTree(childCount, labelBytes int) *protocol.Tree {
+	root := testNode("n1", protocol.RoleRoot, testBoundsPtr(0, 0, 1080, 2400))
+	for index := 2; index < childCount+2; index++ {
+		child := testNode("n"+strconv.Itoa(index), protocol.RoleText, testBoundsPtr(0, 0, 1080, 80))
+		child.Label = []string{strings.Repeat("x", labelBytes)}
+		root.Children = append(root.Children, child)
+	}
+	return &protocol.Tree{Format: "full", Scope: protocol.Scope, Root: root}
+}
+
+func mustRenderTreeText(t *testing.T, result *protocol.Result) string {
+	t.Helper()
+	block, ok := renderTreeText(result)
+	if !ok {
+		t.Fatal("tree text is not representable")
+	}
+	return block
+}
+
+func requireNoTreeText(t *testing.T, result *protocol.Result) {
+	t.Helper()
+	block, ok := renderTreeText(result)
+	if ok || block != "" {
+		t.Fatalf("tree text unexpectedly representable: ok=%t block=%q", ok, block)
+	}
+}
+
 // testFullTree is the synthetic tree used by the full golden test.
 func testFullTree() *protocol.Tree {
 	root := testNode("n1", protocol.RoleRoot, testBoundsPtr(0, 0, 1080, 2400))
@@ -205,7 +232,7 @@ func TestTreeTextFullGolden(t *testing.T) {
 		Status: "complete", ID: "O3", Revision: 3,
 		Tree: &protocol.TreeValue{Full: testFullTree()},
 	}}
-	if block := renderTreeText(result); block != testTreeTextFullGolden {
+	if block := mustRenderTreeText(t, result); block != testTreeTextFullGolden {
 		t.Fatalf("full block mismatch:\n--- got ---\n%s\n--- want ---\n%s", block, testTreeTextFullGolden)
 	}
 }
@@ -215,7 +242,7 @@ func TestTreeTextDeltaGolden(t *testing.T) {
 		Status: "complete", ID: "O4", Revision: 4,
 		Tree: &protocol.TreeValue{Delta: testDelta()},
 	}}
-	if block := renderTreeText(result); block != testTreeTextDeltaGolden {
+	if block := mustRenderTreeText(t, result); block != testTreeTextDeltaGolden {
 		t.Fatalf("delta block mismatch:\n--- got ---\n%s\n--- want ---\n%s", block, testTreeTextDeltaGolden)
 	}
 }
@@ -257,7 +284,7 @@ func TestTreeTextDeltaExplicitValues(t *testing.T) {
 	result := &protocol.Result{Observation: &protocol.Observation{
 		ID: "O9", Tree: &protocol.TreeValue{Delta: delta},
 	}}
-	block := renderTreeText(result)
+	block := mustRenderTreeText(t, result)
 	for _, want := range []string{
 		"~ n1 label=[] actions=[] bounds=null enabled=false focused=false selected=false checked=true value=\"\" hint=\"h\" protected=false axis=y resource=\"r\"",
 		"~ n2 label=null actions=null bounds=[1,2,3,4] enabled=null focused=true selected=null checked=null value=null hint=null protected=true axis=null resource=null",
@@ -275,21 +302,21 @@ func TestTreeTextDeltaExplicitValues(t *testing.T) {
 
 func TestTreeTextInspectTree(t *testing.T) {
 	result := &protocol.Result{Inspection: testInspectionTreeView()}
-	if block := renderTreeText(result); block != testTreeTextInspectTreeGolden {
+	if block := mustRenderTreeText(t, result); block != testTreeTextInspectTreeGolden {
 		t.Fatalf("inspect tree mismatch:\n--- got ---\n%s\n--- want ---\n%s", block, testTreeTextInspectTreeGolden)
 	}
 }
 
 func TestTreeTextInspectSubtree(t *testing.T) {
 	result := &protocol.Result{Inspection: testInspectionSubtreeView()}
-	if block := renderTreeText(result); block != testTreeTextInspectSubtreeGolden {
+	if block := mustRenderTreeText(t, result); block != testTreeTextInspectSubtreeGolden {
 		t.Fatalf("inspect subtree mismatch:\n--- got ---\n%s\n--- want ---\n%s", block, testTreeTextInspectSubtreeGolden)
 	}
 }
 
 func TestTreeTextInspectQuery(t *testing.T) {
 	result := &protocol.Result{Inspection: testInspectionQueryView()}
-	if block := renderTreeText(result); block != testTreeTextInspectQueryGolden {
+	if block := mustRenderTreeText(t, result); block != testTreeTextInspectQueryGolden {
 		t.Fatalf("inspect query mismatch:\n--- got ---\n%s\n--- want ---\n%s", block, testTreeTextInspectQueryGolden)
 	}
 }
@@ -301,9 +328,9 @@ func TestTreeTextIsPure(t *testing.T) {
 		{Inspection: testInspectionQueryView()},
 	}
 	for index, result := range results {
-		first := renderTreeText(result)
+		first := mustRenderTreeText(t, result)
 		for attempt := 0; attempt < 100; attempt++ {
-			if again := renderTreeText(result); again != first {
+			if again := mustRenderTreeText(t, result); again != first {
 				t.Fatalf("result %d is not pure on attempt %d", index, attempt)
 			}
 		}
@@ -315,7 +342,7 @@ func TestTreeTextIsPure(t *testing.T) {
 		if err := protocol.Decode(encoded, &restored); err != nil {
 			t.Fatalf("result %d decode: %v", index, err)
 		}
-		if roundTrip := renderTreeText(&restored); roundTrip != first {
+		if roundTrip := mustRenderTreeText(t, &restored); roundTrip != first {
 			t.Fatalf("result %d changed after JSON round-trip:\n--- first ---\n%s\n--- again ---\n%s", index, first, roundTrip)
 		}
 	}
@@ -324,7 +351,7 @@ func TestTreeTextIsPure(t *testing.T) {
 func TestTreeTextRoundTrip(t *testing.T) {
 	t.Run("full", func(t *testing.T) {
 		tree := testFullTree()
-		block := renderTreeText(&protocol.Result{Observation: &protocol.Observation{
+		block := mustRenderTreeText(t, &protocol.Result{Observation: &protocol.Observation{
 			ID: "O3", Tree: &protocol.TreeValue{Full: tree},
 		}})
 		parsed := parseFullTreeText(t, block)
@@ -334,7 +361,7 @@ func TestTreeTextRoundTrip(t *testing.T) {
 	})
 	t.Run("delta", func(t *testing.T) {
 		delta := testDelta()
-		block := renderTreeText(&protocol.Result{Observation: &protocol.Observation{
+		block := mustRenderTreeText(t, &protocol.Result{Observation: &protocol.Observation{
 			ID: "O4", Tree: &protocol.TreeValue{Delta: delta},
 		}})
 		parsed := parseDeltaText(t, block)
@@ -352,7 +379,7 @@ func TestTreeTextRoundTrip(t *testing.T) {
 	} {
 		testCase := testCase
 		t.Run("inspect/"+testCase.name, func(t *testing.T) {
-			block := renderTreeText(&protocol.Result{Inspection: testCase.view})
+			block := mustRenderTreeText(t, &protocol.Result{Inspection: testCase.view})
 			parsed := parseInspectionText(t, block)
 			want := *testCase.view
 			want.Origin = ""
@@ -385,7 +412,7 @@ func TestTreeTextEscapes(t *testing.T) {
 	root := testNode("n1", protocol.RoleRoot, testBoundsPtr(0, 0, 1, 1))
 	root.Label = []string{label, "second[label]=value"}
 	root.Resource = testStringPtr("res<&>")
-	block := renderTreeText(&protocol.Result{Observation: &protocol.Observation{
+	block := mustRenderTreeText(t, &protocol.Result{Observation: &protocol.Observation{
 		ID: "O1", Tree: &protocol.TreeValue{Full: &protocol.Tree{Format: "full", Scope: protocol.Scope, Root: root}},
 	}})
 	parsed := parseTreeTextBlock(t, block)
@@ -414,18 +441,13 @@ func TestTreeTextEscapes(t *testing.T) {
 	}
 }
 
-func TestTreeTextOmitsWholeBlock(t *testing.T) {
+func TestTreeTextKeepsPreviouslyBoundedBlocks(t *testing.T) {
 	t.Run("full", func(t *testing.T) {
-		root := testNode("n1", protocol.RoleRoot, testBoundsPtr(0, 0, 1, 1))
-		for index := 2; index <= 700; index++ {
-			child := testNode("n"+strconv.Itoa(index), protocol.RoleText, testBoundsPtr(0, 0, 1, 1))
-			child.Label = []string{strings.Repeat("x", 60)}
-			root.Children = append(root.Children, child)
-		}
-		block := renderTreeText(&protocol.Result{Observation: &protocol.Observation{
-			ID: "O3", Tree: &protocol.TreeValue{Full: &protocol.Tree{Format: "full", Scope: protocol.Scope, Root: root}},
+		tree := testLargeTree(699, 60)
+		block := mustRenderTreeText(t, &protocol.Result{Observation: &protocol.Observation{
+			ID: "O3", Tree: &protocol.TreeValue{Full: tree},
 		}})
-		assertOmittedBlock(t, block, "tree v1 omitted format=full id=O3 nodes=700 bytes=", "limit=24576 use=inspect", "end tree")
+		assertCompleteTreeText(t, block, "tree v1 format=full id=O3 ", "end tree\n", 24*1024)
 	})
 
 	t.Run("delta", func(t *testing.T) {
@@ -435,44 +457,260 @@ func TestTreeTextOmitsWholeBlock(t *testing.T) {
 				Label: protocol.Field[[]string]{Set: true, Value: []string{strings.Repeat("y", 60)}},
 			}
 		}
-		block := renderTreeText(&protocol.Result{Observation: &protocol.Observation{
+		block := mustRenderTreeText(t, &protocol.Result{Observation: &protocol.Observation{
 			ID: "O4", Tree: &protocol.TreeValue{Delta: delta},
 		}})
-		assertOmittedBlock(t, block, "tree v1 omitted format=delta id=O4 base=O3 changes=600 bytes=", "limit=24576 use=inspect", "end tree")
+		assertCompleteTreeText(t, block, "tree v1 format=delta id=O4 base=O3 ", "end tree\n", 24*1024)
 	})
 
 	t.Run("inspect", func(t *testing.T) {
-		root := testNode("n1", protocol.RoleRoot, testBoundsPtr(0, 0, 1, 1))
-		for index := 2; index <= 800; index++ {
-			child := testNode("n"+strconv.Itoa(index), protocol.RoleText, testBoundsPtr(0, 0, 1, 1))
-			child.Label = []string{strings.Repeat("z", 60)}
-			root.Children = append(root.Children, child)
-		}
+		tree := testLargeTree(799, 60)
 		view := &protocol.InspectionView{
 			ObservationID: "O2", Revision: 4, CapturedAt: "2026-11-10T03:00:00Z", Scope: "tree",
-			Tree: &protocol.Tree{Format: "full", Scope: protocol.Scope, Root: root},
+			Tree: tree,
 		}
-		block := renderTreeText(&protocol.Result{Inspection: view})
-		assertOmittedBlock(t, block, "inspect v1 omitted scope=tree observation=O2 revision=4 nodes=800 bytes=", "limit=32768 use=query", "end inspect")
+		block := mustRenderTreeText(t, &protocol.Result{Inspection: view})
+		assertCompleteTreeText(t, block, "inspect v1 scope=tree observation=O2 ", "end inspect\n", 32*1024)
 	})
+}
+
+func TestTreeTextLargeFixtures(t *testing.T) {
+	const (
+		observationFullBytes  = 128 * 1024
+		inspectionFullBytes   = 128 * 1024
+		narrowInspectionBytes = 32 * 1024
+	)
+
+	t.Run("observation-full-128KiB", func(t *testing.T) {
+		tree := testLargeTree(200, 700)
+		result := &protocol.Result{Observation: &protocol.Observation{
+			ID: "O3", Tree: &protocol.TreeValue{Full: tree},
+		}}
+		block := mustRenderTreeText(t, result)
+		assertCompleteTreeText(t, block, "tree v1 format=full id=O3 ", "end tree\n", observationFullBytes)
+		if got, want := mustJSON(t, parseFullTreeText(t, block)), mustJSON(t, tree); got != want {
+			t.Fatalf("observation full tree did not round-trip:\n got %s\nwant %s", got, want)
+		}
+		t.Logf("observation full tree text bytes=%d", len(block))
+	})
+
+	t.Run("inspection-full-128KiB", func(t *testing.T) {
+		view := &protocol.InspectionView{
+			ObservationID: "O2", Revision: 4, CapturedAt: "2026-11-10T03:00:00Z", Scope: "tree",
+			Tree: testLargeTree(200, 700),
+		}
+		block := mustRenderTreeText(t, &protocol.Result{Inspection: view})
+		assertCompleteTreeText(t, block, "inspect v1 scope=tree observation=O2 ", "end inspect\n", inspectionFullBytes)
+		if got, want := mustJSON(t, parseInspectionText(t, block)), mustJSON(t, view); got != want {
+			t.Fatalf("inspection full tree did not round-trip:\n got %s\nwant %s", got, want)
+		}
+		t.Logf("inspection full tree text bytes=%d", len(block))
+	})
+
+	t.Run("inspection-subtree-32KiB", func(t *testing.T) {
+		view := &protocol.InspectionView{
+			ObservationID: "O2", Revision: 4, CapturedAt: "2026-11-10T03:00:00Z", Scope: "subtree",
+			Root: testLargeTree(80, 700).Root,
+		}
+		block := mustRenderTreeText(t, &protocol.Result{Inspection: view})
+		assertCompleteTreeText(t, block, "inspect v1 scope=subtree observation=O2 ", "end inspect\n", narrowInspectionBytes)
+		if got, want := mustJSON(t, parseInspectionText(t, block)), mustJSON(t, view); got != want {
+			t.Fatalf("inspection subtree did not round-trip:\n got %s\nwant %s", got, want)
+		}
+		t.Logf("inspection subtree text bytes=%d", len(block))
+	})
+
+	t.Run("inspection-query-32KiB", func(t *testing.T) {
+		matches := make([]protocol.InspectionMatch, 0, 80)
+		for index := 2; index < 82; index++ {
+			match := testNode("n"+strconv.Itoa(index), protocol.RoleText, testBoundsPtr(0, 0, 1080, 80))
+			match.Label = []string{strings.Repeat("q", 700)}
+			matches = append(matches, protocol.InspectionMatch{Node: match, Path: []string{"n1"}})
+		}
+		view := &protocol.InspectionView{
+			ObservationID: "O2", Revision: 4, CapturedAt: "2026-11-10T03:00:00Z", Scope: "query",
+			Matches: matches,
+		}
+		block := mustRenderTreeText(t, &protocol.Result{Inspection: view})
+		assertCompleteTreeText(t, block, "inspect v1 scope=query observation=O2 ", "end inspect\n", narrowInspectionBytes)
+		if got, want := mustJSON(t, parseInspectionText(t, block)), mustJSON(t, view); got != want {
+			t.Fatalf("inspection query did not round-trip:\n got %s\nwant %s", got, want)
+		}
+		t.Logf("inspection query text bytes=%d", len(block))
+	})
+}
+
+func TestTreeTextRejectsUnrepresentableMetadata(t *testing.T) {
+	validTree := func() *protocol.Tree {
+		return &protocol.Tree{Format: "full", Scope: protocol.Scope,
+			Root: testNode("n1", protocol.RoleRoot, nil)}
+	}
+	cases := []struct {
+		name   string
+		result *protocol.Result
+	}{
+		{
+			name: "missing observation id",
+			result: &protocol.Result{Observation: &protocol.Observation{
+				Tree: &protocol.TreeValue{Full: validTree()},
+			}},
+		},
+		{
+			name: "tree value has both formats",
+			result: &protocol.Result{Observation: &protocol.Observation{
+				ID:   "O3",
+				Tree: &protocol.TreeValue{Full: validTree(), Delta: &protocol.Delta{Format: "delta", Base: "O1"}},
+			}},
+		},
+		{
+			name: "full format",
+			result: &protocol.Result{Observation: &protocol.Observation{
+				ID: "O3", Tree: &protocol.TreeValue{Full: &protocol.Tree{
+					Format: "delta", Scope: protocol.Scope,
+					Root: testNode("n1", protocol.RoleRoot, nil),
+				}},
+			}},
+		},
+		{
+			name: "full scope missing",
+			result: &protocol.Result{Observation: &protocol.Observation{
+				ID: "O3", Tree: &protocol.TreeValue{Full: &protocol.Tree{
+					Format: "full", Root: testNode("n1", protocol.RoleRoot, nil),
+				}},
+			}},
+		},
+		{
+			name: "full scope invalid",
+			result: &protocol.Result{Observation: &protocol.Observation{
+				ID: "O3", Tree: &protocol.TreeValue{Full: &protocol.Tree{
+					Format: "full", Scope: "visible",
+					Root: testNode("n1", protocol.RoleRoot, nil),
+				}},
+			}},
+		},
+		{
+			name: "full role invalid",
+			result: &protocol.Result{Observation: &protocol.Observation{
+				ID: "O3", Tree: &protocol.TreeValue{Full: &protocol.Tree{
+					Format: "full", Scope: protocol.Scope,
+					Root: testNode("n1", protocol.Role("card"), nil),
+				}},
+			}},
+		},
+		{
+			name: "full action invalid",
+			result: func() *protocol.Result {
+				root := testNode("n1", protocol.RoleRoot, nil)
+				root.Actions = []protocol.Action{protocol.Action("hover")}
+				return &protocol.Result{Observation: &protocol.Observation{
+					ID: "O3", Tree: &protocol.TreeValue{Full: &protocol.Tree{
+						Format: "full", Scope: protocol.Scope, Root: root,
+					}},
+				}}
+			}(),
+		},
+		{
+			name: "full axis invalid",
+			result: func() *protocol.Result {
+				root := testNode("n1", protocol.RoleRoot, nil)
+				root.Axis = protocol.Axis("diagonal")
+				return &protocol.Result{Observation: &protocol.Observation{
+					ID: "O3", Tree: &protocol.TreeValue{Full: &protocol.Tree{
+						Format: "full", Scope: protocol.Scope, Root: root,
+					}},
+				}}
+			}(),
+		},
+		{
+			name: "delta format",
+			result: &protocol.Result{Observation: &protocol.Observation{
+				ID: "O3", Tree: &protocol.TreeValue{Delta: &protocol.Delta{Format: "full", Base: "O1"}},
+			}},
+		},
+		{
+			name: "delta base missing",
+			result: &protocol.Result{Observation: &protocol.Observation{
+				ID: "O3", Tree: &protocol.TreeValue{Delta: &protocol.Delta{Format: "delta"}},
+			}},
+		},
+		{
+			name: "delta base token invalid",
+			result: &protocol.Result{Observation: &protocol.Observation{
+				ID: "O3", Tree: &protocol.TreeValue{Delta: &protocol.Delta{Format: "delta", Base: "O1 bad"}},
+			}},
+		},
+		{
+			name: "delta set action invalid",
+			result: &protocol.Result{Observation: &protocol.Observation{
+				ID: "O3", Tree: &protocol.TreeValue{Delta: &protocol.Delta{
+					Format: "delta", Base: "O1",
+					Set: map[string]protocol.SetNode{
+						"n2": {Actions: protocol.Field[[]protocol.Action]{
+							Set: true, Value: []protocol.Action{protocol.Action("hover")},
+						}},
+					},
+				}},
+			}},
+		},
+		{
+			name:   "inspection id missing",
+			result: &protocol.Result{Inspection: &protocol.InspectionView{CapturedAt: "2026-11-10T03:00:00Z", Scope: "query"}},
+		},
+		{
+			name:   "inspection captured at missing",
+			result: &protocol.Result{Inspection: &protocol.InspectionView{ObservationID: "O2", Scope: "query"}},
+		},
+		{
+			name:   "inspection captured at token invalid",
+			result: &protocol.Result{Inspection: &protocol.InspectionView{ObservationID: "O2", CapturedAt: "2026-11-10 03:00", Scope: "query"}},
+		},
+		{
+			name:   "inspection scope missing",
+			result: &protocol.Result{Inspection: &protocol.InspectionView{ObservationID: "O2", CapturedAt: "2026-11-10T03:00:00Z"}},
+		},
+		{
+			name:   "inspection scope invalid",
+			result: &protocol.Result{Inspection: &protocol.InspectionView{ObservationID: "O2", CapturedAt: "2026-11-10T03:00:00Z", Scope: "node"}},
+		},
+		{
+			name: "inspection tree missing",
+			result: &protocol.Result{Inspection: &protocol.InspectionView{
+				ObservationID: "O2", CapturedAt: "2026-11-10T03:00:00Z", Scope: "tree",
+			}},
+		},
+		{
+			name: "inspection tree scope missing",
+			result: &protocol.Result{Inspection: &protocol.InspectionView{
+				ObservationID: "O2", CapturedAt: "2026-11-10T03:00:00Z", Scope: "tree",
+				Tree: &protocol.Tree{Format: "full", Root: testNode("n1", protocol.RoleRoot, nil)},
+			}},
+		},
+		{
+			name: "inspection subtree root missing",
+			result: &protocol.Result{Inspection: &protocol.InspectionView{
+				ObservationID: "O2", CapturedAt: "2026-11-10T03:00:00Z", Scope: "subtree",
+			}},
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			requireNoTreeText(t, testCase.result)
+		})
+	}
 }
 
 func TestTreeTextRejectsMalformedRef(t *testing.T) {
 	full := testFullTree()
 	full.Root.Children[0].Ref = "n01"
-	if block := renderTreeText(&protocol.Result{Observation: &protocol.Observation{
+	requireNoTreeText(t, &protocol.Result{Observation: &protocol.Observation{
 		ID: "O3", Tree: &protocol.TreeValue{Full: full},
-	}}); block != "tree v1 omitted reason=ref_format id=O3\n" {
-		t.Fatalf("full malformed ref = %q", block)
-	}
+	}})
 
 	full = testFullTree()
 	full.Root.Children[0].Ref = "bad ref"
-	if block := renderTreeText(&protocol.Result{Observation: &protocol.Observation{
+	requireNoTreeText(t, &protocol.Result{Observation: &protocol.Observation{
 		ID: "O3", Tree: &protocol.TreeValue{Full: full},
-	}}); !strings.Contains(block, "reason=ref_format") {
-		t.Fatalf("full malformed child ref = %q", block)
-	}
+	}})
 
 	cases := []*protocol.Delta{
 		{Format: "delta", Base: "O3", Set: map[string]protocol.SetNode{"n0": {}}},
@@ -483,25 +721,20 @@ func TestTreeTextRejectsMalformedRef(t *testing.T) {
 		{Format: "delta", Base: "O3", Replace: map[string]*protocol.Node{"n1": testNode("n03", protocol.RoleGroup, nil)}},
 	}
 	for index, delta := range cases {
-		block := renderTreeText(&protocol.Result{Observation: &protocol.Observation{
-			ID: "O4", Tree: &protocol.TreeValue{Delta: delta},
-		}})
-		if want := "tree v1 omitted reason=ref_format id=O4 base=O3\n"; block != want {
-			t.Fatalf("delta case %d = %q, want %q", index, block, want)
-		}
+		t.Run("delta-"+strconv.Itoa(index), func(t *testing.T) {
+			requireNoTreeText(t, &protocol.Result{Observation: &protocol.Observation{
+				ID: "O4", Tree: &protocol.TreeValue{Delta: delta},
+			}})
+		})
 	}
 
 	query := testInspectionQueryView()
 	query.Matches[0].Path = []string{"n1", "n01"}
-	if block := renderTreeText(&protocol.Result{Inspection: query}); block != "inspect v1 omitted reason=ref_format observation=O2 scope=query\n" {
-		t.Fatalf("inspect malformed path = %q", block)
-	}
+	requireNoTreeText(t, &protocol.Result{Inspection: query})
 
 	query = testInspectionQueryView()
 	query.Matches[0].Node.Ref = "n1 2"
-	if block := renderTreeText(&protocol.Result{Inspection: query}); block != "inspect v1 omitted reason=ref_format observation=O2 scope=query\n" {
-		t.Fatalf("inspect malformed node = %q", block)
-	}
+	requireNoTreeText(t, &protocol.Result{Inspection: query})
 }
 
 func TestTreeTextTrailer(t *testing.T) {
@@ -521,7 +754,7 @@ func TestTreeTextTrailer(t *testing.T) {
 		{"inspect-query", &protocol.Result{Inspection: testInspectionQueryView()}, "end inspect\n"},
 	}
 	for _, testCase := range cases {
-		block := renderTreeText(testCase.result)
+		block := mustRenderTreeText(t, testCase.result)
 		if !strings.HasSuffix(block, testCase.trailer) {
 			t.Fatalf("%s does not end with %q:\n%s", testCase.name, testCase.trailer, block)
 		}
@@ -536,7 +769,7 @@ func TestTreeTextTrailer(t *testing.T) {
 
 func TestTreeTextEmptyTree(t *testing.T) {
 	root := testNode("n1", protocol.RoleRoot, testBoundsPtr(0, 0, 1080, 2400))
-	block := renderTreeText(&protocol.Result{Observation: &protocol.Observation{
+	block := mustRenderTreeText(t, &protocol.Result{Observation: &protocol.Observation{
 		ID: "O1", Tree: &protocol.TreeValue{Full: &protocol.Tree{Format: "full", Scope: protocol.Scope, Root: root}},
 	}})
 	want := "tree v1 format=full id=O1 scope=reported_visible_with_context nodes=1\n\n" +
@@ -546,7 +779,7 @@ func TestTreeTextEmptyTree(t *testing.T) {
 	}
 
 	delta := &protocol.Delta{Format: "delta", Base: "O1"}
-	block = renderTreeText(&protocol.Result{Observation: &protocol.Observation{
+	block = mustRenderTreeText(t, &protocol.Result{Observation: &protocol.Observation{
 		ID: "O2", Tree: &protocol.TreeValue{Delta: delta},
 	}})
 	want = "tree v1 format=delta id=O2 base=O1 scope=reported_visible_with_context changes=0\n\nend tree\n"
@@ -554,12 +787,31 @@ func TestTreeTextEmptyTree(t *testing.T) {
 		t.Fatalf("empty delta block = %q, want %q", block, want)
 	}
 
-	empty := &protocol.InspectionView{ObservationID: "O2", Revision: 4, CapturedAt: "2026-11-10T03:00:00Z", Scope: "tree"}
-	block = renderTreeText(&protocol.Result{Inspection: empty})
+	empty := &protocol.InspectionView{
+		ObservationID: "O2", Revision: 4, CapturedAt: "2026-11-10T03:00:00Z", Scope: "tree",
+		Tree: &protocol.Tree{Format: "full", Scope: protocol.Scope, Root: root},
+	}
+	block = mustRenderTreeText(t, &protocol.Result{Inspection: empty})
 	want = "inspect v1 scope=tree observation=O2 revision=4 captured_at=2026-11-10T03:00:00Z " +
-		"tree_scope=reported_visible_with_context nodes=0\n\nend inspect\n"
+		"tree_scope=reported_visible_with_context nodes=1\n\n" +
+		"n1 root [0,0,1080,2400]\nend inspect\n"
 	if block != want {
 		t.Fatalf("empty inspection block = %q, want %q", block, want)
+	}
+
+	query := &protocol.InspectionView{
+		ObservationID: "O2", Revision: 4, CapturedAt: "2026-11-10T03:00:00Z", Scope: "query",
+		Matches: nil,
+	}
+	block = mustRenderTreeText(t, &protocol.Result{Inspection: query})
+	want = "inspect v1 scope=query observation=O2 revision=4 captured_at=2026-11-10T03:00:00Z " +
+		"tree_scope=reported_visible_with_context matches=0 nodes=0\n\nend inspect\n"
+	if block != want {
+		t.Fatalf("empty query block = %q, want %q", block, want)
+	}
+	parsed := parseInspectionText(t, block)
+	if parsed.Matches == nil || len(parsed.Matches) != 0 || parsed.HasTotal || parsed.Truncated != nil {
+		t.Fatalf("empty query presence changed: %#v", parsed)
 	}
 }
 
@@ -573,9 +825,9 @@ func TestTreeTextNoTree(t *testing.T) {
 		{Observation: &protocol.Observation{Status: "complete", ID: "O1", Tree: &protocol.TreeValue{}}},
 	}
 	for index, result := range cases {
-		if block := renderTreeText(result); block != "" {
-			t.Fatalf("case %d produced a block: %q", index, block)
-		}
+		t.Run(strconv.Itoa(index), func(t *testing.T) {
+			requireNoTreeText(t, result)
+		})
 	}
 }
 
@@ -642,8 +894,14 @@ func TestTextCarriesTreeBlock(t *testing.T) {
 				t.Fatalf("%s reported an error: %s", testCase.name, testTextContent(t, result))
 			}
 			text := testTextContent(t, result)
-			if !strings.HasSuffix(text, testCase.trailer) {
-				t.Fatalf("%s text does not end with %q:\n%s", testCase.name, testCase.trailer, text)
+			if !strings.HasPrefix(text, "result v1 is_error=false\n") || !strings.HasSuffix(text, "end result\n") {
+				t.Fatalf("%s text is not a complete result envelope:\n%s", testCase.name, text)
+			}
+			if !strings.Contains(text, testCase.trailer+"end result\n") {
+				t.Fatalf("%s text does not carry %q before end result:\n%s", testCase.name, testCase.trailer, text)
+			}
+			if strings.Contains(text, "omitted") {
+				t.Fatalf("%s text contains omitted:\n%s", testCase.name, text)
 			}
 			if !strings.Contains(text, "\n"+testCase.header+"\n") && !strings.HasPrefix(text, testCase.header+"\n") {
 				t.Fatalf("%s text lacks header %q:\n%s", testCase.name, testCase.header, text)
@@ -701,9 +959,6 @@ func parseHeaderFields(t *testing.T, header string) (string, map[string]string) 
 	for _, token := range tokens[2:] {
 		key, value, ok := strings.Cut(token, "=")
 		if !ok {
-			if token == "omitted" {
-				continue
-			}
 			t.Fatalf("header field %q has no '='", token)
 		}
 		fields[key] = value
@@ -1290,31 +1545,18 @@ func countInspectNodeLines(lines []string) int {
 	return count
 }
 
-func assertOmittedBlock(t *testing.T, block, prefix, suffix, forbiddenTrailer string) {
+func assertCompleteTreeText(t *testing.T, block, prefix, suffix string, minimumBytes int) {
 	t.Helper()
+	if strings.Contains(block, "omitted") {
+		t.Fatalf("complete block contains omitted:\n%s", block)
+	}
 	if !strings.HasPrefix(block, prefix) {
-		t.Fatalf("omitted block does not start with %q:\n%s", prefix, block)
+		t.Fatalf("block does not start with %q:\n%s", prefix, block)
 	}
-	if !strings.Contains(block, suffix) {
-		t.Fatalf("omitted block lacks %q:\n%s", suffix, block)
+	if !strings.HasSuffix(block, suffix) {
+		t.Fatalf("block does not end with %q:\n%s", suffix, block)
 	}
-	if strings.Contains(block, forbiddenTrailer) {
-		t.Fatalf("omitted block carries a trailer:\n%s", block)
+	if len(block) < minimumBytes {
+		t.Fatalf("complete block is %d bytes, want at least %d", len(block), minimumBytes)
 	}
-	if strings.Count(block, "\n") != 1 {
-		t.Fatalf("omitted block has content lines:\n%s", block)
-	}
-	_, fields := parseHeaderFields(t, strings.Split(strings.TrimSuffix(block, "\n"), "\n")[0])
-	if got, _ := strconv.Atoi(fields["bytes"]); got <= headerLimit(t, fields["limit"]) {
-		t.Fatalf("omitted bytes=%d is not above limit=%s", got, fields["limit"])
-	}
-}
-
-func headerLimit(t *testing.T, raw string) int {
-	t.Helper()
-	value, err := strconv.Atoi(raw)
-	if err != nil {
-		t.Fatalf("limit %q is not an integer", raw)
-	}
-	return value
 }

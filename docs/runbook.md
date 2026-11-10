@@ -306,11 +306,39 @@ go build -o build/device-mcp.exe ./cmd/device-mcp
 
 HTTP 入口的每个请求都需要 `Authorization: Bearer <MCP token>`；携带 `Origin` 时必须命中
 `allowed_origins`。缺失/错误令牌返回 `401`，不允许的 Origin 返回 `403`。MCP 会话按请求
-隔离；协议版本锁定 `2026-07-28`，客户端使用更低版本时拒绝。
+隔离；现代协议只接受 `2026-07-28`；旧版 `initialize` 收到 `2025-11-25` 生命周期答复后
+应断开，不提供旧协议回退。
 
 取消与漏收：stdio 的 `notifications/cancelled` 与 HTTP 的请求 SSE 流关闭都映射为本次调用
 取消；有本次 P 时适配进程发起有界 `end(P)`，只读工具仅取消读取。连接断开或 `end` 发出都
 不等于手机动作已撤回或原执行链已结束；恢复仍按 `status(P)`/`status()` 与收尾事实。
+
+### 10.3 结果模式
+
+默认 `both` 发送完整文本与结构化结果；`text` 发送完整文本与图片；`structured` 发送完整
+结构化结果与图片，错误时附最小诊断文本。模式只改变表示，事实和图片一致。HTTP 客户端在
+每个请求上设置 `X-Mobile-Use-Result-Mode: text` 或 `structured`，不设置时使用进程默认。
+空值、多值、逗号、前后空白或非法值返回 `400`，不会执行工具；该头不传给设备服务。
+
+```powershell
+./build/device-mcp.exe -transport stdio -config .state/mcp-config.json -result-mode text
+$env:MOBILE_USE_MCP_RESULT_MODE = 'structured'
+./build/device-mcp.exe -transport stdio -config .state/mcp-config.json
+Remove-Item Env:MOBILE_USE_MCP_RESULT_MODE
+```
+
+优先级为显式 `-result-mode` > 环境变量 > `both`。显式空值与非法值退出 `2`，不回退。
+HTTP 进程也可用同一参数设置默认值，每请求头优先。完整文本以 `result v1 is_error=…`
+开头、`end result` 结束；错误最小诊断以 `diagnostic v1 is_error=true` 开头、
+`end diagnostic` 结束。缺尾表示对应文本被宿主截断，可改用 `structured` 或收窄 inspect。
+文本格式取代旧摘要，解析旧文本的宿主须迁移；成功的 `structured` 结果可以是 `content=[]`，
+不接受它的宿主使用 `both`/`text`。详细语法、取消保留键与图片规则见 [MCP 入口](mcp.md)。
+
+探针默认检查 `both`；可用 `-result-mode text|structured` 检查其他投影，例如：
+
+```powershell
+go run ./scripts/mcp-probe -config .state/mcp-config.json -binary build/device-mcp.exe -transport stdio -result-mode text
+```
 
 ## 11. 消息中心
 

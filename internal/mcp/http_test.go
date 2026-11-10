@@ -65,8 +65,13 @@ func (t *testRecordingTransport) sawSSE() bool {
 
 func rawTestMCPRequest(t *testing.T, endpoint, token, origin string) *http.Response {
 	t.Helper()
-	request, err := http.NewRequest(http.MethodPost, endpoint+"/mcp",
-		strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`))
+	return rawTestMCPRequestWith(t, endpoint, token, origin, nil,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`)
+}
+
+func rawTestMCPRequestWith(t *testing.T, endpoint, token, origin string, resultModes []string, body string) *http.Response {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodPost, endpoint+"/mcp", strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
@@ -78,10 +83,32 @@ func rawTestMCPRequest(t *testing.T, endpoint, token, origin string) *http.Respo
 	if origin != "" {
 		request.Header.Set("Origin", origin)
 	}
+	for _, resultMode := range resultModes {
+		request.Header.Add(ResultModeHeader, resultMode)
+	}
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatalf("raw request: %v", err)
 	}
+	return response
+}
+
+func rawTestMCPHandlerResponse(t *testing.T, handler http.Handler, token, origin string, resultModes []string, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodPost, "http://device-mcp.test/mcp", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json, text/event-stream")
+	if token != "" {
+		request.Header.Set("Authorization", "Bearer "+token)
+	}
+	if origin != "" {
+		request.Header.Set("Origin", origin)
+	}
+	for _, resultMode := range resultModes {
+		request.Header.Add(ResultModeHeader, resultMode)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
 	return response
 }
 
@@ -166,6 +193,124 @@ func TestHTTPHandlerAuthOriginAndCatalog(t *testing.T) {
 			t.Fatal("Streamable HTTP responses were not SSE-framed")
 		}
 	})
+}
+
+func TestHTTPResultModeHeader(t *testing.T) {
+	fake := newTestDeviceService(t)
+	server := newTestMCPServer(t, fake)
+	handler := NewHTTPHandler(server, HTTPConfig{Token: "secret-token"})
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+
+	for _, mode := range []string{"both", "text", "structured"} {
+		mode := mode
+		t.Run("accepts/"+mode, func(t *testing.T) {
+			response := rawTestMCPRequestWith(t, httpServer.URL, "secret-token", "", []string{mode},
+				`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`)
+			defer response.Body.Close()
+			if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+				t.Fatalf("status = %d, want 2xx", response.StatusCode)
+			}
+		})
+	}
+
+	t.Run("absent", func(t *testing.T) {
+		response := rawTestMCPRequest(t, httpServer.URL, "secret-token", "")
+		defer response.Body.Close()
+		if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+			t.Fatalf("status = %d, want 2xx", response.StatusCode)
+		}
+	})
+
+	for _, test := range []struct {
+		name   string
+		values []string
+	}{
+		{name: "empty", values: []string{""}},
+		{name: "multiple", values: []string{"text", "structured"}},
+		{name: "comma", values: []string{"text,structured"}},
+		{name: "invalid", values: []string{"legacy"}},
+	} {
+		test := test
+		t.Run("rejects/"+test.name, func(t *testing.T) {
+			response := rawTestMCPRequestWith(t, httpServer.URL, "secret-token", "", test.values,
+				`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`)
+			defer response.Body.Close()
+			if response.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", response.StatusCode)
+			}
+		})
+	}
+}
+
+func TestHTTPResultModeRejectedBeforeToolExecution(t *testing.T) {
+	fake := newTestDeviceService(t)
+	server := newTestMCPServer(t, fake)
+	handler := NewHTTPHandler(server, HTTPConfig{Token: "secret-token"})
+
+	toolCall := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"status","arguments":{}}}`
+	tests := []struct {
+		name   string
+		values []string
+	}{
+		{name: "empty", values: []string{""}},
+		{name: "multiple", values: []string{"text", "structured"}},
+		{name: "comma", values: []string{"text,structured"}},
+		{name: "leading whitespace", values: []string{" text"}},
+		{name: "trailing whitespace", values: []string{"text "}},
+		{name: "invalid", values: []string{"legacy"}},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			before := fake.totalRequests()
+			response := rawTestMCPHandlerResponse(t, handler, "secret-token", "", test.values, toolCall)
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", response.Code)
+			}
+			if after := fake.totalRequests(); after != before {
+				t.Fatalf("device service requests = %d, want %d", after, before)
+			}
+		})
+	}
+}
+
+func TestHTTPResultModePerRequestAndSecurityOrder(t *testing.T) {
+	fake := newTestDeviceService(t)
+	server := newTestMCPServer(t, fake)
+	const allowedOrigin = "https://allowed.example"
+	handler := NewHTTPHandler(server, HTTPConfig{
+		Token:          "secret-token",
+		AllowedOrigins: []string{allowedOrigin},
+	})
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+
+	invalid := rawTestMCPHandlerResponse(t, handler, "secret-token", "", []string{"text "},
+		`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`)
+	if invalid.Code != http.StatusBadRequest {
+		t.Fatalf("invalid-mode status = %d, want 400", invalid.Code)
+	}
+
+	valid := rawTestMCPRequestWith(t, httpServer.URL, "secret-token", "", []string{"structured"},
+		`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`)
+	if valid.StatusCode < http.StatusOK || valid.StatusCode >= http.StatusMultipleChoices {
+		valid.Body.Close()
+		t.Fatalf("follow-up status = %d, want 2xx", valid.StatusCode)
+	}
+	valid.Body.Close()
+
+	missingToken := rawTestMCPHandlerResponse(t, handler, "", "", []string{"text "},
+		`{"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}}`)
+	if missingToken.Code != http.StatusUnauthorized {
+		t.Fatalf("missing-token status = %d, want 401", missingToken.Code)
+	}
+
+	wrongOrigin := rawTestMCPHandlerResponse(t, handler, "secret-token", "https://evil.example", []string{"text "},
+		`{"jsonrpc":"2.0","id":4,"method":"tools/list","params":{}}`)
+	if wrongOrigin.Code != http.StatusForbidden {
+		t.Fatalf("wrong-origin status = %d, want 403", wrongOrigin.Code)
+	}
 }
 
 func TestHTTPSSECancellationEndsOperation(t *testing.T) {

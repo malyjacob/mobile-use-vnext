@@ -20,6 +20,8 @@ const (
 	cancellationDelay        = 400 * time.Millisecond
 	cancellationReturnWindow = 15 * time.Second
 	maxWaitMS                = 8000
+	probeShellOutput         = "mobile-use-mcp-probe"
+	probeUnknownObservation  = "Oprobe-unknown"
 )
 
 // toolNames is the complete public MCP catalog, in registration order.
@@ -31,9 +33,10 @@ var toolNames = []string{
 // probe carries the connected session and the typed service client used for
 // independent status polling.
 type probe struct {
-	reporter *reporter
-	session  *sdk.ClientSession
-	service  *client.Client
+	reporter   *reporter
+	session    *sdk.ClientSession
+	service    *client.Client
+	resultMode string
 }
 
 // schemaView is the probe's projection of one published input schema.
@@ -59,6 +62,9 @@ func (p *probe) runChecks(ctx context.Context) bool {
 		return true
 	}
 	p.reporter.pass("status", "can_start=true")
+	if !p.errorProjectionCheck(ctx) {
+		return false
+	}
 
 	pID, oID, ok := p.startCheck(ctx)
 	if !ok {
@@ -66,6 +72,9 @@ func (p *probe) runChecks(ctx context.Context) bool {
 	}
 	observedID, ok := p.observeCheck(ctx, oID)
 	if !ok {
+		return false
+	}
+	if !p.contentProjectionCheck(ctx, pID, observedID) {
 		return false
 	}
 	if !p.inspectCheck(ctx, observedID) {
@@ -90,7 +99,32 @@ func (p *probe) call(ctx context.Context, name string, arguments any) (*callResu
 	if err != nil {
 		return nil, failf("tool_call_failed")
 	}
-	return project(result)
+	mode := p.resultMode
+	if mode == "" {
+		mode = resultModeBoth
+	}
+	return project(result, mode)
+}
+
+// errorProjectionCheck uses a read-only lookup of an unknown observation. It
+// proves the mode's error envelope without allocating a P or dispatching a
+// device action.
+func (p *probe) errorProjectionCheck(ctx context.Context) bool {
+	projected, failure := p.call(ctx, "inspect", map[string]any{
+		"observation_id": probeUnknownObservation,
+	})
+	if failure != nil {
+		p.reporter.fail("result_error", failure.reason, failure.fields...)
+		return false
+	}
+	if !projected.result.IsError || projected.view.Error == nil {
+		p.reporter.fail("result_error", "error_projection_missing")
+		return false
+	}
+	p.reporter.pass("result_error",
+		field("mode", p.mode()), field("code", projected.view.Error.Code),
+		"is_error=true")
+	return true
 }
 
 // catalogCheck asserts the exact tool catalog and the published schema shape.
@@ -291,9 +325,11 @@ func (p *probe) observeCheck(ctx context.Context, reference string) (string, boo
 		p.reporter.fail("observe", failure.reason, failure.fields...)
 		return "", false
 	}
-	if failure := checkObservationTreeBlock(projected, observation); failure != nil {
-		p.reporter.fail("observe", failure.reason, failure.fields...)
-		return "", false
+	if p.mode() != resultModeStructured {
+		if failure := checkObservationTreeBlock(projected, observation); failure != nil {
+			p.reporter.fail("observe", failure.reason, failure.fields...)
+			return "", false
+		}
 	}
 	p.reporter.pass("observe",
 		field("reference", reference), field("id", observation.ID),
@@ -321,6 +357,128 @@ func checkObservationTreeBlock(projected *callResult, observation *observationVi
 	return nil
 }
 
+// contentProjectionCheck exercises the three content families that the old
+// text projection omitted: full app items, shell output and diagnosis events.
+// Every fact is checked from the selected mode's complete encoding, and
+// both/text additionally require the readable v1 block.
+func (p *probe) contentProjectionCheck(ctx context.Context, startID, observationID string) bool {
+	apps, failure := p.call(ctx, "apps", map[string]any{})
+	if failure != nil {
+		p.reporter.fail("apps_projection", failure.reason, failure.fields...)
+		return false
+	}
+	if apps.result.IsError || apps.view.Apps == nil {
+		p.reporter.fail("apps_projection", "apps_result_missing", field("code", codeOf(apps.view)))
+		return false
+	}
+	if len(apps.view.Apps.Items) == 0 || apps.view.Apps.Total < len(apps.view.Apps.Items) {
+		p.reporter.fail("apps_projection", "apps_items_incomplete",
+			field("items", strconv.Itoa(len(apps.view.Apps.Items))),
+			field("total", strconv.Itoa(apps.view.Apps.Total)))
+		return false
+	}
+	for _, item := range apps.view.Apps.Items {
+		if item.Name == "" || item.Package == "" {
+			p.reporter.fail("apps_projection", "apps_item_incomplete")
+			return false
+		}
+	}
+	if p.mode() != resultModeStructured {
+		if failure := requireTextBlock(apps, "apps v1 items=", "end apps", "apps_block_missing"); failure != nil {
+			p.reporter.fail("apps_projection", failure.reason, failure.fields...)
+			return false
+		}
+	}
+	p.reporter.pass("apps_projection",
+		field("mode", p.mode()), field("items", strconv.Itoa(len(apps.view.Apps.Items))),
+		field("total", strconv.Itoa(apps.view.Apps.Total)))
+
+	shell, failure := p.call(ctx, "shell", map[string]any{
+		"reference": observationID,
+		"command":   "echo " + probeShellOutput,
+	})
+	if failure != nil {
+		p.reporter.fail("shell_projection", failure.reason, failure.fields...)
+		return false
+	}
+	if shell.result.IsError || shell.view.Shell == nil {
+		p.reporter.fail("shell_projection", "shell_result_missing", field("code", codeOf(shell.view)))
+		return false
+	}
+	if shell.view.Shell.Termination != "exited" ||
+		shell.view.Shell.ExitCode == nil || *shell.view.Shell.ExitCode != 0 ||
+		shell.view.Shell.Output == nil || *shell.view.Shell.Output != probeShellOutput+"\n" ||
+		shell.view.Shell.Truncated == nil || *shell.view.Shell.Truncated {
+		p.reporter.fail("shell_projection", "shell_facts_unexpected",
+			field("termination", shell.view.Shell.Termination),
+			field("exit_code", integerString(shell.view.Shell.ExitCode)))
+		return false
+	}
+	if p.mode() != resultModeStructured {
+		if failure := requireTextBlock(shell, "shell v1 ", "end shell", "shell_block_missing"); failure != nil {
+			p.reporter.fail("shell_projection", failure.reason, failure.fields...)
+			return false
+		}
+	}
+	p.reporter.pass("shell_projection",
+		field("mode", p.mode()), "termination=exited", "exit_code=0", "output=present")
+
+	diagnosis, failure := p.call(ctx, "diagnose", map[string]any{"reference": startID})
+	if failure != nil {
+		p.reporter.fail("timeline_projection", failure.reason, failure.fields...)
+		return false
+	}
+	if diagnosis.result.IsError || diagnosis.view.Diagnosis == nil {
+		p.reporter.fail("timeline_projection", "diagnosis_result_missing", field("code", codeOf(diagnosis.view)))
+		return false
+	}
+	if len(diagnosis.view.Diagnosis.Timeline) == 0 {
+		p.reporter.fail("timeline_projection", "timeline_empty")
+		return false
+	}
+	for _, event := range diagnosis.view.Diagnosis.Timeline {
+		if event.At == "" || event.Phase == "" || event.Code == "" {
+			p.reporter.fail("timeline_projection", "timeline_event_incomplete")
+			return false
+		}
+	}
+	if p.mode() != resultModeStructured {
+		if failure := requireTextBlock(diagnosis, "timeline v1 events=", "end timeline", "timeline_block_missing"); failure != nil {
+			p.reporter.fail("timeline_projection", failure.reason, failure.fields...)
+			return false
+		}
+	}
+	p.reporter.pass("timeline_projection",
+		field("mode", p.mode()),
+		field("events", strconv.Itoa(len(diagnosis.view.Diagnosis.Timeline))))
+	return true
+}
+
+func (p *probe) mode() string {
+	if p.resultMode == "" {
+		return resultModeBoth
+	}
+	return p.resultMode
+}
+
+func requireTextBlock(projected *callResult, prefix, end, reason string) *checkError {
+	block, failure := resultBlockText(projected, prefix, end, reason)
+	if failure != nil {
+		return failure
+	}
+	if strings.Contains(block, " omitted ") {
+		return failf("text_block_omitted")
+	}
+	return nil
+}
+
+func integerString(value *int) string {
+	if value == nil {
+		return "none"
+	}
+	return strconv.Itoa(*value)
+}
+
 // inspectCheck reads the observed tree through inspect and asserts the
 // readable inspection block carries a header and a trailer.
 func (p *probe) inspectCheck(ctx context.Context, observationID string) bool {
@@ -337,6 +495,12 @@ func (p *probe) inspectCheck(ctx context.Context, observationID string) bool {
 	if view.Inspection == nil || view.Inspection.ObservationID != observationID {
 		p.reporter.fail("inspect", "inspection_missing")
 		return false
+	}
+	if p.mode() == resultModeStructured {
+		p.reporter.pass("inspect",
+			field("scope", view.Inspection.Scope), field("observation", observationID),
+			"structured=true")
+		return true
 	}
 	prefix := "inspect v1 scope=" + view.Inspection.Scope + " observation=" + observationID
 	block, failure := treeBlockText(projected, prefix)
@@ -403,9 +567,11 @@ func (p *probe) actCheck(ctx context.Context, observationID string) bool {
 		p.reporter.fail("act", failure.reason, failure.fields...)
 		return false
 	}
-	if failure := checkObservationTreeBlock(projected, observation); failure != nil {
-		p.reporter.fail("act", failure.reason, failure.fields...)
-		return false
+	if p.mode() != resultModeStructured {
+		if failure := checkObservationTreeBlock(projected, observation); failure != nil {
+			p.reporter.fail("act", failure.reason, failure.fields...)
+			return false
+		}
 	}
 	p.reporter.pass("act",
 		"outcome=executed", "key=BACK", field("id", observation.ID),

@@ -426,7 +426,7 @@ func TestStrictAdmission(t *testing.T) {
 				t.Fatalf("%s: expected IsError", testCase.name)
 			}
 			text := testTextContent(t, result)
-			requireTestContains(t, text, "invalid_request: ")
+			requireTestContains(t, text, "result v1 is_error=true\nerror.code=invalid_request")
 			structured := testStructuredObject(t, result)
 			errorObject, ok := structured["error"].(map[string]any)
 			if !ok || errorObject["code"] != "invalid_request" {
@@ -449,7 +449,7 @@ func TestStrictAdmission(t *testing.T) {
 		if !result.IsError {
 			t.Fatal("trailing second value was accepted")
 		}
-		requireTestContains(t, testTextContent(t, result), "invalid_request: ")
+		requireTestContains(t, testTextContent(t, result), "result v1 is_error=true\nerror.code=invalid_request")
 		if fake.totalRequests() != 0 {
 			t.Fatal("client was called for a trailing value")
 		}
@@ -502,9 +502,8 @@ func TestStartProjectionWithFullTree(t *testing.T) {
 	requireTestContains(t, text, "outcome=executed")
 	requireTestContains(t, text, "observation.status=complete")
 	requireTestContains(t, text, "observation.id=O1")
-	requireTestContains(t, text, "observation.tree.format=full")
-	requireTestContains(t, text, "observation.screen.width=1080")
-	requireTestContains(t, text, "observation.foreground.package=com.example.probe")
+	requireTestContains(t, text, "observation.screen="+testScreenJSON)
+	requireTestContains(t, text, "observation.foreground="+testForegroundJSON)
 	requireTestContains(t, text, "\n\ntree v1 format=full id=O1 scope=reported_visible_with_context nodes=1\n\n"+
 		"n1 root [0,0,1080,2400]\nend tree\n")
 	structured := testStructuredJSON(t, result)
@@ -539,13 +538,11 @@ func TestObservePartialWithImage(t *testing.T) {
 	text := testTextContent(t, result)
 	requireTestContains(t, text, "operation_id="+operation)
 	requireTestContains(t, text, "observation.status=partial")
-	requireTestContains(t, text, "observation.missing=tree")
-	requireTestContains(t, text, "observation.tree.format=delta")
-	requireTestContains(t, text, "observation.tree.base=O1")
+	requireTestContains(t, text, "observation.missing=[\"tree\"]")
 	requireTestContains(t, text, "\n\ntree v1 format=delta id=O2 base=O1 scope=reported_visible_with_context changes=0\n\nend tree\n")
-	requireTestContains(t, text, "observation.image.media_type=image/png")
-	requireTestContains(t, text, "observation.image.width=2")
-	requireTestContains(t, text, "observation.image.read_only=true")
+	requireTestContains(t, text, "\"media_type\":\"image/png\"")
+	requireTestContains(t, text, "\"width\":2")
+	requireTestContains(t, text, "\"read_only\":true")
 	requireTestNotContains(t, text, "base64")
 	requireTestNotContains(t, text, encodedImage)
 
@@ -712,7 +709,7 @@ func TestWorkToolProjections(t *testing.T) {
 		requireTestContains(t, text, "cleanup.state=unconfirmed")
 		requireTestContains(t, text, "cleanup.execution=confirmed")
 		requireTestContains(t, text, "cleanup.display=unconfirmed")
-		requireTestContains(t, text, "cleanup.error.code=display_release_unconfirmed")
+		requireTestContains(t, text, "cleanup.error={\"code\":\"display_release_unconfirmed\"")
 		requireTestContains(t, text, "session.state=ended")
 	})
 
@@ -730,11 +727,8 @@ func TestWorkToolProjections(t *testing.T) {
 			t.Fatalf("natural nonzero shell exit reported an error: %s", testTextContent(t, result))
 		}
 		text := testTextContent(t, result)
-		requireTestContains(t, text, "shell.termination=exited")
-		requireTestContains(t, text, "shell.exit_code=1")
-		requireTestContains(t, text, "shell.output_bytes=4")
-		requireTestContains(t, text, "shell.truncated=false")
-		requireTestNotContains(t, text, "boom")
+		requireTestContains(t, text, "shell v1 termination=exited exit_code=1 truncated=false output_bytes=4")
+		requireTestContains(t, text, "output \"boom\"")
 		// A managed command publishes no observation.
 		requireTestNotContains(t, text, "observation")
 	})
@@ -760,7 +754,7 @@ func TestWorkToolProjections(t *testing.T) {
 		requireTestNotContains(t, text, "hello")
 	})
 
-	t.Run("apps hides names", func(t *testing.T) {
+	t.Run("apps includes names", func(t *testing.T) {
 		fake := newTestDeviceService(t)
 		fake.setHandler("apps", func(writer http.ResponseWriter, request *http.Request, body string) {
 			writeTestJSON(writer, http.StatusOK, fmt.Sprintf(
@@ -774,10 +768,8 @@ func TestWorkToolProjections(t *testing.T) {
 			t.Fatalf("apps reported an error: %s", testTextContent(t, result))
 		}
 		text := testTextContent(t, result)
-		requireTestContains(t, text, "apps.items_count=1")
-		requireTestContains(t, text, "apps.total=1")
-		requireTestContains(t, text, "apps.truncated=false")
-		requireTestNotContains(t, text, "设置")
+		requireTestContains(t, text, "apps v1 items=1 total=1 truncated=false")
+		requireTestContains(t, text, "item {\"name\":\"设置\",\"package\":\"com.android.settings\"}")
 	})
 }
 
@@ -843,8 +835,8 @@ func TestCancellationWorkToolDirect(t *testing.T) {
 	if execution.result.Cleanup == nil || execution.result.Cleanup.State != "pending" {
 		t.Fatalf("end cleanup facts were not merged: %#v", execution.result.Cleanup)
 	}
-	text := renderText(execution.result, execution.cancelled, execution.cancellation)
-	requireTestContains(t, text, "cancelled=true")
+	text := testTextContent(t, projectExecution(execution, "act", ResultModeBoth))
+	requireTestContains(t, text, "\"mcp.cancelled\":true")
 	requireTestContains(t, text, "call_cancelled")
 	requireTestContains(t, text, operation)
 	requireTestContains(t, text, "有界 end")
@@ -883,8 +875,8 @@ func TestCancellationReadOnlyDirect(t *testing.T) {
 	if execution.result.Error == nil || execution.result.Error.Code != "call_cancelled" {
 		t.Fatalf("cancellation error = %#v", execution.result.Error)
 	}
-	text := renderText(execution.result, execution.cancelled, execution.cancellation)
-	requireTestContains(t, text, "cancelled=true")
+	text := testTextContent(t, projectExecution(execution, "status", ResultModeBoth))
+	requireTestContains(t, text, "\"mcp.cancelled\":true")
 	requireTestContains(t, text, "只读工具未发起 end")
 }
 

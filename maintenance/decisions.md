@@ -367,3 +367,17 @@
 - **影响**：树块只进响应，不进日志；工具 description 变化会改变 `CatalogFingerprint`，
   发布清单在下次发布时重新生成。`docs/mcp.md` §3/§3.1 承载语法与预算，
   `docs/interface.md` §12 补记 `inspect` 的两处既有预算口径。
+
+## D33 MCP 结果模式共享无损事实集
+
+- **背景**：旧文本摘要遗漏 shell 输出、apps 条目与诊断 timeline；D32 的树块上限造成第二处
+  信息丢失，取消说明又只出现在文本。用户已批准 `mcp-result-modes` 提案的 R4 路线。
+- **选择**：`both`（默认）/`text`/`structured` 共用确定性 canonical Result；完整文本采用
+  `result v1`，结构化错误辅助采用 `diagnostic v1`，两者各有终止行。完整文本与结构化内容
+  无损表示同一 `(A,IsError,ImageContent)`，可读块不可表示时 JSON Pointer 兜底，不省略。
+  取消在 `error.details.mcp.*` 中记录且覆盖 `isError=true`，不改写执行事实。HTTP 每请求头
+  与 stdio flag/env 选择模式；非法值在工作前拒绝。字段清单、独立解码与全工具 fixture
+  构成长期等价门禁。D32 的块语法保留，24/32 KiB 省略策略由本条取代。
+- **影响**：MCP 文本格式发生不兼容变化，工具目录/描述/schema/指纹、`/api/*` 与契约号不变；
+  为保持目录指纹，description 中旧 `omitted` 提示保留，由 `docs/mcp.md` 明确格式边界。
+  `both` 承担双份编码开销，宿主截断仍由宿主处理；不增加日志正文或设备执行权威。
