@@ -43,6 +43,57 @@ func assertCannotStart(t *testing.T, e *Engine) {
 		t.Fatalf("recovery admitted start: %+v %v", r, err)
 	}
 }
+
+func assertCanStart(t *testing.T, e *Engine) {
+	t.Helper()
+	r, err := e.Status("agent", "")
+	if err != nil || r.CanStart == nil || !*r.CanStart {
+		t.Fatalf("recovery retained a permanent ordinary gate: %+v %v", r, err)
+	}
+}
+
+func retiredLedgerForOrigin(t *testing.T, e *Engine, origin string) LedgerRetired {
+	t.Helper()
+	e.mu.Lock()
+	record := e.ledgerRecordLocked()
+	e.mu.Unlock()
+	for _, retired := range record.Retired {
+		if retired.Record != nil && retired.Record.Session != nil &&
+			retired.Record.Session.Origin == origin {
+			return retired
+		}
+	}
+	t.Fatalf("retired record for %s was not preserved: %+v", origin, record.Retired)
+	return LedgerRetired{}
+}
+
+func waitRetiredCleanupStopped(t *testing.T, e *Engine, origin string) {
+	t.Helper()
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	for {
+		e.mu.Lock()
+		stopped := false
+		for _, retired := range e.retired {
+			if retired.session != nil && retired.session.Origin == origin &&
+				retired.cleanup != nil && retired.cleanup.State != protocol.CleanupPending {
+				stopped = true
+				break
+			}
+		}
+		change := e.appNotify
+		e.mu.Unlock()
+		if stopped {
+			return
+		}
+		select {
+		case <-change:
+		case <-deadline.C:
+			t.Fatal("retired cleanup did not stop")
+		}
+	}
+}
+
 func syncRecovery(t *testing.T, e *Engine, req *protocol.AppSyncRequest) *protocol.AppSyncResponse {
 	t.Helper()
 	r, err := e.SyncApp(context.Background(), req)
@@ -90,7 +141,7 @@ func TestRecoveryDoesNotForgetAbsentDisplayBeforeAppSync(t *testing.T) {
 	}
 }
 
-func TestRecoveryRequiresSuccessfulTaskReadDespiteAbsentDisplay(t *testing.T) {
+func TestRecoveryRetiresUnresolvedTasksWithoutPermanentGate(t *testing.T) {
 	for _, tasks := range []bool{false, true} {
 		name := "read_failed"
 		if tasks {
@@ -111,17 +162,34 @@ func TestRecoveryRequiresSuccessfulTaskReadDespiteAbsentDisplay(t *testing.T) {
 			}
 			syncRecovery(t, e, readySync())
 			waitRecoveryAttempt(t, e)
-			assertCannotStart(t, e)
+			waitRetiredCleanupStopped(t, e, "Pold")
+			assertCanStart(t, e)
+			retired := retiredLedgerForOrigin(t, e, "Pold")
+			if retired.Record.Session == nil || retired.Record.Session.DisplayID != 12 {
+				t.Fatalf("retired record lost the original session: %+v", retired.Record)
+			}
+			if retired.Record.Cleanup == nil ||
+				retired.Record.Cleanup.Tasks != protocol.CleanupUnconfirmed ||
+				retired.Record.Cleanup.Recents != protocol.CleanupUnconfirmed {
+				t.Fatalf("unread task facts were not preserved as unknown: %+v", retired.Record.Cleanup)
+			}
+			base.mu.Lock()
+			removals := len(base.removeCalls)
+			base.mu.Unlock()
+			if removals != 0 {
+				t.Fatalf("recovery deleted a task without same-boot ownership evidence: %v", removals)
+			}
 			e.mu.Lock()
-			defer e.mu.Unlock()
-			if e.recovery == nil {
+			recovering := e.recovery != nil
+			e.mu.Unlock()
+			if recovering {
 				t.Error("lost unresolved task ownership")
 			}
 		})
 	}
 }
 
-func TestRecoveryPreservesUnconfirmedExecutionAndRecents(t *testing.T) {
+func TestRecoveryRetiresUnconfirmedFactsWithoutPermanentGate(t *testing.T) {
 	for _, field := range []string{"execution", "recents"} {
 		t.Run(field, func(t *testing.T) {
 			record := oldLedger()
@@ -139,7 +207,23 @@ func TestRecoveryPreservesUnconfirmedExecutionAndRecents(t *testing.T) {
 			}
 			syncRecovery(t, e, readySync())
 			waitRecoveryAttempt(t, e)
-			assertCannotStart(t, e)
+			waitRetiredCleanupStopped(t, e, "Pold")
+			assertCanStart(t, e)
+			retired := retiredLedgerForOrigin(t, e, "Pold")
+			if retired.Record.Cleanup == nil {
+				t.Fatal("retired cleanup fact was lost")
+			}
+			if field == "execution" &&
+				retired.Record.Cleanup.Execution != protocol.CleanupUnconfirmed {
+				t.Fatalf("stale execution was promoted without new evidence: %+v", retired.Record.Cleanup)
+			}
+			if field == "recents" &&
+				retired.Record.Cleanup.Recents != protocol.CleanupUnconfirmed {
+				t.Fatalf("stale recents were promoted without new evidence: %+v", retired.Record.Cleanup)
+			}
+			if retired.Record.Cleanup.State == protocol.CleanupComplete {
+				t.Fatalf("unknown cleanup was reported complete: %+v", retired.Record.Cleanup)
+			}
 		})
 	}
 }
@@ -153,16 +237,33 @@ func TestRecoveryPendingCreateCannotExpireAwayReportedDisplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	req := readySync()
-	req.Display = &protocol.AppDisplay{DisplayID: 12, Width: 1080, Height: 2400, Density: 420, Generation: testDisplayGen}
+	req.Display = &protocol.AppDisplay{DisplayID: 12, Width: 1080, Height: 2400, Density: 420, Generation: "old-create"}
 	syncRecovery(t, e, req)
 	waitRecoveryAttempt(t, e)
-	assertCannotStart(t, e)
-	r := syncRecovery(t, e, req)
-	if len(r.Commands) != 1 || r.Commands[0].Kind != "close_display" || r.Commands[0].TargetAppInstanceID != testAppID || r.Commands[0].TargetDisplayID == nil || *r.Commands[0].TargetDisplayID != 12 || r.Commands[0].TargetGeneration != testDisplayGen {
+	assertCanStart(t, e)
+	var r *protocol.AppSyncResponse
+	deadline := time.NewTimer(3 * time.Second)
+	defer deadline.Stop()
+	for {
+		r = syncRecovery(t, e, req)
+		if len(r.Commands) > 0 {
+			break
+		}
+		select {
+		case <-time.After(20 * time.Millisecond):
+		case <-deadline.C:
+			t.Fatalf("precise recovery close was not delivered: %+v", r.Commands)
+		}
+	}
+	if len(r.Commands) != 1 || r.Commands[0].Kind != "close_display" || r.Commands[0].TargetAppInstanceID != testAppID || r.Commands[0].TargetDisplayID == nil || *r.Commands[0].TargetDisplayID != 12 || r.Commands[0].TargetGeneration != "old-create" {
 		t.Fatalf("precise recovery close was not delivered: %+v", r.Commands)
 	}
-	if r.Control.Availability.State != AvailabilityRecovering {
-		t.Fatalf("close not delivered under recovering: %+v", r.Control)
+	if r.Control.Availability.State != AvailabilityReady {
+		t.Fatalf("retired cleanup kept current availability recovering: %+v", r.Control)
+	}
+	retired := retiredLedgerForOrigin(t, e, "Pold")
+	if retired.Record.PendingCreate == nil || retired.Record.PendingCreate.ID != "old-create" {
+		t.Fatalf("retired record lost the precise create identity: %+v", retired.Record.PendingCreate)
 	}
 }
 
@@ -203,11 +304,11 @@ func waitRecoveryComplete(t *testing.T, e *Engine) {
 	}
 }
 
-// TestRecoveryKeepsOldOwnershipUntilResolvedThenClears inspects ledger snapshots
-// taken while recovery is still pending: the old session, pending create and
-// cleanup facts must survive verbatim. Only a completed recovery may drop the
-// old session/pending ownership and replace cleanup with the resolved record.
-func TestRecoveryKeepsOldOwnershipUntilResolvedThenClears(t *testing.T) {
+// TestRecoveryMovesOldOwnershipIntoRetired inspects the pre-sync migration
+// snapshot and the v3 retired record. Ended ownership must never remain in the
+// top-level current fields, while the original session, create and cleanup
+// evidence remain available for bounded compensation.
+func TestRecoveryMovesOldOwnershipIntoRetired(t *testing.T) {
 	record := oldLedger()
 	record.PendingCreate = &LedgerCommand{ID: "old-create", Kind: "create_display",
 		AppInstanceID: testAppID, RequestedAt: record.UpdatedAt}
@@ -236,31 +337,38 @@ func TestRecoveryKeepsOldOwnershipUntilResolvedThenClears(t *testing.T) {
 
 	syncRecovery(t, e, readySync())
 	waitRecoveryComplete(t, e)
+	waitRetiredCleanupStopped(t, e, "Pold")
 	e.mu.Lock()
-	session := e.session
-	last := e.lastSession
 	after := e.ledgerRecordLocked()
 	e.mu.Unlock()
-	if session != nil {
-		t.Fatalf("resolved recovery kept a current session: %+v", session)
-	}
-	if last == nil || last.Origin != "Pold" {
-		t.Fatalf("resolved recovery lost the retired session: %+v", last)
-	}
 	if after.Session != nil {
-		t.Fatalf("resolved recovery still snapshots the old session: %+v", after.Session)
+		t.Fatalf("v3 current fields still snapshot the ended session: %+v", after.Session)
 	}
 	if after.PendingCreate != nil {
-		t.Fatalf("resolved recovery still snapshots the pending create: %+v", after.PendingCreate)
+		t.Fatalf("v3 current fields still snapshot the retired create: %+v", after.PendingCreate)
 	}
-	if after.Cleanup == nil || after.Cleanup.State != protocol.CleanupComplete ||
-		after.Cleanup.Execution != protocol.CleanupConfirmed {
-		t.Fatalf("resolved cleanup record: %+v", after.Cleanup)
+	if after.Cleanup != nil {
+		t.Fatalf("v3 current fields still snapshot retired cleanup: %+v", after.Cleanup)
 	}
-	status, apiErr := e.Status("agent", "")
-	if apiErr != nil || status.CanStart == nil || !*status.CanStart {
-		t.Fatalf("start not admitted after recovery resolved: %+v %v", status, apiErr)
+	if len(after.Retired) != 1 {
+		t.Fatalf("retired records=%+v, want exactly the migrated ownership", after.Retired)
 	}
+	retired := after.Retired[0]
+	if retired.Record == nil || retired.Record.Session == nil ||
+		retired.Record.Session.Origin != "Pold" ||
+		retired.Record.Session.DisplayID != 12 {
+		t.Fatalf("retired record lost the original session: %+v", retired.Record)
+	}
+	if retired.Record.PendingCreate == nil || retired.Record.PendingCreate.ID != "old-create" {
+		t.Fatalf("retired record lost the pending create: %+v", retired.Record.PendingCreate)
+	}
+	if retired.Record.Cleanup == nil {
+		t.Fatal("retired record lost cleanup evidence")
+	}
+	if !retired.BudgetIssued {
+		t.Fatal("migrated recovery record did not record its consumed cleanup budget")
+	}
+	assertCanStart(t, e)
 }
 
 func TestRecoveryRevalidatesAppAfterDeviceWait(t *testing.T) {
@@ -294,5 +402,11 @@ func TestRecoveryRevalidatesAppAfterDeviceWait(t *testing.T) {
 	close(release)
 	awaitSignal(t, done)
 	waitRecoveryAttempt(t, e)
-	assertCannotStart(t, e)
+	status, apiErr := e.Status("agent", "")
+	if apiErr != nil || status.CanStart == nil || *status.CanStart ||
+		status.BlockingCode != protocol.CodeControlUnavailable {
+		t.Fatalf("stale App was replaced by an old-resource gate: %+v %v", status, apiErr)
+	}
+	syncRecovery(t, e, readySync())
+	assertCanStart(t, e)
 }

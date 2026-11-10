@@ -445,6 +445,7 @@ func (h *harness) reportDisplayAfter(delay time.Duration) {
 		h.engine.app.Display = appDisplayToDevice(display)
 		h.engine.app.DisplayRaw = display
 		if h.engine.session != nil {
+			display.Generation = h.engine.session.CreateCommand
 			h.engine.session.Display = *h.engine.app.Display
 			ok := true
 			h.engine.session.CreateResult = &ok

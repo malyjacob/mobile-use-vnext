@@ -22,9 +22,9 @@
 
 ```json
 {
-  "contract_version": "4",
+  "contract_version": "5",
   "app_instance_id": "0b0b8c0e-...",
-  "app_version": "0.4.3",
+  "app_version": "0.5.0",
   "selected_mode": "virtual",
   "mode_generation": "8f0b2e2e-...",
   "mode_ready": true,
@@ -45,12 +45,12 @@
 
 | 字段 | 必填 | 含义 |
 | --- | --- | --- |
-| contract_version | 是 | 共同普通契约；必须等于 `"4"` |
+| contract_version | 是 | 共同普通契约；必须等于 `"5"` |
 | app_instance_id | 是 | 本次 App 进程实例，UUID；重建即变化 |
 | app_version | 是 | 仅发行标识，不参与能力协商 |
 | selected_mode | 是 | `virtual` 或 `primary`；App 重建默认 virtual |
 | mode_generation | 是 | 用户选择代次，UUID；模式切换即变化 |
-| mode_ready | 是 | 所选模式是否可用（显示/权限/主屏确认） |
+| mode_ready | 是 | 所选模式有效且没有待同步的本地 STOP；不表示虚拟显示已创建或权限已就绪 |
 | stop_ready | 是 | 通知 + 前台服务等停止通道均可用 |
 | notifications_enabled | 是 | 系统通知关闭时为 false |
 | background_running | 是 | 前台服务仍在运行 |
@@ -62,13 +62,15 @@
 | message_acks | 否 | App 已保存的消息 ID，至多 32 个；省略/null 按 `[]` 处理；未知或已释放的 ID 忽略 |
 
 `primary_display.generation` 必须等于本次同步中的 `mode_generation`。App 不得把缓存描述当作
-物理存在；`display` 只在系统仍报告该显示时出现。
+物理存在；`display` 只表示当前 attempt，且只在系统仍报告该显示时出现。退休 attempt 不回退为
+`display`；`display=null` 也不表示设备上已没有旧残留。`mode_ready` 只表达当前模式与当前控制
+能力，不因 retired history 或本地 `cleanupPending()` 变假。
 
 响应：
 
 ```json
 {
-  "contract_version": "4",
+  "contract_version": "5",
   "service_instance_id": "d0e...",
   "control": {
     "revision": 42,
@@ -76,12 +78,9 @@
     "session": {"origin":"P1","agent":"agent-short","mode":"virtual","state":"active",
       "started_at":"…","expires_at":"…"},
     "work": {"operation_id":"P2","kind":"act","phase":"dispatch"},
-    "cleanup": {"state":"complete","execution":"confirmed","tasks":"not_applicable",
-      "recents":"not_applicable","display":"confirmed"}
+    "cleanup": null
   },
-  "commands": [
-    {"id":"3b1...","kind":"create_display","width":1080,"height":2400,"density_dpi":420}
-  ],
+  "commands": [],
   "messages": [
     {"id":"M12","seq":12,"text":"…","created_at":"…"}
   ],
@@ -95,7 +94,7 @@
 - `work` 为 `null` 或 {operation_id, kind, phase}，`kind` 为 `start`/`observe`/`act`/`apps`/`open_app`/`shell`；
   不得携带节点、坐标、输入正文或命令。
 - `cleanup` 为 `null` 或 {state, execution, tasks, recents, display}；只表达最低摘要。
-- `commands` 只包含显示生命周期命令，每拍至多一条；重复投递同一命令直到收到回执。
+- `commands` 只包含显示生命周期命令，每拍至多一条；每个命令 ID 只投递一次；原预算内的后续清理尝试使用新 ID。
 - `messages` 只包含尚未确认的 Agent 消息，按创建顺序，每拍至多 8 条且正文合计至多 32 KiB；
   必须始终是数组。未确认消息在后续同步中重发；App 收到 `message_acks` 后释放对应项。
 - `stop` 只在本次请求携带了 `stop_pending` 时出现，确认服务已绑定该停止边界。
@@ -117,28 +116,37 @@ App 必须拒绝无法解析、未知 kind、缺字段或 `contract_version` 不
 {"id":"...","kind":"create_display","width":1080,"height":2400,"density_dpi":420}
 {"id":"...","kind":"close_display","target_app_instance_id":"...","target_display_id":12,
  "target_generation":"..."}
+{"id":"...","kind":"cancel_create","target_app_instance_id":"...",
+ "target_create_command_id":"..."}
 ```
 
-- `create_display` 前服务已通过 ADB 启动 root helper；App 收到命令后通过既有
-  Binder 助手创建虚拟屏，先确认 IME HIDE，再在下一次同步中报告 `display`。
+- `create_display` 的 `id` 同时是该 attempt 的 display generation；Java attempt、engine
+  session、账本与关闭目标使用同一个值。服务在命令就绪前通过 ADB 启动该 attempt 的 root
+  helper；CREATE/VERIFY 使用带 token 的异步请求/回调，App 主线程只校验当前或退休 attempt，
+  不因 Binder 永久不返回而把新 attempt 排在同一阻塞队列后面。
+- App 收到 `create_display` 后由 attempt helper 创建虚拟屏，先确认 IME HIDE，再在下一次同步
+  中报告当前 `display`。retiring 非空不拒绝新 create；同一 create command 不得重复创建。
 - `close_display` 只释放属于 `target_app_instance_id` + `target_display_id` +
-  `target_generation` 的精确资源；不关闭用户主屏 task。
+  `target_generation` 的精确资源，可命中当前或退休 attempt；不关闭用户主屏 task。
+- `cancel_create` 只按 `target_app_instance_id` + `target_create_command_id` 封闭该次创建
+  尝试的本地派发与后续发布；成功只表示 App 本地处理结果，不证明已经跨派发边界的 CREATE
+  被撤回。其它命令不得携带 `target_create_command_id`。
 - 回执 `{command_id, ok, error_code}` 只确认 App 本地处理结果，不证明物理资源已释放；
   服务仍核验 `dumpsys display`/SurfaceFlinger 与 App 在同步中报告的 `display` 事实。
-- App 不执行任意 shell、intent、键值或坐标；命令集合固定为上述两种。
+- App 不执行任意 shell、intent、键值或坐标；命令集合固定为上述三种。
 
 ## 4. 独立 STOP
 
 `POST /v1/control/stop`
 
 ```json
-{"contract_version":"4","app_instance_id":"...","stop_seq":7,"reason":"user_stop"}
+{"contract_version":"5","app_instance_id":"...","stop_seq":7,"reason":"user_stop"}
 ```
 
 响应（最小，不含普通服务状态、消息或设备命令）：
 
 ```json
-{"contract_version":"4","service_instance_id":"...","accepted":true,"stop_seq":7,"state":"revoked"}
+{"contract_version":"5","service_instance_id":"...","accepted":true,"stop_seq":7,"state":"revoked"}
 ```
 
 - App 先在本地提高停止代次、拒绝旧命令/回调恢复权限，再在独立线程发起本请求；不等待
@@ -158,10 +166,10 @@ App 只能从 `control` 与本机事实构造界面，不显示 Agent step，也
 | --- | --- |
 | 本地 stop pending 未确认 | 已阻止本地旧命令 · 停止待同步 |
 | 连接失鲜 | 连接中断 · 服务状态未知 |
-| cleanup.state=pending/unconfirmed 或本机释放未确认 | 控制已停止 · 资源清理未确认 |
-| availability=recovering | 正在核验上次资源 |
+| availability=recovering | 正在核验当前控制能力 |
 | availability=blocked | 控制不可用 · 查看原因 |
 | availability=ready，session=null | 虚拟屏 · 待命 |
+| session.state=ended | 上次会话已结束（附受控原因） |
 | session.state=starting | Agent · 正在准备 |
 | session.state=active，work=null | Agent · 会话有效，无设备操作 |
 | session.state=active，work.kind=act | Agent · 正在操作 |
@@ -170,13 +178,11 @@ App 只能从 `control` 与本机事实构造界面，不显示 Agent step，也
 | session.state=active，work.kind=apps | Agent · 正在读取应用清单 |
 | session.state=active，work.kind=shell | Agent · 正在执行命令 |
 
-主文案按上表自上而下取第一条成立的事实（本地停止/停止未同步 > 失鲜 > 清理风险 > 活动工作
-/会话 > 待命）。当前会话持有的虚拟屏本身不是清理风险；只有停止后仍持有、释放未确认或服务
-报告清理未确认时才进入清理风险。完整界面在短文案之外展开原会话、本机记录的最近一次已结束
-会话/设备工作、停止同步、模式选择、权限与清理五项；这些历史只用于说明，不改变授权、准入
-或主文案。
+主文案按本地停止待同步、失鲜、当前可用性、当前会话/工作、待命的顺序决定；历史清理风险只进入详情。完整界面在短文案之外展开原
+会话、本机记录的最近一次已结束会话/设备工作、停止同步、模式选择、权限与清理五项；这些历史
+只用于说明，不改变授权、准入或主文案。
 
-## 6. 失鲜与重启
+## 6. 失鲜与服务/App 重建
 
 - App 每秒同步一次；连续 6 秒没有成功响应即判失鲜，界面进入未知，不保留缓存中的
   active 运行状态。
@@ -185,5 +191,8 @@ App 只能从 `control` 与本机事实构造界面，不显示 Agent step，也
 - App 重建默认 virtual；主屏授权不持久化，必须重新由用户确认。
 - 服务重启撤销旧输入授权，不重放旧命令；App 的待同步停止意图在服务实例变化后仍保留，
   直到取得原意图的确认或明确服务已换实例。
+- 服务重启后的旧 session 转退休记录；版本 3 中未完成的旧补偿先持久化为 `unconfirmed`。
+  retired/旧 cleanup 不作为 App 的模式准备或新 create 门禁，当前 descriptor 与当前能力就绪
+  后可建立新 attempt。
 - 服务重启后未确认的 Agent 消息按原 ID 继续投递；App 的消息与本地已读属于 App 私有数据，
   不因服务实例变化或 App 重建被清空，也不会恢复任何旧命令或主屏授权。

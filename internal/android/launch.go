@@ -150,21 +150,47 @@ func (d *Device) RemoveTask(ctx context.Context, taskID int) error {
 // RecentTaskIDs reads the RecentTasks index. It is a separate fact from the
 // live task list: a dead task can leave an orphan recents entry.
 func (d *Device) RecentTaskIDs(ctx context.Context) (map[int]bool, bool) {
+	result := d.ReadRecentTasks(ctx)
+	return result.IDs, result.State == "known_empty" || result.State == "known_present"
+}
+
+// RecentTasksResult separates an unreadable index from a readable empty one.
+// State is controlled metadata; raw dumpsys output never leaves this adapter.
+func (d *Device) ReadRecentTasks(ctx context.Context) device.RecentTasksResult {
 	if d == nil {
-		return nil, false
+		return device.RecentTasksResult{State: "transport_unavailable"}
 	}
 	result, err := d.shellWith(ctx, taskTimeout, "dumpsys activity recents")
-	if err != nil || result.ExitCode != 0 {
-		return nil, false
+	if err != nil {
+		return device.RecentTasksResult{State: "transport_unavailable"}
+	}
+	if result.ExitCode != 0 {
+		return device.RecentTasksResult{State: "nonzero_exit"}
+	}
+	return parseRecentTasks(result.Stdout)
+}
+
+func parseRecentTasks(output []byte) device.RecentTasksResult {
+	text := string(output)
+	matches := recentTaskPattern.FindAllSubmatch(output, -1)
+	if strings.Count(text, "Recent #") != len(matches) {
+		return device.RecentTasksResult{State: "format_unrecognized"}
+	}
+	if len(matches) == 0 && !strings.Contains(text, "ACTIVITY MANAGER RECENT TASKS") && !strings.Contains(text, "Recent tasks") {
+		return device.RecentTasksResult{State: "format_unrecognized"}
 	}
 	ids := make(map[int]bool)
-	for _, match := range recentTaskPattern.FindAllSubmatch(result.Stdout, -1) {
-		id, convErr := strconv.Atoi(string(match[1]))
-		if convErr == nil && id > 0 {
+	for _, match := range matches {
+		id, err := strconv.Atoi(string(match[1]))
+		if err == nil && id > 0 {
 			ids[id] = true
 		}
 	}
-	return ids, true
+	state := "known_empty"
+	if len(ids) > 0 {
+		state = "known_present"
+	}
+	return device.RecentTasksResult{IDs: ids, State: state}
 }
 
 // recentTaskPattern matches the task id in one RecentTasks record.

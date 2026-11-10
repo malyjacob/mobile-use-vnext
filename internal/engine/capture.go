@@ -271,7 +271,7 @@ func (e *Engine) captureAndPublish(ctx context.Context, work *workState, session
 		DisplayID: e.session.Display.ID, DisplayGeneration: e.session.Display.Generation,
 		CapturedAt: tree.capture.CapturedAt, ActionableUntil: actionableUntil,
 		Screen: e.session.Display, Foreground: tree.capture.Foreground,
-		Projection: tree.projection, Status: ObservationReady, Full: !useDelta,
+		Projector: work.Projector, Projection: tree.projection, Status: ObservationReady, Full: !useDelta,
 	}
 	e.current = obs
 	e.observations[observationID] = obs
@@ -359,7 +359,7 @@ func (e *Engine) readCapture(ctx context.Context, work *workState, session *sess
 // the single projection step of a published tree.
 func (e *Engine) projectCapture(work *workState, phase string, cap device.Capture) (*treeAttempt, *protocol.APIError) {
 	e.setWorkPhase(work, phase+".project")
-	projection, err := e.projector.Build(&cap)
+	projection, err := work.Projector.Build(&cap)
 	if err != nil {
 		return nil, protocol.NewError(503, protocol.CodeHierarchyFailed, "公开树构造失败")
 	}

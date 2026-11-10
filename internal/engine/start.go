@@ -12,7 +12,7 @@ import (
 // publishes the first full observation. The session is established even if the
 // first tree capture fails; in that case the outcome is executed and the caller
 // recovers with observe(P).
-func (e *Engine) Start(ctx context.Context, agent, p string) (*protocol.Result, *protocol.APIError) {
+func (e *Engine) Start(ctx context.Context, agent, p string) (finalResult *protocol.Result, finalErr *protocol.APIError) {
 	op, duplicate, apiErr := e.registerOperation(p, agent, "start")
 	if apiErr != nil {
 		return nil, apiErr
@@ -20,6 +20,7 @@ func (e *Engine) Start(ctx context.Context, agent, p string) (*protocol.Result, 
 	if duplicate != nil {
 		return duplicate, nil
 	}
+	defer func() { e.applyFrozenResult(op, &finalResult) }()
 	now := time.Now()
 	e.mu.Lock()
 	ok, reason := e.canStartLocked(now)
@@ -95,9 +96,13 @@ func (e *Engine) Start(ctx context.Context, agent, p string) (*protocol.Result, 
 		session.Display = primary
 	} else {
 		session.Display = device.Display{
-			Width: width, Height: height, Density: density, Generation: modeGeneration,
+			Width: width, Height: height, Density: density, Generation: commandID,
 		}
 	}
+	if e.projectorFactory != nil {
+		work.Projector = e.projectorFactory()
+	}
+	session.Projector = work.Projector
 	e.session = session
 	e.ui, e.legacyUI = nil, nil
 	e.uiCheckpointReady = false
@@ -106,9 +111,7 @@ func (e *Engine) Start(ctx context.Context, agent, p string) (*protocol.Result, 
 	e.baseline = nil
 	e.current = nil
 	e.lastSession = nil
-	if e.cleanup != nil && e.cleanup.State == protocol.CleanupComplete {
-		e.cleanup = nil
-	}
+	e.cleanup = nil
 	var command *appCommand
 	if mode == "virtual" {
 		session.CreateCommand = commandID
@@ -125,8 +128,14 @@ func (e *Engine) Start(ctx context.Context, agent, p string) (*protocol.Result, 
 	e.mu.Unlock()
 
 	// The ordinary work position serializes projector state, not the state lock.
-	e.projector.Reset()
+	work.Projector.Reset()
 
+	identity, identityErr := e.dev.ExecutionIdentity(work.Ctx)
+	if identityErr == nil && validUIIdentity(identity) {
+		e.mu.Lock()
+		session.InputIdentity = identity
+		e.mu.Unlock()
+	}
 	// Save original ownership and the create intent before touching Android.
 	persistCtx, persistCancel := context.WithTimeout(ctx, e.cfg.LedgerTimeout)
 	persistErr := e.persistSync(persistCtx)
@@ -169,7 +178,7 @@ func (e *Engine) Start(ctx context.Context, agent, p string) (*protocol.Result, 
 			result := e.finishWithError(op, "display_create", waitErr)
 			e.mu.Lock()
 			result.IncludeSession = true
-			result.Session = e.sessionViewLocked(e.session)
+			result.Session = e.sessionViewLocked(session)
 			e.mu.Unlock()
 			return result, nil
 		}
@@ -182,8 +191,8 @@ func (e *Engine) Start(ctx context.Context, agent, p string) (*protocol.Result, 
 					"虚拟屏创建结果未确认", OutcomeUncertain))
 			e.mu.Lock()
 			result.IncludeSession = true
-			result.Session = e.sessionViewLocked(e.session)
-			result.Cleanup = e.cleanupViewLocked()
+			result.Session = e.sessionViewLocked(session)
+			result.Cleanup = cleanupViewOf(e.cleanupForSessionLocked(session))
 			e.mu.Unlock()
 			return result, nil
 		}
@@ -209,13 +218,14 @@ func (e *Engine) Start(ctx context.Context, agent, p string) (*protocol.Result, 
 	_ = e.persistSync(persistCtx)
 	persistCancel()
 
+	e.noteKnownOutcome(op, OutcomeExecuted)
 	e.setOperationPhase(op, "first_observation")
 	public, _, obsErr := e.captureAndPublish(work.Ctx, work, session, true, false, "start")
 	result := newResult(op)
 	result.Outcome = OutcomeExecuted
 	e.mu.Lock()
 	result.IncludeSession = true
-	result.Session = e.sessionViewLocked(e.session)
+	result.Session = e.sessionViewLocked(session)
 	e.mu.Unlock()
 	if obsErr != nil {
 		result.Observation = &protocol.Observation{
@@ -230,8 +240,8 @@ func (e *Engine) Start(ctx context.Context, agent, p string) (*protocol.Result, 
 			e.mu.Unlock()
 			e.startCleanup(session, obsErr.Code)
 			e.mu.Lock()
-			result.Session = e.sessionViewLocked(e.session)
-			result.Cleanup = e.cleanupViewLocked()
+			result.Session = e.sessionViewLocked(session)
+			result.Cleanup = cleanupViewOf(e.cleanupForSessionLocked(session))
 			e.mu.Unlock()
 		}
 		// The two first-observation branches share the phase but not the next
@@ -275,7 +285,7 @@ func (e *Engine) finishRevokedStart(op *operationState, session *sessionState) *
 	e.mu.Lock()
 	result.IncludeSession = true
 	result.Session = e.sessionViewLocked(e.sessionByEpochLocked(session.Epoch))
-	result.Cleanup = e.cleanupViewLocked()
+	result.Cleanup = cleanupViewOf(e.cleanupForSessionLocked(session))
 	e.mu.Unlock()
 	return result
 }

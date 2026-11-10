@@ -71,11 +71,11 @@ func TestDisplayCommandsDiscardOldInstanceAndTimeout(t *testing.T) {
 	}
 }
 
-// TestCloseCommandsDeliverPerGenerationAndAckedTargetNeverReturns proves that
+// TestCloseCommandsDeliverPerGenerationAndRetryUsesNewID proves that
 // closes for the same display with different generations are separate queue
 // entries, are delivered one per sync in order, only an owner-instance receipt
 // closes one, and an acknowledged target is never regenerated.
-func TestCloseCommandsDeliverPerGenerationAndAckedTargetNeverReturns(t *testing.T) {
+func TestCloseCommandsDeliverPerGenerationAndRetryUsesNewID(t *testing.T) {
 	h := newHarness(t)
 	h.engine.mu.Lock()
 	h.engine.cfg.CleanupTimeout = time.Minute // deterministic delivery window
@@ -138,14 +138,20 @@ func TestCloseCommandsDeliverPerGenerationAndAckedTargetNeverReturns(t *testing.
 	h.engine.mu.Lock()
 	regenerated := len(h.engine.commands)
 	h.engine.mu.Unlock()
-	if regenerated != 0 {
-		t.Errorf("acknowledged generation was queued again: %d", regenerated)
+	if regenerated != 1 {
+		t.Fatalf("next bounded round did not enqueue: %d", regenerated)
+	}
+	h.engine.mu.Lock()
+	retryID := h.engine.commands[0].Command.ID
+	h.engine.mu.Unlock()
+	if retryID == first[0].ID {
+		t.Fatal("retry reused an acknowledged command ID")
 	}
 }
 
 func stringPtr(v string) *string { return &v }
 
-func TestCloseCommandDeduplicatesExactTargetAndNeverRequeuesAck(t *testing.T) {
+func TestCloseCommandDeduplicatesPendingTargetAndAllowsNextRound(t *testing.T) {
 	h := newHarness(t)
 	h.engine.enqueueCloseCommand(12, "generation-a", h.appInstance)
 	h.engine.enqueueCloseCommand(12, "generation-b", h.appInstance)
@@ -163,9 +169,16 @@ func TestCloseCommandDeduplicatesExactTargetAndNeverRequeuesAck(t *testing.T) {
 	h.engine.enqueueCloseCommand(12, "generation-a", h.appInstance)
 	h.engine.mu.Lock()
 	defer h.engine.mu.Unlock()
+	retries := 0
 	for _, c := range h.engine.commands {
 		if c.Command.TargetGeneration == "generation-a" {
-			t.Error("acked close command regenerated")
+			retries++
+			if c.Command.ID == id {
+				t.Error("retry reused acknowledged ID")
+			}
 		}
+	}
+	if retries != 1 {
+		t.Fatalf("next-round target count=%d", retries)
 	}
 }

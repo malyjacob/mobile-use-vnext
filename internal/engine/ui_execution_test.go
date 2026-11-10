@@ -116,7 +116,7 @@ func TestUnknownUIBlocksSubsequentOrdinaryWork(t *testing.T) {
 	}
 }
 
-func TestLateUITerminationRechecksPhysicalCleanup(t *testing.T) {
+func TestLateUITerminationPreservesUnknownWithoutBudgetRefresh(t *testing.T) {
 	h := newHarnessWithClock(t, false)
 	first := h.startSession()
 	entered, release := make(chan struct{}), make(chan struct{})
@@ -155,6 +155,22 @@ func TestLateUITerminationRechecksPhysicalCleanup(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("physical cleanup did not settle independently")
 	}
+	h.engine.mu.Lock()
+	var workUI *uiDispatchState
+	if h.engine.work != nil {
+		workUI = h.engine.work.UI
+	}
+	retiredOrigin := ""
+	for _, retired := range h.engine.retired {
+		if retired.cleanup == h.engine.cleanup || workUI != nil && retired.ui == workUI {
+			retiredOrigin = retired.session.Origin
+			break
+		}
+	}
+	h.engine.mu.Unlock()
+	if retiredOrigin == "" {
+		t.Fatal("ended UI work was not present in retired ownership")
+	}
 	before := taskReads.Load()
 	h.sync(nil, nil)
 	once.Do(func() { close(release) })
@@ -162,17 +178,56 @@ func TestLateUITerminationRechecksPhysicalCleanup(t *testing.T) {
 	if result.Outcome != OutcomeUncertain || result.Observation != nil {
 		t.Fatal("late UI termination rewrote result or published an observation")
 	}
-	awaitShellCondition(t, 3*time.Second, "late termination did not reconcile original physical cleanup", func() bool {
+	deadline := time.NewTimer(3 * time.Second)
+	defer deadline.Stop()
+	for {
 		h.engine.mu.Lock()
-		defer h.engine.mu.Unlock()
-		return h.engine.cleanup != nil && h.engine.cleanup.State == protocol.CleanupComplete
-	})
-	if taskReads.Load() <= before {
-		t.Fatal("cleanup completed using physical evidence from before the termination boundary")
+		var retiredCleanup *LedgerCleanup
+		preserved := false
+		for _, retired := range h.engine.retired {
+			if retired.session != nil && retired.session.Origin == retiredOrigin &&
+				retired.cleanup != nil &&
+				retired.cleanup.Execution == protocol.CleanupConfirmed {
+				retiredCleanup = ledgerCleanupOf(retired.cleanup)
+				if retired.cleanup.needsExecutionRecheck {
+					preserved = true
+					break
+				}
+			}
+		}
+		if preserved {
+			h.engine.mu.Unlock()
+			break
+		}
+		currentCleanup := ledgerCleanupOf(h.engine.cleanup)
+		currentUI := h.engine.ui
+		ledger := h.engine.ledgerRecordLocked()
+		change := h.engine.appNotify
+		h.engine.mu.Unlock()
+		select {
+		case <-change:
+		case <-time.After(20 * time.Millisecond):
+		case <-deadline.C:
+			t.Fatalf("late termination did not preserve its recheck obligation: retired=%+v ledger=%+v current=%+v ui=%+v", retiredCleanup, ledger.Retired, currentCleanup, currentUI)
+		}
 	}
+	retired := retiredLedgerForOrigin(t, h.engine, retiredOrigin)
+	if retired.Record.Cleanup == nil ||
+		retired.Record.Cleanup.State != protocol.CleanupUnconfirmed ||
+		retired.Record.Cleanup.Execution != protocol.CleanupConfirmed ||
+		!retired.Record.Cleanup.ExecutionRecheckRequired ||
+		retired.Record.Cleanup.Tasks != protocol.CleanupUnconfirmed ||
+		retired.Record.Cleanup.Recents != protocol.CleanupUnconfirmed ||
+		retired.Record.Cleanup.Display != protocol.CleanupUnconfirmed {
+		t.Fatalf("late termination fabricated a clean physical result: %+v", retired.Record.Cleanup)
+	}
+	if taskReads.Load() != before {
+		t.Fatal("late termination refreshed the stopped cleanup budget with another physical read")
+	}
+	assertCanStart(t, h.engine)
 	original, apiErr := h.engine.Status("agent", "Plateui")
 	if apiErr != nil || original.Outcome != OutcomeUncertain {
-		t.Fatal("physical reconciliation rewrote original uncertain outcome")
+		t.Fatal("late termination rewrote original uncertain outcome")
 	}
 }
 
@@ -256,9 +311,9 @@ func TestTextFocusReadFailureDoesNotReopenEndedTap(t *testing.T) {
 	}
 }
 
-// Control synchronization may save the ledger before identity I/O can build a
-// checkpoint. Writing the v2 envelope must not erase the old migration need.
-func TestLegacyUISyncSnapshotRetainsMigrationNeed(t *testing.T) {
+// Version 1 UI uncertainty is migrated into a v3 retired record. It remains
+// unconfirmed without being copied into the current top-level ownership.
+func TestLegacyUISyncRetiresMigrationNeed(t *testing.T) {
 	record := oldLedger()
 	record.Version = 1
 	record.Session.State = SessionEnded
@@ -269,12 +324,23 @@ func TestLegacyUISyncSnapshotRetainsMigrationNeed(t *testing.T) {
 	if err := e.StartRecovery(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	syncRecovery(t, e, readySync())
+	waitRecoveryAttempt(t, e)
+	waitRetiredCleanupStopped(t, e, "Pold")
+	assertCanStart(t, e)
+	retired := retiredLedgerForOrigin(t, e, "Pold")
+	if retired.Record.Version != ledgerVersion ||
+		retired.Record.Cleanup == nil ||
+		retired.Record.Cleanup.ExecReason != "ui_input" ||
+		retired.Record.Cleanup.Execution != protocol.CleanupUnconfirmed ||
+		retired.Record.Cleanup.State == protocol.CleanupComplete {
+		t.Fatalf("legacy UI migration lost or confirmed its unknown fact: %+v", retired.Record)
+	}
 	e.mu.Lock()
 	snapshot := e.ledgerRecordLocked()
 	e.mu.Unlock()
-	snapshot.Version = 2 // Store.Save's normal envelope upgrade.
-	if _, pending := legacyUIResponsibility(snapshot); !pending {
-		t.Fatal("an unrelated save erased the legacy UI responsibility before checkpoint creation")
+	if snapshot.Session != nil || snapshot.UI != nil || snapshot.Cleanup != nil {
+		t.Fatalf("legacy UI responsibility remained in current fields: %+v", snapshot)
 	}
 }
 

@@ -10,13 +10,22 @@ import (
 	"github.com/malyjacob/mobile-use-vnext/internal/protocol"
 )
 
-// shellOnlyLedger is a previous instance whose only unresolved ownership is a
-// managed runner.
+// shellOnlyLedger is a version 2 previous instance whose only unresolved live
+// authority is a managed runner. It still carries the original session so the
+// v3 migration can preserve the ownership record.
 func shellOnlyLedger() *Ledger {
 	now := time.Now()
 	return &Ledger{
-		Format: ledgerFormat, Version: ledgerVersion, ServiceInstanceID: "old",
+		Format: ledgerFormat, Version: 2, ServiceInstanceID: "old",
 		UpdatedAt: now.Add(-time.Minute), AppInstanceID: testAppID,
+		Session: &LedgerSession{
+			Origin: "Pold", Agent: "agent", Mode: "virtual", State: SessionEnded,
+			AppInstanceID: testAppID, ModeGeneration: testModeID,
+			DisplayID: 12, DisplayGeneration: testDisplayGen,
+			Width: 1080, Height: 2400, Density: 420,
+			StartedAt: now.Add(-time.Minute),
+		},
+		Cleanup: shellChainCleanup(),
 		Shell: &LedgerShell{
 			RunnerID:    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
 			OperationID: "Pshell", Agent: "agent", Origin: "Pold", Epoch: 1,
@@ -35,17 +44,47 @@ func shellRecoveryDevice(alive bool, snapshotStart device.ShellStart) *fakeDevic
 	dev.shell.startInfo = snapshotStart
 	dev.shell.alive = alive
 	dev.shell.mu.Unlock()
+	dev.mu.Lock()
+	dev.displayExists = false
+	dev.recentKnown = true
+	dev.recentIDs = map[int]bool{}
+	dev.mu.Unlock()
 	return dev
 }
 
 func assertShellRecovered(t *testing.T, e *Engine, outcome string, wantError bool) {
 	t.Helper()
 	e.mu.Lock()
-	run := e.shell
+	current := e.shell
+	var retired *retiredState
+	for _, candidate := range e.retired {
+		if candidate.session != nil && candidate.session.Origin == "Pold" {
+			retired = candidate
+			break
+		}
+	}
+	var run *shellState
+	if retired != nil {
+		run = retired.shell
+	}
 	op := e.operations["Pshell"]
+	ledger := e.ledgerRecordLocked()
 	e.mu.Unlock()
-	if run != nil {
-		t.Fatalf("confirmed chain kept the shell barrier: %+v", run)
+	if current != nil {
+		t.Fatalf("retired shell remained in current ownership: %+v", current)
+	}
+	if ledger.Shell != nil {
+		t.Fatalf("v3 current fields retained the retired shell: %+v", ledger.Shell)
+	}
+	if retired == nil || run == nil {
+		t.Fatalf("retired ownership lost the shell record: %+v", ledger.Retired)
+	}
+	if !run.settled() {
+		t.Fatalf("confirmed chain remained unresolved in retired ownership: %+v", run)
+	}
+	if len(ledger.Retired) != 1 || ledger.Retired[0].Record == nil ||
+		ledger.Retired[0].Record.Shell == nil {
+		t.Fatalf("retired ledger lost the original shell fact: %+v", ledger.Retired)
 	}
 	if op == nil {
 		t.Fatalf("old P record was not restored")
@@ -75,8 +114,9 @@ func assertShellRecovered(t *testing.T, e *Engine, outcome string, wantError boo
 	}
 }
 
-// Case 12a: an alive runner with the recorded identity is terminated; admission
-// stays closed until that exact stop is confirmed.
+// Case 12a: an alive runner with the recorded identity is terminated by the
+// retired cleanup. The old chain remains a reported fact instead of holding the
+// ordinary admission gate.
 func TestShellRecoveryTerminatesLiveRunner(t *testing.T) {
 	dev := shellRecoveryDevice(true, device.ShellStart{
 		HasIdentity: true, PID: 100, PGID: 100, StartTicks: 7, BootID: "boot-old",
@@ -98,9 +138,10 @@ func TestShellRecoveryTerminatesLiveRunner(t *testing.T) {
 		defer dev.shell.mu.Unlock()
 		return dev.shell.terminateCalls == 1
 	})
-	assertCannotStart(t, e)
+	assertCanStart(t, e)
 	close(gate)
 	waitRecoveryComplete(t, e)
+	waitRetiredCleanupStopped(t, e, "Pold")
 	assertShellRecovered(t, e, OutcomeUncertain, true)
 
 	dev.shell.mu.Lock()
@@ -109,10 +150,7 @@ func TestShellRecoveryTerminatesLiveRunner(t *testing.T) {
 	if len(reasons) != 1 || reasons[0] != terminationCancelled {
 		t.Fatalf("terminate reasons=%v", reasons)
 	}
-	status, apiErr := e.Status("agent", "")
-	if apiErr != nil || status.CanStart == nil || !*status.CanStart {
-		t.Fatalf("start not admitted after the confirmed stop: %+v %v", status, apiErr)
-	}
+	assertCanStart(t, e)
 }
 
 // Case 12b: a natural exit receipt is proven executed; no signal is sent.
@@ -132,6 +170,7 @@ func TestShellRecoveryDoneReceiptNeedsNoSignal(t *testing.T) {
 	}
 	syncRecovery(t, e, readySync())
 	waitRecoveryComplete(t, e)
+	waitRetiredCleanupStopped(t, e, "Pold")
 	assertShellRecovered(t, e, OutcomeExecuted, false)
 	dev.shell.mu.Lock()
 	defer dev.shell.mu.Unlock()
@@ -151,6 +190,7 @@ func TestShellRecoveryGoneProcessNeedsNoSignal(t *testing.T) {
 	}
 	syncRecovery(t, e, readySync())
 	waitRecoveryComplete(t, e)
+	waitRetiredCleanupStopped(t, e, "Pold")
 	assertShellRecovered(t, e, OutcomeUncertain, true)
 	dev.shell.mu.Lock()
 	defer dev.shell.mu.Unlock()
@@ -170,6 +210,7 @@ func TestShellRecoveryBootChangeNeedsNoSignal(t *testing.T) {
 	}
 	syncRecovery(t, e, readySync())
 	waitRecoveryComplete(t, e)
+	waitRetiredCleanupStopped(t, e, "Pold")
 	assertShellRecovered(t, e, OutcomeUncertain, true)
 	dev.shell.mu.Lock()
 	defer dev.shell.mu.Unlock()
@@ -178,9 +219,10 @@ func TestShellRecoveryBootChangeNeedsNoSignal(t *testing.T) {
 	}
 }
 
-// Case 12e: an unconfirmed stop keeps the recovery barrier closed on every
-// retry; it never flips can_start to true.
-func TestShellRecoveryUnknownKeepsBarrier(t *testing.T) {
+// Case 12e: an unconfirmed stop remains an unknown retired fact. Its cleanup
+// stops within its budget and never becomes confirmed merely because admission
+// is allowed again.
+func TestShellRecoveryUnknownStopsWithoutAdmissionGate(t *testing.T) {
 	dev := shellRecoveryDevice(true, device.ShellStart{
 		HasIdentity: true, PID: 100, PGID: 100, StartTicks: 7, BootID: "boot-old",
 	})
@@ -193,21 +235,25 @@ func TestShellRecoveryUnknownKeepsBarrier(t *testing.T) {
 	}
 	syncRecovery(t, e, readySync())
 	waitRecoveryAttempt(t, e)
+	waitRetiredCleanupStopped(t, e, "Pold")
 	e.mu.Lock()
-	reason := e.recoveryReason
+	recovering := e.recovery != nil
 	e.mu.Unlock()
-	if reason != "shell_chain_unconfirmed" {
-		t.Fatalf("recovery reason=%q", reason)
+	if recovering {
+		t.Fatal("retired shell remained in startup recovery")
 	}
 	for i := 0; i < 3; i++ {
 		e.RetryRecovery(context.Background())
-		assertCannotStart(t, e)
+		assertCanStart(t, e)
 	}
-	e.mu.Lock()
-	run, recovering := e.shell, e.recovery != nil
-	e.mu.Unlock()
-	if run == nil || run.settled() || !recovering {
-		t.Fatalf("unresolved chain must keep the barrier: run=%+v recovering=%v", run, recovering)
+	retired := retiredLedgerForOrigin(t, e, "Pold")
+	if retired.Record.Shell == nil || retired.Record.Shell.State == ShellConfirmed {
+		t.Fatalf("unknown runner state was rewritten as confirmed: %+v", retired.Record.Shell)
+	}
+	if retired.Record.Cleanup == nil ||
+		retired.Record.Cleanup.Execution != protocol.CleanupUnconfirmed ||
+		retired.Record.Cleanup.State == protocol.CleanupComplete {
+		t.Fatalf("unknown stop was promoted to confirmed cleanup: %+v", retired.Record.Cleanup)
 	}
 }
 
@@ -225,13 +271,21 @@ func TestShellRecoveryProbeFailureStaysBounded(t *testing.T) {
 	}
 	syncRecovery(t, e, readySync())
 	waitRecoveryAttempt(t, e)
-	e.mu.Lock()
-	reason := e.recoveryReason
-	e.mu.Unlock()
-	if reason != "shell_probe_failed" {
-		t.Fatalf("recovery reason=%q", reason)
+	waitRetiredCleanupStopped(t, e, "Pold")
+	assertCanStart(t, e)
+	_, _, inspectCalls, _, terminateCalls, _ := dev.shellCalls()
+	if inspectCalls == 0 {
+		t.Fatal("retired shell compensation skipped the runner probe")
 	}
-	assertCannotStart(t, e)
+	if terminateCalls != 0 {
+		t.Fatalf("unreadable runner was signalled %d times", terminateCalls)
+	}
+	retired := retiredLedgerForOrigin(t, e, "Pold")
+	if retired.Record.Cleanup == nil ||
+		retired.Record.Cleanup.Execution != protocol.CleanupUnconfirmed ||
+		retired.Record.Cleanup.State == protocol.CleanupComplete {
+		t.Fatalf("probe failure fabricated a confirmed end: %+v", retired.Record.Cleanup)
+	}
 }
 
 // shellChainCleanup is a closure whose only unresolved fact is a shell-caused
@@ -255,14 +309,16 @@ func assertCleanupPromoted(t *testing.T, e *Engine) {
 		cleanup.Execution != protocol.CleanupConfirmed {
 		t.Fatalf("cleanup was not promoted: %+v", cleanup)
 	}
-	if record.Cleanup == nil || record.Cleanup.Execution != protocol.CleanupConfirmed ||
-		record.Cleanup.State != protocol.CleanupComplete {
-		t.Fatalf("durable cleanup was not promoted: %+v", record.Cleanup)
+	if record.Session != nil || record.Cleanup != nil || record.Shell != nil {
+		t.Fatalf("retired completion remained in current fields: %+v", record)
 	}
-	status, apiErr := e.Status("agent", "")
-	if apiErr != nil || status.CanStart == nil || !*status.CanStart {
-		t.Fatalf("start not admitted after promotion: %+v %v", status, apiErr)
+	if len(record.Retired) != 1 || record.Retired[0].Record == nil ||
+		record.Retired[0].Record.Cleanup == nil ||
+		record.Retired[0].Record.Cleanup.Execution != protocol.CleanupConfirmed ||
+		record.Retired[0].Record.Cleanup.State != protocol.CleanupComplete {
+		t.Fatalf("retired cleanup was not promoted: %+v", record.Retired)
 	}
+	assertCanStart(t, e)
 }
 
 // A shell-caused execution uncertainty is promoted by exact-chain release
@@ -281,6 +337,7 @@ func TestShellRecoveryPromotesShellChainCleanup(t *testing.T) {
 		}
 		syncRecovery(t, e, readySync())
 		waitRecoveryComplete(t, e)
+		waitRetiredCleanupStopped(t, e, "Pold")
 		assertShellRecovered(t, e, OutcomeUncertain, true)
 		assertCleanupPromoted(t, e)
 	})
@@ -288,13 +345,26 @@ func TestShellRecoveryPromotesShellChainCleanup(t *testing.T) {
 		record := shellOnlyLedger()
 		record.Shell = nil // the exact chain was confirmed in an earlier pass
 		record.Cleanup = shellChainCleanup()
-		e := recoveryEngine(t, record, newFakeDevice())
+		dev := newFakeDevice()
+		dev.mu.Lock()
+		dev.displayExists = false
+		dev.recentKnown = true
+		dev.recentIDs = map[int]bool{}
+		dev.mu.Unlock()
+		e := recoveryEngine(t, record, dev)
 		if err := e.StartRecovery(context.Background()); err != nil {
 			t.Fatalf("StartRecovery: %v", err)
 		}
 		syncRecovery(t, e, readySync())
 		waitRecoveryComplete(t, e)
+		waitRetiredCleanupStopped(t, e, "Pold")
 		assertCleanupPromoted(t, e)
+		dev.mu.Lock()
+		removals := append([]int(nil), dev.removeCalls...)
+		dev.mu.Unlock()
+		if len(removals) != 0 {
+			t.Fatalf("orphan shell recovery deleted recents without same-boot ownership: %v", removals)
+		}
 	})
 	t.Run("ui_input_uncertainty_stays_sticky", func(t *testing.T) {
 		record := shellOnlyLedger()
@@ -308,12 +378,13 @@ func TestShellRecoveryPromotesShellChainCleanup(t *testing.T) {
 		}
 		syncRecovery(t, e, readySync())
 		waitRecoveryAttempt(t, e)
-		e.mu.Lock()
-		reason, recovering := e.recoveryReason, e.recovery != nil
-		e.mu.Unlock()
-		if reason != "old_resource_unconfirmed" || !recovering {
-			t.Fatalf("UI input uncertainty must stay sticky: reason=%q recovering=%v", reason, recovering)
+		waitRetiredCleanupStopped(t, e, "Pold")
+		assertCanStart(t, e)
+		retired := retiredLedgerForOrigin(t, e, "Pold")
+		if retired.Record.Cleanup == nil ||
+			retired.Record.Cleanup.Execution != protocol.CleanupUnconfirmed ||
+			retired.Record.Cleanup.State == protocol.CleanupComplete {
+			t.Fatalf("UI input uncertainty must stay unconfirmed: %+v", retired.Record.Cleanup)
 		}
-		assertCannotStart(t, e)
 	})
 }

@@ -79,7 +79,8 @@ json v1 path="/observation/tree" value={"format":"full","scope":"","root":null}
 | 主动作 `not_executed` / `uncertain` | `true` |
 | 纯 `observe` 有合法核心 O，仅缺图 | `false` |
 | 纯 `observe` 没有合法核心 O（含只有只读图） | `true` |
-| `status` 给出 `not_seen`、`request_closed` 或其他查询事实 | `false` |
+| `status` 正常给出 `request_closed` 或其他查询事实 | `false` |
+| `status`/`end` 返回 `operation_unknown` | `true`；`end` 可同时封闭该 P 的未来接纳 |
 | `diagnose` 证据不足或覆盖范围有限 | `false` |
 | `inspect` 内容不可用、准入/协议/传输错误 | `true` |
 | `start` 已建立会话但首个观察失败 | `false`（主操作 `executed`） |
@@ -217,10 +218,11 @@ device-mcp -transport http -config <private-config>
 `open_app`、`notify`、`shell`）在取消时：
 
 1. 停止等待本次调用结果；
-2. 用独立的有界上下文调用 `end(P)`（上限 5 秒），不等待设备工作完成；
+2. 用独立的有界上下文调用 `end(P)`（上限 5 秒），不等待设备工作完成；若服务已不认识原 P，
+   没有原结果时保留其 `operation_unknown`、`request_closed=true`、`uncertain` 事实；已知原执行事实优先；
 3. 保留取消前已取得的服务结果；没有结果时不伪造 `not_executed`；
-4. 返回结构化取消结果，说明 P 与已发起的有界 `end(P)`，但不声称设备动作已撤回或原执行
-   链已结束。
+4. 返回结构化取消结果，说明 P 与已发起的有界 `end(P)`，但不声称设备动作已撤回、资源已释放
+   或原执行链已结束。未知 `end` 只封闭该 P 的未来接纳，绝不能用来结束当前其它会话。
 
 `status`、`inspect`、`diagnose` 只取消本次读取，不登记 P、不调用 `end`。调用参数中的
 `reference` 是原观察/操作定位，不是本次取消的 P；不得把它当成本次调用的操作编号。

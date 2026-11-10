@@ -12,7 +12,7 @@ import (
 // Act performs one strict action branch against the current ready observation.
 // Static rejection happens before claiming; after claiming the old observation
 // is never returned to ready, even when no input was dispatched.
-func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequest) (*protocol.Result, *protocol.APIError) {
+func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequest) (finalResult *protocol.Result, finalErr *protocol.APIError) {
 	op, duplicate, apiErr := e.registerOperation(p, agent, "act")
 	if apiErr != nil {
 		return nil, apiErr
@@ -20,6 +20,7 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 	if duplicate != nil {
 		return duplicate, nil
 	}
+	defer func() { e.applyFrozenResult(op, &finalResult) }()
 	e.setOperationReference(op, protocol.RecoveryReferenceO)
 
 	e.mu.Lock()
@@ -78,6 +79,7 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 	}
 
 	e.clearDispatchUnknown(work)
+	e.noteKnownOutcome(op, OutcomeExecuted)
 	e.setOperationPhase(op, "post_observation")
 	if e.workRevoked(work) {
 		result := newResult(op)
@@ -129,9 +131,13 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 func (e *Engine) addSessionIfEnded(result *protocol.Result) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.session != nil {
+	op := e.operations[result.OperationID]
+	if op == nil {
+		return
+	}
+	if session := e.sessionByOriginLocked(op.SessionOrigin); session != nil {
 		result.IncludeSession = true
-		result.Session = e.sessionViewLocked(e.session)
+		result.Session = e.sessionViewLocked(session)
 	}
 }
 
@@ -330,7 +336,11 @@ func (e *Engine) provePointTarget(fresh *device.Capture, obs *observationState,
 		return targetChangedAtPoint()
 	}
 	started := time.Now()
-	projection, err := e.projector.Preview(fresh)
+	projector := obs.Projector
+	if projector == nil || e.projectorFactory == nil {
+		projector = e.projector
+	}
+	projection, err := projector.Preview(fresh)
 	if err != nil {
 		point.took += time.Since(started)
 		return protocol.NewError(503, protocol.CodeHierarchyFailed, "公开树构造失败")

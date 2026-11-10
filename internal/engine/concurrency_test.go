@@ -463,7 +463,7 @@ func TestExpiredSessionRejectsActAndObserveWithoutObservation(t *testing.T) {
 // TestStopAfterUncertainActKeepsExecutionUnconfirmed covers the window after an
 // acted input returned uncertain and the ordinary work slot was already
 // released. STOP/end must still report execution=unconfirmed, keep the P
-// outcome uncertain and refuse a new start.
+// outcome uncertain while allowing new work after finite logical handover.
 func TestStopAfterUncertainActKeepsExecutionUnconfirmed(t *testing.T) {
 	for _, terminal := range []string{"stop", "end"} {
 		t.Run(terminal, func(t *testing.T) {
@@ -513,29 +513,25 @@ func TestStopAfterUncertainActKeepsExecutionUnconfirmed(t *testing.T) {
 			if apiErr != nil || status.Outcome != OutcomeUncertain {
 				t.Fatalf("unknown act was rewritten: %+v %v", status, apiErr)
 			}
+			// Contract 5 retains uncertain execution as a retired fact while
+			// admitting a new session after current STOP synchronization.
+			awaitShellCondition(t, time.Second, "current STOP synchronization did not settle", func() bool {
+				h.sync(nil, nil)
+				status, _ := h.engine.Status("agent", "")
+				return status.CanStart != nil && *status.CanStart
+			})
+			h.device.mu.Lock()
+			h.device.displayExists = true
+			h.device.mu.Unlock()
+			second := h.startSession()
+			if second.Outcome != OutcomeExecuted {
+				t.Fatal("retired input blocked new start")
+			}
+			old, _ := h.engine.Status("agent", "Punknown")
+			if old.Outcome != OutcomeUncertain || old.Cleanup == nil || old.Cleanup.Execution != protocol.CleanupUnconfirmed {
+				t.Fatal("new start erased original uncertainty")
+			}
 
-			h.device.mu.Lock()
-			helpers := h.device.helperCalls
-			h.device.mu.Unlock()
-			second, apiErr := h.engine.Start(context.Background(), "agent", "Pafterunknown")
-			if apiErr != nil {
-				t.Fatalf("start transport error: %v", apiErr)
-			}
-			if second.Outcome == OutcomeExecuted {
-				t.Errorf("start was admitted after an unknown-input terminal: %+v", second)
-			}
-			h.device.mu.Lock()
-			helpersAfter := h.device.helperCalls
-			h.device.mu.Unlock()
-			if helpersAfter != helpers {
-				t.Errorf("rejected start dispatched a helper: %d -> %d", helpers, helpersAfter)
-			}
-			h.engine.mu.Lock()
-			nextAfter := h.engine.nextObservation
-			h.engine.mu.Unlock()
-			if nextAfter != 1 {
-				t.Errorf("rejected start allocated O: %d", nextAfter)
-			}
 		})
 	}
 }

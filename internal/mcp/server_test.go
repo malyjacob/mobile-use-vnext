@@ -684,7 +684,7 @@ func TestReadOnlyToolProjections(t *testing.T) {
 }
 
 func TestWorkToolProjections(t *testing.T) {
-	t.Run("end pending cleanup", func(t *testing.T) {
+	t.Run("end unconfirmed cleanup remains a success fact", func(t *testing.T) {
 		fake := newTestDeviceService(t)
 		fake.setHandler("end", func(writer http.ResponseWriter, request *http.Request, body string) {
 			writeTestJSON(writer, http.StatusOK, fmt.Sprintf(
@@ -693,9 +693,7 @@ func TestWorkToolProjections(t *testing.T) {
 					`"started_at":"2026-11-09T00:00:00Z","ended_at":"2026-11-09T00:03:00Z","reason":"client_end"},`+
 					`"cleanup":{"state":"unconfirmed","execution":"confirmed","tasks":"confirmed",`+
 					`"recents":"not_applicable","display":"unconfirmed",`+
-					`"error":{"code":"display_release_unconfirmed","message":"显示释放未确认"}},`+
-					`"recovery":{"entry":"status","reference":"P","input_state":"revoked",`+
-					`"cause":"cleanup_pending"}}`,
+					`"error":{"code":"display_release_unconfirmed","message":"显示释放未确认"}}}`,
 				testOperationHeader(request)))
 		})
 		session := connectTestInMemory(t, newTestMCPServer(t, fake))
@@ -711,6 +709,9 @@ func TestWorkToolProjections(t *testing.T) {
 		requireTestContains(t, text, "cleanup.display=unconfirmed")
 		requireTestContains(t, text, "cleanup.error={\"code\":\"display_release_unconfirmed\"")
 		requireTestContains(t, text, "session.state=ended")
+		if strings.Contains(text, "recovery.entry=") {
+			t.Fatalf("unconfirmed cleanup still requested recovery: %s", text)
+		}
 	})
 
 	t.Run("shell exits nonzero", func(t *testing.T) {

@@ -32,18 +32,14 @@ func (e *Engine) statusSelfLocked(agent string, now time.Time) *protocol.Result 
 	if !canStart {
 		result.BlockingCode = reason
 	}
-	if e.session != nil && e.session.Agent == agent {
+	session := e.latestSessionForAgentLocked(agent)
+	var cleanup *cleanupState
+	if session != nil {
 		result.IncludeSession = true
-		result.Session = e.sessionViewLocked(e.session)
-		result.StartOperation = e.session.Origin
-	} else if e.lastSession != nil && e.lastSession.Agent == agent &&
-		e.cleanup != nil && e.cleanup.State != protocol.CleanupComplete {
-		result.IncludeSession = true
-		result.Session = e.sessionViewLocked(e.lastSession)
-		result.StartOperation = e.lastSession.Origin
-	}
-	if e.cleanup != nil {
-		result.Cleanup = e.cleanupViewLocked()
+		result.Session = e.sessionViewLocked(session)
+		result.StartOperation = session.Origin
+		cleanup = e.cleanupForSessionLocked(session)
+		result.Cleanup = cleanupViewOf(cleanup)
 	}
 	if e.recovery != nil {
 		reference := protocol.RecoveryReferenceNone
@@ -53,6 +49,16 @@ func (e *Engine) statusSelfLocked(agent string, now time.Time) *protocol.Result 
 		result.Recovery = planRecovery(recoveryInput{
 			Tool: "status", Reference: reference, Phase: "self",
 			Code: protocol.CodeRecovering,
+		})
+	}
+	if cleanup != nil && cleanup.State == protocol.CleanupPending {
+		reference := protocol.RecoveryReferenceNone
+		if result.StartOperation != "" {
+			reference = protocol.RecoveryReferenceP
+		}
+		result.Recovery = planRecovery(recoveryInput{
+			Tool: "status", Reference: reference, Phase: "self",
+			InputState: protocol.RecoveryInputRevoked, Cleanup: cleanupValue(cleanup),
 		})
 	}
 	if reason == "ui_input_reboot_required" {
@@ -68,24 +74,50 @@ func (e *Engine) statusSelfLocked(agent string, now time.Time) *protocol.Result 
 	return result
 }
 
+func (e *Engine) latestSessionForAgentLocked(agent string) *sessionState {
+	if e.session != nil && e.session.Agent == agent {
+		return e.session
+	}
+	var latest *sessionState
+	for _, retired := range e.retired {
+		if retired == nil || retired.session == nil || retired.session.Agent != agent {
+			continue
+		}
+		if latest == nil || retired.session.EndedAt.After(latest.EndedAt) {
+			latest = retired.session
+		}
+	}
+	if e.lastSession != nil && e.lastSession.Agent == agent &&
+		(latest == nil || e.lastSession.EndedAt.After(latest.EndedAt)) {
+		latest = e.lastSession
+	}
+	return latest
+}
+
 func (e *Engine) statusOperationLocked(agent, reference string,
 	op *operationState, now time.Time) (*protocol.Result, *protocol.APIError) {
 	if op == nil {
-		if _, closed := e.closed[reference]; closed {
+		if _, closed := e.closed[reference]; closed && e.closedKnown[reference] {
 			closedFlag := true
 			return &protocol.Result{
 				OperationID: reference, OperationState: OperationFinished,
-				Outcome: OutcomeNotExecuted, RequestClosed: &closedFlag,
+				Outcome: OutcomeNotExecuted, Phase: "closed_before_admission",
+				RequestClosed:  &closedFlag,
 				IncludeSession: true, Session: nil,
 			}, nil
 		}
-		return &protocol.Result{OperationID: reference, OperationState: "not_seen"}, nil
+		return nil, protocol.NewError(409, protocol.CodeOperationUnknown, "原操作不可用")
 	}
 	if op.Agent != agent {
 		return nil, protocol.NewError(409, protocol.CodeOperationNotFound, "原操作不可用")
 	}
 	result := e.operationViewLocked(op)
 	result.OperationID = reference
+	if op.Error != nil && op.Error.Code == protocol.CodeOperationUnknown &&
+		op.Phase == "reference_unknown" {
+		closedFlag := true
+		result.RequestClosed = &closedFlag
+	}
 	if op.State == OperationRunning {
 		result.Phase = op.Phase
 		result.Recovery = planRecovery(recoveryInput{
@@ -93,14 +125,25 @@ func (e *Engine) statusOperationLocked(agent, reference string,
 		})
 		return result, nil
 	}
-	// A live closure outranks the operation's own projection: while cleanup is
-	// still pending, status(P) is the only useful next step.
+	sessionEnded := result.Session != nil && result.Session.State == SessionEnded
+	cleanup := e.cleanupForOriginLocked(op.SessionOrigin)
+	if op.Kind == "end" || sessionEnded {
+		result.Cleanup = cleanupViewOf(cleanup)
+	}
+	if result.Recovery != nil &&
+		result.Recovery.Entry == protocol.RecoveryEntryStatus &&
+		result.Recovery.Cause == protocol.RecoveryCauseCleanupPending &&
+		(cleanup == nil || cleanup.State != protocol.CleanupPending) {
+		result.Recovery = nil
+	}
+	// Only pending cleanup has an advancing next step. Unconfirmed means the
+	// bounded automatic closure has stopped and remains as a reported fact.
 	if op.Error == nil && op.Outcome != OutcomeUncertain && result.Session != nil &&
-		result.Session.State == SessionEnded && e.cleanup != nil &&
-		e.cleanup.State != protocol.CleanupComplete {
+		result.Session.State == SessionEnded && cleanup != nil &&
+		cleanup.State == protocol.CleanupPending {
 		result.Recovery = planRecovery(recoveryInput{
 			Tool: "status", Reference: protocol.RecoveryReferenceP, Phase: "operation",
-			Cleanup: cleanupValue(e.cleanup),
+			Cleanup: cleanupValue(cleanup),
 		})
 	}
 	result.Recovery = e.durabilityRecoveryLocked(protocol.RecoveryReferenceP, inputStateFor(op.Kind, op.Reference, "", op.Claimed), result.Recovery)
@@ -123,13 +166,25 @@ func (e *Engine) statusObservationLocked(agent, reference string,
 		result.IncludeSession = true
 		result.Session = e.sessionViewLocked(session)
 	}
+	if session == nil && obs.SessionSnapshot != nil {
+		copy := *obs.SessionSnapshot
+		result.IncludeSession = true
+		result.Session = &copy
+		result.Cleanup = cloneCleanupSnapshot(obs.CleanupSnapshot)
+	}
+	cleanup := e.cleanupForSessionLocked(session)
+	if session != nil && session.State == SessionEnded {
+		result.Cleanup = cleanupViewOf(cleanup)
+	}
 	switch {
 	case session == nil || session.State == SessionEnded:
 		result.InputState = protocol.RecoveryInputRevoked
-		result.Recovery = planRecovery(recoveryInput{
-			Tool: "status", Reference: protocol.RecoveryReferenceO, Phase: "observation",
-			Code: protocol.CodeSessionEnded, InputState: protocol.RecoveryInputRevoked,
-		})
+		if cleanup != nil && cleanup.State == protocol.CleanupPending {
+			result.Recovery = planRecovery(recoveryInput{
+				Tool: "status", Reference: protocol.RecoveryReferenceO, Phase: "operation",
+				InputState: protocol.RecoveryInputRevoked, Cleanup: cleanupValue(cleanup),
+			})
+		}
 	case state == ObservationReady && now.Before(obs.ActionableUntil):
 		result.InputState = protocol.RecoveryInputEffective
 	case state == ObservationReady:

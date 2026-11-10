@@ -13,6 +13,7 @@ import (
 // slot and of the action's outcome. Every snapshot copies record by value.
 type uiDispatchState struct {
 	record   LedgerUI
+	deadline time.Time
 	durable  bool
 	returned bool
 	saving   bool
@@ -80,7 +81,7 @@ func (e *Engine) beginUIDispatch(work *workState, kind string) *protocol.APIErro
 	}
 	e.session.InputIdentity = identity
 	work.UIStep++
-	token := &uiDispatchState{record: LedgerUI{
+	token := &uiDispatchState{deadline: work.Deadline, record: LedgerUI{
 		OperationID: work.OperationID, Origin: e.session.Origin,
 		Epoch: work.SessionEpoch, Step: work.UIStep, Kind: kind,
 		DisplayID: e.session.Display.ID, DisplayGeneration: e.session.Display.Generation,
@@ -114,7 +115,7 @@ func (e *Engine) beginUIDispatch(work *workState, kind string) *protocol.APIErro
 // It never changes a P result, renews authority or publishes an observation.
 func (e *Engine) recordUIReceipt(work *workState, receipt device.DispatchReceipt) {
 	e.mu.Lock()
-	if work == nil || work.UI == nil || e.ui != work.UI {
+	if work == nil || work.UI == nil || !e.ownsUITokenLocked(work.UI) {
 		e.mu.Unlock()
 		return
 	}
@@ -140,11 +141,29 @@ func (e *Engine) recordUIReceipt(work *workState, receipt device.DispatchReceipt
 
 func (e *Engine) persistUIReceipt(token *uiDispatchState) {
 	e.mu.Lock()
-	if e.ui != token || token.record.State == "may_dispatch" || token.durable || token.saving {
+	if !e.ownsUITokenLocked(token) || token.record.State == "may_dispatch" || token.durable || token.saving {
 		e.mu.Unlock()
 		return
 	}
 	token.saving = true
+	for _, r := range e.retired {
+		if r.ui == token {
+			r.cleanup.evidenceRevision++
+			r.cleanup.Execution = protocol.CleanupConfirmed
+			if r.shell != nil && !r.shell.settled() {
+				r.cleanup.Execution = protocol.CleanupUnconfirmed
+			}
+			if r.session.Mode == "virtual" {
+				r.cleanup.Tasks = protocol.CleanupUnconfirmed
+				r.cleanup.Recents = protocol.CleanupUnconfirmed
+				r.cleanup.Display = protocol.CleanupUnconfirmed
+				r.cleanup.needsExecutionRecheck = true
+			}
+			if r.cleanup.State != protocol.CleanupPending {
+				stopCleanup(r.cleanup, "execution_boundary_changed")
+			}
+		}
+	}
 	// Persist the physical recheck obligation in the same snapshot as the
 	// terminal receipt. A crash cannot leave only the old confirmed facts.
 	if e.cleanup != nil && e.session != nil && e.session.Origin == token.record.Origin &&
@@ -161,7 +180,7 @@ func (e *Engine) persistUIReceipt(token *uiDispatchState) {
 	err := e.persistSync(context.Background())
 	e.mu.Lock()
 	token.saving = false
-	if err == nil && e.ui == token {
+	if err == nil && e.ownsUITokenLocked(token) {
 		token.durable = true
 		if e.session != nil && e.session.Origin == token.record.Origin {
 			e.session.ExecutionUnknown = e.shell != nil && !e.shell.settled()
@@ -177,6 +196,10 @@ func (e *Engine) persistUIReceipt(token *uiDispatchState) {
 func (e *Engine) launchExecutionCleanupRecheck() {
 	e.mu.Lock()
 	cleanup := e.cleanup
+	if e.retiredForCleanupLocked(cleanup) != nil {
+		e.mu.Unlock()
+		return
+	}
 	if cleanup == nil || !cleanup.needsExecutionRecheck || cleanup.State == protocol.CleanupPending ||
 		e.uiReconciling || e.uiPendingLocked() || e.work != nil || e.shuttingDown || e.recovery != nil ||
 		e.session == nil || e.session.State != SessionEnded ||
@@ -225,7 +248,7 @@ func (e *Engine) verifyClosedExecutionTarget(ctx context.Context, target cleanup
 	if live, err := e.tasksOnDisplayByTaskList(ctx, target.display.ID); err == nil && len(live) == 0 {
 		tasks = protocol.CleanupConfirmed
 	}
-	if recent, known := e.dev.RecentTaskIDs(ctx); known {
+	if recent, known := e.readCleanupRecents(ctx); known {
 		recents = protocol.CleanupConfirmed
 		for _, id := range ids {
 			if recent[id] {

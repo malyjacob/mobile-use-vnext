@@ -26,6 +26,18 @@ func newTestLedgerStore(t *testing.T) *Ledger {
 
 func validTestLedger(version int) *engine.Ledger {
 	updatedAt := time.Date(2026, 11, 10, 3, 4, 5, 0, time.UTC)
+	session := &engine.LedgerSession{
+		Origin: "Pstart", Agent: "agent", Mode: "virtual", State: "active",
+		AppInstanceID:  "11111111-1111-4111-8111-111111111111",
+		ModeGeneration: "mode-generation",
+		DisplayID:      12, SFID: 99, DisplayGeneration: "display-generation",
+		Width: 1080, Height: 2400, Density: 420, Rotation: 0, StartedAt: updatedAt,
+	}
+	if version >= 3 {
+		session.CreateCommand = "55555555-5555-4555-8555-555555555555"
+		session.DeviceID = "device-private-a"
+		session.BootID = testLedgerBootID
+	}
 	return &engine.Ledger{
 		Format:            "mobile-use-vnext-ledger",
 		Version:           version,
@@ -33,13 +45,7 @@ func validTestLedger(version int) *engine.Ledger {
 		ServiceInstanceID: "service-old",
 		UpdatedAt:         updatedAt,
 		AppInstanceID:     "11111111-1111-4111-8111-111111111111",
-		Session: &engine.LedgerSession{
-			Origin: "Pstart", Agent: "agent", Mode: "virtual", State: "active",
-			AppInstanceID:  "11111111-1111-4111-8111-111111111111",
-			ModeGeneration: "mode-generation",
-			DisplayID:      12, SFID: 99, DisplayGeneration: "display-generation",
-			Width: 1080, Height: 2400, Density: 420, Rotation: 0, StartedAt: updatedAt,
-		},
+		Session:           session,
 		PendingCreate: &engine.LedgerCommand{
 			ID: "22222222-2222-4222-8222-222222222222", Kind: "create_display",
 			AppInstanceID: "11111111-1111-4111-8111-111111111111",
@@ -153,7 +159,7 @@ func TestLedgerAcceptsAllowedUIKindsAndStates(t *testing.T) {
 	}
 }
 
-func TestLedgerSaveWritesV2WithoutMutatingCaller(t *testing.T) {
+func TestLedgerSaveWritesV3WithoutMutatingCaller(t *testing.T) {
 	ledger := newTestLedgerStore(t)
 	record := validTestLedger(1)
 	record.Format = "caller-format"
@@ -181,7 +187,7 @@ func TestLedgerSaveWritesV2WithoutMutatingCaller(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load saved ledger: %v", err)
 	}
-	if got.Format != "mobile-use-vnext-ledger" || got.Version != 2 || got.Revision != 1 {
+	if got.Format != "mobile-use-vnext-ledger" || got.Version != 3 || got.Revision != 1 {
 		t.Fatalf("saved header = %+v", got)
 	}
 	if !reflect.DeepEqual(got.UI, &uiBefore) ||
@@ -283,7 +289,7 @@ func TestLedgerV1UpgradePreservesResponsibilities(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load upgraded ledger: %v", err)
 	}
-	if got.Version != 2 || got.Revision != 8 {
+	if got.Version != 3 || got.Revision != 8 {
 		t.Fatalf("upgraded header = %+v", got)
 	}
 	for name, same := range map[string]bool{
@@ -308,7 +314,7 @@ func TestLedgerLoadRejectsInvalidHeaderOrVersionOneEvidence(t *testing.T) {
 		body string
 	}{
 		{"version zero", `{"format":"mobile-use-vnext-ledger","version":0,"revision":0}`},
-		{"unknown version", `{"format":"mobile-use-vnext-ledger","version":3,"revision":0}`},
+		{"unknown version", `{"format":"mobile-use-vnext-ledger","version":4,"revision":0}`},
 		{"foreign format", `{"format":"other","version":2,"revision":0}`},
 		{"negative revision", `{"format":"mobile-use-vnext-ledger","version":2,"revision":-1}`},
 		{"v1 ui object", `{"format":"mobile-use-vnext-ledger","version":1,"revision":0,"ui":` + baseUI + `}`},

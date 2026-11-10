@@ -15,7 +15,7 @@
 | 方法 | 所有业务端点只接受 `POST`；其他方法返回 `405`，错误码 `invalid_request` |
 | 认证 | `/api/*` 用 `agent_token`；`/v1/control/*` 用 `control_token`；`Authorization: Bearer <token>` |
 | 身份隔离 | agent token 不能访问 `/v1/control/*`，control token 不能访问 `/api/*`；错误为 `401 unauthorized` |
-| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 4`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
+| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 5`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
 | 预分配 P | `/api/*` 可带 `X-Mobile-Use-Operation: P…`；缺省由服务分配。`status` 不使用该头 |
 | 请求体 | 必须是一个 JSON 对象；大小上限：`start`/`status`/`end` 16 KiB，`observe` 32 KiB，`act` 64 KiB，`inspect`/`keepalive`/`diagnose`/`apps`/`open_app` 8 KiB，`notify` 16 KiB，`shell` 32 KiB，`sync` 32 KiB，`stop` 8 KiB |
 | 响应 | `Content-Type: application/json; charset=utf-8`，`Cache-Control: no-store` |
@@ -28,7 +28,9 @@
   （`status` 的 `reference`、`observe` 的 `full`/`image`/`wait_ms`、`act` 的 `image`、
   `text`/`key` 的值等）；
 - 请求体为空、只有空白或不是对象 → `422 invalid_request`；
-- 编号规则：`O…` 为观察，`P…` 为操作；长度 1–64，首字符必须是 `O` 或 `P`。
+- 编号规则：`O…` 为观察，`P…` 为操作；长度 1–64，首字符必须是 `O` 或 `P`。编号是不透明句柄，
+  服务生成的编号含服务实例前缀，调用方不得解析其中数值，也不得跨服务实例复用；客户端预分配的
+  P 按原值登记，不由服务改写。
 
 会话内做收敛采样的三个自动观察点——`start` 的首个观察、`act` 与 `open_app` 的后观察——在
 目标树收敛后发布：连续两帧的节点内容身份、公开树与前台/显示语境一致才停止采样。静默窗口与
@@ -96,9 +98,9 @@ HTTP 状态映射（`protocol.Status`）：
 
 | 状态 | 触发 |
 | --- | --- |
-| 200 | 成功；含 `end`/`start` 的 `cleanup=pending`（收尾未完成不是 HTTP 错误） |
+| 200 | 成功；含 `end`/`status` 的同帧 `cleanup=pending`/`unconfirmed`（退休收尾事实不是 HTTP 错误） |
 | 401 | `unauthorized` |
-| 409 | `contract_mismatch`、`device_busy`、`session_*`、`reference_*`、`operation_*`、`observation_*`、`node_not_found`、`node_disabled`、`stale_screen`、`target_changed`、`foreground_changed`、`foreground_unknown`、`control_revoked`、`request_closed`、`cleanup_unconfirmed`、`control_unavailable`、`stop_unavailable`、`mode_not_selected`、`device_locked`、`device_not_interactive`、`recovering`、`no_ready_observation`、`display_unavailable`、`text_target_uncertain`、`text_result_uncertain`、`control_ui_on_virtual_display`、`app_not_found`、`application_moved`、`task_focus_unavailable`、`task_remove_unconfirmed`、`content_unavailable`、`inspection_too_large`、`root_unavailable` |
+| 409 | `contract_mismatch`、`device_busy`、`session_*`、`reference_*`、`operation_*`、`observation_*`、`node_not_found`、`node_disabled`、`stale_screen`、`target_changed`、`foreground_changed`、`foreground_unknown`、`control_revoked`、`request_closed`、`control_unavailable`、`stop_unavailable`、`mode_not_selected`、`device_locked`、`device_not_interactive`、`recovering`、`no_ready_observation`、`display_unavailable`、`text_target_uncertain`、`text_result_uncertain`、`control_ui_on_virtual_display`、`app_not_found`、`application_moved`、`task_focus_unavailable`、`task_remove_unconfirmed`、`content_unavailable`、`inspection_too_large`、`root_unavailable` |
 | 422 | `invalid_request`、`invalid_coordinates`、`ambiguous_point`、`unsupported_key`、`unsupported_node_action`、`text_too_long`、`reference_invalid` |
 | 503 | `device_unavailable`、`display_create_failed`、`hierarchy_unavailable`、`tree_too_large`、`app_launch_failed`、`app_list_unavailable`、`shell_start_failed`、`delivery_unavailable`；以及 `observation.status=failed` 或没有新 O 的 `partial` 结果 |
 | 504 | `action_result_uncertain`（输入已派发但无法确认完成）、`app_launch_unconfirmed`、`shell_result_unconfirmed` |
@@ -142,15 +144,14 @@ HTTP 状态映射（`protocol.Status`）：
 - 首个采集因 `control_ui_on_virtual_display`、`display_unavailable`、`stale_screen` 失败时，
   会话被撤销并启动收尾，响应同时带 `session`（`ended`）与 `cleanup`；`recovery` 为
   `entry=status`、`reference=P`、`input_state=revoked`、`cause=cleanup_pending`。
-- 接纳失败：`409/503`，`outcome=not_executed`，`error` 为
+- 接纳失败只由当前能力与当前权威冲突产生：`409/503`、`outcome=not_executed`，`error` 可为
   `session_exists`、`device_busy`、`control_unavailable`、`stop_unavailable`、
   `mode_not_selected`、`device_locked`、`device_not_interactive`、`control_revoked`、
-  `cleanup_unconfirmed`、`display_unavailable` 等；也可能是内部阻塞原因串（如
-  `cleanup_pending`、`recovery_pending`、`control_sync_pending`、`ledger_unavailable`），
-  `recovery` 视错误而定：`session_exists` 为 `end`/`P`；`device_locked`、
-  `device_not_interactive`、`mode_not_selected`、`control_unavailable`、`stop_unavailable`、
-  `display_unavailable` 等需要人工处理为 `user`/`none`；`device_busy`、`recovering`、
-  `cleanup_unconfirmed`、账本类阻塞为 `status`/`P`。
+  `display_unavailable`、`device_unavailable` 或 `ledger_unavailable`。旧会话的
+  `cleanup.state`、四项 cleanup 事实、旧 UI/shell、legacy checkpoint、退休记录容量与未停止的
+  物理资源不生成 `cleanup_pending`/`cleanup_unconfirmed`/`old_resource_unconfirmed` 准入失败。
+  `recovery` 按当前错误规划；逻辑交接尚未完成时可用
+  `device_busy`，最多持续撤权后 5 秒。
 - 虚拟屏创建结果未确认或 App 拒绝创建：503（`display_create_failed` /
   `display_unavailable`），`outcome` 为 `not_executed` 或 `uncertain`，响应可能带
   `session`（已结束）与 `cleanup`。
@@ -170,23 +171,22 @@ HTTP 状态映射（`protocol.Status`）：
 **自身状态（无 reference）**
 
 ```json
-{"can_start":true}
-{"can_start":false,"blocking_code":"cleanup_unconfirmed",
+{"can_start":true,
  "session":{"origin":"P1","state":"ended","mode":"virtual","agent":"local-agent",
    "started_at":"…","ended_at":"…","reason":"client_end"},
  "cleanup":{"state":"unconfirmed","execution":"confirmed","tasks":"confirmed",
    "recents":"not_applicable","display":"unconfirmed"}}
+{"can_start":false,"blocking_code":"control_unavailable"}
 ```
 
 - `can_start` 必出；`false` 时必有 `blocking_code`（可能是稳定错误码，也可能是内部原因串：
-  `recovery_pending`、`old_resource_unconfirmed`、`control_sync_pending`、
-  `ledger_unavailable`、`ledger_corrupt`、`no_display_recorded`、`cleanup_pending`、
-  `ui_input_unconfirmed`、`ui_input_reboot_required`）；
-- 会话属于本 Agent 时带 `session` 与 `start_operation_id`；会话已结束但收尾未完成时，
-  同一 Agent 也会看到 `lastSession`；
-- 有收尾记录时带 `cleanup`；一般遗留资源恢复记录的 `recovery` 为 `entry=status`，有
-  `start_operation_id` 时 `reference=P`，否则 `reference=none`。
-  `ui_input_reboot_required` 则使用 `entry=user/reference=none`。
+  `control_sync_pending`、`device_unavailable`、`ledger_unavailable`、`ledger_corrupt`、
+  `ui_input_unconfirmed` 等）。旧 cleanup、旧物理资源未确认与退休记录容量不是合法原因；
+- 会话属于本 Agent 时带 `session` 与 `start_operation_id`。本 Agent 没有当前会话时，可带其
+  最近退休会话；有同一会话的收尾记录时才带 `cleanup`，不得拼接全局或另一会话的 cleanup；
+- 退休 cleanup 为 `pending` 时，可给 `recovery=entry=status`、有 `start_operation_id` 时
+  `reference=P`，否则 `reference=none`。`unconfirmed` 表示自动补偿已停止，只作为同一帧的
+  终态事实返回，不再产生“继续轮询”的 recovery，也不使 `can_start=false`。
 
 **观察状态（reference=O）**
 
@@ -199,7 +199,9 @@ HTTP 状态映射（`protocol.Status`）：
 `observation_state` 为 `ready`/`claimed`/`retired`/`expired`；`input_state` 为
 `effective`（仍可作为输入目标）、`expired`、`revoked`，或其他观察状态原值。`expired`、
 `claimed`、`retired` 时分别带 `recovery` 的 `entry=observe`、`reference=P` 与同名
-`input_state`；会话结束则 `input_state="revoked"`、`recovery` 为 `entry=end`、`reference=O`。
+`input_state`。原会话结束且 cleanup 仍为 `pending` 时，`input_state="revoked"`、
+`recovery` 为 `entry=status`、`reference=O`、`cause=cleanup_pending`；cleanup 为
+`unconfirmed` 时保留 revoked 事实，但不添加无限轮询入口。
 
 **操作状态（reference=P）**
 
@@ -211,12 +213,15 @@ HTTP 状态映射（`protocol.Status`）：
 
 - `running` 时带 `phase` 与 `recovery`（`entry=status`、`reference=P`、`cause=running`）；
 - `finished` 时带 `outcome`、`phase`，操作错误在 `error`，`recovery` 由错误码与结果事实决定；
-- 从未见过的 P：`{"operation_id":"P9","operation_state":"not_seen"}`；
-- 已封闭的 P：`request_closed=true`、`outcome=not_executed`、`session=null`；
+- 不存在的 P：`409 operation_unknown`，不返回 `not_seen`；
+- 有正面“未接纳”证据的已封闭 P：`request_closed=true`、`outcome=not_executed`、`session=null`；
+- 仅保留“未来接纳已封闭”证据的 P：仍为 `409 operation_unknown`；`end(P)` 会带
+  `request_closed=true`、`outcome=uncertain`、`phase=reference_unknown`，`status(P)` 不据缓存
+  缺失声称过去未执行；
 - `end` 或“会话已结束且收尾未完成”的 P 会带 `cleanup`；该 P 结束时没有 `error`、`outcome`
-  不是 `uncertain`，且当前收尾为 `pending`/`unconfirmed` 时，`recovery` 为 `entry=status`、
-  `reference=P`、`input_state=revoked`、`cause=cleanup_pending`；否则沿用该 P 结束时的
-  `recovery`，不添加 `cause`。
+  不是 `uncertain`，且同一原会话的收尾为 `pending` 时，`recovery` 为 `entry=status`、
+  `reference=P`、`input_state=revoked`、`cause=cleanup_pending`；`unconfirmed` 表示自动处理
+  已停止，不添加继续轮询的 `cause`。
 
 `status` 不续租、不认领观察、不改变输入授权；唯一的副作用是查询时把已过期的 `ready`
 观察标记为 `expired`。`status` 不使用 `X-Mobile-Use-Operation`，也不登记 P。
@@ -374,17 +379,19 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 ```
 
 - `end` 只撤权并启动独立收尾，不等待设备工作、账本或网络；`cleanup` 通常先是
-  `pending`，用 `status` 轮询到 `complete` 或 `unconfirmed`。收尾 `pending`/`unconfirmed`
-  时 `recovery` 为 `entry=status`、`reference=P`、`input_state=revoked`、
-  `cause=cleanup_pending`。
+  `pending`。`pending` 时可返回 `recovery=entry=status`、`reference=P`、`input_state=revoked`、
+  `cause=cleanup_pending`；`unconfirmed` 表示有限补偿已停止，只保留五项事实，不再暗示继续
+  轮询就能推进。
 - 重复 `end` 返回同一收尾进度，不新建第二条链。
 - 对从未被接纳的 P：`request_closed=true`、`session=null`、
   `cleanup` 全为 `not_applicable`。
 - 已结束且无可收尾资源的会话：`cleanup.state=complete`。
-- 未知/非法引用：`409 observation_not_found`、`operation_not_found`、
-  `session_not_found` 或 `422 invalid_request`；其中 `session_not_found` 与
-  `reference_has_no_session` 给 `recovery`（`entry=status`、`reference=P`），其余不带
-  `recovery`。
+- 无法定位的 P：`409 operation_unknown`、`phase=reference_unknown`、`outcome=uncertain`、
+  `request_closed=true`，返回 `session:null` 并省略 `cleanup`。该次关闭封闭该 P 的未来接纳，但不声称
+  过去未执行，也不结束当前其它会话。
+- 其它非法或不可用引用：`409 observation_not_found`、`operation_not_found`、
+  `session_not_found` 或 `422 invalid_request`；`session_not_found` 与
+  `reference_has_no_session` 可给 `recovery=entry=status/reference=P`。
 
 ## 8. `POST /v1/control/sync`
 
@@ -392,7 +399,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 
 | 字段 | 必填 | 类型 | 说明 |
 | --- | --- | --- | --- |
-| `contract_version` | 是 | 字符串 | 必须为 `"4"`，否则 `409 contract_mismatch` |
+| `contract_version` | 是 | 字符串 | 必须为 `"5"`，否则 `409 contract_mismatch` |
 | `app_instance_id` | 是 | UUID | App 进程实例；变化会撤销旧归属 |
 | `app_version` | 是 | 字符串 | 仅发行标识 |
 | `selected_mode` | 是 | `virtual`/`primary` | 用户选择 |
@@ -419,7 +426,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 
 ```json
 {
-  "contract_version": "4",
+  "contract_version": "5",
   "service_instance_id": "…",
   "control": {
     "revision": 42,
@@ -427,10 +434,9 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
     "session": {"origin":"P1","agent":"local-agent","mode":"virtual","state":"active",
       "started_at":"…","expires_at":"…"},
     "work": {"operation_id":"P2","kind":"act","phase":"dispatch"},
-    "cleanup": {"state":"complete","execution":"confirmed","tasks":"not_applicable",
-      "recents":"not_applicable","display":"confirmed"}
+    "cleanup": null
   },
-  "commands": [{"id":"…","kind":"create_display","width":1080,"height":2400,"density_dpi":420}],
+  "commands": [],
   "messages": [{"id":"M12","seq":12,"text":"…","created_at":"…"}],
   "stop": {"seq":7,"state":"accepted"}
 }
@@ -439,9 +445,11 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 - `availability.state`：`ready`/`recovering`/`blocked`；非 `ready` 时可带 `reason`；
 - `session`：`null` 或 `{origin, agent?, mode, state, started_at?, expires_at?, ended_at?, reason?}`；
 - `work`：`null` 或 `{operation_id, kind, phase}`；`kind` 为 `start`/`observe`/`act`/`apps`/`open_app`/`shell`；
-- `cleanup`：`null` 或 `{state, execution?, tasks?, recents?, display?}`；
+- `cleanup`：`null` 或 `{state, execution?, tasks?, recents?, display?}`；只与同一
+  `control.session` 同属一个原会话；
 - `commands`：数组，每拍至多一条显示命令；`create_display` 仅在有 `starting` 会话且显示助手
-  已就绪时下发，`close_display` 在收尾/恢复需要精确释放时下发；
+  已就绪时下发；`close_display` 在收尾/恢复需要精确释放时下发；`cancel_create` 只按原 App
+  实例与 `target_create_command_id` 撤销尚未终结的创建；
 - `messages`：数组，未确认的 Agent 消息，按创建顺序，每拍至多 8 条 / 32 KiB 正文；未在
   `message_acks` 中确认的消息会在后续同步重发；App 按 `id` 去重；
 - `stop`：仅当本请求携带 `stop_pending` 且服务已绑定该边界时出现；`state` 为
@@ -452,7 +460,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 ## 9. `POST /v1/control/stop`
 
 ```json
-{"contract_version":"4","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
+{"contract_version":"5","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
 ```
 
 - **不校验普通契约**：`contract_version` 字段存在但不参与准入，服务与 App 契约版本
@@ -462,7 +470,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 - 重复或过期 `seq` 不报错，只返回 `state=duplicate`。
 
 ```json
-{"contract_version":"4","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
+{"contract_version":"5","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
 ```
 
 `accepted` 恒为 `true`；`state` 为 `revoked`（绑定时撤销了活动会话）、`recorded`
@@ -475,7 +483,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 无认证，只表示进程可应答，不代表设备就绪或资源干净：
 
 ```json
-{"status":"ok","contract_version":"4","service_instance_id":"…","release_version":"…"}
+{"status":"ok","contract_version":"5","service_instance_id":"…","release_version":"…"}
 ```
 
 ## 11. 数据对象
@@ -559,15 +567,16 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 ```
 
 `cleanup.error` 只在存在未确认项时出现（`pending` 或 `unconfirmed` 都可能带），`code` 可能是
-内部原因串：`execution_unconfirmed`、`display_create_unconfirmed`、`task_remove_unconfirmed`、
-`recents_cleanup_unconfirmed`、`display_release_unconfirmed`。
+`execution_unconfirmed`、`display_create_unconfirmed`、`task_remove_unconfirmed`、
+`recents_cleanup_unconfirmed`、`display_release_unconfirmed`、`cleanup_budget_exhausted`、
+`cleanup_identity_conflict`、`cleanup_capacity_exhausted` 或 `cleanup_restart_stopped`。
 
 `execution` 表达输入调用/执行链的终结证据，独立于原操作的 `outcome`。启动调用已经结束但
 任务归属未确认时，原 P 保持 `uncertain`，不会因此持续占用 execution 屏障。真实缺回执时
 普通工作立即 `device_busy`；后观察、显示消失或另一 shell 完成都不能代替原调用证据。
-旧记录的启动 checkpoint 耐久保存后，`status.blocking_code=ui_input_reboot_required`、
-`recovery.entry=user/reference=none`；用户重启手机后仍须通过其余恢复门。保存失败优先报告
-账本不安全，不能以 checkpoint 已准备完成指引重启。
+旧 UI/legacy checkpoint 迁移后保留为原退休会话的 `execution=unconfirmed`；没有启动边界证据
+时仍不能改写成 `confirmed`。该事实不产生永久准入门禁，也不要求清账本或清 App 数据。
+当前账本不能保存新归属时仍返回 `ledger_unavailable`。
 
 ## 12. 发现、应用、只读、通知与受管执行工具
 
@@ -714,7 +723,7 @@ O/P 必须属于本 Agent 并定位一个仍 `active` 的原会话；只续租�
 已结束但仅输出缺失时响应仍为 `executed`，错误在嵌套 `shell.output_error`；成功结果不含
 `observation`，也不带 `recovery`。撤销后确认停止的结果 `recovery` 为 `entry=status`、
 `reference=P`、`input_state=revoked`、`cause=executed_revoked` 并带会话视图。`shell` 不产生
-`retry`：执行链的未知状态只能经 `status` 确认。命令正文、输出与异常文本不进入日志或账本。
+`retry`：活动会话内未知执行链禁止下一普通工作；退休后按有限交接处理，`status` 只查询事实，不推动补偿。命令正文、输出与异常文本不进入日志或账本。
 
 ## 13. 端点与能力边界
 
@@ -727,7 +736,7 @@ O/P 必须属于本 Agent 并定位一个仍 `active` 的原会话；只续租�
 | `open_app`、`apps`、`keepalive`、`inspect`、`notify`、`diagnose` | 定义于 §12 |
 | `shell` | 定义于 §12 |
 | MCP stdio / Streamable HTTP、Go client | 由独立入口提供，见 [MCP 入口](mcp.md) 与 [Go 客户端](client.md)；不改变本页 `/api/*` 契约 |
-| `/v1/control/sync`、`/v1/control/stop`、`create_display`/`close_display` | 定义于 [控制端协议](control-protocol.md) |
+| `/v1/control/sync`、`/v1/control/stop`、`create_display`/`close_display`/`cancel_create` | 定义于 [控制端协议](control-protocol.md) |
 | `selected_mode=primary` | 使用主屏（display 0），不创建虚拟屏 |
 
 未注册的 `/api/<tool>` 路径由 Go `ServeMux` 返回默认的纯文本 `404 page not found`，不是本页

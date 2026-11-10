@@ -135,7 +135,7 @@ func shellStateFromLedger(record *LedgerShell) *shellState {
 //
 // A request-context cancellation does not abandon the exact-chain barrier: the
 // termination confirmation uses an independent bounded context.
-func (e *Engine) Shell(ctx context.Context, agent, p string, req *protocol.ShellRequest) (*protocol.Result, *protocol.APIError) {
+func (e *Engine) Shell(ctx context.Context, agent, p string, req *protocol.ShellRequest) (finalResult *protocol.Result, finalErr *protocol.APIError) {
 	_ = ctx
 	op, duplicate, apiErr := e.registerOperation(p, agent, "shell")
 	if apiErr != nil {
@@ -147,6 +147,7 @@ func (e *Engine) Shell(ctx context.Context, agent, p string, req *protocol.Shell
 	if req == nil || req.Command == "" {
 		return e.finishWithError(op, "admission", protocol.Invalid("shell 需要非空 command")), nil
 	}
+	defer func() { e.applyFrozenResult(op, &finalResult) }()
 	e.setOperationReference(op, referenceKind(req.Reference))
 
 	session, admissionErr := e.shellAdmissionLocked(agent, req.Reference)
@@ -457,7 +458,10 @@ func (e *Engine) finishShellNotStarted(op *operationState, work *workState, run 
 	if e.shell == run {
 		e.shell = nil
 	}
-	e.confirmCleanupBarrierLocked()
+	e.confirmRetiredShellLocked(run)
+	if e.session != nil && e.session.Epoch == run.Epoch {
+		e.confirmCleanupBarrierLocked()
+	}
 	e.mu.Unlock()
 	e.persistAsync()
 	e.removeManagedShellDir(run)
@@ -494,6 +498,7 @@ func (e *Engine) finishShellUncertain(op *operationState, run *shellState, messa
 // screen is only inspected again by the caller's next read.
 func (e *Engine) finishShellConfirmed(op *operationState, work *workState, run *shellState,
 	termination string, exitCode *int, phase string) *protocol.Result {
+	e.noteKnownOutcome(op, OutcomeExecuted)
 	output, truncated, outputErr := e.readShellOutput(run)
 	e.confirmShellBarrier(run, termination, exitCode)
 	e.persistAsync()
@@ -544,7 +549,10 @@ func (e *Engine) confirmShellBarrier(run *shellState, termination string, exitCo
 	if e.shell == run {
 		e.shell = nil
 	}
-	e.confirmCleanupBarrierLocked()
+	e.confirmRetiredShellLocked(run)
+	if e.session != nil && e.session.Epoch == run.Epoch {
+		e.confirmCleanupBarrierLocked()
+	}
 	e.mu.Unlock()
 	e.launchExecutionCleanupRecheck()
 }
@@ -637,10 +645,10 @@ func (e *Engine) finishShellResult(op *operationState, work *workState, result *
 func (e *Engine) addShellSession(op *operationState, result *protocol.Result) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	session := e.session
-	if session == nil && e.lastSession != nil && op != nil && e.lastSession.Origin == op.SessionOrigin {
-		session = e.lastSession
+	if op == nil {
+		return
 	}
+	session := e.sessionByOriginLocked(op.SessionOrigin)
 	if session == nil {
 		return
 	}

@@ -69,9 +69,10 @@ func (e *Engine) diagnoseObservationLocked(obs *observationState, now time.Time)
 		TimingMS: e.diagnosisTimingLocked(now),
 		Timeline: make([]protocol.DiagnosisEvent, 0, 4),
 	}
-	e.addCleanupTimingLocked(view.TimingMS, now)
 	var events []diagnosisEvent
 	session := e.sessionByEpochLocked(obs.SessionEpoch)
+	cleanup := e.cleanupForSessionLocked(session)
+	e.addCleanupTimingLocked(view.TimingMS, cleanup, now)
 	switch {
 	case session == nil:
 		view.Issues = append(view.Issues, protocol.DiagnosisIssue{
@@ -89,7 +90,7 @@ func (e *Engine) diagnoseObservationLocked(obs *observationState, now time.Time)
 			at: session.StartedAt, phase: "session", code: session.State,
 		})
 	}
-	e.appendCleanupIssueLocked(&view.Issues)
+	e.appendCleanupIssueLocked(&view.Issues, cleanup)
 	view.Summary = "原观察记录可用"
 	if len(view.Issues) > 0 {
 		view.Summary = "原观察记录存在未完成问题"
@@ -112,7 +113,8 @@ func (e *Engine) diagnoseOperationLocked(op *operationState, now time.Time) *pro
 		TimingMS:  e.diagnosisTimingLocked(now),
 		Timeline:  make([]protocol.DiagnosisEvent, 0, 4),
 	}
-	e.addCleanupTimingLocked(view.TimingMS, now)
+	cleanup := e.cleanupForOriginLocked(op.SessionOrigin)
+	e.addCleanupTimingLocked(view.TimingMS, cleanup, now)
 	var events []diagnosisEvent
 	if op.State == OperationFinished {
 		view.Outcome = op.Outcome
@@ -161,7 +163,7 @@ func (e *Engine) diagnoseOperationLocked(op *operationState, now time.Time) *pro
 			})
 		}
 	}
-	e.appendCleanupIssueLocked(&view.Issues)
+	e.appendCleanupIssueLocked(&view.Issues, cleanup)
 	view.Summary = "原操作记录可用"
 	switch {
 	case op.State == OperationRunning:
@@ -186,13 +188,17 @@ func (e *Engine) diagnoseOwnLocked(agent string, now time.Time) *protocol.Diagno
 		TimingMS: e.diagnosisTimingLocked(now),
 		Timeline: make([]protocol.DiagnosisEvent, 0, maxDiagnosisEntries),
 	}
-	e.addCleanupTimingLocked(view.TimingMS, now)
+	if e.droppedUnconfirmed > 0 {
+		view.Issues = append(view.Issues, protocol.DiagnosisIssue{Phase: "cleanup", Code: "retired_cleanup_dropped"})
+	}
+	cleanup := e.cleanupForSessionLocked(e.latestSessionForAgentLocked(agent))
+	e.addCleanupTimingLocked(view.TimingMS, cleanup, now)
 	if state, reason := e.availabilityLocked(now); state != AvailabilityReady && reason != "" {
 		view.Issues = append(view.Issues, protocol.DiagnosisIssue{
 			Phase: "availability", Code: reason,
 		})
 	}
-	e.appendCleanupIssueLocked(&view.Issues)
+	e.appendCleanupIssueLocked(&view.Issues, cleanup)
 
 	failed := make([]*operationState, 0, len(e.operations))
 	running := make([]*operationState, 0, 4)
@@ -278,28 +284,28 @@ func (e *Engine) diagnosisTimingLocked(now time.Time) map[string]int64 {
 
 // addCleanupTimingLocked reports elapsed cleanup only while it is unfinished;
 // the bounded state carries no completion instant to report as a duration.
-func (e *Engine) addCleanupTimingLocked(timing map[string]int64, now time.Time) {
-	if e.cleanup == nil || e.cleanup.StartedAt.IsZero() ||
-		e.cleanup.State == protocol.CleanupComplete {
+func (e *Engine) addCleanupTimingLocked(timing map[string]int64, cleanup *cleanupState, now time.Time) {
+	if cleanup == nil || cleanup.StartedAt.IsZero() ||
+		cleanup.State == protocol.CleanupComplete {
 		return
 	}
-	if elapsed := now.Sub(e.cleanup.StartedAt); elapsed >= 0 {
+	if elapsed := now.Sub(cleanup.StartedAt); elapsed >= 0 {
 		timing["cleanup"] = elapsed.Milliseconds()
 	}
 }
 
 // appendCleanupIssueLocked reports one controlled cleanup problem, never its
 // internal error text.
-func (e *Engine) appendCleanupIssueLocked(issues *[]protocol.DiagnosisIssue) {
-	if e.cleanup == nil {
+func (e *Engine) appendCleanupIssueLocked(issues *[]protocol.DiagnosisIssue, cleanup *cleanupState) {
+	if cleanup == nil {
 		return
 	}
 	switch {
-	case e.cleanup.Error != nil:
+	case cleanup.Error != nil:
 		*issues = append(*issues, protocol.DiagnosisIssue{
-			Phase: "cleanup", Code: e.cleanup.Error.Code,
+			Phase: "cleanup", Code: cleanup.Error.Code,
 		})
-	case e.cleanup.State == protocol.CleanupUnconfirmed:
+	case cleanup.State == protocol.CleanupUnconfirmed:
 		*issues = append(*issues, protocol.DiagnosisIssue{
 			Phase: "cleanup", Code: protocol.CodeCleanupUnconfirmed,
 		})

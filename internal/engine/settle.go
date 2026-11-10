@@ -147,7 +147,7 @@ func (e *Engine) captureSample(ctx context.Context, work *workState, session *se
 	if apiErr != nil {
 		return nil, apiErr
 	}
-	projection, err := e.projector.Preview(&cap)
+	projection, err := work.Projector.Preview(&cap)
 	if err != nil {
 		return nil, protocol.NewError(503, protocol.CodeHierarchyFailed, "公开树构造失败")
 	}

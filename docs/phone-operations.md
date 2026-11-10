@@ -1,6 +1,6 @@
 # 手机侧运维
 
-本页覆盖手机内设备服务、固定运行制品与配对控制 App 的日常运行、文件、容量、重启、凭据与
+本页覆盖手机内设备服务、固定运行制品与配对控制 App 的日常运行、文件、容量、服务重启、凭据与
 故障处置。整组发布与回退见[发布与回退](release.md)；部署命令与常见错误见[运行手册](runbook.md)；
 Agent 宿主接入见[Agent 接入指南](integration.md)。
 
@@ -31,7 +31,7 @@ Agent 宿主接入见[Agent 接入指南](integration.md)。
 | `/opt/mobile-use-vnext/mcp-config.json` | 手机 MCP 适配器配置（含 MCP token） | `0600` |
 | `/opt/mobile-use-vnext/u2.jar`、`applist.dex` | 固定制品 | `0600`，按哈希校验 |
 | `/opt/mobile-use-vnext/service.sh` | 设备服务启停脚本 | `0755` |
-| `/var/lib/mobile-use-vnext/recovery-ledger.json` | 恢复账本：归属与资源证据 | `0600`，≤64 KiB |
+| `/var/lib/mobile-use-vnext/recovery-ledger.json` | 版本 3 恢复账本：当前归属与退休资源证据 | `0600`，≤64 KiB；退休明细 ≤8 条且合计 ≤24 KiB |
 | `/var/lib/mobile-use-vnext/messages.json` | 未确认 Agent 消息 | `0600`，≤2 MiB（256 条 / 1 MiB 正文） |
 | `/var/lib/mobile-use-vnext/device-service.log` | 服务事件日志（启动时轮转） | `0600`，无固定上限 |
 | `/var/lib/mobile-use-vnext/device-service.pid` | 服务进程记录 | `0600` |
@@ -95,18 +95,19 @@ curl.exe -s http://127.0.0.1:18881/health
 `18881` 供主机直连 HTTP；`18883` 供主机 MCP 客户端访问手机适配器。不要再把手机 `18882`
 转发到主机 `18882`，否则会与主机自建 MCP 适配器冲突。
 
-## 4. 重启、开机与恢复
+## 4. 启动与恢复
 
-- 本仓库不安装开机自启。手机重启后按顺序确认：chroot 可进入、Android 侧 adb 服务可用、
+- 本仓库不安装开机自启。设备系统启动后按顺序确认：chroot 可进入、Android 侧 adb 服务可用、
   固定制品存在；然后 `service.sh start`、启动控制 App、启动手机 MCP 适配器、重新建立
   主机转发 `18881` 与 `18883`。
-- 开机后首次 `/api/status` 往往为 `can_start=false`；App 同步新鲜、旧资源核验完成与恢复
-  屏障通过后才转为 true。这期间不要删除账本、不要强停 App 或重启服务来“清状态”。
+- 首次 `/api/status` 可能为 `can_start=false`，原因只来自当前 App/模式/STOP、设备、锁屏、
+  账本可写性或最多 5 秒的旧逻辑交接。旧 cleanup 可同时显示为 `pending`/`unconfirmed`，
+  但不单独保持 `can_start=false`。这期间不要删除账本、不要强停 App 或反复重启服务。
 - 控制 App 重建默认虚拟屏，不恢复主屏共享；主屏需要用户在 Activity 中重新确认。
 - 服务实例变化后 App 会先使旧命令失效并释放自有显示；旧账本/资源证据仍由服务恢复流程
   核验，不能改挂到新实例继续执行。
-- 设备重启或服务强杀后，旧虚拟屏、任务与受管 shell 链可能仍存在；以
-  `status.cleanup`/`blocking_code` 的原因为准，不用“重启即干净”判断。
+- 服务强杀或设备启动边界变化后，旧虚拟屏、任务与受管 shell 链可能仍存在；以同一原会话的
+  `status.cleanup` 为准，不用“进程已启动”或“设备已启动”判断资源干净。
 
 ## 5. 电池、后台与权限
 
@@ -154,13 +155,14 @@ curl.exe -s http://127.0.0.1:18881/health
 
 - 需要一致备份时先停止服务，再以只读方式复制 `/var/lib/mobile-use-vnext/`。运行中复制
   账本因原子替换通常可读，但可能对应某一时刻的中间状态。
-- 不要在服务运行时恢复旧账本；旧归属可能仍占用资源，服务会按记录保持不可准入，这是预期
-  行为，不是可删除的“脏状态”。
+- 不要在服务运行时恢复旧账本；旧归属可能仍占用资源。服务保留其退休记录与未确认事实，
+  需要当前归属可保存且当前 App/设备能力就绪，不以旧资源全部确认作为新会话准入条件。
 - App 数据（消息、已读、连接、停止意图）属于 App 私有目录；默认 `allowBackup=false`，
   仓库不提供自动备份/迁移工具。换机或重装前由运维决定是否 root 复制；不要用卸载/清库
   解决签名或配对。
 - 升级/回退按[发布与回退](release.md)执行：整组产物、清单核验、覆盖安装、恢复屏障与
-  MCP 宿主重启；回退是另一轮受控部署，不自动回放旧操作。
+  MCP 宿主重启；升级不触发手机重启，设备服务按脚本重启。回退是另一轮受控部署，不自动
+  回放旧操作。
 
 ## 9. 故障处置
 
@@ -170,14 +172,15 @@ curl.exe -s http://127.0.0.1:18881/health
 | `stop_unavailable` | 通知权限/频道关闭、前台服务未运行 | 恢复通知权限与频道；App 内仍可请求停止 |
 | `mode_not_selected` | 虚拟屏未就绪或主屏未确认 | 在 App 选择虚拟屏或重新确认主屏共享 |
 | `device_not_interactive`/`device_locked` | 熄屏或锁屏 | 解锁点亮；服务不绕过锁屏 |
-| `cleanup_pending`/`cleanup_unconfirmed` | 旧显示/任务/执行链未确认 | 保持服务与 App 在线，看 `status.cleanup` 五项；不要删账本/强停 |
-| `ui_input_unconfirmed` | 原 UI 调用缺少结束证据 | 普通工作 busy，保留原 P，不重放输入；status/STOP/end 可用 |
-| `ui_input_reboot_required` | 启动身份恢复记录已耐久保存 | 安排一次手机重启并保留账本/App 数据；启动身份变化只解决对应 execution，仍核验其它资源 |
-| `recovery_pending`/`old_resource_unconfirmed` | 重启后旧归属未核验完 | 等 App 同步、精确 `close_display` 与 TaskList；旧显示不存在也不能只凭一次 absent 放行 |
+| 同一原会话的 `cleanup.pending` | 有限自动补偿仍在运行 | 最多 12 秒、三轮；可同时 `can_start=true`，不要无限轮询 |
+| 同一原会话的 `cleanup.unconfirmed` | 主动补偿已停止，仍有未知事实 | 保留同帧 session/五项证据；不改成 confirmed，不单独阻止新会话 |
+| `device_busy` 且原会话刚结束 | 旧 work/UI/shell 正在最多 5 秒的逻辑交接 | 等待交接；不杀设备进程、不删运行目录 |
+| `ui_input_unconfirmed` | 当前活动会话的原 UI 调用缺少结束证据 | 普通工作 busy，保留原 P，不重放输入；status/STOP/end 可用 |
+| `recovery_pending`/`control_sync_pending` | 当前启动恢复入口或 App 当前同步未就绪 | 检查当前 ADB、App、模式与 STOP；旧 cleanup 未确认本身不是原因 |
 | `shell_pending`/`shell_chain_unconfirmed` | 受管命令未结束或终止未确认 | 等 `status.shell` 确认；不杀 runner、不删运行目录 |
 | `ledger_corrupt`/`ledger_unavailable` | 账本损坏或不可写 | 检查目录权限/磁盘；损坏账本需人工处置并重新部署，不能带病启动 |
 | `device_unavailable` | Android 侧 adb/u2 不可用 | 检查 `adb -s 127.0.0.1:5555 get-state`、u2 端口与固定制品哈希；重启服务触发 `EnsureU2` |
-| `display_probe_failed`/`old_resource_unconfirmed` | 显示探测或旧屏核验失败 | 确认 SurfaceFlinger/`dumpsys display` 与 App `display` 描述；不要手工关闭用户主屏 |
+| `display_probe_failed` | 当前显示探测失败 | 确认 SurfaceFlinger/`dumpsys display` 与 App 当前 `display`；不要手工关闭用户主屏 |
 | 控制 App 崩溃或反复重启 | 权限、系统挂起或旧版本缺陷 | 更新到配套 App；`pm unsuspend`；查看 App 诊断日志的受控事件 |
 | 主机 `/health` 不通 | adb 转发失效或服务未启动 | 重建 `adb forward`；`service.sh status`；核对端口 |
 | 主机 `18883/mcp` 不通 | 手机适配器未运行、转发失效或端口冲突 | 看 `device-mcp.log` 与 `pgrep`；重建 `adb forward tcp:18883 tcp:18882` |
@@ -207,7 +210,7 @@ adb shell su -c 'tail -n 100 /data/data/com.mobileuse.vnext/files/diagnostics.lo
    $control = (Get-Content .state/deploy.json -Raw | ConvertFrom-Json).control_token
    Invoke-RestMethod http://127.0.0.1:18881/v1/control/stop -Method Post `
      -Headers @{ Authorization = "Bearer $control" } -ContentType 'application/json' `
-     -Body '{"contract_version":"4","app_instance_id":"<uuid>","stop_seq":1,"reason":"operator_stop"}'
+     -Body '{"contract_version":"5","app_instance_id":"<uuid>","stop_seq":1,"reason":"operator_stop"}'
    ```
 
    `accepted=true` 只表示停止边界已绑定；仍需用 App/`status.cleanup` 核验执行链、任务与

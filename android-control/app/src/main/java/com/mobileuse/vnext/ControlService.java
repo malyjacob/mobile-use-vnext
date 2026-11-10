@@ -31,7 +31,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -189,8 +188,7 @@ public final class ControlService extends Service {
                 } else {
                     // A bootstrap for an old App/STOP epoch cannot create resources. Close
                     // only its own capability, independently of the current display.
-                    CompletableFuture.runAsync(() ->
-                            RootDisplayConnection.closeEndpoint(endpoint, command, instance));
+                    RootDisplayConnection.closeEndpoint(endpoint, command, instance);
                 }
             }
         } else if (intent != null && ACTION_STOP.equals(intent.getAction())) {
@@ -271,7 +269,7 @@ public final class ControlService extends Service {
         Boolean powerInteractive = powerManager == null ? null : powerManager.isInteractive();
         Boolean keyguardLocked = keyguardManager == null ? null : keyguardManager.isKeyguardLocked();
         ServiceClient.SyncRequest request = new ServiceClient.SyncRequest(selectedMode, modeGeneration,
-                !stopPending && !displays.cleanupPending(), foreground && visible, visible, foreground,
+                !stopPending, foreground && visible, visible, foreground,
                 powerInteractive, keyguardLocked, primaryDisplay(), displays.descriptor(),
                 new ArrayList<>(pendingResults.values()), messageAcksForRequest(),
                 stopPending ? stopSeq : null, pendingStopReason);
@@ -559,8 +557,8 @@ public final class ControlService extends Service {
     }
 
     /**
-     * 主线程准入：只在契约精确匹配、无本地停止、无未确认清理、模式就绪且服务视图可用时
-     * 执行显示命令。任一条件不满足都回执明确失败，但不伪造资源状态。
+     * 主线程准入：只在契约精确匹配、无本地停止、模式就绪且服务视图可用时执行显示命令。
+     * 历史 retired attempt 只作为本机事实展示，不阻止新的精确创建。
      */
     private void execute(ServiceClient.Command command) {
         if (command == null || command.id == null) {
@@ -594,6 +592,21 @@ public final class ControlService extends Service {
             }
             if (!freshControlView(SystemClock.elapsedRealtime())) {
                 throw new IllegalStateException("control_stale");
+            }
+            if (command.cancelsCreate()) {
+                if (command.targetAppInstanceId == null
+                        || command.targetAppInstanceId.isEmpty()
+                        || command.targetCreateCommandId == null
+                        || command.targetCreateCommandId.isEmpty()) {
+                    throw new IllegalArgumentException("cancel_create_target_missing");
+                }
+                if (!application.instanceId.equals(command.targetAppInstanceId)) {
+                    throw new IllegalStateException("cancel_create_foreign_instance");
+                }
+                long epoch = commandEpoch;
+                displays.cancelCreate(command.targetCreateCommandId,
+                        result -> finishDisplayCommand(command, epoch, false, result));
+                return;
             }
             // close_display 只回收命令精确指向的、本实例持有的那个屏幕。缺少目标时拒绝执行，
             // 绝不回退为“释放当前任意屏幕”，以免误伤后来创建的新 generation。
@@ -638,11 +651,18 @@ public final class ControlService extends Service {
 
     private static String displayErrorText(String code) {
         switch (code) {
-            case "display_cleanup_unconfirmed": return "上一块虚拟屏清理尚未确认，暂不创建新屏。";
             case "display_create_in_progress": return "虚拟屏正在创建，等待确认。";
+            case "display_attempt_retired": return "该虚拟屏创建尝试已经退休，不能重复使用同一命令身份。";
+            case "display_create_target_missing": return "取消创建命令缺少原创建命令身份，已拒绝执行。";
+            case "display_create_target_unknown": return "取消创建目标不属于本 App 当前或退休尝试。";
+            case "cancel_create_foreign_instance": return "取消创建目标属于旧 App 实例，已拒绝触碰本实例资源。";
             case "display_create_timeout": return "虚拟屏创建超时，已按未确认处理。";
+            case "display_verify_timeout": return "虚拟屏策略复核超时，已按未确认处理。";
             case "display_create_cancelled": return "虚拟屏创建已被停止取消。";
             case "display_create_unconfirmed": return "虚拟屏创建未被系统确认。";
+            case "display_ime_hide_unconfirmed": return "虚拟屏输入法隐藏策略未获确认。";
+            case "display_helper_unavailable": return "虚拟屏 root helper 不可用或已退出。";
+            case "display_helper_died": return "虚拟屏 root helper 已退出，创建结果未确认。";
             case "display_release_identity_unknown": return "释放目标的显示屏身份不在本 App 记录中。";
             case "local_stop_pending": return "本地停止待同步，已拒绝旧命令。";
             case "control_not_ready": return "服务控制尚未就绪，已拒绝显示命令。";

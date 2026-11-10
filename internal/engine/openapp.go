@@ -30,7 +30,7 @@ type taskEntry struct {
 // OpenApp starts or reuses one application window on the session display. It
 // consumes the same current ready observation as act and returns one fresh
 // full observation.
-func (e *Engine) OpenApp(ctx context.Context, agent, p string, req *protocol.OpenAppRequest) (*protocol.Result, *protocol.APIError) {
+func (e *Engine) OpenApp(ctx context.Context, agent, p string, req *protocol.OpenAppRequest) (finalResult *protocol.Result, finalErr *protocol.APIError) {
 	op, duplicate, apiErr := e.registerOperation(p, agent, "open_app")
 	if apiErr != nil {
 		return nil, apiErr
@@ -38,6 +38,7 @@ func (e *Engine) OpenApp(ctx context.Context, agent, p string, req *protocol.Ope
 	if duplicate != nil {
 		return duplicate, nil
 	}
+	defer func() { e.applyFrozenResult(op, &finalResult) }()
 	e.setOperationReference(op, protocol.RecoveryReferenceO)
 	if req == nil || req.App == "" {
 		return e.finishWithError(op, "admission", protocol.Invalid("open_app 需要 app 包名")), nil
@@ -418,6 +419,7 @@ func (e *Engine) rememberTask(session *sessionState, task device.Task, proven bo
 // observation. A post-observation failure never rewrites executed.
 func (e *Engine) finishOpenAppSuccess(work *workState, op *operationState, session *sessionState,
 	app string, taskID int, reused, preserved bool, outcome string, apiErr *protocol.APIError) (*protocol.Result, *protocol.APIError) {
+	e.noteKnownOutcome(op, outcome)
 	result := newResult(op)
 	result.Outcome = outcome
 	result.App = &protocol.AppView{

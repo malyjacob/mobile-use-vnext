@@ -1,0 +1,110 @@
+package engine
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/malyjacob/mobile-use-vnext/internal/protocol"
+)
+
+// Diagnostic expectations for issue #2, loaded only through a Go overlay.
+// These tests deliberately fail on the investigation baseline. They use fake
+// device/store facts and do not establish the original phone-side trigger.
+func TestIssue2RecentOnlyOwnedTaskIsRemoved(t *testing.T) {
+	h := newHarnessWithClock(t, false)
+	h.device.mu.Lock()
+	h.device.recentKnown = true
+	h.device.recentIDs = map[int]bool{41: true}
+	h.device.mu.Unlock()
+	tasks, recents, checked := h.engine.removeOwnedTasks(context.Background(), 12,
+		[]taskEntry{{TaskID: 41, DisplayID: 12, Proven: true}})
+	h.device.mu.Lock()
+	calls := append([]int(nil), h.device.removeCalls...)
+	h.device.mu.Unlock()
+	t.Logf("tasks=%t recents=%t checked=%v remove_calls=%v", tasks, recents, checked, calls)
+	if !tasks || !recents || len(calls) != 1 || calls[0] != 41 {
+		t.Fatal("recent-only owned task was checked but never submitted for removal")
+	}
+}
+
+func TestIssue2LiveCleanupRechecksAfterTransientRecentsReadFailure(t *testing.T) {
+	h := newHarnessWithClock(t, false)
+	start := h.startSession()
+	h.engine.mu.Lock()
+	h.engine.session.Tasks = []taskEntry{{TaskID: 41, DisplayID: 12, Proven: true}}
+	h.engine.mu.Unlock()
+	h.device.mu.Lock()
+	h.device.displayExists = false
+	h.device.recentKnown = false
+	h.device.mu.Unlock()
+	ended, err := h.engine.End("agent", "", start.OperationID)
+	if err != nil || ended.Outcome != OutcomeExecuted {
+		t.Fatal("end did not revoke the session")
+	}
+	h.engine.mu.Lock()
+	done := h.engine.cleanup.done
+	h.engine.mu.Unlock()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("initial cleanup did not finish")
+	}
+	before, _ := h.engine.Status("agent", "")
+	if before.Cleanup == nil || before.Cleanup.Recents != protocol.CleanupUnconfirmed ||
+		before.Cleanup.Execution != protocol.CleanupConfirmed || before.Cleanup.Tasks != protocol.CleanupConfirmed ||
+		before.Cleanup.Display != protocol.CleanupConfirmed {
+		t.Fatal("did not reach the intended recents-only barrier")
+	}
+	h.device.mu.Lock()
+	h.device.recentKnown = true
+	h.device.recentIDs = map[int]bool{}
+	h.device.mu.Unlock()
+	// Run the existing background entry points explicitly; no wall-clock
+	// retry policy or new implementation is assumed by the diagnostic.
+	for n := 0; n < 3; n++ {
+		h.sync(nil, nil)
+		h.engine.housekeeping(context.Background())
+		h.engine.RetryRecovery(context.Background())
+	}
+	again, err := h.engine.End("agent", "", start.OperationID)
+	if err != nil || again.Outcome != OutcomeExecuted {
+		t.Fatal("idempotent end was rejected")
+	}
+	status, _ := h.engine.Status("agent", "")
+	t.Logf("can_start=%t blocking_code=%s cleanup=%s recents=%s",
+		*status.CanStart, status.BlockingCode, status.Cleanup.State, status.Cleanup.Recents)
+	if !*status.CanStart {
+		t.Fatal("recovered device facts never re-evaluated after one cleanup failure")
+	}
+}
+
+func TestIssue2RestartRechecksStaleUnconfirmedRecents(t *testing.T) {
+	h := newHarnessWithClock(t, false)
+	record := uiRecoveryTestLedger(2, uiRecoveryTestUI("terminated"))
+	record.Session.State = SessionEnded
+	record.Session.AppInstanceID = h.appInstance
+	record.Session.ModeGeneration = h.modeGen
+	record.Cleanup.Execution = protocol.CleanupConfirmed
+	record.Cleanup.Recents = protocol.CleanupUnconfirmed
+	record.Cleanup.CheckedTaskIDs = []int{41}
+	h.device.mu.Lock()
+	h.device.displayExists = false
+	h.device.recentKnown = true
+	h.device.recentIDs = map[int]bool{}
+	h.device.mu.Unlock()
+	h.engine.mu.Lock()
+	h.engine.recovery = record
+	h.engine.recovering = true
+	h.engine.restoreRecoveryLocked(record)
+	h.engine.mu.Unlock()
+	for n := 0; n < 3; n++ {
+		h.engine.RetryRecovery(context.Background())
+	}
+	status, _ := h.engine.Status("agent", "")
+	t.Logf("can_start=%t blocking_code=%s recents=%s",
+		*status.CanStart, status.BlockingCode, status.Cleanup.Recents)
+	if !*status.CanStart {
+		t.Fatal("startup recovery treats stale unconfirmed recents as an immutable fact")
+	}
+}

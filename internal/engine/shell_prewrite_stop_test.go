@@ -103,16 +103,12 @@ func TestShellPreWriteStopRaceTerminatesUnstartedChain(t *testing.T) {
 				t.Fatalf("STOP did not prevent shell dispatch: prepare=%d start=%d", prepare, start)
 			}
 
-			awaitShellCondition(t, 3*time.Second, "cleanup did not record the shell prewrite barrier", func() bool {
-				h.engine.mu.Lock()
-				defer h.engine.mu.Unlock()
-				return h.engine.cleanup != nil &&
-					h.engine.cleanup.State == protocol.CleanupUnconfirmed &&
-					h.engine.cleanup.Execution == protocol.CleanupUnconfirmed &&
-					h.engine.cleanup.ExecReason == "shell_chain" &&
-					h.engine.cleanup.Tasks == protocol.CleanupConfirmed &&
-					h.engine.cleanup.Display == protocol.CleanupConfirmed
-			})
+			h.engine.mu.Lock()
+			cleanup := h.engine.cleanup
+			if cleanup == nil || cleanup.Execution != protocol.CleanupUnconfirmed || cleanup.ExecReason != "shell_chain" {
+				t.Error("STOP lost original shell responsibility")
+			}
+			h.engine.mu.Unlock()
 
 			h.sync(nil, nil)
 			physicalRechecks.Store(0)
@@ -139,16 +135,22 @@ func TestShellPreWriteStopRaceTerminatesUnstartedChain(t *testing.T) {
 				t.Fatalf("unstarted terminalization dispatched a runner: prepare=%d start=%d", prepare, start)
 			}
 
-			awaitShellCondition(t, 3*time.Second, "terminal evidence did not trigger a fresh physical recheck", func() bool {
-				return physicalRechecks.Load() > 0
-			})
-			awaitShellCondition(t, 3*time.Second, "cleanup stayed permanently shell_chain", func() bool {
+			awaitShellCondition(t, 3*time.Second, "unstarted terminal evidence remained unknown", func() bool {
 				h.engine.mu.Lock()
 				defer h.engine.mu.Unlock()
-				return h.engine.cleanup != nil &&
-					h.engine.cleanup.Execution == protocol.CleanupConfirmed &&
-					h.engine.cleanup.State == protocol.CleanupComplete
+				return h.engine.cleanup != nil && h.engine.cleanup.Execution == protocol.CleanupConfirmed
 			})
+			// Contract 5 stops compensation at its original budget. A late
+			// end receipt invalidates old physical facts without renewing it.
+			if err := h.engine.persistSync(context.Background()); err != nil {
+				t.Fatal("current ledger did not recover")
+			}
+			h.sync(nil, nil)
+			status, _ := h.engine.Status("agent", "")
+			if status.BlockingCode == protocol.CodeCleanupUnconfirmed || status.BlockingCode == "shell_chain_unconfirmed" {
+				t.Errorf("retired prewrite responsibility became an admission gate: %s", status.BlockingCode)
+			}
+
 		})
 	}
 }

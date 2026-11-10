@@ -11,7 +11,7 @@ func (e *Engine) ordinaryBarrierLocked(op *operationState) *protocol.APIError {
 		return protocol.NewErrorOutcome(503, protocol.CodeDeviceUnavailable,
 			"恢复账本不可用，普通工作已暂停", OutcomeNotExecuted)
 	}
-	if e.uiPendingLocked() {
+	if e.session != nil && e.session.State != SessionEnded && e.uiPendingLocked() {
 		owner := ""
 		blocking := ""
 		if e.ui != nil {
@@ -22,7 +22,7 @@ func (e *Engine) ordinaryBarrierLocked(op *operationState) *protocol.APIError {
 		}
 		return ordinaryBusyError(op, owner, blocking, "原输入调用结束未确认")
 	}
-	if e.shell != nil && !e.shell.settled() {
+	if e.session != nil && e.session.State != SessionEnded && e.shell != nil && !e.shell.settled() {
 		return ordinaryBusyError(op, e.shell.Agent, e.shell.OperationID,
 			"设备工作尚未完成")
 	}

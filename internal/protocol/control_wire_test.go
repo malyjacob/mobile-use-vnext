@@ -58,3 +58,84 @@ func TestControlSyncWireCarriesMessagesAndAcks(t *testing.T) {
 		t.Fatal("unknown sync member was accepted")
 	}
 }
+
+func TestAppCommandTargetCreateIDIsBranchSpecific(t *testing.T) {
+	tests := []struct {
+		name     string
+		command  AppCommand
+		want     []string
+		unwanted []string
+		wantErr  bool
+	}{
+		{
+			name: "cancel create",
+			command: AppCommand{
+				ID: "cancel-1", Kind: "cancel_create",
+				TargetAppInstanceID: "app-1", TargetCreateCommandID: "create-1",
+			},
+			want: []string{
+				`"kind":"cancel_create"`,
+				`"target_app_instance_id":"app-1"`,
+				`"target_create_command_id":"create-1"`,
+			},
+			unwanted: []string{`"width"`, `"target_display_id"`},
+		},
+		{
+			name: "cancel create missing target",
+			command: AppCommand{
+				ID: "cancel-1", Kind: "cancel_create", TargetAppInstanceID: "app-1",
+			},
+			wantErr: true,
+		},
+		{
+			name: "cancel create missing app instance",
+			command: AppCommand{
+				ID: "cancel-1", Kind: "cancel_create", TargetCreateCommandID: "create-1",
+			},
+			wantErr: true,
+		},
+		{
+			name: "close rejects create target",
+			command: AppCommand{
+				ID: "close-1", Kind: "close_display",
+				TargetAppInstanceID: "app-1", TargetGeneration: "display-1",
+				TargetCreateCommandID: "create-1",
+			},
+			wantErr: true,
+		},
+		{
+			name: "create rejects create target",
+			command: AppCommand{
+				ID: "create-1", Kind: "create_display",
+				Width: 1080, Height: 2400, DensityDPI: 420,
+				TargetCreateCommandID: "create-1",
+			},
+			wantErr: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			data, err := JSON(test.command)
+			if test.wantErr {
+				if err == nil {
+					t.Fatalf("accepted invalid command: %s", data)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("encode command: %v", err)
+			}
+			encoded := string(data)
+			for _, want := range test.want {
+				if !strings.Contains(encoded, want) {
+					t.Fatalf("command missing %s: %s", want, encoded)
+				}
+			}
+			for _, unwanted := range test.unwanted {
+				if strings.Contains(encoded, unwanted) {
+					t.Fatalf("command contains %s: %s", unwanted, encoded)
+				}
+			}
+		})
+	}
+}

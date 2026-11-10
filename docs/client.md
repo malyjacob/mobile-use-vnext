@@ -37,6 +37,10 @@ instance, err := c.Discover(ctx)
 - 普通业务 HTTP 传输失败（拨号、写入、读取、超时、取消）返回结构化 `*client.Error`，
   `Transport=true`，`OperationID` 保留本次 P。调用方用 `Status(ctx, p)` 查询原事实，
   不重发同一 P。
+- `Status(ctx, p)` 返回 `409 operation_unknown` 时，只说明服务当前无法定位该 P，不能推出
+  过去未执行。`End(ctx, p)` 对未知 P 仍会封闭该 P 的未来接纳，返回 `request_closed=true`、
+  `outcome=uncertain`、`phase=reference_unknown`；调用方不得把该错误当成资源已释放或改去结束
+  当前其它会话。
 - 取消 `ctx` 只停止本次客户端读取/交付；它不调用 `end`，也不证明手机动作已撤回或原
   执行链已结束。MCP 入口的取消语义见 [MCP 入口](mcp.md)。
 
@@ -92,7 +96,7 @@ type Error struct {
 
 | Code | 含义 |
 | --- | --- |
-| 服务稳定错误码（如 `session_ended`、`device_busy`、`invalid_request`） | 服务已返回结构化 `Result`；`Result` 保留完整阶段事实 |
+| 服务稳定错误码（如 `session_ended`、`operation_unknown`、`device_busy`、`invalid_request`） | 服务已返回结构化 `Result`；`Result` 保留完整阶段事实与可能的 `request_closed` |
 | `transport_unavailable` | 未取得服务响应（拨号、写入、读取、超时、取消）；P 保留 |
 | `invalid_response` | 响应无法解析、形状不符或图片载体无效 |
 | `response_too_large` | 响应超过 8 MiB 上限 |

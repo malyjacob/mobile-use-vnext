@@ -21,12 +21,17 @@ import (
 const (
 	// MaxLedgerBytes bounds the single recovery object.
 	MaxLedgerBytes = 64 * 1024
+	// MaxRetiredBytes bounds the serialized retired slice, excluding the rest
+	// of the current ownership record.
+	MaxRetiredBytes = 24 * 1024
 
-	ledgerFormat     = "mobile-use-vnext-ledger"
-	ledgerVersionV1  = 1
-	ledgerVersionV2  = 2
-	maxDeviceIDLen   = 128
-	maxCheckedTaskID = 256
+	ledgerFormat      = "mobile-use-vnext-ledger"
+	ledgerVersionV1   = 1
+	ledgerVersionV2   = 2
+	ledgerVersionV3   = 3
+	maxDeviceIDLen    = 128
+	maxCheckedTaskID  = 256
+	maxRetiredEntries = 8
 )
 
 // Ledger is the only implementation of the engine's recovery store. One
@@ -81,26 +86,48 @@ func (l *Ledger) readLocked() (*engine.Ledger, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read ledger: %w", err)
 	}
+	if len(data) > MaxLedgerBytes {
+		return nil, errors.New("ledger exceeds the size budget")
+	}
 	var record engine.Ledger
 	if err := json.Unmarshal(data, &record, json.RejectUnknownMembers(true)); err != nil {
 		return nil, errors.New("ledger is corrupt")
 	}
 	if record.Format != ledgerFormat ||
-		(record.Version != ledgerVersionV1 && record.Version != ledgerVersionV2) {
+		(record.Version != ledgerVersionV1 &&
+			record.Version != ledgerVersionV2 &&
+			record.Version != ledgerVersionV3) {
 		return nil, errors.New("ledger format is unsupported")
 	}
 	if record.Revision < 0 {
 		return nil, errors.New("ledger revision is invalid")
 	}
-	if record.Version == ledgerVersionV1 {
-		if hasVersionOneEvidence(data) {
-			return nil, errors.New("version 1 ledger contains version 2 evidence")
+	switch record.Version {
+	case ledgerVersionV1:
+		if hasVersionOneEvidence(data) || hasVersionThreeEvidence(data) {
+			return nil, errors.New("version 1 ledger contains later-version evidence")
 		}
-	} else {
+	case ledgerVersionV2:
+		if hasVersionThreeEvidence(data) {
+			return nil, errors.New("version 2 ledger contains version 3 evidence")
+		}
 		if hasExplicitEvidenceBooleanNull(data) {
 			return nil, errors.New("ledger evidence boolean cannot be null")
 		}
 		if err := validateEvidence(&record); err != nil {
+			return nil, err
+		}
+	case ledgerVersionV3:
+		if hasExplicitEvidenceBooleanNull(data) {
+			return nil, errors.New("ledger evidence boolean cannot be null")
+		}
+		if err := validateEvidence(&record); err != nil {
+			return nil, err
+		}
+		if err := validateRetiredRecord(&record); err != nil {
+			return nil, err
+		}
+		if err := validateRetiredJSON(data); err != nil {
 			return nil, err
 		}
 	}
@@ -127,19 +154,48 @@ func hasVersionOneEvidence(data []byte) bool {
 
 func hasExplicitEvidenceBooleanNull(data []byte) bool {
 	var presence struct {
-		LegacyUIPending jsontext.Value `json:"legacy_ui_pending"`
-		Cleanup         *struct {
+		DroppedUnconfirmed jsontext.Value `json:"dropped_unconfirmed"`
+		LegacyUIPending    jsontext.Value `json:"legacy_ui_pending"`
+		Cleanup            *struct {
 			ExecutionRecheckRequired jsontext.Value `json:"execution_recheck_required"`
 		} `json:"cleanup"`
 	}
 	if err := json.Unmarshal(data, &presence); err != nil {
 		return true
 	}
-	return bytes.Equal(bytes.TrimSpace(presence.LegacyUIPending), []byte("null")) ||
+	return bytes.Equal(bytes.TrimSpace(presence.DroppedUnconfirmed), []byte("null")) || bytes.Equal(bytes.TrimSpace(presence.LegacyUIPending), []byte("null")) ||
 		presence.Cleanup != nil && bytes.Equal(bytes.TrimSpace(presence.Cleanup.ExecutionRecheckRequired), []byte("null"))
 }
 
+func hasVersionThreeEvidence(data []byte) bool {
+	var presence struct {
+		DroppedUnconfirmed jsontext.Value `json:"dropped_unconfirmed"`
+		Retired            jsontext.Value `json:"retired"`
+		Session            *struct {
+			CreateCommand jsontext.Value `json:"create_command"`
+			DeviceID      jsontext.Value `json:"device_id"`
+			BootID        jsontext.Value `json:"boot_id"`
+		} `json:"session"`
+	}
+	if err := json.Unmarshal(data, &presence); err != nil {
+		return true
+	}
+	return len(presence.DroppedUnconfirmed) > 0 || len(presence.Retired) > 0 ||
+		presence.Session != nil &&
+			(len(presence.Session.CreateCommand) > 0 ||
+				len(presence.Session.DeviceID) > 0 ||
+				len(presence.Session.BootID) > 0)
+}
+
 func validateEvidence(record *engine.Ledger) error {
+	if session := record.Session; session != nil {
+		if session.DeviceID != "" && !validDeviceID(session.DeviceID) {
+			return errors.New("ledger session device identity is invalid")
+		}
+		if session.BootID != "" && !engine.ValidateUUID(session.BootID) {
+			return errors.New("ledger session boot identity is invalid")
+		}
+	}
 	if ui := record.UI; ui != nil {
 		if !validOperationID(ui.OperationID) || !validOperationID(ui.Origin) {
 			return errors.New("ledger ui identity is invalid")
@@ -174,6 +230,125 @@ func validateEvidence(record *engine.Ledger) error {
 	if record.Cleanup != nil {
 		if err := validateCheckedTaskIDs(record.Cleanup.CheckedTaskIDs); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func validateRetiredRecord(record *engine.Ledger) error {
+	if len(record.Retired) > maxRetiredEntries {
+		return errors.New("ledger retired entries exceed the limit")
+	}
+	if record.Retired != nil {
+		data, err := json.Marshal(record.Retired)
+		if err != nil {
+			return errors.New("ledger retired entries are invalid")
+		}
+		if len(data) > MaxRetiredBytes {
+			return errors.New("ledger retired entries exceed the size budget")
+		}
+	}
+	for _, retired := range record.Retired {
+		if retired.Record == nil {
+			return errors.New("ledger retired record is required")
+		}
+		if retired.Record.Retired != nil {
+			return errors.New("ledger retired record is recursive")
+		}
+		if retired.Attempts < 0 || retired.Attempts > 3 {
+			return errors.New("ledger retired attempts are invalid")
+		}
+		if err := validateEvidence(retired.Record); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateRetiredJSON(data []byte) error {
+	if err := validateVersionThreeSessionJSON(data); err != nil {
+		return err
+	}
+	var presence struct {
+		Retired jsontext.Value `json:"retired"`
+	}
+	if err := json.Unmarshal(data, &presence); err != nil {
+		return errors.New("ledger retired entries are invalid")
+	}
+	retiredJSON := bytes.TrimSpace(presence.Retired)
+	if len(retiredJSON) == 0 {
+		return nil
+	}
+	if bytes.Equal(retiredJSON, []byte("null")) {
+		return errors.New("ledger retired entries cannot be null")
+	}
+	var entries []struct {
+		Record        jsontext.Value `json:"record"`
+		BudgetIssued  jsontext.Value `json:"budget_issued"`
+		StoppedReason jsontext.Value `json:"stopped_reason"`
+		Attempts      jsontext.Value `json:"attempts"`
+	}
+	if err := json.Unmarshal(retiredJSON, &entries); err != nil {
+		return errors.New("ledger retired entries are invalid")
+	}
+	for _, entry := range entries {
+		recordJSON := bytes.TrimSpace(entry.Record)
+		if len(recordJSON) == 0 || bytes.Equal(recordJSON, []byte("null")) {
+			return errors.New("ledger retired record is required")
+		}
+		budgetIssued := bytes.TrimSpace(entry.BudgetIssued)
+		if !bytes.Equal(budgetIssued, []byte("true")) &&
+			!bytes.Equal(budgetIssued, []byte("false")) {
+			return errors.New("ledger retired budget marker is required")
+		}
+		attempts := bytes.TrimSpace(entry.Attempts)
+		if len(attempts) == 0 || bytes.Equal(attempts, []byte("null")) {
+			return errors.New("ledger retired attempts are required")
+		}
+		stoppedReason := bytes.TrimSpace(entry.StoppedReason)
+		if bytes.Equal(stoppedReason, []byte("null")) {
+			return errors.New("ledger retired stop reason cannot be null")
+		}
+		var nested struct {
+			Retired jsontext.Value `json:"retired"`
+		}
+		if err := json.Unmarshal(recordJSON, &nested); err != nil {
+			return errors.New("ledger retired record is invalid")
+		}
+		if len(nested.Retired) > 0 {
+			return errors.New("ledger retired record is recursive")
+		}
+		if hasExplicitEvidenceBooleanNull(recordJSON) {
+			return errors.New("ledger evidence boolean cannot be null")
+		}
+		if err := validateVersionThreeSessionJSON(recordJSON); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateVersionThreeSessionJSON(data []byte) error {
+	var presence struct {
+		Session *struct {
+			CreateCommand jsontext.Value `json:"create_command"`
+			DeviceID      jsontext.Value `json:"device_id"`
+			BootID        jsontext.Value `json:"boot_id"`
+		} `json:"session"`
+	}
+	if err := json.Unmarshal(data, &presence); err != nil {
+		return errors.New("ledger session is invalid")
+	}
+	if presence.Session == nil {
+		return nil
+	}
+	for _, value := range []jsontext.Value{
+		presence.Session.CreateCommand,
+		presence.Session.DeviceID,
+		presence.Session.BootID,
+	} {
+		if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			return errors.New("ledger session identity cannot be null")
 		}
 	}
 	return nil
@@ -215,11 +390,6 @@ func validateCheckedTaskIDs(ids []int) error {
 	return nil
 }
 
-func copyLedgerRecord(record *engine.Ledger) *engine.Ledger {
-	snapshot := *record
-	return &snapshot
-}
-
 // Save durably writes an immutable snapshot and returns the assigned revision.
 // It does not modify the caller's record or nested evidence.
 func (l *Ledger) Save(ctx context.Context, record *engine.Ledger) (int64, error) {
@@ -242,14 +412,17 @@ func (l *Ledger) Save(ctx context.Context, record *engine.Ledger) (int64, error)
 		}
 		l.loaded = true
 	}
-	next := l.revision + 1
-	snapshot := copyLedgerRecord(record)
-	snapshot.Format = ledgerFormat
-	snapshot.Version = ledgerVersionV2
-	snapshot.Revision = next
-	if err := validateEvidence(snapshot); err != nil {
+	if err := validateEvidence(record); err != nil {
 		return 0, err
 	}
+	if err := validateRetiredRecord(record); err != nil {
+		return 0, err
+	}
+	next := l.revision + 1
+	snapshot := engine.CloneLedger(record)
+	snapshot.Format = ledgerFormat
+	snapshot.Version = ledgerVersionV3
+	snapshot.Revision = next
 	data, err := json.Marshal(snapshot)
 	if err != nil {
 		return 0, fmt.Errorf("encode ledger: %w", err)

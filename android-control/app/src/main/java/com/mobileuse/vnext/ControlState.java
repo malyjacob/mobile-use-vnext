@@ -27,7 +27,7 @@ final class ControlState {
     final VirtualDisplayHost.Descriptor primaryDisplay;
     final VirtualDisplayHost.Descriptor display;
     final String displayError;
-    /** App 持有的虚拟屏尚未确认物理清理时为 true；此时不能显示干净待命。 */
+    /** App 仍持有退休尝试的收尾事实；只用于详情，不覆盖当前会话或模式文案。 */
     final boolean cleanupUnconfirmed;
     final boolean connected;
     final long lastSyncElapsedMs;
@@ -112,8 +112,8 @@ final class ControlState {
     }
 
     /**
-     * §5 主文案优先级：本地停止待同步 > 连接失鲜 > 资源清理风险 > 可用性阻塞/核验 >
-     * 当前会话/工作 > 待命。历史摘要不参与该映射。
+     * 主文案优先级：本地停止待同步 > 连接失鲜 > 当前可用性 > 当前会话/工作 > 待命。
+     * retired attempt 的清理事实只进入详情，不覆盖新 current。
      */
     String primaryText() {
         if (stopPending) {
@@ -122,12 +122,9 @@ final class ControlState {
         if (!fresh()) {
             return "连接中断 · 服务状态未知";
         }
-        if (cleanupRisk()) {
-            return "控制已停止 · 资源清理未确认";
-        }
         String availability = control.availability.state;
         if ("recovering".equals(availability)) {
-            return "正在核验上次资源";
+            return "正在核验当前控制能力";
         }
         if ("blocked".equals(availability)) {
             return "控制不可用 · 查看原因";
@@ -173,7 +170,7 @@ final class ControlState {
 
     /** 悬浮进度行只表达 work 类别，不显示节点、坐标、输入正文或命令。 */
     String overlayProgress() {
-        if (stopPending || !fresh() || cleanupRisk() || control.session == null) {
+        if (stopPending || !fresh() || control.session == null) {
             return primaryText();
         }
         ServiceClient.Work work = control.work;
@@ -268,6 +265,9 @@ final class ControlState {
 
     private void appendLocalFacts(StringBuilder detail) {
         detail.append("\n所选模式：").append(modeLabel(selectedMode));
+        if (cleanupUnconfirmed) {
+            detail.append("\n本机退休显示：仍有尝试等待真实终结或物理收尾");
+        }
         detail.append("\n通知：").append(notificationsEnabled
                 ? "可用" : "不可用 · 停止入口可能不可见");
         if (overlayIssue != null) {
@@ -280,14 +280,12 @@ final class ControlState {
         }
     }
 
-    /** 本地持有的虚拟屏尚未确认清理，或新鲜的服务摘要仍报告清理未确认。 */
+    /**
+     * Retired cleanup never rewrites a fresh current projection. The compatibility method
+     * only lets local history mark an otherwise stale/unknown view.
+     */
     boolean cleanupRisk() {
-        if (cleanupUnconfirmed) {
-            return true;
-        }
-        ServiceClient.Cleanup cleanup = cleanup();
-        return cleanup != null && ("pending".equals(cleanup.state)
-                || "unconfirmed".equals(cleanup.state));
+        return cleanupUnconfirmed && !fresh();
     }
 
     private static String cleanupText(ServiceClient.Cleanup cleanup) {

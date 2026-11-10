@@ -756,7 +756,7 @@ func TestDiscoverBuildsInstance(t *testing.T) {
 	mux.HandleFunc("/api/status", func(w http.ResponseWriter, request *http.Request) {
 		statusCaptures <- captureRequest(t, request)
 		writeResponse(w, http.StatusOK,
-			`{"can_start":false,"blocking_code":"cleanup_unconfirmed","start_operation_id":"P1","session":{"origin":"P1","state":"ended","mode":"virtual","agent":"local-agent"},"cleanup":{"state":"unconfirmed","execution":"confirmed","tasks":"confirmed","recents":"not_applicable","display":"unconfirmed"}}`)
+			`{"can_start":false,"blocking_code":"device_unavailable","start_operation_id":"P1","session":{"origin":"P1","state":"ended","mode":"virtual","agent":"local-agent"},"cleanup":{"state":"unconfirmed","execution":"confirmed","tasks":"confirmed","recents":"not_applicable","display":"unconfirmed"}}`)
 	})
 	server := httptest.NewServer(mux)
 	defer server.Close()
@@ -791,7 +791,7 @@ func TestDiscoverBuildsInstance(t *testing.T) {
 	if instance.CanStart {
 		t.Fatal("instance reported can_start=true")
 	}
-	if instance.BlockingCode != "cleanup_unconfirmed" {
+	if instance.BlockingCode != "device_unavailable" {
 		t.Fatalf("blocking code = %q", instance.BlockingCode)
 	}
 	if instance.StartOperationID != "P1" {

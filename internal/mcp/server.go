@@ -239,6 +239,15 @@ func (a *adapter) cancelled(call *preparedCall, operationID string, done <-chan 
 		}
 	}
 	if endResult != nil {
+		if base.RequestClosed == nil {
+			base.RequestClosed = endResult.RequestClosed
+		}
+		if !service && endResult.Error != nil && endResult.Error.Code == protocol.CodeOperationUnknown {
+			base.Error = endResult.Error
+			base.Outcome = "uncertain"
+			base.Phase = endResult.Phase
+			base.Recovery = endResult.Recovery
+		}
 		if !base.IncludeSession {
 			base.IncludeSession = endResult.IncludeSession
 			base.Session = endResult.Session

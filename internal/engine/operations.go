@@ -72,7 +72,7 @@ func (e *Engine) registerOperationBound(p, agent, kind string, bindSession bool)
 		_ = closedAt
 		closed := true
 		return nil, &protocol.Result{
-			OperationID: p, OperationState: OperationFinished, Outcome: OutcomeNotExecuted,
+			OperationID: p, OperationState: OperationFinished, Outcome: closedOutcome(e.closedKnown[p]),
 			RequestClosed: &closed,
 			Recovery: planRecovery(recoveryInput{
 				Reference: protocol.RecoveryReferenceP, Code: protocol.CodeRequestClosed,
@@ -138,6 +138,9 @@ func (e *Engine) finishOperation(op *operationState, outcome, phase string, apiE
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if op.State == OperationFinished {
+		return op.Recovery
+	}
 	op.State = OperationFinished
 	op.Outcome = outcome
 	op.Phase = phase
@@ -154,7 +157,7 @@ func (e *Engine) finishOperation(op *operationState, outcome, phase string, apiE
 	op.Recovery = planRecovery(recoveryInput{
 		Tool: op.Kind, Reference: op.Reference, Code: code, Phase: phase,
 		Outcome: outcome, Claimed: op.Claimed, InputState: inputState,
-		Cleanup: cleanupValue(e.cleanup),
+		Cleanup: cleanupValue(e.cleanupForOriginLocked(op.SessionOrigin)),
 	})
 	op.Recovery = e.durabilityRecoveryLocked(protocol.RecoveryReferenceP, inputState, op.Recovery)
 	return op.Recovery
@@ -176,6 +179,7 @@ func (e *Engine) setOperationReference(op *operationState, reference string) {
 func (e *Engine) acquireWork(op *operationState, kind string) (*workState, *protocol.APIError) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	e.detachRetiredLocked(time.Now())
 	if e.shuttingDown {
 		return nil, protocol.NewError(503, protocol.CodeDeviceUnavailable, "服务正在退出")
 	}
@@ -208,13 +212,19 @@ func (e *Engine) acquireWork(op *operationState, kind string) (*workState, *prot
 	case WorkShell:
 		timeout = 65 * time.Second
 	}
+	if e.maintenanceCancel != nil {
+		e.maintenanceCancel()
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	work := &workState{
 		OperationID: op.ID, Agent: op.Agent, Kind: kind, Phase: "admitted",
-		Start: time.Now(), Ctx: ctx, Cancel: cancel,
+		Start: time.Now(), Deadline: time.Now().Add(timeout), Ctx: ctx, Cancel: cancel, Projector: e.projector,
 	}
 	if e.session != nil {
 		work.SessionEpoch = e.session.Epoch
+		if e.projectorFactory != nil && e.session.State != SessionEnded && e.session.Projector != nil {
+			work.Projector = e.session.Projector
+		}
 	}
 	e.work = work
 	e.broadcastAppLocked()
@@ -241,6 +251,7 @@ func (e *Engine) releaseWork(work *workState) {
 		if work.Cancel != nil {
 			work.Cancel()
 		}
+		e.detachRetiredLocked(time.Now())
 		e.broadcastAppLocked()
 	}
 	e.mu.Unlock()

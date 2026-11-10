@@ -7,24 +7,25 @@ import "time"
 // trees, images, input text, commands or shell output. The single serialized
 // object is bounded to 64 KiB by the store.
 type Ledger struct {
-	Format            string         `json:"format"`
-	Version           int            `json:"version"`
-	Revision          int64          `json:"revision"`
-	ServiceInstanceID string         `json:"service_instance_id"`
-	UpdatedAt         time.Time      `json:"updated_at"`
-	AppInstanceID     string         `json:"app_instance_id,omitempty"`
-	Session           *LedgerSession `json:"session,omitempty"`
-	PendingCreate     *LedgerCommand `json:"pending_create,omitempty"`
-	PendingClose      *LedgerCommand `json:"pending_close,omitempty"`
-	Cleanup           *LedgerCleanup `json:"cleanup,omitempty"`
+	DroppedUnconfirmed uint64         `json:"dropped_unconfirmed,omitzero"`
+	Format             string         `json:"format"`
+	Version            int            `json:"version"`
+	Revision           int64          `json:"revision"`
+	ServiceInstanceID  string         `json:"service_instance_id"`
+	UpdatedAt          time.Time      `json:"updated_at"`
+	AppInstanceID      string         `json:"app_instance_id,omitempty"`
+	Session            *LedgerSession `json:"session,omitempty"`
+	PendingCreate      *LedgerCommand `json:"pending_create,omitempty"`
+	PendingClose       *LedgerCommand `json:"pending_close,omitempty"`
+	Cleanup            *LedgerCleanup `json:"cleanup,omitempty"`
 	// Tasks are exact owned window identities for virtual sessions. The list
 	// is bounded and contains no window content.
 	Tasks []LedgerTask `json:"tasks,omitempty"`
 	// Stop carries the bound stop boundary so a restart keeps the admission
 	// barrier even when the original App instance is gone.
 	Stop *LedgerStop `json:"stop,omitempty"`
-	// Shell is the managed runner ownership that must be resolved before any
-	// new ordinary work is admitted. It carries identity, phase and bounded
+	// Shell is managed runner ownership retained for exact bounded cleanup and
+	// late termination evidence. It carries identity, phase and bounded
 	// counters only: never the command, its output, hashes or error strings.
 	Shell *LedgerShell `json:"shell,omitempty"`
 	// UI is the durable identity and minimum end receipt of one UI input
@@ -37,6 +38,18 @@ type Ledger struct {
 	// LegacyUIPending preserves the need to establish a legacy UI checkpoint
 	// before any later save can erase the original version-one evidence.
 	LegacyUIPending bool `json:"legacy_ui_pending,omitempty"`
+	// Retired holds the bounded ownership records that no longer have ordinary
+	// dispatch authority but may still need exact cleanup.
+	Retired []LedgerRetired `json:"retired,omitempty"`
+}
+
+// LedgerRetired wraps one frozen ownership record with the bounded cleanup
+// budget facts. The nested record must not contain another Retired slice.
+type LedgerRetired struct {
+	Record        *Ledger `json:"record"`
+	BudgetIssued  bool    `json:"budget_issued"`
+	StoppedReason string  `json:"stopped_reason,omitempty"`
+	Attempts      int     `json:"attempts"`
 }
 
 // LedgerShell is the durable identity and minimum end receipt of one managed
@@ -80,6 +93,9 @@ type LedgerSession struct {
 	State             string    `json:"state"`
 	AppInstanceID     string    `json:"app_instance_id"`
 	ModeGeneration    string    `json:"mode_generation"`
+	CreateCommand     string    `json:"create_command,omitempty"`
+	DeviceID          string    `json:"device_id,omitempty"`
+	BootID            string    `json:"boot_id,omitempty"`
 	DisplayID         int       `json:"display_id"`
 	SFID              uint64    `json:"sf_id"`
 	DisplayGeneration string    `json:"display_generation"`
@@ -160,8 +176,77 @@ type LedgerStop struct {
 	AcceptedAt    time.Time `json:"accepted_at"`
 }
 
+// CloneLedger returns a deep copy of the ownership record. Retired entries
+// copy one nested record level only because recursive retirement is invalid.
+func CloneLedger(record *Ledger) *Ledger {
+	return cloneLedger(record, true)
+}
+
+func cloneLedger(record *Ledger, includeRetired bool) *Ledger {
+	if record == nil {
+		return nil
+	}
+	clone := *record
+	if record.Session != nil {
+		value := *record.Session
+		clone.Session = &value
+	}
+	if record.PendingCreate != nil {
+		value := *record.PendingCreate
+		clone.PendingCreate = &value
+	}
+	if record.PendingClose != nil {
+		value := *record.PendingClose
+		clone.PendingClose = &value
+	}
+	if record.Cleanup != nil {
+		value := *record.Cleanup
+		if value.CheckedTaskIDs != nil {
+			value.CheckedTaskIDs = append([]int{}, value.CheckedTaskIDs...)
+		}
+		clone.Cleanup = &value
+	}
+	if record.Tasks != nil {
+		clone.Tasks = append([]LedgerTask{}, record.Tasks...)
+	}
+	if record.Stop != nil {
+		value := *record.Stop
+		clone.Stop = &value
+	}
+	if record.Shell != nil {
+		value := *record.Shell
+		if value.ExitCode != nil {
+			exitCode := *value.ExitCode
+			value.ExitCode = &exitCode
+		}
+		if value.Truncated != nil {
+			truncated := *value.Truncated
+			value.Truncated = &truncated
+		}
+		clone.Shell = &value
+	}
+	if record.UI != nil {
+		value := *record.UI
+		clone.UI = &value
+	}
+	if record.LegacyUI != nil {
+		value := *record.LegacyUI
+		clone.LegacyUI = &value
+	}
+	if includeRetired && record.Retired != nil {
+		clone.Retired = make([]LedgerRetired, len(record.Retired))
+		for i, retired := range record.Retired {
+			clone.Retired[i] = retired
+			clone.Retired[i].Record = cloneLedger(retired.Record, false)
+		}
+	} else {
+		clone.Retired = nil
+	}
+	return &clone
+}
+
 // Ledger format constants.
 const (
 	ledgerFormat  = "mobile-use-vnext-ledger"
-	ledgerVersion = 2
+	ledgerVersion = 3
 )

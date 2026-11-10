@@ -18,7 +18,7 @@ type observeTarget struct {
 // Observe performs one new read-only acquisition for an existing session. It
 // never creates a session, never changes ownership and never confirms another
 // caller's baseline.
-func (e *Engine) Observe(ctx context.Context, agent, p string, req *protocol.ObserveRequest) (*protocol.Result, *protocol.APIError) {
+func (e *Engine) Observe(ctx context.Context, agent, p string, req *protocol.ObserveRequest) (finalResult *protocol.Result, finalErr *protocol.APIError) {
 	op, duplicate, apiErr := e.registerOperation(p, agent, "observe")
 	if apiErr != nil {
 		return nil, apiErr
@@ -26,6 +26,7 @@ func (e *Engine) Observe(ctx context.Context, agent, p string, req *protocol.Obs
 	if duplicate != nil {
 		return duplicate, nil
 	}
+	defer func() { e.applyFrozenResult(op, &finalResult) }()
 	e.setOperationReference(op, referenceKind(req.Reference))
 	target, resolveErr := e.resolveObserveTarget(agent, req.Reference)
 	if resolveErr != nil {

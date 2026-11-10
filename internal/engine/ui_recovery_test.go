@@ -6,6 +6,7 @@ import (
 	"errors"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -156,134 +157,146 @@ func TestRestoreUIRecoveryDeepCopiesEvidence(t *testing.T) {
 	}
 }
 
-func TestLegacyUICheckpointPersistsBeforeRebootGuidance(t *testing.T) {
+func TestLegacyUIRecoveryRetiresWithoutRebootGuidance(t *testing.T) {
 	record := uiRecoveryTestLedger(1, nil)
 	originalSession := copyUIRecoveryLedgerForTest(record).Session
 	dev := newFakeDevice()
 	setUIRecoveryIdentity(dev, device.BootIdentity{DeviceID: "device-test", BootID: uiRecoveryBootA}, nil)
 	e, store := newUIRecoveryTestEngine(record, dev)
 
-	resolved, bootChanged, reason := e.resolveRecoveryUI(context.Background(), record)
-	if resolved || bootChanged || reason != "ui_input_reboot_required" {
-		t.Fatalf("first legacy resolution=(%v,%v,%q), want retained after durable checkpoint", resolved, bootChanged, reason)
+	syncRecovery(t, e, readySync())
+	waitRecoveryAttempt(t, e)
+	waitRetiredCleanupStopped(t, e, "Pold")
+	assertCanStart(t, e)
+	retired := retiredLedgerForOrigin(t, e, "Pold")
+	if !reflect.DeepEqual(retired.Record.Session, &LedgerSession{
+		Origin: "Pold", Agent: "agent", Mode: "virtual", State: SessionEnded,
+		AppInstanceID: testAppID, ModeGeneration: testModeID,
+		DisplayID: 12, DisplayGeneration: testDisplayGen,
+		Width: 1080, Height: 2400, Density: 420,
+		StartedAt: originalSession.StartedAt,
+	}) {
+		t.Fatalf("legacy migration rewrote the original session: %+v", retired.Record.Session)
 	}
-	if store.saveCount() != 1 {
-		t.Fatalf("checkpoint save count=%d, want 1", store.saveCount())
+	if retired.Record.Cleanup == nil ||
+		retired.Record.Cleanup.ExecReason != "ui_input" ||
+		retired.Record.Cleanup.Execution != protocol.CleanupUnconfirmed {
+		t.Fatalf("legacy UI uncertainty was not preserved: %+v", retired.Record.Cleanup)
 	}
-	first := store.lastSave(t)
-	if first.Version != 2 || first.LegacyUI == nil ||
-		first.LegacyUI.Origin != "Pold" || first.LegacyUI.DeviceID != "device-test" ||
-		first.LegacyUI.BootID != uiRecoveryBootA {
-		t.Fatalf("legacy checkpoint was not durably projected: %+v", first)
+	if retired.Record.LegacyUI != nil {
+		t.Fatalf("legacy migration invented checkpoint evidence: %+v", retired.Record.LegacyUI)
 	}
-	e.mu.Lock()
-	ready := e.uiCheckpointReady
-	e.mu.Unlock()
-	if !ready {
-		t.Fatal("checkpoint was saved but remained non-durable in engine state")
-	}
-
-	setUIRecoveryIdentity(dev, device.BootIdentity{DeviceID: "device-test", BootID: uiRecoveryBootB}, nil)
-	resolved, bootChanged, reason = e.resolveRecoveryUI(context.Background(), record)
-	if !resolved || !bootChanged || reason != "" {
-		t.Fatalf("cross-boot legacy resolution=(%v,%v,%q)", resolved, bootChanged, reason)
-	}
-	if store.saveCount() != 2 {
-		t.Fatalf("execution promotion save count=%d, want 2", store.saveCount())
-	}
-	second := store.lastSave(t)
-	if second.Cleanup == nil || second.Cleanup.Execution != protocol.CleanupConfirmed ||
-		second.Cleanup.State != protocol.CleanupUnconfirmed {
-		t.Fatalf("cross boot did not promote only execution: %+v", second.Cleanup)
-	}
-	if !reflect.DeepEqual(second.Session, originalSession) {
-		t.Fatalf("cross boot rewrote old session responsibility: %+v", second.Session)
-	}
-	if second.LegacyUI == nil || *second.LegacyUI != *first.LegacyUI {
-		t.Fatalf("checkpoint changed after retry: first=%+v second=%+v", first.LegacyUI, second.LegacyUI)
+	saved := store.lastSave(t)
+	if saved.Version != ledgerVersion || saved.Session != nil || saved.Cleanup != nil ||
+		saved.UI != nil || saved.LegacyUI != nil || len(saved.Retired) != 1 {
+		t.Fatalf("v1 migration was not written as top-level-clean v3: %+v", saved)
 	}
 	e.mu.Lock()
 	operationCount := len(e.operations)
+	_, oldOperationPreserved := e.operations["Pold"]
 	e.mu.Unlock()
-	if operationCount != 0 {
-		t.Fatalf("cross boot invented or rewrote P records: %d", operationCount)
+	if operationCount != 1 || !oldOperationPreserved {
+		t.Fatalf("legacy migration invented or rewrote operation routes: %d", operationCount)
 	}
 }
 
-func TestLegacyUIPendingSurvivesSameBootRetryAndRestart(t *testing.T) {
+func TestMigratedLegacyUIRetiredSurvivesRestartWithoutRebudget(t *testing.T) {
 	record := uiRecoveryTestLedger(1, nil)
 	dev := newFakeDevice()
 	setUIRecoveryIdentity(dev, device.BootIdentity{DeviceID: "device-test", BootID: uiRecoveryBootA}, nil)
 	e, store := newUIRecoveryTestEngine(record, dev)
 
-	resolved, bootChanged, reason := e.resolveRecoveryUI(context.Background(), record)
-	if resolved || bootChanged || reason != "ui_input_reboot_required" {
-		t.Fatalf("first legacy resolution=(%v,%v,%q)", resolved, bootChanged, reason)
-	}
+	syncRecovery(t, e, readySync())
+	waitRecoveryAttempt(t, e)
+	waitRetiredCleanupStopped(t, e, "Pold")
 	first := store.lastSave(t)
-	if !first.LegacyUIPending {
-		t.Fatal("checkpoint save lost the version 2 legacy migration marker")
+	if first.Version != ledgerVersion || len(first.Retired) != 1 ||
+		!first.Retired[0].BudgetIssued {
+		t.Fatalf("v1 UI migration was not durably retired: %+v", first)
 	}
-	if !record.LegacyUIPending {
-		t.Fatal("committed recovery record lost the version 2 legacy migration marker")
-	}
+	firstAttempts := first.Retired[0].Attempts
 
-	resolved, bootChanged, reason = e.resolveRecoveryUI(context.Background(), record)
-	if resolved || bootChanged || reason != "ui_input_reboot_required" {
-		t.Fatalf("same-boot retry=(%v,%v,%q)", resolved, bootChanged, reason)
+	restarted, restartedStore := newUIRecoveryTestEngine(copyUIRecoveryLedgerForTest(first), newFakeDevice())
+	syncRecovery(t, restarted, readySync())
+	waitRecoveryAttempt(t, restarted)
+	waitRetiredCleanupStopped(t, restarted, "Pold")
+	assertCanStart(t, restarted)
+	deadline := time.NewTimer(3 * time.Second)
+	defer deadline.Stop()
+	for restartedStore.saveCount() == 0 {
+		select {
+		case <-time.After(10 * time.Millisecond):
+		case <-deadline.C:
+			t.Fatal("restart retirement snapshot was not saved")
+		}
 	}
-	if !record.LegacyUIPending || store.saveCount() != 1 {
-		t.Fatal("same-boot retry dropped the marker or rewrote the immutable checkpoint")
+	second := restartedStore.lastSave(t)
+	if second.Version != ledgerVersion || len(second.Retired) != 1 {
+		t.Fatalf("restart lost the v3 retired record: %+v", second)
 	}
-
-	restartedRecord := copyUIRecoveryLedgerForTest(first)
-	restartedDevice := newFakeDevice()
-	setUIRecoveryIdentity(restartedDevice, device.BootIdentity{DeviceID: "device-test", BootID: uiRecoveryBootA}, nil)
-	restarted, restartedStore := newUIRecoveryTestEngine(restartedRecord, restartedDevice)
-	resolved, bootChanged, reason = restarted.resolveRecoveryUI(context.Background(), restartedRecord)
-	if resolved || bootChanged || reason != "ui_input_reboot_required" {
-		t.Fatalf("restart same-boot resolution=(%v,%v,%q)", resolved, bootChanged, reason)
+	retired := second.Retired[0]
+	if !retired.BudgetIssued || retired.Attempts != firstAttempts ||
+		retired.StoppedReason != "cleanup_restart_stopped" {
+		t.Fatalf("restart renewed or reset the retired budget: %+v", retired)
 	}
-	if !restartedRecord.LegacyUIPending || restartedStore.saveCount() != 0 {
-		t.Fatal("restart lost the migration marker or unexpectedly rewrote the checkpoint")
+	if retired.Record == nil || retired.Record.Cleanup == nil ||
+		retired.Record.Cleanup.Execution != protocol.CleanupUnconfirmed {
+		t.Fatalf("restart fabricated a confirmed UI end: %+v", retired.Record)
 	}
 }
 
-func TestLegacyUIPendingSnapshotSurvivesRestartUntilCheckpoint(t *testing.T) {
+func TestLegacyUIRecoveryPersistsRetiredBeforeCompensation(t *testing.T) {
 	record := uiRecoveryTestLedger(1, nil)
-	dev := newFakeDevice()
-	setUIRecoveryIdentity(dev, device.BootIdentity{DeviceID: "device-test", BootID: uiRecoveryBootA}, nil)
-	e, _ := newUIRecoveryTestEngine(record, dev)
-	e.mu.Lock()
-	snapshot := copyUIRecoveryLedgerForTest(e.ledgerRecordLocked())
-	e.mu.Unlock()
-	snapshot.Version = 2
-	if !snapshot.LegacyUIPending || snapshot.LegacyUI != nil {
-		t.Fatalf("pre-checkpoint sync snapshot lost the migration need: %+v", snapshot)
+	var deviceIO atomic.Bool
+	base := newFakeDevice()
+	dev := &hookedDevice{
+		Device: base,
+		probe: func(ctx context.Context, id int) (device.DisplayState, error) {
+			deviceIO.Store(true)
+			return base.ProbeDisplay(ctx, id)
+		},
+		tasks: func(ctx context.Context) ([]device.Task, error) {
+			deviceIO.Store(true)
+			return base.TaskList(ctx)
+		},
 	}
-
-	restartedDevice := newFakeDevice()
-	setUIRecoveryIdentity(restartedDevice, device.BootIdentity{DeviceID: "device-test", BootID: uiRecoveryBootA}, nil)
-	restarted, store := newUIRecoveryTestEngine(snapshot, restartedDevice)
-	resolved, bootChanged, reason := restarted.resolveRecoveryUI(context.Background(), snapshot)
-	if resolved || bootChanged || reason != "ui_input_reboot_required" {
-		t.Fatalf("v2 pending snapshot resolution=(%v,%v,%q)", resolved, bootChanged, reason)
-	}
-	if !snapshot.LegacyUIPending || snapshot.LegacyUI == nil {
-		t.Fatal("restart resolution did not retain the marker and establish the checkpoint")
-	}
+	setUIRecoveryIdentity(base, device.BootIdentity{DeviceID: "device-test", BootID: uiRecoveryBootA}, nil)
+	e, store := newUIRecoveryTestEngine(record, dev)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	store.setSaveHook(func(ctx context.Context, candidate *Ledger) error {
+		if len(candidate.Retired) == 0 {
+			return nil
+		}
+		once.Do(func() {
+			close(entered)
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+		})
+		return nil
+	})
+	done := make(chan struct{})
+	go func() {
+		syncRecovery(t, e, readySync())
+		close(done)
+	}()
+	awaitSignal(t, entered)
 	saved := store.lastSave(t)
-	if !saved.LegacyUIPending || saved.LegacyUI == nil {
-		t.Fatalf("checkpoint save dropped restart migration evidence: %+v", saved)
+	if saved.Version != ledgerVersion || saved.Session != nil ||
+		saved.Cleanup != nil || len(saved.Retired) != 1 ||
+		saved.Retired[0].Record == nil || saved.Retired[0].Record.Cleanup == nil ||
+		saved.Retired[0].Record.Cleanup.ExecReason != "ui_input" {
+		t.Fatalf("retirement was not durably captured before compensation: %+v", saved)
 	}
-
-	resolved, bootChanged, reason = restarted.resolveRecoveryUI(context.Background(), snapshot)
-	if resolved || bootChanged || reason != "ui_input_reboot_required" {
-		t.Fatalf("post-checkpoint same-boot retry=(%v,%v,%q)", resolved, bootChanged, reason)
+	if deviceIO.Load() {
+		t.Fatal("physical cleanup started before the retired snapshot was saved")
 	}
-	if !snapshot.LegacyUIPending || store.saveCount() != 1 {
-		t.Fatal("same-boot retry dropped the marker or rewrote the checkpoint")
-	}
+	close(release)
+	awaitSignal(t, done)
+	waitRecoveryAttempt(t, e)
+	waitRetiredCleanupStopped(t, e, "Pold")
 }
 
 func TestLegacyUIPendingUsesOriginalSessionAndCleanupFacts(t *testing.T) {
@@ -302,9 +315,8 @@ func TestLegacyUIPendingUsesOriginalSessionAndCleanupFacts(t *testing.T) {
 	}
 }
 
-func TestLegacyUICheckpointSaveFailureNeverClaimsRebootGuidance(t *testing.T) {
+func TestLegacyUIRecoverySaveFailureIsCurrentCapabilityGate(t *testing.T) {
 	record := uiRecoveryTestLedger(1, nil)
-	before := copyUIRecoveryLedgerForTest(record)
 	dev := newFakeDevice()
 	setUIRecoveryIdentity(dev, device.BootIdentity{DeviceID: "device-test", BootID: uiRecoveryBootA}, nil)
 	e, store := newUIRecoveryTestEngine(record, dev)
@@ -312,30 +324,27 @@ func TestLegacyUICheckpointSaveFailureNeverClaimsRebootGuidance(t *testing.T) {
 		return errors.New("synthetic ledger failure")
 	})
 
-	resolved, bootChanged, reason := e.resolveRecoveryUI(context.Background(), record)
-	if resolved || bootChanged || reason != "ledger_unavailable" {
-		t.Fatalf("failed checkpoint save=(%v,%v,%q)", resolved, bootChanged, reason)
+	syncRecovery(t, e, readySync())
+	waitRecoveryAttempt(t, e)
+	status, apiErr := e.Status("agent", "")
+	if apiErr != nil || status.CanStart == nil || *status.CanStart ||
+		status.BlockingCode != "ledger_unavailable" {
+		t.Fatalf("failed retirement save did not remain a current ledger gate: %+v %v", status, apiErr)
 	}
-	if !reflect.DeepEqual(record, before) {
-		t.Fatalf("failed candidate changed public recovery state: %+v", record)
+	if status.Recovery != nil && status.Recovery.Entry == protocol.RecoveryEntryUser {
+		t.Fatalf("failed retirement save requested an unnecessary reboot: %+v", status.Recovery)
 	}
-	e.mu.Lock()
-	ready, pending := e.uiCheckpointReady, e.legacyUI
-	e.mu.Unlock()
-	if ready || pending == nil {
-		t.Fatalf("failed save checkpoint state ready=%v pending=%+v", ready, pending)
+	retired := retiredLedgerForOrigin(t, e, "Pold")
+	if retired.Record.Cleanup == nil ||
+		retired.Record.Cleanup.Execution != protocol.CleanupUnconfirmed {
+		t.Fatalf("failed save fabricated confirmed execution: %+v", retired.Record.Cleanup)
 	}
-	pendingBefore := *pending
 
 	store.setSaveHook(nil)
-	resolved, bootChanged, reason = e.resolveRecoveryUI(context.Background(), record)
-	if resolved || bootChanged || reason != "ui_input_reboot_required" {
-		t.Fatalf("retry after save recovery=(%v,%v,%q)", resolved, bootChanged, reason)
+	if err := e.persistSync(context.Background()); err != nil {
+		t.Fatalf("retry after save recovery: %v", err)
 	}
-	saved := store.lastSave(t)
-	if saved.LegacyUI == nil || *saved.LegacyUI != pendingBefore {
-		t.Fatalf("retry replaced immutable pending checkpoint: saved=%+v pending=%+v", saved.LegacyUI, pendingBefore)
-	}
+	assertCanStart(t, e)
 }
 
 func TestUIRecoveryUnsafeIdentityRetainsResponsibility(t *testing.T) {
@@ -367,49 +376,93 @@ func TestUIRecoveryUnsafeIdentityRetainsResponsibility(t *testing.T) {
 	}
 }
 
-func TestV2UIRecoverySameBootRequiresReboot(t *testing.T) {
+func TestV2UIRecoverySameBootRetiresWithoutRebootGate(t *testing.T) {
 	record := uiRecoveryTestLedger(2, uiRecoveryTestUI("may_dispatch"))
 	dev := newFakeDevice()
 	setUIRecoveryIdentity(dev, device.BootIdentity{DeviceID: "device-test", BootID: uiRecoveryBootA}, nil)
 	e, store := newUIRecoveryTestEngine(record, dev)
 
-	resolved, bootChanged, reason := e.resolveRecoveryUI(context.Background(), record)
-	if resolved || bootChanged || reason != "ui_input_reboot_required" {
-		t.Fatalf("same-boot UI resolution=(%v,%v,%q)", resolved, bootChanged, reason)
+	syncRecovery(t, e, readySync())
+	waitRecoveryAttempt(t, e)
+	waitRetiredCleanupStopped(t, e, "Pold")
+	assertCanStart(t, e)
+	retired := retiredLedgerForOrigin(t, e, "Pold")
+	if retired.Record.UI == nil || retired.Record.UI.State != "may_dispatch" ||
+		retired.Record.Cleanup == nil ||
+		retired.Record.Cleanup.Execution != protocol.CleanupUnconfirmed {
+		t.Fatalf("same-boot unknown UI was erased or confirmed: %+v", retired.Record)
 	}
-	if store.saveCount() != 0 {
-		t.Fatal("same-boot durable UI state caused a redundant save before recovery")
+	saved := store.lastSave(t)
+	if saved.Session != nil || saved.UI != nil || len(saved.Retired) != 1 {
+		t.Fatalf("same-boot UI remained in v3 current fields: %+v", saved)
 	}
 }
 
 func TestV2UIRecoveryCrossBootPromotesOnlyExecution(t *testing.T) {
 	record := uiRecoveryTestLedger(2, uiRecoveryTestUI("may_dispatch"))
-	before := copyUIRecoveryLedgerForTest(record)
-	dev := newFakeDevice()
-	setUIRecoveryIdentity(dev, device.BootIdentity{DeviceID: "device-test", BootID: uiRecoveryBootB}, nil)
+	base := newFakeDevice()
+	setUIRecoveryIdentity(base, device.BootIdentity{DeviceID: "device-test", BootID: uiRecoveryBootB}, nil)
+	base.mu.Lock()
+	base.displayExists = false
+	base.mu.Unlock()
+	entered, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	releaseIO := func() {
+		releaseOnce.Do(func() { close(release) })
+	}
+	defer releaseIO()
+	var physicalRead sync.Once
+	dev := &hookedDevice{
+		Device: base,
+		tasks: func(ctx context.Context) ([]device.Task, error) {
+			physicalRead.Do(func() { close(entered) })
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			return base.TaskList(ctx)
+		},
+	}
 	e, store := newUIRecoveryTestEngine(record, dev)
 
-	resolved, bootChanged, reason := e.resolveRecoveryUI(context.Background(), record)
-	if !resolved || !bootChanged || reason != "" {
-		t.Fatalf("cross-boot UI resolution=(%v,%v,%q)", resolved, bootChanged, reason)
+	syncRecovery(t, e, readySync())
+	awaitSignal(t, entered)
+	retired := retiredLedgerForOrigin(t, e, "Pold")
+	if retired.Record.Cleanup == nil ||
+		retired.Record.Cleanup.Execution != protocol.CleanupConfirmed ||
+		!retired.Record.Cleanup.ExecutionRecheckRequired {
+		t.Errorf("cross-boot promotion lost its physical recheck before device I/O: %+v", retired.Record.Cleanup)
 	}
-	if store.saveCount() != 1 {
-		t.Fatalf("cross-boot promotion save count=%d, want 1", store.saveCount())
+	if retired.Record.UI == nil || retired.Record.UI.State != "may_dispatch" {
+		t.Errorf("cross boot rewrote the original UI token: %+v", retired.Record.UI)
+	}
+	if t.Failed() {
+		return
 	}
 	saved := store.lastSave(t)
-	if saved.Cleanup == nil || saved.Cleanup.Execution != protocol.CleanupConfirmed {
-		t.Fatalf("execution was not promoted: %+v", saved.Cleanup)
+	if saved.Version != ledgerVersion || saved.Session != nil ||
+		saved.UI != nil || saved.Cleanup != nil || len(saved.Retired) != 1 {
+		t.Fatalf("pre-recheck retirement was not written as v3 retired ownership: %+v", saved)
 	}
-	wantCleanup := *before.Cleanup
-	wantCleanup.Execution = protocol.CleanupConfirmed
-	wantCleanup.ExecutionRecheckRequired = true
-	if !reflect.DeepEqual(saved.Cleanup, &wantCleanup) {
-		t.Fatalf("cross boot changed cleanup beyond execution:\ngot  %+v\nwant %+v", saved.Cleanup, &wantCleanup)
+	releaseIO()
+	waitRecoveryAttempt(t, e)
+	waitRetiredCleanupStopped(t, e, "Pold")
+	assertCanStart(t, e)
+	retired = retiredLedgerForOrigin(t, e, "Pold")
+	if retired.Record.Cleanup == nil || retired.Record.Cleanup.Execution != protocol.CleanupConfirmed ||
+		retired.Record.Cleanup.Recents != protocol.CleanupUnconfirmed ||
+		retired.Record.Cleanup.State == protocol.CleanupComplete {
+		t.Fatalf("cross-boot recheck trusted stale or unreadable physical recents: %+v", retired.Record.Cleanup)
 	}
-	if !reflect.DeepEqual(saved.Session, before.Session) ||
-		!reflect.DeepEqual(saved.UI, before.UI) ||
-		saved.Version != 2 {
-		t.Fatalf("cross boot rewrote unrelated responsibility: %+v", saved)
+	if retired.Record.UI == nil || retired.Record.UI.State != "may_dispatch" {
+		t.Fatalf("cross boot rewrote the original UI token: %+v", retired.Record.UI)
+	}
+	base.mu.Lock()
+	removals := append([]int(nil), base.removeCalls...)
+	base.mu.Unlock()
+	if len(removals) != 0 {
+		t.Fatalf("cross-boot recovery dispatched a destructive task removal: %v", removals)
 	}
 }
 
@@ -464,7 +517,7 @@ func TestTerminalUIDoesNotPromoteShellExecution(t *testing.T) {
 	}
 }
 
-func TestTerminalUIDoesNotReleasePendingLegacyCheckpoint(t *testing.T) {
+func TestTerminalUIDoesNotFabricateLegacyCheckpointRelease(t *testing.T) {
 	record := uiRecoveryTestLedger(2, uiRecoveryTestUI("terminated"))
 	record.LegacyUI = &LedgerUICheckpoint{
 		Origin: "Pold", DeviceID: "device-test", BootID: uiRecoveryBootA,
@@ -473,16 +526,27 @@ func TestTerminalUIDoesNotReleasePendingLegacyCheckpoint(t *testing.T) {
 	setUIRecoveryIdentity(dev, device.BootIdentity{DeviceID: "device-test", BootID: uiRecoveryBootA}, nil)
 	e, store := newUIRecoveryTestEngine(record, dev)
 
-	resolved, bootChanged, reason := e.resolveRecoveryUI(context.Background(), record)
-	if resolved || bootChanged || reason != "ui_input_reboot_required" {
-		t.Fatalf("terminal UI released pending legacy checkpoint: (%v,%v,%q)", resolved, bootChanged, reason)
+	syncRecovery(t, e, readySync())
+	waitRecoveryAttempt(t, e)
+	waitRetiredCleanupStopped(t, e, "Pold")
+	assertCanStart(t, e)
+	retired := retiredLedgerForOrigin(t, e, "Pold")
+	if retired.Record.LegacyUI == nil ||
+		*retired.Record.LegacyUI != *record.LegacyUI {
+		t.Fatalf("pending legacy checkpoint was lost or rewritten: %+v", retired.Record.LegacyUI)
 	}
-	if store.saveCount() != 0 || record.Cleanup.Execution != protocol.CleanupUnconfirmed {
-		t.Fatal("pending legacy checkpoint did not retain execution responsibility")
+	if retired.Record.Cleanup == nil ||
+		retired.Record.Cleanup.Execution != protocol.CleanupUnconfirmed ||
+		retired.Record.Cleanup.State == protocol.CleanupComplete {
+		t.Fatalf("terminal UI fabricated release of the legacy checkpoint: %+v", retired.Record.Cleanup)
+	}
+	saved := store.lastSave(t)
+	if saved.LegacyUI != nil || saved.Session != nil || len(saved.Retired) != 1 {
+		t.Fatalf("retired legacy checkpoint remained in current fields: %+v", saved)
 	}
 }
 
-func TestUIRecoverySnapshotDoesNotRestoreResolvedShell(t *testing.T) {
+func TestUIRecoveryRetiresShellInsteadOfRestoringCurrentOwnership(t *testing.T) {
 	record := uiRecoveryTestLedger(2, uiRecoveryTestUI("terminated"))
 	record.Shell = &LedgerShell{
 		RunnerID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -491,17 +555,16 @@ func TestUIRecoverySnapshotDoesNotRestoreResolvedShell(t *testing.T) {
 	dev := newFakeDevice()
 	setUIRecoveryIdentity(dev, device.BootIdentity{DeviceID: "device-test", BootID: uiRecoveryBootB}, nil)
 	e, store := newUIRecoveryTestEngine(record, dev)
-	e.mu.Lock()
-	e.shell = nil
-	e.mu.Unlock()
 
-	resolved, bootChanged, reason := e.resolveRecoveryUI(context.Background(), record)
-	if !resolved || !bootChanged || reason != "" {
-		t.Fatalf("terminal UI resolution=(%v,%v,%q)", resolved, bootChanged, reason)
-	}
+	syncRecovery(t, e, readySync())
+	waitRecoveryAttempt(t, e)
+	waitRetiredCleanupStopped(t, e, "Pold")
 	saved := store.lastSave(t)
-	if saved.Shell != nil {
-		t.Fatalf("UI recovery save resurrected a resolved shell chain: %+v", saved.Shell)
+	if saved.Shell != nil || saved.Session != nil || len(saved.Retired) != 1 ||
+		saved.Retired[0].Record == nil ||
+		saved.Retired[0].Record.Shell == nil ||
+		saved.Retired[0].Record.Shell.RunnerID != record.Shell.RunnerID {
+		t.Fatalf("UI recovery did not move the shell fact into retired ownership: %+v", saved)
 	}
 }
 

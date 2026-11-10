@@ -258,7 +258,7 @@ func recoveryCases() []planCase {
 		{"end cleanup pending", recoveryInput{Tool: "end", Phase: "ended", Outcome: executed,
 			Cleanup: protocol.CleanupPending}, wantRecovery(protocol.RecoveryEntryStatus, p, revoked, cleanup)},
 		{"end cleanup unconfirmed", recoveryInput{Tool: "end", Phase: "ended", Outcome: executed,
-			Cleanup: protocol.CleanupUnconfirmed}, wantRecovery(protocol.RecoveryEntryStatus, p, revoked, cleanup)},
+			Cleanup: protocol.CleanupUnconfirmed}, nil},
 		{"end cleanup complete", recoveryInput{Tool: "end", Phase: "ended", Outcome: executed,
 			Cleanup: protocol.CleanupComplete}, nil},
 		{"end closed before admission", recoveryInput{Tool: "end", Phase: "closed_before_admission",
@@ -296,6 +296,8 @@ func recoveryCases() []planCase {
 			wantRecovery(protocol.RecoveryEntryStatus, p, "", running)},
 		{"status operation cleanup pending", recoveryInput{Tool: "status", Reference: p, Phase: "operation",
 			Cleanup: protocol.CleanupPending}, wantRecovery(protocol.RecoveryEntryStatus, p, revoked, cleanup)},
+		{"status operation cleanup unconfirmed", recoveryInput{Tool: "status", Reference: p, Phase: "operation",
+			Cleanup: protocol.CleanupUnconfirmed}, nil},
 		{"status operation finished", recoveryInput{Tool: "status", Reference: p, Phase: "operation",
 			Cleanup: protocol.CleanupComplete}, nil},
 
@@ -695,7 +697,7 @@ func TestContractVersionMatchesGenerated(t *testing.T) {
 	if err := json.Unmarshal(data, &versions); err != nil {
 		t.Fatalf("decode version source: %v", err)
 	}
-	if versions.ContractVersion != 4 || protocol.ContractVersion != "4" {
+	if versions.ContractVersion != 5 || protocol.ContractVersion != "5" {
 		t.Fatalf("contract version source=%d compiled=%q, want 3",
 			versions.ContractVersion, protocol.ContractVersion)
 	}

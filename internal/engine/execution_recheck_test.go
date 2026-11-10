@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json/v2"
+	"sync"
 	"testing"
 
 	"github.com/malyjacob/mobile-use-vnext/internal/device"
@@ -12,41 +13,69 @@ import (
 func TestTerminalEvidenceSavesPhysicalRecheckObligation(t *testing.T) {
 	for _, source := range []string{"ui", "shell"} {
 		t.Run(source, func(t *testing.T) {
-			record := uiRecoveryTestLedger(2, uiRecoveryTestUI("may_dispatch"))
-			record.Session.State = SessionEnded
-			e, store := newUIRecoveryTestEngine(record, newFakeDevice())
-			e.mu.Lock()
-			e.restoreRecoveryLocked(record)
-			e.recovery = nil
-			// Model the crash window before any asynchronous physical recheck.
-			e.shuttingDown = true
-			work := &workState{UI: e.ui}
+			h := newHarnessWithClock(t, false)
+			session := &sessionState{
+				Origin: "Pold", Agent: "agent", Mode: "virtual", State: SessionEnded,
+				Epoch: 1, AppInstanceID: h.appInstance,
+				Display: device.Display{ID: 12, Generation: testDisplayGen},
+			}
+			cleanup := &cleanupState{
+				State: protocol.CleanupUnconfirmed, Execution: protocol.CleanupUnconfirmed,
+				Tasks: protocol.CleanupConfirmed, Recents: protocol.CleanupConfirmed,
+				Display: protocol.CleanupConfirmed,
+			}
+			retired := &retiredState{session: session, cleanup: cleanup}
+			var work *workState
+			var run *shellState
 			if source == "shell" {
-				e.ui = nil
-				e.cleanup.ExecReason = "shell_chain"
-				run := &shellState{State: ShellRunning, Origin: record.Session.Origin}
-				e.shell = run
-				e.noteShellTerminalLocked(run)
-				run.State = ShellConfirmed
-				e.cleanup.Execution = protocol.CleanupConfirmed
+				cleanup.ExecReason = "shell_chain"
+				run = &shellState{
+					RunnerID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+					Origin:   session.Origin, Agent: session.Agent, Epoch: session.Epoch,
+					State: ShellRunning,
+				}
+				retired.shell = run
+			} else {
+				cleanup.ExecReason = "ui_input"
+				token := &uiDispatchState{record: LedgerUI{
+					OperationID: "Pinput", Origin: session.Origin,
+					Epoch: session.Epoch, DisplayID: 12, State: "may_dispatch",
+				}}
+				retired.ui = token
+				work = &workState{UI: token}
 			}
-			e.mu.Unlock()
+			h.engine.mu.Lock()
+			h.engine.retired = []*retiredState{retired}
+			// Model the crash window before any asynchronous physical recheck.
+			h.engine.shuttingDown = true
+			h.engine.mu.Unlock()
 			if source == "ui" {
-				e.recordUIReceipt(work, device.DispatchTerminated)
-			} else if err := e.persistSync(context.Background()); err != nil {
-				t.Fatal(err)
+				h.engine.recordUIReceipt(work, device.DispatchTerminated)
+			} else {
+				h.engine.confirmShellBarrier(run, terminationCancelled, nil)
+				if err := h.engine.persistSync(context.Background()); err != nil {
+					t.Fatal(err)
+				}
 			}
-			data, err := json.Marshal(store.lastSave(t))
+			h.store.mu.Lock()
+			savedLedger := copyUIRecoveryLedgerForTest(h.store.record)
+			h.store.mu.Unlock()
+			data, err := json.Marshal(savedLedger)
 			if err != nil {
 				t.Fatal(err)
 			}
 			var saved struct {
-				Cleanup map[string]any `json:"cleanup"`
+				Retired []struct {
+					Record struct {
+						Cleanup map[string]any `json:"cleanup"`
+					} `json:"record"`
+				} `json:"retired"`
 			}
 			if err := json.Unmarshal(data, &saved); err != nil {
 				t.Fatal(err)
 			}
-			if saved.Cleanup["execution_recheck_required"] != true {
+			if len(saved.Retired) != 1 ||
+				saved.Retired[0].Record.Cleanup["execution_recheck_required"] != true {
 				t.Fatal("terminal evidence became durable without its physical recheck obligation")
 			}
 		})
@@ -77,25 +106,74 @@ func TestRestartRetainsPhysicalRecheckAfterTerminalEvidence(t *testing.T) {
 			if err := json.Unmarshal(data, &record); err != nil {
 				t.Fatal(err)
 			}
-			h := newHarnessWithClock(t, false)
-			setUIRecoveryIdentity(h.device, device.BootIdentity{DeviceID: "device-test", BootID: uiRecoveryBootA}, nil)
-			h.device.mu.Lock()
-			h.device.displayExists = false
-			h.device.recentKnown = true
-			h.device.recentIDs = map[int]bool{41: true}
-			h.device.mu.Unlock()
-			h.engine.mu.Lock()
-			h.engine.recovery = record
-			h.engine.recovering = true
-			h.engine.restoreRecoveryLocked(record)
-			h.engine.mu.Unlock()
-			h.engine.driveRecovery(context.Background())
-			status, apiErr := h.engine.Status("agent", "")
-			if apiErr != nil || status.CanStart == nil || *status.CanStart {
-				t.Fatal("restart accepted stale confirmed recents from before terminal evidence")
+			base := newFakeDevice()
+			setUIRecoveryIdentity(base, device.BootIdentity{DeviceID: "device-test", BootID: uiRecoveryBootA}, nil)
+			base.mu.Lock()
+			base.displayExists = false
+			base.recentKnown = true
+			base.recentIDs = map[int]bool{41: true}
+			base.mu.Unlock()
+			entered, release := make(chan struct{}), make(chan struct{})
+			var releaseOnce sync.Once
+			releaseIO := func() {
+				releaseOnce.Do(func() { close(release) })
 			}
-			if status.BlockingCode != "old_resource_unconfirmed" {
-				t.Fatalf("unexpected recovery gate: %s", status.BlockingCode)
+			defer releaseIO()
+			var physicalRead sync.Once
+			dev := &hookedDevice{
+				Device: base,
+				tasks: func(ctx context.Context) ([]device.Task, error) {
+					physicalRead.Do(func() { close(entered) })
+					select {
+					case <-release:
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					}
+					return base.TaskList(ctx)
+				},
+			}
+			e, store := newUIRecoveryTestEngine(record, dev)
+			syncRecovery(t, e, readySync())
+			awaitSignal(t, entered)
+			retired := retiredLedgerForOrigin(t, e, "Pold")
+			if retired.Record.Cleanup == nil ||
+				!retired.Record.Cleanup.ExecutionRecheckRequired ||
+				retired.Record.Cleanup.State == protocol.CleanupComplete ||
+				retired.Record.Cleanup.Recents != protocol.CleanupConfirmed {
+				t.Fatalf("retired snapshot lost the pre-restart recheck obligation: %+v", retired.Record.Cleanup)
+			}
+			saved := store.lastSave(t)
+			if saved.Version != ledgerVersion || saved.Session != nil ||
+				saved.Cleanup != nil || len(saved.Retired) != 1 ||
+				saved.Retired[0].Record == nil || saved.Retired[0].Record.Cleanup == nil ||
+				!saved.Retired[0].Record.Cleanup.ExecutionRecheckRequired {
+				t.Fatalf("recheck obligation was not durable before device I/O: %+v", saved)
+			}
+			releaseIO()
+			waitRecoveryAttempt(t, e)
+			waitRetiredCleanupStopped(t, e, "Pold")
+			assertCanStart(t, e)
+			retired = retiredLedgerForOrigin(t, e, "Pold")
+			base.mu.Lock()
+			removals := append([]int(nil), base.removeCalls...)
+			base.mu.Unlock()
+			if source == "ui" {
+				if retired.Record.Cleanup == nil ||
+					retired.Record.Cleanup.ExecutionRecheckRequired ||
+					retired.Record.Cleanup.State != protocol.CleanupComplete ||
+					retired.Record.Cleanup.Recents != protocol.CleanupConfirmed ||
+					len(removals) != 1 || removals[0] != 41 {
+					t.Fatalf("same-boot recheck did not replace stale recents with fresh physical evidence: cleanup=%+v removals=%v", retired.Record.Cleanup, removals)
+				}
+			} else {
+				if retired.Record.Cleanup == nil ||
+					retired.Record.Cleanup.Execution != protocol.CleanupConfirmed ||
+					retired.Record.Cleanup.ExecutionRecheckRequired ||
+					retired.Record.Cleanup.Recents != protocol.CleanupUnconfirmed ||
+					retired.Record.Cleanup.State == protocol.CleanupComplete ||
+					len(removals) != 0 {
+					t.Fatalf("identity-free shell recheck fabricated recents release or removal: cleanup=%+v removals=%v", retired.Record.Cleanup, removals)
+				}
 			}
 		})
 	}

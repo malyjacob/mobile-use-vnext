@@ -54,7 +54,7 @@ cmd/device-mcp
 权威：
 
 - 控制 App 只拥有自己的虚拟屏物理资源与显示生命周期，执行服务下发的
-  `create_display`/`close_display`；它不能接纳会话、签发观察或自行执行输入。
+  `create_display`/`close_display`/`cancel_create`；它不能接纳会话、签发观察或自行执行输入。
 - HTTP 认证通过后，工具请求仍必须由 engine 的准入、认领、提交条件逐项通过。
 - 客户端持有的 O/P 编号只是引用；编号形状不授予任何权限，归属由认证身份与服务端记录决定
   （`operationState.Agent`、`observationState.Agent`）。
@@ -74,8 +74,10 @@ engine 的状态锁只做有限内存检查与转换：锁内不等待 ADB、u2 
   `status` 查询不续租。硬上限 `SessionHardLimit=1h`，从 `start` 起算，不随续期突破。
 - 结束原因写入 `session.reason`，例如 `client_end`、`user_stop`、`lease_expired`、
   `app_restarted`、`service_shutdown`、`display_create_unconfirmed`。
-- 只有服务正在运行的会话（或收尾未完成时保留的 `lastSession`）会进入公开视图；收尾完成后
-  会话被清空，控制视图不再把它当作运行中会话。
+- 控制视图只投影当前会话；新会话开始后，旧会话不再占用当前槽位，只作为 engine 的有界
+  历史记录。`status()` 可给出本 Agent 最近的原会话，`status(O)`/`status(P)` 只按其仍保留的
+  原归属路由查询，缺失时不改绑到其它会话。公开 `cleanup` 必须与同一帧中的 `session` 同属
+  一个原会话，不能拼入另一会话或全局清理状态。
 
 ### O（观察）
 
@@ -91,17 +93,20 @@ engine 的状态锁只做有限内存检查与转换：锁内不等待 ADB、u2 
 
 ### P（操作）
 
-`P` 的公开状态为 `running → finished`；`status(P)` 可返回 `not_seen`。
+`P` 的公开状态为 `running → finished`；不存在的 P 返回 `409 operation_unknown`。
 
 - 每个工具在任何设备副作用之前登记 P
-  （`registerOperation`），可用 `X-Mobile-Use-Operation` 预分配；缺省时服务生成 `P<n>`。
-  格式为 `P` + 字母/数字/`-`/`_`，总长 ≤64。
+  （`registerOperation`），可用 `X-Mobile-Use-Operation` 预分配；客户端传入的 P 按原值登记。
+  缺省时服务生成带当前服务实例前缀的不透明 `P…`。格式为 `P` + 字母/数字/`-`/`_`，总长 ≤64；
+  调用方不得解析编号中的数值，也不得跨服务实例复用编号。
 - 同一 P 重复到达只返回原操作的公开视图，不再次派发（包括已失败的操作）。
 - P 记录上限 `MaxOperations=256`；淘汰只针对最旧的已完成、且不被会话/工作/O 保护的记录。
-- 已结束或显式封闭的 P（`end` 对未接纳/已结束的引用等）进入有界 `closed` 集合（最多 512），
-  之后返回 `request_closed=true`，不会重新执行。
-- 观察与 P 的公开编号在**同一服务实例内**单调：`O<n>`、`P<n>`；会话自身有 `epoch`，提交与
-  恢复都用它识别“原会话”。
+- 已结束或显式封闭的 P（`end` 对未接纳/已结束的引用等）进入有界 `closed` 集合（最多 512）。
+  有“未接纳”正面证据时返回 `request_closed=true`、`outcome=not_executed`；记录淘汰后只剩
+  “未来接纳已封闭”证据时，`end(P)` 返回 `409 operation_unknown`、`phase=reference_unknown`、
+  `outcome=uncertain` 与 `request_closed=true`，不声称原动作未执行，也不结束其它会话。
+- 服务生成的观察与 P 编号包含当前服务实例前缀，并在该实例内单调分配；会话自身有 `epoch`，
+  提交与恢复都用它识别“原会话”。
 
 ## 4. full/delta 与提交条件
 
@@ -164,11 +169,17 @@ delta 的五类块：`set`（逐字段完整新值，显式保留 `false`/`0`/`"
 
 ## 5. 工作位置与并发
 
-- 设备同时只有一项普通工作（`start`/`observe`/`act`/`apps`/`open_app`/`shell`）。冲突立即返回
+- 设备同时只有一项当前普通工作（`start`/`observe`/`act`/`apps`/`open_app`/`shell`）。冲突立即返回
   `409 device_busy`，不建普通动作队列；同一 Agent 会得到 `blocking_operation_id`。
-- 原 UI 输入子步骤缺少结束证据时，即使原普通工作已返回，也继续拒绝这些普通工作；
-  `status`、`inspect`、`diagnose`、`end` 与 STOP 保持可用。任务归属或读回失败本身不会重新
-  打开已经取得终结回执的输入责任。
+- 会话撤权后，原 work、UI 与 shell 进入独立退休记录。旧逻辑交接从撤权起最多等待 5 秒；
+  原调用提前取得终结证据时提前释放。到期仍无终结证据时，engine 冻结原操作结果、取消原上下文
+  并脱离当前工作位置，最多以 `device_busy` 影响新工作到该边界。
+- 交接完成只封闭旧逻辑派发权和提交权，不证明已派发的 Android 输入、shell/root 派生进程、
+  RPC 或精确清理命令已经停止。本规范接受这些旧调用与新会话发生物理时间重叠的风险；
+  它们的结果只能更新原退休记录，不能发布新 O、延长租约或操作新会话。
+- 当前活动会话内仍有未决 UI 输入或受管 shell 时，后续普通输入保持 busy；
+  `status`、`inspect`、`diagnose`、`end` 与 STOP 保持可用。退休记录中的同类未确认事实只作为
+  原会话证据，不成为新会话的永久门禁。
 - 工作上下文按类型设上限：`start` = `StartTimeout + WorkTimeout`（40s）、`observe` =
   `WorkTimeout + 15s`（35s）、`act`/`open_app` 约 50s、`apps` 约 30s、`shell` 约 65s；具体超时是服务策略，不是请求参数。
 - `end`、STOP、`status` 不占普通工作位置，也不等待普通工作完成。
@@ -204,38 +215,55 @@ delta 的五类块：`set`（逐字段完整新值，显式保留 `false`/`0`/`"
 `not_applicable`。已结束会话且尚无收尾记录时，`primary` 模式或“无显示且无创建结果”直接
 记为 `not_applicable`，否则补建收尾。
 
+P 已无法定位时，`end(P)` 返回 `409 operation_unknown`、`phase=reference_unknown`、
+`outcome=uncertain`、`request_closed=true`，返回 `session:null` 并省略 `cleanup`。该关闭标记只封闭
+该 P 的未来接纳，不证明过去未执行，也不会结束当前其它会话。
+
 ### 收尾链
 
 `cleanup` 固定五元组：`state`（`pending`/`complete`/`unconfirmed`）、`execution`、
 `tasks`、`recents`、`display`（每项可为 `pending`/`confirmed`/`unconfirmed`/`not_applicable`）。
 
+- `pending` 表示该退休记录的有界自动补偿仍在运行，各项保留当时证据。
+  `complete` 表示适用事实均已确认，且没有晚到执行边界使旧物理证据失效。
+  `unconfirmed` 表示主动补偿已经停止且仍有未确认事实；它不表示仍应无限轮询，也不把未知
+  改写成 `confirmed`。
+- 每条退休记录从撤权时开始拥有总计 12 秒预算，最多三轮，轮间等待分别为 200 ms、800 ms；
+  每次设备 I/O 使用剩余总预算且单次不超过 2 秒。预算不因心跳、`status`、重复 `end`、
+  错误或进程重启而刷新。
 - `execution`：所有可能派发的 UI 子步骤与受管 shell 链均有自身结束/未派发证据时为
   `confirmed`，缺证据时为 `unconfirmed`。每个 UI 子步骤由引擎绑定原会话、P、step 和
   设备启动身份；远端 shell v2 退出结果或完整匹配的同步文字 RPC 返回是调用终结证据。
   主 outcome、任务归属、文字读回与调用终结分别判定，原 P 的 `uncertain` 不追认。
   shell 只解除自己的 runner 责任；迟到 UI 终结只补原执行事实，不发布 O 或恢复输入权。
-- 迟到终结晚于原物理核验时，对同一原归属补做有界只读核验。旧任务 ID 留作 recents 核验
-  证据，不创建第二条破坏性链；任务、recents 或显示仍不能确认时不放行。复核义务随终结
-  证据持久化，服务重启也不接受终结边界之前的物理确认。
+- 迟到终结晚于原物理核验时，原物理确认失效并保存复核义务。旧任务 ID 留作 recents
+  核验证据；只有原补偿仍运行且预算足够时才继续核验。主动补偿停止后，可信迟到回执
+  仍可更新原事实，但不重新派发、不延长期限、不改原 P outcome。
 - `primary` 模式：`tasks`/`recents`/`display` 全为 `not_applicable`，从不关闭用户应用。
-- 虚拟屏且显示身份未知：给 App 至多 4s 上报描述；仍无描述时，若创建明确失败或 App 明确
-  报告无自有显示，则 `display=confirmed`，否则 `unconfirmed`。
+- 虚拟屏且显示身份未知：只接纳与原创建命令身份匹配的描述；无匹配描述时保留
+  `unconfirmed`。只有派发前参数拒绝可证明未创建；空 descriptor 或创建超时不能证明资源释放。
 - 显示身份已知：App 实例未更换时下发精确 `close_display`（带
-  `target_app_instance_id`/`target_display_id`/`target_generation`）。关闭显示前先移除该虚拟屏上的全部实时任务（至多三轮，每轮重读实时任务），再核验
-  `dumpsys activity recents`：任务全部消失且最近任务项也消失时 `tasks=confirmed`、
-  `recents=confirmed`；仍有任务或无法核验则相应记 `unconfirmed` 并带
-  `task_remove_unconfirmed`/`recents_cleanup_unconfirmed`。随后最多 `CleanupTimeout=12s`
-  轮询，要求连续两次确认显示不存在才记 `display=confirmed`。
+  `target_app_instance_id`/`target_display_id`/`target_generation`）。有界任务处理后请求
+  精确关闭；即使显示已先关闭，仍执行原 ID 的 recent-only 路径。
+- 任务补偿以原已登记 ID 与当前 live task ID 的并集为候选，每次删除前重验 boot、App 实例、
+  原 display/generation、目标 ID 与当前资源冲突。live 或 recents 命中的原归属 ID 实际派发
+  `RemoveTask`，删除返回不等于成功，必须重读实时任务与 `dumpsys activity recents`。
+  跨 boot、归属不足、任务移到主屏/其它归属或 ID 已被新资源使用时停止该目标的破坏性补偿。
+- 任务全部消失且最近任务项也消失时 `tasks=confirmed`、`recents=confirmed`；仍有任务、
+  不可读或身份冲突时相应记 `unconfirmed` 并进入有限重试或停止。无证据时不能按包名、PID、
+  display 数字或“当前显示”扩大目标。
 - 虚拟会话在内存维护受管窗口登记（`taskEntry`：task id、包名、display、generation、
   owned、proven，上限 16）；它是每次动作前由实时任务列表核对的缓存，不跨会话或重启
   继承控制权；主屏会话不建立该登记。
 - `state=complete` 仅当 `execution`/`display`/`tasks`/`recents` 均不为 `pending` 或
-  `unconfirmed`。完成时清空该会话的 O、基线、任务登记与显示命令。
-- 收尾期间 `availability=recovering`（原因 `cleanup_pending`），同步仍会投递
-  `close_display`（否则无法释放），但 `start` 因可用性非 `ready` 被阻塞；收尾 `unconfirmed`
-  时 `availability=blocked`（原因 `cleanup_unconfirmed`），`can_start=false`。
-- 未确认结束的受管 shell 链保持 `recovering`（原因 `shell_pending`）；终止中尚无证据为
-  `shell_chain_unconfirmed`；期间不接纳普通工作，直到精确 runner 被确认结束。
+  `unconfirmed`。完成时清除当前会话槽位、基线与显示命令；已发布 O/P 只按其有界缓存与仍可
+  解析的原会话路由返回事实，不能改绑到新会话。
+- `cleanup.pending`/`unconfirmed` 不决定 `availability` 或 `can_start`。同步仍可按原目标投递
+  未逾期的 `close_display`/`cancel_create`；新普通工作到达后取消尚未派发的维护命令，不排在
+  其后等待。状态响应可同时给出 `can_start=true` 与原退休会话的未确认事实。
+- App 的当前 `display` 只描述当前 attempt，不回退到 retired attempt。retiring/旧 cleanup
+  非空不阻止新 `create_display`；旧资源是否存在由原 cleanup 事实和 App 本地历史分别表达，
+  `display=null` 不等于全设备无残留。
 - 服务退出（SIGINT/SIGTERM）：撤权并启动收尾，等待已接纳的后台工作至多 25s，然后同步写一次
   账本；进程退出本身从不被当作资源已释放。
 
@@ -244,54 +272,48 @@ delta 的五类块：`set`（逐字段完整新值，显式保留 `false`/`0`/`"
 进程取得固定运行目录内核锁之后，才接触账本、App 与设备。`StartRecovery` 读取账本：
 
 - 账本损坏/不可读 → `blockedReason=ledger_corrupt`，可用性 `blocked`，不接纳新会话；
-- 无记录 → 保持 `recovering`，直到 App 心跳新鲜且模式/停止通道可用、无待处理收尾；设备就绪
-  另由可用性检查要求（`device_unavailable`）；
-- 有记录 → 先要求 App 心跳新鲜，再按记录中的会话/待创建命令逐项核验：
-  - 无会话且无待创建 → `no_session`，恢复完成；
-  - 记录有受管 runner：按记录的 runner 身份探测/终止；`shell_probe_failed` 或
-    `shell_chain_unconfirmed` 时保持 `recovering`，确认结束才写完成记录、不重放命令；
-  - 记录有显示 ID：探测显示；仍存在且 App 实例匹配 → 下发精确 `close_display` 并保持
-    `recovering`，等待 App 回执/显示消失后重试；显示已不存在也要先完成 App 同步与 TaskList
-    核验，不能只凭一次 absent 放行；
-  - 记录无显示 ID 但 App 上报了显示描述 → 以该描述下发精确 `close_display`，不信任旧
-    `UpdatedAt` 计时器；
-  - 显示探测失败/TaskList 失败/旧 display 仍有任务 → 保持 `recovering` 或
-    `old_resource_unconfirmed`，周期重试；
-- `finishRecovery` 只有在“App 心跳新鲜 + 显示已确认释放 + TaskList 成功且目标 display 无
-  任务”后才写完成记录；`tasks` 由该证据写 `confirmed`/`not_applicable`，`execution`/
-  `recents` 的 `unconfirmed` 不会被清成 `confirmed`。恢复未解决期间 `ledgerRecordLocked`
-  返回旧账本快照，普通同步不会抹掉旧归属。
+- 无记录 → 等待 App 心跳、当前模式/STOP 与设备能力就绪后可开始；端口就绪不等于设备就绪；
+- 有记录 → 先要求 App 心跳新鲜，再把旧 session 及其 UI/shell/create/cleanup 责任转入退休记录；
+  不恢复旧 O/P、主屏授权或普通派发权。旧记录中的 boot、App 实例、原创建命令、display
+  generation、精确任务 ID 与私有预算随记录保存。
+- 版本 3 中已发出预算且仍为 `pending` 的退休记录，启动时先持久化为 `unconfirmed`，不授予
+  第二次补偿预算。版本 1/2 的 current 或旧格式记录转成退休记录时获得一次新预算；迁移快照
+  必须先保存，再允许任何补偿派发。
+- boot 变化可作为对应终结证据；跨 boot 的物理清理保持只读，不按旧裸 ID 删除可能属于新资源
+  的对象。旧 shell runner 只在完整身份匹配时探测或终止，不重放命令。
+- 旧 UI/legacy checkpoint 保留为 `execution=unconfirmed` 的原归属证据；没有手机启动边界证据
+  时也不能把它改写成 `confirmed`。该事实不产生永久准入封锁。
 
-`can_start`（`status` 返回）是完整准入门的投影：可用性为 `ready`、无活动会话、App 新鲜且
+`can_start`（`status` 返回）只投影当前服务能力和当前权威冲突：内核目录锁已取得、账本可载入
+且新归属可保存、无当前普通工作、无活动会话、App 心跳新鲜且
 `background_running`/`notifications_enabled`/`stop_ready` 为真、模式就绪且代次匹配、设备
-交互且未锁屏、无未确认停止意图。任一不满足都返回 `can_start=false` 与 `blocking_code`。
+交互且未锁屏、无未确认停止意图。旧 cleanup 五元组、旧执行/任务/recents/display、旧补偿是否
+停止、旧退休记录容量与 legacy UI 是否等过启动边界都不参与判断。逻辑交接最多以
+`device_busy` 影响准入 5 秒。任一当前条件不满足时返回 `can_start=false` 与 `blocking_code`；
 端口已监听、`/health` 返回 `ok` 都不是干净证明。
-
-UI 责任按自身回执恢复。缺回执但有旧设备/boot 身份时，同设备启动身份变化只解除对应
-execution；版本 1 的 `ui_input` 未确认记录或缺完整终结记录的活动会话，先追加并耐久保存
-`legacy_ui_checkpoint`。保存成功才报告 `ui_input_reboot_required` 与 `recovery.entry=user`；
-用户安排手机重启后仍须核验配对 App、模式/STOP、原资源与账本可写。checkpoint 不随同步或
-服务重启覆盖；不清账本或 App 数据。跨 boot 只读核验旧目标，不用旧裸 ID 清理新归属。
 
 ## 8. 账本
 
 `internal/store` 把单个 JSON 对象写在 `<state_dir>/recovery-ledger.json`：
 
-- 预算 64 KiB；格式名 `mobile-use-vnext-ledger`，读版本 1/2、写版本 2，修订号单调递增；
+- 预算 64 KiB；格式名 `mobile-use-vnext-ledger`，读版本 1/2/3、写版本 3，修订号单调递增；
 - 单写者：包内互斥 + 进程锁；`Save` 先 fsync 临时文件，再 rename 覆盖，再 fsync 父目录
   （Windows 跳过目录 fsync，因此 Windows 不提供同等耐久证据）；
-- 内容只有归属与资源证据：会话（origin/agent/mode/state/App 实例/模式代次/显示 ID/SFID/
-  generation/尺寸/密度/旋转/开始时间）、待创建/待关闭命令、收尾五元组、停止边界、虚拟屏
-  受管任务 id 登记（≤16）、受管 shell runner 身份与阶段、一个 UI 子步骤责任、legacy
+- 版本 3 分离当前归属与 `retired` 明细。内容只有归属与资源证据：原 service instance、
+  origin/agent/mode/state/App 实例/boot/device 身份、模式代次、原 create command、
+  显示 ID/SFID/generation/尺寸/密度/旋转/开始时间、待创建/待关闭命令、收尾五元组、停止边界、
+  虚拟屏受管任务 id 登记（≤16）、受管 shell runner 身份与阶段、一个 UI 子步骤责任、legacy
   checkpoint、收尾核验过的任务 ID（≤256）与物理复核义务 `execution_recheck_required`；
+- 退休明细最多 8 条，其序列化集合最多 24 KiB；整个账本仍最多 64 KiB。容量达到边界时停止或
+  压缩退休项，不把容量不足变成新会话拒绝码，也不能把淘汰写成 `complete`。
 - 明确不含：请求体、节点树、图片、输入正文、命令输出、异常字符串；
 - `start` 在启动显示助手前同步写一次（原归属 + 创建意图），会话激活后再写一次；其余进度
   异步写。每个 UI 输入子步骤额外预写 `may_dispatch`，成功后重新竞争派发边界；终结证据
   保存成功前不开放后续普通工作。写失败置 `ledgerUnsafe`，可用性为 `blocked`
   （原因 `ledger_unavailable`）；STOP 不等这些写入。
-- 版本 1 升级保留原 Session/Cleanup/Stop/Shell/task 事实；缺失的新字段不充当结束证据。
-  `legacy_ui_pending` 保留尚未建立 checkpoint 的旧责任，避免普通同步的格式升级抹掉迁移条件。
-  旧二进制不能读取版本 2，不通过降级覆盖或清库恢复。
+- 版本 1/2 升级保留原 Session/Cleanup/Stop/Shell/task 事实；缺失的新字段不充当结束证据。
+  `legacy_ui_pending` 保留旧责任，迁移后作为退休记录中的未确认事实。旧二进制不能读取版本 3，
+  回退只能使用兼容版本 3 的产物；不通过降级覆盖或清库恢复。
 
 账本只由 engine 读取与生成，HTTP 层与 App 都不写账本。
 

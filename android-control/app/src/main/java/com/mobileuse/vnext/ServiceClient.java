@@ -39,6 +39,7 @@ final class ServiceClient implements AutoCloseable {
     // 显示命令集合固定；其他 kind 一律使整份响应作废。
     static final String COMMAND_CREATE_DISPLAY = "create_display";
     static final String COMMAND_CLOSE_DISPLAY = "close_display";
+    static final String COMMAND_CANCEL_CREATE = "cancel_create";
     /** 每拍响应最多携带的消息条数与请求最多携带的确认条数。 */
     static final int MAX_MESSAGES = 8;
     static final int MAX_MESSAGE_ACKS = 32;
@@ -300,15 +301,19 @@ final class ServiceClient implements AutoCloseable {
         String id = text(json, "id");
         String kind = json.getString("kind");
         if (COMMAND_CREATE_DISPLAY.equals(kind)) {
+            rejectCreateTargetFields(json);
             int width = json.getInt("width");
             int height = json.getInt("height");
             int density = json.getInt("density_dpi");
             if (width <= 0 || height <= 0 || density <= 0) {
                 throw new IllegalArgumentException("invalid display size");
             }
-            return new Command(id, kind, width, height, density, null, null, null);
+            return new Command(id, kind, width, height, density, null, null, null, null);
         }
         if (COMMAND_CLOSE_DISPLAY.equals(kind)) {
+            if (json.has("target_create_command_id")) {
+                throw new IllegalArgumentException("close_display cannot cancel a create");
+            }
             String targetInstance = text(json, "target_app_instance_id");
             Integer targetDisplay = json.isNull("target_display_id") ? null
                     : (Integer) json.getInt("target_display_id");
@@ -316,9 +321,30 @@ final class ServiceClient implements AutoCloseable {
                 throw new IllegalArgumentException("close_display requires target_display_id");
             }
             return new Command(id, kind, 0, 0, 0, targetInstance, targetDisplay,
-                    text(json, "target_generation"));
+                    text(json, "target_generation"), null);
+        }
+        if (COMMAND_CANCEL_CREATE.equals(kind)) {
+            if (!json.has("target_app_instance_id") || json.isNull("target_app_instance_id")
+                    || !json.has("target_create_command_id")
+                    || json.isNull("target_create_command_id")) {
+                throw new IllegalArgumentException(
+                        "cancel_create requires app instance and create command targets");
+            }
+            if (json.has("target_display_id") || json.has("target_generation")) {
+                throw new IllegalArgumentException("cancel_create has display target fields");
+            }
+            String targetInstance = text(json, "target_app_instance_id");
+            String targetCreate = text(json, "target_create_command_id");
+            return new Command(id, kind, 0, 0, 0, targetInstance, null, null, targetCreate);
         }
         throw new IllegalArgumentException("unknown command kind");
+    }
+
+    private static void rejectCreateTargetFields(JSONObject json) {
+        if (json.has("target_app_instance_id") || json.has("target_display_id")
+                || json.has("target_generation") || json.has("target_create_command_id")) {
+            throw new IllegalArgumentException("create_display has target fields");
+        }
     }
 
     /** 消息投影；id/seq/时间形状不合法时拒绝整份响应。正文只交给 App 私有存储。 */
@@ -509,9 +535,11 @@ final class ServiceClient implements AutoCloseable {
         final String targetAppInstanceId;
         final Integer targetDisplayId;
         final String targetGeneration;
+        final String targetCreateCommandId;
 
         Command(String id, String kind, int width, int height, int densityDpi,
-                String targetAppInstanceId, Integer targetDisplayId, String targetGeneration) {
+                String targetAppInstanceId, Integer targetDisplayId, String targetGeneration,
+                String targetCreateCommandId) {
             this.id = id;
             this.kind = kind;
             this.width = width;
@@ -520,10 +548,15 @@ final class ServiceClient implements AutoCloseable {
             this.targetAppInstanceId = targetAppInstanceId;
             this.targetDisplayId = targetDisplayId;
             this.targetGeneration = targetGeneration;
+            this.targetCreateCommandId = targetCreateCommandId;
         }
 
         boolean createsDisplay() {
             return COMMAND_CREATE_DISPLAY.equals(kind);
+        }
+
+        boolean cancelsCreate() {
+            return COMMAND_CANCEL_CREATE.equals(kind);
         }
     }
 

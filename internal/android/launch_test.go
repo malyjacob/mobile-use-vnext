@@ -115,6 +115,19 @@ func TestRecentTaskIDs(t *testing.T) {
 	}
 }
 
+func TestRecentsUnreadableFormatDoesNotBecomeEmpty(t *testing.T) {
+	for _, tc := range []struct{ text, state string }{
+		{"unrecognized output", "format_unrecognized"},
+		{"ACTIVITY MANAGER RECENT TASKS\n * Recent #0: Task{truncated", "format_unrecognized"},
+		{"ACTIVITY MANAGER RECENT TASKS\n", "known_empty"},
+		{" * Recent #0: Task{abc #41 type=standard}", "known_present"},
+	} {
+		if result := parseRecentTasks([]byte(tc.text)); result.State != tc.state {
+			t.Fatalf("state=%s want=%s", result.State, tc.state)
+		}
+	}
+}
+
 func TestTasksOnDisplay(t *testing.T) {
 	d := newStubDevice(t, "launch")
 	tasks, known := d.TasksOnDisplay(context.Background(), 61)

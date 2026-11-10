@@ -16,28 +16,35 @@ import android.view.Surface;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * One root app_process per display attempt, launched only by the authenticated service's
- * fixed ADB implementation. The helper's callback Binder is the system's display death
- * token. App death, helper death or its deadline therefore also tears down an in-flight
- * create; an App-owned callback alone would leave a late create alive after helper death.
- * Hidden framework calls are confined to this root entry point, never the ordinary App.
+ * One root app_process per display attempt. The endpoint accepts one-way CREATE and VERIFY
+ * requests and executes them on this helper's single work thread. The helper retains the
+ * Surface until CLOSE/death or a terminal create failure, so App-side logical cancellation
+ * cannot invalidate a system call that is still in flight.
  */
 public final class RootDisplayMain {
     private final String commandId;
     private final String appInstance;
     private final int appUid;
     private final Handler main;
+    private final ExecutorService work = Executors.newSingleThreadExecutor(
+            task -> new Thread(task, "display-helper-work"));
     private final AtomicBoolean started = new AtomicBoolean();
     private final AtomicBoolean closed = new AtomicBoolean();
-    private IBinder events;
-    private IBinder owner;
+    private final AtomicReference<Surface> createSurface = new AtomicReference<>();
+    private volatile IBinder events;
+    private volatile IBinder owner;
     private volatile int ownedDisplayId = -1;
-    private final Runnable deadline = () -> exit();
-    private final IBinder.DeathRecipient ownerDied = () -> exit();
-    // This node must belong to this process, not the App. Never reuse it for another create.
+    private final Runnable deadline = this::exit;
+    private final IBinder.DeathRecipient ownerDied = this::exit;
+
+    // This node belongs to the helper process and is also the system display death token.
     private final Binder displayToken = new Binder() {
         @Override protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
                 throws RemoteException {
@@ -49,13 +56,14 @@ public final class RootDisplayMain {
                 data.enforceInterface("android.hardware.display.IVirtualDisplayCallback");
                 if (code == 3) {
                     notifyStopped();
-                    main.post(() -> exit());
+                    main.post(RootDisplayMain.this::exit);
                 }
                 return true;
             }
             return super.onTransact(code, data, reply, flags);
         }
     };
+
     private final Binder endpoint = new Binder() {
         @Override protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
                 throws RemoteException {
@@ -69,68 +77,27 @@ public final class RootDisplayMain {
                 throw new SecurityException("display_identity_rejected");
             }
             if (code == RootDisplayProtocol.CLOSE) {
-                // Independent Binder thread/main looper; never wait for CREATE's DMS/WMS calls.
                 closed.set(true);
-                main.post(() -> exit());
+                main.post(RootDisplayMain.this::exit);
                 return true;
             }
-            if (code == RootDisplayProtocol.VERIFY && !closed.get() && ownedDisplayId > 0) {
-                long identity = Binder.clearCallingIdentity();
-                try {
-                    reply.writeNoException();
-                    reply.writeInt(imePolicy(ownedDisplayId));
-                } catch (ReflectiveOperationException error) {
-                    throw new IllegalStateException("display_policy_check_unavailable");
-                } finally { Binder.restoreCallingIdentity(identity); }
+            if (code == RootDisplayProtocol.VERIFY) {
+                submitVerify(data.readLong());
                 return true;
             }
-            if (code != RootDisplayProtocol.CREATE || closed.get() || !started.compareAndSet(false, true)) {
-                throw new IllegalStateException("display_create_not_available");
+            if (code == RootDisplayProtocol.CREATE) {
+                submitCreate(data.readLong(), data);
+                return true;
             }
-            IBinder lifetime = data.readStrongBinder();
-            IBinder observer = data.readStrongBinder();
-            Surface surface = data.readTypedObject(Surface.CREATOR);
-            int width = data.readInt();
-            int height = data.readInt();
-            int density = data.readInt();
-            if (lifetime == null || observer == null || surface == null || !surface.isValid()
-                    || width <= 0 || height <= 0 || density <= 0) {
-                if (surface != null) surface.release();
-                throw new IllegalArgumentException("display_arguments_rejected");
-            }
-            owner = lifetime;
-            events = observer;
-            lifetime.linkToDeath(ownerDied, 0);
-            // Outgoing system calls and authentication callbacks must carry root's identity,
-            // not the App identity inherited from this incoming Binder transaction.
-            long identity = Binder.clearCallingIdentity();
-            boolean success = false;
-            try {
-                int id = create(surface, width, height, density);
-                if (closed.get() || !lifetime.isBinderAlive()) throw new IllegalStateException("display_cancelled");
-                ownedDisplayId = id;
-                main.removeCallbacks(deadline);
-                reply.writeNoException();
-                reply.writeInt(id);
-                reply.writeInt(RootDisplayProtocol.IME_HIDE);
-                success = true;
-            } catch (ReflectiveOperationException | RuntimeException error) {
-                // Never serialize framework exception strings or shell output into App diagnostics.
-                reply.writeNoException();
-                reply.writeInt(-1);
-                reply.writeInt(-1);
-            } finally {
-                surface.release();
-                Binder.restoreCallingIdentity(identity);
-                if (!success) main.post(() -> exit());
-            }
-            return true;
+            return super.onTransact(code, data, reply, flags);
         }
     };
 
     private RootDisplayMain(String command, String instance, int uid) {
-        commandId = UUID.fromString(command).toString();
-        appInstance = UUID.fromString(instance).toString();
+        UUID.fromString(command);
+        UUID.fromString(instance);
+        commandId = command;
+        appInstance = instance;
         if (uid < 10000) throw new IllegalArgumentException("display_app_uid_rejected");
         appUid = uid;
         main = new Handler(Looper.getMainLooper());
@@ -146,12 +113,116 @@ public final class RootDisplayMain {
                 try { helper.attach(); }
                 catch (ReflectiveOperationException | RuntimeException failure) { helper.exit(); }
             }, "display-helper-attach").start();
-            // The deadline and CLOSE remain runnable even if AMS bootstrap blocks.
             Looper.loop();
         } catch (RuntimeException error) {
-            // This entry point has no user-content logs or global input-method changes.
             System.exit(2);
         }
+    }
+
+    private void submitCreate(long request, Parcel data) {
+        if (closed.get() || !started.compareAndSet(false, true)) {
+            sendCreateResult(request, RootDisplayProtocol.RESULT_CANCELLED, -1, -1);
+            return;
+        }
+        IBinder lifetime = data.readStrongBinder();
+        IBinder observer = data.readStrongBinder();
+        Surface surface = data.readTypedObject(Surface.CREATOR);
+        int width = data.readInt();
+        int height = data.readInt();
+        int density = data.readInt();
+        if (lifetime == null || observer == null || surface == null || !surface.isValid()
+                || width <= 0 || height <= 0 || density <= 0) {
+            if (surface != null) surface.release();
+            sendCreateResult(request, RootDisplayProtocol.RESULT_CREATE_FAILED, -1, -1);
+            main.post(this::exit);
+            return;
+        }
+        owner = lifetime;
+        events = observer;
+        try {
+            lifetime.linkToDeath(ownerDied, 0);
+        } catch (RemoteException dead) {
+            surface.release();
+            main.post(this::exit);
+            return;
+        }
+        if (!createSurface.compareAndSet(null, surface)) {
+            surface.release();
+            sendCreateResult(request, RootDisplayProtocol.RESULT_CANCELLED, -1, -1);
+            main.post(this::exit);
+            return;
+        }
+        try {
+            work.execute(() -> runCreate(request, width, height, density));
+        } catch (RejectedExecutionException rejected) {
+            sendCreateResult(request, RootDisplayProtocol.RESULT_CANCELLED, -1, -1);
+            main.post(this::exit);
+        }
+    }
+
+    private void submitVerify(long request) {
+        try {
+            work.execute(() -> runVerify(request));
+        } catch (RejectedExecutionException rejected) {
+            sendVerifyResult(request, RootDisplayProtocol.RESULT_VERIFY_UNAVAILABLE, -1);
+        }
+    }
+
+    private void runCreate(long request, int width, int height, int density) {
+        int status = RootDisplayProtocol.RESULT_CREATE_FAILED;
+        int display = -1;
+        long identity = Binder.clearCallingIdentity();
+        try {
+            sendCapability();
+            IBinder currentOwner = owner;
+            if (closed.get() || currentOwner == null || !currentOwner.isBinderAlive()) {
+                status = RootDisplayProtocol.RESULT_CANCELLED;
+            } else {
+                display = createDisplay(width, height, density);
+                if (closed.get() || !currentOwner.isBinderAlive()) {
+                    status = RootDisplayProtocol.RESULT_CANCELLED;
+                } else {
+                    ownedDisplayId = display;
+                    main.removeCallbacks(deadline);
+                    status = RootDisplayProtocol.RESULT_OK;
+                }
+            }
+        } catch (IllegalStateException failure) {
+            if ("display_owner_unavailable".equals(failure.getMessage())) {
+                status = RootDisplayProtocol.RESULT_HELPER_UNAVAILABLE;
+            } else if ("display_ime_hide_unconfirmed".equals(failure.getMessage())) {
+                status = RootDisplayProtocol.RESULT_IME_HIDE_UNCONFIRMED;
+            }
+        } catch (RemoteException failure) {
+            status = RootDisplayProtocol.RESULT_CREATE_FAILED;
+        } catch (ReflectiveOperationException | RuntimeException failure) {
+            status = RootDisplayProtocol.RESULT_CREATE_FAILED;
+        } finally {
+            Binder.restoreCallingIdentity(identity);
+        }
+        boolean delivered = sendCreateResult(request, status,
+                status == RootDisplayProtocol.RESULT_OK ? display : -1,
+                status == RootDisplayProtocol.RESULT_OK ? RootDisplayProtocol.IME_HIDE : -1);
+        if (status != RootDisplayProtocol.RESULT_OK || !delivered) main.post(this::exit);
+    }
+
+    private void runVerify(long request) {
+        int status;
+        int policy = -1;
+        long identity = Binder.clearCallingIdentity();
+        try {
+            if (closed.get() || ownedDisplayId <= 0) {
+                status = RootDisplayProtocol.RESULT_VERIFY_UNAVAILABLE;
+            } else {
+                policy = imePolicy(ownedDisplayId);
+                status = RootDisplayProtocol.RESULT_OK;
+            }
+        } catch (ReflectiveOperationException | RuntimeException failure) {
+            status = RootDisplayProtocol.RESULT_VERIFY_UNAVAILABLE;
+        } finally {
+            Binder.restoreCallingIdentity(identity);
+        }
+        sendVerifyResult(request, status, policy);
     }
 
     private static IBinder service(String name) throws ReflectiveOperationException {
@@ -172,14 +243,44 @@ public final class RootDisplayMain {
         Class<?> api = Class.forName("android.app.IActivityManager");
         Object result = api.getMethod("startService", caller, Intent.class, String.class, boolean.class,
                 String.class, String.class, int.class).invoke(am, null, intent, null, false,
-                        "com.mobileuse.vnext", null, appUid / 100000);
+                "com.mobileuse.vnext", null, appUid / 100000);
         if (!(result instanceof ComponentName)
                 || !"com.mobileuse.vnext".equals(((ComponentName) result).getPackageName())) {
             throw new IllegalStateException("display_attach_rejected");
         }
     }
 
-    private int create(Surface surface, int width, int height, int density)
+    private void sendCapability() {
+        IBinder observer = events;
+        if (observer == null) throw new IllegalStateException("display_owner_unavailable");
+        long identity = Binder.clearCallingIdentity();
+        Parcel cap = Parcel.obtain();
+        Parcel ack = Parcel.obtain();
+        try {
+            IBinder displayService = service("display");
+            Class<?> displayStub = Class.forName("android.hardware.display.IDisplayManager$Stub");
+            Field release = displayStub.getDeclaredField("TRANSACTION_releaseVirtualDisplay");
+            release.setAccessible(true);
+            cap.writeInterfaceToken(RootDisplayProtocol.EVENTS);
+            cap.writeString(commandId);
+            cap.writeString(appInstance);
+            cap.writeStrongBinder(displayService);
+            cap.writeStrongBinder(displayToken);
+            cap.writeInt(release.getInt(null));
+            if (!observer.transact(RootDisplayProtocol.CAPABILITY, cap, ack, 0)) {
+                throw new IllegalStateException("display_owner_unavailable");
+            }
+            ack.readException();
+        } catch (RemoteException | ReflectiveOperationException | RuntimeException failure) {
+            throw new IllegalStateException("display_owner_unavailable");
+        } finally {
+            cap.recycle();
+            ack.recycle();
+            Binder.restoreCallingIdentity(identity);
+        }
+    }
+
+    private int createDisplay(int width, int height, int density)
             throws ReflectiveOperationException, RemoteException {
         IBinder displayService = service("display");
         Class<?> displayStub = Class.forName("android.hardware.display.IDisplayManager$Stub");
@@ -188,31 +289,15 @@ public final class RootDisplayMain {
         Class<?> callbackType = Class.forName("android.hardware.display.IVirtualDisplayCallback");
         Object callback = Class.forName("android.hardware.display.IVirtualDisplayCallback$Stub")
                 .getMethod("asInterface", IBinder.class).invoke(null, displayToken);
-        Field release = displayStub.getDeclaredField("TRANSACTION_releaseVirtualDisplay");
-        release.setAccessible(true);
-        // Give the App only the exact token-release capability before creation can begin.
-        Parcel cap = Parcel.obtain();
-        Parcel ack = Parcel.obtain();
-        try {
-            cap.writeInterfaceToken(RootDisplayProtocol.EVENTS);
-            cap.writeString(commandId);
-            cap.writeString(appInstance);
-            cap.writeStrongBinder(displayService);
-            cap.writeStrongBinder(displayToken);
-            cap.writeInt(release.getInt(null));
-            if (!events.transact(RootDisplayProtocol.CAPABILITY, cap, ack, 0)) {
-                throw new IllegalStateException("display_owner_unavailable");
-            }
-            ack.readException();
-        } finally {
-            cap.recycle();
-            ack.recycle();
+        Surface heldSurface = createSurface.get();
+        if (heldSurface == null || !heldSurface.isValid()) {
+            throw new IllegalStateException("display_create_failed");
         }
-        if (closed.get() || !owner.isBinderAlive()) throw new IllegalStateException("display_cancelled");
-        VirtualDisplayConfig config = new VirtualDisplayConfig.Builder("MobileUseAgent", width, height, density)
+        VirtualDisplayConfig config = new VirtualDisplayConfig.Builder(
+                "MobileUseAgent", width, height, density)
                 .setFlags(1 | 8 | (1 << 8) | (1 << 10))
                 // PUBLIC | OWN_CONTENT_ONLY | DESTROY_CONTENT_ON_REMOVAL | TRUSTED (API 36).
-                .setSurface(surface).build();
+                .setSurface(heldSurface).build();
         Method create = displayApi.getMethod("createVirtualDisplay", VirtualDisplayConfig.class,
                 callbackType, Class.forName("android.media.projection.IMediaProjection"), String.class);
         int id = (Integer) create.invoke(dm, config, callback, null, "com.mobileuse.vnext");
@@ -223,7 +308,9 @@ public final class RootDisplayMain {
         windowApi.getMethod("setDisplayImePolicy", int.class, int.class)
                 .invoke(wm, id, RootDisplayProtocol.IME_HIDE);
         int policy = (Integer) windowApi.getMethod("getDisplayImePolicy", int.class).invoke(wm, id);
-        if (policy != RootDisplayProtocol.IME_HIDE) throw new IllegalStateException("display_ime_hide_unconfirmed");
+        if (policy != RootDisplayProtocol.IME_HIDE) {
+            throw new IllegalStateException("display_ime_hide_unconfirmed");
+        }
         return id;
     }
 
@@ -234,26 +321,69 @@ public final class RootDisplayMain {
                 .getMethod("getDisplayImePolicy", int.class).invoke(wm, id);
     }
 
-    private void notifyStopped() {
-        if (events == null) return;
-        long identity = Binder.clearCallingIdentity();
+    private boolean sendCreateResult(long request, int status, int display, int policy) {
         Parcel data = Parcel.obtain();
         try {
             data.writeInterfaceToken(RootDisplayProtocol.EVENTS);
             data.writeString(commandId);
             data.writeString(appInstance);
-            events.transact(RootDisplayProtocol.STOPPED, data, null, IBinder.FLAG_ONEWAY);
-        } catch (RemoteException ignored) {
-            // Owner death is independently linked to helper exit; no action is replayed.
+            data.writeLong(request);
+            data.writeInt(status);
+            data.writeInt(display);
+            data.writeInt(policy);
+            return sendEvent(RootDisplayProtocol.CREATE_RESULT, data);
         } finally {
             data.recycle();
+        }
+    }
+
+    private void sendVerifyResult(long request, int status, int policy) {
+        Parcel data = Parcel.obtain();
+        try {
+            data.writeInterfaceToken(RootDisplayProtocol.EVENTS);
+            data.writeString(commandId);
+            data.writeString(appInstance);
+            data.writeLong(request);
+            data.writeInt(status);
+            data.writeInt(policy);
+            sendEvent(RootDisplayProtocol.VERIFY_RESULT, data);
+        } finally {
+            data.recycle();
+        }
+    }
+
+    private boolean sendEvent(int code, Parcel data) {
+        IBinder observer = events;
+        if (observer == null) return false;
+        long identity = Binder.clearCallingIdentity();
+        try {
+            return observer.transact(code, data, null, IBinder.FLAG_ONEWAY);
+        } catch (RemoteException dead) {
+            return false;
+        } finally {
             Binder.restoreCallingIdentity(identity);
+        }
+    }
+
+    private void notifyStopped() {
+        IBinder observer = events;
+        if (observer == null) return;
+        Parcel data = Parcel.obtain();
+        try {
+            data.writeInterfaceToken(RootDisplayProtocol.EVENTS);
+            data.writeString(commandId);
+            data.writeString(appInstance);
+            sendEvent(RootDisplayProtocol.STOPPED, data);
+        } finally {
+            data.recycle();
         }
     }
 
     private void exit() {
         closed.set(true);
-        // Do not wait on DMS/WMS here. Kernel death of displayToken cleans even a late create.
+        work.shutdownNow();
+        // Keep the CREATE Surface owned until process death. A helper exit is not a
+        // terminal CREATE result, and App-side cancellation must not recycle it early.
         Process.killProcess(Process.myPid());
         System.exit(0);
     }

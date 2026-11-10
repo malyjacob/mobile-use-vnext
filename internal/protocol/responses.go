@@ -818,18 +818,22 @@ type AppSyncRequest struct {
 
 // AppCommand is one display lifecycle command delivered in a sync response.
 type AppCommand struct {
-	ID                  string
-	Kind                string // create_display / close_display
-	Width               int
-	Height              int
-	DensityDPI          int
-	TargetAppInstanceID string
-	TargetDisplayID     *int
-	TargetGeneration    string
+	ID                    string
+	Kind                  string // create_display / close_display / cancel_create
+	Width                 int
+	Height                int
+	DensityDPI            int
+	TargetAppInstanceID   string
+	TargetDisplayID       *int
+	TargetGeneration      string
+	TargetCreateCommandID string `json:"target_create_command_id,omitempty"`
 }
 
 // MarshalJSONTo writes only the fields belonging to the command kind.
 func (c AppCommand) MarshalJSONTo(enc *jsontext.Encoder) error {
+	if c.Kind != "cancel_create" && c.TargetCreateCommandID != "" {
+		return fmt.Errorf("target_create_command_id is only valid for cancel_create")
+	}
 	if err := enc.WriteToken(jsontext.BeginObject); err != nil {
 		return err
 	}
@@ -879,6 +883,22 @@ func (c AppCommand) MarshalJSONTo(enc *jsontext.Encoder) error {
 			return err
 		}
 		if err := writeString(enc, c.TargetGeneration); err != nil {
+			return err
+		}
+	case "cancel_create":
+		if c.TargetAppInstanceID == "" || c.TargetCreateCommandID == "" {
+			return fmt.Errorf("cancel_create requires target_app_instance_id and target_create_command_id")
+		}
+		if err := writeName(enc, "target_app_instance_id"); err != nil {
+			return err
+		}
+		if err := writeString(enc, c.TargetAppInstanceID); err != nil {
+			return err
+		}
+		if err := writeName(enc, "target_create_command_id"); err != nil {
+			return err
+		}
+		if err := writeString(enc, c.TargetCreateCommandID); err != nil {
 			return err
 		}
 	}

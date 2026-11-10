@@ -65,8 +65,8 @@ PowerShell、docs 或 Manifest 中另写一份版本号；`contract_version` 只
 {
   "format": "mobile-use-vnext-release",
   "version": 1,
-  "release_version": "0.4.3",
-  "contract_version": 4,
+  "release_version": "0.5.0",
+  "contract_version": 5,
   "source_commit": "<40 位提交>",
   "source_dirty": false,
   "built_at": "…",
@@ -74,7 +74,7 @@ PowerShell、docs 或 Manifest 中另写一份版本号；`contract_version` 只
   "go_experiment": "jsonv2",
   "build_target": {"goos": "linux", "goarch": "arm64", "cgo_enabled": false},
   "mcp": {"sdk": "github.com/modelcontextprotocol/go-sdk v1.8.0", "protocol": "2026-07-28"},
-  "android": {"package": "com.mobileuse.vnext", "version_name": "0.4.3", "version_code": 6},
+  "android": {"package": "com.mobileuse.vnext", "version_name": "0.5.0", "version_code": 7},
   "tool_catalog": {"count": 12, "sha256": "…"},
   "artifacts": [{"name": "device-service", "path": "device-service", "sha256": "…", "bytes": 0}]
 }
@@ -89,8 +89,9 @@ PowerShell、docs 或 Manifest 中另写一份版本号；`contract_version` 只
 ## 4. 部署顺序
 
 1. 准备并核验整组构建、清单、契约号、Android 版本与固定制品哈希。
-2. 暂停普通准入；用旧版本结束活动会话或 STOP，分别确认执行链、task/recents 与 display。
-   任一未确认就停止推进，不强停 App 把缺少描述当作已清理。
+2. 暂停新的普通工作；用旧版本结束活动会话或 STOP，等待最多 5 秒的旧逻辑交接，并记录
+   执行链、task/recents 与 display 的 `pending`/`complete`/`unconfirmed`。旧物理事实可以在
+   安装窗口继续保留；不强停 App 把缺少描述当作已清理，也不以未确认单独阻断新版本启动。
 3. 尝试停止旧服务与 App（停止失败不阻断安装）；安装整组产物。chroot 内的文件产物
    与 `connection.json` 先写临时文件再原子替换，APK 用 `adb install -r` 覆盖安装；部署脚本
    复核已部署文件：chroot 内清单产物对清单 SHA-256，生成的配置与 `connection.json` 对宿主
@@ -98,26 +99,29 @@ PowerShell、docs 或 Manifest 中另写一份版本号；`contract_version` 只
    旧进程已停止或准入已关闭；手机 MCP 适配器若在停止窗口后仍存活，脚本告警。操作者应在
    部署窗口保持不可准入。
 4. 启动新服务、App 与手机侧 MCP 适配器：核验 release/contract 与 `can_start`（其成立覆盖
-   配对、STOP 与恢复屏障），以及安装后的 App versionName/versionCode；同时核验唯一 HTTP
-   MCP 适配器进程的 `/proc/<pid>/exe` SHA-256 与清单一致。脚本不读取实例身份或显示模式，
-   二者由控制端与运行手册另行确认。宿主托管的 stdio 适配器若仍持有旧二进制，部署脚本
-   明确告警，必须重启宿主 MCP 进程。默认虚拟屏，主屏共享需要用户重新确认。
-   `-PrepareUIRecovery` 只接受已保存的 UI checkpoint 与 `user/none` 指引，保持不可准入，
-   不完成发布；用户安排手机重启后再运行正常部署验证。
+   当前 App/模式/STOP、设备与账本可写性），以及安装后的 App versionName/versionCode；
+   同时核验唯一 HTTP MCP 适配器进程的 `/proc/<pid>/exe` SHA-256 与清单一致。旧 session
+   转退休记录，旧 cleanup 可仍为 `pending`/`unconfirmed` 并与原 session 同帧展示，不单独
+   使 `can_start=false`。脚本不读取实例身份或显示模式，二者由控制端与运行手册另行确认。
+   宿主托管的 stdio 适配器若仍持有旧二进制，部署脚本明确告警，必须重启宿主 MCP 进程。
+   默认虚拟屏，主屏共享需要用户重新确认。
 5. 重启实际 MCP 宿主进程/连接，使宿主重新发现工具目录；不能只替换磁盘文件或依赖
    `list_changed` 通知。手机适配器默认随部署安装并启动，主机自建适配器可选。
-6. 条件成立才报告完成；分别记录版本匹配、App 配对、恢复屏障、STOP 可用、MCP 宿主刷新与
-   本次最小闭环结果，不合并成一个 success。
+6. 条件成立才报告完成；分别记录版本匹配、App 配对、当前恢复入口、保留的退休 cleanup 事实、
+   STOP 可用、MCP 宿主刷新与本次最小闭环结果，不合并成一个 success。
 
 App 覆盖安装保留私有消息、已读、连接配置与停止意图。不得卸载 App、`pm clear`、删除消息
-文件或清空账本来解决签名、契约或配对问题；安装失败时保留现场并停止发布。
+文件或清空账本来解决签名、契约或配对问题；安装失败时保留现场并停止发布。部署过程不触发
+手机重启；设备服务按脚本重启，覆盖安装后的控制 App 服务由部署启动。
 
 ## 5. 失败与回退
 
 - 任何中间失败都保持普通准入关闭，记录已完成阶段与失败阶段，不继续叠加升级。
-- 服务进程启动但 App 不配对、契约不一致、清理请求未确认，都不算发布完成。
+- 服务进程启动但当前 App 不配对、契约不一致、当前账本不可写、STOP/设备/交互能力未就绪，
+  都不算发布完成。旧 retirement cleanup 未确认只作为保留事实，不单独使发布失败。
 - 消息在服务重启后按原 ID 继续投递；升级不要求清空 App 消息或已读。
 - 回退是另一轮受控部署：安装上一组已核验产物，重新确认旧资源、契约配对与准入；不自动
   回放旧操作、不恢复主屏授权、不清空消息或归属来凑兼容。
-- 旧二进制无法读取已迁移数据时明确不能直接回退；未完成归属必须阻塞并由有明确原归属的
-  恢复部署处理，不能删除后假装干净。
+- 旧二进制无法读取版本 3 账本时明确不能直接回退；回退必须使用支持版本 3 的兼容产物。
+  未确认归属作为退休事实保留，不能删除后假装干净，也不要求旧物理资源全部确认后才允许新
+  当前归属保存。

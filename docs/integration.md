@@ -41,7 +41,7 @@ adb forward          主机 18881 → 服务；主机 18883 → 手机 MCP
    `adb forward`，也不需要 Agent token。
 
 只需要直连 HTTP 的 Agent 则使用 `http://127.0.0.1:18881/api/<tool>`、`agent_token` 与
-`X-Mobile-Use-Contract: 4`。
+`X-Mobile-Use-Contract: 5`。
 
 ## 1. 默认部署后的网络与进程
 
@@ -183,7 +183,7 @@ Header: Authorization: Bearer <mcp_token>
 3. 应看到固定 12 个工具：`start`、`status`、`observe`、`act`、`inspect`、`keepalive`、
    `end`、`apps`、`open_app`、`notify`、`shell`、`diagnose`。
 
-只替换手机上的二进制或重启设备服务，不会让已连接的宿主自动刷新工具；必须重启宿主进程/
+只替换手机上的二进制或重启 service 进程，不会让已连接的宿主自动刷新工具；必须重启宿主进程/
 连接。MCP 适配器本身不保存会话，重启后重新发现即可。
 
 ### 4.5 结果模式
@@ -266,7 +266,7 @@ HTTP 宿主在原有 `Authorization` 头之外按需添加：
 
 ```text
 Authorization: Bearer <agent_token>
-X-Mobile-Use-Contract: 4
+X-Mobile-Use-Contract: 5
 Content-Type: application/json; charset=utf-8
 ```
 
@@ -274,7 +274,7 @@ Content-Type: application/json; charset=utf-8
 $deploy = Get-Content .state/deploy.json -Raw | ConvertFrom-Json
 $headers = @{
     Authorization           = "Bearer $($deploy.agent_token)"
-    'X-Mobile-Use-Contract' = '4'
+    'X-Mobile-Use-Contract' = '5'
 }
 Invoke-RestMethod http://127.0.0.1:18881/api/status -Method Post `
   -Headers $headers -ContentType 'application/json' -Body '{}'
@@ -411,7 +411,7 @@ Header: Authorization: Bearer <mcp_token>
 两种选择：
 
 ```text
-直连 HTTP:  http://127.0.0.1:18880/api/<tool>   + agent_token + X-Mobile-Use-Contract: 4
+直连 HTTP:  http://127.0.0.1:18880/api/<tool>   + agent_token + X-Mobile-Use-Contract: 5
 MCP HTTP:   http://127.0.0.1:18882/mcp          + mcp_token
 ```
 
@@ -426,7 +426,8 @@ stdio 的 Android 宿主应改用手机适配器的 HTTP 入口，或由运维�
 
 ### 7.4 生命周期与电源
 
-- 默认手机适配器由部署启动，不由 `service.sh` 托管；重启手机后需要重新启动（见第 9 节）。
+- 默认手机适配器由部署启动，不由 `service.sh` 托管；手机系统启动后若部署未执行，按第 9 节
+  启动该适配器。
 - 控制 App 的前台服务与唤醒锁只保证控制同步和停止通道，不替 Agent 续租会话或延长 O。
 - Doze、锁屏与熄屏由 App 上报；服务按 `device_not_interactive`/`device_locked` 拒绝普通
   工作，不要用第二个唤醒锁或后台白名单绕过。
@@ -445,7 +446,7 @@ stdio 的 Android 宿主应改用手机适配器的 HTTP 入口，或由运维�
 `./scripts/deploy.ps1 -SkipPhoneMcp` 只用于显式跳过手机适配器；这时部署不完整，手机内
 HTTP MCP 不可用，主机只能走直连 HTTP 或自建适配器。
 
-重启手机或升级后，如果部署脚本没有刚运行过，手工启动：
+发布升级后，如果部署脚本没有刚启动手机适配器，手工启动：
 
 ```powershell
 adb shell su -c 'chroot /data/local/chroots/debian13 /bin/sh -c "nohup setsid /opt/mobile-use-vnext/device-mcp -transport http -config /opt/mobile-use-vnext/mcp-config.json >> /var/lib/mobile-use-vnext/device-mcp.log 2>&1 < /dev/null &"'
@@ -476,9 +477,9 @@ adb shell su -c 'tail -n 50 /data/local/chroots/debian13/var/lib/mobile-use-vnex
 2. 安装并启动手机 MCP 适配器，确认 `/mcp` 无 token 返回 `401`；
 3. 启动控制 App；
 4. 建立主机转发 `18881→18880`、`18883→18882`；
-5. 等待 `can_start=true`，然后报告完成。
+5. 等待当前能力与最多 5 秒的旧逻辑交接完成并取得 `can_start=true`，然后报告完成。
 
-手工重启后的顺序：
+手工启动后的顺序：
 
 1. 确认 chroot 与 Android 侧 adb 可用；
 2. `service.sh start`；
@@ -493,7 +494,8 @@ adb shell su -c 'tail -n 50 /data/local/chroots/debian13/var/lib/mobile-use-vnex
 - 服务、App、适配器与客户端共同使用新的 `contract_version`；
 - 重新建立可能失效的转发；
 - 重启实际 MCP 宿主进程，不能只替换磁盘文件；
-- 不恢复旧会话、不重放旧操作；主屏共享需要用户重新确认。
+- 旧会话转退休记录，不恢复旧 O/P 或主屏授权；旧 cleanup 的 `pending`/`unconfirmed` 可继续
+  作为原会话事实存在，但不成为新会话的永久准入理由。
 
 回退是另一轮受控部署，不自动回放旧操作；见[发布与回退](release.md)。
 
@@ -575,11 +577,12 @@ GET 判断工具是否可用。
 | `503 delivery_unavailable` | 慢交付额度不足 | 等待既有结果交付后再试，不排队 |
 | `504 action_result_uncertain` | 输入已派发但结果未知 | `status(P)`/重新观察，不重放 |
 | `409 session_not_found`/`operation_not_found` | 引用不属于当前身份或已淘汰 | 重新建立会话，不猜测旧引用 |
+| `409 operation_unknown` | 原 P 已不可定位 | `status` 无法证明过去未执行；`end(P)` 会封闭其未来接纳，结果保持 `uncertain`，不得改结束当前其它会话 |
 | 传输超时且持有 P | 服务事实可能已提交 | `status(P)` 查询；不重发动作 |
 | 传输超时且未持有 P | 只读查询未完成，或服务已生成 P 但客户端未知 | 只读可重查；工作不重发，先用 `status()` 恢复启动 P/会话 |
 
-独立 STOP 不受普通契约影响；`accepted=true` 只表示停止边界已绑定，物理清理仍看
-`status.cleanup` 与 App 呈现。
+独立 STOP 不受普通契约影响；`accepted=true` 只表示停止边界已绑定，物理清理仍看与该原会话
+同帧的 `status.cleanup` 与 App 历史。`can_start=true` 不要求旧 cleanup 已全部 `confirmed`。
 
 ## 13. 最小示例
 
@@ -587,7 +590,7 @@ GET 判断工具是否可用。
 $deploy = Get-Content .state/deploy.json -Raw | ConvertFrom-Json
 $headers = @{
     Authorization           = "Bearer $($deploy.agent_token)"
-    'X-Mobile-Use-Contract' = '4'
+    'X-Mobile-Use-Contract' = '5'
 }
 $start = Invoke-RestMethod http://127.0.0.1:18881/api/start -Method Post `
   -Headers $headers -ContentType 'application/json' -Body '{}'

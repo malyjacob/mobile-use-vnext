@@ -91,7 +91,7 @@ func (e *Engine) SyncApp(ctx context.Context, req *protocol.AppSyncRequest) (*pr
 		ContractMatched: true,
 	}
 	if req.Display != nil && e.session != nil && e.session.State == SessionStarting &&
-		e.session.AppInstanceID == req.AppInstanceID {
+		e.session.AppInstanceID == req.AppInstanceID && req.Display.Generation == e.session.CreateCommand {
 		e.session.Display = *e.app.Display
 		if e.log != nil {
 			e.log.Event(eventlog.Debug, "control.display_reported",
@@ -292,7 +292,7 @@ func (e *Engine) controlViewLocked(now time.Time) protocol.ControlView {
 			OperationID: e.work.OperationID, Kind: e.work.Kind, Phase: e.work.Phase,
 		}
 	}
-	if e.cleanup != nil {
+	if e.cleanup != nil && view.Session != nil && view.Session.State == SessionEnded {
 		view.Cleanup = &protocol.ControlCleanup{
 			State: e.cleanup.State, Execution: e.cleanup.Execution,
 			Tasks: e.cleanup.Tasks, Recents: e.cleanup.Recents, Display: e.cleanup.Display,
@@ -448,6 +448,9 @@ func (e *Engine) StartRecovery(ctx context.Context) error {
 	e.mu.Lock()
 	e.recovering, e.recoveryLoading = true, false
 	e.recovery = record
+	if record != nil {
+		e.droppedUnconfirmed = record.DroppedUnconfirmed
+	}
 	e.restoreRecoveryLocked(record)
 	if record != nil && record.Stop != nil {
 		e.stopBoundary = &stopBoundaryState{
@@ -480,94 +483,10 @@ func (e *Engine) driveRecovery(ctx context.Context) {
 		return
 	}
 	e.recoveryRunning = true
-	app := e.app
 	e.mu.Unlock()
 	defer func() { e.mu.Lock(); e.recoveryRunning = false; e.broadcastAppLocked(); e.mu.Unlock() }()
 
-	// One early step resolves the previous instance's managed runner before any
-	// display or task work: while the exact chain is unresolved, new ordinary
-	// work must stay closed.
-	if resolved, reason := e.resolveRecoveryShellChain(ctx); !resolved {
-		e.setRecoveryReason(reason)
-		return
-	}
-	// A shell_chain execution uncertainty whose runner ownership is already
-	// gone was released in an earlier pass; only the closure write was lost.
-	e.promoteOrphanShellCleanup(record)
-	resolvedUI, bootChanged, uiReason := e.resolveRecoveryUI(ctx, record)
-	if !resolvedUI {
-		e.setRecoveryReason(uiReason)
-		return
-	}
-	e.mu.Lock()
-	needsRecheck := e.cleanup != nil && e.cleanup.needsExecutionRecheck
-	e.mu.Unlock()
-	if bootChanged || needsRecheck {
-		e.finishExecutionRecovery(ctx, record, app)
-		return
-	}
-
-	displayID, generation, owner := 0, "", record.AppInstanceID
-	virtual := record.PendingCreate != nil || record.PendingClose != nil
-	if session := record.Session; session != nil {
-		displayID, generation, owner = session.DisplayID, session.DisplayGeneration, session.AppInstanceID
-		virtual = session.Mode == "virtual"
-	}
-	if displayID == 0 && record.PendingClose != nil {
-		displayID, generation, owner = record.PendingClose.DisplayID, record.PendingClose.DisplayGeneration, record.PendingClose.AppInstanceID
-	}
-	if owner == "" && record.PendingCreate != nil {
-		owner = record.PendingCreate.AppInstanceID
-	}
-	if virtual && displayID == 0 && owner == app.InstanceID && app.Display != nil {
-		displayID, generation = app.Display.ID, app.Display.Generation
-	}
-	if virtual && displayID > 0 {
-		absent, known := e.displayConfirmedAbsent(ctx, displayID)
-		if !known {
-			e.setRecoveryReason("display_probe_failed")
-			return
-		}
-		if !absent {
-			if owner == app.InstanceID && generation != "" && app.Display != nil &&
-				app.Display.ID == displayID && app.Display.Generation == generation {
-				e.enqueueCloseCommand(displayID, generation, owner)
-				e.setRecoveryReason("recovery_pending")
-			} else {
-				e.setRecoveryReason("old_resource_unconfirmed")
-			}
-			return
-		}
-		// A missing display is not proof that its old tasks/recents disappeared.
-		tasks, taskErr := e.tasksOnDisplayByTaskList(ctx, displayID)
-		if taskErr != nil {
-			e.setRecoveryReason("display_probe_failed")
-			return
-		}
-		if len(tasks) > 0 {
-			removed, removeErr := e.removeRecoveryTasks(ctx, displayID)
-			if removeErr != nil || !removed {
-				e.setRecoveryReason("old_resource_unconfirmed")
-				return
-			}
-		}
-	} else if virtual {
-		// A bounded create window alone is insufficient: require the original
-		// paired App's fresh absence report as well. Never replay the create.
-		if owner != app.InstanceID || app.Display != nil || time.Since(record.UpdatedAt) <= 15*time.Second {
-			e.setRecoveryReason("old_resource_unconfirmed")
-			return
-		}
-		if record.Cleanup != nil && (record.Cleanup.Tasks == protocol.CleanupPending || record.Cleanup.Tasks == protocol.CleanupUnconfirmed) {
-			e.setRecoveryReason("old_resource_unconfirmed")
-			return
-		}
-	}
-	if record.Cleanup != nil && (unresolvedCleanupFact(record.Cleanup.Execution) || unresolvedCleanupFact(record.Cleanup.Recents)) {
-		e.setRecoveryReason("old_resource_unconfirmed")
-		return
-	}
-	e.finishRecovery(record, app, displayID, "old_resources_resolved")
+	e.recoveryRetire(ctx, record)
 }
 
 func (e *Engine) setRecoveryReason(reason string) {
@@ -647,7 +566,6 @@ func (e *Engine) restoreRecoveryLocked(record *Ledger) {
 		e.commands = append(e.commands, &appCommand{Command: protocol.AppCommand{ID: c.ID, Kind: "close_display",
 			TargetAppInstanceID: c.AppInstanceID, TargetDisplayID: &id, TargetGeneration: c.DisplayGeneration},
 			Kind: "close_display", AppInstance: c.AppInstanceID, RequestedAt: c.RequestedAt})
-		e.closeAttempted[displayOwner{c.AppInstanceID, c.DisplayID, c.DisplayGeneration}] = true
 	}
 	// The runner identity is restored for barrier resolution only: it never
 	// revives a session and never grants new input authority.
@@ -675,11 +593,13 @@ func (e *Engine) enqueueCloseCommand(displayID int, generation, appInstance stri
 	if displayID <= 0 || appInstance == "" || generation == "" {
 		return
 	}
-	target := displayOwner{appInstance, displayID, generation}
-	if e.closeAttempted[target] {
-		return
+	for _, pending := range e.commands {
+		if pending.Kind == "close_display" && pending.Command.TargetDisplayID != nil &&
+			*pending.Command.TargetDisplayID == displayID && pending.Command.TargetGeneration == generation &&
+			pending.AppInstance == appInstance && pending.DeliveredAt.IsZero() {
+			return
+		}
 	}
-	e.closeAttempted[target] = true
 	e.commands = append(e.commands, &appCommand{
 		Command: protocol.AppCommand{
 			ID: id, Kind: "close_display", TargetAppInstanceID: appInstance,
@@ -692,81 +612,34 @@ func (e *Engine) enqueueCloseCommand(displayID int, generation, appInstance stri
 
 // ledgerRecordLocked snapshots the minimal durable ownership facts.
 func (e *Engine) ledgerRecordLocked() *Ledger {
-	now := time.Now()
-	record := &Ledger{
-		ServiceInstanceID: e.cfg.ServiceInstanceID,
-		UpdatedAt:         now,
-		AppInstanceID:     e.app.InstanceID,
-	}
+	e.trimRetiredLocked()
+	record := &Ledger{DroppedUnconfirmed: e.droppedUnconfirmed, Format: ledgerFormat, Version: ledgerVersion, ServiceInstanceID: e.cfg.ServiceInstanceID, UpdatedAt: time.Now(), AppInstanceID: e.app.InstanceID}
 	if e.recovery != nil {
-		*record = *e.recovery
-		record.PendingClose = nil // only still-pending commands survive acknowledgements
+		return CloneLedger(e.recovery)
 	}
-	if e.session != nil && e.recovery == nil {
-		record.Session = &LedgerSession{
-			Origin: e.session.Origin, Agent: e.session.Agent, Mode: e.session.Mode,
-			State: e.session.State, AppInstanceID: e.session.AppInstanceID,
-			ModeGeneration: e.session.ModeGeneration,
-			DisplayID:      e.session.Display.ID, SFID: e.session.Display.SFID,
-			DisplayGeneration: e.session.Display.Generation,
-			Width:             e.session.Display.Width, Height: e.session.Display.Height,
-			Density: e.session.Display.Density, Rotation: e.session.Display.Rotation,
-			StartedAt: e.session.StartedAt,
-		}
+	if e.session != nil && e.session.State != SessionEnded {
+		record.Session = ledgerSessionOf(e.session)
 		record.Tasks = ledgerTasksOf(e.session.Tasks)
-	}
-	for _, command := range e.commands {
-		if command.Kind == "create_display" && record.PendingCreate == nil {
-			record.PendingCreate = &LedgerCommand{
-				ID: command.Command.ID, Kind: command.Kind,
-				AppInstanceID: command.AppInstance, RequestedAt: command.RequestedAt,
-			}
+		record.Shell = e.shell.ledger()
+		if e.ui != nil {
+			v := e.ui.record
+			record.UI = &v
 		}
-		if command.Kind == "close_display" && record.PendingClose == nil {
-			displayID := 0
-			if command.Command.TargetDisplayID != nil {
-				displayID = *command.Command.TargetDisplayID
-			}
-			record.PendingClose = &LedgerCommand{
-				ID: command.Command.ID, Kind: command.Kind,
-				AppInstanceID: command.AppInstance, DisplayID: displayID,
-				DisplayGeneration: command.Command.TargetGeneration,
-				RequestedAt:       command.RequestedAt,
+		if e.legacyUI != nil {
+			v := *e.legacyUI
+			record.LegacyUI = &v
+		}
+		for _, command := range e.commands {
+			if command.Kind == "create_display" && command.Command.ID == e.session.CreateCommand {
+				record.PendingCreate = &LedgerCommand{ID: command.Command.ID, Kind: command.Kind, AppInstanceID: command.AppInstance, RequestedAt: command.RequestedAt}
 			}
 		}
 	}
-	if e.cleanup != nil {
-		record.Cleanup = &LedgerCleanup{
-			State: e.cleanup.State, Execution: e.cleanup.Execution, Tasks: e.cleanup.Tasks,
-			Recents: e.cleanup.Recents, Display: e.cleanup.Display,
-			Reason: e.cleanup.Reason, ExecReason: e.cleanup.ExecReason,
-			StartedAt:                e.cleanup.StartedAt,
-			CheckedTaskIDs:           append([]int(nil), e.cleanup.checkedTaskIDs...),
-			ExecutionRecheckRequired: e.cleanup.needsExecutionRecheck,
-		}
+	for _, r := range e.retired {
+		record.Retired = append(record.Retired, r.ledger())
 	}
 	if e.stopBoundary != nil {
-		record.Stop = &LedgerStop{
-			AppInstanceID: e.stopBoundary.AppInstanceID, Seq: e.stopBoundary.Seq,
-			AcceptedAt: e.stopBoundary.AcceptedAt,
-		}
-	}
-	// The managed runner identity is the only durable evidence that can close
-	// an unresolved shell chain after a restart. It carries no command text and
-	// no output.
-	record.Shell = e.shell.ledger()
-	record.UI, record.LegacyUI = nil, nil
-	if e.ui != nil {
-		copyUI := e.ui.record
-		record.UI = &copyUI
-	}
-	if e.legacyUI != nil {
-		copyCheckpoint := *e.legacyUI
-		record.LegacyUI = &copyCheckpoint
-	}
-	record.Tasks = append([]LedgerTask(nil), record.Tasks...)
-	if _, pending := legacyUIResponsibility(e.recovery); pending {
-		record.LegacyUIPending = true
+		record.Stop = &LedgerStop{AppInstanceID: e.stopBoundary.AppInstanceID, Seq: e.stopBoundary.Seq, AcceptedAt: e.stopBoundary.AcceptedAt}
 	}
 	return record
 }
@@ -800,9 +673,29 @@ func (e *Engine) persistSync(ctx context.Context) error {
 
 // persistAsync records progress without blocking STOP or delivery.
 func (e *Engine) persistAsync() {
+	e.persistScheduleMu.Lock()
+	e.persistRequested = true
+	if e.persistRunning {
+		e.persistScheduleMu.Unlock()
+		return
+	}
+	e.persistRunning = true
 	e.wg.Add(1)
+	e.persistScheduleMu.Unlock()
 	go func() {
 		defer e.wg.Done()
-		_ = e.persistSync(context.Background())
+		for {
+			e.persistScheduleMu.Lock()
+			e.persistRequested = false
+			e.persistScheduleMu.Unlock()
+			_ = e.persistSync(context.Background())
+			e.persistScheduleMu.Lock()
+			if !e.persistRequested {
+				e.persistRunning = false
+				e.persistScheduleMu.Unlock()
+				return
+			}
+			e.persistScheduleMu.Unlock()
+		}
 	}()
 }

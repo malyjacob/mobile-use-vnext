@@ -381,3 +381,19 @@
 - **影响**：MCP 文本格式发生不兼容变化，工具目录/描述/schema/指纹、`/api/*` 与契约号不变；
   为保持目录指纹，description 中旧 `omitted` 提示保留，由 `docs/mcp.md` 明确格式边界。
   `both` 承担双份编码开销，宿主截断仍由宿主处理；不增加日志正文或设备执行权威。
+
+## D34 退休会话有限善后且不永久封锁准入
+
+- **背景**：旧 cleanup、未确认 UI/shell 或 legacy checkpoint 曾可长期占用当前槽位并把整台
+  服务挡在新会话之外；一次 recents 清理失败即可无限期返回 `cleanup_unconfirmed`。
+- **选择**：批准 `cleanup-without-permanent-gate` 取舍。当前会话与退休记录分离；撤权后旧
+  逻辑交接最多 5 秒，独立物理补偿总计 12 秒、最多三轮。`pending` 表示有限处理仍在运行，
+  `unconfirmed` 表示主动处理已停止；二者都不替代事实，也不永久决定新会话准入。账本版本 3
+  最多保留 8 条退休明细、明细合计 24 KiB，整个账本仍不超过 64 KiB。新会话只由当前账本
+  可写性、App/模式/STOP、设备与交互能力、活动会话和当前普通工作决定。未知 P 的 `end` 返回
+  `operation_unknown`，同时封闭该 P 的未来接纳，但不改写过去执行事实或结束其它会话。
+- **影响**：旧 Android 调用与新会话可能在物理时间上重叠，已派发命令不保证撤回；精确清理
+  仍须重验 boot、App 实例、原创建命令、display/generation 和任务归属。旧 cleanup、legacy
+  UI 或容量不足不再作为永久准入理由，运维也不以手机重启、清账本或清 App 数据作为出口。
+  共同契约使用版本 5，App 的 retired attempt 不成为 current descriptor，也不决定
+  `mode_ready`。

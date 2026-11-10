@@ -84,6 +84,7 @@ func run() int {
 		deviceAdapter, ledger,
 		&observationProjector{builder: observation.NewBuilder()}, treeDiffer{},
 		engine.WithImageEncoder(imageEncoder{}),
+		engine.WithProjectorFactory(func() engine.Projector { return &observationProjector{builder: observation.NewBuilder()} }),
 		engine.WithMessageStore(messages))
 
 	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

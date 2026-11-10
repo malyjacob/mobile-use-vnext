@@ -111,15 +111,15 @@ func planRecoveryFor(in recoveryInput) *protocol.Recovery {
 	return nil
 }
 
-// endPlan maps the terminal tool. Cleanup progress always wins: end itself is
-// the terminal entry, so a second end only repeats the same closure view.
+// endPlan maps the terminal tool. Pending cleanup has a bounded advancing
+// status step; unconfirmed cleanup has stopped and remains a reported fact.
 func endPlan(in recoveryInput) *protocol.Recovery {
 	if in.Phase == "closed_before_admission" {
 		return nil
 	}
-	cleanupIncomplete := in.Cleanup == protocol.CleanupPending || in.Cleanup == protocol.CleanupUnconfirmed
+	cleanupPending := in.Cleanup == protocol.CleanupPending
 	if in.Code == "" || isSessionEndCode(in.Code) {
-		if cleanupIncomplete {
+		if cleanupPending {
 			return newRecovery(protocol.RecoveryEntryStatus, protocol.RecoveryReferenceP,
 				protocol.RecoveryInputRevoked, protocol.RecoveryCauseCleanupPending)
 		}
@@ -162,8 +162,8 @@ func statusPlan(in recoveryInput) *protocol.Recovery {
 		}
 		return nil
 	case "operation":
-		if in.Cleanup == protocol.CleanupPending || in.Cleanup == protocol.CleanupUnconfirmed {
-			return newRecovery(protocol.RecoveryEntryStatus, protocol.RecoveryReferenceP,
+		if in.Cleanup == protocol.CleanupPending {
+			return newRecovery(protocol.RecoveryEntryStatus, in.Reference,
 				protocol.RecoveryInputRevoked, protocol.RecoveryCauseCleanupPending)
 		}
 		return nil

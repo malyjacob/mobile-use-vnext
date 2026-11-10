@@ -87,6 +87,7 @@ func (e *Engine) completeShellRecovery(run *shellState, termination string,
 		e.shell = nil
 	}
 	op := e.operations[run.OperationID]
+	restoredOperation := op == nil
 	if op == nil {
 		if len(e.operations) >= e.cfg.MaxOperations {
 			e.evictOperationsLocked()
@@ -94,16 +95,20 @@ func (e *Engine) completeShellRecovery(run *shellState, termination string,
 		op = &operationState{ID: run.OperationID, Agent: run.Agent, Kind: "shell", CreatedAt: run.StartedAt}
 		e.operations[run.OperationID] = op
 	}
-	op.State = OperationFinished
-	op.Phase = "previous_instance"
-	op.Outcome = outcome
-	op.SessionOrigin = run.Origin
-	op.FinishedAt = now
-	op.Error = apiErr
-	e.confirmCleanupBarrierLocked()
+	if restoredOperation {
+		op.State = OperationFinished
+		op.Phase = "previous_instance"
+		op.Outcome = outcome
+		op.SessionOrigin = run.Origin
+		op.FinishedAt = now
+		op.Error = apiErr
+	}
+	e.confirmRetiredShellLocked(run)
+	if e.session != nil && e.session.Epoch == run.Epoch {
+		e.confirmCleanupBarrierLocked()
+	}
 	e.broadcastAppLocked()
 	e.mu.Unlock()
-	e.removeManagedShellDir(run)
 	e.persistAsync()
 	e.logShell("shell.previous_instance", run,
 		eventlog.Str("phase", "previous_instance"),

@@ -219,18 +219,20 @@ func WithImageEncoder(enc ImageEncoder) Option {
 // Engine is the single authority. All exported methods are safe for concurrent
 // use; device I/O always happens outside the state lock.
 type Engine struct {
-	cfg       Config
-	log       *eventlog.Logger
-	dev       Device
-	store     Store
-	projector Projector
-	differ    Differ
-	imaging   ImageEncoder
+	cfg              Config
+	log              *eventlog.Logger
+	dev              Device
+	store            Store
+	projector        Projector
+	projectorFactory func() Projector
+	differ           Differ
+	imaging          ImageEncoder
 
-	mu               sync.Mutex
-	persistMu        sync.Mutex // serializes snapshot + Save, never held with state I/O
-	messagePersistMu sync.Mutex // serializes message-box snapshot + Save
-	messageStore     MessageStore
+	mu                sync.Mutex
+	persistScheduleMu sync.Mutex
+	persistMu         sync.Mutex // serializes snapshot + Save, never held with state I/O
+	messagePersistMu  sync.Mutex // serializes message-box snapshot + Save
+	messageStore      MessageStore
 
 	startedAt                 time.Time
 	blockedReason             string // permanent blocker (corrupt ledger)
@@ -250,12 +252,19 @@ type Engine struct {
 	app       appState
 	appNotify chan struct{}
 
-	commands       []*appCommand
-	closeAttempted map[displayOwner]bool
-	stopBoundary   *stopBoundaryState
-	stopSeqByApp   map[string]int64
-	closed         map[string]time.Time
-	closedOrder    []string
+	commands           []*appCommand
+	closeAttempted     map[displayOwner]bool
+	stopBoundary       *stopBoundaryState
+	stopSeqByApp       map[string]int64
+	closed             map[string]time.Time
+	closedOrder        []string
+	closedKnown        map[string]bool
+	retired            []*retiredState
+	droppedUnconfirmed uint64
+	persistRunning     bool
+	persistRequested   bool
+	maintenanceCancel  context.CancelFunc
+	maintenanceOwner   *cleanupState
 
 	session      *sessionState
 	lastSession  *sessionState
@@ -314,6 +323,7 @@ type appState struct {
 }
 
 type sessionState struct {
+	Projector        Projector
 	Origin           string
 	Agent            string
 	Mode             string
@@ -349,6 +359,9 @@ type baselineState struct {
 }
 
 type observationState struct {
+	SessionSnapshot   *protocol.Session
+	CleanupSnapshot   *protocol.Cleanup
+	Projector         Projector
 	ID                string
 	Origin            string
 	Revision          int
@@ -369,16 +382,19 @@ type observationState struct {
 }
 
 type operationState struct {
-	ID            string
-	Agent         string
-	Kind          string
-	State         string
-	Phase         string
-	Outcome       string
-	Error         *protocol.Error
-	SessionOrigin string
-	CreatedAt     time.Time
-	FinishedAt    time.Time
+	SessionSnapshot *protocol.Session
+	CleanupSnapshot *protocol.Cleanup
+	KnownOutcome    string
+	ID              string
+	Agent           string
+	Kind            string
+	State           string
+	Phase           string
+	Outcome         string
+	Error           *protocol.Error
+	SessionOrigin   string
+	CreatedAt       time.Time
+	FinishedAt      time.Time
 	// Reference is the kind of reference the request already used ("O"/"P").
 	// It is a planning fact only: it never grants authority.
 	Reference string
@@ -395,6 +411,9 @@ type operationState struct {
 }
 
 type workState struct {
+	Projector    Projector
+	Deadline     time.Time
+	RevokedAt    time.Time
 	OperationID  string
 	Agent        string
 	Kind         string
@@ -470,6 +489,7 @@ func New(cfg Config, log *eventlog.Logger, dev Device, st Store, projector Proje
 		closeAttempted: map[displayOwner]bool{},
 		stopSeqByApp:   map[string]int64{},
 		closed:         map[string]time.Time{},
+		closedKnown:    map[string]bool{},
 		observations:   map[string]*observationState{},
 		operations:     map[string]*operationState{},
 		tickerDone:     make(chan struct{}),
@@ -506,29 +526,13 @@ func (e *Engine) availabilityLocked(now time.Time) (string, string) {
 		}
 		return AvailabilityRecovering, "recovery_pending"
 	}
-	if e.uiRebootRequiredLocked() {
-		return AvailabilityBlocked, "ui_input_reboot_required"
-	}
-	if e.uiPendingLocked() {
-		return AvailabilityRecovering, "ui_input_unconfirmed"
-	}
-	if e.cleanup != nil {
-		switch e.cleanup.State {
-		case protocol.CleanupPending:
-			// Closure commands must still reach the paired App; ordinary start
-			// remains blocked by canStart's session/cleanup checks.
-			return AvailabilityRecovering, "cleanup_pending"
-		case protocol.CleanupUnconfirmed:
-			return AvailabilityBlocked, protocol.CodeCleanupUnconfirmed
+	if e.session != nil && e.session.State != SessionEnded {
+		if e.uiPendingLocked() {
+			return AvailabilityRecovering, "ui_input_unconfirmed"
 		}
-	}
-	// An unresolved managed shell chain keeps the barrier closed: no new
-	// ordinary work may be admitted until the exact runner is confirmed gone.
-	if e.shell != nil && !e.shell.settled() {
-		if e.shell.State == ShellTerminating {
-			return AvailabilityRecovering, "shell_chain_unconfirmed"
+		if e.shell != nil && !e.shell.settled() {
+			return AvailabilityRecovering, "shell_pending"
 		}
-		return AvailabilityRecovering, "shell_pending"
 	}
 	if !e.deviceReady {
 		return AvailabilityRecovering, protocol.CodeDeviceUnavailable
@@ -606,7 +610,7 @@ func (e *Engine) appReadyLocked(now time.Time) (bool, string) {
 
 // canStartLocked is the full start admission gate including the work position.
 func (e *Engine) canStartLocked(now time.Time) (bool, string) {
-	if e.work != nil {
+	if e.work != nil && !(e.work.Revoked && !e.work.RevokedAt.IsZero() && !now.Before(e.work.RevokedAt.Add(retirementHandover))) {
 		return false, protocol.CodeDeviceBusy
 	}
 	return e.canStartStateLocked(now)
@@ -623,9 +627,6 @@ func (e *Engine) canStartStateLocked(now time.Time) (bool, string) {
 	if e.session != nil {
 		if e.session.State != SessionEnded {
 			return false, protocol.CodeSessionExists
-		}
-		if e.cleanup == nil || e.cleanup.State != protocol.CleanupComplete {
-			return false, protocol.CodeCleanupUnconfirmed
 		}
 	}
 	ready, why := e.appReadyLocked(now)
@@ -684,6 +685,12 @@ func (e *Engine) housekeeping(ctx context.Context) {
 	now := time.Now()
 	e.mu.Lock()
 	var expired *sessionState
+	if e.session != nil && e.session.State != SessionEnded &&
+		((e.work != nil && !e.work.Deadline.IsZero() && !now.Before(e.work.Deadline)) || (e.ui != nil && !e.ui.deadline.IsZero() && !now.Before(e.ui.deadline))) {
+		expired = e.revokeSessionLocked("work_deadline", now)
+		e.freezeWorkLocked(e.work)
+	}
+	e.detachRetiredLocked(now)
 	if e.session != nil && e.session.State != SessionEnded && !sessionBeforeDeadline(e.session, now) {
 		expired = e.revokeSessionLocked("lease_expired", now)
 	}
@@ -722,6 +729,7 @@ func (e *Engine) housekeeping(ctx context.Context) {
 		go func() { defer e.wg.Done(); e.persistUIReceipt(token) }()
 	}
 	e.launchExecutionCleanupRecheck()
+	e.retryLedgerSave()
 }
 
 // Shutdown closes ordinary admission, revokes the original session, starts the
@@ -773,9 +781,13 @@ func (e *Engine) revokeSessionLocked(reason string, now time.Time) *sessionState
 		e.current.Status = ObservationRetired
 		e.current.RetiredAt = now
 	}
+	if session.CreateCommand != "" && session.CreateResult == nil {
+		e.commands = append(e.commands, &appCommand{Command: protocol.AppCommand{ID: NewUUID(), Kind: "cancel_create", TargetAppInstanceID: session.AppInstanceID, TargetCreateCommandID: session.CreateCommand}, Kind: "cancel_create", AppInstance: session.AppInstanceID, RequestedAt: now, Ready: true})
+	}
 	e.removeCommandLocked(session.CreateCommand)
 	if e.work != nil {
 		e.work.Revoked = true
+		e.work.RevokedAt = now
 		if e.work.Cancel != nil {
 			e.work.Cancel()
 		}
@@ -801,13 +813,13 @@ func (e *Engine) touchSessionLocked(now time.Time) {
 // ObservationID allocation.
 func (e *Engine) nextObservationIDLocked() string {
 	e.nextObservation++
-	return "O" + strconv.FormatInt(e.nextObservation, 10)
+	return "O" + e.cfg.ServiceInstanceID + "_" + strconv.FormatInt(e.nextObservation, 10)
 }
 
 // Operation IDs generated by the service when the SDK did not supply one.
 func (e *Engine) nextOperationIDLocked() string {
 	e.nextOperation++
-	return "P" + strconv.FormatInt(e.nextOperation, 10)
+	return "P" + e.cfg.ServiceInstanceID + "_" + strconv.FormatInt(e.nextOperation, 10)
 }
 
 func (e *Engine) nextCommandIDLocked() string {
@@ -926,8 +938,18 @@ func (e *Engine) sessionByOriginLocked(origin string) *sessionState {
 	if e.session != nil && e.session.Origin == origin {
 		return e.session
 	}
+	for _, retired := range e.retired {
+		if retired.session.Origin == origin {
+			return retired.session
+		}
+	}
 	if e.lastSession != nil && e.lastSession.Origin == origin {
 		return e.lastSession
+	}
+	for _, op := range e.operations {
+		if op.SessionOrigin == origin && op.SessionSnapshot != nil {
+			return sessionFromSnapshot(op.SessionSnapshot, 0)
+		}
 	}
 	return nil
 }
@@ -937,8 +959,18 @@ func (e *Engine) sessionByEpochLocked(epoch int64) *sessionState {
 	if e.session != nil && e.session.Epoch == epoch {
 		return e.session
 	}
+	for _, retired := range e.retired {
+		if retired.session.Epoch == epoch {
+			return retired.session
+		}
+	}
 	if e.lastSession != nil && e.lastSession.Epoch == epoch {
 		return e.lastSession
+	}
+	for _, obs := range e.observations {
+		if obs.SessionEpoch == epoch && obs.SessionSnapshot != nil {
+			return sessionFromSnapshot(obs.SessionSnapshot, epoch)
+		}
 	}
 	return nil
 }
@@ -956,6 +988,7 @@ func (e *Engine) addClosedLocked(ref string, now time.Time) {
 		oldest := e.closedOrder[0]
 		e.closedOrder = e.closedOrder[1:]
 		delete(e.closed, oldest)
+		delete(e.closedKnown, oldest)
 	}
 }
 
@@ -965,6 +998,7 @@ func (e *Engine) pruneClosedLocked(now time.Time) {
 		at, ok := e.closed[ref]
 		if !ok || now.Sub(at) > e.cfg.MaxAcceptanceAge {
 			delete(e.closed, ref)
+			delete(e.closedKnown, ref)
 			continue
 		}
 		keep = append(keep, ref)
@@ -988,10 +1022,17 @@ func (e *Engine) operationViewLocked(op *operationState) *protocol.Result {
 	if session := e.sessionByOriginLocked(op.SessionOrigin); session != nil {
 		result.Session = e.sessionViewLocked(session)
 		result.IncludeSession = true
+	} else if op.SessionSnapshot != nil {
+		copy := *op.SessionSnapshot
+		result.Session = &copy
+		result.IncludeSession = true
+		result.Cleanup = cloneCleanupSnapshot(op.CleanupSnapshot)
 	}
-	if (op.Kind == "end" || (op.SessionOrigin != "" && result.Session != nil &&
-		result.Session.State == SessionEnded)) && e.cleanup != nil {
-		result.Cleanup = e.cleanupViewLocked()
+	if op.Kind == "end" || (op.SessionOrigin != "" && result.Session != nil &&
+		result.Session.State == SessionEnded) {
+		if cleanup := e.cleanupForOriginLocked(op.SessionOrigin); cleanup != nil {
+			result.Cleanup = cleanupViewOf(cleanup)
+		}
 	}
 	return result
 }

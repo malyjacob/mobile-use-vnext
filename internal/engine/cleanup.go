@@ -13,27 +13,29 @@ import (
 // cleanupTarget freezes the original ownership used by the independent
 // closure chain. It never carries user content.
 type cleanupTarget struct {
-	epoch        int64
-	origin       string
-	agent        string
-	mode         string
-	appInstance  string
-	display      device.Display
-	createResult *bool
-	createError  string
-	tasks        []taskEntry
+	epoch         int64
+	origin        string
+	agent         string
+	mode          string
+	appInstance   string
+	display       device.Display
+	createCommand string
+	identity      device.BootIdentity
+	createResult  *bool
+	createError   string
+	tasks         []taskEntry
 }
 
 func targetOf(session *sessionState) cleanupTarget {
 	tasks := append([]taskEntry(nil), session.Tasks...)
-	if len(tasks) > 16 {
-		tasks = tasks[:16]
+	if len(tasks) > 256 {
+		tasks = tasks[:256]
 	}
 	target := cleanupTarget{
 		epoch: session.Epoch, origin: session.Origin, agent: session.Agent,
 		mode: session.Mode, appInstance: session.AppInstanceID, display: session.Display,
 		createResult: session.CreateResult, createError: session.CreateError,
-		tasks: tasks,
+		tasks: tasks, createCommand: session.CreateCommand, identity: session.InputIdentity,
 	}
 	return target
 }
@@ -42,9 +44,6 @@ func targetOf(session *sessionState) cleanupTarget {
 // caller only observes the existing chain.
 func (e *Engine) beginCleanupLocked(session *sessionState, reason string) *cleanupState {
 	if session == nil || session.CleanupStarted {
-		return nil
-	}
-	if e.cleanup != nil && e.cleanup.State == protocol.CleanupPending {
 		return nil
 	}
 	execUnknown := e.uiPendingLocked() || (e.shell != nil && !e.shell.settled()) ||
@@ -69,6 +68,7 @@ func (e *Engine) beginCleanupLocked(session *sessionState, reason string) *clean
 	session.CleanupStarted = true
 	cleanup.done = make(chan struct{})
 	e.cleanup = cleanup
+	e.retireLocked(session, cleanup)
 	e.broadcastAppLocked()
 	return cleanup
 }
@@ -117,7 +117,16 @@ func (e *Engine) launchPreparedCleanup(session *sessionState, reason string,
 }
 
 func (e *Engine) runCleanupChain(target cleanupTarget, cleanup *cleanupState) {
-	e.persistAsync()
+	e.mu.Lock()
+	r := e.retiredForCleanupLocked(cleanup)
+	if r == nil || cleanup.State != protocol.CleanupPending {
+		e.mu.Unlock()
+		return
+	}
+	r.budgetIssued = true
+	ctx, cancel := context.WithDeadline(context.Background(), cleanup.StartedAt.Add(e.cfg.CleanupTimeout))
+	r.cancel = cancel
+	e.mu.Unlock()
 	if e.log != nil {
 		e.log.Event(eventlog.Info, "cleanup.start", eventlog.Str("reason", cleanup.Reason),
 			eventlog.Int("display_id", target.display.ID), eventlog.Str("mode", target.mode))
@@ -125,105 +134,185 @@ func (e *Engine) runCleanupChain(target cleanupTarget, cleanup *cleanupState) {
 	e.wg.Add(1)
 	go func() {
 		defer e.wg.Done()
+		defer cancel()
 		e.mu.Lock()
 		result := *cleanup
 		e.mu.Unlock()
-		e.performCleanup(target, &result)
+		persistCtx, cancel := context.WithTimeout(context.Background(), e.cfg.LedgerTimeout)
+		err := e.persistSync(persistCtx)
+		cancel()
+		if err != nil {
+			result.Error = &protocol.Error{Code: "ledger_unavailable", Message: "原会话清理未能保存"}
+		} else {
+			e.mu.Lock()
+			valid := e.retiredForCleanupLocked(cleanup) == r && cleanup.State == protocol.CleanupPending
+			e.mu.Unlock()
+			if valid && ctx.Err() == nil {
+				e.performCleanup(ctx, target, &result)
+			}
+		}
 		e.finishCleanup(target, cleanup, result)
 	}()
 }
 
 // performCleanup performs the bounded physical closure. It never runs while
 // holding the state lock and never revives input authority.
-func (e *Engine) performCleanup(target cleanupTarget, cleanup *cleanupState) {
+func (e *Engine) performCleanup(ctx context.Context, target cleanupTarget, cleanup *cleanupState) {
+	e.mu.Lock()
+	r := e.retiredForCleanupLockedByTarget(target)
+	if r == nil || r.cleanup.State != protocol.CleanupPending {
+		e.mu.Unlock()
+		return
+	}
+	e.mu.Unlock()
+	waits := []time.Duration{0, 200 * time.Millisecond, 800 * time.Millisecond}
+	for attempt, wait := range waits {
+		if wait > 0 {
+			timer := time.NewTimer(wait)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			}
+			timer.Stop()
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		e.mu.Lock()
+		if r != nil && e.retiredForCleanupLocked(r.cleanup) != r {
+			e.mu.Unlock()
+			return
+		}
+		busy := (e.work != nil && !e.work.Revoked) || e.maintenanceOwner != nil
+		if r != nil {
+			r.attempts = attempt + 1
+		}
+		ioCtx, ioCancel := context.WithCancel(ctx)
+		if !busy {
+			e.maintenanceCancel = ioCancel
+			e.maintenanceOwner = cleanup
+		}
+		e.mu.Unlock()
+		if busy {
+			ioCancel()
+			continue
+		}
+		if e.log != nil {
+			e.log.Event(eventlog.Info, "cleanup.attempt", eventlog.Str("origin", target.origin), eventlog.Int("attempt", attempt+1))
+		}
+		cleanup.Error = nil
+		if r != nil {
+			e.resolveRetiredExecution(ioCtx, r)
+		}
+
+		var revision uint64
+		if r != nil {
+			e.mu.Lock()
+			revision = r.cleanup.evidenceRevision
+			cleanup.Execution = r.cleanup.Execution
+			e.mu.Unlock()
+		}
+		e.performCleanupAttempt(ioCtx, target, cleanup)
+		if r != nil {
+			e.mu.Lock()
+			cleanup.needsExecutionRecheck = r.cleanup.evidenceRevision != revision
+			cleanup.evidenceRevision = revision
+			e.mu.Unlock()
+		}
+		ioCancel()
+		e.mu.Lock()
+		if e.maintenanceOwner == cleanup {
+			e.maintenanceCancel = nil
+			e.maintenanceOwner = nil
+		}
+		e.mu.Unlock()
+		if closureComplete(cleanup) {
+			return
+		}
+	}
+	if cleanup.Error == nil {
+		cleanup.Error = &protocol.Error{Code: "cleanup_budget_exhausted", Message: "原会话自动清理预算已结束"}
+	}
+}
+
+func (e *Engine) retiredForCleanupLockedByTarget(target cleanupTarget) *retiredState {
+	for _, r := range e.retired {
+		if r.session.Epoch == target.epoch && r.session.Origin == target.origin {
+			return r
+		}
+	}
+	return nil
+}
+
+func (e *Engine) performCleanupAttempt(ctx context.Context, target cleanupTarget, cleanup *cleanupState) {
 	if target.mode != "virtual" {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), e.cfg.CleanupTimeout+8*time.Second)
-	defer cancel()
-	displayID := target.display.ID
-	generation := target.display.Generation
-	if displayID == 0 && target.createResult == nil {
-		// The create may have succeeded without a reported descriptor. Give the
-		// App one bounded chance to report it before deciding evidence is missing.
-		displayID, generation = e.waitForAppDisplay(ctx, target, 4*time.Second)
-	}
+	displayID, generation := target.display.ID, target.display.Generation
 	if displayID == 0 {
-		switch {
-		case target.createResult != nil && !*target.createResult:
-			cleanup.Display = protocol.CleanupConfirmed
-		case e.appReportsNoDisplay(target):
-			// The App's own descriptor is absent and the helper create window has
-			// passed. This is the App's physical evidence that no owned screen
-			// remains; it is still an App fact, not an ADB screenshot.
-			cleanup.Display = protocol.CleanupConfirmed
-		default:
-			cleanup.Display = protocol.CleanupUnconfirmed
-			cleanup.Error = &protocol.Error{Code: "display_create_unconfirmed",
-				Message: "无法确认原虚拟屏是否已建立"}
+		e.mu.Lock()
+		if e.app.InstanceID == target.appInstance && e.app.Display != nil && e.app.Display.Generation == target.createCommand {
+			displayID, generation = e.app.Display.ID, e.app.Display.Generation
 		}
-		cleanup.Tasks = protocol.CleanupNotApplicable
-		cleanup.Recents = protocol.CleanupNotApplicable
-		return
+		e.mu.Unlock()
+		if displayID == 0 {
+			cleanup.Tasks, cleanup.Recents = protocol.CleanupUnconfirmed, protocol.CleanupUnconfirmed
+			cleanup.Display = protocol.CleanupUnconfirmed
+			if target.createResult != nil && !*target.createResult && (target.createError == "display_dimensions_invalid" || target.createError == "display_arguments_invalid") {
+				cleanup.Tasks, cleanup.Recents, cleanup.Display = protocol.CleanupNotApplicable, protocol.CleanupNotApplicable, protocol.CleanupConfirmed
+			}
+			return
+		}
 	}
-
+	target.display.ID, target.display.Generation = displayID, generation
 	e.mu.Lock()
+	if r := e.retiredForCleanupLockedByTarget(target); r != nil && r.session.Display.ID == 0 {
+		r.session.Display.ID = displayID
+		r.session.Display.Generation = generation
+	}
+	conflict := e.cleanupDisplayConflictLocked(target.epoch, displayID)
 	appInstance := e.app.InstanceID
 	e.mu.Unlock()
-	if appInstance != "" && target.appInstance == appInstance {
-		e.enqueueCloseCommand(displayID, generation, appInstance)
+	if conflict {
+		cleanup.Tasks, cleanup.Recents, cleanup.Display = protocol.CleanupUnconfirmed, protocol.CleanupUnconfirmed, protocol.CleanupUnconfirmed
+		cleanup.Error = &protocol.Error{Code: "cleanup_identity_conflict", Message: "旧清理目标与当前归属冲突"}
+		return
 	}
-
-	// A virtual display is exclusively owned: every live task on it belongs to
-	// this session. Remove owned windows before destroying the display, then
-	// verify both the live task list and the RecentTasks index.
-	hadTasks := len(target.tasks) > 0
-	if live, known := e.dev.TasksOnDisplay(ctx, displayID); known && len(live) > 0 {
-		hadTasks = true
-	}
-	if hadTasks {
-		tasksOK, recentsOK, checked := e.removeOwnedTasks(ctx, displayID, target.tasks)
-		cleanup.checkedTaskIDs = checked
+	identity, identityErr := e.cleanupIdentity(ctx)
+	destructive := identityErr == nil && validUIIdentity(target.identity) && identity == target.identity
+	if destructive {
+		tasksOK, recentsOK, ids := e.removeOwnedTasksIdentity(ctx, displayID, cleanupTasksOfTarget(target, cleanup), target.identity, target.epoch)
+		cleanup.checkedTaskIDs = ids
+		cleanup.Tasks, cleanup.Recents = protocol.CleanupUnconfirmed, protocol.CleanupUnconfirmed
 		if tasksOK {
 			cleanup.Tasks = protocol.CleanupConfirmed
-		} else {
-			cleanup.Tasks = protocol.CleanupUnconfirmed
-			cleanup.Error = &protocol.Error{Code: protocol.CodeAppTaskUnconfirmed,
-				Message: "原会话任务未能全部移除"}
 		}
-		if recentsOK {
+		if tasksOK && len(ids) == 0 {
+			cleanup.Recents = protocol.CleanupNotApplicable
+		} else if recentsOK {
 			cleanup.Recents = protocol.CleanupConfirmed
 		} else {
-			cleanup.Recents = protocol.CleanupUnconfirmed
-			if cleanup.Error == nil {
-				cleanup.Error = &protocol.Error{Code: "recents_cleanup_unconfirmed",
-					Message: "最近任务清理尚未确认"}
-			}
+			cleanup.Error = &protocol.Error{Code: "recents_cleanup_unconfirmed", Message: "最近任务清理尚未确认"}
 		}
 	} else {
-		cleanup.Tasks = protocol.CleanupConfirmed
-		cleanup.Recents = protocol.CleanupNotApplicable
+		ids := append([]int(nil), cleanup.checkedTaskIDs...)
+		for _, t := range target.tasks {
+			ids = append(ids, t.TaskID)
+		}
+		cleanup.Tasks, cleanup.Recents, _ = e.verifyClosedExecutionTarget(ctx, target, ids)
 	}
-
-	deadline := time.Now().Add(e.cfg.CleanupTimeout)
-	for {
-		absent, known := e.displayConfirmedAbsent(ctx, displayID)
-		if known && absent {
-			cleanup.Display = protocol.CleanupConfirmed
-			break
-		}
-		if time.Now().After(deadline) {
-			if absent, known := e.displayConfirmedAbsent(ctx, displayID); known && absent {
-				cleanup.Display = protocol.CleanupConfirmed
-				cleanup.Error = nil
-			} else {
-				cleanup.Display = protocol.CleanupUnconfirmed
-				cleanup.Error = &protocol.Error{Code: "display_release_unconfirmed",
-					Message: "原虚拟屏释放尚未确认"}
-			}
-			break
-		}
-		e.waitAppChange(ctx, 200*time.Millisecond)
+	// Closing is bound by original App/create generation, even if a numerical
+	// display ID is reused. Task deletion still needs a same-boot identity.
+	if target.appInstance == appInstance && generation != "" {
+		e.enqueueCloseCommand(displayID, generation, appInstance)
+	}
+	if cleanup.Display != protocol.CleanupConfirmed {
+		cleanup.Display = protocol.CleanupUnconfirmed
+	}
+	if absent, known := e.displayConfirmedAbsent(ctx, displayID); known && absent {
+		cleanup.Display = protocol.CleanupConfirmed
 	}
 }
 
@@ -253,7 +342,7 @@ func (e *Engine) waitForAppDisplay(ctx context.Context, target cleanupTarget,
 }
 
 func (e *Engine) tasksOnDisplay(ctx context.Context, displayID int) []int {
-	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	queryCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	tasks, err := e.dev.TaskList(queryCtx)
 	if err != nil {
@@ -271,7 +360,7 @@ func (e *Engine) tasksOnDisplay(ctx context.Context, displayID int) []int {
 // displayAbsent probes the original display. known=false means the device could
 // not answer; that is never treated as absence.
 func (e *Engine) displayAbsent(ctx context.Context, displayID int) (bool, bool) {
-	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	state, err := e.dev.ProbeDisplay(probeCtx, displayID)
 	if err != nil {
@@ -295,7 +384,8 @@ func (e *Engine) waitAppChange(ctx context.Context, timeout time.Duration) {
 
 func (e *Engine) finishCleanup(target cleanupTarget, cleanup *cleanupState, result cleanupState) {
 	e.mu.Lock()
-	if e.cleanup != cleanup {
+	r := e.retiredForCleanupLocked(cleanup)
+	if e.cleanup != cleanup && r == nil {
 		e.mu.Unlock()
 		return
 	}
@@ -313,8 +403,12 @@ func (e *Engine) finishCleanup(target cleanupTarget, cleanup *cleanupState, resu
 		// begin-time error must not survive in the public closure record.
 		result.Error = nil
 	}
-	result.needsExecutionRecheck = result.needsExecutionRecheck || result.evidenceRevision != e.executionEvidenceRevision
-	complete := !result.needsExecutionRecheck && !e.uiPendingLocked() && result.Execution != protocol.CleanupUnconfirmed &&
+	result.needsExecutionRecheck = result.needsExecutionRecheck || (r == nil && result.evidenceRevision != e.executionEvidenceRevision) ||
+		(r != nil && result.evidenceRevision != cleanup.evidenceRevision)
+	if result.needsExecutionRecheck && target.mode == "virtual" {
+		result.Tasks, result.Recents, result.Display = protocol.CleanupUnconfirmed, protocol.CleanupUnconfirmed, protocol.CleanupUnconfirmed
+	}
+	complete := !result.needsExecutionRecheck && (r != nil || !e.uiPendingLocked()) && result.Execution != protocol.CleanupUnconfirmed &&
 		result.Display != protocol.CleanupUnconfirmed &&
 		result.Tasks != protocol.CleanupUnconfirmed &&
 		result.Recents != protocol.CleanupUnconfirmed &&
@@ -328,6 +422,15 @@ func (e *Engine) finishCleanup(target cleanupTarget, cleanup *cleanupState, resu
 		result.State = protocol.CleanupUnconfirmed
 	}
 	*cleanup = result
+	if !complete {
+		stopCleanup(cleanup, "cleanup_budget_exhausted")
+	}
+	if r != nil {
+		r.stoppedReason = "cleanup_budget_exhausted"
+		if complete {
+			r.stoppedReason = "complete"
+		}
+	}
 	if cleanup.done != nil {
 		select {
 		case <-cleanup.done:
@@ -346,23 +449,26 @@ func (e *Engine) finishCleanup(target cleanupTarget, cleanup *cleanupState, resu
 		if e.baseline != nil && e.baseline.Origin == target.origin {
 			e.baseline = nil
 		}
-		e.commands = filterCommands(e.commands, target)
 	}
+	e.commands = filterCommands(e.commands, target)
+	e.detachRetiredLocked(time.Now())
 	e.broadcastAppLocked()
+	logged := *cleanup
 	e.mu.Unlock()
 	if e.log != nil {
 		fields := []eventlog.Field{
-			eventlog.Str("state", cleanup.State),
-			eventlog.Str("execution", cleanup.Execution),
-			eventlog.Str("tasks", cleanup.Tasks),
-			eventlog.Str("recents", cleanup.Recents),
-			eventlog.Str("display", cleanup.Display),
-			eventlog.Str("reason", cleanup.Reason),
+			eventlog.Str("state", logged.State),
+			eventlog.Str("execution", logged.Execution),
+			eventlog.Str("tasks", logged.Tasks),
+			eventlog.Str("recents", logged.Recents),
+			eventlog.Str("display", logged.Display),
+			eventlog.Str("reason", logged.Reason),
 		}
 		if complete {
 			e.log.Event(eventlog.Info, "cleanup.complete", fields...)
 		} else {
 			e.log.Event(eventlog.Warn, "cleanup.unconfirmed", fields...)
+			e.log.Event(eventlog.Info, "cleanup.stopped", eventlog.Str("origin", target.origin), eventlog.Str("state", logged.State))
 		}
 	}
 	e.persistAsync()
@@ -372,7 +478,7 @@ func (e *Engine) finishCleanup(target cleanupTarget, cleanup *cleanupState, resu
 // tasksOnDisplayByTaskList reads the complete task list and filters one
 // display. Recovery uses this path so an unreadable list stays unknown.
 func (e *Engine) tasksOnDisplayByTaskList(ctx context.Context, displayID int) ([]device.Task, error) {
-	all, err := e.dev.TaskList(ctx)
+	all, err := e.cleanupTaskList(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -424,57 +530,93 @@ func (e *Engine) removeRecoveryTasks(ctx context.Context, displayID int) (bool, 
 // most three bounded sweeps, then verifies the live task list and RecentTasks
 // index. It never touches display 0 or another session display.
 func (e *Engine) removeOwnedTasks(ctx context.Context, displayID int, original []taskEntry) (tasksOK, recentsOK bool, checked []int) {
+	return e.removeOwnedTasksIdentity(ctx, displayID, original, device.BootIdentity{}, 0)
+}
+
+func (e *Engine) removeOwnedTasksIdentity(ctx context.Context, displayID int, original []taskEntry, identity device.BootIdentity, epoch int64) (tasksOK, recentsOK bool, checked []int) {
 	if displayID <= 0 {
 		return false, false, nil
 	}
-	removed := make(map[int]bool)
-	for _, task := range original {
-		if task.TaskID > 0 {
-			removed[task.TaskID] = true
+	owned := make(map[int]bool)
+	for _, t := range original {
+		if t.TaskID > 0 && t.Proven && t.DisplayID == displayID {
+			owned[t.TaskID] = true
 		}
 	}
 	defer func() {
-		for id := range removed {
+		for id := range owned {
 			checked = append(checked, id)
 		}
 		sort.Ints(checked)
 	}()
-	for sweep := 0; sweep < 3; sweep++ {
-		tasks, known := e.dev.TasksOnDisplay(ctx, displayID)
-		if !known {
-			return false, false, nil
-		}
-		if len(tasks) == 0 {
-			break
-		}
-		for _, task := range tasks {
-			if task.TaskID <= 0 {
-				continue
-			}
-			if !removed[task.TaskID] && len(removed) >= 256 {
+	all, err := e.cleanupTaskList(ctx)
+	if err != nil {
+		return false, false, nil
+	}
+	live := map[int]int{}
+	for _, t := range all {
+		live[t.TaskID] = t.DisplayID
+		if t.DisplayID == displayID && t.TaskID > 0 {
+			if len(owned) >= 256 && !owned[t.TaskID] {
 				return false, false, nil
 			}
-			removed[task.TaskID] = true
-			_ = e.dev.RemoveTask(ctx, task.TaskID)
+			owned[t.TaskID] = true
 		}
-		timer := time.NewTimer(120 * time.Millisecond)
-		select {
-		case <-timer.C:
-		case <-ctx.Done():
-			timer.Stop()
+	}
+	recent, known := e.readCleanupRecents(ctx)
+	for id := range owned {
+		if ctx.Err() != nil {
 			return false, false, nil
 		}
-		timer.Stop()
+		if place, present := live[id]; present && place != displayID {
+			return false, false, nil
+		}
+		if _, present := live[id]; !present && (!known || !recent[id]) {
+			continue
+		}
+		e.mu.Lock()
+		conflict := e.cleanupDisplayConflictLocked(epoch, displayID) || e.cleanupTaskConflictLocked(epoch, id)
+		e.mu.Unlock()
+		if conflict {
+			return false, false, nil
+		}
+		// Re-read immediately before each destructive dispatch: an old task
+		// moved to the user's primary display must not be deleted by ID.
+		latest, err := e.cleanupTaskList(ctx)
+		if err != nil {
+			return false, false, nil
+		}
+		for _, t := range latest {
+			if t.TaskID == id && t.DisplayID != displayID {
+				return false, false, nil
+			}
+		}
+		if validUIIdentity(identity) {
+			current, err := e.cleanupIdentity(ctx)
+			if err != nil || current != identity {
+				return false, false, nil
+			}
+		}
+		if ctx.Err() != nil {
+			return false, false, nil
+		}
+		e.mu.Lock()
+		conflict = e.cleanupDisplayConflictLocked(epoch, displayID) || e.cleanupTaskConflictLocked(epoch, id) || !e.cleanupOwnerValidLocked(epoch)
+		e.mu.Unlock()
+		if conflict {
+			return false, false, nil
+		}
+		_ = e.cleanupRemoveTask(ctx, id)
 	}
-	tasks, known := e.dev.TasksOnDisplay(ctx, displayID)
+	tasks, known := e.cleanupLiveTasks(ctx, displayID)
 	if !known || len(tasks) > 0 {
 		return false, false, nil
 	}
-	recent, recentsKnown := e.dev.RecentTaskIDs(ctx)
-	if !recentsKnown {
+	recent, known = e.readCleanupRecents(ctx)
+	if !known {
 		return true, false, nil
 	}
-	for id := range removed {
+	for id := range owned {
 		if recent[id] {
 			return true, false, nil
 		}
@@ -489,14 +631,107 @@ func filterCommands(commands []*appCommand, target cleanupTarget) []*appCommand 
 			out = append(out, command)
 			continue
 		}
-		if command.Kind == "create_display" {
+		if command.Kind == "cancel_create" && command.Command.TargetCreateCommandID == target.createCommand {
+			continue
+		}
+		if command.Kind == "create_display" && command.Command.ID == target.createCommand {
 			continue
 		}
 		if command.Kind == "close_display" && command.Command.TargetDisplayID != nil &&
-			*command.Command.TargetDisplayID == target.display.ID {
+			*command.Command.TargetDisplayID == target.display.ID && command.Command.TargetGeneration == target.display.Generation {
 			continue
 		}
 		out = append(out, command)
 	}
 	return out
+}
+
+func cleanupTasksOfTarget(target cleanupTarget, c *cleanupState) []taskEntry {
+	tasks := append([]taskEntry(nil), target.tasks...)
+	for _, id := range c.checkedTaskIDs {
+		tasks = append(tasks, taskEntry{TaskID: id, DisplayID: target.display.ID, Proven: true})
+	}
+	return tasks
+}
+
+func (e *Engine) cleanupDisplayConflictLocked(epoch int64, displayID int) bool {
+	if e.session != nil && e.session.State != SessionEnded && e.session.Epoch != epoch && e.session.Display.ID == displayID {
+		return true
+	}
+	for _, r := range e.retired {
+		if r.session.Epoch != epoch && r.session.Display.ID == displayID && r.cleanup.Display != protocol.CleanupConfirmed && r.cleanup.Display != protocol.CleanupNotApplicable {
+			return true
+		}
+	}
+	return false
+}
+
+func (e *Engine) cleanupTaskConflictLocked(epoch int64, id int) bool {
+	if e.session != nil && e.session.State != SessionEnded && e.session.Epoch != epoch {
+		for _, t := range e.session.Tasks {
+			if t.TaskID == id {
+				return true
+			}
+		}
+	}
+	for _, r := range e.retired {
+		if r.session.Epoch != epoch && r.cleanup.State != protocol.CleanupComplete {
+			for _, t := range r.session.Tasks {
+				if t.TaskID == id {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func (e *Engine) readCleanupRecents(ctx context.Context) (map[int]bool, bool) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if reader, ok := e.dev.(interface {
+		ReadRecentTasks(context.Context) device.RecentTasksResult
+	}); ok {
+		result := reader.ReadRecentTasks(ctx)
+		known := result.State == "known_empty" || result.State == "known_present"
+		if !known && e.log != nil {
+			e.log.Event(eventlog.Warn, "cleanup.recents_read", eventlog.Str("phase", "recents"), eventlog.Str("code", result.State))
+		}
+		return result.IDs, known
+	}
+	return e.dev.RecentTaskIDs(ctx)
+}
+
+func (e *Engine) cleanupIdentity(ctx context.Context) (device.BootIdentity, error) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	return e.dev.ExecutionIdentity(ctx)
+}
+func (e *Engine) cleanupTaskList(ctx context.Context) ([]device.Task, error) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	return e.dev.TaskList(ctx)
+}
+func (e *Engine) cleanupLiveTasks(ctx context.Context, id int) ([]device.Task, bool) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	return e.dev.TasksOnDisplay(ctx, id)
+}
+func (e *Engine) cleanupRemoveTask(ctx context.Context, id int) error {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	return e.dev.RemoveTask(ctx, id)
+}
+
+func (e *Engine) cleanupOwnerValidLocked(epoch int64) bool {
+	if epoch == 0 {
+		return true
+	}
+	for _, r := range e.retired {
+		if r.session.Epoch == epoch {
+			return r.cleanup.State == protocol.CleanupPending && r.session.AppInstanceID == e.app.InstanceID && e.appFreshLocked(time.Now()) &&
+				(e.app.Display == nil || e.app.Display.ID != r.session.Display.ID || e.app.Display.Generation == r.session.Display.Generation)
+		}
+	}
+	return false
 }
