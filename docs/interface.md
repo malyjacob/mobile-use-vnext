@@ -15,7 +15,7 @@
 | 方法 | 所有业务端点只接受 `POST`；其他方法返回 `405`，错误码 `invalid_request` |
 | 认证 | `/api/*` 用 `agent_token`；`/v1/control/*` 用 `control_token`；`Authorization: Bearer <token>` |
 | 身份隔离 | agent token 不能访问 `/v1/control/*`，control token 不能访问 `/api/*`；错误为 `401 unauthorized` |
-| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 6`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
+| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 7`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
 | 预分配 P | `/api/*` 可带 `X-Mobile-Use-Operation: P…`；缺省由服务分配。`status` 不使用该头 |
 | 请求体 | 必须是一个 JSON 对象；大小上限：`start`/`status`/`end` 16 KiB，`observe` 32 KiB，`act` 64 KiB，`inspect`/`keepalive`/`diagnose`/`apps`/`open_app` 8 KiB，`notify` 16 KiB，`shell` 32 KiB，`sync` 32 KiB，`stop` 8 KiB |
 | 响应 | `Content-Type: application/json; charset=utf-8`，`Cache-Control: no-store` |
@@ -43,6 +43,12 @@
 实时重验或一次 `observe` 回答。
 
 ## 2. 结果分层与错误
+
+> 除外部不可抗力（`end`、STOP、App 实例变化、设备不可达、服务退出/重启、租约到期）外，任何内部原因都不得撤销会话、不得让会话无法继续使用、不得让服务锁死到只能重启手机。
+
+> 该保证约束工具级期限与内部未决事实。启动阶段失败、设备/App 不可达、恢复账本不可写与当前
+> 能力门禁属于外部资源条件，仍按各自错误码拒绝新工作或结束启动阶段的原会话（包括激活后的
+> 首个观察失败）。
 
 工具响应是一个 `Result` 对象，字段只在本次调用确有该事实时出现，固定顺序为：
 
@@ -188,8 +194,8 @@ HTTP 状态映射（`protocol.Status`）：
 ```
 
 - `can_start` 必出；`false` 时必有 `blocking_code`（可能是稳定错误码，也可能是内部原因串：
-  `control_sync_pending`、`device_unavailable`、`ledger_unavailable`、`ledger_corrupt`、
-  `ui_input_unconfirmed` 等）。旧 cleanup、旧物理资源未确认与退休记录容量不是合法原因；
+  `control_sync_pending`、`device_unavailable`、`ledger_unavailable`、`ledger_corrupt`
+  等）。旧 cleanup、旧物理资源未确认与退休记录容量不是合法原因；
 - 会话属于本 Agent 时带 `session` 与 `start_operation_id`。本 Agent 没有当前会话时，可带其
   最近退休会话；有同一会话的收尾记录时才带 `cleanup`，不得拼接全局或另一会话的 cleanup；
 - 退休 cleanup 为 `pending` 时，可给 `recovery=entry=status`、有 `start_operation_id` 时
@@ -362,6 +368,10 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 | `not_executed` | 未派发（静态拒绝、重验失败、工作被撤销等） | `error`、`recovery`；重验失败且已交付新帧时另带 `observation` |
 | `uncertain` | 已派发但无法确认完成（传输失败、读回失败、超时） | `error`（`action_result_uncertain` / `text_target_uncertain` / `text_result_uncertain`）、`recovery` 为 `entry=status`、`reference=P`、`input_state=retired` |
 
+- 每次派发只有一个窗口，`may_dispatch` 仅表示调用仍未返回。派发调用返回时，窗口一次性
+  关闭为 `terminated`、`not_dispatched` 或缺少可用结束回执的持久终态 `unknown`；后者保持
+  工具结果 `uncertain`，不阻止后续 `observe`、`act` 等普通调用。用 `status(P)` 查询原结果，
+  用一次新 `observe` 收窄不确定性；不重放原输入。
 - 输入派发后即使 `text` 读回失败也不回滚、不重放；原 O 不再归还。
 - 后观察在树收敛后采集（见 §1）；收敛期间被撤销时 `outcome` 仍是 `executed`、
   `recovery` 为 `entry=status`、`reference=P`、`input_state=revoked`、`cause=executed_revoked`、
@@ -420,7 +430,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 
 | 字段 | 必填 | 类型 | 说明 |
 | --- | --- | --- | --- |
-| `contract_version` | 是 | 字符串 | 必须为 `"6"`，否则 `409 contract_mismatch` |
+| `contract_version` | 是 | 字符串 | 必须为 `"7"`，否则 `409 contract_mismatch` |
 | `app_instance_id` | 是 | UUID | App 进程实例；变化会撤销旧归属 |
 | `app_version` | 是 | 字符串 | 仅发行标识 |
 | `selected_mode` | 是 | `virtual`/`primary` | 用户选择 |
@@ -447,7 +457,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 
 ```json
 {
-  "contract_version": "6",
+  "contract_version": "7",
   "service_instance_id": "…",
   "control": {
     "revision": 42,
@@ -481,7 +491,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 ## 9. `POST /v1/control/stop`
 
 ```json
-{"contract_version":"6","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
+{"contract_version":"7","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
 ```
 
 - **不校验普通契约**：`contract_version` 字段存在但不参与准入，服务与 App 契约版本
@@ -491,7 +501,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 - 重复或过期 `seq` 不报错，只返回 `state=duplicate`。
 
 ```json
-{"contract_version":"6","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
+{"contract_version":"7","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
 ```
 
 `accepted` 恒为 `true`；`state` 为 `revoked`（绑定时撤销了活动会话）、`recorded`
@@ -504,7 +514,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 无认证，只表示进程可应答，不代表设备就绪或资源干净：
 
 ```json
-{"status":"ok","contract_version":"6","service_instance_id":"…","release_version":"…"}
+{"status":"ok","contract_version":"7","service_instance_id":"…","release_version":"…"}
 ```
 
 ## 11. 数据对象
@@ -592,12 +602,14 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 `recents_cleanup_unconfirmed`、`display_release_unconfirmed`、`cleanup_budget_exhausted`、
 `cleanup_identity_conflict`、`cleanup_capacity_exhausted` 或 `cleanup_restart_stopped`。
 
-`execution` 表达输入调用/执行链的终结证据，独立于原操作的 `outcome`。启动调用已经结束但
-任务归属未确认时，原 P 保持 `uncertain`，不会因此持续占用 execution 屏障。真实缺回执时
-普通工作立即 `device_busy`；后观察、显示消失或另一 shell 完成都不能代替原调用证据。
-旧 UI/legacy checkpoint 迁移后保留为原退休会话的 `execution=unconfirmed`；没有启动边界证据
-时仍不能改写成 `confirmed`。该事实不产生永久准入门禁，也不要求清账本或清 App 数据。
-当前账本不能保存新归属时仍返回 `ledger_unavailable`。
+`execution` 独立于原操作的 `outcome`。UI 子步骤只在调用仍未返回时保持 `unconfirmed`；
+窗口返回时关闭，即使回执不可用而记为 `unknown`，也不再单独保持该值，原 P 仍为 `uncertain`。
+启动调用已经结束但任务归属未确认时也不占执行屏障。受管 shell 则要精确链被证明结束或未启动
+（`confirmed`/`aborted`）才能解除 `unconfirmed`；以 `unknown` 封闭不能据此写成 `confirmed`。
+后观察、显示消失或另一 shell 完成都不能代替原链终结证据。
+旧 `may_dispatch` UI/legacy checkpoint 迁移后保留为原退休会话的 `execution=unconfirmed`；
+未确认事实不产生永久准入门禁，也不要求重启手机、清账本或清 App 数据。当前账本不能保存
+新归属时仍返回 `ledger_unavailable`。
 
 ## 12. 发现、应用、只读、通知与受管执行工具
 
@@ -630,11 +642,16 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 {"reference":"O1"}
 ```
 
-O/P 必须属于本 Agent 并定位一个仍 `active` 的原会话；只续租会话活动期，不延长任何 O 的
-`actionable_until`，不改变 O 状态，不占工作位置、不访问设备。成功返回
-`outcome=executed` 与新的 `session.expires_at`。重复 P 只返回原操作视图，不会再次续租。
-已结束/过期会话返回 `session_ended`/`session_expired`；P 没有原会话返回
-`reference_has_no_session`。
+O/P 必须属于本 Agent 并定位一个仍 `active` 的原会话；成功返回 `outcome=executed` 与新的
+`session.expires_at`。
+
+| 项 | 契约表述 |
+| --- | --- |
+| 作用 | 把当前活动会话的滑动租约推到 `min(now + 120s, started_at + 1h)`；只增不减 |
+| 不作用 | 不延长任何 O 的 `actionable_until`，不改 O 状态，不确认基线，不占工作位，不访问设备，不写账本正文 |
+| 拒绝条件 | 会话 `ended` → `session_ended`；`starting` → `reference_has_no_session`；已越线 → `session_expired`；重复 P 只回原视图、不再续租 |
+| 保证 | 时间型撤销只剩租约一族：每次续租必须在当前 `expires_at` 之前成功（默认需要严格小于 120 秒的间隔），并受 1 小时硬上限约束；在硬上限内按此节奏续租，会话不会因任何内部原因结束 |
+| 边界 | 硬上限 1 小时不可延长；跨过硬上限只能重新 `start`；`keepalive` 不能保活超过硬上限，也不能保住任何 O |
 
 ### `POST /api/diagnose`
 
@@ -737,14 +754,18 @@ O/P 必须属于本 Agent 并定位一个仍 `active` 的原会话；只续租�
 结果分层：自然退出（含非零与命令自行 `exit 124`）为 `executed`/`exited`；监管超时且已确认
 进程组停止为 `executed`/`timeout`；STOP/end 后已确认停止为 `cancelled`（若信号前已有自然退出码
 则保留 `exited`/实际码）；已派发但开始/结束无法确认为 `uncertain`/`unknown`；确认未启动为
-`not_executed`/`not_started`。超时/取消只报告已确认的终止；没有停止证据不包装成 timeout。
+`not_executed`/`not_started`。超时/取消后无法确认终止时，以 `uncertain`/`unknown` 封闭该链，
+释放工作位置；没有停止证据不包装成 `timeout` 或 `cancelled`。
 
 常见失败：`409 root_unavailable`、`503 shell_start_failed`、`504 shell_result_unconfirmed`、
 `409 session_ended`/`reference_has_no_session`/`operation_unknown`、`409 device_busy`。
 已结束但仅输出缺失时响应仍为 `executed`，错误在嵌套 `shell.output_error`；成功结果不含
 `observation`，也不带 `recovery`。撤销后确认停止的结果 `recovery` 为 `entry=status`、
 `reference=P`、`input_state=revoked`、`cause=executed_revoked` 并带会话视图。`shell` 不产生
-`retry`：活动会话内未知执行链禁止下一普通工作；退休后按有限交接处理，`status` 只查询事实，不推动补偿。命令正文、输出与异常文本不进入日志或账本。
+`retry`。未确认的执行链只在 `run.DeadlineAt + ShellConfirmTimeout + 3s` 内关闭普通准入；
+到界后以 `termination=unknown` 结案让位，普通工具照常接纳，收尾链至多再作一次精确终止尝试，
+未证明进程消失前 `cleanup.execution` 保持 `unconfirmed`。退休后按有限交接处理，`status`
+只查询事实，不推动补偿。命令正文、输出与异常文本不进入日志或账本。
 
 ## 13. 端点与能力边界
 

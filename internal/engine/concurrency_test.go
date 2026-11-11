@@ -460,11 +460,11 @@ func TestExpiredSessionRejectsActAndObserveWithoutObservation(t *testing.T) {
 	}
 }
 
-// TestStopAfterUncertainActKeepsExecutionUnconfirmed covers the window after an
-// acted input returned uncertain and the ordinary work slot was already
-// released. STOP/end must still report execution=unconfirmed, keep the P
-// outcome uncertain while allowing new work after finite logical handover.
-func TestStopAfterUncertainActKeepsExecutionUnconfirmed(t *testing.T) {
+// TestStopAfterUnknownReceiptKeepsOutcomeAndClosesWindow covers the window
+// after an acted input returned without an end receipt. The window is closed by
+// the call itself: the P keeps its uncertain outcome, no in-flight execution
+// remains to guard the closure, and new work is admitted after finite handover.
+func TestStopAfterUnknownReceiptKeepsOutcomeAndClosesWindow(t *testing.T) {
 	for _, terminal := range []string{"stop", "end"} {
 		t.Run(terminal, func(t *testing.T) {
 			h := newHarness(t)
@@ -501,20 +501,29 @@ func TestStopAfterUncertainActKeepsExecutionUnconfirmed(t *testing.T) {
 
 			h.engine.mu.Lock()
 			cleanup := h.engine.cleanup
+			window := ""
+			for _, retired := range h.engine.retired {
+				if retired.session.Origin == start.OperationID && retired.ui != nil {
+					window = retired.ui.record.State
+				}
+			}
 			h.engine.mu.Unlock()
 			if cleanup == nil {
 				t.Fatal("no cleanup record after terminal request")
 			}
-			if cleanup.Execution != protocol.CleanupUnconfirmed {
-				t.Fatalf("cleanup.execution=%q, want unconfirmed for an unknown dispatched input",
+			if cleanup.Execution != protocol.CleanupConfirmed {
+				t.Fatalf("cleanup.execution=%q, want confirmed once the input call returned",
 					cleanup.Execution)
+			}
+			if window != uiStateUnknown {
+				t.Fatalf("closed input window state=%q, want unknown", window)
 			}
 			status, apiErr := h.engine.Status("agent", "Punknown")
 			if apiErr != nil || status.Outcome != OutcomeUncertain {
 				t.Fatalf("unknown act was rewritten: %+v %v", status, apiErr)
 			}
-			// Contract 5 retains uncertain execution as a retired fact while
-			// admitting a new session after current STOP synchronization.
+			// The uncertain outcome is a retired fact; it does not block the
+			// next session after the current STOP boundary synchronizes.
 			awaitShellCondition(t, time.Second, "current STOP synchronization did not settle", func() bool {
 				h.sync(nil, nil)
 				status, _ := h.engine.Status("agent", "")
@@ -528,8 +537,9 @@ func TestStopAfterUncertainActKeepsExecutionUnconfirmed(t *testing.T) {
 				t.Fatal("retired input blocked new start")
 			}
 			old, _ := h.engine.Status("agent", "Punknown")
-			if old.Outcome != OutcomeUncertain || old.Cleanup == nil || old.Cleanup.Execution != protocol.CleanupUnconfirmed {
-				t.Fatal("new start erased original uncertainty")
+			if old.Outcome != OutcomeUncertain || old.Cleanup == nil ||
+				old.Cleanup.Execution != protocol.CleanupConfirmed {
+				t.Fatal("new start erased or rewrote the original uncertainty")
 			}
 
 		})

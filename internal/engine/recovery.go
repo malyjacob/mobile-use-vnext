@@ -188,9 +188,6 @@ func statusPlan(in recoveryInput) *protocol.Recovery {
 // the session: an active session recovers with observe(P), a revoked one is a
 // closure/status fact.
 func startPlan(in recoveryInput) *protocol.Recovery {
-	if in.Code == "ui_input_reboot_required" {
-		return newRecovery(protocol.RecoveryEntryUser, protocol.RecoveryReferenceNone, "", "")
-	}
 	switch in.Code {
 	case "":
 		if in.Phase != "first_observation_failed" {
@@ -207,7 +204,7 @@ func startPlan(in recoveryInput) *protocol.Recovery {
 		return newRecovery(protocol.RecoveryEntryEnd, protocol.RecoveryReferenceP, "", "")
 	case protocol.CodeDeviceBusy, protocol.CodeDeviceUnavailable,
 		protocol.CodeRecovering, protocol.CodeCleanupUnconfirmed,
-		"recovery_pending", "old_resource_unconfirmed", "control_sync_pending", "ui_input_unconfirmed",
+		"recovery_pending", "old_resource_unconfirmed", "control_sync_pending",
 		"no_display_recorded", "cleanup_pending", "shell_pending",
 		"shell_chain_unconfirmed", "ledger_unavailable", "ledger_corrupt":
 		return newRecovery(protocol.RecoveryEntryStatus, protocol.RecoveryReferenceP, "", "")

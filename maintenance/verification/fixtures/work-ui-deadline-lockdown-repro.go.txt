@@ -1,0 +1,54 @@
+package engine
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/malyjacob/mobile-use-vnext/internal/protocol"
+)
+
+// Baseline repro 1: one successful act leaves the UI token whose deadline is
+// the act work deadline. housekeeping then ends the whole session.
+func TestReproWorkUISessionLockdown(t *testing.T) {
+	h := newHarnessWithClock(t, false)
+	first := h.startSession()
+	acted, apiErr := h.engine.Act(context.Background(), "agent", "Preprodeadline", tapRequest(first.Observation.ID))
+	if apiErr != nil || acted.Outcome != OutcomeExecuted {
+		t.Fatalf("act did not execute: %+v %v", acted, apiErr)
+	}
+	h.engine.mu.Lock()
+	if h.engine.ui != nil {
+		h.engine.ui.deadline = time.Now().Add(-time.Second)
+	}
+	h.engine.mu.Unlock()
+	h.engine.housekeeping(context.Background())
+	h.engine.mu.Lock()
+	state, reason := h.engine.session.State, h.engine.session.Reason
+	h.engine.mu.Unlock()
+	if state != SessionActive {
+		t.Fatalf("session ended after a successful act: state=%s reason=%s", state, reason)
+	}
+}
+
+// Baseline repro 2: an unknown input receipt blocks the only recovery action.
+func TestReproUnknownUIReceiptBlocksObservation(t *testing.T) {
+	h := newHarnessWithClock(t, false)
+	first := h.startSession()
+	h.engine.dev = &hookedDevice{Device: h.device, tap: func(context.Context, int, int, int) error {
+		return errors.New("synthetic transport failure")
+	}}
+	acted, apiErr := h.engine.Act(context.Background(), "agent", "Preprereceipt", tapRequest(first.Observation.ID))
+	if apiErr != nil || acted.Outcome != OutcomeUncertain {
+		t.Fatalf("act did not reach the unknown receipt: %+v %v", acted, apiErr)
+	}
+	observed, apiErr := h.engine.Observe(context.Background(), "agent", "Preprobserve",
+		&protocol.ObserveRequest{Reference: acted.OperationID})
+	if apiErr != nil {
+		t.Fatalf("observe transport error: %v", apiErr)
+	}
+	if observed.Error != nil || observed.Observation == nil {
+		t.Fatalf("observe blocked after an unknown receipt: %+v", observed)
+	}
+}

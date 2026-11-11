@@ -6,6 +6,10 @@ import "time"
 // ownership, command and resource evidence; it never stores request bodies,
 // trees, images, input text, commands or shell output. The single serialized
 // object is bounded to 64 KiB by the store.
+//
+// Version 4 adds the closed input window state "unknown": a dispatch call
+// returned without a usable end receipt, so the window is over while the end
+// fact stays unproven.
 type Ledger struct {
 	DroppedUnconfirmed uint64         `json:"dropped_unconfirmed,omitzero"`
 	Format             string         `json:"format"`
@@ -114,9 +118,9 @@ type LedgerTask struct {
 	Proven    bool   `json:"proven"`
 }
 
-// LedgerUI is one durable UI input responsibility. State records only whether
-// dispatch may have occurred or has ended; it never represents the tool's
-// primary outcome.
+// LedgerUI is one durable UI input responsibility. State records the dispatch
+// window only (may_dispatch while the call is in flight, then terminated,
+// not_dispatched or unknown); it never represents the tool's primary outcome.
 type LedgerUI struct {
 	OperationID       string `json:"operation_id"`
 	Origin            string `json:"origin"`
@@ -248,5 +252,5 @@ func cloneLedger(record *Ledger, includeRetired bool) *Ledger {
 // Ledger format constants.
 const (
 	ledgerFormat  = "mobile-use-vnext-ledger"
-	ledgerVersion = 3
+	ledgerVersion = 4
 )

@@ -90,7 +90,16 @@ func (e *Engine) retireLocked(session *sessionState, cleanup *cleanupState) *ret
 	if r := e.retiredForCleanupLocked(cleanup); r != nil {
 		return r
 	}
-	r := &retiredState{session: session, cleanup: cleanup, ui: e.ui, shell: e.shell, legacy: e.legacyUI,
+	shell := e.shell
+	// A closed-out chain is not the live runner ownership any more, but it is
+	// still this session's exact identity: the closure chain gets it once.
+	if e.shellOrphan != nil && e.shellOrphan.Origin == session.Origin {
+		if shell == nil {
+			shell = e.shellOrphan
+		}
+		e.shellOrphan = nil
+	}
+	r := &retiredState{session: session, cleanup: cleanup, ui: e.ui, shell: shell, legacy: e.legacyUI,
 		service: e.cfg.ServiceInstanceID}
 	if session.CreateCommand != "" {
 		r.create = &LedgerCommand{ID: session.CreateCommand, Kind: "create_display", AppInstanceID: session.AppInstanceID, RequestedAt: session.StartedAt}
@@ -101,26 +110,42 @@ func (e *Engine) retireLocked(session *sessionState, cleanup *cleanupState) *ret
 	return r
 }
 
+// detachWorkLocked freezes one abandoned operation and releases the ordinary
+// work position. It changes nothing else: the session stays active, every
+// observation keeps its status and no closure starts. A late handler returns
+// through pointer equality and cannot release a newer work position.
+func (e *Engine) detachWorkLocked(work *workState) {
+	if work == nil {
+		return
+	}
+	e.freezeWorkLocked(work)
+	if work.Cancel != nil {
+		work.Cancel()
+	}
+	if e.work == work {
+		e.work = nil
+	}
+	e.broadcastAppLocked()
+}
+
 // detachRetiredLocked never waits for physical completion. The clock bounds a
 // cancelled handler even when it ignores its context. Its eventual defer uses
 // pointer equality and therefore cannot release a newer work slot.
 func (e *Engine) detachRetiredLocked(now time.Time) {
 	if e.work != nil && e.work.Revoked && !e.work.RevokedAt.IsZero() && !now.Before(e.work.RevokedAt.Add(retirementHandover)) {
-		e.freezeWorkLocked(e.work)
-		e.work.Cancel()
+		work := e.work
+		e.detachWorkLocked(work)
 		if e.log != nil {
-			e.log.Event(eventlog.Info, "retirement.detached", eventlog.Str("operation_id", e.work.OperationID))
+			e.log.Event(eventlog.Info, "retirement.detached", eventlog.Str("operation_id", work.OperationID))
 		}
-		e.work = nil
 	}
 	for _, r := range e.retired {
 		if e.work != nil && e.work.SessionEpoch == r.session.Epoch {
 			if now.Before(r.session.EndedAt.Add(retirementHandover)) {
 				continue
 			}
-			e.freezeWorkLocked(e.work)
-			e.work.Cancel()
-			e.work = nil
+			work := e.work
+			e.detachWorkLocked(work)
 			if e.log != nil {
 				e.log.Event(eventlog.Info, "retirement.detached", eventlog.Str("origin", r.session.Origin))
 			}
@@ -146,7 +171,7 @@ func (e *Engine) freezeWorkLocked(work *workState) {
 	if op := e.operations[work.OperationID]; op != nil && op.State == OperationRunning {
 		op.State, op.Phase, op.FinishedAt = OperationFinished, "work_deadline", time.Now()
 		op.Outcome = OutcomeNotExecuted
-		if work.DispatchUnknown || work.UI != nil && work.UI.record.State != "not_dispatched" {
+		if work.DispatchUnknown || work.UI != nil && work.UI.record.State != uiStateNotDispatched {
 			op.Outcome = OutcomeUncertain
 		}
 		if op.KnownOutcome != "" {
@@ -334,7 +359,7 @@ func (e *Engine) recoveryRetire(ctx context.Context, record *Ledger) {
 			c = &cleanupState{State: protocol.CleanupUnconfirmed, Execution: protocol.CleanupUnconfirmed, Tasks: protocol.CleanupUnconfirmed, Recents: protocol.CleanupUnconfirmed, Display: protocol.CleanupUnconfirmed, StartedAt: time.Now(), Reason: "service_restarted"}
 			e.cleanup = c
 		}
-		if c.Execution == protocol.CleanupUnconfirmed && c.ExecReason == "shell_chain" && old.Shell == nil && old.LegacyUI == nil && !old.LegacyUIPending && (old.UI == nil || old.UI.State != "may_dispatch") {
+		if c.Execution == protocol.CleanupUnconfirmed && c.ExecReason == "shell_chain" && old.Shell == nil && old.LegacyUI == nil && !old.LegacyUIPending && (old.UI == nil || old.UI.State != uiStateMayDispatch) {
 			c.Execution = protocol.CleanupConfirmed
 			c.needsExecutionRecheck = true
 		}
@@ -405,10 +430,10 @@ func (e *Engine) ownsUITokenLocked(token *uiDispatchState) bool {
 
 func (e *Engine) confirmRetiredShellLocked(run *shellState) {
 	for _, r := range e.retired {
-		if r.shell == run && run.settled() {
+		if r.shell == run && run.provenGone() {
 			r.cleanup.evidenceRevision++
 			r.cleanup.Execution = protocol.CleanupConfirmed
-			if r.ui != nil && r.ui.record.State == "may_dispatch" {
+			if r.ui != nil && r.ui.record.State == uiStateMayDispatch {
 				r.cleanup.Execution = protocol.CleanupUnconfirmed
 			}
 			if r.session.Mode == "virtual" {
@@ -446,12 +471,20 @@ func (e *Engine) applyFrozenResult(op *operationState, result **protocol.Result)
 }
 
 // resolveRetiredExecution consumes exact original end evidence without replay.
+// A chain that was closed out as unconfirmed gets exactly one more termination
+// attempt in this process; the attempt never rewrites the frozen P outcome.
 func (e *Engine) resolveRetiredExecution(ctx context.Context, r *retiredState) {
 	e.mu.Lock()
 	run := r.shell
-	unresolved := run != nil && !run.settled()
+	attempt := run != nil && !run.provenGone()
+	if attempt && run.State == ShellUnknown {
+		if run.orphanTried {
+			attempt = false
+		}
+		run.orphanTried = true
+	}
 	e.mu.Unlock()
-	if unresolved {
+	if attempt {
 		inspectCtx, inspectCancel := context.WithTimeout(ctx, 2*time.Second)
 		snapshot, err := e.dev.InspectManagedShell(inspectCtx, run.RunnerID)
 		inspectCancel()
@@ -477,11 +510,11 @@ func (e *Engine) resolveRetiredExecution(ctx context.Context, r *retiredState) {
 			}
 		}
 	}
-	if unresolved {
+	if attempt {
 		e.mu.Lock()
-		settled := run.settled()
+		gone := run.provenGone()
 		e.mu.Unlock()
-		if settled {
+		if gone {
 			removeCtx, removeCancel := context.WithTimeout(ctx, 2*time.Second)
 			_ = e.dev.RemoveManagedShell(removeCtx, run.RunnerID, run.Root)
 			removeCancel()
@@ -505,7 +538,8 @@ func (e *Engine) resolveRetiredExecution(ctx context.Context, r *retiredState) {
 		// The boot boundary is end evidence, not an original RPC receipt.
 		// Keep may_dispatch and the original identity intact in the ledger.
 	}
-	if r.ui != nil && r.ui.record.State != "may_dispatch" && r.legacy == nil && (r.shell == nil || r.shell.settled()) {
+	if r.ui != nil && r.ui.record.State != uiStateMayDispatch && r.legacy == nil &&
+		(r.shell == nil || r.shell.provenGone()) {
 		r.cleanup.Execution = protocol.CleanupConfirmed
 	}
 }

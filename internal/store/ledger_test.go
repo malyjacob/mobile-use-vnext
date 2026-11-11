@@ -159,7 +159,7 @@ func TestLedgerAcceptsAllowedUIKindsAndStates(t *testing.T) {
 	}
 }
 
-func TestLedgerSaveWritesV3WithoutMutatingCaller(t *testing.T) {
+func TestLedgerSaveWritesV4WithoutMutatingCaller(t *testing.T) {
 	ledger := newTestLedgerStore(t)
 	record := validTestLedger(1)
 	record.Format = "caller-format"
@@ -187,7 +187,7 @@ func TestLedgerSaveWritesV3WithoutMutatingCaller(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load saved ledger: %v", err)
 	}
-	if got.Format != "mobile-use-vnext-ledger" || got.Version != 3 || got.Revision != 1 {
+	if got.Format != "mobile-use-vnext-ledger" || got.Version != ledgerVersionV4 || got.Revision != 1 {
 		t.Fatalf("saved header = %+v", got)
 	}
 	if !reflect.DeepEqual(got.UI, &uiBefore) ||
@@ -289,7 +289,7 @@ func TestLedgerV1UpgradePreservesResponsibilities(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load upgraded ledger: %v", err)
 	}
-	if got.Version != 3 || got.Revision != 8 {
+	if got.Version != ledgerVersionV4 || got.Revision != 8 {
 		t.Fatalf("upgraded header = %+v", got)
 	}
 	for name, same := range map[string]bool{
@@ -314,7 +314,7 @@ func TestLedgerLoadRejectsInvalidHeaderOrVersionOneEvidence(t *testing.T) {
 		body string
 	}{
 		{"version zero", `{"format":"mobile-use-vnext-ledger","version":0,"revision":0}`},
-		{"unknown version", `{"format":"mobile-use-vnext-ledger","version":4,"revision":0}`},
+		{"unknown version", `{"format":"mobile-use-vnext-ledger","version":5,"revision":0}`},
 		{"foreign format", `{"format":"other","version":2,"revision":0}`},
 		{"negative revision", `{"format":"mobile-use-vnext-ledger","version":2,"revision":-1}`},
 		{"v1 ui object", `{"format":"mobile-use-vnext-ledger","version":1,"revision":0,"ui":` + baseUI + `}`},

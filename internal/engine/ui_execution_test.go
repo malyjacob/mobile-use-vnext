@@ -80,7 +80,10 @@ func TestOpenAppAttributionFailureDoesNotRetainUIExecution(t *testing.T) {
 	}
 }
 
-func TestUnknownUIBlocksSubsequentOrdinaryWork(t *testing.T) {
+// A closed input window is a recorded fact, never an admission barrier: the
+// uncertain call must not forbid the observation that is the only way to
+// narrow it.
+func TestUnknownUIReceiptAllowsSubsequentOrdinaryWork(t *testing.T) {
 	h := newHarnessWithClock(t, false)
 	first := h.startSession()
 	h.engine.dev = &hookedDevice{Device: h.device, tap: func(context.Context, int, int, int) error {
@@ -90,25 +93,30 @@ func TestUnknownUIBlocksSubsequentOrdinaryWork(t *testing.T) {
 	if apiErr != nil || acted.Outcome != OutcomeUncertain {
 		t.Fatal("UI dispatch did not become uncertain")
 	}
+	h.engine.mu.Lock()
+	token := h.engine.ui
+	h.engine.mu.Unlock()
+	if token == nil || token.record.State != uiStateUnknown {
+		t.Fatalf("unknown receipt did not close the window: %+v", token)
+	}
 	before := h.device.captureCount()
-	observed, apiErr := h.engine.Observe(context.Background(), "agent", "Pblockedobserve",
+	observed, apiErr := h.engine.Observe(context.Background(), "agent", "Pafterunknownobserve",
 		&protocol.ObserveRequest{Reference: acted.OperationID})
-	if apiErr != nil || observed.Error == nil || observed.Error.Code != protocol.CodeDeviceBusy || h.device.captureCount() != before {
-		t.Error("unknown UI allowed a second device observation")
+	if apiErr != nil || observed.Error != nil || observed.Observation == nil || h.device.captureCount() == before {
+		t.Fatalf("unknown receipt blocked the observation that narrows it: %+v %v", observed, apiErr)
+	}
+	if observed.Observation.ID == first.Observation.ID {
+		t.Fatal("observation after the unknown receipt reused the consumed O")
 	}
 	h.device.setShellDone(exitedDone(0, 0, false))
-	shelled, apiErr := h.engine.Shell(context.Background(), "agent", "Pblockedshell",
+	shelled, apiErr := h.engine.Shell(context.Background(), "agent", "Pafterunknownshell",
 		&protocol.ShellRequest{Reference: acted.OperationID, Command: "true"})
-	if apiErr != nil || shelled.Error == nil || shelled.Error.Code != protocol.CodeDeviceBusy {
-		t.Error("unknown UI allowed a later shell to replace its evidence")
+	if apiErr != nil || shelled.Error != nil || shelled.Outcome != OutcomeExecuted {
+		t.Fatalf("unknown receipt blocked a later shell: %+v %v", shelled, apiErr)
 	}
-	prepare, start, _, _, _, _ := h.device.shellCalls()
-	if prepare != 0 || start != 0 {
-		t.Error("rejected shell touched the device")
-	}
-	blockedStart, apiErr := h.engine.Start(context.Background(), "agent", "Pblockedstart")
-	if apiErr != nil || blockedStart.Error == nil || blockedStart.Error.Code != protocol.CodeDeviceBusy {
-		t.Error("unknown UI did not reject start through the ordinary-work busy contract")
+	blockedStart, apiErr := h.engine.Start(context.Background(), "agent", "Pafterunknownstart")
+	if apiErr != nil || blockedStart.Error == nil || blockedStart.Error.Code != protocol.CodeSessionExists {
+		t.Error("an active session must still reject a second start as session_exists")
 	}
 	status, apiErr := h.engine.Status("agent", acted.OperationID)
 	if apiErr != nil || status.Outcome != OutcomeUncertain {

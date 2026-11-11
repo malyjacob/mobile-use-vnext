@@ -1,28 +1,26 @@
 package engine
 
-import "github.com/malyjacob/mobile-use-vnext/internal/protocol"
+import (
+	"time"
+
+	"github.com/malyjacob/mobile-use-vnext/internal/protocol"
+)
 
 // ordinaryBarrierLocked is the common admission barrier for every ordinary
-// tool. The caller holds e.mu. It deliberately does not inspect e.work: the
-// existing work-position conflict check remains separate so a trusted apps
-// cache can still be served while unrelated work is active.
-func (e *Engine) ordinaryBarrierLocked(op *operationState) *protocol.APIError {
+// tool. The caller holds e.mu. A closed input window is never a barrier: the
+// dispatch is over, and the only way to narrow an unknown end is to observe
+// again. A managed shell keeps the barrier only until its bounded confirmation
+// deadline, so an abandoned chain can never close admission indefinitely.
+//
+// It deliberately does not inspect e.work: the existing work-position conflict
+// check remains separate so a trusted apps cache can still be served while
+// unrelated work is active.
+func (e *Engine) ordinaryBarrierLocked(op *operationState, now time.Time) *protocol.APIError {
 	if e.ledgerUnsafe {
 		return protocol.NewErrorOutcome(503, protocol.CodeDeviceUnavailable,
 			"恢复账本不可用，普通工作已暂停", OutcomeNotExecuted)
 	}
-	if e.session != nil && e.session.State != SessionEnded && e.uiPendingLocked() {
-		owner := ""
-		blocking := ""
-		if e.ui != nil {
-			blocking = e.ui.record.OperationID
-		}
-		if e.session != nil {
-			owner = e.session.Agent
-		}
-		return ordinaryBusyError(op, owner, blocking, "原输入调用结束未确认")
-	}
-	if e.session != nil && e.session.State != SessionEnded && e.shell != nil && !e.shell.settled() {
+	if e.session != nil && e.session.State != SessionEnded && e.shellBarrierLocked(e.shell, now) {
 		return ordinaryBusyError(op, e.shell.Agent, e.shell.OperationID,
 			"设备工作尚未完成")
 	}

@@ -31,7 +31,7 @@ Agent 宿主接入见[Agent 接入指南](integration.md)。
 | `/opt/mobile-use-vnext/mcp-config.json` | 手机 MCP 适配器配置（含 MCP token） | `0600` |
 | `/opt/mobile-use-vnext/u2.jar`、`applist.dex` | 固定制品 | `0600`，按哈希校验 |
 | `/opt/mobile-use-vnext/service.sh` | 设备服务启停脚本 | `0755` |
-| `/var/lib/mobile-use-vnext/recovery-ledger.json` | 版本 3 恢复账本：当前归属与退休资源证据 | `0600`，≤64 KiB；退休明细 ≤8 条且合计 ≤24 KiB |
+| `/var/lib/mobile-use-vnext/recovery-ledger.json` | 版本 4 恢复账本：当前归属与退休资源证据 | `0600`，≤64 KiB；退休明细 ≤8 条且合计 ≤24 KiB |
 | `/var/lib/mobile-use-vnext/messages.json` | 未确认 Agent 消息 | `0600`，≤2 MiB（256 条 / 1 MiB 正文） |
 | `/var/lib/mobile-use-vnext/device-service.log` | 服务事件日志（启动时轮转） | `0600`，无固定上限 |
 | `/var/lib/mobile-use-vnext/device-service.pid` | 服务进程记录 | `0600` |
@@ -175,9 +175,9 @@ curl.exe -s http://127.0.0.1:18881/health
 | 同一原会话的 `cleanup.pending` | 有限自动补偿仍在运行 | 最多 12 秒、三轮；可同时 `can_start=true`，不要无限轮询 |
 | 同一原会话的 `cleanup.unconfirmed` | 主动补偿已停止，仍有未知事实 | 保留同帧 session/五项证据；不改成 confirmed，不单独阻止新会话 |
 | `device_busy` 且原会话刚结束 | 旧 work/UI/shell 正在最多 5 秒的逻辑交接 | 等待交接；不杀设备进程、不删运行目录 |
-| `ui_input_unconfirmed` | 当前活动会话的原 UI 调用缺少结束证据 | 普通工作 busy，保留原 P，不重放输入；status/STOP/end 可用 |
-| `recovery_pending`/`control_sync_pending` | 当前启动恢复入口或 App 当前同步未就绪 | 检查当前 ADB、App、模式与 STOP；旧 cleanup 未确认本身不是原因 |
-| `shell_pending`/`shell_chain_unconfirmed` | 受管命令未结束或终止未确认 | 等 `status.shell` 确认；不杀 runner、不删运行目录 |
+| 原会话返回 `uncertain` 后普通工具仍可用 | 输入窗口在调用返回时关闭，且不是准入屏障 | 用一次新 `observe` 确认现状；不重放原输入；受管 shell 例外，见下方 `shell_pending` 行 |
+| `recovery_pending`/`control_sync_pending` | 当前启动恢复入口或 App 当前同步未就绪 | 检查当前 ADB、App、模式与 STOP；旧 cleanup 未确认本身不是原因；恢复不要求重启手机 |
+| `shell_pending` | 受管命令未结束或终止未确认 | 屏障最长到 `deadline_at + ShellConfirmTimeout + 3s`（默认约执行预算结束后 8 秒）；到界后以 `termination=unknown` 结案让位，不杀 runner、不删运行目录，且 `cleanup.execution` 保持未确认 |
 | `ledger_corrupt`/`ledger_unavailable` | 账本损坏或不可写 | 检查目录权限/磁盘；损坏账本需人工处置并重新部署，不能带病启动 |
 | `device_unavailable` | Android 侧 adb/u2 不可用 | 检查 `adb -s 127.0.0.1:5555 get-state`、u2 端口与固定制品哈希；重启服务触发 `EnsureU2` |
 | `display_probe_failed` | 当前显示探测失败 | 确认 SurfaceFlinger/`dumpsys display` 与 App 当前 `display`；不要手工关闭用户主屏 |
@@ -210,7 +210,7 @@ adb shell su -c 'tail -n 100 /data/data/com.mobileuse.vnext/files/diagnostics.lo
    $control = (Get-Content .state/deploy.json -Raw | ConvertFrom-Json).control_token
    Invoke-RestMethod http://127.0.0.1:18881/v1/control/stop -Method Post `
      -Headers @{ Authorization = "Bearer $control" } -ContentType 'application/json' `
-     -Body '{"contract_version":"6","app_instance_id":"<uuid>","stop_seq":1,"reason":"operator_stop"}'
+     -Body '{"contract_version":"7","app_instance_id":"<uuid>","stop_seq":1,"reason":"operator_stop"}'
    ```
 
    `accepted=true` 只表示停止边界已绑定；仍需用 App/`status.cleanup` 核验执行链、任务与

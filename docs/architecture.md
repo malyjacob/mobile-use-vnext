@@ -70,14 +70,24 @@ engine 的状态锁只做有限内存检查与转换：锁内不等待 ADB、u2 
 
 - `start` 先登记 P、取得工作位置，再创建 `starting` 会话；虚拟屏要等 App 创建回执、App
   上报的显示描述、以及 `dumpsys`/SurfaceFlinger 的显示存在与 SFID 三者一致后才转 `active`。
-- 租约 `SessionTTL=120s` 滑动续期，只由被接纳的普通工作延长（成功提交的采集、`act` 认领）；
-  `status` 查询不续租。硬上限 `SessionHardLimit=1h`，从 `start` 起算，不随续期突破。
-- 结束原因写入 `session.reason`，例如 `client_end`、`user_stop`、`lease_expired`、
-  `app_restarted`、`service_shutdown`、`display_create_unconfirmed`。
+- 租约 `SessionTTL=120s` 由 `keepalive` 或被接纳的普通工作滑动续期；`status` 查询不续租。
+  硬上限 `SessionHardLimit=1h`，从 `start` 起算，不随续期突破。
+- 会话只因外部原因或启动阶段失败结束：显式 `end`（`client_end`）、STOP（`reason` 原样记入，
+  独立 STOP 缺省或超长时用 `user_stop`）、
+  滑动租约或 1 小时硬上限到期（`lease_expired`）、App 实例变化（`app_restarted`）、
+  服务退出/重启（`service_shutdown`；恢复旧归属记 `service_restarted`），以及
+  `display_create_unconfirmed` 等启动失败。原因写入 `session.reason`；工具级期限不是会话事实，
+  不撤销或冻结会话。
 - 控制视图只投影当前会话；新会话开始后，旧会话不再占用当前槽位，只作为 engine 的有界
   历史记录。`status()` 可给出本 Agent 最近的原会话，`status(O)`/`status(P)` 只按其仍保留的
   原归属路由查询，缺失时不改绑到其它会话。公开 `cleanup` 必须与同一帧中的 `session` 同属
   一个原会话，不能拼入另一会话或全局清理状态。
+
+> 除外部不可抗力（`end`、STOP、App 实例变化、设备不可达、服务退出/重启、租约到期）外，任何内部原因都不得撤销会话、不得让会话无法继续使用、不得让服务锁死到只能重启手机。
+
+> 该保证约束工具级期限与内部未决事实：工作期限和已关闭输入窗口不撤销活动会话，也不阻止后续
+> 普通工作。启动阶段失败、设备/App 不可达、恢复账本不可写与当前能力门禁属于外部资源条件，
+> 仍按各自契约拒绝新工作或结束启动阶段的原会话（包括激活后的首个观察失败）。
 
 ### O（观察）
 
@@ -187,9 +197,19 @@ delta 的五类块：`set`（逐字段完整新值，显式保留 `false`/`0`/`"
 - 交接完成只封闭旧逻辑派发权和提交权，不证明已派发的 Android 输入、shell/root 派生进程、
   RPC 或精确清理命令已经停止。本规范接受这些旧调用与新会话发生物理时间重叠的风险；
   它们的结果只能更新原退休记录，不能发布新 O、延长租约或操作新会话。
-- 当前活动会话内仍有未决 UI 输入或受管 shell 时，后续普通输入保持 busy；
-  `status`、`inspect`、`diagnose`、`end` 与 STOP 保持可用。退休记录中的同类未确认事实只作为
-  原会话证据，不成为新会话的永久门禁。
+- 每次 UI 派发只拥有一个输入窗口：`may_dispatch` 表示调用尚未返回；返回时一次性记为
+  `terminated`、`not_dispatched` 或 `unknown`。已关闭窗口不构成屏障，`unknown` 不阻止
+  `observe`、`act` 等普通工具；用一次新 `observe` 收窄不确定性，不重放原输入，也无第二个 UI 期限。
+- 普通工具之间唯一保留的跨调用执行屏障是受管 shell，最长至
+  `run.DeadlineAt + cfg.ShellConfirmTimeout + 3s`；
+  默认 30 秒执行预算结束后再约 8 秒。到界或超时/撤销后的终止无法确认时，以
+  `termination=unknown` 封闭该链并释放工作位置；该不确定性本身不改变会话状态（超时/到界
+  不会结束活动会话，STOP/end 撤销后仍为 `ended`）；精确 runner 身份移入
+  单个内存孤儿槽，较新的封闭链替换旧项。收尾链至多再作一次精确终止尝试，未证明进程消失前
+  不删除 runner 目录。`status`、`inspect`、`diagnose`、`end` 与 STOP 保持可用。
+- `work.Deadline` 到期只冻结该 P（`phase=work_deadline`）：默认 `outcome=not_executed`，
+  派发未知时为 `uncertain`，已有确认 outcome 时保留；取消其上下文并令 `e.work=nil`。
+  会话、所有观察与收尾链不因该工作期限改变。
 - 工作上下文按类型设上限：`start` = `StartTimeout + WorkTimeout`（40s）、`observe` =
   `WorkTimeout + 15s`（35s）、`act`/`open_app` 约 50s、`apps` 约 30s、`shell` 约 65s；具体超时是服务策略，不是请求参数。
 - `end`、STOP、`status` 不占普通工作位置，也不等待普通工作完成。
@@ -209,8 +229,9 @@ delta 的五类块：`set`（逐字段完整新值，显式保留 `false`/`0`/`"
 `accepted=true`，`state=duplicate`）。成功绑定时：
 
 1. 记录停止边界（`stopBoundary`，并写入账本 `stop`）；
-2. 若存在未结束会话：`state=ended`、`reason=user_stop`、会话的 ready O 退休、工作标记撤销并
-   取消上下文；
+2. 若存在未结束会话：`state=ended`、`reason` 为接受的停止原因（仅独立 STOP 的空值或超长
+   原因改用 `user_stop`，同步 `stop_pending.reason` 原样保留）、
+   会话的 ready O 退休、工作标记撤销并取消上下文；
 3. 锁外启动独立收尾链；
 4. 不等待设备工作、日志/账本刷盘或网络；已派发的 Android 命令不保证撤回。
 
@@ -241,11 +262,13 @@ P 已无法定位时，`end(P)` 返回 `409 operation_unknown`、`phase=referenc
 - 每条退休记录从撤权时开始拥有总计 12 秒预算，最多三轮，轮间等待分别为 200 ms、800 ms；
   每次设备 I/O 使用剩余总预算且单次不超过 2 秒。预算不因心跳、`status`、重复 `end`、
   错误或进程重启而刷新。
-- `execution`：所有可能派发的 UI 子步骤与受管 shell 链均有自身结束/未派发证据时为
-  `confirmed`，缺证据时为 `unconfirmed`。每个 UI 子步骤由引擎绑定原会话、P、step 和
-  设备启动身份；远端 shell v2 退出结果或完整匹配的同步文字 RPC 返回是调用终结证据。
-  主 outcome、任务归属、文字读回与调用终结分别判定，原 P 的 `uncertain` 不追认。
-  shell 只解除自己的 runner 责任；迟到 UI 终结只补原执行事实，不发布 O 或恢复输入权。
+- `execution`：UI 子步骤只在调用仍未返回时保持 `unconfirmed`；调用返回即关闭窗口，
+  缺少可用结束回执时持久记为 `unknown`，不再单独使 `execution=unconfirmed`。
+  受管 shell 则须精确链被证明结束或未启动（`confirmed`/`aborted`）才解除 `unconfirmed`；
+  以 `unknown` 封闭并释放工作位置不证明链已消失，不能据此写成 `confirmed`。
+  每个 UI 子步骤由引擎绑定原会话、P、step 和设备启动身份；主 outcome、任务归属、
+  文字读回与调用终结分别判定，原 P 的 `uncertain` 不追认。shell 只解除自己的 runner 责任；
+  迟到 UI 返回只补原执行事实，不发布 O 或恢复输入权。
 - 迟到终结晚于原物理核验时，原物理确认失效并保存复核义务。旧任务 ID 留作 recents
   核验证据；只有原补偿仍运行且预算足够时才继续核验。主动补偿停止后，可信迟到回执
   仍可更新原事实，但不重新派发、不延长期限、不改原 P outcome。
@@ -283,16 +306,19 @@ P 已无法定位时，`end(P)` 返回 `409 operation_unknown`、`phase=referenc
 
 - 账本损坏/不可读 → `blockedReason=ledger_corrupt`，可用性 `blocked`，不接纳新会话；
 - 无记录 → 等待 App 心跳、当前模式/STOP 与设备能力就绪后可开始；端口就绪不等于设备就绪；
-- 有记录 → 先要求 App 心跳新鲜，再把旧 session 及其 UI/shell/create/cleanup 责任转入退休记录；
+- 有记录 → 要求 App 心跳、当前能力与设备就绪，再把旧 session 及其 UI/shell/create/cleanup
+  责任转入有界收尾的退休记录，包括 `may_dispatch`/`unknown` UI 记录与旧 shell 身份；
   不恢复旧 O/P、主屏授权或普通派发权。旧记录中的 boot、App 实例、原创建命令、display
-  generation、精确任务 ID 与私有预算随记录保存。
-- 版本 3 中已发出预算且仍为 `pending` 的退休记录，启动时先持久化为 `unconfirmed`，不授予
-  第二次补偿预算。版本 1/2 的 current 或旧格式记录转成退休记录时获得一次新预算；迁移快照
-  必须先保存，再允许任何补偿派发。
+  generation、精确任务 ID 与私有预算随记录保存。恢复不要求重启手机；旧归属退休且当前能力
+  就绪、账本可保存新归属后开放准入。
+- 读取版本 1/2/3/4。版本 3/4 中已发出预算且仍为 `pending` 的退休记录，启动时先持久化为
+  `unconfirmed`，不授予第二次补偿预算。current 或旧格式记录转成退休记录时获得一次新预算；
+  迁移快照必须先保存，再允许任何补偿派发。
 - boot 变化可作为对应终结证据；跨 boot 的物理清理保持只读，不按旧裸 ID 删除可能属于新资源
   的对象。旧 shell runner 只在完整身份匹配时探测或终止，不重放命令。
-- 旧 UI/legacy checkpoint 保留为 `execution=unconfirmed` 的原归属证据；没有手机启动边界证据
-  时也不能把它改写成 `confirmed`。该事实不产生永久准入封锁。
+- 旧 `may_dispatch` UI/legacy checkpoint 保留为 `execution=unconfirmed` 的原归属证据；
+  旧 UI 的窗口已关闭且无未证明结束的 shell 或 legacy 责任时，不再单独保持该值。
+  未确认事实不产生永久准入封锁。
 
 `can_start`（`status` 返回）只投影当前服务能力和当前权威冲突：内核目录锁已取得、账本可载入
 且新归属可保存、无当前普通工作、无活动会话、App 心跳新鲜且
@@ -306,7 +332,7 @@ P 已无法定位时，`end(P)` 返回 `409 operation_unknown`、`phase=referenc
 
 `internal/store` 把单个 JSON 对象写在 `<state_dir>/recovery-ledger.json`：
 
-- 预算 64 KiB；格式名 `mobile-use-vnext-ledger`，读版本 1/2/3、写版本 3，修订号单调递增；
+- 预算 64 KiB；格式名 `mobile-use-vnext-ledger`，读版本 1/2/3/4、写版本 4，修订号单调递增；
 - 单写者：包内互斥 + 进程锁；`Save` 先 fsync 临时文件，再 rename 覆盖，再 fsync 父目录
   （Windows 跳过目录 fsync，因此 Windows 不提供同等耐久证据）；
 - 版本 3 分离当前归属与 `retired` 明细。内容只有归属与资源证据：原 service instance、
@@ -317,13 +343,16 @@ P 已无法定位时，`end(P)` 返回 `409 operation_unknown`、`phase=referenc
 - 退休明细最多 8 条，其序列化集合最多 24 KiB；整个账本仍最多 64 KiB。容量达到边界时停止或
   压缩退休项，不把容量不足变成新会话拒绝码，也不能把淘汰写成 `complete`。
 - 明确不含：请求体、节点树、图片、输入正文、命令输出、异常字符串；
+- UI 窗口状态为 `may_dispatch`、`terminated`、`not_dispatched`、`unknown`；`may_dispatch`
+  表示调用仍未返回，`unknown` 表示窗口已关闭但没有可用结束回执，是私有账本的持久终态，
+  不改判原工具的 `uncertain`。
 - `start` 在启动显示助手前同步写一次（原归属 + 创建意图），会话激活后再写一次；其余进度
-  异步写。每个 UI 输入子步骤额外预写 `may_dispatch`，成功后重新竞争派发边界；终结证据
-  保存成功前不开放后续普通工作。写失败置 `ledgerUnsafe`，可用性为 `blocked`
-  （原因 `ledger_unavailable`）；STOP 不等这些写入。
-- 版本 1/2 升级保留原 Session/Cleanup/Stop/Shell/task 事实；缺失的新字段不充当结束证据。
-  `legacy_ui_pending` 保留旧责任，迁移后作为退休记录中的未确认事实。旧二进制不能读取版本 3，
-  回退只能使用兼容版本 3 的产物；不通过降级覆盖或清库恢复。
+  异步写。每个 UI 输入子步骤额外预写 `may_dispatch`，成功后重新竞争派发边界；调用返回后
+  只记录一次关闭状态。窗口关闭不阻止后续普通工作；写失败仍置 `ledgerUnsafe`，可用性为
+  `blocked`（原因 `ledger_unavailable`）；STOP 不等这些写入。
+- 版本 1/2/3 升级保留原 Session/Cleanup/Stop/Shell/task 事实；缺失的新字段不充当结束证据。
+  `legacy_ui_pending` 保留旧责任，迁移后作为退休记录中的未确认事实。回退只能使用兼容版本 4
+  的产物；不通过降级覆盖或清库恢复。
 
 账本只由 engine 读取与生成，HTTP 层与 App 都不写账本。
 
@@ -340,7 +369,8 @@ P 已无法定位时，`end(P)` 返回 `409 operation_unknown`、`phase=referenc
 | 物理收尾 | `cleanup.*` | 显示/任务/执行链是否确认释放 |
 
 事件日志只记白名单键（ID、枚举、布尔、计数、时长），值经过单行截断；不记录树、差异、输入
-正文、命令、原始响应或异常文本。
+正文、命令、原始响应或异常文本。每个 UI 窗口关闭只记一条 `ui.window_closed`，
+`state=terminated|not_dispatched|unknown`；该事件不进入任何工具响应。
 
 ## 10. 消息投递与发布边界
 

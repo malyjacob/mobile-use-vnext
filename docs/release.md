@@ -65,8 +65,8 @@ PowerShell、docs 或 Manifest 中另写一份版本号；`contract_version` 只
 {
   "format": "mobile-use-vnext-release",
   "version": 1,
-  "release_version": "0.6.0",
-  "contract_version": 6,
+  "release_version": "0.7.0",
+  "contract_version": 7,
   "source_commit": "<40 位提交>",
   "source_dirty": false,
   "built_at": "…",
@@ -74,7 +74,7 @@ PowerShell、docs 或 Manifest 中另写一份版本号；`contract_version` 只
   "go_experiment": "jsonv2",
   "build_target": {"goos": "linux", "goarch": "arm64", "cgo_enabled": false},
   "mcp": {"sdk": "github.com/modelcontextprotocol/go-sdk v1.8.0", "protocol": "2026-07-28"},
-  "android": {"package": "com.mobileuse.vnext", "version_name": "0.6.0", "version_code": 8},
+  "android": {"package": "com.mobileuse.vnext", "version_name": "0.7.0", "version_code": 9},
   "tool_catalog": {"count": 12, "sha256": "…"},
   "artifacts": [{"name": "device-service", "path": "device-service", "sha256": "…", "bytes": 0}]
 }
@@ -122,6 +122,6 @@ App 覆盖安装保留私有消息、已读、连接配置与停止意图。不�
 - 消息在服务重启后按原 ID 继续投递；升级不要求清空 App 消息或已读。
 - 回退是另一轮受控部署：安装上一组已核验产物，重新确认旧资源、契约配对与准入；不自动
   回放旧操作、不恢复主屏授权、不清空消息或归属来凑兼容。
-- 旧二进制无法读取版本 3 账本时明确不能直接回退；回退必须使用支持版本 3 的兼容产物。
+- 旧二进制无法读取版本 4 账本时明确不能直接回退；回退必须使用支持版本 4 的兼容产物。
   未确认归属作为退休事实保留，不能删除后假装干净，也不要求旧物理资源全部确认后才允许新
   当前归属保存。

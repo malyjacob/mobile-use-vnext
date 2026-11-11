@@ -6,14 +6,25 @@ import (
 	"time"
 
 	"github.com/malyjacob/mobile-use-vnext/internal/device"
+	"github.com/malyjacob/mobile-use-vnext/internal/eventlog"
 	"github.com/malyjacob/mobile-use-vnext/internal/protocol"
+)
+
+// UI input window states. One dispatch owns exactly one window: it is open
+// while the call is in flight and closed once the call returned, whatever its
+// receipt was. "unknown" is a closed window whose dispatch end could not be
+// confirmed; it is a recorded fact, never an admission barrier.
+const (
+	uiStateMayDispatch   = "may_dispatch"
+	uiStateTerminated    = "terminated"
+	uiStateNotDispatched = "not_dispatched"
+	uiStateUnknown       = "unknown"
 )
 
 // uiDispatchState belongs to the engine, independently of the ordinary work
 // slot and of the action's outcome. Every snapshot copies record by value.
 type uiDispatchState struct {
 	record   LedgerUI
-	deadline time.Time
 	durable  bool
 	returned bool
 	saving   bool
@@ -25,13 +36,32 @@ func validUIIdentity(identity device.BootIdentity) bool {
 	return len(identity.DeviceID) > 0 && len(identity.DeviceID) <= 128 && uiBootUUID.MatchString(identity.BootID)
 }
 
+// uiPendingLocked reports one input call that has not returned yet. That is the
+// whole meaning of a pending input: a call that returned is a closed window,
+// whatever receipt it carried.
 func (e *Engine) uiPendingLocked() bool {
-	return e.ui != nil && (e.ui.record.State == "may_dispatch" || !e.ui.durable)
+	return e.ui != nil && e.ui.record.State == uiStateMayDispatch
+}
+
+// executionUnknownLocked projects the unproven execution facts: an input call
+// still in flight, one whose end receipt was unusable, or a managed chain that
+// may still be running. The caller holds e.mu.
+func (e *Engine) executionUnknownLocked() bool {
+	uiUnproven := e.ui != nil && (e.ui.record.State == uiStateMayDispatch || e.ui.record.State == uiStateUnknown)
+	return uiUnproven || e.shellUnprovenLocked()
+}
+
+// refreshExecutionUnknownLocked keeps the diagnostic projection in step with
+// the token and shell facts. The caller holds e.mu.
+func (e *Engine) refreshExecutionUnknownLocked() {
+	if e.session != nil {
+		e.session.ExecutionUnknown = e.executionUnknownLocked()
+	}
 }
 
 // Durable storage is a separate gate; it cannot rewrite the action outcome.
 func (e *Engine) durabilityRecoveryLocked(reference, inputState string, previous *protocol.Recovery) *protocol.Recovery {
-	if !e.ledgerUnsafe && !(e.ui != nil && e.ui.record.State != "may_dispatch" && !e.ui.durable) {
+	if !e.ledgerUnsafe && !(e.ui != nil && e.ui.record.State != uiStateMayDispatch && !e.ui.durable) {
 		return previous
 	}
 	cause := ""
@@ -51,18 +81,13 @@ func (e *Engine) noteShellTerminalLocked(run *shellState) {
 	}
 }
 
-func (e *Engine) uiRebootRequiredLocked() bool {
-	return e.legacyUI != nil && e.uiCheckpointReady ||
-		e.ui != nil && e.ui.record.State == "may_dispatch" && e.ui.durable && e.ui.returned
-}
-
 // beginUIDispatch saves a may-dispatch record before competing with STOP at
 // the final in-memory boundary. No disk or device wait holds the state lock.
 func (e *Engine) beginUIDispatch(work *workState, kind string) *protocol.APIError {
 	e.mu.Lock()
-	if !e.workAuthorizedLocked(work, time.Now()) || e.uiPendingLocked() {
+	if !e.workAuthorizedLocked(work, time.Now()) {
 		e.mu.Unlock()
-		return protocol.NewError(409, protocol.CodeStopped, "输入未派发：原工作已撤销或执行未确认")
+		return protocol.NewError(409, protocol.CodeStopped, "输入未派发：原工作已撤销")
 	}
 	identity := e.session.InputIdentity
 	identityRevision := e.deviceIdentityRevision
@@ -75,17 +100,17 @@ func (e *Engine) beginUIDispatch(work *workState, kind string) *protocol.APIErro
 		}
 	}
 	e.mu.Lock()
-	if !e.workAuthorizedLocked(work, time.Now()) || e.uiPendingLocked() || e.deviceIdentityRevision != identityRevision {
+	if !e.workAuthorizedLocked(work, time.Now()) || e.deviceIdentityRevision != identityRevision {
 		e.mu.Unlock()
 		return protocol.NewError(409, protocol.CodeStopped, "输入未派发：原会话已撤销")
 	}
 	e.session.InputIdentity = identity
 	work.UIStep++
-	token := &uiDispatchState{deadline: work.Deadline, record: LedgerUI{
+	token := &uiDispatchState{record: LedgerUI{
 		OperationID: work.OperationID, Origin: e.session.Origin,
 		Epoch: work.SessionEpoch, Step: work.UIStep, Kind: kind,
 		DisplayID: e.session.Display.ID, DisplayGeneration: e.session.Display.Generation,
-		DeviceID: identity.DeviceID, BootID: identity.BootID, State: "may_dispatch",
+		DeviceID: identity.DeviceID, BootID: identity.BootID, State: uiStateMayDispatch,
 	}}
 	e.ui, work.UI = token, token
 	e.session.ExecutionUnknown = true
@@ -111,8 +136,11 @@ func (e *Engine) beginUIDispatch(work *workState, kind string) *protocol.APIErro
 	return nil
 }
 
-// recordUIReceipt accepts termination for the original token even after STOP.
-// It never changes a P result, renews authority or publishes an observation.
+// recordUIReceipt closes the dispatch window of the original token even after
+// STOP. The window closes when the call returns: a usable receipt records its
+// own state, an unusable one records the terminal "unknown" state. The receipt
+// is recorded once and never rewritten. It never changes a P result, renews
+// authority or publishes an observation.
 func (e *Engine) recordUIReceipt(work *workState, receipt device.DispatchReceipt) {
 	e.mu.Lock()
 	if work == nil || work.UI == nil || !e.ownsUITokenLocked(work.UI) {
@@ -121,27 +149,38 @@ func (e *Engine) recordUIReceipt(work *workState, receipt device.DispatchReceipt
 	}
 	token := work.UI
 	token.returned = true
-	if receipt != device.DispatchTerminated && receipt != device.DispatchNotDispatched {
-		work.DispatchUnknown = true
+	if token.record.State != uiStateMayDispatch {
 		e.mu.Unlock()
 		return
 	}
-	if token.record.State == "may_dispatch" {
-		token.record.State = "terminated"
-		if receipt == device.DispatchNotDispatched {
-			token.record.State = "not_dispatched"
-		}
-		token.durable = false
-		e.executionEvidenceRevision++
+	switch receipt {
+	case device.DispatchTerminated:
+		token.record.State = uiStateTerminated
+		work.DispatchUnknown = false
+	case device.DispatchNotDispatched:
+		token.record.State = uiStateNotDispatched
+		work.DispatchUnknown = false
+	default:
+		// The call returned without a usable end receipt. The window is over;
+		// the unproven end stays as one recorded fact on this token.
+		token.record.State = uiStateUnknown
+		work.DispatchUnknown = true
 	}
-	work.DispatchUnknown = false
+	token.durable = false
+	e.executionEvidenceRevision++
+	e.refreshExecutionUnknownLocked()
+	origin, state := token.record.Origin, token.record.State
 	e.mu.Unlock()
+	if e.log != nil {
+		e.log.Event(eventlog.Info, "ui.window_closed",
+			eventlog.Str("state", state), eventlog.Str("origin", origin))
+	}
 	e.persistUIReceipt(token)
 }
 
 func (e *Engine) persistUIReceipt(token *uiDispatchState) {
 	e.mu.Lock()
-	if !e.ownsUITokenLocked(token) || token.record.State == "may_dispatch" || token.durable || token.saving {
+	if !e.ownsUITokenLocked(token) || token.record.State == uiStateMayDispatch || token.durable || token.saving {
 		e.mu.Unlock()
 		return
 	}
@@ -150,7 +189,7 @@ func (e *Engine) persistUIReceipt(token *uiDispatchState) {
 		if r.ui == token {
 			r.cleanup.evidenceRevision++
 			r.cleanup.Execution = protocol.CleanupConfirmed
-			if r.shell != nil && !r.shell.settled() {
+			if r.shell != nil && !r.shell.provenGone() {
 				r.cleanup.Execution = protocol.CleanupUnconfirmed
 			}
 			if r.session.Mode == "virtual" {
@@ -169,7 +208,7 @@ func (e *Engine) persistUIReceipt(token *uiDispatchState) {
 	if e.cleanup != nil && e.session != nil && e.session.Origin == token.record.Origin &&
 		e.session.State == SessionEnded {
 		e.cleanup.needsExecutionRecheck = true
-		if e.shell == nil || e.shell.settled() {
+		if !e.shellUnprovenLocked() {
 			e.cleanup.Execution = protocol.CleanupConfirmed
 			if e.cleanup.Error != nil && e.cleanup.Error.Code == "execution_unconfirmed" {
 				e.cleanup.Error = nil
@@ -183,7 +222,7 @@ func (e *Engine) persistUIReceipt(token *uiDispatchState) {
 	if err == nil && e.ownsUITokenLocked(token) {
 		token.durable = true
 		if e.session != nil && e.session.Origin == token.record.Origin {
-			e.session.ExecutionUnknown = e.shell != nil && !e.shell.settled()
+			e.session.ExecutionUnknown = e.executionUnknownLocked()
 		}
 	}
 	e.broadcastAppLocked()
@@ -261,69 +300,4 @@ func (e *Engine) verifyClosedExecutionTarget(ctx context.Context, target cleanup
 		display = protocol.CleanupConfirmed
 	}
 	return tasks, recents, display
-}
-
-// A boot boundary proves termination only. All physical checks remain read-only
-// because old numerical IDs may now name somebody else's resources.
-func (e *Engine) finishExecutionRecovery(ctx context.Context, record *Ledger, app appState) {
-	e.mu.Lock()
-	if e.recovery != record {
-		e.mu.Unlock()
-		e.setRecoveryReason("old_resource_unconfirmed")
-		return
-	}
-	target := cleanupTarget{mode: "primary"}
-	switch {
-	case e.session != nil:
-		target = targetOf(e.session)
-	case record.PendingClose != nil:
-		target.mode = "virtual"
-		target.display = device.Display{ID: record.PendingClose.DisplayID, Generation: record.PendingClose.DisplayGeneration}
-	case record.Shell != nil:
-		target.display = device.Display{ID: record.Shell.DisplayID, Generation: record.Shell.DisplayGeneration}
-		if record.Shell.DisplayID > 0 {
-			target.mode = "virtual"
-		}
-	case record.PendingCreate != nil || len(record.Tasks) > 0:
-		e.mu.Unlock()
-		e.setRecoveryReason("old_resource_unconfirmed")
-		return
-	}
-	ids := []int{}
-	if record.Cleanup != nil {
-		ids = append(ids, record.Cleanup.CheckedTaskIDs...)
-	}
-	for _, task := range record.Tasks {
-		ids = append(ids, task.TaskID)
-	}
-	e.mu.Unlock()
-	queryCtx, cancel := context.WithTimeout(ctx, e.cfg.CleanupTimeout)
-	defer cancel()
-	tasks, recents, display := e.verifyClosedExecutionTarget(queryCtx, target, ids)
-	if target.mode == "virtual" && len(ids) == 0 && record.Cleanup != nil && unresolvedCleanupFact(record.Cleanup.Recents) {
-		recents = protocol.CleanupUnconfirmed
-	}
-	if unresolvedCleanupFact(tasks) || unresolvedCleanupFact(recents) || unresolvedCleanupFact(display) {
-		e.setRecoveryReason("old_resource_unconfirmed")
-		return
-	}
-	e.mu.Lock()
-	ready, _ := e.appReadyLocked(time.Now())
-	if e.recovery != record || !ready || e.shuttingDown || e.app.InstanceID != app.InstanceID ||
-		e.app.ModeGeneration != app.ModeGeneration || e.app.Display != nil {
-		e.mu.Unlock()
-		e.setRecoveryReason("control_sync_pending")
-		return
-	}
-	closure := LedgerCleanup{Execution: protocol.CleanupConfirmed}
-	if record.Cleanup != nil {
-		closure = *record.Cleanup
-		closure.CheckedTaskIDs = append([]int(nil), record.Cleanup.CheckedTaskIDs...)
-	}
-	closure.Execution = protocol.CleanupConfirmed
-	closure.Tasks, closure.Recents, closure.Display = tasks, recents, display
-	closure.ExecutionRecheckRequired = false
-	record.Cleanup = &closure
-	e.mu.Unlock()
-	e.finishRecovery(record, app, target.display.ID, "old_resources_resolved")
 }

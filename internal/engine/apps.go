@@ -38,7 +38,7 @@ func (e *Engine) Apps(ctx context.Context, agent, p string, req *protocol.AppsRe
 		ttl = 60 * time.Second
 	}
 	e.mu.Lock()
-	if barrier := e.ordinaryBarrierLocked(op); barrier != nil {
+	if barrier := e.ordinaryBarrierLocked(op, now); barrier != nil {
 		e.mu.Unlock()
 		return e.finishWithError(op, "admission", barrier), nil
 	}

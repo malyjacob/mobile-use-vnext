@@ -29,7 +29,7 @@ func validTestRetired(attempts int) engine.LedgerRetired {
 
 func TestLedgerV3RetiredRoundTrip(t *testing.T) {
 	ledger := newTestLedgerStore(t)
-	want := validTestLedger(3)
+	want := validTestLedger(ledgerVersionV4)
 	want.Revision = 1
 	retired := validTestRetired(0)
 	retired.BudgetIssued = false
@@ -44,7 +44,7 @@ func TestLedgerV3RetiredRoundTrip(t *testing.T) {
 		t.Fatalf("read saved ledger: %v", err)
 	}
 	for _, member := range [][]byte{
-		[]byte(`"version":3`),
+		[]byte(`"version":4`),
 		[]byte(`"create_command":"55555555-5555-4555-8555-555555555555"`),
 		[]byte(`"device_id":"device-private-a"`),
 		[]byte(`"boot_id":"` + testLedgerBootID + `"`),
@@ -131,7 +131,7 @@ func TestLedgerV1AndV2AllowMissingCrossBootIdentity(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Load migrated v%d: %v", version, err)
 			}
-			if upgraded.Version != 3 ||
+			if upgraded.Version != ledgerVersionV4 ||
 				upgraded.Session.CreateCommand != "" ||
 				upgraded.Session.DeviceID != "" ||
 				upgraded.Session.BootID != "" {

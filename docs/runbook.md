@@ -29,8 +29,9 @@ Android 侧，只与服务通信。Windows 主机只负责构建与下发，不�
 也可另行运行主机侧适配器；两条路径都只通过服务的 loopback HTTP 入口工作。
 
 受管 shell 的命令文件、start/done 元数据与有界输出位于单次运行目录；命令正文与输出不写
-服务日志、不写恢复账本。活动会话中执行身份未知时保持 busy；退休后按有限交接与补偿保留未知，
-不得按包名/PID 猜测清理。
+服务日志、不写恢复账本。活动会话中执行身份未知时只在有限屏障内保持 busy（见 §7 的
+`shell_pending` 行）；到界或无法确认终止后以 `termination=unknown` 结案让位；退休后按有限
+交接与补偿保留未知，不得按包名/PID 猜测清理。
 
 ## 2. 私有文件
 
@@ -95,10 +96,10 @@ STOP 可用与 MCP 宿主已重新发现工具。手机适配器的安装/监听
 部署过程不触发手机重启。设备服务通过 `service.sh stop/start` 重启；APK 使用
 `adb install -r` 覆盖安装并保留 App 私有数据。
 
-版本 1/2 账本由当前服务读取并迁移为版本 3；旧 session 直接转入退休记录，待保存迁移快照后
+版本 1/2/3 账本由当前服务读取并保存为版本 4；旧 session 直接转入退休记录，待保存迁移快照后
 才允许有限补偿。升级继续使用同一次 `deploy.ps1 -SkipBuild`，覆盖安装保留 App 私有数据；
-legacy UI、旧 cleanup 或版本 3 中未完成的退休补偿不作为再次部署或新会话准入门禁。
-版本 3 账本不能交给旧二进制解释，回退必须使用支持版本 3 的兼容产物。
+legacy UI、旧 cleanup 或版本 3/4 中已发出预算且未完成的退休补偿不作为再次部署或新会话准入门禁。
+版本 4 账本不能交给旧二进制解释，回退必须使用支持版本 4 的兼容产物。
 
 ## 4. 启动、停止、状态
 
@@ -147,7 +148,7 @@ adb -s 127.0.0.1:5555 forward tcp:18881 tcp:18880
 curl -s http://127.0.0.1:18881/health
 ```
 
-`/health` 无认证，返回 `status`、`contract_version`（当前 `"6"`）、`service_instance_id`、
+`/health` 无认证，返回 `status`、`contract_version`（当前 `"7"`）、`service_instance_id`、
 `release_version`。它只证明进程能应答，**不是** `can_start`。
 
 就绪以 `POST /api/status` 为准（令牌从 `.state/deploy.json` 读取，下面用占位符）：
@@ -155,7 +156,7 @@ curl -s http://127.0.0.1:18881/health
 ```bash
 curl -s -X POST http://127.0.0.1:18881/api/status \
   -H "Authorization: Bearer $AGENT_TOKEN" \
-  -H "X-Mobile-Use-Contract: 6" \
+  -H "X-Mobile-Use-Contract: 7" \
   -H "Content-Type: application/json" -d '{}'
 ```
 
@@ -198,25 +199,24 @@ adb -s 127.0.0.1:5555 shell su -c 'tail -n 100 /data/data/com.mobileuse.vnext/fi
 | `dumpsys SurfaceFlinger` 的层 id 解析失败或溢出 | 虚拟屏 SFID 可能超出 `int64` 范围 | 服务按 `uint64` 解析并原样传给 `screencap -d`；不要改成 `int64`/`int`，不要回退到 display 0。只读核对用 `dumpsys SurfaceFlinger --display-id` |
 | u2 启动失败或采集报 `hierarchy_unavailable` | 旧 `app_process` 仍在跑旧 JAR、JAR 哈希不符、端口未就绪 | 重启服务触发 `EnsureU2`（校验本地哈希 → 停旧 server → 比对/推送远端 → `/ping`）；JAR 替换后必须重启，进程不会热加载。服务只 `pkill` 固定模式 `^app_process / com.wetest.uia2.Main$`，不影响其他进程 |
 | 虚拟屏没有子节点，疑似采集失败 | 空虚拟屏是合法画面 | 公开树只有合成根、无 `children`，是正常空树；不要把它当失败，也不要伪造子节点。空树仍可 `observe`/`end` |
-| `can_start=false`、`blocking_code=shell_pending`/`shell_chain_unconfirmed` | 当前活动会话中受管命令仍在执行或终止未确认 | 等 `shell` 返回或 `status` 的 `shell.termination` 确认；不要 kill 进程或删运行目录 |
+| `can_start=false`、`blocking_code=shell_pending` | 当前活动会话中受管命令仍在执行或终止未确认 | 屏障最长到 `deadline_at + ShellConfirmTimeout + 3s`（默认约执行预算结束后 8 秒）；到界后以 `termination=unknown` 结案让位，不 kill 进程、不删运行目录；`cleanup.execution` 仍为未确认 |
 | `status.cleanup=pending` 且 `can_start=true` | 原退休记录的有限自动补偿仍在运行 | 同帧查看 `session`/`cleanup`；补偿最多 12 秒、三轮，不需要等它完成才能 `start` |
 | `status.cleanup=unconfirmed` 且 `can_start=true` | 原退休记录的主动补偿已停止，未确认事实保留 | 不得把未知改成 `confirmed`；检查当前能力或创建新会话，不需要无限轮询 `status` |
 | `can_start=false`、`blocking_code=device_busy`，且原会话刚结束 | 旧 work/UI/shell 正在最多 5 秒的逻辑交接 | 等待交接或查看原 `blocking_operation_id`；不杀设备进程、不删账本 |
-| `can_start=false`、`blocking_code=ui_input_unconfirmed` | 原 UI 调用仍缺终结证据 | 普通工作保持 busy；status/STOP/end 可用，不重放原动作 |
-| `can_start=false`、`blocking_code=recovery_pending`/`control_sync_pending` | 当前服务仍在恢复入口或等待 App 当前同步 | 保持服务与 App 运行，修当前 ADB/App/模式/STOP 能力；旧 cleanup 未确认本身不是原因 |
+| `can_start=false`、`blocking_code=recovery_pending`/`control_sync_pending` | 当前服务仍在恢复入口或等待 App 当前同步 | 保持服务与 App 运行，修当前 ADB/App/模式/STOP 能力；旧 cleanup 未确认本身不是原因；不需要重启手机 |
 | `can_start=false`、`blocking_code=ledger_corrupt` / `ledger_unavailable` | 账本损坏或不可写 | 检查 `/var/lib/mobile-use-vnext` 权限与磁盘；损坏账本需要明确的人工处置（移走并重新部署），不能带病启动 |
 | `can_start=false`、`blocking_code=device_busy` | 已有普通工作（start/observe/act/apps/open_app/shell）在进行 | 等该操作完成或用 `status` 查 `blocking_operation_id`；不建队列，不重试并发动作 |
 | `can_start=false`、`blocking_code=device_locked` / `device_not_interactive` | 锁屏或熄屏 | 解锁并点亮屏幕；服务不绕过锁屏 |
 | `can_start=false`、`blocking_code=control_revoked` | 收到 STOP 后未完成一次新同步 | 等 App 下一拍同步（不再携带 `stop_pending`）后再 `start` |
 | `can_start=false`、`blocking_code=mode_not_selected`/`stop_unavailable` | App 模式/通知/停止通道不可用 | 在 App 选择虚拟屏或确认主屏共享；授予通知权限并确认通知频道可用 |
-| `409 contract_mismatch` | `X-Mobile-Use-Contract` 缺失/不是 `6`，或 App 契约版本不符；错误体带 `recovery`（`entry=update`、`reference=none`） | 服务与客户端必须同为 `contract_version=6`；升级整组产物，不要只升一侧 |
+| `409 contract_mismatch` | `X-Mobile-Use-Contract` 缺失/不是 `7`，或 App 契约版本不符；错误体带 `recovery`（`entry=update`、`reference=none`） | 服务与客户端必须同为 `contract_version=7`；升级整组产物，不要只升一侧 |
 | `401 unauthorized` | Bearer 令牌错误，或用了另一身份的令牌 | 从私有配置核对 agent/control 令牌；两者不能互换 |
 | 主机 `18883/mcp` 不通或 401 | 手机适配器未运行、转发失效、填错 token | 看 `device-mcp.log` 与 `pgrep`；重建 `adb forward tcp:18883 tcp:18882`；手机路径填 `.state/deploy.json` 的 `mcp_token` |
 | MCP 客户端 403 | `Origin` 未在 `allowed_origins` | 部署时用 `-McpAllowedOrigins` 精确放行并重启适配器；不要填 `*` |
 | 手机 `18882` 启动失败 | 端口被占用或配置/二进制不匹配 | 只保留一个适配器进程；检查 `mcp-config.json` 与日志 |
 | `409 device_busy` | 已有普通工作占用工作位置 | 读 `blocking_operation_id`；串行化调用 |
 | `409 observation_expired`/`target_changed`/`foreground_changed` | 观察已过期（60 秒）或界面变化 | `target_changed`/`foreground_changed` 的重验失败结果通常已带新观察：用它的 O 与新 P 再 `act`；没有 `observation` 时先 `observe`。不要重放旧动作 |
-| `504 action_result_uncertain` | 输入已派发但结果无法确认 | 用 `status(P)`/重新观察判断现状，不重放；结束会话时该事实会反映到 `cleanup.execution` |
+| `504 action_result_uncertain` | 输入已派发但结果无法确认 | 用 `status(P)` 查询原结果，再用一次新 `observe` 收窄不确定性；不重放。窗口在调用返回时已关闭，不阻止后续普通工具；该事实保留在原 P 的 `uncertain` 与账本窗口状态中，不等于 `cleanup.execution` 未确认 |
 | App 进程重建或服务重启 | 服务实例变化、App 实例变化 | 服务实例变化后 App 会作废旧命令；App 实例变化会按 `app_restarted` 撤销旧会话，服务正常退出按 `service_shutdown` 撤权。等待新的恢复结果，不沿用缓存状态 |
 
 ## 8. 正常停止与资源确认
@@ -392,7 +392,7 @@ adb -s 127.0.0.1:5555 shell su -c 'ls -l /data/data/com.mobileuse.vnext/files/me
 
 1. 构造活动会话并使用虚拟屏；记录 `status` 的会话、`cleanup` 与显示。
 2. 停止服务：`service.sh stop`（SIGTERM 路径）或受控 `SIGKILL` 路径；不得删除账本。
-3. 启动服务与 App。旧 session 转退休记录；版本 3 中未完成的补偿先持久化为 `unconfirmed`。
+3. 启动服务与 App。旧 session 转退休记录；版本 3/4 中已发出预算且未完成的补偿先持久化为 `unconfirmed`。
    不恢复旧会话、不重放动作。新会话只需等待当前 App/设备/账本能力与最多 5 秒逻辑交接。
 4. 按 `status.cleanup` 记录执行链、task/recents/display；`unconfirmed` 作为原会话事实保留，
    不阻止 `can_start=true`。

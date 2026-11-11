@@ -299,22 +299,6 @@ func TestLegacyUIRecoveryPersistsRetiredBeforeCompensation(t *testing.T) {
 	waitRetiredCleanupStopped(t, e, "Pold")
 }
 
-func TestLegacyUIPendingUsesOriginalSessionAndCleanupFacts(t *testing.T) {
-	record := uiRecoveryTestLedger(2, nil)
-	record.LegacyUIPending = true
-
-	origin, pending := legacyUIResponsibility(record)
-	if origin != "Pold" || !pending {
-		t.Fatalf("v2 legacy marker was ignored: origin=%q pending=%v", origin, pending)
-	}
-
-	record.Session.State = SessionEnded
-	record.Cleanup.Execution = protocol.CleanupConfirmed
-	if origin, pending := legacyUIResponsibility(record); origin != "" || pending {
-		t.Fatalf("completed original facts remained pending: origin=%q pending=%v", origin, pending)
-	}
-}
-
 func TestLegacyUIRecoverySaveFailureIsCurrentCapabilityGate(t *testing.T) {
 	record := uiRecoveryTestLedger(1, nil)
 	dev := newFakeDevice()
@@ -345,35 +329,6 @@ func TestLegacyUIRecoverySaveFailureIsCurrentCapabilityGate(t *testing.T) {
 		t.Fatalf("retry after save recovery: %v", err)
 	}
 	assertCanStart(t, e)
-}
-
-func TestUIRecoveryUnsafeIdentityRetainsResponsibility(t *testing.T) {
-	cases := []struct {
-		name     string
-		identity device.BootIdentity
-		err      error
-	}{
-		{name: "different device", identity: device.BootIdentity{DeviceID: "device-other", BootID: uiRecoveryBootA}},
-		{name: "invalid boot", identity: device.BootIdentity{DeviceID: "device-test", BootID: "boot-invalid"}},
-		{name: "read failure", identity: device.BootIdentity{DeviceID: "device-test", BootID: uiRecoveryBootA}, err: errors.New("identity unavailable")},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			record := uiRecoveryTestLedger(2, uiRecoveryTestUI("may_dispatch"))
-			before := copyUIRecoveryLedgerForTest(record)
-			dev := newFakeDevice()
-			setUIRecoveryIdentity(dev, tc.identity, tc.err)
-			e, store := newUIRecoveryTestEngine(record, dev)
-
-			resolved, bootChanged, reason := e.resolveRecoveryUI(context.Background(), record)
-			if resolved || bootChanged || reason != "ui_input_unconfirmed" {
-				t.Fatalf("unsafe identity=(%v,%v,%q), want retained", resolved, bootChanged, reason)
-			}
-			if store.saveCount() != 0 || !reflect.DeepEqual(record, before) {
-				t.Fatal("unsafe identity changed or saved recovery state")
-			}
-		})
-	}
 }
 
 func TestV2UIRecoverySameBootRetiresWithoutRebootGate(t *testing.T) {
@@ -466,57 +421,6 @@ func TestV2UIRecoveryCrossBootPromotesOnlyExecution(t *testing.T) {
 	}
 }
 
-func TestTerminalUIEvidencePromotesExecutionAndReportsCrossBootBoundary(t *testing.T) {
-	cases := []struct {
-		state       string
-		name        string
-		boot        string
-		bootChanged bool
-	}{
-		{state: "terminated", name: "terminated same boot", boot: uiRecoveryBootA},
-		{state: "terminated", name: "terminated different boot", boot: uiRecoveryBootB, bootChanged: true},
-		{state: "not_dispatched", name: "not dispatched same boot", boot: uiRecoveryBootA},
-		{state: "not_dispatched", name: "not dispatched different boot", boot: uiRecoveryBootB, bootChanged: true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			record := uiRecoveryTestLedger(2, uiRecoveryTestUI(tc.state))
-			dev := newFakeDevice()
-			setUIRecoveryIdentity(dev, device.BootIdentity{DeviceID: "device-test", BootID: tc.boot}, nil)
-			e, store := newUIRecoveryTestEngine(record, dev)
-
-			resolved, bootChanged, reason := e.resolveRecoveryUI(context.Background(), record)
-			if !resolved || bootChanged != tc.bootChanged || reason != "" {
-				t.Fatalf("terminal UI resolution=(%v,%v,%q), want bootChanged=%v", resolved, bootChanged, reason, tc.bootChanged)
-			}
-			if store.saveCount() != 1 {
-				t.Fatalf("terminal UI receipt promotion saves=%d, want 1", store.saveCount())
-			}
-			saved := store.lastSave(t)
-			if saved.Cleanup == nil || saved.Cleanup.Execution != protocol.CleanupConfirmed {
-				t.Fatalf("terminal UI receipt did not promote execution: %+v", saved.Cleanup)
-			}
-		})
-	}
-}
-
-func TestTerminalUIDoesNotPromoteShellExecution(t *testing.T) {
-	record := uiRecoveryTestLedger(2, uiRecoveryTestUI("terminated"))
-	record.Cleanup.ExecReason = "shell_chain"
-	before := copyUIRecoveryLedgerForTest(record)
-	dev := newFakeDevice()
-	setUIRecoveryIdentity(dev, device.BootIdentity{DeviceID: "device-test", BootID: uiRecoveryBootB}, nil)
-	e, store := newUIRecoveryTestEngine(record, dev)
-
-	resolved, bootChanged, reason := e.resolveRecoveryUI(context.Background(), record)
-	if !resolved || !bootChanged || reason != "" {
-		t.Fatalf("terminal UI resolution=(%v,%v,%q)", resolved, bootChanged, reason)
-	}
-	if store.saveCount() != 0 || !reflect.DeepEqual(record.Cleanup, before.Cleanup) {
-		t.Fatal("terminal UI receipt cleared the independent shell execution responsibility")
-	}
-}
-
 func TestTerminalUIDoesNotFabricateLegacyCheckpointRelease(t *testing.T) {
 	record := uiRecoveryTestLedger(2, uiRecoveryTestUI("terminated"))
 	record.LegacyUI = &LedgerUICheckpoint{
@@ -565,109 +469,5 @@ func TestUIRecoveryRetiresShellInsteadOfRestoringCurrentOwnership(t *testing.T) 
 		saved.Retired[0].Record.Shell == nil ||
 		saved.Retired[0].Record.Shell.RunnerID != record.Shell.RunnerID {
 		t.Fatalf("UI recovery did not move the shell fact into retired ownership: %+v", saved)
-	}
-}
-
-func TestUIRecoveryWithoutResponsibilityDoesNotReadIdentity(t *testing.T) {
-	record := uiRecoveryTestLedger(2, nil)
-	record.Session.State = SessionEnded
-	record.Cleanup = nil
-	dev := newFakeDevice()
-	setUIRecoveryIdentity(dev, device.BootIdentity{}, errors.New("identity must not be read"))
-	e, _ := newUIRecoveryTestEngine(record, dev)
-
-	resolved, bootChanged, reason := e.resolveRecoveryUI(context.Background(), record)
-	if !resolved || bootChanged || reason != "" {
-		t.Fatalf("plain record resolution=(%v,%v,%q)", resolved, bootChanged, reason)
-	}
-}
-
-type uiRecoveryIdentityHookDevice struct {
-	Device
-	identity func(context.Context) (device.BootIdentity, error)
-}
-
-func (d *uiRecoveryIdentityHookDevice) ExecutionIdentity(ctx context.Context) (device.BootIdentity, error) {
-	return d.identity(ctx)
-}
-
-func TestUIRecoveryRevalidatesOwnershipAfterIdentityRead(t *testing.T) {
-	record := uiRecoveryTestLedger(2, uiRecoveryTestUI("may_dispatch"))
-	base := newFakeDevice()
-	setUIRecoveryIdentity(base, device.BootIdentity{DeviceID: "device-test", BootID: uiRecoveryBootA}, nil)
-	entered, release := make(chan struct{}), make(chan struct{})
-	dev := &uiRecoveryIdentityHookDevice{
-		Device: base,
-		identity: func(context.Context) (device.BootIdentity, error) {
-			close(entered)
-			<-release
-			return device.BootIdentity{DeviceID: "device-test", BootID: uiRecoveryBootA}, nil
-		},
-	}
-	e, store := newUIRecoveryTestEngine(record, dev)
-	type outcome struct {
-		resolved    bool
-		bootChanged bool
-		reason      string
-	}
-	done := make(chan outcome, 1)
-	go func() {
-		resolved, bootChanged, reason := e.resolveRecoveryUI(context.Background(), record)
-		done <- outcome{resolved: resolved, bootChanged: bootChanged, reason: reason}
-	}()
-	select {
-	case <-entered:
-	case <-time.After(3 * time.Second):
-		t.Fatal("identity read was not reached")
-	}
-	e.mu.Lock()
-	e.recovery = nil
-	e.mu.Unlock()
-	close(release)
-	got := <-done
-	if got.resolved || got.bootChanged || got.reason != "recovery_pending" {
-		t.Fatalf("stale identity result=(%+v)", got)
-	}
-	if store.saveCount() != 0 {
-		t.Fatal("stale identity result was saved")
-	}
-}
-
-func TestUIRecoveryRevalidatesOwnershipAfterSave(t *testing.T) {
-	record := uiRecoveryTestLedger(2, uiRecoveryTestUI("may_dispatch"))
-	dev := newFakeDevice()
-	setUIRecoveryIdentity(dev, device.BootIdentity{DeviceID: "device-test", BootID: uiRecoveryBootB}, nil)
-	e, store := newUIRecoveryTestEngine(record, dev)
-	entered, release := make(chan struct{}), make(chan struct{})
-	store.setSaveHook(func(context.Context, *Ledger) error {
-		close(entered)
-		<-release
-		return nil
-	})
-	type outcome struct {
-		resolved    bool
-		bootChanged bool
-		reason      string
-	}
-	done := make(chan outcome, 1)
-	go func() {
-		resolved, bootChanged, reason := e.resolveRecoveryUI(context.Background(), record)
-		done <- outcome{resolved: resolved, bootChanged: bootChanged, reason: reason}
-	}()
-	select {
-	case <-entered:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Save was not reached")
-	}
-	e.mu.Lock()
-	e.shuttingDown = true
-	e.mu.Unlock()
-	close(release)
-	got := <-done
-	if got.resolved || got.bootChanged || got.reason != "recovery_pending" {
-		t.Fatalf("post-save stale result=(%+v)", got)
-	}
-	if record.Cleanup.Execution != protocol.CleanupUnconfirmed {
-		t.Fatal("post-save ownership loss still committed the promotion")
 	}
 }

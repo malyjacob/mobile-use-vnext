@@ -86,6 +86,9 @@ func (e *Engine) completeShellRecovery(run *shellState, termination string,
 	if e.shell == run {
 		e.shell = nil
 	}
+	if e.shellOrphan == run {
+		e.shellOrphan = nil
+	}
 	op := e.operations[run.OperationID]
 	restoredOperation := op == nil
 	if op == nil {

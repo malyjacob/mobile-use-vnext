@@ -46,7 +46,7 @@ func (e *Engine) beginCleanupLocked(session *sessionState, reason string) *clean
 	if session == nil || session.CleanupStarted {
 		return nil
 	}
-	execUnknown := e.uiPendingLocked() || (e.shell != nil && !e.shell.settled()) ||
+	execUnknown := e.uiPendingLocked() || e.shellUnprovenLocked() ||
 		(e.work != nil && e.work.SessionEpoch == session.Epoch && e.work.DispatchUnknown)
 	cleanup := &cleanupState{
 		State: protocol.CleanupPending, Execution: protocol.CleanupConfirmed,
@@ -82,7 +82,7 @@ func (e *Engine) cleanupExecReasonLocked() string {
 	if e.work != nil && e.work.Kind == WorkShell {
 		return "shell_chain"
 	}
-	if e.shell != nil && !e.shell.settled() {
+	if e.shellUnprovenLocked() {
 		return "shell_chain"
 	}
 	return "ui_input"

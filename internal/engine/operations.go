@@ -184,7 +184,7 @@ func (e *Engine) acquireWork(op *operationState, kind string) (*workState, *prot
 	if e.shuttingDown {
 		return nil, protocol.NewError(503, protocol.CodeDeviceUnavailable, "服务正在退出")
 	}
-	if barrier := e.ordinaryBarrierLocked(op); barrier != nil {
+	if barrier := e.ordinaryBarrierLocked(op, time.Now()); barrier != nil {
 		return nil, barrier
 	}
 	if e.work != nil {
@@ -319,10 +319,11 @@ func (e *Engine) markDispatchUnknown(work *workState) {
 	if work == nil {
 		return
 	}
-	// Semantic uncertainty never recreates a completed input responsibility.
-	work.DispatchUnknown = work.UI != nil && e.ui == work.UI && e.uiPendingLocked()
+	// Semantic uncertainty never recreates a completed input responsibility:
+	// only this call's own token can make its dispatch unproven.
+	work.DispatchUnknown = work.UI != nil && e.ui == work.UI && e.ui.record.State != uiStateNotDispatched
 	if e.session != nil && e.session.Epoch == work.SessionEpoch {
-		e.session.ExecutionUnknown = e.uiPendingLocked() || e.shell != nil && !e.shell.settled()
+		e.session.ExecutionUnknown = e.executionUnknownLocked()
 	}
 }
 

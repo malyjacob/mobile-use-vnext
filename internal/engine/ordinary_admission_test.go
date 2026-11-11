@@ -16,6 +16,11 @@ func TestOrdinaryAdmissionRejectsAllToolsBehindUnresolvedShell(t *testing.T) {
 	first := h.startSession()
 	h.engine.cfg.ShellTimeout = 20 * time.Millisecond
 	h.engine.cfg.ShellConfirmTimeout = 20 * time.Millisecond
+	// An unreadable start keeps the exact chain unresolved while the barrier
+	// inside its bounded confirmation deadline still closes admission.
+	h.device.shell.mu.Lock()
+	h.device.shell.startErr = errors.New("synthetic ambiguous start")
+	h.device.shell.mu.Unlock()
 
 	shelled, apiErr := h.engine.Shell(context.Background(), "agent", "Pshellbarrier",
 		shellRequestFor(first.Observation, "synthetic"))
@@ -290,25 +295,6 @@ func TestOrdinaryAdmissionWarmAppsCacheHonorsBarriers(t *testing.T) {
 		checkIDIsolation bool
 	}{
 		{
-			name: "unknown_ui",
-			setup: func(h *harness) {
-				h.engine.mu.Lock()
-				h.engine.ui = &uiDispatchState{
-					record: LedgerUI{
-						OperationID: "Puiunknown",
-						Origin:      h.engine.session.Origin,
-						Epoch:       h.engine.session.Epoch,
-						State:       "may_dispatch",
-					},
-					durable: true,
-				}
-				h.engine.mu.Unlock()
-			},
-			code:             protocol.CodeDeviceBusy,
-			blockingID:       "Puiunknown",
-			checkIDIsolation: true,
-		},
-		{
 			name: "unresolved_shell",
 			setup: func(h *harness) {
 				h.engine.mu.Lock()
@@ -319,6 +305,8 @@ func TestOrdinaryAdmissionWarmAppsCacheHonorsBarriers(t *testing.T) {
 					Origin:      h.engine.session.Origin,
 					Epoch:       h.engine.session.Epoch,
 					State:       ShellRunning,
+					StartedAt:   time.Now(),
+					DeadlineAt:  time.Now().Add(time.Minute),
 				}
 				h.engine.mu.Unlock()
 			},

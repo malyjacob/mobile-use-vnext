@@ -22,9 +22,9 @@
 
 ```json
 {
-  "contract_version": "6",
+  "contract_version": "7",
   "app_instance_id": "0b0b8c0e-...",
-  "app_version": "0.6.0",
+  "app_version": "0.7.0",
   "selected_mode": "virtual",
   "mode_generation": "8f0b2e2e-...",
   "mode_ready": true,
@@ -45,7 +45,7 @@
 
 | 字段 | 必填 | 含义 |
 | --- | --- | --- |
-| contract_version | 是 | 共同普通契约；必须等于 `"6"` |
+| contract_version | 是 | 共同普通契约；必须等于 `"7"` |
 | app_instance_id | 是 | 本次 App 进程实例，UUID；重建即变化 |
 | app_version | 是 | 仅发行标识，不参与能力协商 |
 | selected_mode | 是 | `virtual` 或 `primary`；App 重建默认 virtual |
@@ -70,7 +70,7 @@
 
 ```json
 {
-  "contract_version": "6",
+  "contract_version": "7",
   "service_instance_id": "d0e...",
   "control": {
     "revision": 42,
@@ -140,13 +140,13 @@ App 必须拒绝无法解析、未知 kind、缺字段或 `contract_version` 不
 `POST /v1/control/stop`
 
 ```json
-{"contract_version":"6","app_instance_id":"...","stop_seq":7,"reason":"user_stop"}
+{"contract_version":"7","app_instance_id":"...","stop_seq":7,"reason":"user_stop"}
 ```
 
 响应（最小，不含普通服务状态、消息或设备命令）：
 
 ```json
-{"contract_version":"6","service_instance_id":"...","accepted":true,"stop_seq":7,"state":"revoked"}
+{"contract_version":"7","service_instance_id":"...","accepted":true,"stop_seq":7,"state":"revoked"}
 ```
 
 - App 先在本地提高停止代次、拒绝旧命令/回调恢复权限，再在独立线程发起本请求；不等待
@@ -191,7 +191,7 @@ App 只能从 `control` 与本机事实构造界面，不显示 Agent step，也
 - App 重建默认 virtual；主屏授权不持久化，必须重新由用户确认。
 - 服务重启撤销旧输入授权，不重放旧命令；App 的待同步停止意图在服务实例变化后仍保留，
   直到取得原意图的确认或明确服务已换实例。
-- 服务重启后的旧 session 转退休记录；版本 3 中未完成的旧补偿先持久化为 `unconfirmed`。
+- 服务重启后的旧 session 转退休记录；版本 3/4 中已发出预算且仍为 `pending` 的旧补偿先持久化为 `unconfirmed`。
   retired/旧 cleanup 不作为 App 的模式准备或新 create 门禁，当前 descriptor 与当前能力就绪
   后可建立新 attempt。
 - 服务重启后未确认的 Agent 消息按原 ID 继续投递；App 的消息与本地已读属于 App 私有数据，

@@ -61,9 +61,6 @@ func (e *Engine) statusSelfLocked(agent string, now time.Time) *protocol.Result 
 			InputState: protocol.RecoveryInputRevoked, Cleanup: cleanupValue(cleanup),
 		})
 	}
-	if reason == "ui_input_reboot_required" {
-		result.Recovery = &protocol.Recovery{Entry: protocol.RecoveryEntryUser, Reference: protocol.RecoveryReferenceNone}
-	}
 	if reason == "ledger_unavailable" {
 		reference := protocol.RecoveryReferenceNone
 		if result.StartOperation != "" {

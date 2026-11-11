@@ -109,6 +109,7 @@ var toolCatalog = []toolDefinition{
 			"operation 只接受对应分支的成员；image=true 在动作后的同一次采集中附加 ImageContent。" +
 			"坐标目标会在派发前按点解析节点并证明未变化，变化时返回 target_changed。" +
 			"重验失败且已取得新帧时，结果另带一个新观察与 retry 入口：用该 O 加新 P 重试，不必再 observe。" +
+			"派发回执不可用时结果记为 uncertain，本次调用即关闭该窗口，不阻塞后续 observe 或其他普通调用，应以一次新 observe 收窄不确定性。" +
 			treeTextGuide,
 		schema: json.RawMessage(`{
   "type": "object",
@@ -231,8 +232,12 @@ var toolCatalog = []toolDefinition{
 	},
 	{
 		name: "keepalive",
-		description: "延长给定 O/P 所指活动会话的租约，不改变任何 O 的可输入期限，" +
-			"不占普通工作位置、不访问设备。",
+		description: "仅将给定 O/P 所指活动会话的滑动租约单调续至 min(now + 120s, started_at + 1h)；" +
+			"1 小时硬上限不可延长，跨越须重新 start。" +
+			"只续租约，不延长任何 O 的 actionable_until、不改变 O 状态、不确认基线、" +
+			"不占普通工作位置、不访问设备、不写账本正文。" +
+			"会话 ended 返回 session_ended，starting 返回 reference_has_no_session，已过期限返回 session_expired；" +
+			"重复 P 仅重放原视图，不再次续租。",
 		schema: json.RawMessage(`{
   "type": "object",
   "properties": {

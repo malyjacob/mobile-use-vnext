@@ -29,6 +29,7 @@ const (
 	ledgerVersionV1   = 1
 	ledgerVersionV2   = 2
 	ledgerVersionV3   = 3
+	ledgerVersionV4   = 4
 	maxDeviceIDLen    = 128
 	maxCheckedTaskID  = 256
 	maxRetiredEntries = 8
@@ -96,11 +97,15 @@ func (l *Ledger) readLocked() (*engine.Ledger, error) {
 	if record.Format != ledgerFormat ||
 		(record.Version != ledgerVersionV1 &&
 			record.Version != ledgerVersionV2 &&
-			record.Version != ledgerVersionV3) {
+			record.Version != ledgerVersionV3 &&
+			record.Version != ledgerVersionV4) {
 		return nil, errors.New("ledger format is unsupported")
 	}
 	if record.Revision < 0 {
 		return nil, errors.New("ledger revision is invalid")
+	}
+	if record.Version < ledgerVersionV4 && hasVersionFourEvidence(data) {
+		return nil, fmt.Errorf("version %d ledger contains version 4 evidence", record.Version)
 	}
 	switch record.Version {
 	case ledgerVersionV1:
@@ -117,7 +122,7 @@ func (l *Ledger) readLocked() (*engine.Ledger, error) {
 		if err := validateEvidence(&record); err != nil {
 			return nil, err
 		}
-	case ledgerVersionV3:
+	case ledgerVersionV3, ledgerVersionV4:
 		if hasExplicitEvidenceBooleanNull(data) {
 			return nil, errors.New("ledger evidence boolean cannot be null")
 		}
@@ -187,6 +192,29 @@ func hasVersionThreeEvidence(data []byte) bool {
 				len(presence.Session.BootID) > 0)
 }
 
+func hasVersionFourEvidence(data []byte) bool {
+	var presence struct {
+		UI *struct {
+			State jsontext.Value `json:"state"`
+		} `json:"ui"`
+		Retired []struct {
+			Record jsontext.Value `json:"record"`
+		} `json:"retired"`
+	}
+	if err := json.Unmarshal(data, &presence); err != nil {
+		return true
+	}
+	if presence.UI != nil && bytes.Equal(bytes.TrimSpace(presence.UI.State), []byte(`"unknown"`)) {
+		return true
+	}
+	for _, retired := range presence.Retired {
+		if hasVersionFourEvidence(retired.Record) {
+			return true
+		}
+	}
+	return false
+}
+
 func validateEvidence(record *engine.Ledger) error {
 	if session := record.Session; session != nil {
 		if session.DeviceID != "" && !validDeviceID(session.DeviceID) {
@@ -215,7 +243,7 @@ func validateEvidence(record *engine.Ledger) error {
 			return errors.New("ledger ui device identity is invalid")
 		}
 		switch ui.State {
-		case "may_dispatch", "terminated", "not_dispatched":
+		case "may_dispatch", "terminated", "not_dispatched", "unknown":
 		default:
 			return errors.New("ledger ui state is invalid")
 		}
@@ -421,7 +449,7 @@ func (l *Ledger) Save(ctx context.Context, record *engine.Ledger) (int64, error)
 	next := l.revision + 1
 	snapshot := engine.CloneLedger(record)
 	snapshot.Format = ledgerFormat
-	snapshot.Version = ledgerVersionV3
+	snapshot.Version = ledgerVersionV4
 	snapshot.Revision = next
 	data, err := json.Marshal(snapshot)
 	if err != nil {

@@ -274,10 +274,15 @@ type Engine struct {
 	operations   map[string]*operationState
 	work         *workState
 	cleanup      *cleanupState
-	// shell is the current managed runner ownership. It outlives the ordinary
-	// work slot when the chain is unresolved so admission stays closed.
+	// shell is the current managed runner ownership. It keeps ordinary
+	// admission closed only until its bounded confirmation deadline.
 	shell        *shellState
 	shellProbing bool
+	// shellOrphan is the single slot holding a chain that was closed out as
+	// unconfirmed. It no longer blocks admission; it keeps the identity so the
+	// closure chain may try one more exact termination and so no physical fact
+	// is reported as confirmed. A newer closed-out chain replaces it.
+	shellOrphan *shellState
 
 	nextObservation int64
 	nextOperation   int64
@@ -343,7 +348,7 @@ type sessionState struct {
 	CreateError      string
 	ExpireTimer      *time.Timer
 	CleanupStarted   bool
-	ExecutionUnknown bool // diagnostic projection; UI tokens and shell identities own the barrier
+	ExecutionUnknown bool // diagnostic projection; the input window and shell own the barriers
 	InputIdentity    device.BootIdentity
 	// Tasks is the virtual-session window registry. It is a cache rebuilt from
 	// live task reads, keyed by task id; primary sessions never populate it.
@@ -532,10 +537,7 @@ func (e *Engine) availabilityLocked(now time.Time) (string, string) {
 		return AvailabilityRecovering, "recovery_pending"
 	}
 	if e.session != nil && e.session.State != SessionEnded {
-		if e.uiPendingLocked() {
-			return AvailabilityRecovering, "ui_input_unconfirmed"
-		}
-		if e.shell != nil && !e.shell.settled() {
+		if e.shellBarrierLocked(e.shell, now) {
 			return AvailabilityRecovering, "shell_pending"
 		}
 	}
@@ -690,10 +692,14 @@ func (e *Engine) housekeeping(ctx context.Context) {
 	now := time.Now()
 	e.mu.Lock()
 	var expired *sessionState
-	if e.session != nil && e.session.State != SessionEnded &&
-		((e.work != nil && !e.work.Deadline.IsZero() && !now.Before(e.work.Deadline)) || (e.ui != nil && !e.ui.deadline.IsZero() && !now.Before(e.ui.deadline))) {
-		expired = e.revokeSessionLocked("work_deadline", now)
-		e.freezeWorkLocked(e.work)
+	// A work deadline freezes only its own operation and releases the work
+	// position. It is not a session fact: the session, every observation and
+	// the closure stay untouched.
+	if e.work != nil && !e.work.Deadline.IsZero() && !now.Before(e.work.Deadline) {
+		work := e.work
+		e.detachWorkLocked(work)
+		e.log.Event(eventlog.Info, "work.detached",
+			eventlog.Str("operation_id", work.OperationID), eventlog.Str("phase", "work_deadline"))
 	}
 	e.detachRetiredLocked(now)
 	if e.session != nil && e.session.State != SessionEnded && !sessionBeforeDeadline(e.session, now) {
@@ -708,14 +714,24 @@ func (e *Engine) housekeeping(ctx context.Context) {
 	needsRecovery := e.recovery != nil
 	// An unresolved managed chain is re-probed from the bounded clock, never
 	// from the request path, so a natural end does not keep admission closed.
-	probeShell := e.shell != nil && !e.shell.settled() && e.work == nil &&
+	// Once its confirmation budget is spent the chain is closed out as
+	// unconfirmed: the barrier opens and the identity moves to the orphan slot.
+	var closeShell *shellState
+	if run := e.shell; run != nil && !run.settled() &&
+		!now.Before(e.shellBarrierLimit(run)) {
+		closeShell = run
+	}
+	probeShell := closeShell == nil && e.shell != nil && !e.shell.settled() && e.work == nil &&
 		!e.shellProbing && !e.shuttingDown
 	if probeShell {
 		e.wg.Add(1)
 	}
 	e.mu.Unlock()
 	if expired != nil {
-		e.launchCleanup(expired, "lease_expired")
+		e.launchCleanup(expired, expired.Reason)
+	}
+	if closeShell != nil {
+		e.closeOutUnresolvedShell(closeShell)
 	}
 	if probeShell {
 		go func() { defer e.wg.Done(); e.confirmUnresolvedShell(ctx) }()
@@ -725,7 +741,7 @@ func (e *Engine) housekeeping(ctx context.Context) {
 	}
 	e.mu.Lock()
 	token := e.ui
-	retryUI := token != nil && token.record.State != "may_dispatch" && !token.durable && !token.saving && e.work == nil && !e.shuttingDown
+	retryUI := token != nil && token.record.State != uiStateMayDispatch && !token.durable && !token.saving && e.work == nil && !e.shuttingDown
 	if retryUI {
 		e.wg.Add(1)
 	}

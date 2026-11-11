@@ -20,6 +20,10 @@ const (
 	ShellTerminating = "terminating"
 	ShellConfirmed   = "confirmed"
 	ShellAborted     = "aborted"
+	// ShellUnknown is the bounded close-out state: the execution deadline and
+	// the termination-confirmation budget both expired without proof that the
+	// exact chain is gone. It opens the barrier and keeps the honest end fact.
+	ShellUnknown = "unknown"
 )
 
 // Managed shell termination tokens. They are the public `termination` values
@@ -36,8 +40,8 @@ const (
 const shellPollInterval = 200 * time.Millisecond
 
 // shellState is the engine-owned identity of one managed runner. It survives
-// the ordinary work slot while the chain is unresolved, so admission stays
-// closed until the exact process group is confirmed gone.
+// the ordinary work slot only while the chain is unresolved; a closed-out
+// chain keeps its identity in the orphan slot instead.
 type shellState struct {
 	RunnerID    string
 	Dir         string
@@ -69,10 +73,24 @@ type shellState struct {
 	OutputBytes int
 	Truncated   *bool
 	ConfirmedAt time.Time
+
+	// orphanTried bounds the closure chain to one more exact termination
+	// attempt for a chain that was already closed out in this process. It is
+	// process-local: a restart starts a new bounded cleanup budget.
+	orphanTried bool
 }
 
 // settled reports whether this run no longer keeps the admission barrier.
+// A closed-out unknown chain is settled: the barrier is gone while the end fact
+// stays unproven.
 func (s *shellState) settled() bool {
+	return s == nil || s.State == ShellConfirmed || s.State == ShellAborted || s.State == ShellUnknown
+}
+
+// provenGone reports whether the chain's end is proven: confirmed gone or
+// provably never started. A closed-out unknown chain is neither, so every
+// physical fact that needs "nothing can still run" must use this predicate.
+func (s *shellState) provenGone() bool {
 	return s == nil || s.State == ShellConfirmed || s.State == ShellAborted
 }
 
@@ -126,6 +144,82 @@ func shellStateFromLedger(record *LedgerShell) *shellState {
 		run.State = ShellDispatched
 	}
 	return run
+}
+
+// shellBarrierLimit is the latest instant an unresolved managed chain may keep
+// the ordinary work position closed: its execution deadline plus the
+// termination-confirmation budget and a small dispatch margin. A record with no
+// recorded time bound has no barrier left.
+func (e *Engine) shellBarrierLimit(run *shellState) time.Time {
+	if run == nil {
+		return time.Time{}
+	}
+	base := run.DeadlineAt
+	if base.IsZero() {
+		base = run.StartedAt.Add(e.cfg.ShellTimeout)
+	}
+	return base.Add(e.cfg.ShellConfirmTimeout + 3*time.Second)
+}
+
+// shellBarrierLocked reports whether this run still closes ordinary admission.
+// The bound is a time fact, so no unresolved chain can block forever.
+func (e *Engine) shellBarrierLocked(run *shellState, now time.Time) bool {
+	if run == nil || run.settled() {
+		return false
+	}
+	return now.Before(e.shellBarrierLimit(run))
+}
+
+// shellUnprovenLocked reports a managed chain that may still be running. It
+// keeps the cleanup execution fact unconfirmed even after the barrier opened.
+func (e *Engine) shellUnprovenLocked() bool {
+	if e.shell != nil && !e.shell.provenGone() {
+		return true
+	}
+	return e.shellOrphan != nil && !e.shellOrphan.provenGone()
+}
+
+// closeOutUnresolvedShell ends the bounded wait for an unresolved chain. The
+// exact identity moves to the single orphan slot so the closure chain may try
+// one more termination; the barrier opens and no physical fact is claimed. The
+// caller must not hold e.mu.
+func (e *Engine) closeOutUnresolvedShell(run *shellState) {
+	if run == nil {
+		return
+	}
+	e.mu.Lock()
+	if run.settled() {
+		e.mu.Unlock()
+		return
+	}
+	e.noteShellTerminalLocked(run)
+	run.State, run.Phase = ShellUnknown, "unconfirmed"
+	run.Termination, run.ExitCode = terminationUnknown, nil
+	run.ConfirmedAt = time.Now()
+	if e.shell == run {
+		e.shell = nil
+	}
+	e.shellOrphan = run
+	if e.cleanup != nil && e.session != nil && e.session.Epoch == run.Epoch {
+		if e.cleanup.Execution != protocol.CleanupUnconfirmed {
+			e.cleanup.Execution = protocol.CleanupUnconfirmed
+			if e.cleanup.ExecReason == "" {
+				e.cleanup.ExecReason = "shell_chain"
+			}
+			if e.cleanup.Error == nil {
+				e.cleanup.Error = &protocol.Error{Code: "execution_unconfirmed",
+					Message: "存在未确认结束的受管命令"}
+			}
+		}
+		e.cleanup.needsExecutionRecheck = true
+	}
+	e.refreshExecutionUnknownLocked()
+	e.broadcastAppLocked()
+	e.mu.Unlock()
+	e.persistAsync()
+	e.logShell("shell.barrier_released", run,
+		eventlog.Str("phase", "unconfirmed"),
+		eventlog.Str("termination", terminationUnknown))
 }
 
 // Shell runs one managed command. The reference only locates the original
@@ -417,22 +511,27 @@ func (e *Engine) finishShellDone(op *operationState, work *workState, run *shell
 	}
 }
 
-// finishShellTimeout terminates a run that exceeded its execution budget. A
-// supervisor timeout is reported only when the exact process group is
-// confirmed gone; otherwise the result is uncertain.
+// finishShellTimeout terminates a run that exceeded its execution budget. The
+// termination attempt spends the confirmation budget; when it cannot prove the
+// exact chain gone the chain is closed out as unconfirmed, the work position is
+// released and the identity moves to the orphan slot. The result stays
+// uncertain.
 func (e *Engine) finishShellTimeout(op *operationState, work *workState, run *shellState) *protocol.Result {
 	termination, err := e.terminateShellRun(run, terminationTimeout)
 	if err != nil || !termination.Confirmed {
+		e.closeOutUnresolvedShell(run)
 		return e.finishShellUncertain(op, run, "命令超时后无法确认受管链已停止")
 	}
 	return e.finishShellConfirmed(op, work, run, terminationTimeout, nil, "finished")
 }
 
 // finishShellRevoked terminates a cancelled run. A natural exit recorded before
-// the signal keeps its own fact; a confirmed stop is a cancellation fact.
+// the signal keeps its own fact; a confirmed stop is a cancellation fact. An
+// unconfirmed stop closes out exactly like a timed-out chain.
 func (e *Engine) finishShellRevoked(op *operationState, work *workState, run *shellState) *protocol.Result {
 	termination, err := e.terminateShellRun(run, terminationCancelled)
 	if err != nil || !termination.Confirmed {
+		e.closeOutUnresolvedShell(run)
 		return e.finishShellUncertain(op, run, "取消后无法确认受管链已停止")
 	}
 	if termination.ExitCode != nil {
@@ -453,10 +552,13 @@ func (e *Engine) finishShellNotStarted(op *operationState, work *workState, run 
 	run.ConfirmedAt = time.Now()
 	work.DispatchUnknown = false
 	if e.session != nil && e.session.Epoch == run.Epoch {
-		e.session.ExecutionUnknown = e.uiPendingLocked()
+		e.session.ExecutionUnknown = e.executionUnknownLocked()
 	}
 	if e.shell == run {
 		e.shell = nil
+	}
+	if e.shellOrphan == run {
+		e.shellOrphan = nil
 	}
 	e.confirmRetiredShellLocked(run)
 	if e.session != nil && e.session.Epoch == run.Epoch {
@@ -541,13 +643,16 @@ func (e *Engine) confirmShellBarrier(run *shellState, termination string, exitCo
 	}
 	run.ConfirmedAt = time.Now()
 	if e.session != nil && e.session.Epoch == run.Epoch {
-		e.session.ExecutionUnknown = e.uiPendingLocked()
+		e.session.ExecutionUnknown = e.executionUnknownLocked()
 	}
 	if e.work != nil && e.work.OperationID == run.OperationID {
 		e.work.DispatchUnknown = false
 	}
 	if e.shell == run {
 		e.shell = nil
+	}
+	if e.shellOrphan == run {
+		e.shellOrphan = nil
 	}
 	e.confirmRetiredShellLocked(run)
 	if e.session != nil && e.session.Epoch == run.Epoch {
@@ -662,7 +767,7 @@ func (e *Engine) addShellSession(op *operationState, result *protocol.Result) {
 // outcome, the session state or any observation.
 func (e *Engine) confirmCleanupBarrierLocked() {
 	cleanup := e.cleanup
-	if cleanup == nil || e.uiPendingLocked() || e.legacyUI != nil || e.shell != nil && !e.shell.settled() {
+	if cleanup == nil || e.uiPendingLocked() || e.legacyUI != nil || e.shellUnprovenLocked() {
 		return
 	}
 	if cleanup.ExecReason == "ui_input" && e.ui == nil {
@@ -703,7 +808,8 @@ func closureComplete(cleanup *cleanupState) bool {
 // unresolved (an unconfirmed start or an unconfirmed termination). A natural
 // end or a dead process releases the barrier; a live chain is stopped only
 // when its session is already gone, because an active session may still own a
-// legitimately running command.
+// legitimately running command. Past the confirmation budget the chain is
+// closed out instead of being re-probed forever.
 func (e *Engine) confirmUnresolvedShell(ctx context.Context) {
 	e.mu.Lock()
 	run := e.shell
@@ -720,6 +826,10 @@ func (e *Engine) confirmUnresolvedShell(ctx context.Context) {
 		e.shellProbing = false
 		e.mu.Unlock()
 	}()
+	if !time.Now().Before(e.shellBarrierLimit(run)) {
+		e.closeOutUnresolvedShell(run)
+		return
+	}
 
 	inspectCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	snapshot, err := e.dev.InspectManagedShell(inspectCtx, run.RunnerID)

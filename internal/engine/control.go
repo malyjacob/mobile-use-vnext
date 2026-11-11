@@ -510,7 +510,7 @@ func (e *Engine) finishRecovery(record *Ledger, app appState, displayID int, rea
 	e.recovering = false
 	e.recoveryReason = ""
 	execution, recents := protocol.CleanupNotApplicable, protocol.CleanupNotApplicable
-	if record.UI != nil && record.UI.State != "may_dispatch" {
+	if record.UI != nil && record.UI.State != uiStateMayDispatch {
 		execution = protocol.CleanupConfirmed
 	}
 	if record.Cleanup != nil {
