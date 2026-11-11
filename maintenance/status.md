@@ -79,6 +79,7 @@
 - [MCP 文本树块实现、0.4.2 部署与实机验证](verification/mcp-tree-text.md)
 - [工作期限与未决输入的会话级封锁实现与实机验证](verification/remove-work-ui-deadline-lockdown.md)
 - [显式重设会话租期与取消累计硬上限实现、发布与实机验证](verification/explicit-keepalive-duration.md)
+- [ref 连续性与静态页 delta 修复验证](verification/ref-stability-public-identity.md)
 - [主屏多窗口层级修复与实机验证](verification/primary-display-multi-window.md)
 - [工程决策](decisions.md)
 - [工程流程](process.md)
@@ -87,7 +88,8 @@
 
 - 第 3 节的验证缺口暂不单独补测；待其后按真实使用路径补齐证据。
 - 当前部署为 `0.8.0`（`contract_version=8`、`android_version_code=10`），`can_start=true`；
-  发布产物构建自提交 `f1da2d5`，`source_dirty=false`；手机 HTTP MCP 适配器二进制与清单
-  一致，主机 stdio 适配器已重建为 `build/device-mcp.exe` 与 `build/mcp-probe.exe`，需由各
-  agent 宿主进程自行重启才能加载新的工具描述与目录指纹；chroot 内仍有一个旧 stdio
-  `device-mcp` 进程，同样需其宿主重启。旧 0.7.0 及更早产物仍作为不匹配验证材料。
+  发布产物构建自提交 `9046cb1`，`source_dirty=false`；`device-service` 与
+  `build/release-clean/manifest.json` 一致；手机 HTTP MCP 适配器二进制与清单一致，主机
+  stdio 适配器已重建为 `build/device-mcp.exe` 与 `build/mcp-probe.exe`，需由各 agent 宿主
+  进程自行重启才能加载新的工具描述与目录指纹；chroot 内仍有一个旧 stdio `device-mcp`
+  进程，同样需其宿主重启。旧 0.7.0 及更早产物仍作为不匹配验证材料。
