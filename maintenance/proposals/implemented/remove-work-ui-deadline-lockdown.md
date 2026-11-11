@@ -1,7 +1,8 @@
 # 提案：拆除工作期限与未决输入造成的会话级封锁
 
-状态：提案，未实现。
+状态：已实现（实现提交 `96e4c6b4e645fb0eeee28a84ca705bb865bcaded`，2026-11-11）。
 基线提交：`015599ce73c99476dfff0a2a1f09ba7711824a0d`（分支 `master`，2026-11-11）。
+实现与验证记录：[remove-work-ui-deadline-lockdown.md](../../verification/remove-work-ui-deadline-lockdown.md)。
 适用范围：全部普通工具（`start`/`observe`/`act`/`open_app`/`apps`/`shell`）的准入、`housekeeping` 时钟、UI 输入预写与回执、受管 `shell` 的结案让位、服务重启恢复。不改变租约取值与 `keepalive` 行为；只把 `keepalive` 的既有语义写入契约面。
 影响范围：`internal/engine`（`engine.go`、`ordinary_admission.go`、`ui_execution.go`、`ui_recovery.go`、`recovery.go`、`status.go`、`start.go`、`retirement.go`、`shell.go`、`ledger.go`）、`internal/mcp`（schema 描述文字）、`docs/`、`maintenance/`、`release/versions.json` 与生成常量。
 契约（`/api/*` 字段与 `contract_version`）：改变。不新增/删除字段，但默认行为与执行语义变化：普通工具不再因未决输入返回 `409 device_busy`，会话不再出现 `reason=work_deadline`，受管 `shell` 超时后不再无限期占用工作位；私有账本版本 3 → 4。
@@ -335,7 +336,39 @@ handler 卡死（超过 work.Deadline）
 12. 按 §8.2 实机验证，写验证记录；提案归档（`implemented/`，§11 注明实现提交）。
 13. 推送后回复并关闭 issue #9（见 §8.4）。
 
-## 11. 实现结果（归档时补写）
+## 11. 实现结果
+
+实现提交为 `96e4c6b4e645fb0eeee28a84ca705bb865bcaded`（含契约 6→7 与 0.7.0 / versionCode 9
+的版本源前进）。发布核验、手机闭环与未执行项见
+[实现验证记录](../../verification/remove-work-ui-deadline-lockdown.md)。
+
+### 11.1 已落地
+
+| 提案条目 | 代码落点 |
+| --- | --- |
+| 删除 `housekeeping` 的 `work_deadline` 撤销；会话判据只剩外部原因 | `internal/engine/engine.go`（`housekeeping`、`launchCleanup`） |
+| 工作位兜底：冻结 P、脱离工作位，不碰会话/O/收尾 | `internal/engine/retirement.go`（`detachWorkLocked`、`freezeWorkLocked`、`detachRetiredLocked`）、`engine.go` |
+| 删除 `uiDispatchState.deadline`；未知回执写 `unknown` 终态并持久化 | `internal/engine/ui_execution.go`（`uiState*` 常量、`recordUIReceipt`、`persistUIReceipt`）、`internal/engine/ledger.go` |
+| 删除 UI 准入屏障与 `ui_input_unconfirmed` availability 分支 | `internal/engine/ordinary_admission.go`、`internal/engine/engine.go`（`availabilityLocked`） |
+| 受管 shell 上界结案、孤儿槽、收尾再试一次、不谎报 confirmed | `internal/engine/shell.go`（`shellBarrierLimit`、`shellBarrierLocked`、`shellUnprovenLocked`、`closeOutUnresolvedShell`、`ShellUnknown`、`provenGone`）、`retirement.go`（`retireLocked`、`resolveRetiredExecution`）、`cleanup.go` |
+| `ui.window_closed` 日志事件 | `internal/engine/ui_execution.go` |
+| 删除不可达恢复期重启要求及独占 helper 与测试 | `internal/engine/ui_recovery.go`（仅留 `restoreUIRecoveryLocked`）、`ui_execution.go` |
+| 清除 `ui_input_reboot_required`/`ui_input_unconfirmed` 的 reason 映射 | `internal/engine/recovery.go`、`status.go`、`start.go` |
+| 账本版本 4（UI 状态 `unknown`），store 读 1/2/3/4、写 4 | `internal/engine/ledger.go`、`internal/store/ledger.go` |
+| MCP `act`/`keepalive` 说明；docs 同步与保证句 | `internal/mcp/schema.go`、`docs/architecture.md`、`docs/interface.md` 等 |
+| 版本源 0.7.0 / 契约 7 / versionCode 9 与生成常量；主机侧 `build/device-mcp.exe` 重建与宿主重连（注册 12 工具） | `release/versions.json`、生成常量、`scripts/generate-version.ps1`、`build/device-mcp.exe` |
+| 回归用例（先红复现 + 窗口/工作位/shell 上界/表驱动 uncertain） | `internal/engine/deadline_lockdown_test.go`、`internal_uncertain_test.go`、`internal/store/ledger_v4_test.go`、更新后的既有测试 |
+
+### 11.2 与提案不同或未执行
+
+| 项 | 结论与理由 |
+| --- | --- |
+| 独立“版本提交” | 未按上一次的 `chore(release)` 单独提交，改为与实现同一提交：docs 的契约字面量与行为改动分布在同一批文件，拆开会留下 docs 与 `release/versions.json` 不一致的中间提交；`versions.json` 的 `source_commit` 记前一提交 `1666bad`，真实 HEAD 由发布清单记录。 |
+| 真实 input 回执未知的实机注入（§8.2） | 未执行：发布二进制无注入面，输入走 chroot 内 `adb`，制造 `DispatchUnknown` 必须打断 adbd 并会同时切断恢复观察。由先红复现与单元测试覆盖，实机未构造。 |
+| 受管 shell `termination=unknown` 的实机样本（§8.2） | 未执行：本机 runner 能确认超时终止，未构造终止失败样本；由单元测试覆盖。实机验证的是超时返回与工作位释放。 |
+| 删除 `cleanupExecutionUnsettled` 等 helper | 随 `ui_recovery.go` 的死函数一并删除（提案列为“独占 helper”的传递闭包）；`resolveRecoveryShellChain`、`promoteOrphanShellCleanup` 也是无调用者代码，但不在本提案范围，保留未动。 |
+| `deploy.ps1 -SkipBuild` 之后的 issue #9 关闭（§8.4） | 未执行：本次会话未推送远端、未操作 GitHub issue；实现与实机证据已落在本提交与验证记录中。 |
+| 部署后首次 `start` 的启动阶段失败 | 实机观察：App 冷启动期间首次 `start` 越过 40 秒启动预算被兜底冻结（`phase=work_deadline`、`not_executed`）；重试立即成功。这是启动阶段的外部失败，不是会话级期限撤销；验证记录已如实记载。 |
 
 ---
 

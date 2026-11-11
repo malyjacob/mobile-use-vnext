@@ -415,3 +415,21 @@
   MCP 的入参 schema 与投影机制不变，但 `act` 的描述与目录指纹随本次契约变更，错误结果现在
   可以带树块。`retry` 的含义改为“结果指向的那个 ready O 可用”，不再以“本次请求未认领观察”
   为前提。
+
+## D36 契约 7：拆除工作期限与未决输入的会话级封锁
+
+- **背景**：一次 `adb shell` 传输抖动使 UI 输入回执变成 `DispatchUnknown`，预写停在
+  `may_dispatch`，于是包括 `observe` 在内的全部普通工作被拒；`act` 之后第 50 秒会话又被
+  `work_deadline` 撤销。两者都不是必需事实，而是把毫秒级投递窗口表达成永久状态的后果。
+- **选择**：批准 `remove-work-ui-deadline-lockdown` 取舍。会话只因外部原因结束（`end`、
+  STOP、租约、App 实例变化、服务退出、启动阶段失败）；`work.Deadline` 到期只冻结该 P 并
+  脱离工作位；输入窗口在调用返回时关闭为 `terminated`/`not_dispatched`/`unknown`，已关闭
+  窗口不构成准入屏障；受管 shell 屏障保留但以
+  `DeadlineAt + ShellConfirmTimeout + 3s` 为上界，到界结案为 `termination=unknown` 并让位，
+  身份进入单槽孤儿位供收尾再试一次精确终止，且不把 `cleanup.execution` 写成 `confirmed`；
+  删除不可达的恢复期重启要求及其 reason 映射。私有账本版本 3 升为 4（UI 状态新增 `unknown`）。
+- **影响**：`contract_version` 前进为 `7`（默认行为与执行语义变化，且“除外部不可抗力外，
+  内部原因不得撤销会话、不得让会话无法继续使用、不得让服务锁死到只能重启手机”作为规范性
+  语句进入 `docs/architecture.md` 与 `docs/interface.md`）。`keepalive` 的既有语义（只承诺
+  租约，不承诺保活超过 1 小时硬上限）同时写入契约面，行为不变。保留风险：输入不提供幂等，
+  被放弃的 `shell` 可能与后续工作物理重叠，回执未知后应立即 `observe` 收敛。
