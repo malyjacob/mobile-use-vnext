@@ -367,7 +367,7 @@ handler 卡死（超过 work.Deadline）
 | 真实 input 回执未知的实机注入（§8.2） | 未执行：发布二进制无注入面，输入走 chroot 内 `adb`，制造 `DispatchUnknown` 必须打断 adbd 并会同时切断恢复观察。由先红复现与单元测试覆盖，实机未构造。 |
 | 受管 shell `termination=unknown` 的实机样本（§8.2） | 未执行：本机 runner 能确认超时终止，未构造终止失败样本；由单元测试覆盖。实机验证的是超时返回与工作位释放。 |
 | 删除 `cleanupExecutionUnsettled` 等 helper | 随 `ui_recovery.go` 的死函数一并删除（提案列为“独占 helper”的传递闭包）；`resolveRecoveryShellChain`、`promoteOrphanShellCleanup` 也是无调用者代码，但不在本提案范围，保留未动。 |
-| `deploy.ps1 -SkipBuild` 之后的 issue #9 关闭（§8.4） | 未执行：本次会话未推送远端、未操作 GitHub issue；实现与实机证据已落在本提交与验证记录中。 |
+| `deploy.ps1 -SkipBuild` 之后的 issue #9 关闭（§8.4） | 已执行：推送 `96e4c6b`、`c94561e` 后在 issue #9 按 §8.4 留言并关闭（`state=CLOSED/completed`，留言见 <https://github.com/malyjacob/mobile-use-vnext/issues/9#issuecomment-6794858860>）；留言同时写明本次未包含的“shell 证据可区分”与 `diagnose` timeline 两项。 |
 | 部署后首次 `start` 的启动阶段失败 | 实机观察：App 冷启动期间首次 `start` 越过 40 秒启动预算被兜底冻结（`phase=work_deadline`、`not_executed`）；重试立即成功。这是启动阶段的外部失败，不是会话级期限撤销；验证记录已如实记载。 |
 
 ---
