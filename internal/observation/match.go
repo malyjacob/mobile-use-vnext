@@ -21,10 +21,25 @@ import (
 // allocates a new ref: never a nearest coordinate, never traversal order alone.
 //
 // Passes run parent-first so a matched parent is a usable anchor:
-//  1. same matched parent, identical identity evidence;
-//  2. same matched parent, same class/role shape (label-free containers);
-//  3. unique global identity match;
-//  4. same matched parent, input anchor (survives value edits).
+//  1. label-free containers under a matched parent (non-actionable wrappers
+//     may ignore unpublished class/package; actionable containers require it);
+//  2. same matched parent, identical raw identity evidence;
+//  3. unique global raw identity match;
+//  4. same matched parent, input anchor (survives value edits);
+//  5. same matched parent, identical public identity (class/package changed);
+//  6. unique global public identity match.
+//
+// The container pass is retried after a parent is matched by an identity rule.
+
+// Action bits used by shape matching. An actionable anonymous container is a
+// potential act target, so it needs the stricter raw class/package agreement;
+// a non-actionable wrapper may ignore those unpublished facts.
+const (
+	actionTap uint8 = 1 << iota
+	actionLongPress
+	actionText
+	actionSwipe
+)
 
 // matchKey is the identity evidence of one public unit. It deliberately
 // excludes input value, checked/focused/selected and bounds, so typing,
@@ -37,6 +52,21 @@ type matchKey struct {
 	hasRes    bool
 	label     string // label signature; unused when the unit has a resource id
 	anchor    string // input description, used to survive value edits
+	actions   uint8  // tap/long_press/text/swipe bits
+	editable  bool
+	protected bool
+}
+
+// publicKey is the identity evidence visible in the published tree. It exists
+// so a node can keep its ref when only an unpublished raw attribute (class,
+// package or an unpublished resource id) changes. Raw class/package stay as
+// tie-breakers in matchKey; they are not hard identity here.
+type publicKey struct {
+	role      protocol.Role
+	label     string
+	resource  string
+	hasRes    bool
+	anchor    string
 	editable  bool
 	protected bool
 }
@@ -49,6 +79,7 @@ func signature(raw *device.RawNode, role protocol.Role) matchKey {
 		role:     role,
 		class:    raw.ClassName,
 		pkg:      raw.Package,
+		actions:  actionsMask(raw),
 		editable: role == protocol.RoleInput,
 	}
 	if raw.ResourceSet && raw.ResourceID != "" {
@@ -71,6 +102,25 @@ func signature(raw *device.RawNode, role protocol.Role) matchKey {
 	return key
 }
 
+// actionsMask returns the public action bits of a raw node. It mirrors
+// actionsOf so shape matching never invents an action the projection hides.
+func actionsMask(raw *device.RawNode) uint8 {
+	var mask uint8
+	if raw.HasClickable && raw.Clickable {
+		mask |= actionTap
+	}
+	if raw.HasLongClick && raw.LongClickable {
+		mask |= actionLongPress
+	}
+	if raw.Editable {
+		mask |= actionText
+	}
+	if raw.HasScrollable && raw.Scrollable {
+		mask |= actionSwipe
+	}
+	return mask
+}
+
 // labelSignature joins label parts with a separator that cannot appear inside
 // one part, so ["a","b"] and ["a\x00b"] stay distinct.
 func labelSignature(parts []string) string {
@@ -84,12 +134,48 @@ func labelSignature(parts []string) string {
 	return sig
 }
 
+// publicSignature builds the identity evidence visible in the public tree. A
+// resource id is included only when the projection publishes it (an unlabelled
+// interactive unit); otherwise the readable label is the public identity.
+func publicSignature(raw *device.RawNode, role protocol.Role) publicKey {
+	key := publicKey{
+		role:      role,
+		editable:  role == protocol.RoleInput,
+		protected: raw.HasPassword && raw.Password,
+	}
+	if role == protocol.RoleInput {
+		if raw.DescSet && !key.protected {
+			key.anchor = raw.Description
+		}
+		return key
+	}
+	label := labelParts(raw)
+	key.label = labelSignature(label)
+	if raw.ResourceSet && raw.ResourceID != "" && needsResourceHint(raw, len(label) == 0) {
+		key.resource = raw.ResourceID
+		key.hasRes = true
+	}
+	return key
+}
+
+// contextSignature is the raw evidence of a context node. Context nodes are
+// reading ancestry, never targets, so their signature carries no label,
+// resource or protection evidence; class/package are tie-breakers only.
+func contextSignature(raw *device.RawNode) matchKey {
+	return matchKey{
+		role:  protocol.RoleGroup,
+		class: raw.ClassName,
+		pkg:   raw.Package,
+	}
+}
+
 // prevUnit is one unit of the previous tree with its preorder position.
 type prevUnit struct {
 	ref       string
 	position  int
 	parentPos int // -1 for the previous root
 	key       matchKey
+	pub       publicKey
 }
 
 // matchRefs assigns refs to the published units of cap, continuing the
@@ -104,12 +190,11 @@ func (b *Builder) matchRefs(cap *device.Capture, units []unit, refs []string) {
 		walk = func(n *protocol.Node, parentPos int) {
 			unit := prevUnit{ref: n.Ref, position: cursor, parentPos: parentPos}
 			if i, ok := b.prev.Source[n.Ref]; ok {
-				unit.key = signature(&b.prev.Capture.Nodes[i], n.Role)
-			} else {
-				// A context node has no source geometry. Its role and label
-				// are all it has; the empty class keeps it from being paired
-				// with a real unit, which always carries a source class.
-				unit.key = matchKey{role: n.Role, label: labelSignature(n.Label)}
+				raw := &b.prev.Capture.Nodes[i]
+				unit.key = signature(raw, n.Role)
+				unit.pub = publicSignature(raw, n.Role)
+			} else if i, ok := b.prev.ContextSource[n.Ref]; ok {
+				unit.key = contextSignature(&b.prev.Capture.Nodes[i])
 			}
 			prevPosition[n.Ref] = cursor
 			prev = append(prev, unit)
@@ -121,13 +206,38 @@ func (b *Builder) matchRefs(cap *device.Capture, units []unit, refs []string) {
 		walk(b.prev.Tree.Root, -1)
 	}
 
-	curOrder := preorder(cap)
+	// Only published units take part in matching. An unpublished raw node has
+	// no public role and must not consume a ref, a previous position, or a
+	// global-uniqueness slot.
+	curOrder := make([]int, 0, len(cap.Nodes))
+	parentOf := make(map[int]int, len(cap.Nodes))
+	childrenOf := make(map[int][]int, len(cap.Nodes))
+	for _, i := range preorder(cap) {
+		if i != cap.Root && !units[i].published {
+			continue
+		}
+		curOrder = append(curOrder, i)
+		if i == cap.Root {
+			continue
+		}
+		p := nearestPublishedParent(cap, units, i)
+		parentOf[i] = p
+		childrenOf[p] = append(childrenOf[p], i)
+	}
+
 	curSig := make(map[int]matchKey, len(curOrder))
+	curPub := make(map[int]publicKey, len(curOrder))
 	for _, i := range curOrder {
 		if i == cap.Root {
 			continue
 		}
-		curSig[i] = signature(&cap.Nodes[i], units[i].role)
+		raw := &cap.Nodes[i]
+		if units[i].context {
+			curSig[i] = contextSignature(raw)
+			continue
+		}
+		curSig[i] = signature(raw, units[i].role)
+		curPub[i] = publicSignature(raw, units[i].role)
 	}
 
 	usedRef := map[string]bool{}
@@ -168,48 +278,69 @@ func (b *Builder) matchRefs(cap *device.Capture, units []unit, refs []string) {
 		refs[cap.Root] = allocate()
 	}
 
-	// Pass 1: label-free containers (scroll areas, layout rows) under a matched
-	// parent. A container carries no identity evidence of its own, so the
-	// parent anchor decides and siblings must be unique on both sides. This is
-	// not "first child in traversal order": two indistinguishable siblings are
-	// never paired.
-	for _, i := range curOrder {
-		if i == cap.Root || refs[i] != "" || curSig[i].editable || hasIdentity(curSig[i]) {
-			continue
-		}
-		anchor, ok := prevParent[at(cap, i)]
-		if !ok {
-			continue
-		}
-		var candidates []prevUnit
-		for _, unit := range prev {
-			if usedPos[unit.position] || unit.parentPos != anchor || !sameShape(unit.key, curSig[i]) {
+	// Pass 1: label-free containers (scroll areas, layout rows, context
+	// ancestry) under a matched parent. A container carries no published
+	// identity of its own, so the parent anchor and sibling structure decide.
+	// A non-actionable wrapper may ignore unpublished class/package; an
+	// actionable anonymous container is a possible act target and still
+	// requires class/package agreement in sameShape.
+	//
+	// The pass is callable more than once: a parent that is matched by an
+	// identity rule becomes an anchor only after that rule ran, so its
+	// anonymous children need another container pass.
+	matchContainers := func() int {
+		matchedNow := 0
+		for _, i := range curOrder {
+			if i == cap.Root || refs[i] != "" || curSig[i].editable || hasPublicIdentity(curPub[i]) {
 				continue
 			}
-			candidates = append(candidates, unit)
-		}
-		switch {
-		case len(candidates) == 0:
-			// New or reappeared container: fresh ref below.
-		case countCurrentSiblings(cap, curSig, at(cap, i), curSig[i]) == 1:
-			match(i, candidates[0].ref, candidates[0].position)
-		default:
-			// Several identical containers under this parent (list rows).
-			// Pair by ordinal only when the parent keeps exactly the same
-			// number of them: then nothing moved and the ordinal, not a
-			// coordinate, is the remaining evidence.
-			if ref, pos, ok := ordinalSibling(prev, usedPos, cap, curOrder, curSig, anchor, i, sameShape); ok {
+			anchor, ok := prevParent[parentOf[i]]
+			if !ok {
+				continue
+			}
+			var candidates []prevUnit
+			for _, unit := range prev {
+				if usedPos[unit.position] || unit.parentPos != anchor || !sameShape(unit.key, curSig[i]) {
+					continue
+				}
+				candidates = append(candidates, unit)
+			}
+			if len(candidates) == 0 {
+				continue
+			}
+			if countCurrentSiblings(childrenOf, curSig, parentOf[i], curSig[i]) == 1 {
+				if len(candidates) == 1 {
+					match(i, candidates[0].ref, candidates[0].position)
+					matchedNow++
+					continue
+				}
+				// The public shape is unique on the current side but several
+				// previous containers share it. Class/package may still single
+				// one out; otherwise the pair is ambiguous and gets a new ref.
+				if ref, pos, ok := classCandidate(candidates, curSig[i]); ok {
+					match(i, ref, pos)
+					matchedNow++
+				}
+				continue
+			}
+			// Several identical containers under this parent (list rows). Pair by
+			// ordinal only when the parent keeps exactly the same number of public
+			// shapes: then nothing moved and the ordinal is the remaining evidence.
+			if ref, pos, ok := ordinalSibling(prev, usedPos, childrenOf[parentOf[i]], curSig, anchor, i, sameShape); ok {
 				match(i, ref, pos)
+				matchedNow++
 			}
 		}
+		return matchedNow
 	}
+	matchContainers()
 
-	// Pass 2: same matched parent, identical identity evidence.
+	// Pass 2: same matched parent, identical raw identity evidence.
 	for _, i := range curOrder {
 		if i == cap.Root || refs[i] != "" {
 			continue
 		}
-		anchor, ok := prevParent[at(cap, i)]
+		anchor, ok := prevParent[parentOf[i]]
 		if !ok || !hasIdentity(curSig[i]) {
 			continue
 		}
@@ -223,18 +354,18 @@ func (b *Builder) matchRefs(cap *device.Capture, units []unit, refs []string) {
 			candidate = unit.ref
 			count++
 		}
-		if count == 1 {
+		if count == 1 && countCurrentIdentitySiblings(childrenOf, curSig, parentOf[i], curSig[i]) == 1 {
 			match(i, candidate, prevPosition[candidate])
 		}
 		// count == 0: new or reappeared -> fresh ref below.
 		// count > 1: several previous units carry identical evidence under this
-		// parent (a list of buttons sharing one resource id and label). There is
-		// no way to tell which one this is, so it gets a new ref. Pass 3 may
-		// still recover it if it is unique in the whole tree.
+		// parent. There is no way to tell which one this is, so it gets a new
+		// ref. Later passes may still recover it if the public evidence is
+		// unique.
 	}
 
 	// Pass 3: exactly one previous unit and exactly one current unit carry the
-	// same identity evidence anywhere in the trees.
+	// same raw identity evidence anywhere in the trees.
 	for _, i := range curOrder {
 		if i == cap.Root || refs[i] != "" || !hasIdentity(curSig[i]) {
 			continue
@@ -259,7 +390,7 @@ func (b *Builder) matchRefs(cap *device.Capture, units []unit, refs []string) {
 		if i == cap.Root || refs[i] != "" || !curSig[i].editable {
 			continue
 		}
-		anchor, ok := prevParent[at(cap, i)]
+		anchor, ok := prevParent[parentOf[i]]
 		if !ok {
 			continue
 		}
@@ -272,8 +403,72 @@ func (b *Builder) matchRefs(cap *device.Capture, units []unit, refs []string) {
 			candidate = unit.ref
 			count++
 		}
-		if count == 1 {
+		if count == 1 && countCurrentInputSiblings(childrenOf, curSig, parentOf[i], curSig[i]) == 1 {
 			match(i, candidate, prevPosition[candidate])
+		}
+	}
+
+	// Pass 4b: retry containers now that identity/input parents have anchors.
+	// A scroll area or row container may itself carry a resource id and be
+	// matched by an identity rule; its anonymous children could not match
+	// before that correspondence existed.
+	for attempt := 0; attempt < 2; attempt++ {
+		if matchContainers() == 0 {
+			break
+		}
+	}
+
+	// Pass 5: public identity under the same matched parent. This recovers a
+	// unit whose raw class/package or unpublished resource id changed while
+	// every published field stayed the same. Both sides must be unique.
+	for _, i := range curOrder {
+		if i == cap.Root || refs[i] != "" || curPub[i].editable || !hasPublicIdentity(curPub[i]) {
+			continue
+		}
+		anchor, ok := prevParent[parentOf[i]]
+		if !ok {
+			continue
+		}
+		candidate := ""
+		count := 0
+		for _, unit := range prev {
+			if usedPos[unit.position] || unit.parentPos != anchor ||
+				unit.pub.editable || !hasPublicIdentity(unit.pub) || !samePublicUnit(unit.pub, curPub[i]) {
+				continue
+			}
+			candidate = unit.ref
+			count++
+		}
+		if count == 1 && countCurrentPublic(childrenOf[parentOf[i]], curPub, curPub[i]) == 1 {
+			match(i, candidate, prevPosition[candidate])
+		}
+	}
+
+	// Pass 6: exactly one previous and one current unit carry the same public
+	// identity anywhere in the trees (a class change that also moved parent).
+	for _, i := range curOrder {
+		if i == cap.Root || refs[i] != "" || curPub[i].editable || !hasPublicIdentity(curPub[i]) {
+			continue
+		}
+		candidate := -1
+		count := 0
+		for _, unit := range prev {
+			if usedPos[unit.position] || unit.pub.editable ||
+				!hasPublicIdentity(unit.pub) || !samePublicUnit(unit.pub, curPub[i]) {
+				continue
+			}
+			candidate = unit.position
+			count++
+		}
+		if count == 1 && countCurrentPublicAll(curOrder, curPub, curPub[i], cap.Root) == 1 {
+			match(i, prev[candidate].ref, candidate)
+		}
+	}
+
+	// Pass 6b: the public fallback can also turn a parent into an anchor.
+	for attempt := 0; attempt < 2; attempt++ {
+		if matchContainers() == 0 {
+			break
 		}
 	}
 
@@ -287,9 +482,9 @@ func (b *Builder) matchRefs(cap *device.Capture, units []unit, refs []string) {
 	}
 }
 
-// hasIdentity reports whether a key carries evidence strong enough for rules 1
-// and 3. A bare role and class with no label and no resource is a generic
-// container that many units share; it is never paired on that alone.
+// hasIdentity reports whether a raw key carries evidence strong enough for
+// rules 2 and 3. A bare role and class with no label and no resource is a
+// generic container that many units share; it is never paired on that alone.
 func hasIdentity(key matchKey) bool {
 	if key.protected {
 		return true
@@ -316,18 +511,41 @@ func countCurrentIdentities(cap *device.Capture, order []int, sigs map[int]match
 	return count
 }
 
+// countCurrentIdentitySiblings counts current published direct children of
+// parent whose raw identity equals sig, including self. A local exact match is
+// accepted only when the current side is unambiguous too.
+func countCurrentIdentitySiblings(childrenOf map[int][]int, sigs map[int]matchKey, parent int, sig matchKey) int {
+	count := 0
+	for _, child := range childrenOf[parent] {
+		if hasIdentity(sigs[child]) && sameUnit(sigs[child], sig) {
+			count++
+		}
+	}
+	return count
+}
+
+// countCurrentInputSiblings counts current published direct children of parent
+// whose input anchor equals sig, including self.
+func countCurrentInputSiblings(childrenOf map[int][]int, sigs map[int]matchKey, parent int, sig matchKey) int {
+	count := 0
+	for _, child := range childrenOf[parent] {
+		if sigs[child].editable && sameInputAnchor(sigs[child], sig) {
+			count++
+		}
+	}
+	return count
+}
+
 // ordinalSibling pairs i with the previous sibling of the same shape at the
-// same ordinal under the same matched parent, but only when both sibling lists
-// have exactly the same size and shapes; otherwise it reports false.
-func ordinalSibling(prev []prevUnit, usedPos map[int]bool, cap *device.Capture, order []int, sigs map[int]matchKey, anchor, i int, same func(a, b matchKey) bool) (string, int, bool) {
-	// Rank of i among current shape-siblings under its parent.
+// same ordinal under the same matched parent, but only when both published
+// sibling lists have exactly the same size and shapes; otherwise it reports
+// false.
+func ordinalSibling(prev []prevUnit, usedPos map[int]bool, siblings []int, sigs map[int]matchKey, anchor, i int, same func(a, b matchKey) bool) (string, int, bool) {
+	// Rank of i among current published shape-siblings under its parent.
 	rank := 0
 	sameShapeCount := 0
-	for _, child := range cap.Nodes[cap.Nodes[i].Parent].Children {
-		if child < 0 || child >= len(cap.Nodes) || !same(sigs[child], sigs[i]) {
-			continue
-		}
-		if !containsInt(order, child) {
+	for _, child := range siblings {
+		if !same(sigs[child], sigs[i]) {
 			continue
 		}
 		if child == i {
@@ -352,43 +570,99 @@ func ordinalSibling(prev []prevUnit, usedPos map[int]bool, cap *device.Capture, 
 	return unit.ref, unit.position, true
 }
 
-// at returns the raw parent index of i used for anchor lookup: top-level nodes
-// anchor on the synthetic root (raw root index), the raw root anchors on -1.
-func at(cap *device.Capture, i int) int {
+// classCandidate picks the only previous container whose raw class/package
+// agree when the public shape alone matched several candidates.
+func classCandidate(candidates []prevUnit, sig matchKey) (string, int, bool) {
+	var found prevUnit
+	count := 0
+	for _, unit := range candidates {
+		if unit.key.class == sig.class && unit.key.pkg == sig.pkg {
+			found = unit
+			count++
+		}
+	}
+	if count == 1 {
+		return found.ref, found.position, true
+	}
+	return "", 0, false
+}
+
+// nearestPublishedParent walks the raw parent chain to the first published
+// unit. The public tree may differ from the raw tree when a raw ancestor is
+// not projected; matching must anchor on the published ancestor the reader
+// actually sees.
+func nearestPublishedParent(cap *device.Capture, units []unit, i int) int {
 	if i == cap.Root {
 		return -1
 	}
-	if i < 0 || i >= len(cap.Nodes) {
-		return cap.Root
-	}
-	if p := cap.Nodes[i].Parent; p >= 0 && p < len(cap.Nodes) && p != i {
-		return p
+	p := cap.Nodes[i].Parent
+	for steps := 0; p >= 0 && p < len(cap.Nodes) && p != cap.Root && steps <= len(cap.Nodes); steps++ {
+		if units[p].published {
+			return p
+		}
+		next := cap.Nodes[p].Parent
+		if next == p {
+			break
+		}
+		p = next
 	}
 	return cap.Root
 }
 
-func containsInt(values []int, want int) bool {
-	for _, v := range values {
-		if v == want {
-			return true
-		}
-	}
-	return false
-}
-
-// countCurrentSiblings counts current siblings of parentRaw whose shape equals
-// sig, including self.
-func countCurrentSiblings(cap *device.Capture, sigs map[int]matchKey, parentRaw int, sig matchKey) int {
+// countCurrentSiblings counts current published direct children of parent
+// whose public shape equals sig, including self.
+func countCurrentSiblings(childrenOf map[int][]int, sigs map[int]matchKey, parent int, sig matchKey) int {
 	count := 0
-	for _, child := range cap.Nodes[parentRaw].Children {
-		if child >= 0 && child < len(cap.Nodes) && sameShape(sigs[child], sig) {
+	for _, child := range childrenOf[parent] {
+		if sameShape(sigs[child], sig) {
 			count++
 		}
 	}
 	return count
 }
 
-// sameUnit is rules 1 and 3: identical role, class, package, resource presence,
+// countCurrentPublic counts current published direct children of parent whose
+// public identity equals sig, including self.
+func countCurrentPublic(siblings []int, sigs map[int]publicKey, sig publicKey) int {
+	count := 0
+	for _, child := range siblings {
+		if hasPublicIdentity(sigs[child]) && samePublicUnit(sigs[child], sig) {
+			count++
+		}
+	}
+	return count
+}
+
+// countCurrentPublicAll counts public identities anywhere in the published
+// current tree.
+func countCurrentPublicAll(order []int, sigs map[int]publicKey, sig publicKey, root int) int {
+	count := 0
+	for _, j := range order {
+		if j == root || sigs[j].editable {
+			continue
+		}
+		if hasPublicIdentity(sigs[j]) && samePublicUnit(sigs[j], sig) {
+			count++
+		}
+	}
+	return count
+}
+
+// hasPublicIdentity reports whether published fields carry identity evidence.
+func hasPublicIdentity(key publicKey) bool {
+	return key.protected || key.hasRes || key.label != ""
+}
+
+// samePublicUnit compares only published identity fields; raw class, package
+// and unpublished resource ids are deliberately absent.
+func samePublicUnit(a, b publicKey) bool {
+	return a.role == b.role && a.label == b.label &&
+		a.hasRes == b.hasRes && a.resource == b.resource &&
+		a.anchor == b.anchor && a.editable == b.editable &&
+		a.protected == b.protected
+}
+
+// sameUnit is rules 2 and 3: identical role, class, package, resource presence,
 // label signature and protection.
 func sameUnit(a, b matchKey) bool {
 	return a.role == b.role && a.class == b.class && a.pkg == b.pkg &&
@@ -413,15 +687,22 @@ func sameInputAnchor(a, b matchKey) bool {
 	return a.anchor != "" && a.anchor == b.anchor
 }
 
-// sameShape matches label-free containers: same role, class, package and
-// protection, no label on either side. A resource id is ignored here because
-// every list row usually shares one.
+// sameShape matches label-free containers: no label on either side, the same
+// role, action set and protection. Raw class/package are ignored only when the
+// container is non-actionable; an anonymous actionable container is a possible
+// act target, so it still needs the stricter class/package agreement.
 func sameShape(a, b matchKey) bool {
 	if a.editable || b.editable {
 		return false
 	}
-	return a.label == "" && b.label == "" && a.role == b.role &&
-		a.class == b.class && a.pkg == b.pkg && a.protected == b.protected
+	if a.label != "" || b.label != "" || a.role != b.role ||
+		a.actions != b.actions || a.protected != b.protected {
+		return false
+	}
+	if a.actions != 0 {
+		return a.class == b.class && a.pkg == b.pkg
+	}
+	return true
 }
 
 // preorder returns the capture nodes reachable from the traversal root in

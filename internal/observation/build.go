@@ -21,6 +21,10 @@ type Snapshot struct {
 	// non-context nodes (and the synthetic root, which maps to the raw root)
 	// appear here.
 	Source map[string]int
+	// ContextSource maps a context ref to its raw index. Context nodes are not
+	// actionable, so they stay out of Source; continuity still needs their raw
+	// evidence to keep the reading ancestry stable.
+	ContextSource map[string]int
 	// Refs lists the public refs in preorder.
 	Refs []string
 }
@@ -110,12 +114,21 @@ func (b *Builder) Build(cap *device.Capture) (*Snapshot, error) {
 		root.Children = append(root.Children, public[child])
 	}
 
-	snap := &Snapshot{Capture: cap, Source: make(map[string]int)}
+	snap := &Snapshot{
+		Capture:       cap,
+		Source:        make(map[string]int),
+		ContextSource: make(map[string]int),
+	}
 	snap.Source[root.Ref] = cap.Root
 	for i := range cap.Nodes {
-		if public[i] != nil && !units[i].context {
-			snap.Source[public[i].Ref] = i
+		if public[i] == nil {
+			continue
 		}
+		if units[i].context {
+			snap.ContextSource[public[i].Ref] = i
+			continue
+		}
+		snap.Source[public[i].Ref] = i
 	}
 	snap.Tree = &protocol.Tree{Format: "full", Scope: protocol.Scope, Root: root}
 	collectRefs(root, &snap.Refs)
