@@ -148,6 +148,41 @@ func TestRequestEncodersRoundTrip(t *testing.T) {
 	})
 }
 
+func TestKeepaliveDurationEncoding(t *testing.T) {
+	for _, req := range []KeepaliveRequest{
+		{Reference: "O1"},
+		{Reference: "O1", DurationMinutes: 121}, // No presence: this value is not a supplied parameter.
+		{Reference: "O1", DurationMinutes: 1, HasDurationMinutes: true},
+		{Reference: "O1", DurationMinutes: 2, HasDurationMinutes: true},
+		{Reference: "O1", DurationMinutes: 120, HasDurationMinutes: true},
+	} {
+		body, err := req.Encode()
+		if err != nil {
+			t.Fatalf("Encode(%+v): %v", req, err)
+		}
+		if !req.HasDurationMinutes && string(body) != `{"reference":"O1"}` {
+			t.Fatalf("omitted duration was encoded: %s", body)
+		}
+		decoded, apiErr := DecodeKeepalive(body)
+		if apiErr != nil {
+			t.Fatalf("DecodeKeepalive(%s): %v", body, apiErr)
+		}
+		if decoded.HasDurationMinutes != req.HasDurationMinutes ||
+			(req.HasDurationMinutes && decoded.DurationMinutes != req.DurationMinutes) {
+			t.Fatalf("duration presence/value lost: request=%+v decoded=%+v", req, decoded)
+		}
+	}
+	for _, minutes := range []int{-1, 0, 121} {
+		req := &KeepaliveRequest{Reference: "O1", DurationMinutes: minutes, HasDurationMinutes: true}
+		if _, apiErr := req.EffectiveDurationMinutes(); apiErr == nil || apiErr.Code != CodeInvalidRequest {
+			t.Fatalf("explicit invalid duration %d passed direct validation: %v", minutes, apiErr)
+		}
+		if body, err := req.Encode(); err == nil || body != nil {
+			t.Fatalf("explicit invalid duration %d encoded: %s err=%v", minutes, body, err)
+		}
+	}
+}
+
 // Encoded members stay within the documented public vocabulary: no Go field
 // names, no aliases and no explicit nulls.
 func TestEncodedMembersArePublic(t *testing.T) {

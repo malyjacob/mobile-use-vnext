@@ -84,14 +84,11 @@ func (e *Engine) Start(ctx context.Context, agent, p string) (finalResult *proto
 	e.nextSession++
 	session := &sessionState{
 		Origin: op.ID, Agent: agent, Mode: mode, State: SessionStarting,
-		StartedAt: now, HardExpiresAt: now.Add(e.cfg.SessionHardLimit),
+		StartedAt:     now,
 		AppInstanceID: appInstance, ModeGeneration: modeGeneration,
 		Epoch: e.nextSession,
 	}
-	session.ExpiresAt = now.Add(e.cfg.SessionTTL)
-	if session.ExpiresAt.After(session.HardExpiresAt) {
-		session.ExpiresAt = session.HardExpiresAt
-	}
+	session.ExpiresAt = now.Add(e.cfg.StartSessionTTL)
 	if mode == "primary" {
 		session.Display = primary
 	} else {
@@ -274,7 +271,7 @@ func (e *Engine) activateSession(work *workState, session *sessionState, display
 	}
 	session.Display = display
 	session.State = SessionActive
-	e.touchSessionLocked(time.Now())
+	e.extendSessionLocked(time.Now(), e.cfg.StartSessionTTL)
 	e.removeCommandLocked(session.CreateCommand)
 	e.broadcastAppLocked()
 	return true

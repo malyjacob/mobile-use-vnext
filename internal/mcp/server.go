@@ -497,6 +497,9 @@ func prepareCall(service *client.Client, definition toolDefinition, body []byte)
 			return nil, apiErr
 		}
 		call.run = func(ctx context.Context, operationID string) (*client.Response, error) {
+			if request.HasDurationMinutes {
+				return service.KeepaliveWithDuration(ctx, request.Reference, request.DurationMinutes, client.WithOperationID(operationID))
+			}
 			return service.Keepalive(ctx, request.Reference, client.WithOperationID(operationID))
 		}
 	case "end":

@@ -76,7 +76,8 @@ type Response struct {
 | `Act` | `*protocol.ActRequest` | 是 |
 | `End` | `reference` | 是 |
 | `Inspect` | `*protocol.InspectRequest` | 否 |
-| `Keepalive` | `reference` | 是 |
+| `Keepalive` | `reference`（省略时长，显式重设为两分钟） | 是 |
+| `KeepaliveWithDuration` | `reference` + `durationMinutes`（1～120，显式覆盖） | 是 |
 | `Apps` | `*protocol.AppsRequest` | 是 |
 | `OpenApp` | `*protocol.OpenAppRequest` | 是 |
 | `Notify` | `*protocol.NotifyRequest` | 是 |
@@ -86,6 +87,12 @@ type Response struct {
 请求体由 `internal/protocol` 的 `Encode` 生成，只包含该工具声明的成员；未知字段、类型
 混用与显式 `null` 不会被客户端补成默认值。客户端每条逻辑调用最多发出一次 HTTP 请求
 （`Discover` 固定两次只读请求），不排队、不重试、不跟随重定向。
+
+`Keepalive(ctx, reference)` 表示显式重设为两分钟；`KeepaliveWithDuration` 发送显式
+`duration_minutes`。两者共用同一发送路径与 P 校验；直接传入 0、负数、超过 120 或把时长
+加进通用选项都不会发送请求，也不会把非法值归一化为默认值。显式调用覆盖原截止时间，因此
+可以缩短 start 的五分钟租期或先前设置的长租期；普通活动之后仍可按 `max(expires_at, now+2分钟)`
+再次延长。重复 P 只读取原操作视图，不再次更新；改变时长必须使用新的 P。
 
 ## 4. 错误
 

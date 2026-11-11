@@ -32,7 +32,7 @@ func (p *hookedProjector) Reset() {
 }
 
 func TestCaptureCommitRejectsExpiryAndDisplayGenerationChange(t *testing.T) {
-	for _, change := range []string{"lease", "hard_limit", "display_generation"} {
+	for _, change := range []string{"lease", "display_generation"} {
 		t.Run(change, func(t *testing.T) {
 			h := newHarness(t)
 			start := h.startSession()
@@ -56,8 +56,6 @@ func TestCaptureCommitRejectsExpiryAndDisplayGenerationChange(t *testing.T) {
 			switch change {
 			case "lease":
 				h.engine.session.ExpiresAt = time.Now().Add(-time.Second)
-			case "hard_limit":
-				h.engine.session.HardExpiresAt = time.Now().Add(-time.Second)
 			case "display_generation":
 				h.engine.session.Display.Generation = "changed"
 			}

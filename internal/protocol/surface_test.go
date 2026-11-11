@@ -71,6 +71,57 @@ func TestToolSurfaceStrictAdmission(t *testing.T) {
 	}
 }
 
+func TestKeepaliveDurationAdmission(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		body     string
+		minutes  int
+		explicit bool
+	}{
+		{"omitted", `{"reference":"O1"}`, 2, false},
+		{"minimum", `{"reference":"O1","duration_minutes":1}`, 1, true},
+		{"explicit default", `{"reference":"O1","duration_minutes":2}`, 2, true},
+		{"maximum", `{"reference":"O1","duration_minutes":120}`, 120, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req, apiErr := DecodeKeepalive([]byte(tc.body))
+			if apiErr != nil {
+				t.Fatalf("DecodeKeepalive: %v", apiErr)
+			}
+			minutes, apiErr := req.EffectiveDurationMinutes()
+			if apiErr != nil || minutes != tc.minutes || req.HasDurationMinutes != tc.explicit {
+				t.Fatalf("duration=%d presence=%v err=%v", minutes, req.HasDurationMinutes, apiErr)
+			}
+			if !tc.explicit && req.DurationMinutes != 0 {
+				t.Fatalf("omitted duration was filled in: %+v", req)
+			}
+		})
+	}
+	invalid := []string{
+		`{"reference":"O1","duration_minutes":null}`,
+		`{"reference":"O1","duration_minutes":"2"}`,
+		`{"reference":"O1","duration_minutes":true}`,
+		`{"reference":"O1","duration_minutes":1.5}`,
+		`{"reference":"O1","duration_minutes":2.0}`,
+		`{"reference":"O1","duration_minutes":2e0}`,
+		`{"reference":"O1","duration_minutes":0}`,
+		`{"reference":"O1","duration_minutes":-1}`,
+		`{"reference":"O1","duration_minutes":121}`,
+		`{"reference":"O1","duration_minutes":1,"duration_minutes":2}`,
+		`{"reference":"O1","Duration_minutes":2}`,
+		`{"reference":"O1","duration_minutes":2,"extra":true}`,
+		`{"reference":"O1","duration_minutes":2} {}`,
+	}
+	for _, body := range invalid {
+		t.Run(body, func(t *testing.T) {
+			req, apiErr := DecodeKeepalive([]byte(body))
+			if req != nil || apiErr == nil || apiErr.Code != CodeInvalidRequest {
+				t.Fatalf("invalid duration admitted: req=%+v err=%v", req, apiErr)
+			}
+		})
+	}
+}
+
 func TestToolSurfaceDuplicateAndTrailingRejected(t *testing.T) {
 	cases := []struct {
 		name string

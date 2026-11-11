@@ -34,6 +34,11 @@ var toolCatalog = []toolDefinition{
 		name: "start",
 		description: "建立新会话并返回第一个 full 观察。请求体必须是空对象；" +
 			"目标屏幕与模式来自控制端当前选择，不接受尺寸、模式或凭据参数。" +
+			"启动初始化、激活与首观察成功发布使用五分钟租期。正常启动且无并发更新时，" +
+			"首观察成功发布将租期推至发布时起五分钟，已有更晚期限则保留；以响应 session.expires_at 为准，网络交付会消耗剩余时间。" +
+			"后续 observe/act/open_app/shell 等仅在既有续期点取 max(当前截止时间, now + 2分钟)，不截短启动租期。" +
+			"显式 keepalive 可重设并缩短它。五分钟不延长单次 start 工作期限，也不延长首个 O 的独立输入有效期；" +
+			"重放原 start 操作不重新获得五分钟。" +
 			treeTextGuide,
 		schema: json.RawMessage(`{
   "type": "object",
@@ -232,12 +237,18 @@ var toolCatalog = []toolDefinition{
 	},
 	{
 		name: "keepalive",
-		description: "仅将给定 O/P 所指活动会话的滑动租约单调续至 min(now + 120s, started_at + 1h)；" +
-			"1 小时硬上限不可延长，跨越须重新 start。" +
-			"只续租约，不延长任何 O 的 actionable_until、不改变 O 状态、不确认基线、" +
-			"不占普通工作位置、不访问设备、不写账本正文。" +
-			"会话 ended 返回 session_ended，starting 返回 reference_has_no_session，已过期限返回 session_expired；" +
-			"重复 P 仅重放原视图，不再次续租。",
+		description: "重设给定 O/P 所指当前活动会话的租约截止时间。duration_minutes 为 1～120 的整数，默认 2；" +
+			"每个新操作从服务端应用更新时计时并覆盖原截止时间，可延长或缩短。" +
+			"省略参数也会重设为两分钟，可能缩短已有长租约或 start 的五分钟启动租期。" +
+			"start 使用五分钟续期；其他普通活动仅在既有续期点取 max(现有截止时间, now + 2分钟)，" +
+			"不会缩短长租约，也不继承本次时长；它们可再次延长已缩短的租约。" +
+			"无会话累计时长硬上限，120 分钟只约束单次显式请求。调用不等待旧租约到期、不占普通工作位；" +
+			"已到期或结束不可恢复：ended 返回 session_ended，starting 返回 reference_has_no_session，已过期限返回 session_expired。" +
+			"同一可识别 P 重试不再次更新，改变租期须用新操作；P 记录仍有界保留，不提供无限历史去重。" +
+			"只改会话期限，不延长 O 的 actionable_until 或工作/shell 期限，不改变 O 状态、不确认基线、不访问设备或新增账本写入；" +
+			"STOP/end、App/服务生命周期与 MCP 取消规则仍适用。" +
+			"首次成功返回本次 operation_id、outcome=executed 和 session，session.expires_at 是当次更新后的绝对截止时间；" +
+			"重放可投影原会话的当前事实，后续更新或撤权仍可改变会话事实；继续保留会话须在当前截止时间前成功续期。",
 		schema: json.RawMessage(`{
   "type": "object",
   "properties": {
@@ -246,12 +257,19 @@ var toolCatalog = []toolDefinition{
       "minLength": 1,
       "maxLength": 64,
       "pattern": "^[OP]",
-      "description": "必填的 O 或 P 编号，必须定位到仍活动的原会话。"
+      "description": "本 Agent 的 O 或 P，必须仍能定位当前活动且未到期的原会话；不要求 O 仍可用于输入，不复活已到期或结束会话。"
+    },
+    "duration_minutes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 120,
+      "default": 2,
+      "description": "从本次更新应用时起重新计时的分钟数，整数 1～120，省略为 2；覆盖原截止时间，所以较小值或省略参数可缩短已有长租约。后续普通活动仍可延长。"
     }
   },
   "required": ["reference"],
   "additionalProperties": false,
-  "description": "keepalive 需要 reference。"
+  "description": "keepalive 需要 reference；duration_minutes 可选，省略也重设为两分钟。"
 }`),
 	},
 	{

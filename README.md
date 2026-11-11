@@ -7,8 +7,8 @@ HTTP 协议配对。
 
 - 模块：`github.com/malyjacob/mobile-use-vnext`
 - Go：1.27.1，启用 `GOEXPERIMENT=jsonv2`
-- 契约：`contract_version = "5"`，服务、HTTP 客户端、控制 App 精确相等才做普通工作
-- 发行：`0.5.0`；`release/versions.json` 是发行号、契约号与 Android versionCode 的唯一来源，
+- 契约：`contract_version = "8"`，服务、HTTP 客户端、控制 App 精确相等才做普通工作
+- 发行：`0.8.0`；`release/versions.json` 是发行号、契约号与 Android versionCode 的唯一来源，
   构建生成 Go/Java 常量
 
 ## 能力边界
@@ -143,16 +143,16 @@ $env:GOEXPERIMENT = 'jsonv2'; go test ./...
 ## 接口
 
 Agent 工具（`POST /api/<tool>`，`Authorization: Bearer <agent_token>`，
-`X-Mobile-Use-Contract: 2`）：
+`X-Mobile-Use-Contract: 8`）：
 
 | 工具 | 说明 |
 | --- | --- |
-| `start` | 请求体必须为 `{}`；创建/绑定目标屏幕并发布首个 full 观察 |
+| `start` | 请求体必须为 `{}`；创建/绑定目标屏幕并发布首个 full 观察；初始化、激活与首观察成功发布使用五分钟租期 |
 | `status` | 无参数、`{"reference":"O…"}` 或 `{"reference":"P…"}`；只读查询 |
 | `observe` | `reference`（O/P）；按服务端基线返回 full 或 delta；`observe(P)` 与 `full=true` 强制 full；`image=true` 附加本次图片 |
 | `act` | `observation_id` + `operation`：`tap`、`long_press`、`swipe`、`key`、`text`；`image=true` 为后观察附图 |
 | `inspect` | `observation_id` 可选 `node` 或 `query`；只读历史树 |
-| `keepalive` | `reference`（O/P）；续租原活动会话 |
+| `keepalive` | `reference`（O/P）+ 可选 `duration_minutes`（1～120，默认 2）；从应用时重设当前活动会话租期，可延长或缩短；普通活动仅按两分钟取最大值 |
 | `end` | `reference`（O/P）；撤权并启动独立收尾 |
 | `apps` | 可选 `query`；发现可启动应用 |
 | `open_app` | `observation_id` + `app`；在会话屏打开/复用应用并返回新观察 |

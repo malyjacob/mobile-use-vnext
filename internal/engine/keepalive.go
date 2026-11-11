@@ -13,12 +13,16 @@ type keepaliveResolution struct {
 	apiErr  *protocol.APIError
 }
 
-// Keepalive explicitly renews the original session activity deadline located by
-// an owned O/P. It takes no work position, performs no device I/O, never
-// extends an observation's input deadline and never acknowledges a baseline.
+// Keepalive replaces the original active session's expiry with now plus the
+// requested minutes (default two). It can shorten a long lease, takes no work
+// position or device I/O, and changes neither O's input deadline nor baseline.
 func (e *Engine) Keepalive(agent, p string, req *protocol.KeepaliveRequest) (*protocol.Result, *protocol.APIError) {
 	if req == nil {
 		return nil, protocol.Invalid("keepalive 请求缺失")
+	}
+	minutes, apiErr := req.EffectiveDurationMinutes()
+	if apiErr != nil {
+		return nil, apiErr
 	}
 	op, duplicate, apiErr := e.registerOperation(p, agent, "keepalive")
 	if apiErr != nil {
@@ -30,16 +34,18 @@ func (e *Engine) Keepalive(agent, p string, req *protocol.KeepaliveRequest) (*pr
 		return duplicate, nil
 	}
 	e.setOperationReference(op, referenceKind(req.Reference))
-	now := time.Now()
 	e.mu.Lock()
+	// Expiry admission and replacement share the application instant. A request
+	// that arrived before expiry cannot renew after waiting past that boundary.
+	now := time.Now()
 	resolution := e.resolveKeepaliveLocked(agent, req.Reference, now)
 	if resolution.apiErr != nil {
 		e.mu.Unlock()
 		return e.finishKeepaliveError(op, resolution), nil
 	}
-	// The explicit keepalive is the only lease extension here. Observation
-	// actionability and O state stay frozen.
-	e.touchSessionLocked(now)
+	// Explicit reset deliberately overwrites even a later expiry. Ordinary
+	// activity's monotonic extension must not be used for this operation.
+	resolution.session.ExpiresAt = now.Add(time.Duration(minutes) * time.Minute)
 	resolution.view = e.sessionViewLocked(e.session)
 	e.mu.Unlock()
 

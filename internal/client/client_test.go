@@ -187,6 +187,72 @@ func TestWithOperationIDHonored(t *testing.T) {
 	}
 }
 
+func TestKeepaliveDurationRequests(t *testing.T) {
+	captures := make(chan requestCapture, 3)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		captures <- captureRequest(t, request)
+		writeResponse(w, http.StatusOK, fmt.Sprintf(
+			`{"operation_id":%q,"outcome":"executed","session":{"origin":"Pstart","state":"active","mode":"virtual","agent":"local-agent","started_at":"2026-11-11T02:00:00Z","expires_at":"2026-11-11T02:30:00Z"}}`,
+			request.Header.Get(operationHeader)))
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL)
+	for _, tc := range []struct {
+		name    string
+		minutes int
+		body    string
+	}{
+		{"omitted", 0, `{"reference":"O1"}`},
+		{"minimum", 1, `{"reference":"O1","duration_minutes":1}`},
+		{"maximum", 120, `{"reference":"O1","duration_minutes":120}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			operation := "Pkeep-" + tc.name
+			var response *Response
+			var err error
+			if tc.name == "omitted" {
+				response, err = client.Keepalive(context.Background(), "O1", WithOperationID(operation))
+			} else {
+				response, err = client.KeepaliveWithDuration(context.Background(), "O1", tc.minutes, WithOperationID(operation))
+			}
+			if err != nil {
+				t.Fatalf("Keepalive: %v", err)
+			}
+			capture := <-captures
+			assertToolRequest(t, capture, "/api/keepalive")
+			if capture.body != tc.body || onlyOperationHeader(t, capture.headers) != operation {
+				t.Fatalf("body/P changed: %+v", capture)
+			}
+			if response.OperationID != operation || response.Result.Session.ExpiresAt != "2026-11-11T02:30:00Z" {
+				t.Fatalf("response lost P or deadline: %+v", response)
+			}
+		})
+	}
+}
+
+func TestKeepaliveInvalidDurationDoesNotSend(t *testing.T) {
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		hits.Add(1)
+		writeResponse(w, http.StatusOK, `{}`)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL)
+	for _, minutes := range []int{-1, 0, 121} {
+		response, err := client.KeepaliveWithDuration(context.Background(), "O1", minutes, WithOperationID("Pinvalid-duration"))
+		clientErr := requireClientError(t, err)
+		if response != nil || clientErr.Code != protocol.CodeInvalidRequest || clientErr.Transport ||
+			clientErr.OperationID != "Pinvalid-duration" {
+			t.Fatalf("duration %d: response=%+v err=%+v", minutes, response, clientErr)
+		}
+	}
+	_, err := client.KeepaliveWithDuration(context.Background(), "O1", 0)
+	assertGeneratedOperation(t, requireClientError(t, err).OperationID)
+	if hits.Load() != 0 {
+		t.Fatalf("invalid durations reached service %d times", hits.Load())
+	}
+}
+
 func TestInvalidOperationIDSendsNothing(t *testing.T) {
 	var hits atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {

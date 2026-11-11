@@ -388,6 +388,20 @@ func TestToolCatalog(t *testing.T) {
 				t.Fatalf("%s: required member %q is not declared", tool.Name, name)
 			}
 		}
+		if tool.Name == "keepalive" {
+			var duration struct {
+				Type    string `json:"type"`
+				Minimum int    `json:"minimum"`
+				Maximum int    `json:"maximum"`
+				Default int    `json:"default"`
+			}
+			if err := json.Unmarshal(schema.Properties["duration_minutes"], &duration); err != nil {
+				t.Fatalf("duration schema: %v", err)
+			}
+			if duration.Type != "integer" || duration.Minimum != 1 || duration.Maximum != 120 || duration.Default != 2 {
+				t.Fatalf("duration schema does not match admission: %+v", duration)
+			}
+		}
 	}
 
 	capabilities := session.InitializeResult().Capabilities
@@ -416,6 +430,9 @@ func TestStrictAdmission(t *testing.T) {
 		{name: "explicit null", tool: "observe", arguments: map[string]any{"reference": "O1", "full": nil}},
 		{name: "missing required", tool: "end", arguments: map[string]any{}},
 		{name: "case variant", tool: "keepalive", arguments: map[string]any{"Reference": "O1"}},
+		{name: "null duration", tool: "keepalive", arguments: map[string]any{"reference": "O1", "duration_minutes": nil}},
+		{name: "zero duration", tool: "keepalive", arguments: map[string]any{"reference": "O1", "duration_minutes": 0}},
+		{name: "duration above maximum", tool: "keepalive", arguments: map[string]any{"reference": "O1", "duration_minutes": 121}},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -470,6 +487,46 @@ func TestStrictAdmission(t *testing.T) {
 			t.Fatal("client was called for a duplicate key")
 		}
 	})
+}
+
+func TestKeepaliveDurationForwarding(t *testing.T) {
+	fake := newTestDeviceService(t)
+	fake.setHandler("keepalive", func(w http.ResponseWriter, request *http.Request, _ string) {
+		writeTestJSON(w, http.StatusOK, fmt.Sprintf(`{"operation_id":%q,"outcome":"executed","session":%s}`,
+			testOperationHeader(request), testActiveSessionJSON))
+	})
+	session := connectTestInMemory(t, newTestMCPServer(t, fake))
+	for index, tc := range []struct {
+		name      string
+		arguments map[string]any
+		body      string
+	}{
+		{"omitted", map[string]any{"reference": "O1"}, `{"reference":"O1"}`},
+		{"minimum", map[string]any{"reference": "O1", "duration_minutes": 1}, `{"reference":"O1","duration_minutes":1}`},
+		{"maximum", map[string]any{"reference": "O1", "duration_minutes": 120}, `{"reference":"O1","duration_minutes":120}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result := callTestTool(t, session, "keepalive", tc.arguments)
+			if result.IsError {
+				t.Fatalf("keepalive failed: %s", testTextContent(t, result))
+			}
+			requests := fake.requestsFor("keepalive")
+			if len(requests) != index+1 || requests[index].Body != tc.body {
+				t.Fatalf("duration presence/value changed: %+v", requests)
+			}
+			request := requests[index]
+			structured := testStructuredObject(t, result)
+			if !strings.HasPrefix(request.OperationID, "P") || structured["operation_id"] != request.OperationID ||
+				structured["outcome"] != "executed" || len(structured) != 3 {
+				t.Fatalf("keepalive result shape/P changed: %#v", structured)
+			}
+			sessionView, ok := structured["session"].(map[string]any)
+			if !ok || sessionView["expires_at"] != "2026-11-09T00:02:00Z" {
+				t.Fatalf("session deadline lost: %#v", structured)
+			}
+			requireTestContains(t, testTextContent(t, result), "session.expires_at=2026-11-09T00:02:00Z")
+		})
+	}
 }
 
 func TestStartProjectionWithFullTree(t *testing.T) {

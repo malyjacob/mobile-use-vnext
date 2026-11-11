@@ -45,9 +45,24 @@ type InspectRequest struct {
 	HasQuery      bool
 }
 
-// KeepaliveRequest is keepalive(reference).
+// KeepaliveRequest is keepalive(reference, duration_minutes=2). Presence is
+// preserved so an omitted duration can never be confused with an explicit zero.
 type KeepaliveRequest struct {
-	Reference string
+	Reference          string
+	DurationMinutes    int
+	HasDurationMinutes bool
+}
+
+// EffectiveDurationMinutes applies the shared default and range rules without
+// changing presence. Direct engine calls and wire encoders use the same check.
+func (r *KeepaliveRequest) EffectiveDurationMinutes() (int, *APIError) {
+	if !r.HasDurationMinutes {
+		return 2, nil
+	}
+	if r.DurationMinutes < 1 || r.DurationMinutes > 120 {
+		return 0, Invalid("duration_minutes 必须是 1～120 的整数")
+	}
+	return r.DurationMinutes, nil
 }
 
 // DiagnoseRequest is diagnose(reference=None).
@@ -213,13 +228,15 @@ func DecodeInspect(body []byte) (*InspectRequest, *APIError) {
 	}, nil
 }
 
-// DecodeKeepalive admits keepalive(reference).
+// DecodeKeepalive admits keepalive(reference, duration_minutes).
 func DecodeKeepalive(body []byte) (*KeepaliveRequest, *APIError) {
 	var presence struct {
-		Reference jsontext.Value `json:"reference"`
+		Reference       jsontext.Value `json:"reference"`
+		DurationMinutes jsontext.Value `json:"duration_minutes"`
 	}
 	var wire struct {
-		Reference string `json:"reference"`
+		Reference       string `json:"reference"`
+		DurationMinutes int    `json:"duration_minutes"`
 	}
 	if err := decodeStrict(body, &presence, &wire); err != nil {
 		return nil, invalidDecode(err)
@@ -230,7 +247,17 @@ func DecodeKeepalive(body []byte) (*KeepaliveRequest, *APIError) {
 	if err := checkReference(wire.Reference); err != nil {
 		return nil, err
 	}
-	return &KeepaliveRequest{Reference: wire.Reference}, nil
+	if err := checkNulls(map[string]jsontext.Value{"duration_minutes": presence.DurationMinutes}); err != nil {
+		return nil, err
+	}
+	req := &KeepaliveRequest{
+		Reference: wire.Reference, DurationMinutes: wire.DurationMinutes,
+		HasDurationMinutes: len(presence.DurationMinutes) > 0,
+	}
+	if _, apiErr := req.EffectiveDurationMinutes(); apiErr != nil {
+		return nil, apiErr
+	}
+	return req, nil
 }
 
 // DecodeDiagnose admits diagnose(reference).

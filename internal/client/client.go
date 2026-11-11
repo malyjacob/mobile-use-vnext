@@ -249,13 +249,29 @@ func (c *Client) Inspect(ctx context.Context, request *protocol.InspectRequest) 
 	return c.post(ctx, "inspect", body, "")
 }
 
-// Keepalive calls POST /api/keepalive.
+// Keepalive resets the session lease to two minutes from server application
+// time. The omitted duration may shorten an existing lease, including start's
+// five-minute lease. Success reports the new session.expires_at.
 func (c *Client) Keepalive(ctx context.Context, reference string, opts ...CallOption) (*Response, error) {
+	return c.keepalive(ctx, &protocol.KeepaliveRequest{Reference: reference}, opts)
+}
+
+// KeepaliveWithDuration resets the lease to durationMinutes (1–120) from server
+// application time, possibly shortening it. Ordinary activity may extend it
+// again. Reusing a recognizable P reads its original operation without updating
+// the lease; a changed duration requires a new operation.
+func (c *Client) KeepaliveWithDuration(ctx context.Context, reference string, durationMinutes int, opts ...CallOption) (*Response, error) {
+	return c.keepalive(ctx, &protocol.KeepaliveRequest{
+		Reference: reference, DurationMinutes: durationMinutes, HasDurationMinutes: true,
+	}, opts)
+}
+
+func (c *Client) keepalive(ctx context.Context, request *protocol.KeepaliveRequest, opts []CallOption) (*Response, error) {
 	operation, operationErr := c.newOperation(opts)
 	if operationErr != nil {
 		return nil, operationErr
 	}
-	body, err := (&protocol.KeepaliveRequest{Reference: reference}).Encode()
+	body, err := request.Encode()
 	if err != nil {
 		return nil, invalidRequest(operation, messageInvalidRequest)
 	}

@@ -63,8 +63,8 @@ const (
 type Config struct {
 	ServiceInstanceID   string
 	AgentName           string
-	SessionTTL          time.Duration // 120s sliding activity
-	SessionHardLimit    time.Duration // 1h from start
+	StartSessionTTL     time.Duration // 5min initialization, activation and first observation
+	SessionTTL          time.Duration // 120s monotonic ordinary activity extension
 	ObservationLifetime time.Duration // 60s input lifetime
 	StartTimeout        time.Duration // 20s create phase
 	WorkTimeout         time.Duration // 20s per capture/action phase
@@ -102,8 +102,8 @@ func DefaultConfig(instanceID, agentName string) Config {
 	return Config{
 		ServiceInstanceID:   instanceID,
 		AgentName:           agentName,
+		StartSessionTTL:     5 * time.Minute,
 		SessionTTL:          120 * time.Second,
-		SessionHardLimit:    time.Hour,
 		ObservationLifetime: 60 * time.Second,
 		StartTimeout:        20 * time.Second,
 		WorkTimeout:         20 * time.Second,
@@ -335,7 +335,6 @@ type sessionState struct {
 	State            string
 	StartedAt        time.Time
 	ExpiresAt        time.Time
-	HardExpiresAt    time.Time
 	EndedAt          time.Time
 	Reason           string
 	Display          device.Display
@@ -816,17 +815,19 @@ func (e *Engine) revokeSessionLocked(reason string, now time.Time) *sessionState
 	return session
 }
 
-// touchSessionLocked applies a successful ordinary work lease extension. It is
-// only called for valid accepted work, not for queries or rejected requests.
+// touchSessionLocked preserves an existing long lease while filling ordinary
+// activity's two-minute window. Explicit keepalive instead replaces the expiry.
 func (e *Engine) touchSessionLocked(now time.Time) {
+	e.extendSessionLocked(now, e.cfg.SessionTTL)
+}
+
+// extendSessionLocked renews only valid accepted activity, never queries,
+// rejections or expired sessions. Start uses its own five-minute policy.
+func (e *Engine) extendSessionLocked(now time.Time, ttl time.Duration) {
 	if e.session == nil || e.session.State != SessionActive || !sessionBeforeDeadline(e.session, now) {
 		return
 	}
-	next := now.Add(e.cfg.SessionTTL)
-	if next.After(e.session.HardExpiresAt) {
-		next = e.session.HardExpiresAt
-	}
-	if next.After(e.session.ExpiresAt) {
+	if next := now.Add(ttl); next.After(e.session.ExpiresAt) {
 		e.session.ExpiresAt = next
 	}
 }

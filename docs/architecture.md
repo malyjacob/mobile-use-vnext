@@ -70,11 +70,18 @@ engine 的状态锁只做有限内存检查与转换：锁内不等待 ADB、u2 
 
 - `start` 先登记 P、取得工作位置，再创建 `starting` 会话；虚拟屏要等 App 创建回执、App
   上报的显示描述、以及 `dumpsys`/SurfaceFlinger 的显示存在与 SFID 三者一致后才转 `active`。
-- 租约 `SessionTTL=120s` 由 `keepalive` 或被接纳的普通工作滑动续期；`status` 查询不续租。
-  硬上限 `SessionHardLimit=1h`，从 `start` 起算，不随续期突破。
+- `start` 初始化、激活与首个 full 观察成功发布使用 `StartSessionTTL=5min`：接纳时以
+  `started_at + 5min` 初始化，后两个续期点取 `max(expires_at, now + 5min)`。其他普通工作只在
+  既有触发点（`act` 认领、成功发布新 O、`shell` 派发边界）按 `SessionTTL=120s` 取
+  `max(expires_at, now + 120s)`，不继承显式 `keepalive` 时长，也不截短更长的剩余租期。
+  `status` 查询与其他只读调用不续租。
+- `keepalive` 是显式重设：engine 在同一状态锁内取应用时 `now`，校验原会话仍为当前 `active`
+  且 `now < expires_at`，再覆盖为 `expires_at = now + duration_minutes`。时长是 1～120 的整数，
+  省略为两分钟；每个新 P 都可延长或缩短原截止时间。120 分钟只约束单次请求，会话没有累计
+  时长硬上限；`now == expires_at` 已视为到期，过期或结束的会话不能复活。
 - 会话只因外部原因或启动阶段失败结束：显式 `end`（`client_end`）、STOP（`reason` 原样记入，
   独立 STOP 缺省或超长时用 `user_stop`）、
-  滑动租约或 1 小时硬上限到期（`lease_expired`）、App 实例变化（`app_restarted`）、
+  租约到期（`lease_expired`）、App 实例变化（`app_restarted`）、
   服务退出/重启（`service_shutdown`；恢复旧归属记 `service_restarted`），以及
   `display_create_unconfirmed` 等启动失败。原因写入 `session.reason`；工具级期限不是会话事实，
   不撤销或冻结会话。

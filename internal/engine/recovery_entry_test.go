@@ -709,8 +709,8 @@ func TestContractVersionMatchesGenerated(t *testing.T) {
 	if err := json.Unmarshal(data, &versions); err != nil {
 		t.Fatalf("decode version source: %v", err)
 	}
-	if versions.ContractVersion != 7 || protocol.ContractVersion != "7" {
-		t.Fatalf("contract version source=%d compiled=%q, want 7",
+	if versions.ContractVersion != 8 || protocol.ContractVersion != "8" {
+		t.Fatalf("contract version source=%d compiled=%q, want 8",
 			versions.ContractVersion, protocol.ContractVersion)
 	}
 	if versions.ReleaseVersion != protocol.ReleaseVersion {

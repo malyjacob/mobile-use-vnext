@@ -289,10 +289,13 @@ func (r *InspectRequest) Encode() ([]byte, error) {
 	})
 }
 
-// Encode writes the canonical keepalive(reference) body.
+// Encode writes the canonical keepalive(reference, duration_minutes) body.
 func (r *KeepaliveRequest) Encode() ([]byte, error) {
 	if r.Reference == "" {
 		return nil, errors.New("keepalive requires a reference")
+	}
+	if _, apiErr := r.EffectiveDurationMinutes(); apiErr != nil {
+		return nil, apiErr
 	}
 	return encodeRequest(func(enc *jsontext.Encoder) error {
 		if err := enc.WriteToken(jsontext.BeginObject); err != nil {
@@ -303,6 +306,14 @@ func (r *KeepaliveRequest) Encode() ([]byte, error) {
 		}
 		if err := writeString(enc, r.Reference); err != nil {
 			return err
+		}
+		if r.HasDurationMinutes {
+			if err := writeName(enc, "duration_minutes"); err != nil {
+				return err
+			}
+			if err := writeInt(enc, r.DurationMinutes); err != nil {
+				return err
+			}
 		}
 		return enc.WriteToken(jsontext.EndObject)
 	})

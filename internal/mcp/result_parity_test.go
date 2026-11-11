@@ -273,10 +273,10 @@ func TestHTTPModesSelectProjectionPerCall(t *testing.T) {
 	}
 }
 
-func TestCatalogFingerprintUnchanged(t *testing.T) {
-	// The act description covers the closed unknown window; keepalive states
-	// the lease-only contract. Other tool descriptions and all schemas stay unchanged.
-	const baseline = "79247d5826bd2f1d9357529fb854d42c45745c69ddcccb2d0c28c8c85cb5ba79"
+func TestCatalogFingerprintExplicitKeepaliveDuration(t *testing.T) {
+	// Start and keepalive descriptions explain the lease reset semantics;
+	// keepalive alone adds the optional duration schema. Result modes stay intact.
+	const baseline = "7326317c03b6a654da7e2df5a517bb4aaf24365f21a45551e9a1492b83666c31"
 	if got := CatalogFingerprint(); got != baseline {
 		t.Fatalf("catalog changed: %s", got)
 	}

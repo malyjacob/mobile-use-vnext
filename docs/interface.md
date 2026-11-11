@@ -15,7 +15,7 @@
 | 方法 | 所有业务端点只接受 `POST`；其他方法返回 `405`，错误码 `invalid_request` |
 | 认证 | `/api/*` 用 `agent_token`；`/v1/control/*` 用 `control_token`；`Authorization: Bearer <token>` |
 | 身份隔离 | agent token 不能访问 `/v1/control/*`，control token 不能访问 `/api/*`；错误为 `401 unauthorized` |
-| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 7`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
+| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 8`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
 | 预分配 P | `/api/*` 可带 `X-Mobile-Use-Operation: P…`；缺省由服务分配。`status` 不使用该头 |
 | 请求体 | 必须是一个 JSON 对象；大小上限：`start`/`status`/`end` 16 KiB，`observe` 32 KiB，`act` 64 KiB，`inspect`/`keepalive`/`diagnose`/`apps`/`open_app` 8 KiB，`notify` 16 KiB，`shell` 32 KiB，`sync` 32 KiB，`stop` 8 KiB |
 | 响应 | `Content-Type: application/json; charset=utf-8`，`Cache-Control: no-store` |
@@ -152,6 +152,9 @@ HTTP 状态映射（`protocol.Status`）：
 ```
 
 - `start` 的首个观察固定为 full（`forceFull=true`），即使已有基线。
+- 会话租期在接纳时初始化为 `started_at + 5min`；激活与首个 full 观察成功发布各按
+  `max(expires_at, now + 5min)` 更新。首个观察失败但会话保留时不额外续期，也不回滚期间
+  已应用的显式 `keepalive` 结果；重放或被拒绝的 `start` 不重新给已有会话五分钟。
 - 会话已建立但首个采集失败：HTTP 503，`outcome=executed`，`observation.status=failed`、
   `missing=["tree"]`，`recovery` 为 `entry=observe`、`reference=P`、`input_state=retired`、
   `cause=post_observation_failed`；会话仍存在，调用方应用新的 P 调用 `observe`。
@@ -340,7 +343,8 @@ HTTP 状态映射（`protocol.Status`）：
 `invalid_coordinates`、`ambiguous_point`、`unsupported_key` 等），什么都没派发、O 未被认领，
 `recovery` 为 `entry=retry`、`reference=O`、`input_state=effective`。
 
-通过后：取得唯一工作位置 → O 单向 `ready→claimed` → 延长租约 → 实时重验（目标显示仍存在、
+通过后：取得唯一工作位置 → O 单向 `ready→claimed` → 普通活动续期（`max(expires_at, now+2分钟)`，
+不继承显式时长） → 实时重验（目标显示仍存在、
 重新采集、前台包/任务与观察时一致；ref 在新鲜树中按“完整内容身份 + 祖先链”唯一匹配；
 坐标目标解析到唯一节点时，该节点也必须按同一身份与祖先链唯一匹配，且同一坐标在不推进
 ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动作所需的输入（`text` 为焦点点击 +
@@ -430,7 +434,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 
 | 字段 | 必填 | 类型 | 说明 |
 | --- | --- | --- | --- |
-| `contract_version` | 是 | 字符串 | 必须为 `"7"`，否则 `409 contract_mismatch` |
+| `contract_version` | 是 | 字符串 | 必须为 `"8"`，否则 `409 contract_mismatch` |
 | `app_instance_id` | 是 | UUID | App 进程实例；变化会撤销旧归属 |
 | `app_version` | 是 | 字符串 | 仅发行标识 |
 | `selected_mode` | 是 | `virtual`/`primary` | 用户选择 |
@@ -457,7 +461,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 
 ```json
 {
-  "contract_version": "7",
+  "contract_version": "8",
   "service_instance_id": "…",
   "control": {
     "revision": 42,
@@ -491,7 +495,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 ## 9. `POST /v1/control/stop`
 
 ```json
-{"contract_version":"7","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
+{"contract_version":"8","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
 ```
 
 - **不校验普通契约**：`contract_version` 字段存在但不参与准入，服务与 App 契约版本
@@ -501,7 +505,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 - 重复或过期 `seq` 不报错，只返回 `state=duplicate`。
 
 ```json
-{"contract_version":"7","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
+{"contract_version":"8","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
 ```
 
 `accepted` 恒为 `true`；`state` 为 `revoked`（绑定时撤销了活动会话）、`recorded`
@@ -514,7 +518,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 无认证，只表示进程可应答，不代表设备就绪或资源干净：
 
 ```json
-{"status":"ok","contract_version":"7","service_instance_id":"…","release_version":"…"}
+{"status":"ok","contract_version":"8","service_instance_id":"…","release_version":"…"}
 ```
 
 ## 11. 数据对象
@@ -639,19 +643,35 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 ### `POST /api/keepalive`
 
 ```json
-{"reference":"O1"}
+{"reference":"O1","duration_minutes":30}
 ```
 
-O/P 必须属于本 Agent 并定位一个仍 `active` 的原会话；成功返回 `outcome=executed` 与新的
-`session.expires_at`。
+`reference` 必填，沿用 O/P 归属解析；`duration_minutes` 可选，必须是 1～120 的 JSON
+整数，省略等于 2。显式 `null`、字符串、布尔、非整数及越界都按 `422 invalid_request`
+拒绝，不截断、不归一化为默认值，也不登记本次 P。
+
+```json
+{"operation_id":"Pkeep1","outcome":"executed","session":{
+  "origin":"Pstart","state":"active","mode":"virtual","agent":"local-agent",
+  "started_at":"…","expires_at":"…"}}
+```
 
 | 项 | 契约表述 |
 | --- | --- |
-| 作用 | 把当前活动会话的滑动租约推到 `min(now + 120s, started_at + 1h)`；只增不减 |
-| 不作用 | 不延长任何 O 的 `actionable_until`，不改 O 状态，不确认基线，不占工作位，不访问设备，不写账本正文 |
-| 拒绝条件 | 会话 `ended` → `session_ended`；`starting` → `reference_has_no_session`；已越线 → `session_expired`；重复 P 只回原视图、不再续租 |
-| 保证 | 时间型撤销只剩租约一族：每次续租必须在当前 `expires_at` 之前成功（默认需要严格小于 120 秒的间隔），并受 1 小时硬上限约束；在硬上限内按此节奏续租，会话不会因任何内部原因结束 |
-| 边界 | 硬上限 1 小时不可延长；跨过硬上限只能重新 `start`；`keepalive` 不能保活超过硬上限，也不能保住任何 O |
+| 作用 | engine 在同一状态锁内取应用时 `now`，校验原会话仍为当前 `active` 且 `now < expires_at`，然后覆盖 `expires_at = now + duration_minutes`。每个新的 P 都从本次应用时重新计时，可延长也可缩短；省略参数同样覆盖为两分钟。 |
+| 起算与上限 | 1～120 分钟只约束单次显式请求；会话没有累计时长硬上限。先前显式设置的长租期不限制后续缩短，缩短后的租期也不限制普通活动再次延长。 |
+| start 与其他普通活动 | `start` 初始化、激活与首观察成功发布使用五分钟；其他普通工作只在各自既有续期点取 `max(expires_at, now + 2分钟)`，不继承显式时长，也不截短更长租期。显式两分钟的默认调用可以缩短 start 的五分钟启动租期；普通活动随后仍可按最大值把它延长到 `now + 2分钟`。 |
+| 不作用 | 不延长任何 O 的 `actionable_until`，不改 O 状态，不确认基线，不占普通工作位，不访问设备，不写账本正文，不延长工作或 shell 期限。 |
+| 拒绝条件 | 会话 `ended` → `session_ended`；`starting` → `reference_has_no_session`；未撤权但已到/越过 `expires_at` → `session_expired`；`now == expires_at` 即视为到期。失败不修改截止时间。引用未知、外来或不能定位按既有错误族拒绝。 |
+| P 与重放 | 同一可识别 P 只返回原操作视图或封闭事实，不再次重设截止时间；重放视图中的 `session` 可以反映当前租期或 ended 状态。改变时长必须使用新 P。P 记录与编号沿用现有有界保留规则，不承诺无限历史。 |
+| 并发 | 更新按 engine 锁内的实际应用顺序生效；显式覆盖与普通 `max` 续期互不继承。STOP/end 先撤权时后续续租不能恢复；续租先成功也不阻止后续 STOP/end。 |
+| 保证 | 成功响应返回当次锁内更新后的 `session.expires_at`。截止时间是应用时快照，不承诺任务完成或会话存活至该时刻；后续显式调用、普通活动、STOP/end、App/服务生命周期与 MCP 取消仍可改变事实。续租结果漏收不回滚已应用更新；调用方按 P 查询或创建新 P。 |
+| 边界 | 到期与结束的会话不能复活；keepalive 不保住任何 O，也不延长 O 的输入期限。 |
+
+成功响应沿用现有 `Result`/`session` 形状，不新增时长回显或剩余分钟字段；绝对期限以
+`session.expires_at` 为准。首次成功不保证顶层 `phase`/`operation_state` 出现；完成的操作
+在内部记为 `phase=renewed`，查询/重放已完成 P 时可出现 `operation_state=finished` 与
+`phase=renewed`。
 
 ### `POST /api/diagnose`
 

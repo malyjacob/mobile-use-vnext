@@ -294,7 +294,11 @@ func (e *Engine) publishTreeAttempt(work *workState, session *sessionState, phas
 	e.current = obs
 	e.observations[observationID] = obs
 	e.pruneObservationsLocked()
-	e.touchSessionLocked(time.Now())
+	ttl := e.cfg.SessionTTL
+	if work.Kind == WorkStart {
+		ttl = e.cfg.StartSessionTTL
+	}
+	e.extendSessionLocked(time.Now(), ttl)
 	public := e.observationPublicLocked(obs, status, tree.full, delta, image)
 	return public, obs, nil
 }

@@ -290,7 +290,7 @@ func (e *Engine) sessionForWork(work *workState) *sessionState {
 }
 
 func sessionBeforeDeadline(session *sessionState, now time.Time) bool {
-	return now.Before(session.ExpiresAt) && now.Before(session.HardExpiresAt)
+	return now.Before(session.ExpiresAt)
 }
 
 func (e *Engine) workAuthorizedLocked(work *workState, now time.Time) bool {

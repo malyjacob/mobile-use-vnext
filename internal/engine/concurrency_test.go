@@ -352,21 +352,20 @@ func TestExpiredLeaseCannotBeRenewedOrPublished(t *testing.T) {
 	}
 }
 
-func TestSessionLeaseSlidesOnlyUntilHardLimit(t *testing.T) {
+func TestSessionLeaseRenewalStopsAfterRevocation(t *testing.T) {
 	h := newHarness(t)
 	h.startSession()
 	now := time.Now()
 	h.engine.mu.Lock()
 	s := h.engine.session
 	s.ExpiresAt = now.Add(time.Second)
-	s.HardExpiresAt = now.Add(30 * time.Second)
 	h.engine.touchSessionLocked(now)
 	first := s.ExpiresAt
 	h.engine.revokeSessionLocked("user_stop", now)
 	h.engine.touchSessionLocked(now.Add(time.Second))
 	afterStop := s.ExpiresAt
 	h.engine.mu.Unlock()
-	if !first.Equal(now.Add(30*time.Second)) || !afterStop.Equal(first) {
+	if !first.Equal(now.Add(h.engine.cfg.SessionTTL)) || !afterStop.Equal(first) {
 		t.Errorf("lease first=%v afterStop=%v", first, afterStop)
 	}
 }
@@ -385,34 +384,31 @@ func TestCleanupDoesNotRestartAfterCompletion(t *testing.T) {
 	}
 }
 
-// TestSessionLeaseStopsRenewalAtHardLimit isolates the hard-limit clamp: a
-// fresh lease may slide up to HardExpiresAt, but once that instant is reached
-// touchSessionLocked must never push it further, and an already expired lease
-// must not be revived.
-func TestSessionLeaseStopsRenewalAtHardLimit(t *testing.T) {
-	h := newHarnessWithClock(t, false)
-	h.startSession()
-	now := time.Now()
-	h.engine.mu.Lock()
-	s := h.engine.session
-	s.ExpiresAt = now.Add(time.Second)
-	s.HardExpiresAt = now.Add(5 * time.Second)
-	hard := s.HardExpiresAt
-	h.engine.touchSessionLocked(now) // clamped to the hard limit
-	clamped := s.ExpiresAt
-	h.engine.touchSessionLocked(now.Add(4 * time.Second)) // still before the hard limit
-	beforeHard := s.ExpiresAt
-	h.engine.touchSessionLocked(now.Add(6 * time.Second)) // past the hard limit
-	afterHard := s.ExpiresAt
-	h.engine.mu.Unlock()
-	if !clamped.Equal(hard) {
-		t.Errorf("first renewal clamped to %v, want hard limit %v", clamped, hard)
-	}
-	if !beforeHard.Equal(hard) {
-		t.Errorf("renewal near the hard limit moved expiry to %v, want %v", beforeHard, hard)
-	}
-	if !afterHard.Equal(hard) {
-		t.Errorf("renewal after the hard limit revived expiry to %v, want %v", afterHard, hard)
+func TestSessionLeaseOnlyExtendsUnexpiredActivity(t *testing.T) {
+	for _, remaining := range []time.Duration{30 * time.Second, 30 * time.Minute} {
+		t.Run(remaining.String(), func(t *testing.T) {
+			h := newHarnessWithClock(t, false)
+			h.startSession()
+			now := time.Now()
+			h.engine.mu.Lock()
+			defer h.engine.mu.Unlock()
+			s := h.engine.session
+			s.ExpiresAt = now.Add(remaining)
+			want := s.ExpiresAt
+			if next := now.Add(h.engine.cfg.SessionTTL); next.After(want) {
+				want = next
+			}
+			h.engine.touchSessionLocked(now)
+			if !s.ExpiresAt.Equal(want) {
+				t.Fatalf("ordinary expiry=%v want=%v", s.ExpiresAt, want)
+			}
+			// Equality is already expiry; neither a later action nor a query
+			// may revive the original lease.
+			h.engine.touchSessionLocked(want)
+			if !s.ExpiresAt.Equal(want) {
+				t.Fatal("ordinary activity revived an expired lease")
+			}
+		})
 	}
 }
 
