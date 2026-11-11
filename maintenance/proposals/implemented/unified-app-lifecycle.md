@@ -1,6 +1,7 @@
 # 提案：用统一 app 工具管理应用发现、任务认领交接、关窗与进程终止
 
-状态：提案，未实现。
+状态：已实现（实现提交 `1d27416e253618ae50cd26f2af4b0123a90cc1b8`，2026-11-12；
+验证记录 [unified-app-lifecycle.md](../../verification/unified-app-lifecycle.md)）。
 基线提交：`cbe1668cb3ca78c61a24cbcdee527d4ae96fa604`（分支 `master`，2026-11-12）。
 适用范围：HTTP、Go 客户端、MCP stdio/Streamable HTTP 的应用发现与生命周期调用；虚拟屏任务归属、STOP/end 收尾、恢复账本；手机与构建主机配套交付。
 影响范围：`internal/protocol`、`internal/device`、`internal/android`、`internal/engine`、`internal/store`、`internal/httpapi`、`internal/client`、`internal/mcp`、`android-control` 的状态文案/测试目标、`scripts/mcp-probe`、版本生成、构建部署、正式文档及设计源头。
@@ -32,24 +33,24 @@
 
 | 现行事实 | 基线位置 |
 | --- | --- |
-| open_app 只读预检、O 认领、目标重验、primary/virtual 分流 | [openapp.go](../../internal/engine/openapp.go#L33)；复用/新建 [L152](../../internal/engine/openapp.go#L152)；主屏不登记 [L216](../../internal/engine/openapp.go#L216) |
-| Task 没有 root task ID；解析器只保留显示位置与 leaf 事实 | [types.go](../../internal/device/types.go#L204)、[dumpsys.go](../../internal/android/dumpsys.go#L250) |
-| FocusTask 带派发回执，RemoveTask 仅返回 error | [launch.go](../../internal/android/launch.go#L114)、[L132](../../internal/android/launch.go#L132) |
-| 任务账本没有 ownership、origin_display、迁移责任 | [ledger.go](../../internal/engine/ledger.go#L113)；恢复项一律 owned [openapp.go](../../internal/engine/openapp.go#L292) |
-| cleanup 冻结原任务，再结合本屏 live task 与 recent-only 精确 ID 删除 | [cleanup.go](../../internal/engine/cleanup.go#L29)、[L536](../../internal/engine/cleanup.go#L536)、[L649](../../internal/engine/cleanup.go#L649) |
-| UI 派发前保存责任，落盘后与 STOP 再竞争 | [ui_execution.go](../../internal/engine/ui_execution.go#L84) |
-| 查询 apps 使用 detached P，成功/失败均不带主 outcome | [apps.go](../../internal/engine/apps.go#L24)、[L134](../../internal/engine/apps.go#L134)、[L155](../../internal/engine/apps.go#L155) |
-| recovery 把 act/open_app 名字写入消费者判定；uncertain 指向 status | [recovery.go](../../internal/engine/recovery.go#L80)、[L88](../../internal/engine/recovery.go#L88)、[L112](../../internal/engine/recovery.go#L112)、[L377](../../internal/engine/recovery.go#L377) |
-| status 不采集新证据，操作视图回放摘要而非原结果材料 | [status.go](../../internal/engine/status.go#L9)、[engine.go](../../internal/engine/engine.go#L1031) |
-| MCP 按整工具分配 P/取消策略，按工具名判断 IsError | [server.go](../../internal/mcp/server.go#L128)、[L197](../../internal/mcp/server.go#L197)、[L383](../../internal/mcp/server.go#L383) |
-| 文本分类表只有旧 app 单任务字段，复合 JSON 可以无损承载新增嵌套成员 | [result_text.go](../../internal/mcp/result_text.go#L26) |
-| 三模式既定的完整编码与 diagnostic 边界 | [MCP 契约](../../docs/mcp.md#L37)、[模式提案](implemented/mcp-result-modes.md#L18) |
-| 共同版本为 0.8.0 / contract 8 / Android 10；账本为 v4、64 KiB | [版本源](../../release/versions.json#L1)、[ledger.go](../../internal/engine/ledger.go#L5)、[L252](../../internal/engine/ledger.go#L252) |
-| 手机构建只产生 linux/arm64 服务与适配器；Go 探针默认使用主机 exe | [build.ps1](../../scripts/build.ps1#L42)、[probe/main.go](../../scripts/mcp-probe/main.go#L39) |
-| 现 probe 的 HTTP 模式启动本地子适配器，不能当作已部署手机适配器的验证 | [probe/main.go](../../scripts/mcp-probe/main.go#L108) |
-| verify-m5 会重生成主机 HTTP token，旧构建分支不固定目标/产物身份；启动日志仍写 tools=12 | [verify-m5.ps1](../../scripts/verify-m5.ps1#L103)、[L125](../../scripts/verify-m5.ps1#L125)、[main.go](../../cmd/device-mcp/main.go#L125) |
-| 源目录指纹包含顺序、描述与嵌入 schema，不能对 SDK 重排后的 tools/list 字节直接套同一哈希 | [catalog.go](../../internal/mcp/catalog.go#L14) |
-| 发布清单记录当前 HEAD、dirty、目录指纹、产物；部署覆盖安装保留私存 | [build-release.ps1](../../scripts/build-release.ps1#L172)、[发行契约](../../docs/release.md#L89) |
+| open_app 只读预检、O 认领、目标重验、primary/virtual 分流 | [openapp.go](../../../internal/engine/openapp.go#L33)；复用/新建 [L152](../../../internal/engine/openapp.go#L152)；主屏不登记 [L216](../../../internal/engine/openapp.go#L216) |
+| Task 没有 root task ID；解析器只保留显示位置与 leaf 事实 | [types.go](../../../internal/device/types.go#L204)、[dumpsys.go](../../../internal/android/dumpsys.go#L250) |
+| FocusTask 带派发回执，RemoveTask 仅返回 error | [launch.go](../../../internal/android/launch.go#L114)、[L132](../../../internal/android/launch.go#L132) |
+| 任务账本没有 ownership、origin_display、迁移责任 | [ledger.go](../../../internal/engine/ledger.go#L113)；恢复项一律 owned [openapp.go](../../../internal/engine/openapp.go#L292) |
+| cleanup 冻结原任务，再结合本屏 live task 与 recent-only 精确 ID 删除 | [cleanup.go](../../../internal/engine/cleanup.go#L29)、[L536](../../../internal/engine/cleanup.go#L536)、[L649](../../../internal/engine/cleanup.go#L649) |
+| UI 派发前保存责任，落盘后与 STOP 再竞争 | [ui_execution.go](../../../internal/engine/ui_execution.go#L84) |
+| 查询 apps 使用 detached P，成功/失败均不带主 outcome | [apps.go](../../../internal/engine/apps.go#L24)、[L134](../../../internal/engine/apps.go#L134)、[L155](../../../internal/engine/apps.go#L155) |
+| recovery 把 act/open_app 名字写入消费者判定；uncertain 指向 status | [recovery.go](../../../internal/engine/recovery.go#L80)、[L88](../../../internal/engine/recovery.go#L88)、[L112](../../../internal/engine/recovery.go#L112)、[L377](../../../internal/engine/recovery.go#L377) |
+| status 不采集新证据，操作视图回放摘要而非原结果材料 | [status.go](../../../internal/engine/status.go#L9)、[engine.go](../../../internal/engine/engine.go#L1031) |
+| MCP 按整工具分配 P/取消策略，按工具名判断 IsError | [server.go](../../../internal/mcp/server.go#L128)、[L197](../../../internal/mcp/server.go#L197)、[L383](../../../internal/mcp/server.go#L383) |
+| 文本分类表只有旧 app 单任务字段，复合 JSON 可以无损承载新增嵌套成员 | [result_text.go](../../../internal/mcp/result_text.go#L26) |
+| 三模式既定的完整编码与 diagnostic 边界 | [MCP 契约](../../../docs/mcp.md#L37)、[模式提案](mcp-result-modes.md#L18) |
+| 共同版本为 0.8.0 / contract 8 / Android 10；账本为 v4、64 KiB | [版本源](../../../release/versions.json#L1)、[ledger.go](../../../internal/engine/ledger.go#L5)、[L252](../../../internal/engine/ledger.go#L252) |
+| 手机构建只产生 linux/arm64 服务与适配器；Go 探针默认使用主机 exe | [build.ps1](../../../scripts/build.ps1#L42)、[probe/main.go](../../../scripts/mcp-probe/main.go#L39) |
+| 现 probe 的 HTTP 模式启动本地子适配器，不能当作已部署手机适配器的验证 | [probe/main.go](../../../scripts/mcp-probe/main.go#L108) |
+| verify-m5 会重生成主机 HTTP token，旧构建分支不固定目标/产物身份；启动日志仍写 tools=12 | [verify-m5.ps1](../../../scripts/verify-m5.ps1#L103)、[L125](../../../scripts/verify-m5.ps1#L125)、[main.go](../../cmd/device-mcp/main.go#L125) |
+| 源目录指纹包含顺序、描述与嵌入 schema，不能对 SDK 重排后的 tools/list 字节直接套同一哈希 | [catalog.go](../../../internal/mcp/catalog.go#L14) |
+| 发布清单记录当前 HEAD、dirty、目录指纹、产物；部署覆盖安装保留私存 | [build-release.ps1](../../../scripts/build-release.ps1#L172)、[发行契约](../../../docs/release.md#L89) |
 
 旧项目参考位置（本机同级仓库 `mobile-use-platform`，调研基线 `225dd6a020e1343e0eb94f821b03ae101341dc93`）：
 
@@ -677,17 +678,69 @@ stdio、host HTTP 与 phone remote 的适用三模式均要有真实结果；app
 8. 按 §8.2 部署手机、替换主机 exe、重启实际宿主并重新发现，运行受控生命周期与适用三模式验收。发现需要改契约/时序的偏离先回提案，不以放宽保护通过测试。
 9. 记录真实结果；实现提交存在后另做提案归档，补 §11、实现 hash 与验证记录、重写相对链接。部分落地写明缺口，不以“已构建”冒充“已部署/已实测”。
 
-## 11. 实现结果（归档时补写）
+## 11. 实现结果
 
-尚无实现提交。本节只在实现提交存在、按流程归档时填写；不得提前把待执行命令或设计推演写成验证结论。
+实现提交：`1d27416e253618ae50cd26f2af4b0123a90cc1b8`。构建、部署与实机结果见
+[验证记录](../../verification/unified-app-lifecycle.md)；本节只记录落地条目与偏离。
 
 ### 11.1 已落地
 
-归档时逐项填写提案条目、代码落点与实现提交，当前不填已落地项。
+- **契约**：`protocol.AppRequest` 七 kind 严格解码（成员表、`target` 互斥、`kill` 只收
+  `task_id`）；`AppView` 按 kind 编码/解码，保留 `state_preserved`/`restarted`/
+  `recents_cleaned` 的 null 与省略、find/list 失败省略集合；删除 `apps`/`open_app`
+  公共面；新增 app 业务错误码与 HTTP 映射。
+- **查询**：find 为 detached P，list 绑定原会话并接受当前 ready O 或可解析 P；两者无
+  outcome、不续租、不消费 O；request ctx 取消为 `query_cancelled`，工作期限到期为
+  `query_timeout`，均无业务错误码；查询工作在取消时立即脱离普通位置。
+- **变更**：open 复用/新建（主屏 shared、不登记；虚屏 owned）；claim 根任务搬移并登记
+  borrowed（`origin_display`）；handoff 移回主屏并移除删除责任（shared、
+  `foreground_restore` 三值）；close 冻结 ≤16 个目标、逐项 outcome/recents/complete；
+  kill 检查 owned、同屏唯一、非前台、FGS/播放、root、进程身份，精确 PID 派发一次并
+  有界回读 `killed_pids`/`remaining_pids`/`restarted`；全部变更成功后做一次 full 无图
+  后观察。
+- **归属与保护**：`owned/borrowed/shared` 注册；根级 `task_transfers` 责任池与 prepared/
+  may_dispatch/terminated/unknown/released 状态；本屏 live 自动采纳、checked IDs、退休
+  快照与恢复重试都排除受保护任务；已有删除/迁移责任的任务拒绝再次 claim。
+- **恢复与摘要**：v5 恢复保留迁移池与归属；恢复不重放 move/kill；同一 P 与 `status(P)`
+  只回 `app.kind`；app 专用 recovery planner 先于通用分支运行。
+- **android**：`RootTask` 解析；`MoveTask`/`RemoveTask` 回执三态；包进程清单（UID +
+  start ticks + `:remote` 子进程，root 回退）；精确 `kill -9`；FGS 与 MediaSession 事实。
+- **store**：账本 v5、v1–v4 迁移、v5 字段禁入旧版本、容量分区与 64 KiB 门禁、退休记录
+  禁嵌迁移池、禁止降存 v4；单份 >21 KiB 退休记录封闭删除资格后压缩为有界 owner 摘要。
+- **接入**：`/api/app` 8 KiB 严格入口与按 kind 交付预留；`Client.App`；删除旧路由与方法。
+- **MCP**：11 工具与 `app` schema 七分支；按 kind 的 P 分配/取消/IsError；三模式同源；
+  `app.*` 文本分类；未知结果只补 `app.kind`；启动日志 tools=11。
+- **脚本与 App**：`build-host-tools.ps1`（清单 + `-VerifyOnly`）、verify-m5/m6/p4 迁移、
+  probe 11 工具与 app 三模式矩阵、`http-remote` 与 `app-lifecycle`；控制 App 的
+  `app`/`app_kind` 受控中文状态与 test-target 扩展。
+- **版本与文档**：`0.9.0` / contract 9 / Android versionCode 11；README 与 `docs/` 同步；
+  独立只读文档审计最终结论 clean。
 
 ### 11.2 与提案不同或未执行
 
-归档时逐项填写偏离/未执行及真实理由；当前本提案的全部实现、构建与部署均未执行。
+- **设计源头修订未执行**：提案要求先在同级 `mobile-use-platform` 的
+  `docs/architecture/` 做 docs-only 修订；本次未改动该仓库，本仓库按提案语义实现。
+- **日志字段**：未在 `internal/eventlog` 增加 `app_kind` 字段；迁移事件只记录
+  direction/state（`task_id` 若不在白名单会被丢弃）。没有把 app kind 写入事件日志。
+- **实机未闭环的路径**：`claim` 成功搬移、`handoff` 及其前台恢复、`kill` 的实际进程终止
+  未在用户应用上执行；p4 只验证 claim/kill 的静态拒绝，probe 的 claim 因无受控主屏任务
+  SKIP，kill 只验证前台拒绝。相关分支由 engine/android 单测与 probe 矩阵覆盖。
+- **退休压缩**：实现为“单份 >21 KiB 时先停止旧 cleanup 并清空任务 ID，再压缩为有界
+  owner 摘要”，单测覆盖；未在设备上构造超大退休记录实测。
+- **部署与宿主**：手机与主机产物来自实现提交的干净构建并已部署；未重启用户真实 MCP
+  宿主进程，因此“宿主重新发现 11 工具”只由 probe/verify-m5 证明，未冒充宿主刷新。
+- **单向模式实机**：设备上 app 套件以 `both` 运行（同时含 text 与 structured）；未在设备上
+  分别以 `text`/`structured` 运行，单向模式由 probe 的 7×3 矩阵单测覆盖。
+- **测试边界**：未运行 `-race`（Windows 需 CGO/gcc）；未扩展 JVM 单测；test-target 的
+  第二任务、`:remote` 与 media FGS 运行时未验证（APK 已构建并含组件）。
+- **设备事实限制**：`MoveTask` 的适配器结果不含源显示屏（恒 0，engine 不使用该字段）；
+  `KillProcess` 适配器以 start ticks + 应用 UID 范围 + 进程名形状复核，具体包绑定由
+  engine 的进程清单负责。
+- **观察到的显示竞态**：`end` 后立即 `start` 时，旧虚屏仍在释放，控制 App 可能返回
+  `display_create_timeout`。该路径不由本提案新增代码引入；probe 与 verify-p4 在下次
+  start 前增加 5–6 秒有界 cleanup 观察等待，服务准入规则未改。
+- **版本源**：`release/versions.json` 的 `source_commit` 仍记冻结基线
+  `cbe1668…`；实际构建提交由 release/host-tools 清单记录。
 
 ---
 
