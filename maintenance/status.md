@@ -41,6 +41,7 @@
 | UI 执行结束证据与旧账本恢复（契约 4） | 已实现 | 已实测：原 v1 execution-only 账本 checkpoint/手机重启恢复；真实 launch 关联失败时原 P uncertain、后观察成功、end 后准入恢复；0.4.3 整组部署与新 stdio 适配器通过。当前 Codex 旧进程需重启，验证边界见[记录](verification/ui-input-execution-evidence.md) |
 | `act` 重验失败交付新观察（契约 6） | 已实现 | 已实测：probe 与 Settings 两个场景的 `target_changed` 都返回新 O 与 `retry/O/effective`，交付 O 为 `ready`，用新 P 一步重试成功、旧 O 返回 `observation_retired`；被拒的 `act` 零派发，`end` 后准入屏障恢复；主机 stdio 探针 12 工具 PASS（[记录](verification/act-revalidation-observation-delivery.md)） |
 | 工作期限与未决输入的会话级封锁（契约 7） | 已实现 | 已实测：`act` 后静默 60 秒会话仍 `active`；未确认回执不再阻止 `observe`；受管 `shell` 超预算返回后立即 `observe` 成功；服务进程重启（不重启手机）后 `can_start=true` 且旧会话记 `service_restarted`；账本为版本 4；stdio 与手机 HTTP `mcp-probe` 均 PASS。真实回执未知注入与 `termination=unknown` 实机样本未执行（[记录](verification/remove-work-ui-deadline-lockdown.md)） |
+| 显式重设会话租期并取消累计硬上限（契约 8） | 已实现 | 已实测：start 首观察后五分钟期限；120 分钟显式租约跨过 `started_at+1h`；普通 observe 不截短 30 分钟长租约；省略/1 分钟可缩短；同一 P 重放不再次计时；一分钟真实到期记 `lease_expired` 且 cleanup 完成；长租约下 STOP 立即 `revoked`。已发布 0.8.0 / versionCode 10，手机 HTTP 与主机 stdio `mcp-probe` PASS（[记录](verification/explicit-keepalive-duration.md)） |
 
 ## 3. 未验证 / 未实现
 
@@ -63,6 +64,8 @@
 | act 坐标目标点证明的真实歧义/无节点/同包浮层/WebView | 单元测试覆盖判据；实机未构造，原因见[记录](verification/act-coordinate-point-proof.md) §6 |
 | `act` 交付观察的 delta 分支 | `base` 规则由单元测试覆盖；实机两次场景交付均为 `full`，未取得 delta 样本 |
 | 真实 input 回执未知的实机注入 / shell `termination=unknown` 实机样本 | 未执行：发布二进制无注入面，打断 adbd 会同时切断恢复观察；受管链在本机总能确认超时终止。两条路径均由先红复现与单元测试覆盖（[记录](verification/remove-work-ui-deadline-lockdown.md)） |
+| 实等会话累计超过一小时 | 未执行：由受控时间单测证明硬上限已删除；实机 120 分钟显式租约返回的绝对期限已超过 `started_at+1h`（[记录](verification/explicit-keepalive-duration.md)） |
+| 实机 MCP 调用带 `duration_minutes` 的 keepalive | 未单独构造：MCP 转发由单测覆盖，实机 keepalive 语义由直接 HTTP 调用验证（[记录](verification/explicit-keepalive-duration.md)） |
 
 ## 4. 证据入口
 
@@ -75,6 +78,7 @@
 - [结构化 recovery 入口实现与验证](verification/structured-recovery-entry.md)
 - [MCP 文本树块实现、0.4.2 部署与实机验证](verification/mcp-tree-text.md)
 - [工作期限与未决输入的会话级封锁实现与实机验证](verification/remove-work-ui-deadline-lockdown.md)
+- [显式重设会话租期与取消累计硬上限实现、发布与实机验证](verification/explicit-keepalive-duration.md)
 - [主屏多窗口层级修复与实机验证](verification/primary-display-multi-window.md)
 - [工程决策](decisions.md)
 - [工程流程](process.md)
@@ -82,7 +86,8 @@
 ## 5. 暂缓事项
 
 - 第 3 节的验证缺口暂不单独补测；待其后按真实使用路径补齐证据。
-- 当前部署为 `0.7.0`（`contract_version=7`、`android_version_code=9`），`can_start=true`；
-  发布产物构建自提交 `96e4c6b`，`source_dirty=false`；手机 HTTP MCP 适配器二进制与清单
-  一致，主机 stdio 适配器已重建为 `build/device-mcp.exe`，需由各 agent 宿主进程自行重启
-  才能加载新的工具描述与目录指纹。旧 0.6.0 及更早产物仍作为不匹配验证材料。
+- 当前部署为 `0.8.0`（`contract_version=8`、`android_version_code=10`），`can_start=true`；
+  发布产物构建自提交 `f1da2d5`，`source_dirty=false`；手机 HTTP MCP 适配器二进制与清单
+  一致，主机 stdio 适配器已重建为 `build/device-mcp.exe` 与 `build/mcp-probe.exe`，需由各
+  agent 宿主进程自行重启才能加载新的工具描述与目录指纹；chroot 内仍有一个旧 stdio
+  `device-mcp` 进程，同样需其宿主重启。旧 0.7.0 及更早产物仍作为不匹配验证材料。

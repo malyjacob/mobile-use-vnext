@@ -1,7 +1,8 @@
 # 提案：显式重设会话租期并取消累计时长硬上限
 
-状态：提案，未实现。
+状态：已实现（实现提交 `f1da2d58ff8ba4ef33b7ea18442f7bdfa1ac3b95`，2026-11-11）。
 基线提交：`d3161e7b8a479b29ef8b5412ba21d0a0416453b0`（分支 `master`，2026-11-11）。
+实现与验证记录：[explicit-keepalive-duration.md](../../verification/explicit-keepalive-duration.md)。
 适用范围：HTTP/MCP `start` 与 `keepalive`、Go 客户端、现有自动续期点及会话期限检查。
 影响范围：`internal/protocol`、`internal/engine`、`internal/client`、`internal/mcp`、相关测试、共同版本源及所涉正式文档。
 契约（`/api/*` 字段与 `contract_version`）：改变。`start` 租期改为五分钟；`keepalive` 增加可选 `duration_minutes`，显式续租由单调延长改为覆盖截止时间，取消一小时硬上限；返回值沿用现有 Result/session 形状，拟将共同契约从 7 升至 8。
@@ -28,22 +29,22 @@ Agent 长时间思考或等待用户时，可能来不及在 120 秒内续租，
 
 | 事实 | 基线位置 |
 | --- | --- |
-| 默认滑动租期 120 秒、累计硬上限一小时 | [engine.go:63](../../internal/engine/engine.go#L63)、[engine.go:100](../../internal/engine/engine.go#L100) |
-| `keepalive` 请求只声明 `reference`，无时长成员 | [surface.go:48](../../internal/protocol/surface.go#L48)、[surface.go:216](../../internal/protocol/surface.go#L216) |
-| HTTP 解码后交给 engine；engine 显式续租复用普通续期函数 | [server.go:298](../../internal/httpapi/server.go#L298)、[keepalive.go:33](../../internal/engine/keepalive.go#L33) |
-| 普通续期受硬上限截断，且只增不减 | [engine.go:819](../../internal/engine/engine.go#L819) |
-| 初始会话也设置硬期限；公共授权同时检查两个期限 | [start.go:84](../../internal/engine/start.go#L84)、[operations.go:292](../../internal/engine/operations.go#L292) |
-| 会话越线后，时钟撤权并启动清理 | [engine.go:705](../../internal/engine/engine.go#L705)、[engine.go:730](../../internal/engine/engine.go#L730) |
-| 虚拟屏清理尝试移除原任务/最近任务并请求关闭显示；主屏不清用户任务 | [cleanup.go:283](../../internal/engine/cleanup.go#L283)、[cleanup.go:63](../../internal/engine/cleanup.go#L63) |
-| 相同 P 返回原操作视图，不再次续租；已有测试确认重放可投影更新后的会话截止时间 | [keepalive.go:23](../../internal/engine/keepalive.go#L23)、[readonly_test.go:429](../../internal/engine/readonly_test.go#L429) |
-| keepalive 首次成功响应构造 operation_id/outcome/session；newResult 不自动填 operation_state/phase | [keepalive.go:46](../../internal/engine/keepalive.go#L46)、[operations.go:351](../../internal/engine/operations.go#L351) |
-| session 对活动会话投影 expires_at，对 ended 投影 ended_at/reason；时间格式为 UTC RFC3339Nano | [engine.go:885](../../internal/engine/engine.go#L885)、[responses.go:283](../../internal/protocol/responses.go#L283) |
-| 重放/查询原 P 的已完成视图包含 operation_state/phase，并重投影原会话当前事实 | [engine.go:1031](../../internal/engine/engine.go#L1031) |
-| SDK 重建只含 `reference` 的请求；MCP 也只传该成员，新增字段必须贯通两层 | [client.go:252](../../internal/client/client.go#L252)、[server.go:494](../../internal/mcp/server.go#L494) |
-| 正式契约和工具说明均承诺单调续租及一小时硬上限 | [interface.md:639](../../docs/interface.md#L639)、[schema.go:234](../../internal/mcp/schema.go#L234) |
-| 共同契约号为 7；默认行为或执行语义变化应推进契约版本 | [versions.json:1](../../release/versions.json#L1)、[release.md:19](../../docs/release.md#L19)、[release.md:42](../../docs/release.md#L42) |
+| 默认滑动租期 120 秒、累计硬上限一小时 | [engine.go:63](../../../internal/engine/engine.go#L63)、[engine.go:100](../../../internal/engine/engine.go#L100) |
+| `keepalive` 请求只声明 `reference`，无时长成员 | [surface.go:48](../../../internal/protocol/surface.go#L48)、[surface.go:216](../../../internal/protocol/surface.go#L216) |
+| HTTP 解码后交给 engine；engine 显式续租复用普通续期函数 | [server.go:298](../../../internal/httpapi/server.go#L298)、[keepalive.go:33](../../../internal/engine/keepalive.go#L33) |
+| 普通续期受硬上限截断，且只增不减 | [engine.go:819](../../../internal/engine/engine.go#L819) |
+| 初始会话也设置硬期限；公共授权同时检查两个期限 | [start.go:84](../../../internal/engine/start.go#L84)、[operations.go:292](../../../internal/engine/operations.go#L292) |
+| 会话越线后，时钟撤权并启动清理 | [engine.go:705](../../../internal/engine/engine.go#L705)、[engine.go:730](../../../internal/engine/engine.go#L730) |
+| 虚拟屏清理尝试移除原任务/最近任务并请求关闭显示；主屏不清用户任务 | [cleanup.go:283](../../../internal/engine/cleanup.go#L283)、[cleanup.go:63](../../../internal/engine/cleanup.go#L63) |
+| 相同 P 返回原操作视图，不再次续租；已有测试确认重放可投影更新后的会话截止时间 | [keepalive.go:23](../../../internal/engine/keepalive.go#L23)、[readonly_test.go:429](../../../internal/engine/readonly_test.go#L429) |
+| keepalive 首次成功响应构造 operation_id/outcome/session；newResult 不自动填 operation_state/phase | [keepalive.go:46](../../../internal/engine/keepalive.go#L46)、[operations.go:351](../../../internal/engine/operations.go#L351) |
+| session 对活动会话投影 expires_at，对 ended 投影 ended_at/reason；时间格式为 UTC RFC3339Nano | [engine.go:885](../../../internal/engine/engine.go#L885)、[responses.go:283](../../../internal/protocol/responses.go#L283) |
+| 重放/查询原 P 的已完成视图包含 operation_state/phase，并重投影原会话当前事实 | [engine.go:1031](../../../internal/engine/engine.go#L1031) |
+| SDK 重建只含 `reference` 的请求；MCP 也只传该成员，新增字段必须贯通两层 | [client.go:252](../../../internal/client/client.go#L252)、[server.go:494](../../../internal/mcp/server.go#L494) |
+| 正式契约和工具说明均承诺单调续租及一小时硬上限 | [interface.md:639](../../../docs/interface.md#L639)、[schema.go:234](../../../internal/mcp/schema.go#L234) |
+| 共同契约号为 7；默认行为或执行语义变化应推进契约版本 | [versions.json:1](../../../release/versions.json#L1)、[release.md:19](../../../docs/release.md#L19)、[release.md:42](../../../docs/release.md#L42) |
 
-现有自动续期点分别是：`start` 激活、`act` 成功认领后、成功发布新 O，以及受管 `shell` 的派发边界。依据为 [start.go:275](../../internal/engine/start.go#L275)、[act.go:48](../../internal/engine/act.go#L48)、[capture.go:294](../../internal/engine/capture.go#L294)、[shell.go:307](../../internal/engine/shell.go#L307)。`open_app` 认领本身没有直接续期调用，成功发布后观察才经过公共发布续期点，见 [openapp.go:86](../../internal/engine/openapp.go#L86)。本提案不新增或移动这些触发点。
+现有自动续期点分别是：`start` 激活、`act` 成功认领后、成功发布新 O，以及受管 `shell` 的派发边界。依据为 [start.go:275](../../../internal/engine/start.go#L275)、[act.go:48](../../../internal/engine/act.go#L48)、[capture.go:294](../../../internal/engine/capture.go#L294)、[shell.go:307](../../../internal/engine/shell.go#L307)。`open_app` 认领本身没有直接续期调用，成功发布后观察才经过公共发布续期点，见 [openapp.go:86](../../../internal/engine/openapp.go#L86)。本提案不新增或移动这些触发点。
 
 ### 1.3 为什么直觉会出错
 
@@ -132,14 +133,14 @@ session_before_deadline(session, now):
 
 | 文件 | 计划改动 |
 | --- | --- |
-| [surface.go](../../internal/protocol/surface.go)、[encode.go](../../internal/protocol/encode.go) | 增加 `DurationMinutes` 与显式存在标记，严格区分省略、null、0 与有效整数；编码省略时不补 null，原引用校验沿用 |
-| [keepalive.go](../../internal/engine/keepalive.go) | 与普通单调续期分开，锁内取时、校验、覆盖并复制视图；保留 P 重放与错误规划 |
-| [engine.go](../../internal/engine/engine.go)、[start.go](../../internal/engine/start.go)、[operations.go](../../internal/engine/operations.go) | 删除累计硬期限字段、初始化、clamp 和公共授权检查；增加 StartSessionTTL=5分钟，start 初始化/激活使用它；其他普通续期仍按 SessionTTL=2分钟取最大值 |
-| [capture.go](../../internal/engine/capture.go)、[act.go](../../internal/engine/act.go)、[shell.go](../../internal/engine/shell.go) | 公共发布按工作类型区分 WorkStart 的五分钟与其他工作的两分钟；不新增自动续期边界或继承显式时长 |
-| [client.go](../../internal/client/client.go) | 保留默认 `Keepalive(ctx, reference, opts...)`，新增专用 `KeepaliveWithDuration(ctx, reference, durationMinutes, opts...)`，共用强类型请求发送；不把时长加进所有工具的通用调用选项 |
-| [server.go](../../internal/mcp/server.go)、[schema.go](../../internal/mcp/schema.go) | 根据参数是否存在调用对应 SDK 路径，完整透传；新增整数 schema/边界/默认值及 §6.5 文案，工具名称和数量保持 |
+| [surface.go](../../../internal/protocol/surface.go)、[encode.go](../../../internal/protocol/encode.go) | 增加 `DurationMinutes` 与显式存在标记，严格区分省略、null、0 与有效整数；编码省略时不补 null，原引用校验沿用 |
+| [keepalive.go](../../../internal/engine/keepalive.go) | 与普通单调续期分开，锁内取时、校验、覆盖并复制视图；保留 P 重放与错误规划 |
+| [engine.go](../../../internal/engine/engine.go)、[start.go](../../../internal/engine/start.go)、[operations.go](../../../internal/engine/operations.go) | 删除累计硬期限字段、初始化、clamp 和公共授权检查；增加 StartSessionTTL=5分钟，start 初始化/激活使用它；其他普通续期仍按 SessionTTL=2分钟取最大值 |
+| [capture.go](../../../internal/engine/capture.go)、[act.go](../../../internal/engine/act.go)、[shell.go](../../../internal/engine/shell.go) | 公共发布按工作类型区分 WorkStart 的五分钟与其他工作的两分钟；不新增自动续期边界或继承显式时长 |
+| [client.go](../../../internal/client/client.go) | 保留默认 `Keepalive(ctx, reference, opts...)`，新增专用 `KeepaliveWithDuration(ctx, reference, durationMinutes, opts...)`，共用强类型请求发送；不把时长加进所有工具的通用调用选项 |
+| [server.go](../../../internal/mcp/server.go)、[schema.go](../../../internal/mcp/schema.go) | 根据参数是否存在调用对应 SDK 路径，完整透传；新增整数 schema/边界/默认值及 §6.5 文案，工具名称和数量保持 |
 | 所涉 protocol/engine/client/MCP 测试 | 替换一小时硬上限预期，覆盖新语义和完整转发，保留到期不可复活、STOP 与 P 幂等测试 |
-| [versions.json](../../release/versions.json) 与生成常量 | 实现时统一推进契约号并按发布规范生成 Go/Java/XML；不在此次提案修改版本 |
+| [versions.json](../../../release/versions.json) 与生成常量 | 实现时统一推进契约号并按发布规范生成 Go/Java/XML；不在此次提案修改版本 |
 
 ### 6.2 配置与取值
 
@@ -240,10 +241,10 @@ keepalive 不发布新 O，首次正常成功不返回观察树，也不因续�
 
 **正式文档同步范围：**
 
-- [interface.md](../../docs/interface.md)：请求字段、默认/校验、覆盖与最大值公式、错误/幂等/并发、无累计硬上限、示例与期限保证措辞。
-- [architecture.md](../../docs/architecture.md)：会话生命周期和单个期限权威，去除一小时约束，区分显式覆盖与自动单调续期。
-- [mcp.md](../../docs/mcp.md)、[client.md](../../docs/client.md)：参数和 SDK 路径、完整透传、调用取消仍可撤权、默认调用可能缩短。
-- [release.md](../../docs/release.md) 及实际出现契约号/工具目录指纹的正式材料：仅按实现后的共同版本与产物更新，历史维护记录不重写为新规则。
+- [interface.md](../../../docs/interface.md)：请求字段、默认/校验、覆盖与最大值公式、错误/幂等/并发、无累计硬上限、示例与期限保证措辞。
+- [architecture.md](../../../docs/architecture.md)：会话生命周期和单个期限权威，去除一小时约束，区分显式覆盖与自动单调续期。
+- [mcp.md](../../../docs/mcp.md)、[client.md](../../../docs/client.md)：参数和 SDK 路径、完整透传、调用取消仍可撤权、默认调用可能缩短。
+- [release.md](../../../docs/release.md) 及实际出现契约号/工具目录指纹的正式材料：仅按实现后的共同版本与产物更新，历史维护记录不重写为新规则。
 
 升级是语义变更：旧调用方即使只传 `reference`，也不能再假定显式调用只增不减。共同契约号从 7 推进到 8，仍按现有精确匹配策略整组升级，不用新增字段可选来掩盖默认行为变化。
 
@@ -340,6 +341,38 @@ keepalive 不发布新 O，首次正常成功不返回观察树，也不因续�
 4. 实现具备后同步正式契约、架构、SDK/MCP 文档和版本生成产物；发起独立只读 docs 审计，修正并复检至 clean。
 5. 按实际可用环境执行所涉系统/实机检查及发布必要验证，记录执行与未执行事实；提交实现时提案状态仍保持“提案，未实现”。
 6. 实现提交落盘后再追加 §11、写实现 hash 和验证记录，移入 implemented 并重写链接；单独提交归档。
+
+## 11. 实现结果
+
+实现提交为 `f1da2d58ff8ba4ef33b7ea18442f7bdfa1ac3b95`（2026-11-11，含契约 7→8、
+发行 0.8.0、Android versionCode 10 与生成常量）。整组发布、手机/主机部署、MCP 探针与
+实机验证见[实现验证记录](../../verification/explicit-keepalive-duration.md)。
+
+### 11.1 已落地
+
+| 提案条目 | 代码落点 |
+| --- | --- |
+| 可选时长与省略/显式非法值区分 | `internal/protocol/surface.go`（`KeepaliveRequest`、`EffectiveDurationMinutes`、`DecodeKeepalive`）、`encode.go` |
+| 显式覆盖截止时间 | `internal/engine/keepalive.go`（`Keepalive`、`resolveKeepaliveLocked`） |
+| start 五分钟租期 | `internal/engine/engine.go`（`StartSessionTTL`）、`start.go`（初始化、激活）、`capture.go`（`publishTreeAttempt` 按工作类型） |
+| 删除累计硬上限 | `internal/engine/engine.go`（删除 `SessionHardLimit`/`HardExpiresAt`）、`operations.go`（`sessionBeforeDeadline` 只剩单一期限） |
+| 其他普通活动两分钟最大值 | `act.go`、`capture.go`、`shell.go` 既有触发点与 `touchSessionLocked`/`extendSessionLocked` |
+| Go 客户端显式方法 | `internal/client/client.go`（`KeepaliveWithDuration`，共享发送路径与 P） |
+| MCP schema 与透传 | `internal/mcp/schema.go`（integer 1～120、default 2）、`server.go`（按 presence 调用对应 SDK 路径） |
+| 版本源与正式文档 | `release/versions.json` 与生成常量；`docs/architecture.md`、`docs/interface.md`、`docs/client.md`、`docs/mcp.md`、`docs/control-protocol.md`、`docs/release.md`、`docs/runbook.md`、`docs/phone-operations.md`、`docs/integration.md`、`README.md` |
+| 回归用例 | `internal/engine/lease_test.go` 及 protocol/client/MCP 测试更新；工具目录指纹 `7326317c…` |
+
+### 11.2 与提案不同或未执行
+
+| 项 | 结论与理由 |
+| --- | --- |
+| 实等会话累计超过一小时 | 未实等。取消硬上限由 `TestOrdinaryLeasePassesFormerHardLimit` 的受控时间证明；实机 120 分钟显式租约返回的期限已超过 `started_at+1h`，不把这一现场检查写成实等一小时。 |
+| 实机 MCP 工具带 `duration_minutes` | 未单独构造。MCP 的省略/1/120 完整转发由 `internal/mcp/server_test.go` 的内存 MCP 服务覆盖；实机 keepalive 语义由直接 `/api/keepalive` 验证，MCP 探针验证 12 工具与 schema。 |
+| 首次 MCP 探针瞬态失败 | stdio 首次 start 返回 `control_revoked`（部署后 App 同步尚未稳定），HTTP 首次取消检查的第二 start 返回 `display_create_failed`（紧接 end 后显示清理未完成）；均在状态稳定后重跑 `RESULT PASS`，未发生在 keepalive/租期路径。 |
+| 旧 stdio MCP 进程 | 部署在 chroot 内仍发现一个旧 stdio `device-mcp`；默认 HTTP 适配器已按清单重启并核验，旧进程属宿主托管，需宿主重启；部署脚本不越过宿主边界强杀。 |
+| 主机宿主刷新 | 已重建 `build/device-mcp.exe` 与 `build/mcp-probe.exe` 并跑通探针；是否由 DSH/其他宿主重新加载新二进制不在本提案内，宿主必须重启实际进程。 |
+
+---
 
 ## 附：本提案不改变的事项
 

@@ -433,3 +433,22 @@
   语句进入 `docs/architecture.md` 与 `docs/interface.md`）。`keepalive` 的既有语义（只承诺
   租约，不承诺保活超过 1 小时硬上限）同时写入契约面，行为不变。保留风险：输入不提供幂等，
   被放弃的 `shell` 可能与后续工作物理重叠，回执未知后应立即 `observe` 收敛。
+
+## D37 契约 8：显式重设会话租期并取消累计硬上限
+
+- **背景**：Agent 长时间思考或等待用户时可能来不及在 120 秒内续租；旧 `keepalive` 只能把
+  截止时间单调推到 `min(now+120s, started_at+1h)`，既不能提前申请较长等待窗口，也不能
+  缩短长租约，持续保活仍无法跨过累计一小时。用户确认这是生命周期策略取舍，不是实现缺陷。
+- **选择**：批准 `explicit-keepalive-duration` 取舍。`start` 初始化、激活与首个 full 观察
+  成功发布使用五分钟租期；其他普通活动仍只在既有触发点取
+  `max(expires_at, now+2分钟)`，不继承显式时长；新 `keepalive` 的可选 `duration_minutes`
+  为 1～120 的整数，省略为 2，engine 在同一状态锁内取应用时 `now` 后直接覆盖
+  `expires_at = now + duration_minutes`，可延长或缩短；同一可识别 P 重放不再次重设。
+  删除 `SessionHardLimit`/`HardExpiresAt`，会话只有一个 `ExpiresAt` 权威；到期、STOP/end、
+  观察有效期、基线与工作期限保持各自边界。严格拒绝 `null`、字符串、布尔、非整数、
+  0/负数/121 及未知/重复/大小写字段。
+- **影响**：`contract_version` 前进为 `8`，发行 0.8.0、Android versionCode 10；旧调用方不能
+  再假定显式 `keepalive` 只增不减，默认两分钟调用可能主动缩短五分钟启动租期或长租约。
+  MCP schema/描述、Go 客户端 `KeepaliveWithDuration` 与正式文档同步；工具数仍为 12，目录
+  指纹随描述变化。保留风险：未提前申请足够时长仍会到期回收；显式长租约会增加遗弃会话
+  占用时间，调用方应在完成后 `end`。
