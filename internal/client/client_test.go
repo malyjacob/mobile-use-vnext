@@ -470,6 +470,423 @@ func TestObserveEncodingIsCanonical(t *testing.T) {
 	}
 }
 
+func TestAppEncodesKindBranches(t *testing.T) {
+	cases := []struct {
+		name    string
+		request *protocol.AppRequest
+		body    string
+	}{
+		{"find-all", &protocol.AppRequest{Kind: protocol.AppKindFind}, `{"kind":"find"}`},
+		{"find-query", &protocol.AppRequest{Kind: protocol.AppKindFind, Query: "设置", HasQuery: true}, `{"kind":"find","query":"设置"}`},
+		{"list-default", &protocol.AppRequest{Kind: protocol.AppKindList, Reference: "O1"}, `{"kind":"list","reference":"O1"}`},
+		{
+			"list-primary-filter",
+			&protocol.AppRequest{
+				Kind: protocol.AppKindList, Reference: "P1",
+				Scope: protocol.AppScopePrimary, FilterApp: "com.example", HasFilter: true,
+			},
+			`{"kind":"list","reference":"P1","scope":"primary","app":"com.example"}`,
+		},
+		{
+			"open",
+			&protocol.AppRequest{Kind: protocol.AppKindOpen, ObservationID: "O1", App: "com.example"},
+			`{"kind":"open","observation_id":"O1","app":"com.example"}`,
+		},
+		{
+			"claim-task",
+			&protocol.AppRequest{
+				Kind: protocol.AppKindClaim, ObservationID: "O1",
+				Target: &protocol.AppTarget{TaskID: 42, UseTask: true},
+			},
+			`{"kind":"claim","observation_id":"O1","target":{"task_id":42}}`,
+		},
+		{
+			"claim-app",
+			&protocol.AppRequest{
+				Kind: protocol.AppKindClaim, ObservationID: "O1",
+				Target: &protocol.AppTarget{App: "com.example"},
+			},
+			`{"kind":"claim","observation_id":"O1","target":{"app":"com.example"}}`,
+		},
+		{
+			"handoff-restore",
+			&protocol.AppRequest{
+				Kind: protocol.AppKindHandoff, ObservationID: "O1",
+				Target: &protocol.AppTarget{TaskID: 42, UseTask: true}, RestoreForeground: true,
+			},
+			`{"kind":"handoff","observation_id":"O1","target":{"task_id":42},"restore_foreground":true}`,
+		},
+		{
+			"close-borrowed",
+			&protocol.AppRequest{
+				Kind: protocol.AppKindClose, ObservationID: "O1",
+				Target: &protocol.AppTarget{App: "com.example"}, AllowBorrowed: true,
+			},
+			`{"kind":"close","observation_id":"O1","target":{"app":"com.example"},"allow_borrowed":true}`,
+		},
+		{
+			"kill-playback",
+			&protocol.AppRequest{
+				Kind: protocol.AppKindKill, ObservationID: "O1",
+				Target: &protocol.AppTarget{TaskID: 42, UseTask: true}, AllowStopPlayback: true,
+			},
+			`{"kind":"kill","observation_id":"O1","target":{"task_id":42},"allow_stop_playback":true}`,
+		},
+	}
+
+	captures := make(chan requestCapture, len(cases))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		captures <- captureRequest(t, request)
+		writeResponse(w, http.StatusOK, `{}`)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			operation := "Papp-" + tc.name
+			response, err := client.App(context.Background(), tc.request, WithOperationID(operation))
+			if err != nil {
+				t.Fatalf("App() error: %v", err)
+			}
+			capture := <-captures
+			assertToolRequest(t, capture, "/api/app")
+			if capture.body != tc.body {
+				t.Fatalf("app body = %q, want %q", capture.body, tc.body)
+			}
+			if got := onlyOperationHeader(t, capture.headers); got != operation {
+				t.Fatalf("operation header = %q, want %q", got, operation)
+			}
+			if response == nil || response.OperationID != operation {
+				t.Fatal("response did not keep the pre-assigned operation ID")
+			}
+		})
+	}
+}
+
+func TestAppRejectsUnencodableBranchesWithoutSending(t *testing.T) {
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		hits.Add(1)
+		writeResponse(w, http.StatusOK, `{}`)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	cases := []struct {
+		name    string
+		request *protocol.AppRequest
+	}{
+		{"unknown-kind", &protocol.AppRequest{Kind: "bogus"}},
+		{"list-missing-reference", &protocol.AppRequest{Kind: protocol.AppKindList}},
+		{"open-missing-app", &protocol.AppRequest{Kind: protocol.AppKindOpen, ObservationID: "O1"}},
+		{"claim-missing-target", &protocol.AppRequest{Kind: protocol.AppKindClaim, ObservationID: "O1"}},
+		{
+			"kill-package-target",
+			&protocol.AppRequest{
+				Kind: protocol.AppKindKill, ObservationID: "O1",
+				Target: &protocol.AppTarget{App: "com.example"},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			response, err := client.App(context.Background(), tc.request, WithOperationID("Papp-reject"))
+			if response != nil {
+				t.Fatal("unencodable request produced a response")
+			}
+			clientErr := requireClientError(t, err)
+			if clientErr.Code != protocol.CodeInvalidRequest || clientErr.Transport {
+				t.Fatalf("code = %q transport=%t, want a caller-side invalid request", clientErr.Code, clientErr.Transport)
+			}
+			if clientErr.OperationID != "Papp-reject" {
+				t.Fatal("caller-side rejection lost the pre-assigned operation ID")
+			}
+		})
+	}
+	if hits.Load() != 0 {
+		t.Fatalf("unencodable app branches reached the service %d times", hits.Load())
+	}
+}
+
+func TestAppDecodesFindView(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		writeResponse(w, http.StatusOK,
+			`{"operation_id":"Pappfind","app":{"kind":"find","items":[{"name":"设置","package":"com.android.settings"},{"name":"示例应用","package":"com.example"}],"total":7,"truncated":false,"captured_at":"2026-11-12T03:00:00+08:00"}}`)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	response, err := client.App(context.Background(),
+		&protocol.AppRequest{Kind: protocol.AppKindFind}, WithOperationID("Pappfind"))
+	if err != nil {
+		t.Fatalf("App() error: %v", err)
+	}
+	if response == nil || response.Result == nil || response.Result.App == nil {
+		t.Fatal("find view was not decoded")
+	}
+	app := response.Result.App
+	if app.Kind != protocol.AppKindFind {
+		t.Fatalf("kind = %q, want find", app.Kind)
+	}
+	if len(app.Items) != 2 || app.Items[0] != (protocol.AppItem{Name: "设置", Package: "com.android.settings"}) ||
+		app.Items[1] != (protocol.AppItem{Name: "示例应用", Package: "com.example"}) {
+		t.Fatalf("find items differ: %+v", app.Items)
+	}
+	if !app.HasTotal || app.Total != 7 {
+		t.Fatalf("total = %d (present=%t), want 7", app.Total, app.HasTotal)
+	}
+	if app.Truncated == nil || *app.Truncated {
+		t.Fatal("explicit truncated=false was not preserved")
+	}
+	if app.CapturedAt != "2026-11-12T03:00:00+08:00" {
+		t.Fatalf("captured_at = %q", app.CapturedAt)
+	}
+	if response.Result.Outcome != "" {
+		t.Fatalf("query outcome = %q, want omitted", response.Result.Outcome)
+	}
+}
+
+func TestAppDecodesListView(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		writeResponse(w, http.StatusOK,
+			`{"operation_id":"Papplist","app":{"kind":"list","display_id":12,"items":[{"task_id":42,"package":"com.example","ownership":"borrowed","origin_display":0},{"task_id":43,"package":"com.example","ownership":"shared"}],"total":2,"truncated":false,"captured_at":"2026-11-12T03:00:01+08:00","foreground":{"state":"present","package":"com.example","task_id":null}}}`)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	response, err := client.App(context.Background(),
+		&protocol.AppRequest{Kind: protocol.AppKindList, Reference: "O1"}, WithOperationID("Papplist"))
+	if err != nil {
+		t.Fatalf("App() error: %v", err)
+	}
+	if response == nil || response.Result == nil || response.Result.App == nil {
+		t.Fatal("list view was not decoded")
+	}
+	app := response.Result.App
+	if app.Kind != protocol.AppKindList {
+		t.Fatalf("kind = %q, want list", app.Kind)
+	}
+	if app.DisplayID == nil || *app.DisplayID != 12 {
+		t.Fatalf("display_id = %v, want 12", app.DisplayID)
+	}
+	if len(app.TaskItems) != 2 {
+		t.Fatalf("list items = %d, want 2", len(app.TaskItems))
+	}
+	first, second := app.TaskItems[0], app.TaskItems[1]
+	if first.TaskID != 42 || first.Ownership != protocol.TaskOwnershipBorrowed ||
+		first.OriginDisplay == nil || *first.OriginDisplay != 0 {
+		t.Fatalf("first list item differs: %+v", first)
+	}
+	if second.TaskID != 43 || second.Ownership != protocol.TaskOwnershipShared ||
+		second.OriginDisplay != nil {
+		t.Fatalf("second list item differs: %+v", second)
+	}
+	if app.Foreground == nil || app.Foreground.State != "present" ||
+		app.Foreground.Package != "com.example" {
+		t.Fatalf("foreground differs: %+v", app.Foreground)
+	}
+	if !app.Foreground.HasTask || app.Foreground.TaskID != nil {
+		t.Fatal("foreground task_id=null was not decoded as present-but-unknown")
+	}
+}
+
+func TestAppDecodesOpenView(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		writeResponse(w, http.StatusOK,
+			`{"operation_id":"Pappopen","outcome":"executed","app":{"kind":"open","package":"com.example","task_id":42,"display_id":12,"ownership":"owned","reused":true,"state_preserved":true}}`)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	response, err := client.App(context.Background(),
+		&protocol.AppRequest{Kind: protocol.AppKindOpen, ObservationID: "O1", App: "com.example"},
+		WithOperationID("Pappopen"))
+	if err != nil {
+		t.Fatalf("App() error: %v", err)
+	}
+	if response == nil || response.Result == nil || response.Result.App == nil {
+		t.Fatal("open view was not decoded")
+	}
+	app := response.Result.App
+	if app.Kind != protocol.AppKindOpen || app.Package != "com.example" {
+		t.Fatalf("open identity differs: %+v", app)
+	}
+	if app.TaskID == nil || *app.TaskID != 42 || app.DisplayID == nil || *app.DisplayID != 12 {
+		t.Fatalf("open task/display differs: %+v", app)
+	}
+	if app.Ownership != protocol.TaskOwnershipOwned {
+		t.Fatalf("ownership = %q, want owned", app.Ownership)
+	}
+	if app.Reused == nil || !*app.Reused {
+		t.Fatal("reused=true was not decoded")
+	}
+	if !app.HasStatePreserved || app.StatePreserved == nil || !*app.StatePreserved {
+		t.Fatal("state_preserved=true was not decoded")
+	}
+}
+
+func TestAppDecodesClaimAmbiguity(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		writeResponse(w, http.StatusConflict,
+			`{"operation_id":"Pappclaim","outcome":"not_executed","app":{"kind":"claim","package":"com.example","source_display_id":0},"error":{"code":"task_target_ambiguous","message":"主屏存在多个同名应用任务，请用 task_id 精确选择","details":{"task_ids":[42,43]}}}`)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	response, err := client.App(context.Background(),
+		&protocol.AppRequest{
+			Kind: protocol.AppKindClaim, ObservationID: "O1",
+			Target: &protocol.AppTarget{App: "com.example"},
+		}, WithOperationID("Pappclaim"))
+	if response == nil {
+		t.Fatal("structured ambiguity error dropped the response")
+	}
+	clientErr := requireClientError(t, err)
+	if clientErr.Code != protocol.CodeTaskAmbiguous || clientErr.HTTPStatus != http.StatusConflict {
+		t.Fatalf("code = %q HTTP = %d, want task_target_ambiguous/409", clientErr.Code, clientErr.HTTPStatus)
+	}
+	if clientErr.Result == nil || clientErr.Result.App == nil {
+		t.Fatal("ambiguity error lost the app view")
+	}
+	if clientErr.Result.App.Kind != protocol.AppKindClaim ||
+		clientErr.Result.App.SourceDisplayID == nil || *clientErr.Result.App.SourceDisplayID != 0 {
+		t.Fatalf("claim source identity differs: %+v", clientErr.Result.App)
+	}
+	taskIDs, ok := clientErr.Result.Error.Details["task_ids"].([]any)
+	if !ok || len(taskIDs) != 2 ||
+		taskIDs[0] != float64(42) || taskIDs[1] != float64(43) {
+		t.Fatalf("details.task_ids = %#v, want [42,43]", clientErr.Result.Error.Details["task_ids"])
+	}
+}
+
+func TestAppDecodesHandoffNullStatePreserved(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		writeResponse(w, http.StatusOK,
+			`{"operation_id":"Papphandoff","outcome":"executed","app":{"kind":"handoff","package":"com.example","task_id":42,"source_display_id":12,"display_id":0,"ownership":"shared","state_preserved":null,"foreground_restore":"not_requested"}}`)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	response, err := client.App(context.Background(),
+		&protocol.AppRequest{
+			Kind: protocol.AppKindHandoff, ObservationID: "O1",
+			Target: &protocol.AppTarget{TaskID: 42, UseTask: true},
+		}, WithOperationID("Papphandoff"))
+	if err != nil {
+		t.Fatalf("App() error: %v", err)
+	}
+	if response == nil || response.Result == nil || response.Result.App == nil {
+		t.Fatal("handoff view was not decoded")
+	}
+	app := response.Result.App
+	if app.Kind != protocol.AppKindHandoff || app.Ownership != protocol.TaskOwnershipShared {
+		t.Fatalf("handoff identity differs: %+v", app)
+	}
+	if app.SourceDisplayID == nil || *app.SourceDisplayID != 12 {
+		t.Fatalf("source_display_id = %v, want 12", app.SourceDisplayID)
+	}
+	if app.DisplayID == nil || *app.DisplayID != 0 {
+		t.Fatalf("display_id = %v, want the proven primary display 0", app.DisplayID)
+	}
+	if !app.HasStatePreserved || app.StatePreserved != nil {
+		t.Fatal("explicit state_preserved=null was not preserved")
+	}
+	if app.ForegroundRestore != protocol.ForegroundRestoreNotRequested {
+		t.Fatalf("foreground_restore = %q", app.ForegroundRestore)
+	}
+	if app.Reused != nil {
+		t.Fatal("handoff carried an open-only reused member")
+	}
+}
+
+func TestAppDecodesCloseTasks(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		writeResponse(w, http.StatusConflict,
+			`{"operation_id":"Pappclose","outcome":"uncertain","app":{"kind":"close","display_id":12,"tasks":[{"task_id":42,"outcome":"executed","recents_cleaned":true},{"task_id":43,"outcome":"uncertain","recents_cleaned":null},{"task_id":44,"outcome":"not_executed"}],"complete":false},"error":{"code":"task_remove_unconfirmed","message":"部分任务的关闭结果未确认，请先核验现状"}}`)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	response, err := client.App(context.Background(),
+		&protocol.AppRequest{
+			Kind: protocol.AppKindClose, ObservationID: "O1",
+			Target: &protocol.AppTarget{TaskID: 42, UseTask: true},
+		}, WithOperationID("Pappclose"))
+	if response == nil {
+		t.Fatal("structured close error dropped the response")
+	}
+	if clientErr := requireClientError(t, err); clientErr.Code != protocol.CodeAppTaskUnconfirmed {
+		t.Fatalf("code = %q, want task_remove_unconfirmed", clientErr.Code)
+	}
+	app := response.Result.App
+	if app == nil || app.Kind != protocol.AppKindClose {
+		t.Fatal("close view was not decoded")
+	}
+	if app.DisplayID == nil || *app.DisplayID != 12 {
+		t.Fatalf("close display_id = %v, want 12", app.DisplayID)
+	}
+	if !app.HasTasks || len(app.Tasks) != 3 {
+		t.Fatalf("close tasks = %d (present=%t), want 3", len(app.Tasks), app.HasTasks)
+	}
+	executed, uncertain, notExecuted := app.Tasks[0], app.Tasks[1], app.Tasks[2]
+	if executed.TaskID != 42 || executed.Outcome != "executed" ||
+		executed.RecentsCleaned == nil || !*executed.RecentsCleaned {
+		t.Fatalf("executed close item differs: %+v", executed)
+	}
+	if uncertain.TaskID != 43 || uncertain.Outcome != "uncertain" || uncertain.RecentsCleaned != nil {
+		t.Fatalf("uncertain close item differs: %+v", uncertain)
+	}
+	if notExecuted.TaskID != 44 || notExecuted.Outcome != "not_executed" || notExecuted.RecentsCleaned != nil {
+		t.Fatalf("not_executed close item differs: %+v", notExecuted)
+	}
+	if app.Complete == nil || *app.Complete {
+		t.Fatal("complete=false was not preserved")
+	}
+}
+
+func TestAppDecodesKillPIDs(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		writeResponse(w, http.StatusOK,
+			`{"operation_id":"Pappkill","outcome":"executed","app":{"kind":"kill","package":"com.example","source_task_id":42,"display_id":12,"target_pids":[1234,1235],"killed_pids":[1234,1235],"remaining_pids":[],"restarted":null}}`)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	response, err := client.App(context.Background(),
+		&protocol.AppRequest{
+			Kind: protocol.AppKindKill, ObservationID: "O1",
+			Target: &protocol.AppTarget{TaskID: 42, UseTask: true},
+		}, WithOperationID("Pappkill"))
+	if err != nil {
+		t.Fatalf("App() error: %v", err)
+	}
+	if response == nil || response.Result == nil || response.Result.App == nil {
+		t.Fatal("kill view was not decoded")
+	}
+	app := response.Result.App
+	if app.Kind != protocol.AppKindKill || app.Package != "com.example" {
+		t.Fatalf("kill identity differs: %+v", app)
+	}
+	if app.SourceTaskID == nil || *app.SourceTaskID != 42 ||
+		app.DisplayID == nil || *app.DisplayID != 12 {
+		t.Fatalf("kill task/display differs: %+v", app)
+	}
+	if !app.HasTargetPIDs || len(app.TargetPIDs) != 2 ||
+		app.TargetPIDs[0] != 1234 || app.TargetPIDs[1] != 1235 {
+		t.Fatalf("target_pids = %v (present=%t)", app.TargetPIDs, app.HasTargetPIDs)
+	}
+	if !app.HasKilledPIDs || len(app.KilledPIDs) != 2 ||
+		app.KilledPIDs[0] != 1234 || app.KilledPIDs[1] != 1235 {
+		t.Fatalf("killed_pids = %v (present=%t)", app.KilledPIDs, app.HasKilledPIDs)
+	}
+	if !app.HasRemainingPIDs || app.RemainingPIDs == nil || len(app.RemainingPIDs) != 0 {
+		t.Fatalf("remaining_pids = %v (present=%t), want a present empty array", app.RemainingPIDs, app.HasRemainingPIDs)
+	}
+	if !app.HasRestarted || app.Restarted != nil {
+		t.Fatal("explicit restarted=null was not preserved")
+	}
+}
 func TestStatusEncodingAndNoOperation(t *testing.T) {
 	captures := make(chan requestCapture, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
@@ -1006,8 +1423,7 @@ func TestNilOrUnencodableRequestsDoNotSend(t *testing.T) {
 	}{
 		{"observe-nil", func() (*Response, error) { return client.Observe(ctx, nil) }, true},
 		{"act-nil", func() (*Response, error) { return client.Act(ctx, nil) }, true},
-		{"apps-nil", func() (*Response, error) { return client.Apps(ctx, nil) }, true},
-		{"open-app-nil", func() (*Response, error) { return client.OpenApp(ctx, nil) }, true},
+		{"app-nil", func() (*Response, error) { return client.App(ctx, nil) }, true},
 		{"notify-nil", func() (*Response, error) { return client.Notify(ctx, nil) }, true},
 		{"shell-nil", func() (*Response, error) { return client.Shell(ctx, nil) }, true},
 		{"inspect-nil", func() (*Response, error) { return client.Inspect(ctx, nil) }, false},

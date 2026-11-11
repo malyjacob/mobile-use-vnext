@@ -32,6 +32,9 @@
 | `android_version_code` | Android versionCode，写入 `AndroidManifest.xml` 与清单 |
 | `source_commit` | 该版本号冻结时的基线提交（仅供校验）；清单记录构建时的 HEAD |
 
+当前版本源为 `release_version=0.9.0`、`contract_version=9`、`android_version_code=11`；三者
+只能在本文件手改，其他位置由生成脚本写入。
+
 `scripts/generate-version.ps1` 生成：
 
 - `internal/protocol/version_generated.go`（`ContractVersion`、`ReleaseVersion`）；
@@ -65,8 +68,8 @@ PowerShell、docs 或 Manifest 中另写一份版本号；`contract_version` 只
 {
   "format": "mobile-use-vnext-release",
   "version": 1,
-  "release_version": "0.8.0",
-  "contract_version": 8,
+  "release_version": "0.9.0",
+  "contract_version": 9,
   "source_commit": "<40 位提交>",
   "source_dirty": false,
   "built_at": "…",
@@ -74,8 +77,8 @@ PowerShell、docs 或 Manifest 中另写一份版本号；`contract_version` 只
   "go_experiment": "jsonv2",
   "build_target": {"goos": "linux", "goarch": "arm64", "cgo_enabled": false},
   "mcp": {"sdk": "github.com/modelcontextprotocol/go-sdk v1.8.0", "protocol": "2026-07-28"},
-  "android": {"package": "com.mobileuse.vnext", "version_name": "0.8.0", "version_code": 10},
-  "tool_catalog": {"count": 12, "sha256": "…"},
+  "android": {"package": "com.mobileuse.vnext", "version_name": "0.9.0", "version_code": 11},
+  "tool_catalog": {"count": 11, "sha256": "…"},
   "artifacts": [{"name": "device-service", "path": "device-service", "sha256": "…", "bytes": 0}]
 }
 ```
@@ -86,9 +89,34 @@ PowerShell、docs 或 Manifest 中另写一份版本号；`contract_version` 只
 清单不包含 `.state/`、令牌、账本、消息、截图、节点树或日志。工具目录指纹用于运维比对本次
 构建的 `tools/list`，不证明任何宿主已读取它。
 
+主机工具使用同一版本源单独构建，不进入 linux/arm64 发布产物列表：
+
+```powershell
+./scripts/build-host-tools.ps1
+./scripts/build-host-tools.ps1 -VerifyOnly
+```
+
+脚本校验 `release/versions.json` 与生成常量一致，在 Windows/amd64、`CGO_ENABLED=0`、
+`GOEXPERIMENT=jsonv2` 下用 `go build -trimpath -buildvcs=false` 构建 `build/device-mcp.exe`
+与 `build/mcp-probe.exe`，并写 `build/host-tools-manifest.json`：
+
+| 字段 | 内容 |
+| --- | --- |
+| `format`/`version` | `mobile-use-vnext-host-tools` 与清单格式版本 |
+| `release_version`/`contract_version` | 共同发行号与契约号 |
+| `source_commit`/`source_dirty` | 构建时实际 HEAD 与源码脏标记（`build/`、`.state/` 不计入） |
+| `built_at`/`go_version`/`go_experiment` | 构建时间、Go 版本与 `jsonv2` |
+| `build_target` | `goos=windows`、`goarch=amd64`、`cgo_enabled=false` |
+| `tool_catalog` | 工具数 `count` 与固定目录 `sha256` |
+| `artifacts` | 两个 exe 的 `name`/`path`/`sha256`/`bytes` |
+
+`-VerifyOnly` 不构建、不访问设备：校验主机清单的格式、目标、共同版本、源码与目录身份、
+两个 exe 的大小和 SHA-256，并在手机发布清单是同一配套版本时核验提交、契约与目录指纹一致；
+失败返回非零且不改写清单。单独的 `device-mcp.exe -version` 只是发行标签，不能代替清单核验。
+
 ## 4. 部署顺序
 
-1. 准备并核验整组构建、清单、契约号、Android 版本与固定制品哈希。
+1. 准备并核验整组构建、清单、契约号、Android 版本、固定制品哈希与主机工具清单。
 2. 暂停新的普通工作；用旧版本结束活动会话或 STOP，等待最多 5 秒的旧逻辑交接，并记录
    执行链、task/recents 与 display 的 `pending`/`complete`/`unconfirmed`。旧物理事实可以在
    安装窗口继续保留；不强停 App 把缺少描述当作已清理，也不以未确认单独阻断新版本启动。
@@ -105,10 +133,14 @@ PowerShell、docs 或 Manifest 中另写一份版本号；`contract_version` 只
    使 `can_start=false`。脚本不读取实例身份或显示模式，二者由控制端与运行手册另行确认。
    宿主托管的 stdio 适配器若仍持有旧二进制，部署脚本明确告警，必须重启宿主 MCP 进程。
    默认虚拟屏，主屏共享需要用户重新确认。
-5. 重启实际 MCP 宿主进程/连接，使宿主重新发现工具目录；不能只替换磁盘文件或依赖
-   `list_changed` 通知。手机适配器默认随部署安装并启动，主机自建适配器可选。
+5. 使用主机侧适配器时，先辨认实际镜像路径与承载它的宿主进程，结束旧活动调用并停止该
+   精确进程，再按 `build/host-tools-manifest.json` 替换 `build/device-mcp.exe` 与
+   `build/mcp-probe.exe`；不宽泛终止所有同名进程。随后重启实际 MCP 宿主进程/连接，使宿主
+   重新发现 11 个工具；不能只替换磁盘文件或依赖 `list_changed` 通知。手机适配器默认随部署
+   安装并启动，主机自建适配器可选。
 6. 条件成立才报告完成；分别记录版本匹配、App 配对、当前恢复入口、保留的退休 cleanup 事实、
-   STOP 可用、MCP 宿主刷新与本次最小闭环结果，不合并成一个 success。
+   手机与主机工具清单元数据、两个主机 exe 的哈希、MCP 宿主刷新与本次最小闭环结果，不合并成
+   一个 success。
 
 App 覆盖安装保留私有消息、已读、连接配置与停止意图。不得卸载 App、`pm clear`、删除消息
 文件或清空账本来解决签名、契约或配对问题；安装失败时保留现场并停止发布。部署过程不触发
@@ -122,6 +154,6 @@ App 覆盖安装保留私有消息、已读、连接配置与停止意图。不�
 - 消息在服务重启后按原 ID 继续投递；升级不要求清空 App 消息或已读。
 - 回退是另一轮受控部署：安装上一组已核验产物，重新确认旧资源、契约配对与准入；不自动
   回放旧操作、不恢复主屏授权、不清空消息或归属来凑兼容。
-- 旧二进制无法读取版本 4 账本时明确不能直接回退；回退必须使用支持版本 4 的兼容产物。
-  未确认归属作为退休事实保留，不能删除后假装干净，也不要求旧物理资源全部确认后才允许新
-  当前归属保存。
+- 账本写版本 5；首次 0.9.0 写入 v5 后不支持回退到 0.8.0，只能使用同为 v5 的候选或前滚
+  修复。不得删除账本、清空 App 数据或忽略迁移字段来制造回退。未确认归属作为退休事实保留，
+  不能删除后假装干净，也不要求旧物理资源全部确认后才允许新当前归属保存。

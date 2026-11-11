@@ -233,7 +233,8 @@ func TestProjectResultModeViolations(t *testing.T) {
 
 func TestDecodeResultTextContentBlocks(t *testing.T) {
 	payload := map[string]any{
-		"apps": map[string]any{
+		"app": map[string]any{
+			"kind": "find",
 			"items": []any{map[string]any{
 				"name": "设置", "package": "com.android.settings", "future": true,
 			}},
@@ -258,9 +259,10 @@ func TestDecodeResultTextContentBlocks(t *testing.T) {
 	if failure != nil {
 		t.Fatalf("decodeResultText: %v", failure.reason)
 	}
-	if decoded.view.Apps == nil || len(decoded.view.Apps.Items) != 1 ||
-		decoded.view.Apps.Items[0].Package != "com.android.settings" {
-		t.Fatalf("apps projection = %+v", decoded.view.Apps)
+	if decoded.view.App == nil || decoded.view.App.Kind != "find" ||
+		!decoded.view.App.HasItems || len(decoded.view.App.Items) != 1 ||
+		decoded.view.App.Items[0].Package != "com.android.settings" {
+		t.Fatalf("app projection = %+v", decoded.view.App)
 	}
 	if decoded.view.Shell == nil || decoded.view.Shell.Output == nil ||
 		*decoded.view.Shell.Output != "first\r\nsecond\n" {
@@ -269,7 +271,7 @@ func TestDecodeResultTextContentBlocks(t *testing.T) {
 	if decoded.view.Diagnosis == nil || len(decoded.view.Diagnosis.Timeline) != 1 {
 		t.Fatalf("timeline projection = %+v", decoded.view.Diagnosis)
 	}
-	appItem, _ := lookupPath(decoded.object, []string{"apps", "items", "0"})
+	appItem, _ := lookupPath(decoded.object, []string{"app", "items", "0"})
 	appObject, _ := appItem.(map[string]any)
 	eventItem, _ := lookupPath(decoded.object, []string{"diagnosis", "timeline", "0"})
 	eventObject, _ := eventItem.(map[string]any)

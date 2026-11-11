@@ -149,17 +149,82 @@ func TestParseTasksKeepsDistinctInstances(t *testing.T) {
 	if len(tasks) != 2 {
 		t.Fatalf("want 2 current tasks, got %d: %+v", len(tasks), tasks)
 	}
-	if tasks[0].TaskID != 42 || tasks[0].DisplayID != 0 || tasks[0].Package != "com.example" {
+	if tasks[0].TaskID != 42 || tasks[0].RootID != 42 ||
+		tasks[0].DisplayID != 0 || tasks[0].Package != "com.example" {
 		t.Fatalf("first task=%+v", tasks[0])
 	}
 	if !tasks[0].Visible || tasks[0].Component != "com.example/com.example.Main" {
 		t.Fatalf("first task=%+v", tasks[0])
 	}
-	if tasks[1].TaskID != 43 || tasks[1].DisplayID != 61 || tasks[1].Visible {
+	if tasks[1].TaskID != 43 || tasks[1].RootID != 43 ||
+		tasks[1].DisplayID != 61 || tasks[1].Visible {
 		t.Fatalf("second task=%+v", tasks[1])
 	}
 	if tasks[1].Component != "com.example/com.example.Main" {
 		t.Fatalf("component=%q", tasks[1].Component)
+	}
+}
+
+// TestParseTasksRootID covers the root header forms: a normal header names the
+// root, an unreadable root id keeps RootID=0 so the task is never moved, and a
+// leaf line outside any root header is not a task at all.
+func TestParseTasksRootID(t *testing.T) {
+	cases := []struct {
+		name    string
+		listing string
+		want    []device.Task
+	}{
+		{
+			name: "root header",
+			listing: "RootTask id=42 bounds=[0,0][1080,2400] displayId=0 userId=0\n" +
+				"  taskId=42: com.example/com.example.Main visible=true\n",
+			want: []device.Task{{TaskID: 42, RootID: 42, DisplayID: 0,
+				Package: "com.example", Component: "com.example/com.example.Main", Visible: true}},
+		},
+		{
+			name: "unreadable root id stays zero",
+			listing: "RootTask id=? bounds=[0,0][720,1280] displayId=61 userId=0\n" +
+				"  taskId=9: com.example/.Main visible=true\n",
+			want: []device.Task{{TaskID: 9, RootID: 0, DisplayID: 61,
+				Package: "com.example", Component: "com.example/com.example.Main", Visible: true}},
+		},
+		{
+			name:    "leaf outside a root header",
+			listing: "  taskId=7: com.example/.Main visible=true\n",
+			want:    []device.Task{},
+		},
+		{
+			name: "root id never carries over",
+			listing: "RootTask id=42 bounds=[0,0][1080,2400] displayId=0 userId=0\n" +
+				"  taskId=42: com.example/com.example.Main visible=true\n" +
+				"RootTask id=? bounds=[0,0][720,1280] displayId=61 userId=0\n" +
+				"  taskId=9: com.example/.Main visible=true\n",
+			want: []device.Task{
+				{TaskID: 42, RootID: 42, DisplayID: 0,
+					Package: "com.example", Component: "com.example/com.example.Main", Visible: true},
+				{TaskID: 9, RootID: 0, DisplayID: 61,
+					Package: "com.example", Component: "com.example/com.example.Main", Visible: true},
+			},
+		},
+		{
+			name: "unknown package leaf is skipped",
+			listing: "RootTask id=42 bounds=[0,0][1080,2400] displayId=0 userId=0\n" +
+				"  taskId=4: unknown bounds=[0,0][1080,2400] userId=0 visible=false\n",
+			want: []device.Task{},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseTasks(tc.listing)
+			if len(got) != len(tc.want) {
+				t.Fatalf("tasks=%+v want=%+v", got, tc.want)
+			}
+			for index := range tc.want {
+				if got[index] != tc.want[index] {
+					t.Fatalf("task %d=%+v want=%+v", index, got[index], tc.want[index])
+				}
+			}
+		})
 	}
 }
 

@@ -6,8 +6,8 @@ import (
 )
 
 func TestCatalogFingerprint(t *testing.T) {
-	if count := ToolCount(); count != 12 {
-		t.Fatalf("ToolCount() = %d, want 12", count)
+	if count := ToolCount(); count != 11 {
+		t.Fatalf("ToolCount() = %d, want 11", count)
 	}
 	fingerprint := CatalogFingerprint()
 	if len(fingerprint) != 64 {

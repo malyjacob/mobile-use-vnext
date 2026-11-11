@@ -22,9 +22,9 @@
 
 ```json
 {
-  "contract_version": "8",
+  "contract_version": "9",
   "app_instance_id": "0b0b8c0e-...",
-  "app_version": "0.8.0",
+  "app_version": "0.9.0",
   "selected_mode": "virtual",
   "mode_generation": "8f0b2e2e-...",
   "mode_ready": true,
@@ -45,7 +45,7 @@
 
 | 字段 | 必填 | 含义 |
 | --- | --- | --- |
-| contract_version | 是 | 共同普通契约；必须等于 `"8"` |
+| contract_version | 是 | 共同普通契约；必须等于 `"9"` |
 | app_instance_id | 是 | 本次 App 进程实例，UUID；重建即变化 |
 | app_version | 是 | 仅发行标识，不参与能力协商 |
 | selected_mode | 是 | `virtual` 或 `primary`；App 重建默认 virtual |
@@ -55,8 +55,8 @@
 | notifications_enabled | 是 | 系统通知关闭时为 false |
 | background_running | 是 | 前台服务仍在运行 |
 | power_interactive / keyguard_locked | 否 | `true`/`false`；未知为 `null` 或省略 |
-| primary_display | virtual 模式应有 | 主屏实际逻辑尺寸；出现时校验形状（无效返回 `422 invalid_request`）；`display_id` 必须为 0；virtual 模式缺失不单独阻断准入 |
-| display | 有自有虚拟屏时 | 本次 App 实际持有的虚拟屏 |
+| primary_display | virtual 模式应有 | 主屏实际逻辑尺寸；出现时校验形状（无效返回 `422 invalid_request`）；`display_id` 必须为 0；virtual 模式缺失不单独阻断准入；可选 `ime_hide`（布尔） |
+| display | 有自有虚拟屏时 | 本次 App 实际持有的虚拟屏；可选 `ime_hide`（布尔） |
 | command_results | 否 | 对上一拍命令的回执；省略/null 按 `[]` 处理 |
 | stop_pending | 否 | 未被服务受理的本地停止意图 |
 | message_acks | 否 | App 已保存的消息 ID，至多 32 个；省略/null 按 `[]` 处理；未知或已释放的 ID 忽略 |
@@ -70,7 +70,7 @@
 
 ```json
 {
-  "contract_version": "8",
+  "contract_version": "9",
   "service_instance_id": "d0e...",
   "control": {
     "revision": 42,
@@ -91,8 +91,9 @@
 - `control.revision` 在同一 `service_instance_id` 下单调递增；只有实际控制事实变化才递增。
 - `availability.state` 为 `ready` / `recovering` / `blocked`，`reason` 为受控短码。
 - `session` 为 `null` 或 {origin, agent, mode, state, started_at, expires_at/ended_at, reason}。
-- `work` 为 `null` 或 {operation_id, kind, phase}，`kind` 为 `start`/`observe`/`act`/`apps`/`open_app`/`shell`；
-  不得携带节点、坐标、输入正文或命令。
+- `work` 为 `null` 或 {operation_id, kind, phase, app_kind?}，`kind` 为
+  `start`/`observe`/`act`/`app`/`shell`；`kind=app` 时 `app_kind` 为七种 kind 之一
+  （`find`/`list`/`open`/`claim`/`handoff`/`close`/`kill`）；不得携带节点、坐标、输入正文或命令。
 - `cleanup` 为 `null` 或 {state, execution, tasks, recents, display}；只表达最低摘要。
 - `commands` 只包含显示生命周期命令，每拍至多一条；每个命令 ID 只投递一次；原预算内的后续清理尝试使用新 ID。
 - `messages` 只包含尚未确认的 Agent 消息，按创建顺序，每拍至多 8 条且正文合计至多 32 KiB；
@@ -140,13 +141,13 @@ App 必须拒绝无法解析、未知 kind、缺字段或 `contract_version` 不
 `POST /v1/control/stop`
 
 ```json
-{"contract_version":"8","app_instance_id":"...","stop_seq":7,"reason":"user_stop"}
+{"contract_version":"9","app_instance_id":"...","stop_seq":7,"reason":"user_stop"}
 ```
 
 响应（最小，不含普通服务状态、消息或设备命令）：
 
 ```json
-{"contract_version":"8","service_instance_id":"...","accepted":true,"stop_seq":7,"state":"revoked"}
+{"contract_version":"9","service_instance_id":"...","accepted":true,"stop_seq":7,"state":"revoked"}
 ```
 
 - App 先在本地提高停止代次、拒绝旧命令/回调恢复权限，再在独立线程发起本请求；不等待
@@ -173,9 +174,14 @@ App 只能从 `control` 与本机事实构造界面，不显示 Agent step，也
 | session.state=starting | Agent · 正在准备 |
 | session.state=active，work=null | Agent · 会话有效，无设备操作 |
 | session.state=active，work.kind=act | Agent · 正在操作 |
-| session.state=active，work.kind=open_app | Agent · 正在打开应用 |
+| session.state=active，work.kind=app，app_kind=find | Agent · 正在查找应用 |
+| session.state=active，work.kind=app，app_kind=list | Agent · 正在读取应用清单 |
+| session.state=active，work.kind=app，app_kind=open | Agent · 正在打开应用 |
+| session.state=active，work.kind=app，app_kind=claim | Agent · 正在认领应用任务 |
+| session.state=active，work.kind=app，app_kind=handoff | Agent · 正在交还应用任务 |
+| session.state=active，work.kind=app，app_kind=close | Agent · 正在关闭应用窗口 |
+| session.state=active，work.kind=app，app_kind=kill | Agent · 正在终止应用进程 |
 | session.state=active，work.kind=observe | Agent · 正在观察 |
-| session.state=active，work.kind=apps | Agent · 正在读取应用清单 |
 | session.state=active，work.kind=shell | Agent · 正在执行命令 |
 
 主文案按本地停止待同步、失鲜、当前可用性、当前会话/工作、待命的顺序决定；历史清理风险只进入详情。完整界面在短文案之外展开原
@@ -191,7 +197,7 @@ App 只能从 `control` 与本机事实构造界面，不显示 Agent step，也
 - App 重建默认 virtual；主屏授权不持久化，必须重新由用户确认。
 - 服务重启撤销旧输入授权，不重放旧命令；App 的待同步停止意图在服务实例变化后仍保留，
   直到取得原意图的确认或明确服务已换实例。
-- 服务重启后的旧 session 转退休记录；版本 3/4 中已发出预算且仍为 `pending` 的旧补偿先持久化为 `unconfirmed`。
+- 服务重启后的旧 session 转退休记录；版本 3/4/5 中已发出预算且仍为 `pending` 的旧补偿先持久化为 `unconfirmed`。
   retired/旧 cleanup 不作为 App 的模式准备或新 create 门禁，当前 descriptor 与当前能力就绪
   后可建立新 attempt。
 - 服务重启后未确认的 Agent 消息按原 ID 继续投递；App 的消息与本地已读属于 App 私有数据，

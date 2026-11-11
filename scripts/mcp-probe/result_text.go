@@ -1,6 +1,7 @@
 package main
 
 import (
+	jsonlegacy "encoding/json"
 	"encoding/json/v2"
 	"strconv"
 	"strings"
@@ -65,6 +66,9 @@ func decodeResultText(text string) (*decodedTextResult, *checkError) {
 			if failure != nil {
 				return nil, failure
 			}
+			if isTypedAppPath(path) {
+				return nil, failf("text_result_app_field_typed_required")
+			}
 			if failure := setJSONPointer(object, seen, path, value); failure != nil {
 				return nil, failure
 			}
@@ -74,6 +78,13 @@ func decodeResultText(text string) (*decodedTextResult, *checkError) {
 		key, rawValue, found := strings.Cut(line, "=")
 		if !found || key == "" {
 			return nil, failf("text_result_item_invalid")
+		}
+		if strings.HasPrefix(key, "app.") {
+			if failure := applyAppTextField(object, seen, key, rawValue); failure != nil {
+				return nil, failure
+			}
+			index++
+			continue
 		}
 		value, failure := decodeTextScalar(rawValue)
 		if failure != nil {
@@ -103,7 +114,7 @@ func decodeResultText(text string) (*decodedTextResult, *checkError) {
 
 func isResultBlockHeader(line string) bool {
 	for _, prefix := range []string{
-		"tree v1 ", "inspect v1 ", "shell v1 ", "apps v1 ", "timeline v1 ",
+		"tree v1 ", "inspect v1 ", "shell v1 ", "timeline v1 ",
 	} {
 		if strings.HasPrefix(line, prefix) {
 			return true
@@ -124,8 +135,6 @@ func decodeResultBlock(lines []string, start int, object map[string]any,
 		return decodeInspectionBlock(lines, start, object, seen)
 	case strings.HasPrefix(lines[start], "shell v1 "):
 		return decodeShellBlock(lines, start, object, seen)
-	case strings.HasPrefix(lines[start], "apps v1 "):
-		return decodeAppsBlock(lines, start, object, seen)
 	case strings.HasPrefix(lines[start], "timeline v1 "):
 		return decodeTimelineBlock(lines, start, object, seen)
 	default:
@@ -291,65 +300,6 @@ func decodeShellBlock(lines []string, start int, object map[string]any,
 	return 0, failf("text_shell_unterminated")
 }
 
-func decodeAppsBlock(lines []string, start int, object map[string]any,
-	seen map[string]bool) (int, *checkError) {
-	fields, failure := decodeBlockHeader(lines[start], "apps v1 ")
-	if failure != nil {
-		return 0, failure
-	}
-	count, ok := parseInteger(fields["items"])
-	if !ok || count < 0 {
-		return 0, failf("text_apps_count_invalid")
-	}
-	total, ok := parseInteger(fields["total"])
-	if !ok || total < 0 {
-		return 0, failf("text_apps_total_invalid")
-	}
-	truncated, failure := decodeTextScalar(fields["truncated"])
-	if failure != nil {
-		return 0, failure
-	}
-	if _, ok := truncated.(bool); !ok {
-		return 0, failf("text_apps_truncated_invalid")
-	}
-	items := make([]any, 0, count)
-	end := start + 1
-	for ; end < len(lines); end++ {
-		line := lines[end]
-		if line == "end apps" {
-			if len(items) != count {
-				return 0, failf("text_apps_count_mismatch")
-			}
-			for key, value := range map[string]any{
-				"items":       items,
-				"total":       total,
-				"truncated":   truncated,
-				"captured_at": fields["captured_at"],
-			} {
-				if key == "captured_at" && fields[key] == "" {
-					continue
-				}
-				if failure := setDecodedPath(object, seen, []string{"apps", key}, value); failure != nil {
-					return 0, failure
-				}
-			}
-			return end + 1, nil
-		}
-		if !strings.HasPrefix(line, "item ") {
-			return 0, failf("text_apps_item_invalid")
-		}
-		item, failure := decodeJSONValue(line[len("item "):])
-		if failure != nil {
-			return 0, failure
-		}
-		if _, ok := item.(map[string]any); !ok {
-			return 0, failf("text_apps_item_not_object")
-		}
-		items = append(items, item)
-	}
-	return 0, failf("text_apps_unterminated")
-}
-
 func decodeTimelineBlock(lines []string, start int, object map[string]any,
 	seen map[string]bool) (int, *checkError) {
 	fields, failure := decodeBlockHeader(lines[start], "timeline v1 ")
@@ -419,6 +369,185 @@ func decodeBlockHeader(line, prefix string) (map[string]string, *checkError) {
 	return fields, nil
 }
 
+// appTextFieldKind is the probe-side classification of every app member that
+// must use a typed readable line. Composite members stay complete compact JSON,
+// never a synthesized count.
+type appTextFieldKind uint8
+
+const (
+	appTextFieldToken appTextFieldKind = iota + 1
+	appTextFieldString
+	appTextFieldInt
+	appTextFieldBool
+	appTextFieldNullableBool
+	appTextFieldArray
+	appTextFieldIntArray
+	appTextFieldObject
+)
+
+var appTextFields = map[string]appTextFieldKind{
+	"kind":               appTextFieldToken,
+	"ownership":          appTextFieldToken,
+	"foreground_restore": appTextFieldToken,
+	"captured_at":        appTextFieldToken,
+	"package":            appTextFieldString,
+	"task_id":            appTextFieldInt,
+	"source_task_id":     appTextFieldInt,
+	"display_id":         appTextFieldInt,
+	"source_display_id":  appTextFieldInt,
+	"total":              appTextFieldInt,
+	"reused":             appTextFieldBool,
+	"state_preserved":    appTextFieldNullableBool,
+	"complete":           appTextFieldBool,
+	"truncated":          appTextFieldBool,
+	"restarted":          appTextFieldNullableBool,
+	"items":              appTextFieldArray,
+	"tasks":              appTextFieldArray,
+	"foreground":         appTextFieldObject,
+	"target_pids":        appTextFieldIntArray,
+	"killed_pids":        appTextFieldIntArray,
+	"remaining_pids":     appTextFieldIntArray,
+}
+
+var (
+	appKindSet = map[string]bool{
+		"find": true, "list": true, "open": true, "claim": true,
+		"handoff": true, "close": true, "kill": true,
+	}
+	appOwnershipSet = map[string]bool{
+		"owned": true, "borrowed": true, "shared": true,
+	}
+	appForegroundRestoreSet = map[string]bool{
+		"not_requested": true, "confirmed": true, "unconfirmed": true,
+	}
+)
+
+// isTypedAppPath reports whether a json v1 fallback pointer names an app member
+// that the contract requires on its typed line. Unknown app members still fall
+// back whole, as do unknown fields of every other object.
+func isTypedAppPath(pointer string) bool {
+	parts := strings.Split(pointer, "/")
+	if len(parts) < 2 || parts[0] != "" || parts[1] != "app" {
+		return false
+	}
+	if len(parts) == 2 {
+		return true
+	}
+	_, known := appTextFields[parts[2]]
+	return known
+}
+
+// applyAppTextField validates one app.kind=... style line and stores it. A known
+// member may never arrive through json v1, and an unknown member may never take
+// a typed line: both would let one channel hide a field the other carries.
+func applyAppTextField(object map[string]any, seen map[string]bool,
+	key, rawValue string) *checkError {
+	name := strings.TrimPrefix(key, "app.")
+	kind, known := appTextFields[name]
+	if !known {
+		return failf("text_result_app_field_unknown", field("field", key))
+	}
+	value, failure := decodeTextScalar(rawValue)
+	if failure != nil {
+		return failure
+	}
+	if failure := validateAppTextValue(name, kind, rawValue, value); failure != nil {
+		return failure
+	}
+	return setDecodedPath(object, seen, []string{"app", name}, value)
+}
+
+func validateAppTextValue(name string, kind appTextFieldKind, rawValue string, value any) *checkError {
+	switch kind {
+	case appTextFieldToken:
+		text, ok := value.(string)
+		if !ok || text == "" || strings.HasPrefix(rawValue, `"`) {
+			return failf("text_result_app_token_invalid", field("field", name))
+		}
+		switch name {
+		case "kind":
+			if !appKindSet[text] {
+				return failf("text_result_app_kind_invalid", field("kind", text))
+			}
+		case "ownership":
+			if !appOwnershipSet[text] {
+				return failf("text_result_app_ownership_invalid", field("ownership", text))
+			}
+		case "foreground_restore":
+			if !appForegroundRestoreSet[text] {
+				return failf("text_result_app_foreground_restore_invalid", field("state", text))
+			}
+		}
+	case appTextFieldString:
+		if _, ok := value.(string); !ok || !strings.HasPrefix(rawValue, `"`) {
+			return failf("text_result_app_string_invalid", field("field", name))
+		}
+	case appTextFieldInt:
+		number, ok := exactInteger(value)
+		if !ok || number < 0 {
+			return failf("text_result_app_number_invalid", field("field", name))
+		}
+		if (name == "task_id" || name == "source_task_id") && number <= 0 {
+			return failf("text_result_app_number_invalid", field("field", name))
+		}
+	case appTextFieldBool:
+		if _, ok := value.(bool); !ok {
+			return failf("text_result_app_bool_invalid", field("field", name))
+		}
+	case appTextFieldNullableBool:
+		if value != nil {
+			if _, ok := value.(bool); !ok {
+				return failf("text_result_app_bool_invalid", field("field", name))
+			}
+		}
+	case appTextFieldArray:
+		values, ok := value.([]any)
+		if !ok {
+			return failf("text_result_app_array_invalid", field("field", name))
+		}
+		for _, element := range values {
+			if _, ok := element.(map[string]any); !ok {
+				return failf("text_result_app_array_element_invalid", field("field", name))
+			}
+		}
+	case appTextFieldIntArray:
+		values, ok := value.([]any)
+		if !ok {
+			return failf("text_result_app_int_array_invalid", field("field", name))
+		}
+		previous := int64(-1)
+		for _, element := range values {
+			number, ok := exactInteger(element)
+			if !ok || number < 0 {
+				return failf("text_result_app_int_array_invalid", field("field", name))
+			}
+			if number < previous {
+				return failf("text_result_app_int_array_unsorted", field("field", name))
+			}
+			previous = number
+		}
+	case appTextFieldObject:
+		if _, ok := value.(map[string]any); !ok {
+			return failf("text_result_app_object_invalid", field("field", name))
+		}
+	}
+	return nil
+}
+
+func exactInteger(value any) (int64, bool) {
+	switch number := value.(type) {
+	case int64:
+		return number, true
+	case int:
+		return int64(number), true
+	case jsonlegacy.Number:
+		parsed, err := number.Int64()
+		return parsed, err == nil
+	default:
+		return 0, false
+	}
+}
+
 func decodeJSONFallback(line string) (string, any, *checkError) {
 	rest, found := strings.CutPrefix(line, "json v1 path=")
 	if !found || !strings.HasPrefix(rest, `"`) {
@@ -477,8 +606,8 @@ func decodeTextScalar(value string) (any, *checkError) {
 }
 
 func decodeJSONValue(value string) (any, *checkError) {
-	var decoded any
-	if err := json.Unmarshal([]byte(value), &decoded); err != nil {
+	decoded, err := decodeExactJSON([]byte(value))
+	if err != nil {
 		return nil, failf("text_result_json_invalid")
 	}
 	return decoded, nil
@@ -500,6 +629,9 @@ func valueInteger(value any) (int64, bool) {
 			return 0, false
 		}
 		return int64(number), true
+	case jsonlegacy.Number:
+		parsed, err := number.Int64()
+		return parsed, err == nil
 	default:
 		return 0, false
 	}

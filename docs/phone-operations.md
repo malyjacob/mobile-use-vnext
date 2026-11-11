@@ -31,7 +31,7 @@ Agent 宿主接入见[Agent 接入指南](integration.md)。
 | `/opt/mobile-use-vnext/mcp-config.json` | 手机 MCP 适配器配置（含 MCP token） | `0600` |
 | `/opt/mobile-use-vnext/u2.jar`、`applist.dex` | 固定制品 | `0600`，按哈希校验 |
 | `/opt/mobile-use-vnext/service.sh` | 设备服务启停脚本 | `0755` |
-| `/var/lib/mobile-use-vnext/recovery-ledger.json` | 版本 4 恢复账本：当前归属与退休资源证据 | `0600`，≤64 KiB；退休明细 ≤8 条且合计 ≤24 KiB |
+| `/var/lib/mobile-use-vnext/recovery-ledger.json` | 版本 5 恢复账本：当前归属、退休资源证据与根级任务迁移责任池 | `0600`，完整 ≤64 KiB；退休明细 ≤8 条且 ≤24 KiB；迁移池 ≤16 项、≤16 KiB；base ≤20 KiB |
 | `/var/lib/mobile-use-vnext/messages.json` | 未确认 Agent 消息 | `0600`，≤2 MiB（256 条 / 1 MiB 正文） |
 | `/var/lib/mobile-use-vnext/device-service.log` | 服务事件日志（启动时轮转） | `0600`，无固定上限 |
 | `/var/lib/mobile-use-vnext/device-service.pid` | 服务进程记录 | `0600` |
@@ -47,6 +47,19 @@ Agent 宿主接入见[Agent 接入指南](integration.md)。
 - 消息文件有界；账本损坏时服务进入 `blocked`，不以清空账本恢复准入。
 
 ## 3. 启动、停止与检查
+
+部署/升级在主机执行，并保持手机处于不可准入窗口：
+
+```powershell
+./scripts/build-release.ps1
+./scripts/verify-manifest.ps1 -Manifest build/release/manifest.json
+./scripts/build-host-tools.ps1
+./scripts/deploy.ps1 -SkipBuild -Manifest build/release/manifest.json
+```
+
+手机整组产物由 `build/release/manifest.json` 核验；主机 `device-mcp.exe`/`mcp-probe.exe` 由
+`build/host-tools-manifest.json` 核验；两者使用同一 `release/versions.json`。覆盖安装保留
+App 私有数据，不卸载、不清库。
 
 ```bash
 # 以下命令在主机执行，由 adb + su 送入 chroot
@@ -142,6 +155,13 @@ curl.exe -s http://127.0.0.1:18881/health
 
 - 账本、消息文件、App 消息与诊断均有界；增长主要来自服务日志、MCP 适配器日志与受管
   shell 运行目录。
+- 账本 v5 按实际序列化分区：完整账本 ≤64 KiB；base（不含 `retired` 与 `task_transfers`）
+  ≤20 KiB；`retired` ≤8 项且 ≤24 KiB；`task_transfers` ≤16 项、每项 ≤1000 B、数组 ≤16 KiB。
+  `retired` 超过 8 条或序列化集合超过 24 KiB 时的压缩/驱逐顺序为 `complete` → `unconfirmed`
+  → `pending`，按该顺序驱逐最旧记录（同状态取开始时间更早者）；被驱逐的未完成清理记为
+  `unconfirmed` 并计入 `dropped_unconfirmed`，不能把淘汰写成 `complete`。保护池项的回收
+  必须晚于所有可能删除同一任务的引用；`prepared`/`may_dispatch`/`unknown` 的出站记录不得
+  为腾空间丢弃。
 - 服务日志只在 `service.sh start` 时轮转（`.log.1`、`.log.1.old`）；长期不重启时需外部
   轮转或监控磁盘，不要删除正在写入的日志。
 - 受管 shell 的单次运行目录位于 `/data/local/tmp/mobile-use-shell/<run-id>/`；确认结束后
@@ -162,7 +182,8 @@ curl.exe -s http://127.0.0.1:18881/health
   解决签名或配对。
 - 升级/回退按[发布与回退](release.md)执行：整组产物、清单核验、覆盖安装、恢复屏障与
   MCP 宿主重启；升级不触发手机重启，设备服务按脚本重启。回退是另一轮受控部署，不自动
-  回放旧操作。
+  回放旧操作。账本写版本 5；首次 0.9.0 写入 v5 后不支持回退到 0.8.0，只能使用同为 v5 的
+  候选或前滚修复；不得删除账本、清空 App 数据或忽略迁移字段。
 
 ## 9. 故障处置
 
@@ -210,7 +231,7 @@ adb shell su -c 'tail -n 100 /data/data/com.mobileuse.vnext/files/diagnostics.lo
    $control = (Get-Content .state/deploy.json -Raw | ConvertFrom-Json).control_token
    Invoke-RestMethod http://127.0.0.1:18881/v1/control/stop -Method Post `
      -Headers @{ Authorization = "Bearer $control" } -ContentType 'application/json' `
-     -Body '{"contract_version":"8","app_instance_id":"<uuid>","stop_seq":1,"reason":"operator_stop"}'
+     -Body '{"contract_version":"9","app_instance_id":"<uuid>","stop_seq":1,"reason":"operator_stop"}'
    ```
 
    `accepted=true` 只表示停止边界已绑定；仍需用 App/`status.cleanup` 核验执行链、任务与

@@ -67,8 +67,8 @@ func TestOrdinaryAdmissionRejectsAllToolsBehindUnresolvedShell(t *testing.T) {
 			p:       "Pbarrieropen",
 			outcome: OutcomeNotExecuted,
 			call: func() (*protocol.Result, *protocol.APIError) {
-				return h.engine.OpenApp(context.Background(), "agent", "Pbarrieropen",
-					openAppRequest(first.Observation, "com.example"))
+				return h.engine.App(context.Background(), "agent", "Pbarrieropen",
+					appOpenRequest(first.Observation, "com.example"))
 			},
 		},
 		{
@@ -83,10 +83,10 @@ func TestOrdinaryAdmissionRejectsAllToolsBehindUnresolvedShell(t *testing.T) {
 		{
 			name:    "apps",
 			p:       "Pbarrierapps",
-			outcome: OutcomeNotExecuted,
+			outcome: "",
 			call: func() (*protocol.Result, *protocol.APIError) {
-				return h.engine.Apps(context.Background(), "agent", "Pbarrierapps",
-					&protocol.AppsRequest{})
+				return h.engine.App(context.Background(), "agent", "Pbarrierapps",
+					&protocol.AppRequest{Kind: protocol.AppKindFind})
 			},
 		},
 	}
@@ -105,12 +105,12 @@ func TestOrdinaryAdmissionRejectsAllToolsBehindUnresolvedShell(t *testing.T) {
 		}
 	}
 
-	outsider, apiErr := h.engine.Apps(context.Background(), "other", "Pbarrieroutside",
-		&protocol.AppsRequest{})
+	outsider, apiErr := h.engine.App(context.Background(), "other", "Pbarrieroutside",
+		&protocol.AppRequest{Kind: protocol.AppKindFind})
 	if apiErr != nil || outsider == nil || outsider.Error == nil ||
 		outsider.Error.Code != protocol.CodeDeviceBusy ||
-		outsider.Outcome != OutcomeNotExecuted {
-		t.Fatalf("another agent was not rejected as not_executed/device_busy: result=%+v api_error=%v",
+		outsider.Outcome != "" {
+		t.Fatalf("another agent was not rejected as a query conflict: result=%+v api_error=%v",
 			outsider, apiErr)
 	}
 	if outsider.BlockingOperationID != "" {
@@ -227,8 +227,8 @@ func TestOrdinaryAdmissionLedgerFailureBlocksWithoutDeviceIOOrClaim(t *testing.T
 			p:       "Pledgeropen",
 			outcome: OutcomeNotExecuted,
 			call: func() (*protocol.Result, *protocol.APIError) {
-				return h.engine.OpenApp(context.Background(), "agent", "Pledgeropen",
-					openAppRequest(first.Observation, "com.example"))
+				return h.engine.App(context.Background(), "agent", "Pledgeropen",
+					appOpenRequest(first.Observation, "com.example"))
 			},
 		},
 		{
@@ -247,10 +247,10 @@ func TestOrdinaryAdmissionLedgerFailureBlocksWithoutDeviceIOOrClaim(t *testing.T
 		{
 			name:    "apps",
 			p:       "Pledgerapps",
-			outcome: OutcomeNotExecuted,
+			outcome: "",
 			call: func() (*protocol.Result, *protocol.APIError) {
-				return h.engine.Apps(context.Background(), "agent", "Pledgerapps",
-					&protocol.AppsRequest{})
+				return h.engine.App(context.Background(), "agent", "Pledgerapps",
+					&protocol.AppRequest{Kind: protocol.AppKindFind})
 			},
 		},
 	}
@@ -335,9 +335,9 @@ func TestOrdinaryAdmissionWarmAppsCacheHonorsBarriers(t *testing.T) {
 			h.device.mu.Lock()
 			h.device.appEntries = []device.AppEntry{{Name: "Synthetic", Package: "com.example"}}
 			h.device.mu.Unlock()
-			warm, apiErr := h.engine.Apps(context.Background(), "agent", "Pwarmapps",
-				&protocol.AppsRequest{})
-			if apiErr != nil || warm == nil || warm.Apps == nil {
+			warm, apiErr := h.engine.App(context.Background(), "agent", "Pwarmapps",
+				&protocol.AppRequest{Kind: protocol.AppKindFind})
+			if apiErr != nil || warm == nil || warm.App == nil {
 				t.Fatalf("warm apps cache failed: result=%+v api_error=%v", warm, apiErr)
 			}
 			h.device.mu.Lock()
@@ -345,10 +345,10 @@ func TestOrdinaryAdmissionWarmAppsCacheHonorsBarriers(t *testing.T) {
 			h.device.mu.Unlock()
 
 			tc.setup(h)
-			blocked, apiErr := h.engine.Apps(context.Background(), "agent", "Pblockedapps",
-				&protocol.AppsRequest{})
+			blocked, apiErr := h.engine.App(context.Background(), "agent", "Pblockedapps",
+				&protocol.AppRequest{Kind: protocol.AppKindFind})
 			if apiErr != nil || blocked == nil || blocked.Error == nil ||
-				blocked.Error.Code != tc.code || blocked.Outcome != OutcomeNotExecuted {
+				blocked.Error.Code != tc.code || blocked.Outcome != "" {
 				t.Fatalf("warm cache bypassed %s barrier: result=%+v api_error=%v",
 					tc.name, blocked, apiErr)
 			}
@@ -364,11 +364,11 @@ func TestOrdinaryAdmissionWarmAppsCacheHonorsBarriers(t *testing.T) {
 			}
 
 			if tc.checkIDIsolation {
-				outsider, apiErr := h.engine.Apps(context.Background(), "other", "Poutsider",
-					&protocol.AppsRequest{})
+				outsider, apiErr := h.engine.App(context.Background(), "other", "Poutsider",
+					&protocol.AppRequest{Kind: protocol.AppKindFind})
 				if apiErr != nil || outsider == nil || outsider.Error == nil ||
 					outsider.Error.Code != tc.code ||
-					outsider.Outcome != OutcomeNotExecuted {
+					outsider.Outcome != "" {
 					t.Fatalf("outsider was not rejected: result=%+v api_error=%v", outsider, apiErr)
 				}
 				if outsider.BlockingOperationID != "" {

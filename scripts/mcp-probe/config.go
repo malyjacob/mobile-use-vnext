@@ -57,10 +57,15 @@ func loadConfig(path, mode string) (*config, error) {
 	if cfg.Transport != "stdio" && cfg.Transport != "http" {
 		return nil, errConfigTransport
 	}
+	// The phone forwarding entry is an HTTP MCP endpoint; a stdio configuration
+	// cannot describe it and must never be silently treated as remote HTTP.
+	if mode == modeHTTPRemote && cfg.Transport != "http" {
+		return nil, errConfigTransport
+	}
 	if err := validateService(cfg.Service.BaseURL, cfg.Service.AgentToken); err != nil {
 		return nil, err
 	}
-	if mode == modeHTTP || cfg.Transport == "http" {
+	if mode == modeHTTP || mode == modeHTTPRemote || cfg.Transport == "http" {
 		if err := validateHTTP(cfg.HTTP.Listen, cfg.HTTP.Token, cfg.Service.AgentToken); err != nil {
 			return nil, err
 		}
@@ -71,6 +76,30 @@ func loadConfig(path, mode string) (*config, error) {
 		}
 	}
 	return &cfg, nil
+}
+
+// validPackageName applies the public app schema's package shape. It is used
+// for the controlled app-lifecycle target, not as a device capability check.
+func validPackageName(value string) bool {
+	if value == "" || len(value) > 255 {
+		return false
+	}
+	for _, segment := range strings.Split(value, ".") {
+		if segment == "" {
+			return false
+		}
+		for _, character := range segment {
+			switch {
+			case character >= 'a' && character <= 'z',
+				character >= 'A' && character <= 'Z',
+				character >= '0' && character <= '9',
+				character == '_':
+			default:
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // validateService requires a loopback service URL so the Agent credential can

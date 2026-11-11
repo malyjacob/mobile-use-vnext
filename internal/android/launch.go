@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/malyjacob/mobile-use-vnext/internal/device"
+	"github.com/malyjacob/mobile-use-vnext/internal/eventlog"
 )
 
 // App launch and task primitives. They only perform bounded device I/O and
@@ -129,22 +130,113 @@ func (d *Device) FocusTask(ctx context.Context, taskID int) (device.DispatchRece
 	return receipt, nil
 }
 
-// RemoveTask removes one leaf task and its RecentTasks entry.
-func (d *Device) RemoveTask(ctx context.Context, taskID int) error {
+// RemoveTask removes one exact leaf task and its RecentTasks entry. The receipt
+// describes the command boundary only: a device status other than zero proves
+// the request finished but never proves the task ended, so it is reported as an
+// unconfirmed dispatch with a controlled error. The command is never retried.
+func (d *Device) RemoveTask(ctx context.Context, taskID int) (device.TaskRemoveResult, error) {
+	result := device.TaskRemoveResult{Receipt: device.DispatchNotDispatched, TaskID: taskID}
 	if d == nil {
-		return errNilDevice
+		return result, errNilDevice
 	}
 	if taskID <= 0 {
-		return newErr(CodeInvalidArgs, "invalid task id", nil)
+		return result, newErr(CodeInvalidArgs, "invalid task id", nil)
 	}
-	result, err := d.shellWith(ctx, taskTimeout, "am stack remove "+strconv.Itoa(taskID))
+	started := time.Now()
+	shell, receipt, err := d.runShellV2(ctx, taskTimeout, "am stack remove "+strconv.Itoa(taskID))
+	result.Receipt = receipt
 	if err != nil {
-		return err
+		d.logRemove(receipt, started)
+		return result, err
 	}
-	if result.ExitCode != 0 {
-		return newErr(CodeAvailability, "the task could not be removed", nil)
+	if receipt != device.DispatchTerminated {
+		// A returned command whose end could not be confirmed stays unknown.
+		result.Receipt = device.DispatchUnknown
+		d.logRemove(result.Receipt, started)
+		return result, nil
 	}
-	return nil
+	if shell.ExitCode != 0 {
+		// The removal itself is unconfirmed; never report it as terminated.
+		result.Receipt = device.DispatchUnknown
+		d.logRemove(result.Receipt, started)
+		return result, exitDetail(shell.ExitCode)
+	}
+	d.logRemove(result.Receipt, started)
+	return result, nil
+}
+
+// logRemove records the removal dispatch boundary. Only whitelisted fields are
+// written: no package, task text or device output.
+func (d *Device) logRemove(receipt device.DispatchReceipt, started time.Time) {
+	d.logEvent(eventlog.Info, "android.task.remove",
+		eventlog.Str("state", receiptName(receipt)),
+		eventlog.Duration("ms", time.Since(started)))
+}
+
+// receiptName renders one dispatch receipt as a controlled token.
+func receiptName(receipt device.DispatchReceipt) string {
+	switch receipt {
+	case device.DispatchTerminated:
+		return "terminated"
+	case device.DispatchNotDispatched:
+		return "not_dispatched"
+	default:
+		return "unknown"
+	}
+}
+
+// MoveTask moves one verified leaf task's root task to another display with
+// `am display move-stack`. The adapter validates only the command arguments; the
+// engine owns the candidate, ownership, root/leaf and landing checks and never
+// lets this primitive retry. A non-zero device status is reported as an
+// unconfirmed move because it never proves the task moved.
+//
+// SourceDisplayID is not part of the dispatch boundary and the frozen signature
+// carries no source argument, so the result leaves it zero: the adapter never
+// guesses where the task came from.
+func (d *Device) MoveTask(ctx context.Context, rootID, leafTaskID, targetDisplayID int) (
+	device.TaskMoveResult, error,
+) {
+	result := device.TaskMoveResult{
+		Receipt:         device.DispatchNotDispatched,
+		RootID:          rootID,
+		LeafTaskID:      leafTaskID,
+		TargetDisplayID: targetDisplayID,
+	}
+	if d == nil {
+		return result, errNilDevice
+	}
+	if rootID <= 0 || leafTaskID <= 0 || targetDisplayID < 0 {
+		return result, newErr(CodeInvalidArgs, "invalid task move target", nil)
+	}
+	started := time.Now()
+	command := "am display move-stack " + strconv.Itoa(rootID) + " " + strconv.Itoa(targetDisplayID)
+	shell, receipt, err := d.runShellV2(ctx, taskTimeout, command)
+	result.Receipt = receipt
+	if err != nil {
+		d.logMove(targetDisplayID, receipt, started)
+		return result, err
+	}
+	if receipt != device.DispatchTerminated {
+		result.Receipt = device.DispatchUnknown
+		d.logMove(targetDisplayID, result.Receipt, started)
+		return result, nil
+	}
+	if shell.ExitCode != 0 {
+		result.Receipt = device.DispatchUnknown
+		d.logMove(targetDisplayID, result.Receipt, started)
+		return result, exitDetail(shell.ExitCode)
+	}
+	d.logMove(targetDisplayID, result.Receipt, started)
+	return result, nil
+}
+
+// logMove records the move dispatch boundary with whitelisted fields only.
+func (d *Device) logMove(targetDisplayID int, receipt device.DispatchReceipt, started time.Time) {
+	d.logEvent(eventlog.Info, "android.task.move",
+		eventlog.Int("display_id", targetDisplayID),
+		eventlog.Str("state", receiptName(receipt)),
+		eventlog.Duration("ms", time.Since(started)))
 }
 
 // RecentTaskIDs reads the RecentTasks index. It is a separate fact from the

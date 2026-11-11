@@ -18,7 +18,7 @@ cmd/device-service
 
 cmd/device-mcp
   ├─ 私有配置、stdio / Streamable HTTP 传输、认证与 Origin 门禁
-  ├─ internal/mcp        12 工具注册、schema、严格接入、结果与图片投影、取消包装
+  ├─ internal/mcp        11 工具注册、schema、严格接入、结果与图片投影、取消包装
   └─ internal/client     强类型 HTTP 客户端（发送前 P、结构化结果/错误、图片字节）
 ```
 
@@ -127,18 +127,45 @@ engine 的状态锁只做有限内存检查与转换：锁内不等待 ADB、u2 
 - 服务生成的观察与 P 编号包含当前服务实例前缀，并在该实例内单调分配；会话自身有 `epoch`，
   提交与恢复都用它识别“原会话”。
 
+### app（统一应用生命周期）
+
+`app` 是应用发现、任务归属与进程终止的唯一入口，`kind` 为 `find`/`list`/`open`/`claim`/
+`handoff`/`close`/`kill`。查询与变更共用同一会话、O/P 与普通工作权威，不增加第二份任务表：
+
+- `find`/`list` 是查询：不消费 O、不续租、无 outcome；`find` 使用 detached P，`list` 绑定
+  `reference` 解析到的原会话。`open`/`claim`/`handoff`/`close`/`kill` 消费当前 ready O；
+  静态拒绝不消费，认领后不归还。主屏会话只允许 `find`/`list`/`open`。
+- task 归属分三类：`owned` 是会话虚屏中可确认的自有任务（虚拟屏 open 新建或复用的窗口）；
+  `borrowed` 是显式从主屏 `0` claim 进本会话虚屏的任务；`shared` 是主屏 open/list 或已
+  handoff 交给主屏的任务。`shared` 不进入会话删除名单；主屏 open 不登记用户任务。
+- 迁移责任池是账本根级 `task_transfers`：每次 claim/handoff 在派发前写入方向（`in`/`out`）
+  与 `prepared`/`may_dispatch`/`terminated`/`not_dispatched`/`unknown`/`released` 状态。
+  所有删除候选（当前会话任务、冻结快照、`checkedTaskIDs`、本屏 live 自动采纳、recent-only
+  与恢复重试）都查询同一保护池；出站未确认或已交出的任务不得被任何清理路径重新认领或按
+  ID 删除。确认未派发后才解除排除；同一 task 有旧 `RemoveTask`/`MoveTask` 责任未结束时，
+  再 claim 返回 `task_lifecycle_busy`，只限制该任务。
+- `open` 在虚屏优先复用同包 live 任务（先前台、否则最小 task ID），否则新建并登记 owned；
+  主屏 open 返回 shared、不登记。`claim` 要求主屏 live task 精确且 root 只有单个 leaf；
+  `handoff` 每次只交还一个任务，默认不恢复前台。`close` 冻结不超过 16 个本会话管理的 live
+  目标，逐项记录 outcome 与独立 recents 核验；`complete` 仅在全部关闭且 recents 全确认时
+  为真。`kill` 仅对本会话 live owned 且同屏唯一可归因、非前台、无已知 FGS/播放（或显式
+  允许）的应用执行精确 PID `kill -9`，不 force-stop、不追杀重启。
+- 五个变更成功提交后统一做一次原会话屏 full 无图后观察；后观察失败保留 executed 与
+  `observation.status=failed`，不改写主 outcome；STOP 撤权后的迟到候选不发布。
+
 ## 4. full/delta 与提交条件
 
 一次采集（`captureAndPublish`）的固定步骤：
 
 1. 复核工作未撤销、会话仍属于该工作；
 2. `ProbeDisplay` 确认目标逻辑屏存在；
-3. `start` 的首个观察、`act` 与 `open_app` 的后观察先做收敛采样：逐帧 `Capture`，只有当
-   连续两帧的三层摘要全部相同才停止——节点内容身份链（与实时重验同一个 `identityOf`）、
-   公开树的规范编码、前台状态/包/任务与显示几何。采样间隔取上一帧的实测耗时，相邻两帧的
-   采集起点间隔不小于该阶段的静默窗口，帧数与总墙钟分别有上限；预算耗尽照常发布最后一帧，
-   不判采集失败。当前取值（静默窗口/总预算）：`act` 400ms/2s、`start` 300ms/1.5s、
-   `open_app` 600ms/3s；它们是服务端固定策略，不是请求字段；
+3. `start` 的首个观察、`act` 的后观察与 `app` 五个变更 kind 的后观察先做收敛采样：逐帧
+   `Capture`，只有当连续两帧的三层摘要全部相同才停止——节点内容身份链（与实时重验同一个
+   `identityOf`）、公开树的规范编码、前台状态/包/任务与显示几何。采样间隔取上一帧的实测
+   耗时，相邻两帧的采集起点间隔不小于该阶段的静默窗口，帧数与总墙钟分别有上限；预算耗尽
+   照常发布最后一帧，不判采集失败。当前取值（静默窗口/总预算）：`act` 400ms/2s、
+   `start` 300ms/1.5s、`app.open` 600ms/3s（其余 app 变更沿用 `act` 档）；它们是服务端固定
+   策略，不是请求字段；
 4. 取得发布用层级与前台：有收敛采样时用收敛帧，否则 `Capture` 读取一次；两者在同一次读取
    中取得；
 5. 采集龄超过 `CaptureMaxAge=15s` → `stale_screen`；
@@ -202,7 +229,7 @@ delta 的五类块：`set`（逐字段完整新值，显式保留 `false`/`0`/`"
 
 ## 5. 工作位置与并发
 
-- 设备同时只有一项当前普通工作（`start`/`observe`/`act`/`apps`/`open_app`/`shell`）。冲突立即返回
+- 设备同时只有一项当前普通工作（`start`/`observe`/`act`/`app`/`shell`）。冲突立即返回
   `409 device_busy`，不建普通动作队列；同一 Agent 会得到 `blocking_operation_id`。
 - 会话撤权后，原 work、UI 与 shell 进入独立退休记录。旧逻辑交接从撤权起最多等待 5 秒；
   原调用提前取得终结证据时提前释放。到期仍无终结证据时，engine 冻结原操作结果、取消原上下文
@@ -224,7 +251,14 @@ delta 的五类块：`set`（逐字段完整新值，显式保留 `false`/`0`/`"
   派发未知时为 `uncertain`，已有确认 outcome 时保留；取消其上下文并令 `e.work=nil`。
   会话、所有观察与收尾链不因该工作期限改变。
 - 工作上下文按类型设上限：`start` = `StartTimeout + WorkTimeout`（40s）、`observe` =
-  `WorkTimeout + 15s`（35s）、`act`/`open_app` 约 50s、`apps` 约 30s、`shell` 约 65s；具体超时是服务策略，不是请求参数。
+  `WorkTimeout + 15s`（35s）、`act` 与 `app` 的五个变更 kind 约 50s、`app` 的 `find`/`list`
+  查询 `WorkTimeout + 10s`（30s）、`shell` 约 65s；具体超时是服务策略，不是请求参数。
+- `app` 的 `find`/`list` 使用查询工作（`WorkAppQuery`），其上下文继承调用方 `ctx`，可被请求
+  取消；取消后只关闭查询的发布资格与读取，`phase=query_cancelled`、无 outcome、无 error、
+  无集合，普通工作位置最迟在 5 秒逻辑交接内释放。查询工作期限到期为 `phase=query_timeout`、
+  `error=device_unavailable`，同样无 outcome。五个变更 kind 使用变更工作（`WorkAppAction`），
+  按普通 O 认领/派发与 STOP 规则处理；MCP 对查询取消不发 `end`，对五个变更取消保留有界
+  `end(P)`。
 - `end`、STOP、`status` 不占普通工作位置，也不等待普通工作完成。
 - 控制同步 `/v1/control/sync` 不占工作位置，不做设备 I/O；只更新 App 事实、处理命令回执、
   停止意图与消息确认，至多下发一条显示命令与一批未确认消息。
@@ -291,16 +325,18 @@ P 已无法定位时，`end(P)` 返回 `409 operation_unknown`、`phase=referenc
 - 显示身份已知：App 实例未更换时下发精确 `close_display`（带
   `target_app_instance_id`/`target_display_id`/`target_generation`）。有界任务处理后请求
   精确关闭；即使显示已先关闭，仍执行原 ID 的 recent-only 路径。
-- 任务补偿以原已登记 ID 与当前 live task ID 的并集为候选，每次删除前重验 boot、App 实例、
-  原 display/generation、目标 ID 与当前资源冲突。live 或 recents 命中的原归属 ID 实际派发
-  `RemoveTask`，删除返回不等于成功，必须重读实时任务与 `dumpsys activity recents`。
-  跨 boot、归属不足、任务移到主屏/其它归属或 ID 已被新资源使用时停止该目标的破坏性补偿。
+- 任务补偿以原已登记 ID 与当前 live task ID 的并集为候选，先排除根级 `task_transfers`
+  保护池中的任务，再每次删除前重验 boot、App 实例、原 display/generation、目标 ID 与当前
+  资源冲突。live 或 recents 命中的原归属 ID 实际派发 `RemoveTask`，删除返回不等于成功，
+  必须重读实时任务与 `dumpsys activity recents`。跨 boot、归属不足、任务移到主屏/其它归属、
+  已交出或仍受迁移保护、或 ID 已被新资源使用时停止该目标的破坏性补偿。
 - 任务全部消失且最近任务项也消失时 `tasks=confirmed`、`recents=confirmed`；仍有任务、
   不可读或身份冲突时相应记 `unconfirmed` 并进入有限重试或停止。无证据时不能按包名、PID、
   display 数字或“当前显示”扩大目标。
-- 虚拟会话在内存维护受管窗口登记（`taskEntry`：task id、包名、display、generation、
-  owned、proven，上限 16）；它是每次动作前由实时任务列表核对的缓存，不跨会话或重启
-  继承控制权；主屏会话不建立该登记。
+- 虚拟会话在内存维护受管窗口登记（`taskEntry`：task id、root task、包名、display、
+  generation、ownership（`owned`/`borrowed`/`shared`）、origin_display、proven，上限 16）；
+  它是每次动作前由实时任务列表核对的缓存，不跨会话或重启继承控制权；主屏会话不建立该
+  登记。已交出或仍受迁移保护的任务不会因本屏扫描、旧快照或 `checkedTaskIDs` 重新变成 owned。
 - `state=complete` 仅当 `execution`/`display`/`tasks`/`recents` 均不为 `pending` 或
   `unconfirmed`。完成时清除当前会话槽位、基线与显示命令；已发布 O/P 只按其有界缓存与仍可
   解析的原会话路由返回事实，不能改绑到新会话。
@@ -324,9 +360,9 @@ P 已无法定位时，`end(P)` 返回 `409 operation_unknown`、`phase=referenc
   不恢复旧 O/P、主屏授权或普通派发权。旧记录中的 boot、App 实例、原创建命令、display
   generation、精确任务 ID 与私有预算随记录保存。恢复不要求重启手机；旧归属退休且当前能力
   就绪、账本可保存新归属后开放准入。
-- 读取版本 1/2/3/4。版本 3/4 中已发出预算且仍为 `pending` 的退休记录，启动时先持久化为
-  `unconfirmed`，不授予第二次补偿预算。current 或旧格式记录转成退休记录时获得一次新预算；
-  迁移快照必须先保存，再允许任何补偿派发。
+- 读取版本 1–5。版本 1–4 的记录按原格式升级到 v5；版本 3/4/5 中已发出预算且仍为 `pending`
+  的退休记录，启动时先持久化为 `unconfirmed`，不授予第二次补偿预算。current 或旧格式记录
+  转成退休记录时获得一次新预算；迁移快照必须先保存，再允许任何补偿派发。
 - boot 变化可作为对应终结证据；跨 boot 的物理清理保持只读，不按旧裸 ID 删除可能属于新资源
   的对象。旧 shell runner 只在完整身份匹配时探测或终止，不重放命令。
 - 旧 `may_dispatch` UI/legacy checkpoint 保留为 `execution=unconfirmed` 的原归属证据；
@@ -345,27 +381,40 @@ P 已无法定位时，`end(P)` 返回 `409 operation_unknown`、`phase=referenc
 
 `internal/store` 把单个 JSON 对象写在 `<state_dir>/recovery-ledger.json`：
 
-- 预算 64 KiB；格式名 `mobile-use-vnext-ledger`，读版本 1/2/3/4、写版本 4，修订号单调递增；
+- 格式名 `mobile-use-vnext-ledger`，写版本 5；读版本 1–5，修订号单调递增；完整编码 ≤64 KiB；
 - 单写者：包内互斥 + 进程锁；`Save` 先 fsync 临时文件，再 rename 覆盖，再 fsync 父目录
   （Windows 跳过目录 fsync，因此 Windows 不提供同等耐久证据）；
-- 版本 3 分离当前归属与 `retired` 明细。内容只有归属与资源证据：原 service instance、
-  origin/agent/mode/state/App 实例/boot/device 身份、模式代次、原 create command、
-  显示 ID/SFID/generation/尺寸/密度/旋转/开始时间、待创建/待关闭命令、收尾五元组、停止边界、
-  虚拟屏受管任务 id 登记（≤16）、受管 shell runner 身份与阶段、一个 UI 子步骤责任、legacy
-  checkpoint、收尾核验过的任务 ID（≤256）与物理复核义务 `execution_recheck_required`；
-- 退休明细最多 8 条，其序列化集合最多 24 KiB；整个账本仍最多 64 KiB。容量达到边界时停止或
-  压缩退休项，不把容量不足变成新会话拒绝码，也不能把淘汰写成 `complete`。
+- 版本 5 在版本 4 的当前归属与退休明细上增加根级 `task_transfers` 迁移/排除池，并给任务记录
+  `root_task_id`、`ownership`（`owned`/`borrowed`/`shared`）、`origin_display`、`generation`、
+  `proven`。迁移记录含 operation_id、direction、state、epoch、boot/App 实例、包名、
+  leaf/root task、源/目标 display 与 source generation；不保存请求、树或自由文本。退休记录
+  **不得嵌入** `task_transfers`；
+- 容量分区（按实际序列化计）：完整账本 ≤64 KiB；retired 数组 ≤8 项且 ≤24 KiB；base（不含
+  retired 与 task_transfers）≤20 KiB；task_transfers 全局 ≤16 项、每项 ≤1000 B、数组 ≤16 KiB；
+  根对象拼接开销 ≤512 B。独立分区不能替代完整编码门禁；
+- 退休明细超过 8 条或序列化集合超过 24 KiB 时，`trimRetiredLocked` 的压缩/驱逐顺序为
+  `complete` → `unconfirmed` → `pending`，按该顺序驱逐最旧记录（同状态取开始时间更早者）；
+  被驱逐的未完成清理终止为 `unconfirmed` 并计入 `dropped_unconfirmed`，不得把淘汰写成
+  `complete`。只有
+  不存在任何仍可删除同一目标的引用时，才回收对应 `task_transfers` 项；
+  `prepared`/`may_dispatch`/`unknown` 的出站记录不得因腾空间被丢弃；
+- 内容只有归属与资源证据：原 service instance、origin/agent/mode/state/App 实例/boot/device
+  身份、模式代次、原 create command、显示 ID/SFID/generation/尺寸/密度/旋转/开始时间、
+  待创建/待关闭命令、收尾五元组、停止边界、虚拟屏受管任务登记（≤16）、受管 shell runner
+  身份与阶段、一个 UI 子步骤责任、legacy checkpoint、收尾核验过的任务 ID（≤256）与物理复核
+  义务 `execution_recheck_required`；
 - 明确不含：请求体、节点树、图片、输入正文、命令输出、异常字符串；
-- UI 窗口状态为 `may_dispatch`、`terminated`、`not_dispatched`、`unknown`；`may_dispatch`
-  表示调用仍未返回，`unknown` 表示窗口已关闭但没有可用结束回执，是私有账本的持久终态，
-  不改判原工具的 `uncertain`。
+- UI 窗口状态为 `may_dispatch`、`terminated`、`not_dispatched`、`unknown`；`may_dispatch` 表示
+  调用仍未返回，`unknown` 表示窗口已关闭但没有可用结束回执，是私有账本的持久终态，不改判
+  原工具的 `uncertain`；
 - `start` 在启动显示助手前同步写一次（原归属 + 创建意图），会话激活后再写一次；其余进度
   异步写。每个 UI 输入子步骤额外预写 `may_dispatch`，成功后重新竞争派发边界；调用返回后
   只记录一次关闭状态。窗口关闭不阻止后续普通工作；写失败仍置 `ledgerUnsafe`，可用性为
-  `blocked`（原因 `ledger_unavailable`）；STOP 不等这些写入。
-- 版本 1/2/3 升级保留原 Session/Cleanup/Stop/Shell/task 事实；缺失的新字段不充当结束证据。
-  `legacy_ui_pending` 保留旧责任，迁移后作为退休记录中的未确认事实。回退只能使用兼容版本 4
-  的产物；不通过降级覆盖或清库恢复。
+  `blocked`（原因 `ledger_unavailable`）；STOP 不等这些写入；
+- 版本 1–4 升级保留原 Session/Cleanup/Stop/Shell/task 事实；版本 1–4 的任务仅按旧格式的
+  原拥有关系升级为 `owned`，绝不根据包名推断 `borrowed` 或交出。v5 专属字段不得出现在标为
+  v1–v4 的账本中；加载 v5 后禁止丢字段降存 v4。**首次 0.9.0 写入 v5 后不支持回退到 0.8.0**，
+  只能使用同为 v5 的候选或前滚修复；不得删除账本、清 App 数据或忽略迁移字段。
 
 账本只由 engine 读取与生成，HTTP 层与 App 都不写账本。
 
@@ -400,6 +449,9 @@ P 已无法定位时，`end(P)` 返回 `409 operation_unknown`、`phase=referenc
 `release/versions.json` 是发行号、共同契约号与 Android versionCode 的唯一来源，构建生成
 Go/Java 常量；`scripts/build-release.ps1` 产出整组产物与 `build/release/manifest.json`
 （源码提交、Go 版本、MCP SDK/协议、各产物 SHA-256/大小、Android 包名/版本、工具目录指纹）。
+主机侧工具由 `scripts/build-host-tools.ps1` 用同一版本源构建，并在
+`build/host-tools-manifest.json` 记录发行/契约、源码身份、工具目录 count/sha256 与两个
+exe 的大小/SHA-256；`-VerifyOnly` 只核验而不构建。
 部署按清单核验后覆盖安装，服务与 App 的契约必须精确相等；App 私有数据保留，不使用卸载/
 清库解决签名或配对。MCP 宿主必须重启实际进程并重新发现工具，替换磁盘文件不等于发布完成。
 发布与回退的受控顺序见[发布与回退](release.md)。

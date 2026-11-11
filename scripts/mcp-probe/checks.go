@@ -22,13 +22,26 @@ const (
 	maxWaitMS                = 8000
 	probeShellOutput         = "mobile-use-mcp-probe"
 	probeUnknownObservation  = "Oprobe-unknown"
+	probeEmptyQuery          = "com.mobileuse.probe.no-such-application"
+
+	suiteSmoke        = "smoke"
+	suiteAppLifecycle = "app-lifecycle"
+
+	// controlledAppPackage is the dedicated writable-loop target built from
+	// android-control/test-target. The app-lifecycle suite never mutates any
+	// other package by default.
+	controlledAppPackage = "com.mobileuse.probe"
 )
 
-// toolNames is the complete public MCP catalog, in registration order.
+// toolNames is the complete public MCP catalog, in registration order. apps and
+// open_app were merged into app; any of the old names existing is a failure.
 var toolNames = []string{
 	"start", "status", "observe", "act", "inspect", "keepalive",
-	"end", "apps", "open_app", "notify", "shell", "diagnose",
+	"end", "app", "notify", "shell", "diagnose",
 }
+
+// legacyToolNames must never appear in tools/list after the app merge.
+var legacyToolNames = []string{"apps", "open_app"}
 
 // probe carries the connected session and the typed service client used for
 // independent status polling.
@@ -37,6 +50,9 @@ type probe struct {
 	session    *sdk.ClientSession
 	service    *client.Client
 	resultMode string
+	suite      string
+	appTarget  string
+	manifests  []string
 }
 
 // schemaView is the probe's projection of one published input schema.
@@ -45,6 +61,13 @@ type schemaView struct {
 	Properties           map[string]any `json:"properties"`
 	Required             []string       `json:"required"`
 	AdditionalProperties *bool          `json:"additionalProperties"`
+}
+
+// startSummary is the stable identity of one ordinary start.
+type startSummary struct {
+	OperationID   string
+	ObservationID string
+	Mode          string
 }
 
 // runChecks performs the catalog, session and cancellation checks. It reports
@@ -66,30 +89,46 @@ func (p *probe) runChecks(ctx context.Context) bool {
 		return false
 	}
 
-	pID, oID, ok := p.startCheck(ctx)
+	start, ok := p.startCheck(ctx)
 	if !ok {
 		return false
 	}
-	observedID, ok := p.observeCheck(ctx, oID)
-	if !ok {
+	if !p.appQueryChecks(ctx, start.OperationID) {
 		return false
 	}
-	if !p.contentProjectionCheck(ctx, pID, observedID) {
-		return false
+	if p.suiteMode() == suiteAppLifecycle {
+		if !p.appLifecycleChecks(ctx, start) {
+			return false
+		}
+	} else {
+		observedID, ok := p.observeCheck(ctx, start.ObservationID)
+		if !ok {
+			return false
+		}
+		if !p.contentProjectionCheck(ctx, start.OperationID, observedID) {
+			return false
+		}
+		if !p.inspectCheck(ctx, observedID) {
+			return false
+		}
+		if !p.actCheck(ctx, observedID) {
+			return false
+		}
 	}
-	if !p.inspectCheck(ctx, observedID) {
-		return false
-	}
-	if !p.actCheck(ctx, observedID) {
-		return false
-	}
-	if !p.endCheck(ctx, pID) {
+	if !p.endCheck(ctx, start.OperationID) {
 		return false
 	}
 	if !p.cancellationCheck(ctx) {
 		return false
 	}
 	return false
+}
+
+func (p *probe) suiteMode() string {
+	if p.suite == "" {
+		return suiteSmoke
+	}
+	return p.suite
 }
 
 // call invokes one MCP tool and projects its result. MCP-level errors become a
@@ -127,43 +166,38 @@ func (p *probe) errorProjectionCheck(ctx context.Context) bool {
 	return true
 }
 
-// catalogCheck asserts the exact tool catalog and the published schema shape.
+// catalogCheck asserts the exact 11-tool catalog, the live/source semantic
+// equality and the source fingerprint identity.
 func (p *probe) catalogCheck(ctx context.Context) bool {
 	list, err := p.session.ListTools(ctx, nil)
 	if err != nil {
 		p.reporter.fail("tools", "list_failed")
 		return false
 	}
-	seen := make(map[string]bool, len(list.Tools))
-	for _, tool := range list.Tools {
-		seen[tool.Name] = true
-	}
-	if len(list.Tools) != len(toolNames) {
-		p.reporter.fail("tools", "catalog_size_mismatch",
-			field("count", strconv.Itoa(len(list.Tools))))
+	if failure := checkLiveCatalog(list.Tools); failure != nil {
+		p.reporter.fail("tools", failure.reason, failure.fields...)
 		return false
 	}
-	for _, wanted := range toolNames {
-		if !seen[wanted] {
-			p.reporter.fail("tools", "tool_missing", field("tool", wanted))
-			return false
-		}
+	p.reporter.pass("tools",
+		field("count", strconv.Itoa(len(list.Tools))),
+		field("source_count", strconv.Itoa(len(toolNames))),
+		"legacy_absent=true")
+	p.reporter.pass("catalog",
+		field("tools", strconv.Itoa(len(toolNames))),
+		"names=set_equal", "description=identical", "schema=semantic_equal")
+	if !p.catalogIdentityCheck() {
+		return false
 	}
-	for name := range seen {
-		if !containsString(toolNames, name) {
-			p.reporter.fail("tools", "tool_unexpected", field("tool", name))
-			return false
-		}
-	}
-	p.reporter.pass("tools", "count=12")
 
 	if failure := checkSchemas(list.Tools); failure != nil {
 		p.reporter.fail("schema", failure.reason, failure.fields...)
 		return false
 	}
 	p.reporter.pass("schema",
-		"objects=12", "additional_properties_false=12",
-		"required_start=0", "required_observe=1", "required_act=2", "required_status=0")
+		field("objects", strconv.Itoa(len(toolNames))),
+		field("additional_properties_false", strconv.Itoa(len(toolNames))),
+		"required_start=0", "required_observe=1", "required_act=2",
+		"required_status=0", "required_app=1")
 	return true
 }
 
@@ -206,6 +240,21 @@ func checkSchemas(tools []*sdk.Tool) *checkError {
 			if !sameStringSet(schema.Required, []string{"observation_id", "operation"}) {
 				return failf("required_mismatch", field("tool", "act"))
 			}
+		case "app":
+			if !sameStringSet(schema.Required, []string{"kind"}) {
+				return failf("required_mismatch", field("tool", "app"))
+			}
+			kind, declared := schema.Properties["kind"]
+			if !declared {
+				return failf("app_schema_kind_missing", field("tool", "app"))
+			}
+			kindObject, ok := kind.(map[string]any)
+			if !ok {
+				return failf("app_schema_kind_invalid", field("tool", "app"))
+			}
+			if values, ok := kindObject["enum"].([]any); !ok || len(values) != 7 {
+				return failf("app_schema_kind_enum", field("tool", "app"))
+			}
 		}
 	}
 	return nil
@@ -225,43 +274,47 @@ func (p *probe) statusCheck(ctx context.Context) (resultView, bool) {
 	return projected.view, true
 }
 
-// startCheck runs one ordinary start and records P and O1.
-func (p *probe) startCheck(ctx context.Context) (string, string, bool) {
+// startCheck runs one ordinary start and records P, O1 and the session mode.
+func (p *probe) startCheck(ctx context.Context) (startSummary, bool) {
 	projected, failure := p.call(ctx, "start", map[string]any{})
 	if failure != nil {
 		p.reporter.fail("start", failure.reason, failure.fields...)
-		return "", "", false
+		return startSummary{}, false
 	}
 	view := projected.view
 	if projected.result.IsError {
 		p.reporter.fail("start", "tool_is_error", field("code", codeOf(view)))
-		return "", "", false
+		return startSummary{}, false
 	}
 	if view.Outcome != outcomeExecuted {
 		p.reporter.fail("start", "outcome_not_executed", field("outcome", view.Outcome), field("code", codeOf(view)))
-		return "", "", false
+		return startSummary{}, false
 	}
 	if !validReference(view.OperationID, 'P') {
 		p.reporter.fail("start", "operation_id_invalid")
-		return "", "", false
+		return startSummary{}, false
 	}
 	if view.Session == nil || view.Session.State != sessionActive {
 		p.reporter.fail("start", "session_not_active", field("session", sessionStateOf(view.Session)))
-		return "", "", false
+		return startSummary{}, false
 	}
 	if view.Observation == nil || !validReference(view.Observation.ID, 'O') {
 		p.reporter.fail("start", "observation_missing")
-		return "", "", false
+		return startSummary{}, false
 	}
 	if format := treeFormatOf(view.Observation); format != treeFull {
 		p.reporter.fail("start", "tree_not_full",
 			field("tree_format", format), field("observation_status", view.Observation.Status))
-		return "", "", false
+		return startSummary{}, false
 	}
 	p.reporter.pass("start",
 		field("P", view.OperationID), field("O1", view.Observation.ID),
-		"session=active", "tree=full")
-	return view.OperationID, view.Observation.ID, true
+		"session=active", field("session_mode", view.Session.Mode), "tree=full")
+	return startSummary{
+		OperationID:   view.OperationID,
+		ObservationID: view.Observation.ID,
+		Mode:          view.Session.Mode,
+	}, true
 }
 
 // beginSession performs a start without printing a check line; the caller uses
@@ -357,42 +410,178 @@ func checkObservationTreeBlock(projected *callResult, observation *observationVi
 	return nil
 }
 
-// contentProjectionCheck exercises the three content families that the old
-// text projection omitted: full app items, shell output and diagnosis events.
-// Every fact is checked from the selected mode's complete encoding, and
-// both/text additionally require the readable v1 block.
-func (p *probe) contentProjectionCheck(ctx context.Context, startID, observationID string) bool {
-	apps, failure := p.call(ctx, "apps", map[string]any{})
+// appQueryChecks covers the read-only app kinds on a live adapter. These calls
+// never consume a ready O, so they are safe in the default smoke suite.
+func (p *probe) appQueryChecks(ctx context.Context, reference string) bool {
+	find, failure := p.call(ctx, "app", map[string]any{"kind": "find"})
 	if failure != nil {
-		p.reporter.fail("apps_projection", failure.reason, failure.fields...)
+		p.reporter.fail("app_find", failure.reason, failure.fields...)
 		return false
 	}
-	if apps.result.IsError || apps.view.Apps == nil {
-		p.reporter.fail("apps_projection", "apps_result_missing", field("code", codeOf(apps.view)))
+	if find.result.IsError || find.view.App == nil || find.view.App.Kind != "find" {
+		p.reporter.fail("app_find", "find_result_missing", field("code", codeOf(find.view)))
 		return false
 	}
-	if len(apps.view.Apps.Items) == 0 || apps.view.Apps.Total < len(apps.view.Apps.Items) {
-		p.reporter.fail("apps_projection", "apps_items_incomplete",
-			field("items", strconv.Itoa(len(apps.view.Apps.Items))),
-			field("total", strconv.Itoa(apps.view.Apps.Total)))
+	qApp := find.view.App
+	if find.view.Outcome != "" {
+		p.reporter.fail("app_find", "query_has_outcome", field("outcome", find.view.Outcome))
 		return false
 	}
-	for _, item := range apps.view.Apps.Items {
+	if !qApp.HasItems || qApp.Items == nil || !qApp.HasTotal || qApp.Truncated == nil || qApp.CapturedAt == "" {
+		p.reporter.fail("app_find", "find_facts_missing")
+		return false
+	}
+	if qApp.Total < len(qApp.Items) || (!*qApp.Truncated && qApp.Total != len(qApp.Items)) {
+		p.reporter.fail("app_find", "find_total_mismatch",
+			field("items", strconv.Itoa(len(qApp.Items))), field("total", strconv.Itoa(qApp.Total)))
+		return false
+	}
+	for _, item := range qApp.Items {
 		if item.Name == "" || item.Package == "" {
-			p.reporter.fail("apps_projection", "apps_item_incomplete")
+			p.reporter.fail("app_find", "find_item_incomplete")
 			return false
 		}
 	}
-	if p.mode() != resultModeStructured {
-		if failure := requireTextBlock(apps, "apps v1 items=", "end apps", "apps_block_missing"); failure != nil {
-			p.reporter.fail("apps_projection", failure.reason, failure.fields...)
-			return false
-		}
-	}
-	p.reporter.pass("apps_projection",
-		field("mode", p.mode()), field("items", strconv.Itoa(len(apps.view.Apps.Items))),
-		field("total", strconv.Itoa(apps.view.Apps.Total)))
+	p.reporter.pass("app_find",
+		field("mode", p.mode()), field("items", strconv.Itoa(len(qApp.Items))),
+		field("total", strconv.Itoa(qApp.Total)), "outcome=none")
 
+	empty, failure := p.call(ctx, "app", map[string]any{
+		"kind": "find", "query": probeEmptyQuery,
+	})
+	if failure != nil {
+		p.reporter.fail("app_find_empty", failure.reason, failure.fields...)
+		return false
+	}
+	if empty.result.IsError || empty.view.App == nil || empty.view.App.Kind != "find" {
+		p.reporter.fail("app_find_empty", "empty_result_missing", field("code", codeOf(empty.view)))
+		return false
+	}
+	eApp := empty.view.App
+	if empty.view.Outcome != "" || !eApp.HasItems || len(eApp.Items) != 0 ||
+		!eApp.HasTotal || eApp.Total != 0 || eApp.Truncated == nil || *eApp.Truncated {
+		p.reporter.fail("app_find_empty", "empty_facts_unexpected",
+			field("items", strconv.Itoa(len(eApp.Items))), field("total", strconv.Itoa(eApp.Total)))
+		return false
+	}
+	p.reporter.pass("app_find_empty", "items=0", "total=0", "truncated=false", "outcome=none")
+
+	list, failure := p.call(ctx, "app", map[string]any{
+		"kind": "list", "reference": reference,
+	})
+	if failure != nil {
+		p.reporter.fail("app_list", failure.reason, failure.fields...)
+		return false
+	}
+	if list.result.IsError || list.view.App == nil || list.view.App.Kind != "list" {
+		p.reporter.fail("app_list", "list_result_missing", field("code", codeOf(list.view)))
+		return false
+	}
+	lApp := list.view.App
+	if list.view.Outcome != "" {
+		p.reporter.fail("app_list", "query_has_outcome", field("outcome", list.view.Outcome))
+		return false
+	}
+	if lApp.DisplayID == nil || !lApp.HasTaskItems || !lApp.HasTotal ||
+		lApp.Truncated == nil || lApp.CapturedAt == "" || lApp.Foreground == nil {
+		p.reporter.fail("app_list", "list_facts_missing")
+		return false
+	}
+	if lApp.Total < len(lApp.TaskItems) || (!*lApp.Truncated && lApp.Total != len(lApp.TaskItems)) {
+		p.reporter.fail("app_list", "list_total_mismatch",
+			field("items", strconv.Itoa(len(lApp.TaskItems))), field("total", strconv.Itoa(lApp.Total)))
+		return false
+	}
+	previousTaskID := 0
+	for _, item := range lApp.TaskItems {
+		if item.TaskID <= previousTaskID || item.Package == "" ||
+			!appOwnershipSet[item.Ownership] {
+			p.reporter.fail("app_list", "list_item_invalid")
+			return false
+		}
+		previousTaskID = item.TaskID
+	}
+	if failure := checkForeground(lApp.Foreground); failure != nil {
+		p.reporter.fail("app_list", failure.reason, failure.fields...)
+		return false
+	}
+	p.reporter.pass("app_list",
+		field("mode", p.mode()), field("display_id", integerString(lApp.DisplayID)),
+		field("items", strconv.Itoa(len(lApp.TaskItems))), field("total", strconv.Itoa(lApp.Total)),
+		field("foreground", lApp.Foreground.State), "outcome=none")
+
+	primary, failure := p.call(ctx, "app", map[string]any{
+		"kind": "list", "reference": reference, "scope": "primary",
+	})
+	if failure != nil {
+		p.reporter.fail("app_list_primary", failure.reason, failure.fields...)
+		return false
+	}
+	if primary.result.IsError || primary.view.App == nil || primary.view.App.Kind != "list" ||
+		primary.view.Outcome != "" {
+		p.reporter.fail("app_list_primary", "primary_result_missing", field("code", codeOf(primary.view)))
+		return false
+	}
+	pApp := primary.view.App
+	if pApp.DisplayID == nil || *pApp.DisplayID != 0 || !pApp.HasTaskItems ||
+		!pApp.HasTotal || pApp.Truncated == nil || pApp.CapturedAt == "" ||
+		pApp.Foreground == nil {
+		p.reporter.fail("app_list_primary", "primary_facts_unexpected",
+			field("display_id", integerString(pApp.DisplayID)))
+		return false
+	}
+	if failure := checkForeground(pApp.Foreground); failure != nil {
+		p.reporter.fail("app_list_primary", failure.reason, failure.fields...)
+		return false
+	}
+	p.reporter.pass("app_list_primary",
+		field("display_id", integerString(pApp.DisplayID)),
+		field("items", strconv.Itoa(len(pApp.TaskItems))),
+		field("foreground", pApp.Foreground.State), "outcome=none")
+
+	// Cross-kind member: find never admits reference. A strict adapter rejects
+	// before allocating an operation, so there is no P and no app result.
+	admission, failure := p.call(ctx, "app", map[string]any{
+		"kind": "find", "reference": reference,
+	})
+	if failure != nil {
+		p.reporter.fail("app_admission", failure.reason, failure.fields...)
+		return false
+	}
+	if !admission.result.IsError || admission.view.Error == nil ||
+		admission.view.Error.Code != "invalid_request" ||
+		admission.view.App != nil || admission.view.Outcome != "" ||
+		admission.view.OperationID != "" {
+		p.reporter.fail("app_admission", "cross_kind_not_rejected",
+			field("code", codeOf(admission.view)), field("outcome", admission.view.Outcome))
+		return false
+	}
+	p.reporter.pass("app_admission", "kind=find", "cross_member=reference",
+		"code=invalid_request", "is_error=true", "operation_id=none")
+	return true
+}
+
+// checkForeground validates one list foreground branch without assuming any
+// device state. A null task_id is allowed on present; unknown must name a
+// reason.
+func checkForeground(foreground *foregroundView) *checkError {
+	switch foreground.State {
+	case "present":
+		if !foreground.HasTask {
+			return failf("foreground_task_missing")
+		}
+	case "none":
+	case "unknown":
+		if foreground.Reason == "" {
+			return failf("foreground_reason_missing")
+		}
+	default:
+		return failf("foreground_state_invalid", field("state", foreground.State))
+	}
+	return nil
+}
+
+func (p *probe) contentProjectionCheck(ctx context.Context, startID, observationID string) bool {
 	shell, failure := p.call(ctx, "shell", map[string]any{
 		"reference": observationID,
 		"command":   "echo " + probeShellOutput,
@@ -614,9 +803,32 @@ func (p *probe) endCheck(ctx context.Context, startID string) bool {
 	return true
 }
 
+// waitCleanupSettled bounds the display-teardown race between the previous end
+// and a second start. It asserts nothing about cleanup; it only avoids turning
+// an in-flight teardown into a cancellation failure.
+func (p *probe) waitCleanupSettled(ctx context.Context, budget time.Duration) {
+	deadline := time.Now().Add(budget)
+	for time.Now().Before(deadline) {
+		result, err := p.service.Status(ctx, "")
+		if err == nil && (result == nil || result.Result == nil ||
+			result.Result.Cleanup == nil || result.Result.Cleanup.State != "pending") {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
 // cancellationCheck starts a second session, cancels a waiting observe and
 // proves the adapter issued a bounded end for it.
 func (p *probe) cancellationCheck(ctx context.Context) bool {
+	// The previous end starts the independent cleanup chain. A second start is
+	// admitted while that chain runs, so give the display teardown a bounded
+	// moment instead of reporting a teardown race as a cancellation failure.
+	p.waitCleanupSettled(ctx, 5*time.Second)
 	startID, observationID, failure := p.beginSession(ctx)
 	if failure != nil {
 		p.reporter.fail("cancel", "second_start_failed", failure.fields...)

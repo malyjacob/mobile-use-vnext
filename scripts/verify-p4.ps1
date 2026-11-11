@@ -2,18 +2,21 @@
 <#
 Tool-surface verification against the deployed device service.
 
-    health/status -> apps -> diagnose -> notify -> start -> inspect -> keepalive
-    -> open_app (create + reuse + unknown app) -> end -> cleanup verification
-    -> optional shell (normal, output bound, timeout, STOP)
+    health/status -> app(kind=find) -> diagnose -> notify -> start -> inspect
+    -> keepalive -> app(kind=list/open/close) with controlled probe tasks
+    -> end -> cleanup verification -> optional shell (normal, output bound,
+    timeout, STOP)
 
 Requires the service deployed by scripts/deploy.ps1 and one online adb device.
-The script never prints tokens, node trees, commands or shell output.
+The script never prints tokens, node trees, commands or shell output. It uses
+only the unified /api/app surface and never calls the removed legacy
+application routes.
 
 Exit codes: 0 = PASS/SKIP, 1 = FAIL, 2 = BLOCKED (can_start=false before work).
 #>
 param(
     [int]$HostPort = 0,
-    [ValidateSet('All', 'Core', 'OpenApp', 'Shell', 'ShellRecovery')]
+    [ValidateSet('All', 'Core', 'App', 'OpenApp', 'Shell', 'ShellRecovery')]
     [string]$Section = 'All',
     [int]$ShellTimeoutSeconds = 60
 )
@@ -161,6 +164,19 @@ function Assert-ApiError {
     if ($code -ne $ExpectedCode) { Fail "$Path expected error $ExpectedCode, got $code" }
 }
 
+function Assert-ApiErrorCodeIn {
+    param([string]$Path, [string]$Body, [string[]]$ExpectedCodes, [int]$ExpectedStatus)
+    $response = Invoke-Http -Url ($script:baseUrl + $Path) -Body $Body -Headers (Get-AgentHeaders)
+    if ($response.Status -ne $ExpectedStatus) {
+        Fail "$Path expected HTTP $ExpectedStatus, got $($response.Status)"
+    }
+    $parsed = ConvertFrom-JsonSafe -Text $response.Text -Label "$Path error"
+    $code = [string](Get-Field (Get-Field $parsed 'error') 'code')
+    if ($ExpectedCodes -notcontains $code) {
+        Fail "$Path expected error $($ExpectedCodes -join '/'), got $code"
+    }
+}
+
 function Get-Status {
     return (Invoke-Api -Path '/api/status' -Body '{}')
 }
@@ -189,6 +205,15 @@ function Assert-CleanComplete {
     }
     $canStart = Get-Field $Status 'can_start'
     Assert-True ($null -ne $canStart -and [bool]$canStart) 'can_start is not true after cleanup'
+}
+
+function Assert-AppKind {
+    param($Result, [string]$Kind)
+    $app = Get-Field $Result 'app'
+    Assert-True ($null -ne $app) 'response has no app object'
+    $actualKind = [string](Get-Field $app 'kind')
+    Assert-True ($actualKind -eq $Kind) ("app.kind=$actualKind, expected $Kind")
+    return $app
 }
 
 function Wait-CanStart {
@@ -290,36 +315,37 @@ su -c 'chroot $($script:chroot) /bin/sh -c "export PATH=/usr/local/bin:/usr/bin:
 
 # ---------------------------------------------------------------- core tools
 function Test-CoreTools {
-    Write-Host 'core: health/status/apps/diagnose/notify'
+    Write-Host 'core: health/status/app(find)/diagnose/notify'
     $status = Get-Status
     $canStart = Get-Field $status 'can_start'
     if ($null -eq $canStart -or -not [bool]$canStart) {
         Fail ("service is not admissible: " + [string](Get-Field $status 'blocking_code'))
     }
 
-    $apps = Invoke-Api -Path '/api/apps' -Body '{}'
-    $view = Get-Field $apps 'apps'
-    Assert-True ($null -ne $view) 'apps response has no apps object'
-    Assert-True ($null -ne (Get-Field $view 'items')) 'apps.items missing'
-    Assert-True ($null -ne (Get-Field $view 'total')) 'apps.total missing'
-    Assert-True ([string](Get-Field $view 'captured_at') -ne '') 'apps.captured_at missing'
-    Assert-True ($null -eq (Get-Field $apps 'outcome')) 'apps must not report an outcome'
-    Assert-True ([int](Get-Field $view 'total') -ge 1) 'apps.total is zero'
+    $find = Invoke-Api -Path '/api/app' -Body '{"kind":"find"}'
+    $findApp = Assert-AppKind -Result $find -Kind 'find'
+    Assert-True ($null -ne (Get-Field $findApp 'items')) 'app.find items missing'
+    Assert-True ($null -ne (Get-Field $findApp 'total')) 'app.find total missing'
+    Assert-True ([string](Get-Field $findApp 'captured_at') -ne '') 'app.find captured_at missing'
+    Assert-True ($null -eq (Get-Field $find 'outcome')) 'app.find must not report an outcome'
+    Assert-True ([int](Get-Field $findApp 'total') -ge 1) 'app.find total is zero'
 
     $query = 'com.android'
     $probeInstalled = ((Invoke-Adb -Arguments @('shell', 'pm', 'path', $script:probePackage)) -match 'package:')
     if ($probeInstalled) { $query = $script:probePackage }
-    $filtered = Invoke-Api -Path '/api/apps' -Body ('{"query":"' + $query + '"}')
-    $filteredView = Get-Field $filtered 'apps'
-    Assert-True ([int](Get-Field $filteredView 'total') -ge 1) 'apps query matched nothing'
+    $filtered = Invoke-Api -Path '/api/app' -Body ('{"kind":"find","query":"' + $query + '"}')
+    $filteredApp = Assert-AppKind -Result $filtered -Kind 'find'
+    Assert-True ([int](Get-Field $filteredApp 'total') -ge 1) 'app.find query matched nothing'
     if ($probeInstalled) {
         $names = @()
-        foreach ($item in @(Get-Field $filteredView 'items')) {
+        foreach ($item in @(Get-Field $filteredApp 'items')) {
             $names += [string](Get-Field $item 'package')
         }
-        Assert-True ($names -contains $script:probePackage) 'apps query did not return the probe package'
+        Assert-True ($names -contains $script:probePackage) 'app.find query did not return the probe package'
     }
-    Assert-ApiError -Path '/api/apps' -Body '{"query":"x","limit":1}' `
+    Assert-ApiError -Path '/api/app' -Body '{"kind":"find","query":"x","limit":1}' `
+        -ExpectedCode 'invalid_request' -ExpectedStatus 422
+    Assert-ApiError -Path '/api/app' -Body '{"kind":"apps"}' `
         -ExpectedCode 'invalid_request' -ExpectedStatus 422
 
     $diag = Invoke-Api -Path '/api/diagnose' -Body '{}'
@@ -339,7 +365,26 @@ function Test-CoreTools {
 }
 
 # ---------------------------------------------------------------- session/inspect/keepalive
+
+# Wait-CleanupSettled gives the previous independent closure chain a bounded
+# moment before the next start. A new start is admitted while that chain runs,
+# but the control App still has to release the old virtual display; starting in
+# the middle of that release turns a teardown race into display_create_timeout.
+function Wait-CleanupSettled {
+    param([int]$Seconds = 6)
+    $deadline = (Get-Date).AddSeconds($Seconds)
+    while ((Get-Date) -lt $deadline) {
+        $status = Get-Status
+        $cleanup = Get-Field $status 'cleanup'
+        if ($null -eq $cleanup -or [string](Get-Field $cleanup 'state') -ne 'pending') {
+            return
+        }
+        Start-Sleep -Milliseconds 200
+    }
+}
+
 function Start-VerifySession {
+    Wait-CleanupSettled
     $script:startSeq++
     $start = Invoke-Api -Path '/api/start' -Body '{}' `
         -Operation ('Pverify-start-' + $script:runId + '-' + [string]$script:startSeq)
@@ -401,46 +446,106 @@ function Test-SessionTools {
     return $start
 }
 
-# ---------------------------------------------------------------- open_app + cleanup
-function Test-OpenApp {
-    Write-Host 'open_app: create/reuse/unknown/cleanup'
+# ---------------------------------------------------------------- unified app lifecycle + cleanup
+function Test-AppLifecycle {
+    Write-Host 'app: list/open/reuse/claim/kill-reject/close/cleanup'
     $probe = ((Invoke-Adb -Arguments @('shell', 'pm', 'path', $script:probePackage)) -match 'package:')
-    if (-not $probe) { Write-Host 'open_app: SKIP (probe package not installed)'; return }
+    if (-not $probe) { Write-Host 'app: SKIP (probe package not installed)'; return }
 
     $start = Start-VerifySession
+    $sessionOp = [string](Get-Field $start 'operation_id')
     $oid = [string](Get-Field (Get-Field $start 'observation') 'id')
 
-    $missing = Invoke-Http -Url ($script:baseUrl + '/api/open_app') `
-        -Body ('{"observation_id":"' + $oid + '","app":"com.mobileuse.missing.package"}') `
-        -Headers (Get-AgentHeaders -Operation ('Pverify-open-missing-' + $script:runId))
-    Assert-True ($missing.Status -eq 409) "open_app missing app expected 409, got $($missing.Status)"
-    $missingBody = ConvertFrom-JsonSafe -Text $missing.Text -Label 'open_app missing'
-    Assert-True ([string](Get-Field (Get-Field $missingBody 'error') 'code') -eq 'app_not_found') 'open_app missing app code'
+    $list = Invoke-Api -Path '/api/app' -Body ('{"kind":"list","reference":"' + $oid + '"}')
+    $listApp = Assert-AppKind -Result $list -Kind 'list'
+    $sessionDisplay = Get-Field $listApp 'display_id'
+    Assert-True ($null -ne $sessionDisplay) 'app.list display_id missing'
+    Assert-True ([int]$sessionDisplay -gt 0) 'app.list display_id is not a virtual display'
+    # An empty array is present on the wire but Get-Field enumerates it to no
+    # output; assert the member itself instead of a non-null value.
+    Assert-True ($null -ne $listApp.PSObject.Properties['items']) 'app.list items missing'
+    Assert-True ($null -ne (Get-Field $listApp 'total')) 'app.list total missing'
+    Assert-True ($null -ne (Get-Field $listApp 'truncated')) 'app.list truncated missing'
+    Assert-True ([string](Get-Field $listApp 'captured_at') -ne '') 'app.list captured_at missing'
+    Assert-True ($null -ne (Get-Field $listApp 'foreground')) 'app.list foreground missing'
+    Assert-True ($null -eq (Get-Field $list 'outcome')) 'app.list must not report an outcome'
 
-    $open = Invoke-Api -Path '/api/open_app' `
-        -Body ('{"observation_id":"' + $oid + '","app":"' + $script:probePackage + '"}') `
+    $primaryList = Invoke-Api -Path '/api/app' `
+        -Body ('{"kind":"list","reference":"' + $oid + '","scope":"primary"}')
+    $primaryApp = Assert-AppKind -Result $primaryList -Kind 'list'
+    Assert-True ([int](Get-Field $primaryApp 'display_id') -eq 0) 'app.list scope=primary display_id is not 0'
+    Assert-True ($null -ne $primaryApp.PSObject.Properties['items']) 'app.list scope=primary items missing'
+
+    # Static branch checks use task ids that cannot exist. They must reject before
+    # consuming the ready O, so the later open with the same O must still work.
+    Assert-ApiErrorCodeIn -Path '/api/app' `
+        -Body ('{"kind":"claim","observation_id":"' + $oid + '","target":{"task_id":2147483647}}') `
+        -ExpectedCodes @('task_not_found', 'task_not_tracked') -ExpectedStatus 409
+    Assert-ApiErrorCodeIn -Path '/api/app' `
+        -Body ('{"kind":"kill","observation_id":"' + $oid + '","target":{"task_id":2147483647}}') `
+        -ExpectedCodes @('task_not_found', 'task_not_tracked') -ExpectedStatus 409
+
+    $missing = Invoke-Http -Url ($script:baseUrl + '/api/app') `
+        -Body ('{"kind":"open","observation_id":"' + $oid + '","app":"com.mobileuse.missing.package"}') `
+        -Headers (Get-AgentHeaders -Operation ('Pverify-open-missing-' + $script:runId))
+    Assert-True ($missing.Status -eq 409) "app open missing package expected 409, got $($missing.Status)"
+    $missingBody = ConvertFrom-JsonSafe -Text $missing.Text -Label 'app open missing'
+    Assert-True ([string](Get-Field (Get-Field $missingBody 'error') 'code') -eq 'app_not_found') 'app open missing code'
+
+    $open = Invoke-Api -Path '/api/app' `
+        -Body ('{"kind":"open","observation_id":"' + $oid + '","app":"' + $script:probePackage + '"}') `
         -Operation ('Pverify-open-1-' + $script:runId)
-    Assert-True ([string](Get-Field $open 'outcome') -eq 'executed') 'open_app outcome is not executed'
-    $app = Get-Field $open 'app'
-    $task1 = [int](Get-Field $app 'task_id')
-    $display = [int](Get-Field $app 'display_id')
-    Assert-True ($task1 -gt 0) 'open_app task_id missing'
-    Assert-True ($display -gt 0) 'open_app display_id is not a virtual display'
-    Assert-True (-not [bool](Get-Field $app 'reused')) 'first open_app unexpectedly reused a task'
+    Assert-True ([string](Get-Field $open 'outcome') -eq 'executed') 'app open outcome is not executed'
+    $openApp = Assert-AppKind -Result $open -Kind 'open'
+    $task1 = [int](Get-Field $openApp 'task_id')
+    $display = [int](Get-Field $openApp 'display_id')
+    Assert-True ($task1 -gt 0) 'app open task_id missing'
+    Assert-True ($display -gt 0) 'app open display_id is not a virtual display'
+    Assert-True ([string](Get-Field $openApp 'ownership') -eq 'owned') 'app open ownership is not owned'
+    $reused = Get-Field $openApp 'reused'
+    Assert-True ($null -ne $reused -and -not [bool]$reused) 'first app open unexpectedly reused a task'
+    Assert-True ($null -ne (Get-Field $openApp 'state_preserved')) 'app open state_preserved missing'
     $post = Get-Field $open 'observation'
-    Assert-True ([string](Get-Field $post 'status') -eq 'complete') 'open_app post observation is not complete'
-    Assert-True ([string](Get-Field (Get-Field $post 'tree') 'format') -eq 'full') 'open_app post observation is not full'
+    Assert-True ([string](Get-Field $post 'status') -eq 'complete') 'app open post observation is not complete'
+    Assert-True ([string](Get-Field (Get-Field $post 'tree') 'format') -eq 'full') 'app open post observation is not full'
     $oid2 = [string](Get-Field $post 'id')
 
-    $reuse = Invoke-Api -Path '/api/open_app' `
-        -Body ('{"observation_id":"' + $oid2 + '","app":"' + $script:probePackage + '"}') `
+    $reuse = Invoke-Api -Path '/api/app' `
+        -Body ('{"kind":"open","observation_id":"' + $oid2 + '","app":"' + $script:probePackage + '"}') `
         -Operation ('Pverify-open-2-' + $script:runId)
-    $reuseApp = Get-Field $reuse 'app'
-    Assert-True ([string](Get-Field $reuse 'outcome') -eq 'executed') 'reuse outcome is not executed'
-    Assert-True ([bool](Get-Field $reuseApp 'reused')) 'second open_app did not reuse'
+    Assert-True ([string](Get-Field $reuse 'outcome') -eq 'executed') 'app reuse outcome is not executed'
+    $reuseApp = Assert-AppKind -Result $reuse -Kind 'open'
+    Assert-True ([bool](Get-Field $reuseApp 'reused')) 'second app open did not reuse'
     Assert-True ([int](Get-Field $reuseApp 'task_id') -eq $task1) 'reused task id changed'
+    Assert-True ([string](Get-Field $reuseApp 'ownership') -eq 'owned') 'reused app ownership is not owned'
+    $postReuse = Get-Field $reuse 'observation'
+    Assert-True ([string](Get-Field $postReuse 'status') -eq 'complete') 'app reuse post observation is not complete'
+    $oid3 = [string](Get-Field $postReuse 'id')
 
-    $end = Invoke-Api -Path '/api/end' -Body ('{"reference":"' + [string](Get-Field $start 'operation_id') + '"}') `
+    # Explicit close of the controlled owned task preserves the original
+    # open/reuse/cleanup regression purpose through the unified app result.
+    $close = Invoke-Api -Path '/api/app' `
+        -Body ('{"kind":"close","observation_id":"' + $oid3 + '","target":{"task_id":' + [string]$task1 + '}}') `
+        -Operation ('Pverify-close-1-' + $script:runId)
+    Assert-True ([string](Get-Field $close 'outcome') -eq 'executed') 'app close outcome is not executed'
+    $closeApp = Assert-AppKind -Result $close -Kind 'close'
+    Assert-True ([int](Get-Field $closeApp 'display_id') -eq $display) 'app close display_id changed'
+    $closeTasks = @(Get-Field $closeApp 'tasks')
+    Assert-True ($closeTasks.Count -eq 1) 'app close tasks count is not 1'
+    Assert-True ([int](Get-Field $closeTasks[0] 'task_id') -eq $task1) 'app close task_id changed'
+    Assert-True ([string](Get-Field $closeTasks[0] 'outcome') -eq 'executed') 'app close task outcome is not executed'
+    Assert-True ($null -ne (Get-Field $closeApp 'complete')) 'app close complete missing'
+    $postClose = Get-Field $close 'observation'
+    Assert-True ([string](Get-Field $postClose 'status') -eq 'complete') 'app close post observation is not complete'
+    $oid4 = [string](Get-Field $postClose 'id')
+
+    # kill cannot succeed after the only controlled task was closed; this is a
+    # bounded negative path on the unified branch, not a destructive user app kill.
+    Assert-ApiErrorCodeIn -Path '/api/app' `
+        -Body ('{"kind":"kill","observation_id":"' + $oid4 + '","target":{"task_id":' + [string]$task1 + '}}') `
+        -ExpectedCodes @('task_not_found', 'task_not_tracked', 'kill_refused_not_owned') -ExpectedStatus 409
+
+    $end = Invoke-Api -Path '/api/end' -Body ('{"reference":"' + $sessionOp + '"}') `
         -Operation ('Pverify-end-' + $script:runId)
     Assert-True ([string](Get-Field $end 'outcome') -eq 'executed') 'end outcome is not executed'
     $final = Wait-Cleanup
@@ -451,10 +556,11 @@ function Test-OpenApp {
     # User STOP with an owned window: revoke, remove the task, release display.
     $stopStart = Start-VerifySession
     $stopOid = [string](Get-Field (Get-Field $stopStart 'observation') 'id')
-    $stopOpen = Invoke-Api -Path '/api/open_app' `
-        -Body ('{"observation_id":"' + $stopOid + '","app":"' + $script:probePackage + '"}') `
+    $stopOpen = Invoke-Api -Path '/api/app' `
+        -Body ('{"kind":"open","observation_id":"' + $stopOid + '","app":"' + $script:probePackage + '"}') `
         -Operation ('Pverify-stop-open-' + $script:runId)
-    Assert-True ([string](Get-Field $stopOpen 'outcome') -eq 'executed') 'STOP scene open_app failed'
+    Assert-True ([string](Get-Field $stopOpen 'outcome') -eq 'executed') 'STOP scene app open failed'
+    $null = Assert-AppKind -Result $stopOpen -Kind 'open'
     Invoke-Stop
     $stopped = Wait-Cleanup -Seconds 30
     Assert-True ([string](Get-Field (Get-Field $stopped 'cleanup') 'state') -eq 'complete') 'STOP cleanup did not complete'
@@ -462,7 +568,7 @@ function Test-OpenApp {
     Assert-True ([bool](Get-Field $stopped 'can_start')) 'STOP did not restore can_start'
     $script:activeStart = ''
     Assert-NoAgentDisplay
-    Write-Host 'open_app: PASS'
+    Write-Host 'app: PASS'
 }
 
 # ---------------------------------------------------------------- shell
@@ -676,12 +782,13 @@ try {
     Read-DeployState
     switch ($Section) {
         'Core' { Test-CoreTools }
-        'OpenApp' { Test-OpenApp }
+        'App' { Test-AppLifecycle }
+        'OpenApp' { Test-AppLifecycle }
         'Shell' { Test-Shell }
         'ShellRecovery' { Test-ShellRecovery }
         'All' {
             Test-CoreTools
-            Test-OpenApp
+            Test-AppLifecycle
             Test-Shell
         }
     }

@@ -34,7 +34,7 @@ var resultFields = func() map[string]resultFieldKind {
 	}
 	add("", "operation_id operation_state outcome phase target_reference request_closed blocking_operation_id can_start blocking_code start_operation_id observation_state input_state message_id saved", fieldToken)
 	add("", "session cleanup error recovery observation app notification diagnosis", fieldObject)
-	add("", "inspection apps shell", fieldBlock)
+	add("", "inspection shell", fieldBlock)
 	add("session.", "origin state mode started_at expires_at ended_at reason", fieldToken)
 	add("session.", "agent", fieldString)
 	add("cleanup.", "state execution tasks recents display", fieldToken)
@@ -47,8 +47,11 @@ var resultFields = func() map[string]resultFieldKind {
 	add("observation.", "screen foreground missing image error", fieldJSON)
 	add("observation.", "tree", fieldBlock)
 	add("inspection.", "origin", fieldToken)
+	add("app.", "kind ownership foreground_restore captured_at", fieldToken)
 	add("app.", "package", fieldString)
-	add("app.", "task_id display_id reused state_preserved", fieldToken)
+	add("app.", "task_id source_task_id display_id source_display_id total", fieldLiteral)
+	add("app.", "reused state_preserved complete truncated restarted", fieldLiteral)
+	add("app.", "items tasks foreground target_pids killed_pids remaining_pids", fieldJSON)
 	add("notification.", "state", fieldToken)
 	add("notification.", "error", fieldJSON)
 	add("diagnosis.", "summary", fieldString)
@@ -57,7 +60,6 @@ var resultFields = func() map[string]resultFieldKind {
 	add("diagnosis.", "timeline", fieldBlock)
 	add("", "request_closed can_start saved", fieldLiteral)
 	add("observation.", "revision", fieldLiteral)
-	add("app.", "task_id display_id reused state_preserved", fieldLiteral)
 	add("diagnosis.", "truncated", fieldLiteral)
 	return m
 }()
@@ -246,8 +248,6 @@ func readableResultBlock(key string, raw []byte, parent []resultMember) (string,
 		return renderInspectionText(&inspection)
 	case "shell":
 		return readableShell(raw)
-	case "apps":
-		return readableApps(raw)
 	case "diagnosis.timeline":
 		var events []json.RawMessage
 		if jsonv2.Unmarshal(raw, &events) != nil || len(events) == 0 {
@@ -335,43 +335,6 @@ func readableShell(raw []byte) (string, bool) {
 	return b.String(), true
 }
 
-func readableApps(raw []byte) (string, bool) {
-	members, m, ok := rawMemberMap(raw)
-	if !ok {
-		return "", false
-	}
-	for _, key := range []string{"items", "total", "truncated", "captured_at"} {
-		if _, ok := m[key]; !ok {
-			return "", false
-		}
-	}
-	var items []json.RawMessage
-	var captured string
-	if string(m["items"]) == "null" || jsonv2.Unmarshal(m["items"], &items) != nil || json.Unmarshal(m["captured_at"], &captured) != nil || !resultToken(captured) {
-		return "", false
-	}
-	if !resultToken(string(m["total"])) || !resultToken(string(m["truncated"])) {
-		return "", false
-	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "apps v1 items=%d total=%s truncated=%s captured_at=%s\n", len(items), m["total"], m["truncated"], captured)
-	for _, item := range items {
-		if len(item) == 0 || item[0] != '{' {
-			return "", false
-		}
-		b.WriteString("item " + compactResultJSON(item) + "\n")
-	}
-	b.WriteString("end apps\n")
-	for _, v := range members {
-		switch v.name {
-		case "items", "total", "truncated", "captured_at":
-		default:
-			fmt.Fprintf(&b, "json v1 path=%s value=%s\n", quoteResult("/apps/"+pointerPart(v.name)), compactResultJSON(v.value))
-		}
-	}
-	return b.String(), true
-}
-
 func encodeResultDiagnostic(raw []byte) (string, error) {
 	members, err := resultMembers(raw)
 	if err != nil {
@@ -381,8 +344,20 @@ func encodeResultDiagnostic(raw []byte) (string, error) {
 	w.line("diagnostic v1 is_error=true")
 	for _, m := range members {
 		switch m.name {
-		case "inspection", "apps", "app", "shell", "notification", "diagnosis":
+		case "inspection", "shell", "notification", "diagnosis":
 			continue
+		case "app":
+			// Only app.kind is whitelisted into diagnostic v1; the rest of the
+			// app object (items/tasks/PIDs/...) is not a diagnostic fact.
+			parts, err := resultMembers(m.value)
+			if err != nil {
+				continue
+			}
+			for _, v := range parts {
+				if v.name == "kind" {
+					_ = w.member("app.kind", "/app/kind", v.value, nil)
+				}
+			}
 		case "observation":
 			parts, err := resultMembers(m.value)
 			if err != nil {

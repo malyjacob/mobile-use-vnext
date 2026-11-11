@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"reflect"
 	"strconv"
@@ -42,9 +43,20 @@ type sessionView struct {
 	Reason    string `json:"reason"`
 }
 
-// errorView is the controlled error object; only the stable code is read.
+// errorView is the controlled error object. Details stay raw so a check can
+// compare task ids and other controlled values exactly.
 type errorView struct {
-	Code string `json:"code"`
+	Code    string                    `json:"code"`
+	Message string                    `json:"message"`
+	Details map[string]jsontext.Value `json:"details"`
+}
+
+// recoveryView is the controlled next-step projection.
+type recoveryView struct {
+	Entry      string `json:"entry"`
+	Reference  string `json:"reference"`
+	InputState string `json:"input_state"`
+	Cause      string `json:"cause"`
 }
 
 // imageView is the observation image metadata carried by structuredContent.
@@ -55,18 +67,6 @@ type imageView struct {
 	MediaType  string     `json:"media_type"`
 	ReadOnly   bool       `json:"read_only"`
 	Error      *errorView `json:"error"`
-}
-
-type appView struct {
-	Name    string `json:"name"`
-	Package string `json:"package"`
-}
-
-type appsView struct {
-	Items      []appView `json:"items"`
-	Total      int       `json:"total"`
-	Truncated  bool      `json:"truncated"`
-	CapturedAt string    `json:"captured_at"`
 }
 
 type shellView struct {
@@ -135,11 +135,12 @@ type resultView struct {
 	Session          *sessionView     `json:"session"`
 	Observation      *observationView `json:"observation"`
 	Inspection       *inspectionView  `json:"inspection"`
-	Apps             *appsView        `json:"apps"`
+	App              *appView         `json:"app"`
 	Shell            *shellView       `json:"shell"`
 	Diagnosis        *diagnosisView   `json:"diagnosis"`
 	Cleanup          *cleanupView     `json:"cleanup"`
 	Error            *errorView       `json:"error"`
+	Recovery         *recoveryView    `json:"recovery"`
 }
 
 // checkError is one failed assertion with controlled reason and fields.
@@ -153,10 +154,12 @@ func failf(reason string, fields ...string) *checkError {
 }
 
 // callResult is one projected tool result. structured is the canonical
-// structuredContent JSON, kept only for leak scanning.
+// structuredContent JSON, kept for leak scanning; object is the exact decoded
+// JSON projection used for field-by-field comparison across channels.
 type callResult struct {
 	result     *sdk.CallToolResult
 	view       resultView
+	object     map[string]any
 	structured []byte
 	texts      []string
 	images     []*sdk.ImageContent
@@ -182,12 +185,16 @@ func project(result *sdk.CallToolResult, mode string) (*callResult, *checkError)
 		}
 	}
 	var structuredView resultView
+	var structuredObject map[string]any
 	if result.StructuredContent != nil {
 		encoded, err := json.Marshal(result.StructuredContent)
 		if err != nil || string(encoded) == "null" {
 			return nil, failf("structured_content_unusable")
 		}
 		projected.structured = encoded
+		if structuredObject, err = exactObject(encoded); err != nil {
+			return nil, failf("structured_content_unusable")
+		}
 		if err := json.Unmarshal(encoded, &structuredView); err != nil {
 			return nil, failf("structured_content_unusable")
 		}
@@ -209,6 +216,7 @@ func project(result *sdk.CallToolResult, mode string) (*callResult, *checkError)
 			return nil, failf("text_mode_is_error_mismatch")
 		}
 		projected.view = decoded.view
+		projected.object = decoded.object
 	case resultModeStructured:
 		if result.StructuredContent == nil {
 			return nil, failf("structured_mode_content_missing")
@@ -226,6 +234,7 @@ func project(result *sdk.CallToolResult, mode string) (*callResult, *checkError)
 			}
 		}
 		projected.view = structuredView
+		projected.object = structuredObject
 	case resultModeBoth:
 		if result.StructuredContent == nil {
 			return nil, failf("both_mode_content_missing")
@@ -240,12 +249,59 @@ func project(result *sdk.CallToolResult, mode string) (*callResult, *checkError)
 		if decoded.isError != result.IsError {
 			return nil, failf("both_mode_is_error_mismatch")
 		}
+		// Compare the complete decoded objects, not only the probe's typed
+		// projection: an unknown field must be equal in both channels too. Tree
+		// and inspection bodies are blocks the probe checks separately; the
+		// readable decoder intentionally restores only their headers.
+		if !semanticEqual(comparableResultObject(decoded.object), comparableResultObject(structuredObject)) {
+			return nil, failf("both_mode_object_mismatch")
+		}
 		if !reflect.DeepEqual(decoded.view, structuredView) {
 			return nil, failf("both_mode_projection_mismatch")
 		}
 		projected.view = structuredView
+		projected.object = structuredObject
 	}
 	return projected, nil
+}
+
+// comparableResultObject strips the block bodies that the readable decoder
+// deliberately does not reconstruct (observation tree nodes, inspection tree
+// and matches) while keeping their header facts. Every other member, including
+// the complete app object and unknown fields, stays in the comparison.
+func comparableResultObject(object map[string]any) map[string]any {
+	clone := make(map[string]any, len(object))
+	for key, value := range object {
+		clone[key] = value
+	}
+	if observation, ok := object["observation"].(map[string]any); ok {
+		observationClone := make(map[string]any, len(observation))
+		for key, value := range observation {
+			observationClone[key] = value
+		}
+		if tree, ok := observation["tree"].(map[string]any); ok {
+			treeHeader := make(map[string]any, 2)
+			for _, key := range []string{"format", "base"} {
+				if value, exists := tree[key]; exists {
+					treeHeader[key] = value
+				}
+			}
+			observationClone["tree"] = treeHeader
+		}
+		clone["observation"] = observationClone
+	}
+	if inspection, ok := object["inspection"].(map[string]any); ok {
+		header := make(map[string]any, 5)
+		for _, key := range []string{
+			"observation_id", "origin", "revision", "captured_at", "scope",
+		} {
+			if value, exists := inspection[key]; exists {
+				header[key] = value
+			}
+		}
+		clone["inspection"] = header
+	}
+	return clone
 }
 
 func checkDiagnosticText(values []string) *checkError {

@@ -100,6 +100,7 @@ type execution struct {
 	cancelled    bool
 	cancellation string
 	code         string
+	appKind      string
 }
 
 func (a *adapter) handle(ctx context.Context, definition toolDefinition, arguments []byte, modes ...ResultMode) *sdk.CallToolResult {
@@ -158,10 +159,32 @@ func (a *adapter) run(ctx context.Context, definition toolDefinition, arguments 
 }
 
 // preparedCall is one admitted request. run executes the client method with
-// the pre-allocated operation ID; read-only calls ignore it.
+// the pre-allocated operation ID; read-only calls ignore it. kind carries the
+// app branch so cancellation and IsError can distinguish the two query kinds
+// from the five mutating ones: the app tool is not read-only as a whole, but a
+// cancelled query must never issue end.
 type preparedCall struct {
 	readOnly bool
+	kind     string
 	run      func(ctx context.Context, operationID string) (*client.Response, error)
+}
+
+// appQuery reports one of the two app kinds that read without an outcome.
+func (c *preparedCall) appQuery() bool {
+	return c.kind == protocol.AppKindFind || c.kind == protocol.AppKindList
+}
+
+// appMutation reports one of the five app kinds that consume a ready O and
+// dispatch a task or process change.
+func (c *preparedCall) appMutation() bool {
+	return c.kind != "" && !c.appQuery()
+}
+
+// endsOnCancel reports whether cancellation may issue a bounded end. Only the
+// five app mutation kinds and the other work tools do; app queries do not, even
+// though the app tool is not marked read-only.
+func (c *preparedCall) endsOnCancel() bool {
+	return !c.readOnly && !c.appQuery()
 }
 
 type callOutcome struct {
@@ -183,7 +206,7 @@ func (a *adapter) invoke(ctx context.Context, call *preparedCall, operationID st
 		if ctx.Err() != nil {
 			return a.cancelled(call, operationID, done, outcome, true)
 		}
-		return projectCall(outcome.response, outcome.err, operationID)
+		return projectCall(outcome.response, outcome.err, operationID, call.kind)
 	case <-ctx.Done():
 		select {
 		case outcome := <-done:
@@ -194,13 +217,19 @@ func (a *adapter) invoke(ctx context.Context, call *preparedCall, operationID st
 	}
 }
 
-// cancelled builds the cancellation result. Work calls issue a bounded end
-// with a background context; read-only calls never do. Any service result the
-// original call already produced is preserved, and end's session/cleanup
-// facts fill only the gaps.
+const (
+	cancellationReadOnlyMessage = "调用已取消；只读工具未发起 end"
+	cancellationQueryMessage    = "查询已取消；未发起 end"
+)
+
+// cancelled builds the cancellation result. Only work calls outside the app
+// query kinds issue a bounded end with a background context. A cancelled app
+// query keeps any service facts it already has, clears outcome and recovery,
+// and never claims an end was sent; the five mutation kinds retain the existing
+// bounded end behaviour and its real session/cleanup facts.
 func (a *adapter) cancelled(call *preparedCall, operationID string, done <-chan callOutcome, known callOutcome, haveKnown bool) *execution {
 	var endResult *protocol.Result
-	if !call.readOnly {
+	if call.endsOnCancel() {
 		endCtx, cancel := context.WithTimeout(context.Background(), cancellationEndTimeout)
 		endResponse, endErr := a.client.End(endCtx, operationID)
 		cancel()
@@ -219,18 +248,52 @@ func (a *adapter) cancelled(call *preparedCall, operationID string, done <-chan 
 
 	base := pickResult(known.response, known.err)
 	service := base != nil
-	if base == nil {
-		base = &protocol.Result{Recovery: adapterRecovery("call_cancelled")}
+	if base != nil {
+		// Work on an adapter-owned copy: cancellation may clear outcome,
+		// recovery or an image body, but it must never rewrite the service
+		// result object.
+		snapshot := *base
+		base = &snapshot
 	}
-	if call.readOnly {
+	query := call.appQuery()
+	if base == nil {
+		base = &protocol.Result{}
+		if !query {
+			base.Recovery = adapterRecovery("call_cancelled")
+		}
+	}
+	switch {
+	case query:
+		// A query never has an outcome and cancellation never fabricates one.
+		base.OperationID = operationID
+		base.Outcome = ""
+		// The adapter's query-cancellation recovery is omission; a known service
+		// recovery is not copied into a cancelled query.
+		base.Recovery = nil
+		if base.App == nil && !service {
+			// Adapter call metadata only: strict decode succeeded and this P was
+			// pre-allocated, but no service result was obtained. Never add task,
+			// display or PID facts here.
+			base.App = &protocol.AppView{Kind: call.kind}
+		}
+		if base.Error == nil {
+			base.Error = &protocol.Error{
+				Code:    "call_cancelled",
+				Message: cancellationQueryMessage,
+			}
+		}
+	case call.readOnly:
 		if !service && base.Error == nil {
 			base.Error = &protocol.Error{
 				Code:    "call_cancelled",
-				Message: "调用已取消；只读工具未发起 end",
+				Message: cancellationReadOnlyMessage,
 			}
 		}
-	} else {
+	default:
 		base.OperationID = operationID
+		if base.App == nil && !service && call.appMutation() {
+			base.App = &protocol.AppView{Kind: call.kind}
+		}
 		if base.Error == nil {
 			base.Error = &protocol.Error{
 				Code:    "call_cancelled",
@@ -256,14 +319,16 @@ func (a *adapter) cancelled(call *preparedCall, operationID string, done <-chan 
 			base.Cleanup = endResult.Cleanup
 		}
 	}
-	if base.Recovery == nil && base.Error != nil {
+	if !query && base.Recovery == nil && base.Error != nil {
 		base.Recovery = adapterRecovery(base.Error.Code)
 	}
 	clearImageBase64(base)
 
 	cancellation := cancellationEndMessage(operationID)
 	if call.readOnly {
-		cancellation = "调用已取消；只读工具未发起 end"
+		cancellation = cancellationReadOnlyMessage
+	} else if query {
+		cancellation = cancellationQueryMessage
 	}
 	var image *client.Image
 	if known.response != nil {
@@ -276,6 +341,7 @@ func (a *adapter) cancelled(call *preparedCall, operationID string, done <-chan 
 		cancelled:    true,
 		cancellation: cancellation,
 		code:         logCode(base),
+		appKind:      call.kind,
 	}
 }
 
@@ -285,8 +351,10 @@ func cancellationEndMessage(operationID string) string {
 
 // projectCall converts one client response or error into a canonical result.
 // A service structured failure keeps its facts; an adapter failure gets a
-// controlled error without any raw transport text.
-func projectCall(response *client.Response, err error, operationID string) *execution {
+// controlled error without any raw transport text. When the service result is
+// unknown and the admitted tool was app, the adapter adds app:{kind} call
+// metadata only — never a task id, display or PID it did not prove.
+func projectCall(response *client.Response, err error, operationID, appKind string) *execution {
 	result := pickResult(response, err)
 	service := result != nil
 	if result == nil {
@@ -295,6 +363,9 @@ func projectCall(response *client.Response, err error, operationID string) *exec
 			OperationID: operationID,
 			Error:       &protocol.Error{Code: code, Message: message},
 			Recovery:    adapterRecovery(code),
+		}
+		if appKind != "" {
+			result.App = &protocol.AppView{Kind: appKind}
 		}
 	} else {
 		if result.OperationID == "" && operationID != "" {
@@ -318,6 +389,7 @@ func projectCall(response *client.Response, err error, operationID string) *exec
 		image:   image,
 		service: service,
 		code:    logCode(result),
+		appKind: appKind,
 	}
 }
 
@@ -391,10 +463,37 @@ func (e *execution) isError(tool string) bool {
 		return result == nil || result.Outcome != "executed"
 	case "inspect":
 		return result == nil || result.Inspection == nil
-	case "apps":
-		return result == nil || result.Apps == nil || result.Error != nil
+	case "app":
+		return appResultIsError(result)
 	default:
 		return result == nil || result.Outcome != "executed"
+	}
+}
+
+// appResultIsError applies the per-kind success rule. A find/list call is a
+// success only when the first complete query delivered its collection or an
+// explicitly marked no-error summary arrived; a read, admission or transport
+// failure stays an error. The five mutating kinds follow the public outcome:
+// executed is success, not_executed and uncertain are errors. A close that is
+// only missing recents confirmation, a handoff whose foreground restore is
+// unconfirmed, or a failed post-observation do not rewrite the main outcome.
+func appResultIsError(result *protocol.Result) bool {
+	if result == nil || result.App == nil {
+		return true
+	}
+	switch result.App.Kind {
+	case protocol.AppKindFind:
+		if result.Error != nil {
+			return true
+		}
+		return result.App.Items == nil && result.OperationState == ""
+	case protocol.AppKindList:
+		if result.Error != nil {
+			return true
+		}
+		return result.App.TaskItems == nil && result.OperationState == ""
+	default:
+		return result.Outcome != "executed"
 	}
 }
 
@@ -510,27 +609,14 @@ func prepareCall(service *client.Client, definition toolDefinition, body []byte)
 		call.run = func(ctx context.Context, operationID string) (*client.Response, error) {
 			return service.End(ctx, request.Reference, client.WithOperationID(operationID))
 		}
-	case "apps":
-		request, apiErr := protocol.DecodeApps(body)
+	case "app":
+		request, apiErr := protocol.DecodeApp(body)
 		if apiErr != nil {
 			return nil, apiErr
 		}
+		call.kind = request.Kind
 		call.run = func(ctx context.Context, operationID string) (*client.Response, error) {
-			return service.Apps(ctx, &protocol.AppsRequest{
-				Query:    request.Query,
-				HasQuery: request.HasQuery,
-			}, client.WithOperationID(operationID))
-		}
-	case "open_app":
-		request, apiErr := protocol.DecodeOpenApp(body)
-		if apiErr != nil {
-			return nil, apiErr
-		}
-		call.run = func(ctx context.Context, operationID string) (*client.Response, error) {
-			return service.OpenApp(ctx, &protocol.OpenAppRequest{
-				ObservationID: request.ObservationID,
-				App:           request.App,
-			}, client.WithOperationID(operationID))
+			return service.App(ctx, request, client.WithOperationID(operationID))
 		}
 	case "notify":
 		request, apiErr := protocol.DecodeNotify(body)

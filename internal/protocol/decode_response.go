@@ -16,9 +16,9 @@ import (
 // existing Node, Bounds, Tree, Delta and TreeValue decoders keep their own
 // stricter member checks and are reached through normal json/v2 decoding.
 //
-// A member whose wire shape always carries a value (for example Screen.width
-// or AppsView.items) is required. Result is a branch union: its members appear
-// only when known, so none of them is required by the decoder.
+// A member whose wire shape always carries a value (for example Screen.width)
+// is required. Result is a branch union: its members appear only when known, so
+// none of them is required by the decoder.
 
 // member captures one JSON object member and rejects explicit null. Present
 // distinguishes an absent member from an explicit zero value.
@@ -335,7 +335,6 @@ func (r *Result) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 		Session             nullableMember[*Session] `json:"session"`
 		Observation         *Observation             `json:"observation"`
 		Inspection          *InspectionView          `json:"inspection"`
-		Apps                *AppsView                `json:"apps"`
 		App                 *AppView                 `json:"app"`
 		Shell               *ShellView               `json:"shell"`
 		Notification        *NotificationView        `json:"notification"`
@@ -366,7 +365,6 @@ func (r *Result) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 		Session:             wire.Session.Value,
 		Observation:         wire.Observation,
 		Inspection:          wire.Inspection,
-		Apps:                wire.Apps,
 		App:                 wire.App,
 		Shell:               wire.Shell,
 		Notification:        wire.Notification,
@@ -473,92 +471,215 @@ func (m *InspectionMatch) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 	return nil
 }
 
-// UnmarshalJSONFrom decodes the apps discovery view.
-func (a *AppsView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
-	var wire struct {
-		Items      member[[]AppEntry] `json:"items"`
-		Total      member[int]        `json:"total"`
-		Truncated  member[bool]       `json:"truncated"`
-		CapturedAt member[string]     `json:"captured_at"`
-	}
-	if err := readObject(dec, "apps", &wire); err != nil {
-		return err
-	}
-	items, err := requireResponseMember(wire.Items, "apps.items")
-	if err != nil {
-		return err
-	}
-	total, err := requireResponseMember(wire.Total, "apps.total")
-	if err != nil {
-		return err
-	}
-	truncated, err := requireResponseMember(wire.Truncated, "apps.truncated")
-	if err != nil {
-		return err
-	}
-	capturedAt, err := requireResponseMember(wire.CapturedAt, "apps.captured_at")
-	if err != nil {
-		return err
-	}
-	*a = AppsView{Items: items, Total: total, Truncated: truncated, CapturedAt: capturedAt}
-	return nil
-}
-
-// UnmarshalJSONFrom decodes one discovered launchable application.
-func (e *AppEntry) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
-	var wire struct {
-		Name    member[string] `json:"name"`
-		Package member[string] `json:"package"`
-	}
-	if err := readObject(dec, "app entry", &wire); err != nil {
-		return err
-	}
-	name, err := requireResponseMember(wire.Name, "app entry name")
-	if err != nil {
-		return err
-	}
-	pkg, err := requireResponseMember(wire.Package, "app entry package")
-	if err != nil {
-		return err
-	}
-	*e = AppEntry{Name: name, Package: pkg}
-	return nil
-}
-
-// UnmarshalJSONFrom decodes one open_app action fact.
+// UnmarshalJSONFrom decodes the kind-discriminated app view. Branch members are
+// optional at decode time — the kind decides which are valid — and the decoder
+// keeps unknown future members readable instead of failing a whole result.
 func (a *AppView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 	var wire struct {
-		Package        member[string] `json:"package"`
-		TaskID         member[int]    `json:"task_id"`
-		DisplayID      member[int]    `json:"display_id"`
-		Reused         member[bool]   `json:"reused"`
-		StatePreserved *bool          `json:"state_preserved"`
+		Kind              member[string] `json:"kind"`
+		Items             jsontext.Value `json:"items"`
+		Total             member[int]    `json:"total"`
+		Truncated         *bool          `json:"truncated"`
+		CapturedAt        member[string] `json:"captured_at"`
+		DisplayID         *int           `json:"display_id"`
+		Foreground        *Foreground    `json:"foreground"`
+		Package           member[string] `json:"package"`
+		TaskID            *int           `json:"task_id"`
+		Ownership         member[string] `json:"ownership"`
+		Reused            *bool          `json:"reused"`
+		StatePreserved    jsontext.Value `json:"state_preserved"`
+		SourceDisplayID   *int           `json:"source_display_id"`
+		ForegroundRestore member[string] `json:"foreground_restore"`
+		Tasks             jsontext.Value `json:"tasks"`
+		Complete          *bool          `json:"complete"`
+		SourceTaskID      *int           `json:"source_task_id"`
+		TargetPIDs        jsontext.Value `json:"target_pids"`
+		KilledPIDs        jsontext.Value `json:"killed_pids"`
+		RemainingPIDs     jsontext.Value `json:"remaining_pids"`
+		Restarted         jsontext.Value `json:"restarted"`
 	}
 	if err := readObject(dec, "app", &wire); err != nil {
 		return err
 	}
-	pkg, err := requireResponseMember(wire.Package, "app.package")
+	kind, err := requireResponseMember(wire.Kind, "app.kind")
 	if err != nil {
 		return err
 	}
-	taskID, err := requireResponseMember(wire.TaskID, "app.task_id")
-	if err != nil {
+	view := AppView{
+		Kind:              kind,
+		Total:             wire.Total.Value,
+		HasTotal:          wire.Total.Present,
+		Truncated:         wire.Truncated,
+		CapturedAt:        wire.CapturedAt.Value,
+		DisplayID:         wire.DisplayID,
+		Foreground:        wire.Foreground,
+		Package:           wire.Package.Value,
+		TaskID:            wire.TaskID,
+		Ownership:         wire.Ownership.Value,
+		Reused:            wire.Reused,
+		SourceDisplayID:   wire.SourceDisplayID,
+		ForegroundRestore: wire.ForegroundRestore.Value,
+		Complete:          wire.Complete,
+		SourceTaskID:      wire.SourceTaskID,
+	}
+	if len(wire.StatePreserved) > 0 {
+		view.HasStatePreserved = true
+		if !isJSONNull(wire.StatePreserved) {
+			var value bool
+			if err := json.Unmarshal(wire.StatePreserved, &value); err != nil {
+				return err
+			}
+			view.StatePreserved = &value
+		}
+	}
+	if len(wire.Restarted) > 0 {
+		view.HasRestarted = true
+		if !isJSONNull(wire.Restarted) {
+			var value bool
+			if err := json.Unmarshal(wire.Restarted, &value); err != nil {
+				return err
+			}
+			view.Restarted = &value
+		}
+	}
+	if err := decodeAppItems(&view, wire.Items); err != nil {
 		return err
 	}
-	displayID, err := requireResponseMember(wire.DisplayID, "app.display_id")
-	if err != nil {
+	if err := decodeAppTasks(&view, wire.Tasks); err != nil {
 		return err
 	}
-	reused, err := requireResponseMember(wire.Reused, "app.reused")
-	if err != nil {
+	for _, field := range []struct {
+		name   string
+		raw    jsontext.Value
+		target *[]int
+		has    *bool
+	}{
+		{"target_pids", wire.TargetPIDs, &view.TargetPIDs, &view.HasTargetPIDs},
+		{"killed_pids", wire.KilledPIDs, &view.KilledPIDs, &view.HasKilledPIDs},
+		{"remaining_pids", wire.RemainingPIDs, &view.RemainingPIDs, &view.HasRemainingPIDs},
+	} {
+		if len(field.raw) == 0 {
+			continue
+		}
+		if isJSONNull(field.raw) {
+			return fmt.Errorf("response member %q must not be null", "app."+field.name)
+		}
+		var ids []int
+		if err := json.Unmarshal(field.raw, &ids); err != nil {
+			return err
+		}
+		*field.target = ids
+		*field.has = true
+	}
+	*a = view
+	return nil
+}
+
+// decodeAppItems decodes the find or list item array, selected by kind.
+func decodeAppItems(view *AppView, raw jsontext.Value) error {
+	if len(raw) == 0 {
+		return nil
+	}
+	if isJSONNull(raw) {
+		return fmt.Errorf("response member %q must not be null", "app.items")
+	}
+	if view.Kind == AppKindList {
+		var items []struct {
+			TaskID        member[int]    `json:"task_id"`
+			Package       member[string] `json:"package"`
+			Ownership     member[string] `json:"ownership"`
+			OriginDisplay *int           `json:"origin_display"`
+		}
+		if err := json.Unmarshal(raw, &items); err != nil {
+			return err
+		}
+		view.TaskItems = make([]AppTaskItem, 0, len(items))
+		view.HasItems = true
+		for _, item := range items {
+			taskID, err := requireResponseMember(item.TaskID, "app.items.task_id")
+			if err != nil {
+				return err
+			}
+			pkg, err := requireResponseMember(item.Package, "app.items.package")
+			if err != nil {
+				return err
+			}
+			ownership, err := requireResponseMember(item.Ownership, "app.items.ownership")
+			if err != nil {
+				return err
+			}
+			view.TaskItems = append(view.TaskItems, AppTaskItem{
+				TaskID: taskID, Package: pkg, Ownership: ownership,
+				OriginDisplay: item.OriginDisplay,
+			})
+		}
+		return nil
+	}
+	var items []struct {
+		Name    member[string] `json:"name"`
+		Package member[string] `json:"package"`
+	}
+	if err := json.Unmarshal(raw, &items); err != nil {
 		return err
 	}
-	*a = AppView{
-		Package:        pkg,
-		TaskID:         taskID,
-		DisplayID:      displayID,
-		Reused:         reused,
-		StatePreserved: wire.StatePreserved,
+	view.Items = make([]AppItem, 0, len(items))
+	view.HasItems = true
+	for _, item := range items {
+		name, err := requireResponseMember(item.Name, "app.items.name")
+		if err != nil {
+			return err
+		}
+		pkg, err := requireResponseMember(item.Package, "app.items.package")
+		if err != nil {
+			return err
+		}
+		view.Items = append(view.Items, AppItem{Name: name, Package: pkg})
+	}
+	return nil
+}
+
+// decodeAppTasks decodes the close task array.
+func decodeAppTasks(view *AppView, raw jsontext.Value) error {
+	if len(raw) == 0 {
+		return nil
+	}
+	if isJSONNull(raw) {
+		return fmt.Errorf("response member %q must not be null", "app.tasks")
+	}
+	var items []struct {
+		TaskID         member[int]    `json:"task_id"`
+		Outcome        member[string] `json:"outcome"`
+		RecentsCleaned jsontext.Value `json:"recents_cleaned"`
+		Error          *Error         `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return err
+	}
+	view.Tasks = make([]AppCloseTask, 0, len(items))
+	view.HasTasks = true
+	for _, item := range items {
+		taskID, err := requireResponseMember(item.TaskID, "app.tasks.task_id")
+		if err != nil {
+			return err
+		}
+		outcome, err := requireResponseMember(item.Outcome, "app.tasks.outcome")
+		if err != nil {
+			return err
+		}
+		task := AppCloseTask{TaskID: taskID, Outcome: outcome, Error: item.Error}
+		if len(item.RecentsCleaned) > 0 {
+			task.HasRecentsCleaned = true
+			if isJSONNull(item.RecentsCleaned) {
+				task.RecentsCleaned = nil
+			} else {
+				var cleaned bool
+				if err := json.Unmarshal(item.RecentsCleaned, &cleaned); err != nil {
+					return err
+				}
+				task.RecentsCleaned = &cleaned
+			}
+		}
+		view.Tasks = append(view.Tasks, task)
 	}
 	return nil
 }

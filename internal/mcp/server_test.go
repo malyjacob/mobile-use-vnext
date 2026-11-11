@@ -323,10 +323,19 @@ func TestToolCatalog(t *testing.T) {
 	}
 	want := []string{
 		"start", "status", "observe", "act", "inspect", "keepalive",
-		"end", "apps", "open_app", "notify", "shell", "diagnose",
+		"end", "app", "notify", "shell", "diagnose",
 	}
 	if len(list.Tools) != len(want) {
 		t.Fatalf("got %d tools, want %d", len(list.Tools), len(want))
+	}
+	snapshot := CatalogSnapshot()
+	if len(snapshot) != len(want) {
+		t.Fatalf("catalog snapshot has %d tools, want %d", len(snapshot), len(want))
+	}
+	for index, name := range want {
+		if snapshot[index].Name != name {
+			t.Fatalf("catalog snapshot %d = %q, want %q", index, snapshot[index].Name, name)
+		}
 	}
 	seen := make(map[string]bool, len(list.Tools))
 	for _, tool := range list.Tools {
@@ -346,8 +355,7 @@ func TestToolCatalog(t *testing.T) {
 		"inspect":   {"observation_id"},
 		"keepalive": {"reference"},
 		"end":       {"reference"},
-		"apps":      {},
-		"open_app":  {"observation_id", "app"},
+		"app":       {"kind"},
 		"notify":    {"text"},
 		"shell":     {"reference", "command"},
 		"diagnose":  {},
@@ -401,6 +409,9 @@ func TestToolCatalog(t *testing.T) {
 			if duration.Type != "integer" || duration.Minimum != 1 || duration.Maximum != 120 || duration.Default != 2 {
 				t.Fatalf("duration schema does not match admission: %+v", duration)
 			}
+		}
+		if tool.Name == "app" {
+			testAppSchemaShape(t, encoded)
 		}
 	}
 
@@ -812,22 +823,33 @@ func TestWorkToolProjections(t *testing.T) {
 		requireTestNotContains(t, text, "hello")
 	})
 
-	t.Run("apps includes names", func(t *testing.T) {
+	t.Run("app find includes names", func(t *testing.T) {
 		fake := newTestDeviceService(t)
-		fake.setHandler("apps", func(writer http.ResponseWriter, request *http.Request, body string) {
+		fake.setHandler("app", func(writer http.ResponseWriter, request *http.Request, body string) {
 			writeTestJSON(writer, http.StatusOK, fmt.Sprintf(
-				`{"operation_id":%q,"apps":{"items":[{"name":"设置","package":"com.android.settings"}],`+
+				`{"operation_id":%q,"app":{"kind":"find","items":[{"name":"设置","package":"com.android.settings"}],`+
 					`"total":1,"truncated":false,"captured_at":"2026-11-09T00:00:04Z"}}`,
 				testOperationHeader(request)))
 		})
 		session := connectTestInMemory(t, newTestMCPServer(t, fake))
-		result := callTestTool(t, session, "apps", map[string]any{})
+		result := callTestTool(t, session, "app", map[string]any{"kind": "find"})
 		if result.IsError {
-			t.Fatalf("apps reported an error: %s", testTextContent(t, result))
+			t.Fatalf("app find reported an error: %s", testTextContent(t, result))
 		}
 		text := testTextContent(t, result)
-		requireTestContains(t, text, "apps v1 items=1 total=1 truncated=false")
-		requireTestContains(t, text, "item {\"name\":\"设置\",\"package\":\"com.android.settings\"}")
+		requireTestContains(t, text, "app.kind=find")
+		requireTestContains(t, text, `app.items=[{"name":"设置","package":"com.android.settings"}]`)
+		requireTestContains(t, text, "app.total=1")
+		requireTestContains(t, text, "app.truncated=false")
+		requireTestContains(t, text, "app.captured_at=2026-11-09T00:00:04Z")
+		requireTestNotContains(t, text, "outcome=")
+		requests := fake.requestsFor("app")
+		if len(requests) != 1 || requests[0].Body != `{"kind":"find"}` {
+			t.Fatalf("app body = %+v", requests)
+		}
+		if !strings.HasPrefix(requests[0].OperationID, "P") {
+			t.Fatal("app find did not allocate a P")
+		}
 	})
 }
 

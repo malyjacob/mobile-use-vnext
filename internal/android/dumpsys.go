@@ -235,8 +235,16 @@ func normalizeComponent(component string) string {
 	return pkg + "/" + class
 }
 
-// rootTaskHeader opens one `am stack list` root task.
-var rootTaskHeader = regexp.MustCompile(`^RootTask id=(\d+) .*displayId=(\d+)\b`)
+// rootTaskPrefix opens one `am stack list` root task.
+var rootTaskPrefix = regexp.MustCompile(`^RootTask id=`)
+
+// rootTaskID reads the root task id token of one header. A header whose id is
+// missing or unparseable still opens a container; its leaf tasks then carry
+// RootID=0 so the engine never moves a task under an unproven root.
+var rootTaskID = regexp.MustCompile(`^RootTask id=(\d+)\b`)
+
+// rootTaskDisplay reads the display id of one root task header.
+var rootTaskDisplay = regexp.MustCompile(`\bdisplayId=(\d+)\b`)
 
 // leafTask is one `taskId=N: package/Class` line under a root task.
 var leafTask = regexp.MustCompile(`^\s+taskId=(\d+): (` + componentPattern + `)\b`)
@@ -250,16 +258,26 @@ var leafTaskVisible = regexp.MustCompile(`\bvisible=(true|false)\b`)
 func parseTasks(listing string) []device.Task {
 	tasks := []device.Task{}
 	displayID := -1
+	rootID := 0
 	rootSeen := false
 	for _, line := range strings.Split(listing, "\n") {
-		if header := rootTaskHeader.FindStringSubmatch(line); header != nil {
-			parsed, err := strconv.Atoi(header[2])
-			if err != nil {
-				rootSeen = false
-				continue
+		if rootTaskPrefix.MatchString(line) {
+			// Every header starts a new container, so the previous root id never
+			// carries over to the next one.
+			rootID = 0
+			displayID = -1
+			rootSeen = false
+			if id := rootTaskID.FindStringSubmatch(line); id != nil {
+				if parsed, err := strconv.Atoi(id[1]); err == nil && parsed > 0 {
+					rootID = parsed
+				}
 			}
-			displayID = parsed
-			rootSeen = true
+			if display := rootTaskDisplay.FindStringSubmatch(line); display != nil {
+				if parsed, err := strconv.Atoi(display[1]); err == nil && parsed >= 0 {
+					displayID = parsed
+					rootSeen = true
+				}
+			}
 			continue
 		}
 		task := leafTask.FindStringSubmatch(line)
@@ -274,6 +292,7 @@ func parseTasks(listing string) []device.Task {
 		visible := leafTaskVisible.FindStringSubmatch(line)
 		tasks = append(tasks, device.Task{
 			TaskID:    taskID,
+			RootID:    rootID,
 			DisplayID: displayID,
 			Package:   packageOf(component),
 			Component: component,

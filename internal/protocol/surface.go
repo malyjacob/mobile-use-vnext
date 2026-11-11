@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"sort"
 	"strings"
 	"unicode"
@@ -12,16 +13,99 @@ import (
 // presence struct; every optional member is omitted from the wire when not
 // supplied (never encoded as an explicit null).
 
-// AppsRequest is apps(query=None).
-type AppsRequest struct {
-	Query    string
-	HasQuery bool
+// Application lifecycle kinds of the single app tool. Every kind is a closed
+// branch with its own required and admitted members.
+const (
+	AppKindFind    = "find"
+	AppKindList    = "list"
+	AppKindOpen    = "open"
+	AppKindClaim   = "claim"
+	AppKindHandoff = "handoff"
+	AppKindClose   = "close"
+	AppKindKill    = "kill"
+)
+
+// AppKinds is the closed kind vocabulary in catalog order.
+var AppKinds = []string{
+	AppKindFind, AppKindList, AppKindOpen, AppKindClaim, AppKindHandoff,
+	AppKindClose, AppKindKill,
 }
 
-// OpenAppRequest is open_app(observation_id, app).
-type OpenAppRequest struct {
+// List scopes. A primary session lists the same primary display either way;
+// scope never grants task ownership.
+const (
+	AppScopeSession = "session"
+	AppScopePrimary = "primary"
+)
+
+// Task ownership values published by list and by the mutating kinds.
+const (
+	TaskOwnershipOwned    = "owned"
+	TaskOwnershipBorrowed = "borrowed"
+	TaskOwnershipShared   = "shared"
+)
+
+// Handoff foreground-restore facts.
+const (
+	ForegroundRestoreNotRequested = "not_requested"
+	ForegroundRestoreConfirmed    = "confirmed"
+	ForegroundRestoreUnconfirmed  = "unconfirmed"
+)
+
+// AppTarget selects exactly one live task: a task id or an explicit package.
+type AppTarget struct {
+	TaskID  int
+	App     string
+	UseTask bool
+}
+
+// AppRequest is app(kind, ...). Only the branch members of Kind are populated;
+// the wire decoder rejects every other member before the engine sees it.
+type AppRequest struct {
+	Kind string
+
+	// find
+	Query    string
+	HasQuery bool
+
+	// list
+	Reference string
+	Scope     string
+	FilterApp string
+	HasFilter bool
+
+	// open
 	ObservationID string
 	App           string
+
+	// claim / handoff / close / kill
+	Target            *AppTarget
+	RestoreForeground bool
+	AllowBorrowed     bool
+	AllowStopPlayback bool
+}
+
+// RequiresObservation reports whether the kind consumes a current ready O.
+func (r *AppRequest) RequiresObservation() bool {
+	switch r.Kind {
+	case AppKindOpen, AppKindClaim, AppKindHandoff, AppKindClose, AppKindKill:
+		return true
+	}
+	return false
+}
+
+// IsQuery reports whether the kind is a read-only query without an outcome.
+func (r *AppRequest) IsQuery() bool {
+	return r.Kind == AppKindFind || r.Kind == AppKindList
+}
+
+// MutatesTasks reports whether the kind dispatches a task or process change.
+func (r *AppRequest) MutatesTasks() bool {
+	switch r.Kind {
+	case AppKindOpen, AppKindClaim, AppKindHandoff, AppKindClose:
+		return true
+	}
+	return false
 }
 
 // NotifyRequest is notify(text).
@@ -71,52 +155,190 @@ type DiagnoseRequest struct {
 	HasRef    bool
 }
 
-// DecodeApps admits apps(query).
-func DecodeApps(body []byte) (*AppsRequest, *APIError) {
-	var presence struct {
-		Query jsontext.Value `json:"query"`
-	}
-	var wire struct {
-		Query string `json:"query"`
-	}
-	if err := decodeStrict(body, &presence, &wire); err != nil {
-		return nil, invalidDecode(err)
-	}
-	if len(presence.Query) > 0 && string(presence.Query) == "null" {
-		return nil, Invalid("query 不接受 null；省略该字段表示列出全部")
-	}
-	if utf8.RuneCountInString(wire.Query) > MaxQueryRunes {
-		return nil, Invalid("query 超过长度上限").WithDetail("limit", MaxQueryRunes)
-	}
-	return &AppsRequest{Query: wire.Query, HasQuery: len(presence.Query) > 0}, nil
+type rawAppTarget struct {
+	TaskID jsontext.Value `json:"task_id"`
+	App    jsontext.Value `json:"app"`
 }
 
-// DecodeOpenApp admits open_app(observation_id, app).
-func DecodeOpenApp(body []byte) (*OpenAppRequest, *APIError) {
+// DecodeApp admits exactly one strict app kind branch. Every branch declares its
+// own member set: a member belonging to another kind is rejected before any
+// session check, so a query can never inherit a mutation's admission path.
+func DecodeApp(body []byte) (*AppRequest, *APIError) {
 	var presence struct {
-		ObservationID jsontext.Value `json:"observation_id"`
-		App           jsontext.Value `json:"app"`
+		Kind              jsontext.Value `json:"kind"`
+		Query             jsontext.Value `json:"query"`
+		Reference         jsontext.Value `json:"reference"`
+		Scope             jsontext.Value `json:"scope"`
+		App               jsontext.Value `json:"app"`
+		ObservationID     jsontext.Value `json:"observation_id"`
+		Target            jsontext.Value `json:"target"`
+		RestoreForeground jsontext.Value `json:"restore_foreground"`
+		AllowBorrowed     jsontext.Value `json:"allow_borrowed"`
+		AllowStopPlayback jsontext.Value `json:"allow_stop_playback"`
 	}
 	var wire struct {
-		ObservationID string `json:"observation_id"`
-		App           string `json:"app"`
+		Kind              string        `json:"kind"`
+		Query             string        `json:"query"`
+		Reference         string        `json:"reference"`
+		Scope             string        `json:"scope"`
+		App               string        `json:"app"`
+		ObservationID     string        `json:"observation_id"`
+		Target            *rawAppTarget `json:"target"`
+		RestoreForeground bool          `json:"restore_foreground"`
+		AllowBorrowed     bool          `json:"allow_borrowed"`
+		AllowStopPlayback bool          `json:"allow_stop_playback"`
 	}
 	if err := decodeStrict(body, &presence, &wire); err != nil {
 		return nil, invalidDecode(err)
 	}
-	if len(presence.ObservationID) == 0 || string(presence.ObservationID) == "null" {
-		return nil, Invalid("open_app 需要 observation_id")
+	if len(presence.Kind) == 0 || string(presence.Kind) == "null" {
+		return nil, Invalid("app 需要 kind")
 	}
-	if len(presence.App) == 0 || string(presence.App) == "null" {
-		return nil, Invalid("open_app 需要 app 包名")
+	kind := wire.Kind
+	members := []struct {
+		name string
+		raw  jsontext.Value
+	}{
+		{"query", presence.Query},
+		{"reference", presence.Reference},
+		{"scope", presence.Scope},
+		{"app", presence.App},
+		{"observation_id", presence.ObservationID},
+		{"target", presence.Target},
+		{"restore_foreground", presence.RestoreForeground},
+		{"allow_borrowed", presence.AllowBorrowed},
+		{"allow_stop_playback", presence.AllowStopPlayback},
 	}
-	if err := checkReference(wire.ObservationID); err != nil {
-		return nil, err
+	allowed := appKindMembers(kind)
+	if allowed == nil {
+		return nil, Invalid("不支持的 app kind").WithDetail("allowed_kinds", AppKinds)
 	}
-	if !ValidPackageName(wire.App) {
-		return nil, Invalid("app 必须是明确的应用包名")
+	for _, member := range members {
+		if len(member.raw) == 0 {
+			continue
+		}
+		if !allowed[member.name] {
+			return nil, Invalid(kind + " 不接受该成员").WithDetail("field", member.name)
+		}
+		if string(member.raw) == "null" {
+			return nil, Invalid("参数不接受显式 null；省略该字段使用默认值").
+				WithDetail("field", member.name)
+		}
 	}
-	return &OpenAppRequest{ObservationID: wire.ObservationID, App: wire.App}, nil
+	req := &AppRequest{Kind: kind}
+	switch kind {
+	case AppKindFind:
+		req.Query, req.HasQuery = wire.Query, len(presence.Query) > 0
+		if utf8.RuneCountInString(req.Query) > MaxQueryRunes {
+			return nil, Invalid("query 超过长度上限").WithDetail("limit", MaxQueryRunes)
+		}
+		return req, nil
+	case AppKindList:
+		req.Reference = wire.Reference
+		if err := checkReference(req.Reference); err != nil {
+			return nil, err
+		}
+		req.Scope = wire.Scope
+		if req.Scope == "" {
+			req.Scope = AppScopeSession
+		}
+		if req.Scope != AppScopeSession && req.Scope != AppScopePrimary {
+			return nil, Invalid("scope 必须是 session 或 primary").
+				WithDetail("allowed_scopes", []string{AppScopeSession, AppScopePrimary})
+		}
+		req.FilterApp, req.HasFilter = wire.App, len(presence.App) > 0
+		if req.HasFilter && !ValidPackageName(req.FilterApp) {
+			return nil, Invalid("app 必须是明确的应用包名")
+		}
+		return req, nil
+	case AppKindOpen:
+		req.ObservationID = wire.ObservationID
+		if err := checkReference(req.ObservationID); err != nil {
+			return nil, err
+		}
+		if !ValidPackageName(wire.App) {
+			return nil, Invalid("app 必须是明确的应用包名")
+		}
+		req.App = wire.App
+		return req, nil
+	case AppKindClaim, AppKindHandoff, AppKindClose, AppKindKill:
+		req.ObservationID = wire.ObservationID
+		if err := checkReference(req.ObservationID); err != nil {
+			return nil, err
+		}
+		if wire.Target == nil {
+			return nil, Invalid(kind + " 需要 target")
+		}
+		target, apiErr := parseAppTarget(kind, wire.Target)
+		if apiErr != nil {
+			return nil, apiErr
+		}
+		req.Target = target
+		req.RestoreForeground = wire.RestoreForeground
+		req.AllowBorrowed = wire.AllowBorrowed
+		req.AllowStopPlayback = wire.AllowStopPlayback
+		return req, nil
+	}
+	return nil, Invalid("不支持的 app kind").WithDetail("allowed_kinds", AppKinds)
+}
+
+// appKindMembers returns the closed member set of one kind, excluding kind.
+func appKindMembers(kind string) map[string]bool {
+	switch kind {
+	case AppKindFind:
+		return map[string]bool{"query": true}
+	case AppKindList:
+		return map[string]bool{"reference": true, "scope": true, "app": true}
+	case AppKindOpen:
+		return map[string]bool{"observation_id": true, "app": true}
+	case AppKindClaim:
+		return map[string]bool{"observation_id": true, "target": true}
+	case AppKindHandoff:
+		return map[string]bool{
+			"observation_id": true, "target": true, "restore_foreground": true,
+		}
+	case AppKindClose:
+		return map[string]bool{
+			"observation_id": true, "target": true, "allow_borrowed": true,
+		}
+	case AppKindKill:
+		return map[string]bool{
+			"observation_id": true, "target": true, "allow_stop_playback": true,
+		}
+	}
+	return nil
+}
+
+// parseAppTarget admits exactly one selector. kill only accepts a task id.
+func parseAppTarget(kind string, raw *rawAppTarget) (*AppTarget, *APIError) {
+	hasTask := len(raw.TaskID) > 0
+	hasApp := len(raw.App) > 0
+	switch {
+	case hasTask && hasApp:
+		return nil, Invalid("target 的 task_id 与 app 互斥")
+	case !hasTask && !hasApp:
+		return nil, Invalid("target 需要 task_id 或 app")
+	case hasTask:
+		var taskID int
+		if err := json.Unmarshal(raw.TaskID, &taskID); err != nil {
+			return nil, Invalid("target.task_id 必须是整数")
+		}
+		if taskID <= 0 {
+			return nil, Invalid("target.task_id 必须是正整数")
+		}
+		return &AppTarget{TaskID: taskID, UseTask: true}, nil
+	}
+	if kind == AppKindKill {
+		return nil, Invalid("kill 只接受 target.task_id；包名需先由 list 解析")
+	}
+	var app string
+	if err := json.Unmarshal(raw.App, &app); err != nil {
+		return nil, Invalid("target.app 必须是字符串")
+	}
+	if !ValidPackageName(app) {
+		return nil, Invalid("target.app 必须是明确的应用包名")
+	}
+	return &AppTarget{App: app}, nil
 }
 
 // DecodeNotify admits notify(text). The text must be present and non-empty;
@@ -306,91 +528,82 @@ func ValidPackageName(value string) bool {
 	return true
 }
 
-// AppEntry is one discovered launchable application. Name is the localized
-// launcher label and is user-facing content; it must never be logged.
-type AppEntry struct {
+// AppItem is one discovered launchable application of the find kind. Name is
+// the localized launcher label and is user-facing content; it must never be
+// logged.
+type AppItem struct {
 	Name    string
 	Package string
 }
 
-// AppsView is the apps tool result. Items always encodes an array, including
-// the empty list; total counts all matches before the byte budget applies.
-type AppsView struct {
-	Items      []AppEntry
-	Total      int
-	Truncated  bool
-	CapturedAt string
+// AppTaskItem is one live task of the list kind. OriginDisplay is present only
+// when the session still holds an original-ownership record for the task.
+type AppTaskItem struct {
+	TaskID        int
+	Package       string
+	Ownership     string
+	OriginDisplay *int
 }
 
-// MarshalJSONTo writes the apps discovery result.
-func (a *AppsView) MarshalJSONTo(enc *jsontext.Encoder) error {
-	if a == nil {
-		return writeNull(enc)
-	}
-	if err := enc.WriteToken(jsontext.BeginObject); err != nil {
-		return err
-	}
-	if err := writeName(enc, "items"); err != nil {
-		return err
-	}
-	if err := enc.WriteToken(jsontext.BeginArray); err != nil {
-		return err
-	}
-	for _, entry := range a.Items {
-		if err := enc.WriteToken(jsontext.BeginObject); err != nil {
-			return err
-		}
-		if err := writeName(enc, "name"); err != nil {
-			return err
-		}
-		if err := writeString(enc, entry.Name); err != nil {
-			return err
-		}
-		if err := writeName(enc, "package"); err != nil {
-			return err
-		}
-		if err := writeString(enc, entry.Package); err != nil {
-			return err
-		}
-		if err := enc.WriteToken(jsontext.EndObject); err != nil {
-			return err
-		}
-	}
-	if err := enc.WriteToken(jsontext.EndArray); err != nil {
-		return err
-	}
-	if err := writeName(enc, "total"); err != nil {
-		return err
-	}
-	if err := writeInt(enc, a.Total); err != nil {
-		return err
-	}
-	if err := writeName(enc, "truncated"); err != nil {
-		return err
-	}
-	if err := writeBool(enc, a.Truncated); err != nil {
-		return err
-	}
-	if err := writeName(enc, "captured_at"); err != nil {
-		return err
-	}
-	if err := writeString(enc, a.CapturedAt); err != nil {
-		return err
-	}
-	return enc.WriteToken(jsontext.EndObject)
+// AppCloseTask is one frozen close target and its per-item facts. Outcome is
+// executed / not_executed / uncertain. RecentsCleaned is present only when the
+// item actually reached an independent recents verification; HasRecentsCleaned
+// distinguishes an omitted member from an explicit null.
+type AppCloseTask struct {
+	TaskID            int
+	Outcome           string
+	RecentsCleaned    *bool
+	HasRecentsCleaned bool
+	Error             *Error
 }
 
-// AppView is one open_app action fact. It carries only the package and owned
-// task identity, never the launch component or intent body.
+// AppView is the single app result object discriminated by kind. Only members
+// that this call has proven appear; unknown scalars are omitted rather than
+// encoded as zero, and the two declared nullable members (state_preserved,
+// restarted) keep an explicit null.
 type AppView struct {
-	Package        string
-	TaskID         int
-	DisplayID      int
-	Reused         bool
-	StatePreserved *bool
+	Kind string
+
+	// find and list
+	Items      []AppItem
+	TaskItems  []AppTaskItem
+	HasItems   bool
+	Total      int
+	HasTotal   bool
+	Truncated  *bool
+	CapturedAt string
+	// list
+	DisplayID  *int
+	Foreground *Foreground
+
+	// open / claim / handoff
+	Package           string
+	TaskID            *int
+	Ownership         string
+	Reused            *bool
+	StatePreserved    *bool
+	HasStatePreserved bool
+	SourceDisplayID   *int
+	ForegroundRestore string
+
+	// close
+	Tasks    []AppCloseTask
+	HasTasks bool
+	Complete *bool
+
+	// kill
+	SourceTaskID     *int
+	TargetPIDs       []int
+	KilledPIDs       []int
+	RemainingPIDs    []int
+	HasTargetPIDs    bool
+	HasKilledPIDs    bool
+	HasRemainingPIDs bool
+	Restarted        *bool
+	HasRestarted     bool
 }
 
-// MarshalJSONTo writes the open_app action fact.
+// MarshalJSONTo writes the kind-specific member set in its fixed public order.
 func (a *AppView) MarshalJSONTo(enc *jsontext.Encoder) error {
 	if a == nil {
 		return writeNull(enc)
@@ -398,39 +611,347 @@ func (a *AppView) MarshalJSONTo(enc *jsontext.Encoder) error {
 	if err := enc.WriteToken(jsontext.BeginObject); err != nil {
 		return err
 	}
-	if err := writeName(enc, "package"); err != nil {
+	if err := a.writeString(enc, "kind", a.Kind); err != nil {
 		return err
 	}
-	if err := writeString(enc, a.Package); err != nil {
-		return err
-	}
-	if err := writeName(enc, "task_id"); err != nil {
-		return err
-	}
-	if err := writeInt(enc, a.TaskID); err != nil {
-		return err
-	}
-	if err := writeName(enc, "display_id"); err != nil {
-		return err
-	}
-	if err := writeInt(enc, a.DisplayID); err != nil {
-		return err
-	}
-	if err := writeName(enc, "reused"); err != nil {
-		return err
-	}
-	if err := writeBool(enc, a.Reused); err != nil {
-		return err
-	}
-	if a.StatePreserved != nil {
-		if err := writeName(enc, "state_preserved"); err != nil {
+	switch a.Kind {
+	case AppKindFind:
+		if err := a.writeFind(enc); err != nil {
 			return err
 		}
-		if err := writeBool(enc, *a.StatePreserved); err != nil {
+	case AppKindList:
+		if err := a.writeList(enc); err != nil {
 			return err
 		}
+	case AppKindOpen, AppKindClaim, AppKindHandoff:
+		if err := a.writeOpenLike(enc); err != nil {
+			return err
+		}
+	case AppKindClose:
+		if err := a.writeClose(enc); err != nil {
+			return err
+		}
+	case AppKindKill:
+		if err := a.writeKill(enc); err != nil {
+			return err
+		}
+	default:
+		return writeNilKind(enc)
 	}
 	return enc.WriteToken(jsontext.EndObject)
+}
+
+func writeNilKind(enc *jsontext.Encoder) error {
+	// An unknown kind must never be encoded as an empty object; the caller
+	// treats the encoding failure as an internal error.
+	return errUnknownAppKind
+}
+
+// errUnknownAppKind reports an internal programming error.
+var errUnknownAppKind = rejectKind("app kind")
+
+func (a *AppView) writeString(enc *jsontext.Encoder, name, value string) error {
+	if err := writeName(enc, name); err != nil {
+		return err
+	}
+	return writeString(enc, value)
+}
+
+func (a *AppView) writeIntField(enc *jsontext.Encoder, name string, value int) error {
+	if err := writeName(enc, name); err != nil {
+		return err
+	}
+	return writeInt(enc, value)
+}
+
+func (a *AppView) writeIntPtr(enc *jsontext.Encoder, name string, value *int) error {
+	if err := writeName(enc, name); err != nil {
+		return err
+	}
+	return writeInt(enc, *value)
+}
+
+func (a *AppView) writeBoolField(enc *jsontext.Encoder, name string, value bool) error {
+	if err := writeName(enc, name); err != nil {
+		return err
+	}
+	return writeBool(enc, value)
+}
+
+func (a *AppView) writeNullableBool(enc *jsontext.Encoder, name string, value *bool) error {
+	if err := writeName(enc, name); err != nil {
+		return err
+	}
+	if value == nil {
+		return writeNull(enc)
+	}
+	return writeBool(enc, *value)
+}
+
+func (a *AppView) writeFind(enc *jsontext.Encoder) error {
+	if a.hasItems() {
+		if err := writeName(enc, "items"); err != nil {
+			return err
+		}
+		if err := enc.WriteToken(jsontext.BeginArray); err != nil {
+			return err
+		}
+		for _, item := range a.Items {
+			if err := enc.WriteToken(jsontext.BeginObject); err != nil {
+				return err
+			}
+			if err := a.writeString(enc, "name", item.Name); err != nil {
+				return err
+			}
+			if err := a.writeString(enc, "package", item.Package); err != nil {
+				return err
+			}
+			if err := enc.WriteToken(jsontext.EndObject); err != nil {
+				return err
+			}
+		}
+		if err := enc.WriteToken(jsontext.EndArray); err != nil {
+			return err
+		}
+	}
+	if a.hasTotal() {
+		if err := a.writeIntField(enc, "total", a.Total); err != nil {
+			return err
+		}
+	}
+	return a.writeTail(enc)
+}
+
+// hasItems reports whether this view carries a collection. A non-nil slice is
+// evidence of a successful read even when the explicit presence flag is unset.
+func (a *AppView) hasItems() bool {
+	if a.HasItems {
+		return true
+	}
+	if a.Kind == AppKindList {
+		return a.TaskItems != nil
+	}
+	return a.Items != nil
+}
+
+// hasTotal reports whether the pre-budget match count is known.
+func (a *AppView) hasTotal() bool {
+	return a.HasTotal || a.Total != 0 || a.Truncated != nil
+}
+
+func (a *AppView) writeList(enc *jsontext.Encoder) error {
+	if a.DisplayID != nil {
+		if err := a.writeIntPtr(enc, "display_id", a.DisplayID); err != nil {
+			return err
+		}
+	}
+	if a.hasItems() {
+		if err := writeName(enc, "items"); err != nil {
+			return err
+		}
+		if err := enc.WriteToken(jsontext.BeginArray); err != nil {
+			return err
+		}
+		for _, item := range a.TaskItems {
+			if err := enc.WriteToken(jsontext.BeginObject); err != nil {
+				return err
+			}
+			if err := a.writeIntField(enc, "task_id", item.TaskID); err != nil {
+				return err
+			}
+			if err := a.writeString(enc, "package", item.Package); err != nil {
+				return err
+			}
+			if err := a.writeString(enc, "ownership", item.Ownership); err != nil {
+				return err
+			}
+			if item.OriginDisplay != nil {
+				if err := a.writeIntPtr(enc, "origin_display", item.OriginDisplay); err != nil {
+					return err
+				}
+			}
+			if err := enc.WriteToken(jsontext.EndObject); err != nil {
+				return err
+			}
+		}
+		if err := enc.WriteToken(jsontext.EndArray); err != nil {
+			return err
+		}
+	}
+	if a.hasTotal() {
+		if err := a.writeIntField(enc, "total", a.Total); err != nil {
+			return err
+		}
+	}
+	if err := a.writeTail(enc); err != nil {
+		return err
+	}
+	if a.Foreground != nil {
+		if err := writeName(enc, "foreground"); err != nil {
+			return err
+		}
+		if err := MarshalJSONTo(enc, a.Foreground); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// writeTail writes truncated and captured_at, the shared find/list tail.
+func (a *AppView) writeTail(enc *jsontext.Encoder) error {
+	if a.Truncated != nil {
+		if err := a.writeBoolField(enc, "truncated", *a.Truncated); err != nil {
+			return err
+		}
+	}
+	if a.CapturedAt != "" {
+		return a.writeString(enc, "captured_at", a.CapturedAt)
+	}
+	return nil
+}
+
+func (a *AppView) writeOpenLike(enc *jsontext.Encoder) error {
+	if a.Package != "" {
+		if err := a.writeString(enc, "package", a.Package); err != nil {
+			return err
+		}
+	}
+	if a.TaskID != nil {
+		if err := a.writeIntPtr(enc, "task_id", a.TaskID); err != nil {
+			return err
+		}
+	}
+	if a.Kind != AppKindOpen && a.SourceDisplayID != nil {
+		if err := a.writeIntPtr(enc, "source_display_id", a.SourceDisplayID); err != nil {
+			return err
+		}
+	}
+	if a.DisplayID != nil {
+		if err := a.writeIntPtr(enc, "display_id", a.DisplayID); err != nil {
+			return err
+		}
+	}
+	if a.Ownership != "" {
+		if err := a.writeString(enc, "ownership", a.Ownership); err != nil {
+			return err
+		}
+	}
+	if a.Kind == AppKindOpen && a.Reused != nil {
+		if err := a.writeBoolField(enc, "reused", *a.Reused); err != nil {
+			return err
+		}
+	}
+	if a.HasStatePreserved {
+		if err := a.writeNullableBool(enc, "state_preserved", a.StatePreserved); err != nil {
+			return err
+		}
+	}
+	if a.Kind == AppKindHandoff && a.ForegroundRestore != "" {
+		return a.writeString(enc, "foreground_restore", a.ForegroundRestore)
+	}
+	return nil
+}
+
+func (a *AppView) writeClose(enc *jsontext.Encoder) error {
+	if a.DisplayID != nil {
+		if err := a.writeIntPtr(enc, "display_id", a.DisplayID); err != nil {
+			return err
+		}
+	}
+	if a.HasTasks {
+		if err := writeName(enc, "tasks"); err != nil {
+			return err
+		}
+		if err := enc.WriteToken(jsontext.BeginArray); err != nil {
+			return err
+		}
+		for _, task := range a.Tasks {
+			if err := enc.WriteToken(jsontext.BeginObject); err != nil {
+				return err
+			}
+			if err := a.writeIntField(enc, "task_id", task.TaskID); err != nil {
+				return err
+			}
+			if err := a.writeString(enc, "outcome", task.Outcome); err != nil {
+				return err
+			}
+			if task.HasRecentsCleaned {
+				if err := a.writeNullableBool(enc, "recents_cleaned", task.RecentsCleaned); err != nil {
+					return err
+				}
+			}
+			if task.Error != nil {
+				if err := writeName(enc, "error"); err != nil {
+					return err
+				}
+				if err := MarshalJSONTo(enc, task.Error); err != nil {
+					return err
+				}
+			}
+			if err := enc.WriteToken(jsontext.EndObject); err != nil {
+				return err
+			}
+		}
+		if err := enc.WriteToken(jsontext.EndArray); err != nil {
+			return err
+		}
+	}
+	if a.Complete != nil {
+		return a.writeBoolField(enc, "complete", *a.Complete)
+	}
+	return nil
+}
+
+func (a *AppView) writeKill(enc *jsontext.Encoder) error {
+	if a.Package != "" {
+		if err := a.writeString(enc, "package", a.Package); err != nil {
+			return err
+		}
+	}
+	if a.SourceTaskID != nil {
+		if err := a.writeIntPtr(enc, "source_task_id", a.SourceTaskID); err != nil {
+			return err
+		}
+	}
+	if a.DisplayID != nil {
+		if err := a.writeIntPtr(enc, "display_id", a.DisplayID); err != nil {
+			return err
+		}
+	}
+	if a.HasTargetPIDs {
+		if err := a.writeIntArray(enc, "target_pids", a.TargetPIDs); err != nil {
+			return err
+		}
+	}
+	if a.HasKilledPIDs {
+		if err := a.writeIntArray(enc, "killed_pids", a.KilledPIDs); err != nil {
+			return err
+		}
+	}
+	if a.HasRemainingPIDs {
+		if err := a.writeIntArray(enc, "remaining_pids", a.RemainingPIDs); err != nil {
+			return err
+		}
+	}
+	if a.HasRestarted {
+		return a.writeNullableBool(enc, "restarted", a.Restarted)
+	}
+	return nil
+}
+
+func (a *AppView) writeIntArray(enc *jsontext.Encoder, name string, values []int) error {
+	if err := writeName(enc, name); err != nil {
+		return err
+	}
+	if err := enc.WriteToken(jsontext.BeginArray); err != nil {
+		return err
+	}
+	for _, value := range values {
+		if err := writeInt(enc, value); err != nil {
+			return err
+		}
+	}
+	return enc.WriteToken(jsontext.EndArray)
 }
 
 // ShellView is the managed shell execution report. exit_code, output and

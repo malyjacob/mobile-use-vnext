@@ -43,13 +43,17 @@ const (
 
 // Work kinds.
 const (
-	WorkStart   = "start"
-	WorkObserve = "observe"
-	WorkAct     = "act"
-	WorkApps    = "apps"
-	WorkOpenApp = "open_app"
-	WorkShell   = "shell"
+	WorkStart     = "start"
+	WorkObserve   = "observe"
+	WorkAct       = "act"
+	WorkAppQuery  = "app_query"
+	WorkAppAction = "app_action"
+	WorkShell     = "shell"
 )
+
+// appTool is the single public tool name of every app lifecycle kind. The kind
+// is carried by the operation record, never by a second tool name.
+const appTool = "app"
 
 // Outcome values.
 const (
@@ -83,6 +87,13 @@ type Config struct {
 	ShellConfirmTimeout time.Duration // 5s termination/confirmation budget
 	ShellStartTimeout   time.Duration // 3s managed start evidence budget
 	ShellOutputBytes    int           // 64 KiB retained output prefix
+
+	// App lifecycle policy. These are service budgets, never per-call options.
+	MaxCloseTasks     int           // 16 frozen close targets
+	MaxAppTransfers   int           // 16 root-level transfer/exclusion records
+	MaxLedgerBytes    int           // complete serialized ledger bound
+	MaxRetiredRecords int           // bounded retired wrapper count
+	ForegroundRestore time.Duration // bounded best-effort handoff foreground restore
 
 	// Image policy. The image is additional material of one acquisition, so
 	// these are fixed service budgets, never per-call options.
@@ -122,6 +133,11 @@ func DefaultConfig(instanceID, agentName string) Config {
 		ShellConfirmTimeout: 5 * time.Second,
 		ShellStartTimeout:   3 * time.Second,
 		ShellOutputBytes:    65536,
+		MaxCloseTasks:       16,
+		MaxAppTransfers:     16,
+		MaxLedgerBytes:      65536,
+		MaxRetiredRecords:   8,
+		ForegroundRestore:   2 * time.Second,
 		ImageMaxLongSide:    1200,
 		ImageQuality:        80,
 		MaxImageBytes:       512 * 1024,
@@ -157,7 +173,6 @@ type Device interface {
 	ResolveLauncher(ctx context.Context, pkg string) (string, bool, error)
 	LaunchApp(ctx context.Context, displayID int, component string) (device.LaunchResult, error)
 	FocusTask(ctx context.Context, taskID int) (device.DispatchReceipt, error)
-	RemoveTask(ctx context.Context, taskID int) error
 	RecentTaskIDs(ctx context.Context) (map[int]bool, bool)
 	TasksOnDisplay(ctx context.Context, displayID int) ([]device.Task, bool)
 	// Managed shell runner. The concrete adapter writes the exact command
@@ -170,6 +185,15 @@ type Device interface {
 	TerminateManagedShell(ctx context.Context, runID string, root bool, reason string) (device.ShellTermination, error)
 	RemoveManagedShell(ctx context.Context, runID string, root bool) error
 	RootAvailable(ctx context.Context) (bool, error)
+
+	// App lifecycle primitives. They report bounded dispatch facts only; the
+	// engine decides ownership, guards, outcome and every exclusion.
+	MoveTask(ctx context.Context, rootID, leafTaskID, targetDisplayID int) (device.TaskMoveResult, error)
+	RemoveTask(ctx context.Context, taskID int) (device.TaskRemoveResult, error)
+	PackageProcesses(ctx context.Context, pkg string) (device.PackageProcesses, error)
+	KillProcess(ctx context.Context, pid int, startTicks uint64) (device.DispatchReceipt, error)
+	MediaPlayback(ctx context.Context) (device.MediaState, error)
+	ForegroundService(ctx context.Context, pkg string) (device.ServiceState, error)
 }
 
 // Store is the recovery ledger capability.
@@ -277,8 +301,7 @@ type Engine struct {
 	// shell is the current managed runner ownership. It keeps ordinary
 	// admission closed only until its bounded confirmation deadline.
 	shell        *shellState
-	shellProbing bool
-	// shellOrphan is the single slot holding a chain that was closed out as
+	shellProbing bool	// shellOrphan is the single slot holding a chain that was closed out as
 	// unconfirmed. It no longer blocks admission; it keeps the identity so the
 	// closure chain may try one more exact termination and so no physical fact
 	// is reported as confirmed. A newer closed-out chain replaces it.
@@ -296,6 +319,9 @@ type Engine struct {
 	messageBytes       int
 	messageSaveFailing bool
 	appsCache          *appListCache
+	// transfers is the root-level task transfer protection pool. Every cleanup
+	// candidate, live-scan adoption and late recheck consults it before a delete.
+	transfers []*transferState
 
 	lastControl     *protocol.ControlView
 	lastFingerprint *controlComparable
@@ -392,7 +418,10 @@ type operationState struct {
 	ID              string
 	Agent           string
 	Kind            string
-	State           string
+	// AppKind is the app branch of this operation. It is the only fact a
+	// duplicate P or status(P) summary republishes.
+	AppKind       string
+	State         string
 	Phase           string
 	Outcome         string
 	Error           *protocol.Error
@@ -1034,6 +1063,11 @@ func (e *Engine) operationViewLocked(op *operationState) *protocol.Result {
 	if op.State == OperationFinished {
 		result.Outcome = op.Outcome
 		result.Phase = op.Phase
+	}
+	if op.AppKind != "" {
+		// A replay is a summary, never a fresh business result: only the kind is
+		// republished, no identity, landing point or device fact.
+		result.App = &protocol.AppView{Kind: op.AppKind}
 	}
 	if op.Error != nil {
 		result.Error = op.Error

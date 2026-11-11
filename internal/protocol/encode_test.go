@@ -105,21 +105,33 @@ func TestRequestEncodersRoundTrip(t *testing.T) {
 		if req, apiErr := DecodeEnd(body); apiErr != nil || req.Reference != "P1" {
 			t.Fatalf("DecodeEnd: %v %+v", apiErr, req)
 		}
-		apps := &AppsRequest{Query: "设置", HasQuery: true}
-		body, err = apps.Encode()
+		find := &AppRequest{Kind: AppKindFind, Query: "设置", HasQuery: true}
+		body, err = find.Encode()
 		if err != nil {
 			t.Fatal(err)
 		}
-		if req, apiErr := DecodeApps(body); apiErr != nil || req.Query != "设置" || !req.HasQuery {
-			t.Fatalf("DecodeApps: %v %+v", apiErr, req)
+		if req, apiErr := DecodeApp(body); apiErr != nil || req.Query != "设置" ||
+			!req.HasQuery || req.Kind != AppKindFind {
+			t.Fatalf("DecodeApp find: %v %+v", apiErr, req)
 		}
-		openApp := &OpenAppRequest{ObservationID: "O4", App: "com.android.settings"}
+		openApp := &AppRequest{Kind: AppKindOpen, ObservationID: "O4", App: "com.android.settings"}
 		body, err = openApp.Encode()
 		if err != nil {
 			t.Fatal(err)
 		}
-		if req, apiErr := DecodeOpenApp(body); apiErr != nil || req.App != "com.android.settings" {
-			t.Fatalf("DecodeOpenApp: %v %+v", apiErr, req)
+		if req, apiErr := DecodeApp(body); apiErr != nil ||
+			req.App != "com.android.settings" || req.Kind != AppKindOpen {
+			t.Fatalf("DecodeApp open: %v %+v", apiErr, req)
+		}
+		kill := &AppRequest{Kind: AppKindKill, ObservationID: "O4",
+			Target: &AppTarget{TaskID: 42, UseTask: true}, AllowStopPlayback: true}
+		body, err = kill.Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if req, apiErr := DecodeApp(body); apiErr != nil || req.Target == nil ||
+			req.Target.TaskID != 42 || !req.AllowStopPlayback {
+			t.Fatalf("DecodeApp kill: %v %+v", apiErr, req)
 		}
 		notify := &NotifyRequest{Text: "消息正文"}
 		body, err = notify.Encode()

@@ -12,8 +12,9 @@
 
     Checks:
       1. release manifest, health identity, installed App identity, tool catalog;
-      2. ordinary contract pairing: an old-contract sync is refused, minimal STOP
-         still binds, and admission recovers;
+      2. ordinary contract pairing: the previous release contract 8 is refused
+         on both the control sync and an ordinary API header, minimal STOP still
+         binds, and admission recovers;
       3. notify -> App private store -> acknowledgement -> notification -> UI list
          and detail with local read state;
       4. the Activity, foreground notification and overlay derive from one control
@@ -427,7 +428,7 @@ function SyncBody {
     return (@{
             contract_version      = $Contract
             app_instance_id       = $AppInstance
-            app_version           = '0.4.0'
+            app_version           = $script:releaseVersion
             selected_mode         = 'virtual'
             mode_generation       = $ModeGeneration
             mode_ready            = $true
@@ -468,7 +469,7 @@ try {
     if (-not (Test-Path -LiteralPath $versionsPath -PathType Leaf)) { Fail 'release/versions.json is missing' }
     $versions = Get-Content -LiteralPath $versionsPath -Raw | ConvertFrom-Json
     $script:contractVersion = [string]$versions.contract_version
-    $releaseVersion = [string]$versions.release_version
+    $script:releaseVersion = [string]$versions.release_version
     $script:agentToken = $agentToken
     $script:baseUrl = $baseUrl
 
@@ -504,9 +505,11 @@ try {
     $manifestContract = [string](Get-Field $manifestObject 'contract_version')
     $manifestAndroid = Get-Field $manifestObject 'android'
     $manifestToolCatalog = Get-Field $manifestObject 'tool_catalog'
-    Assert-True ($manifestRelease -eq $releaseVersion) 'manifest release_version differs from the version source'
+    Assert-True ($manifestRelease -eq $script:releaseVersion) 'manifest release_version differs from the version source'
     Assert-True ($manifestContract -eq $script:contractVersion) 'manifest contract_version differs from the version source'
-    Write-Output ("CHECK release manifest: PASS release=$manifestRelease contract=$manifestContract source_commit=" +
+    Assert-True ([int](Get-Field $manifestToolCatalog 'count') -eq 11) 'manifest tool catalog count is not 11'
+    Write-Output ("CHECK release manifest: PASS release=$manifestRelease contract=$manifestContract tool_catalog=" +
+        [string](Get-Field $manifestToolCatalog 'count') + " source_commit=" +
         [string](Get-Field $manifestObject 'source_commit'))
 
     $health = Get-Health
@@ -521,12 +524,22 @@ try {
 
     $catalogText = @()
     $catalogExit = 1
-    Push-Location $repository
+    $previousExperiment = $env:GOEXPERIMENT
     try {
-        $catalogText = (@(& go run ./scripts/toolcatalog) -join "`n")
-        $catalogExit = $LASTEXITCODE
+        $env:GOEXPERIMENT = 'jsonv2'
+        Push-Location $repository
+        try {
+            $catalogText = (@(& go run ./scripts/toolcatalog) -join "`n")
+            $catalogExit = $LASTEXITCODE
+        } finally {
+            Pop-Location
+        }
     } finally {
-        Pop-Location
+        if ($null -eq $previousExperiment) {
+            Remove-Item Env:GOEXPERIMENT -ErrorAction SilentlyContinue
+        } else {
+            $env:GOEXPERIMENT = $previousExperiment
+        }
     }
     if ($catalogExit -ne 0) { Fail 'tool catalog command failed' }
     $catalog = Get-Json $catalogText 'tool catalog'
@@ -541,7 +554,7 @@ try {
     }
     Write-Output 'CHECK admissible baseline: PASS can_start=true'
 
-    # ---------------------------------------------------------------- phone MCP adapter
+    # ---------------------------------------------------------------- phone MCP discovery only
     $mcpUrl = 'http://127.0.0.1:' + $phoneMcpHostPort + '/mcp'
     $mcpNoAuth = Invoke-Http -Url $mcpUrl -Method 'GET'
     Assert-True ($mcpNoAuth.Status -eq 401) ('phone MCP adapter did not reject an unauthenticated request: HTTP ' + $mcpNoAuth.Status)
@@ -557,16 +570,30 @@ try {
     $mcpResponse = Invoke-Http -Url $mcpUrl -Body $discoverBody -Headers $mcpHeaders
     Assert-True ($mcpResponse.Status -eq 200) ('phone MCP discover returned HTTP ' + $mcpResponse.Status)
     Assert-True ($mcpResponse.Text -match 'supportedVersions') 'phone MCP discover did not return a supported version'
-    Write-Output ('CHECK phone MCP adapter: PASS url=' + $mcpUrl + ' discover=supportedVersions')
+    Write-Output ('CHECK phone MCP discovery only (not tools/list, not lifecycle): PASS url=' + $mcpUrl + ' discover=supportedVersions')
+    Write-Output 'CHECK phone MCP tools/list: NOT VERIFIED by verify-m6 (run the MCP probe for the deployed adapter)'
+    Write-Output 'CHECK phone MCP process identity: NOT VERIFIED by verify-m6 (deploy.ps1 proves the managed adapter hash)'
+    Write-Output 'CHECK phone MCP lifecycle: NOT VERIFIED by verify-m6 (discovery and process checks are not a lifecycle pass)'
 
     # ---------------------------------------------------------------- contract pairing
+    # The previous published ordinary contract for this release line is 8. A
+    # generic old number would not prove the documented upgrade boundary.
+    $previousContract = [int]$script:contractVersion - 1
+    Assert-True ($previousContract -eq 8) ("expected previous release contract 8, computed " + $previousContract)
     $oldApp = New-Uuid
     $oldMode = New-Uuid
-    $oldSync = Invoke-Http -Url ($baseUrl + '/v1/control/sync') -Body (SyncBody -Contract '1' `
+    $oldSync = Invoke-Http -Url ($baseUrl + '/v1/control/sync') -Body (SyncBody -Contract ([string]$previousContract) `
             -AppInstance $oldApp -ModeGeneration $oldMode) -Headers @{ Authorization = 'Bearer ' + $controlToken }
-    Assert-True ($oldSync.Status -eq 409) ("old-contract sync was not refused: HTTP " + $oldSync.Status)
-    Assert-True ($oldSync.Text -match 'contract_mismatch') 'old-contract sync refusal did not use contract_mismatch'
-    Write-Output 'CHECK contract pairing: PASS old-contract sync=409 contract_mismatch'
+    Assert-True ($oldSync.Status -eq 409) ("previous-contract sync was not refused: HTTP " + $oldSync.Status)
+    Assert-True ($oldSync.Text -match 'contract_mismatch') 'previous-contract sync refusal did not use contract_mismatch'
+    $oldHeader = Invoke-Http -Url ($baseUrl + '/api/status') -Body '{}' -Headers @{
+        Authorization           = 'Bearer ' + $agentToken
+        'X-Mobile-Use-Contract' = [string]$previousContract
+    }
+    Assert-True ($oldHeader.Status -eq 409) ("previous-contract API header was not refused: HTTP " + $oldHeader.Status)
+    Assert-True ($oldHeader.Text -match 'contract_mismatch') 'previous-contract API refusal did not use contract_mismatch'
+    Write-Output ('CHECK contract pairing: PASS previous-contract=' + $previousContract +
+        ' sync=409 contract_mismatch api=409 contract_mismatch')
 
     $sessionBeforeStop = Get-Field $status 'session'
     Assert-True ($null -eq $sessionBeforeStop -or [string](Get-Field $sessionBeforeStop 'state') -eq 'ended') 'STOP pairing check requires no active session'
@@ -622,7 +649,17 @@ try {
     Write-Output 'CHECK system notification: PASS channel+text'
 
     Start-Activity
-    $activityDump = Get-UiDump
+    # The control detail may be long enough to push the message entry below the
+    # fold; uiautomator only reports rendered nodes, so scroll the page first.
+    $null = Invoke-Adb -Arguments @('shell', 'input', 'swipe', '540', '1900', '540', '900', '300')
+    Start-Sleep -Milliseconds 400
+    $activityDump = ''
+    $activityDeadline = (Get-Date).AddSeconds(5)
+    do {
+        $activityDump = Get-UiDump
+        if ($activityDump -match '消息中心') { break }
+        Start-Sleep -Milliseconds 300
+    } while ((Get-Date) -lt $activityDeadline)
     Assert-True ($activityDump -match '消息中心') 'the Activity message-center entry is missing'
     $unreadBefore = Get-UnreadCount $activityDump
     Assert-True ($unreadBefore -ge 1) 'the Activity entry does not report an unread message'
@@ -646,6 +683,12 @@ try {
     Write-Output ('CHECK local read: PASS unread ' + $unreadBefore + ' -> ' + $unreadAfter + ' (never reported to the service)')
 
     # ---------------------------------------------------------------- control view entries
+    # The message-center check scrolled the page down; return to the top so the
+    # mode and stop entries are rendered again.
+    $null = Invoke-Adb -Arguments @('shell', 'input', 'swipe', '540', '600', '540', '2000', '250')
+    Start-Sleep -Milliseconds 200
+    $null = Invoke-Adb -Arguments @('shell', 'input', 'swipe', '540', '600', '540', '2000', '250')
+    Start-Sleep -Milliseconds 300
     Start-Activity
     $activityDump = Get-UiDump
     Assert-True ($activityDump -match '使用主屏（共享）') 'the primary-screen entry is missing'
@@ -665,10 +708,19 @@ try {
     Assert-True ($notifications -match '虚拟屏 · 待命|会话有效|正在') 'the foreground notification does not show the control summary'
     Start-Activity
     $activityDump = Get-UiDump
-    Assert-True ($activityDump -match '虚拟屏 · 待命') 'the Activity does not show the standby summary'
+    # A retained unconfirmed cleanup keeps the last ended session in the control
+    # view; both the plain standby line and that honest retained summary are
+    # valid standby presentations.
+    Assert-True ($activityDump -match '虚拟屏 · 待命|上次会话已结束') 'the Activity does not show the standby summary'
     foreach ($field in @('停止同步：已同步', '可用性：', '会话：', '设备操作：', '资源清理：',
-            '执行链', '最近任务', '所选模式：虚拟屏', '通知：')) {
+            '所选模式：虚拟屏', '通知：')) {
         Assert-True ($activityDump -match [regex]::Escape($field)) ('the control detail is missing: ' + $field)
+    }
+    # 资源清理的具体子项只在存在清理记录时出现；待命且无记录时只显示“不适用”。
+    if ($activityDump -match '资源清理：(?!不适用)') {
+        foreach ($field in @('执行链', '最近任务')) {
+            Assert-True ($activityDump -match [regex]::Escape($field)) ('the control detail is missing: ' + $field)
+        }
     }
     Write-Output 'CHECK control detail: PASS availability/session/work/cleanup/mode/permissions'
     Write-Output 'CHECK control view entries: PASS Activity/notification/overlay show the same standby snapshot'
@@ -738,9 +790,20 @@ su -c 'kill -9 $pidText 2>/dev/null || true'
         $afterRecovery = $recovery.Status
         $afterSession = Get-Field $afterRecovery 'session'
         Assert-True ($null -eq $afterSession -or [string](Get-Field $afterSession 'state') -ne 'active') 'the old session was revived after recovery'
+        Assert-True ([bool](Get-Field $afterRecovery 'can_start')) 'admission stayed closed after recovery'
         $cleanup = Get-Field $afterRecovery 'cleanup'
-        Assert-True ($null -eq $cleanup -or [string](Get-Field $cleanup 'state') -eq 'complete') 'cleanup did not complete after recovery'
-        Write-Output 'CHECK restart recovery: PASS no old active session, cleanup complete, can_start=true'
+        $cleanupState = 'none'
+        $cleanupExecution = ''
+        if ($null -ne $cleanup) {
+            $cleanupState = [string](Get-Field $cleanup 'state')
+            $cleanupExecution = [string](Get-Field $cleanup 'execution')
+        }
+        # The independent closure chain keeps its own budget; admission is open
+        # while it is still pending, and an unconfirmed execution fact is
+        # retained unchanged. Neither is a permanent gate.
+        Assert-True ($cleanupState -in @('none', 'pending', 'unconfirmed', 'complete')) ('unexpected cleanup state after recovery: ' + $cleanupState)
+        Write-Output ('CHECK restart recovery: PASS no old active session; cleanup=' + $cleanupState +
+            '/' + $cleanupExecution + '; admission open')
 
         if (-not $SkipTermDrill) {
             $start = Invoke-Api -Path '/api/start' -Body '{}'

@@ -37,6 +37,7 @@ func TestLedgerV4UnknownUIRoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Save: %v", err)
 			}
+			want.Version = ledgerVersionV5
 			want.Revision++
 			if revision != want.Revision || ledger.Revision() != want.Revision {
 				t.Fatalf("revision = %d, store revision = %d, want %d", revision, ledger.Revision(), want.Revision)
@@ -45,7 +46,7 @@ func TestLedgerV4UnknownUIRoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read saved ledger: %v", err)
 			}
-			if !bytes.Contains(data, []byte(`"version":4`)) ||
+			if !bytes.Contains(data, []byte(`"version":5`)) ||
 				!bytes.Contains(data, []byte(`"state":"unknown"`)) {
 				t.Fatalf("saved ledger lost version 4 evidence: %s", data)
 			}

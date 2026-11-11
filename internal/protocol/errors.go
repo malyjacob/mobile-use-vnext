@@ -136,6 +136,24 @@ const (
 	CodeDeliveryUnavailable     = "delivery_unavailable"
 	CodeNotificationUnavailable = "notification_unavailable"
 
+	// App lifecycle codes. They describe the unified app tool's controlled
+	// stages and never change the meaning of an earlier code.
+	CodeWindowActionPrimary = "window_action_not_supported_on_primary_display"
+	CodeTaskNotFound        = "task_not_found"
+	CodeTaskNotTracked      = "task_not_tracked"
+	CodeTaskAmbiguous       = "task_target_ambiguous"
+	CodeTaskRootShared      = "task_root_shared"
+	CodeTaskMoveUnconfirmed = "task_move_unconfirmed"
+	CodeCloseBorrowed       = "close_refused_borrowed"
+	CodeKillNotOwned        = "kill_refused_not_owned"
+	CodeKillTaskElsewhere   = "kill_refused_task_elsewhere"
+	CodeKillForeground      = "kill_refused_foreground"
+	CodeKillPlayback        = "kill_refused_playback"
+	CodeKillProcessShared   = "kill_refused_process_shared"
+	CodeKillUnconfirmed     = "kill_unconfirmed"
+	CodeAppCapacity         = "app_capacity_exceeded"
+	CodeTaskLifecycleBusy   = "task_lifecycle_busy"
+
 	// Observation image stage codes. They describe the additional visual
 	// material of one acquisition; they never replace a confirmed core tree or
 	// the main action outcome.
@@ -170,7 +188,12 @@ func Status(code string) int {
 		CodeForegroundChanged, CodeForegroundUnknown, CodeControlUI,
 		CodeAppNotFound, CodeAppMoved, CodeAppTaskUnconfirmed, CodeTaskFocus,
 		CodeContentUnavailable, CodeInspectionTooLarge, CodeRootUnavailable,
-		CodeNotificationUnavailable:
+		CodeNotificationUnavailable,
+		CodeWindowActionPrimary, CodeTaskNotFound, CodeTaskNotTracked,
+		CodeTaskAmbiguous, CodeTaskRootShared, CodeTaskMoveUnconfirmed,
+		CodeCloseBorrowed, CodeKillNotOwned, CodeKillTaskElsewhere,
+		CodeKillForeground, CodeKillPlayback, CodeKillProcessShared,
+		CodeKillUnconfirmed, CodeAppCapacity, CodeTaskLifecycleBusy:
 		return http.StatusConflict
 	case CodeDeviceUnavailable, CodeDisplayCreate, CodeHierarchyFailed,
 		CodeTreeTooLarge, CodeAppLaunchFailed, CodeAppListUnavailable,

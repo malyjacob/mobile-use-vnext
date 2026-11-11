@@ -96,12 +96,24 @@ func validTestLedgerCheckpoint() *engine.LedgerUICheckpoint {
 	}
 }
 
-func writeLedgerRecord(t *testing.T, ledger *Ledger, record *engine.Ledger) []byte {
+func marshalLedgerRecord(t *testing.T, record *engine.Ledger) []byte {
 	t.Helper()
 	data, err := json.Marshal(record)
 	if err != nil {
 		t.Fatalf("marshal ledger: %v", err)
 	}
+	if record.Version < ledgerVersionV5 {
+		// The current LedgerTask struct always encodes root_task_id because
+		// omitempty no longer drops numeric zero. Version 1-4 files predate the
+		// member, so strip its zero value when synthesising old-format bytes.
+		data = bytes.ReplaceAll(data, []byte(`,"root_task_id":0`), nil)
+	}
+	return data
+}
+
+func writeLedgerRecord(t *testing.T, ledger *Ledger, record *engine.Ledger) []byte {
+	t.Helper()
+	data := marshalLedgerRecord(t, record)
 	writeLedgerBytes(t, ledger, data)
 	return data
 }
@@ -159,7 +171,7 @@ func TestLedgerAcceptsAllowedUIKindsAndStates(t *testing.T) {
 	}
 }
 
-func TestLedgerSaveWritesV4WithoutMutatingCaller(t *testing.T) {
+func TestLedgerSaveWritesV5WithoutMutatingCaller(t *testing.T) {
 	ledger := newTestLedgerStore(t)
 	record := validTestLedger(1)
 	record.Format = "caller-format"
@@ -187,7 +199,7 @@ func TestLedgerSaveWritesV4WithoutMutatingCaller(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load saved ledger: %v", err)
 	}
-	if got.Format != "mobile-use-vnext-ledger" || got.Version != ledgerVersionV4 || got.Revision != 1 {
+	if got.Format != "mobile-use-vnext-ledger" || got.Version != ledgerVersionV5 || got.Revision != 1 {
 		t.Fatalf("saved header = %+v", got)
 	}
 	if !reflect.DeepEqual(got.UI, &uiBefore) ||
@@ -268,10 +280,7 @@ func TestLedgerPhysicalRecheckEvidence(t *testing.T) {
 func TestLedgerV1UpgradePreservesResponsibilities(t *testing.T) {
 	ledger := newTestLedgerStore(t)
 	want := validTestLedger(1)
-	data, err := json.Marshal(want)
-	if err != nil {
-		t.Fatalf("marshal v1 ledger: %v", err)
-	}
+	data := marshalLedgerRecord(t, want)
 	data = bytes.Replace(data, []byte(`,"legacy_ui_pending":false`), nil, 1)
 	writeLedgerBytes(t, ledger, data)
 
@@ -289,7 +298,7 @@ func TestLedgerV1UpgradePreservesResponsibilities(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load upgraded ledger: %v", err)
 	}
-	if got.Version != ledgerVersionV4 || got.Revision != 8 {
+	if got.Version != ledgerVersionV5 || got.Revision != 8 {
 		t.Fatalf("upgraded header = %+v", got)
 	}
 	for name, same := range map[string]bool{
@@ -314,7 +323,7 @@ func TestLedgerLoadRejectsInvalidHeaderOrVersionOneEvidence(t *testing.T) {
 		body string
 	}{
 		{"version zero", `{"format":"mobile-use-vnext-ledger","version":0,"revision":0}`},
-		{"unknown version", `{"format":"mobile-use-vnext-ledger","version":5,"revision":0}`},
+		{"unknown version", `{"format":"mobile-use-vnext-ledger","version":6,"revision":0}`},
 		{"foreign format", `{"format":"other","version":2,"revision":0}`},
 		{"negative revision", `{"format":"mobile-use-vnext-ledger","version":2,"revision":-1}`},
 		{"v1 ui object", `{"format":"mobile-use-vnext-ledger","version":1,"revision":0,"ui":` + baseUI + `}`},
@@ -423,10 +432,7 @@ func TestLedgerLoadRejectsUnknownEvidenceMembers(t *testing.T) {
 	record := validTestLedger(2)
 	record.UI = validTestLedgerUI()
 	record.LegacyUI = validTestLedgerCheckpoint()
-	data, err := json.Marshal(record)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
+	data := marshalLedgerRecord(t, record)
 	for name, invalid := range map[string][]byte{
 		"top-level command": bytes.Replace(data, []byte(`"ui":`), []byte(`"command":"secret","ui":`), 1),
 		"ui text":           bytes.Replace(data, []byte(`"kind":"tap"`), []byte(`"kind":"tap","text":"secret"`), 1),

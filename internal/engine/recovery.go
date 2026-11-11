@@ -30,6 +30,9 @@ type recoveryInput struct {
 	// InputState is the usability of the observation this request referenced.
 	// It is not persisted; callers derive it from the facts they already hold.
 	InputState string
+	// AppKind is the app branch of an app-tool request. It selects the app
+	// planner; an empty value means the request is not an app call.
+	AppKind string
 	// Cleanup is the cleanup fact visible when the result is finished:
 	// none / pending / unconfirmed / complete.
 	Cleanup string
@@ -62,8 +65,13 @@ func planRecoveryFor(in recoveryInput) *protocol.Recovery {
 	if in.Code == protocol.CodeContractMismatch {
 		return newRecovery(protocol.RecoveryEntryUpdate, protocol.RecoveryReferenceNone, "", "")
 	}
+	if in.Tool == appTool {
+		// The app planner must run before the generic status/outcome branches:
+		// a query has no outcome and must never inherit a mutation plan.
+		return appPlan(in)
+	}
 	switch in.Tool {
-	case "apps", "notify":
+	case "notify":
 		return discoveryPlan(in)
 	case "shell":
 		return shellPlan(in)
@@ -81,7 +89,7 @@ func planRecoveryFor(in recoveryInput) *protocol.Recovery {
 		// Capture failures consume the observation for the two observation
 		// consumers. The one pre-claim path (a static control-UI rejection) is
 		// still "nothing happened" and falls through to the retry window.
-		if in.Claimed || (in.Tool != "act" && in.Tool != "open_app") {
+		if in.Claimed || in.Tool != "act" {
 			return newRecovery(protocol.RecoveryEntryObserve, protocol.RecoveryReferenceP, in.InputState, "")
 		}
 	}
@@ -109,8 +117,7 @@ func planRecoveryFor(in recoveryInput) *protocol.Recovery {
 	if in.Claimed && in.Code != "" {
 		return newRecovery(protocol.RecoveryEntryObserve, protocol.RecoveryReferenceP, in.InputState, "")
 	}
-	if in.Outcome == OutcomeNotExecuted && !in.Claimed &&
-		(in.Tool == "act" || in.Tool == "open_app") {
+	if in.Outcome == OutcomeNotExecuted && !in.Claimed && in.Tool == "act" {
 		if _, ok := userCodes[in.Code]; ok {
 			return newRecovery(protocol.RecoveryEntryUser, protocol.RecoveryReferenceNone,
 				protocol.RecoveryInputEffective, "")
@@ -230,9 +237,90 @@ func startPlan(in recoveryInput) *protocol.Recovery {
 	return newRecovery(protocol.RecoveryEntryStatus, protocol.RecoveryReferenceP, "", "")
 }
 
-// discoveryPlan maps the two session-free discovery tools. They never reuse an
-// observation, so they cannot produce retry; a controlled failure is either a
-// session-end fact or a transient/unavailable fact to poll.
+// appPlan maps the unified app tool. Queries never carry an action outcome and
+// never inherit a mutation plan; the five mutating kinds reuse the ordinary
+// observation/session/outcome ordering.
+func appPlan(in recoveryInput) *protocol.Recovery {
+	switch in.AppKind {
+	case protocol.AppKindFind, protocol.AppKindList:
+		return appQueryPlan(in)
+	}
+	if isSessionEndCode(in.Code) {
+		return newRecovery(protocol.RecoveryEntryEnd, protocol.RecoveryReferenceP, in.InputState, "")
+	}
+	if _, ok := observationDeadCodes[in.Code]; ok {
+		return newRecovery(protocol.RecoveryEntryObserve, protocol.RecoveryReferenceP, in.InputState, "")
+	}
+	if _, ok := statusCodes[in.Code]; ok {
+		return newRecovery(protocol.RecoveryEntryStatus, protocol.RecoveryReferenceP, in.InputState, "")
+	}
+	if in.Code == protocol.CodeTaskLifecycleBusy || in.Outcome == OutcomeUncertain {
+		return newRecovery(protocol.RecoveryEntryStatus, protocol.RecoveryReferenceP, in.InputState, "")
+	}
+	if in.Phase == "post_observation_failed" {
+		return newRecovery(protocol.RecoveryEntryObserve, protocol.RecoveryReferenceP,
+			recoveryInputRetired(in.InputState), protocol.RecoveryCausePostObservationFailed)
+	}
+	if in.Phase == "executed_revoked" {
+		return newRecovery(protocol.RecoveryEntryStatus, protocol.RecoveryReferenceP,
+			protocol.RecoveryInputRevoked, protocol.RecoveryCauseExecutedRevoked)
+	}
+	if in.Claimed && in.Code != "" {
+		return newRecovery(protocol.RecoveryEntryObserve, protocol.RecoveryReferenceP, in.InputState, "")
+	}
+	if in.Outcome == OutcomeNotExecuted && !in.Claimed {
+		if _, ok := userCodes[in.Code]; ok {
+			return newRecovery(protocol.RecoveryEntryUser, protocol.RecoveryReferenceNone,
+				protocol.RecoveryInputEffective, "")
+		}
+		if _, ok := appRefusalCodes[in.Code]; ok {
+			// An identity, ownership or protection refusal has no generic next
+			// step; the controlled message names the reason.
+			return nil
+		}
+		return newRecovery(protocol.RecoveryEntryRetry, protocol.RecoveryReferenceO,
+			protocol.RecoveryInputEffective, "")
+	}
+	return nil
+}
+
+// appRefusalCodes are controlled app refusals with no advancing recovery step.
+var appRefusalCodes = map[string]struct{}{
+	protocol.CodeTaskNotFound:      {},
+	protocol.CodeTaskNotTracked:    {},
+	protocol.CodeTaskRootShared:    {},
+	protocol.CodeCloseBorrowed:     {},
+	protocol.CodeKillNotOwned:      {},
+	protocol.CodeKillTaskElsewhere: {},
+	protocol.CodeKillForeground:    {},
+	protocol.CodeKillPlayback:      {},
+	protocol.CodeKillProcessShared: {},
+	protocol.CodeAppCapacity:       {},
+	protocol.CodeTaskLifecycleBusy: {},
+}
+
+// appQueryPlan maps the read-only app kinds. A closed query has no advancing
+// recovery; a transient read failure is retried by the caller with a new P, and
+// only a global readiness fact may point at status or the user.
+func appQueryPlan(in recoveryInput) *protocol.Recovery {
+	switch in.Code {
+	case "":
+		return nil
+	}
+	if in.Code == protocol.CodeDeviceBusy {
+		return newRecovery(protocol.RecoveryEntryStatus, protocol.RecoveryReferenceP, "", "")
+	}
+	if isSessionEndCode(in.Code) || in.Code == protocol.CodeReferenceNoSession {
+		return newRecovery(protocol.RecoveryEntryStatus, protocol.RecoveryReferenceP, "", "")
+	}
+	if _, ok := userCodes[in.Code]; ok {
+		return newRecovery(protocol.RecoveryEntryUser, protocol.RecoveryReferenceNone, "", "")
+	}
+	return nil
+}
+
+// discoveryPlan maps the session-free discovery tool. It never reuses an
+// observation, so it cannot produce retry.
 func discoveryPlan(in recoveryInput) *protocol.Recovery {
 	switch in.Code {
 	case "", protocol.CodeInvalidRequest:
@@ -260,7 +348,7 @@ func shellPlan(in recoveryInput) *protocol.Recovery {
 	}
 	if isSessionEndCode(in.Code) {
 		return newRecovery(protocol.RecoveryEntryEnd, protocol.RecoveryReferenceP,
-			inputStateFor(shellTool, in.Reference, in.Code, in.Claimed), "")
+			inputStateFor(shellTool, "", in.Reference, in.Code, in.Claimed), "")
 	}
 	if _, ok := observationDeadCodes[in.Code]; ok {
 		return newRecovery(protocol.RecoveryEntryObserve, protocol.RecoveryReferenceP, "", "")
@@ -340,6 +428,7 @@ var (
 		protocol.CodeAppNotFound:        {},
 		protocol.CodeRootUnavailable:    {},
 		protocol.CodeDisplayCreate:      {},
+		protocol.CodeWindowActionPrimary: {},
 	}
 )
 
@@ -356,7 +445,7 @@ func isSessionEndCode(code string) bool {
 // inputStateFor derives the usability of the observation a request referenced.
 // It is pure: the caller already owns the code, the claim fact and the session
 // fact. An empty result means the result does not state that usability.
-func inputStateFor(tool, reference, code string, claimed bool) string {
+func inputStateFor(tool, appKind, reference, code string, claimed bool) string {
 	switch code {
 	case protocol.CodeObservationExpired:
 		return protocol.RecoveryInputExpired
@@ -374,7 +463,8 @@ func inputStateFor(tool, reference, code string, claimed bool) string {
 		}
 		return ""
 	}
-	if tool == "act" || tool == "open_app" {
+	if tool == "act" || (tool == appTool && appKind != "" &&
+		appKind != protocol.AppKindFind && appKind != protocol.AppKindList) {
 		if claimed {
 			return protocol.RecoveryInputRetired
 		}

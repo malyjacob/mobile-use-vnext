@@ -5,9 +5,11 @@
 
 .DESCRIPTION
     Reads .state/deploy.json, refreshes the private MCP configuration, builds
-    the host binaries, runs the MCP probe for the requested transports and
-    prints the service health/status summary. Tokens, node trees, image data,
-    shell output and notification text are never printed.
+    the host binaries through scripts/build-host-tools.ps1, runs the MCP probe
+    for the requested transports and prints the service health/status summary.
+    An existing valid private host MCP token is reused; a token is created only
+    when none is available. Tokens, node trees, image data, shell output and
+    notification text are never printed.
 
     The service must already be deployed by scripts/deploy.ps1 and the control
     App must report can_start=true. This script never deploys, restarts or
@@ -17,7 +19,8 @@
     Service host port. Defaults to host_port in .state/deploy.json.
 
 .PARAMETER SkipBuild
-    Reuse the existing build/device-mcp.exe and build/mcp-probe.exe.
+    Do not rebuild. Run scripts/build-host-tools.ps1 -VerifyOnly instead of
+    trusting that the existing executables merely exist.
 
 .PARAMETER Transport
     All, Stdio, Http or PRecovery.
@@ -49,11 +52,12 @@ if ($contractVersion -notmatch '^[1-9][0-9]{0,2}$') {
     throw "contract_version must be a positive integer: $contractVersion"
 }
 $mcpConfigPath = Join-Path $stateDirectory 'mcp-config.json'
+$hostManifestPath = Join-Path $repository 'build/host-tools-manifest.json'
 $adapterBinary = Join-Path $repository 'build/device-mcp.exe'
 $probeBinary = Join-Path $repository 'build/mcp-probe.exe'
 $httpListen = '127.0.0.1:18882'
 $httpPort = 18882
-$allowedOrigin = 'http://127.0.0.1:3000'
+$allowedOrigins = @('http://127.0.0.1:3000')
 $probeTimeoutSeconds = 180
 
 function Write-Utf8NoBom {
@@ -77,6 +81,43 @@ function New-HexToken {
     return ([System.BitConverter]::ToString($bytes) -replace '-', '').ToLowerInvariant()
 }
 
+# Start one stdio adapter with an immediately closed stdin and read only its
+# startup log. This proves the build-side tools count without a device call and
+# without printing protocol stdout or any configuration value.
+function Assert-AdapterStartupLog {
+    param([string]$Binary, [string]$ConfigPath, [int]$ExpectedTools)
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $Binary
+    $startInfo.Arguments = '-transport stdio -config "' + ($ConfigPath -replace '"', '\"') + '" -result-mode both'
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardInput = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.CreateNoWindow = $true
+    $process = [System.Diagnostics.Process]::Start($startInfo)
+    try {
+        $process.StandardInput.Close()
+        $exited = $process.WaitForExit(15000)
+        if (-not $exited) {
+            $process.Kill()
+            $process.WaitForExit(5000)
+            throw 'adapter_startup_timeout'
+        }
+        $stderr = $process.StandardError.ReadToEnd()
+        $null = $process.StandardOutput.ReadToEnd()
+    } finally {
+        $process.Dispose()
+    }
+    if ($stderr -notmatch 'msg=mcp\.start\b') { throw 'adapter_startup_log_missing' }
+    $match = [regex]::Match($stderr, 'tools=(\d+)')
+    if (-not $match.Success) { throw 'adapter_startup_tools_missing' }
+    $actual = [int]$match.Groups[1].Value
+    if ($actual -ne $ExpectedTools) {
+        throw ('adapter_startup_tools=' + $actual + ' expected=' + $ExpectedTools)
+    }
+    Write-Output ('adapter startup log: PASS tools=' + $actual)
+}
+
 try {
     if (-not (Test-Path -LiteralPath $deployStatePath -PathType Leaf)) {
         throw 'deploy_state_missing'
@@ -88,6 +129,7 @@ try {
     }
 
     $agentToken = [string](Get-Field $deploy 'agent_token')
+    $controlToken = [string](Get-Field $deploy 'control_token')
     if ($agentToken -eq '') { throw 'deploy_state_agent_token_missing' }
 
     if ($HostPort -gt 0) {
@@ -100,9 +142,43 @@ try {
     if ($servicePort -lt 1 -or $servicePort -gt 65535) { throw 'host_port_invalid' }
     $baseUrl = 'http://127.0.0.1:' + $servicePort
 
-    $mcpToken = New-HexToken
-    while ($mcpToken -eq $agentToken) {
+    # Reuse the private host MCP token from the existing configuration when it
+    # is valid. Verification must not rotate a token that the real host process
+    # may still be using; a new token is created only when none is available.
+    $existingConfig = $null
+    if (Test-Path -LiteralPath $mcpConfigPath -PathType Leaf) {
+        try {
+            $existingConfig = Get-Content -LiteralPath $mcpConfigPath -Raw | ConvertFrom-Json
+        } catch {
+            $existingConfig = $null
+        }
+    }
+    $mcpToken = ''
+    $tokenReused = $false
+    if ($null -ne $existingConfig) {
+        $existingHttp = Get-Field $existingConfig 'http'
+        $candidate = [string](Get-Field $existingHttp 'token')
+        if ($candidate -match '^[0-9a-fA-F]{64}$' -and $candidate -ne $agentToken -and
+                $candidate -ne $controlToken) {
+            $mcpToken = $candidate
+            $tokenReused = $true
+        }
+        $existingListen = [string](Get-Field $existingHttp 'listen')
+        if ($existingListen -ne '') {
+            $httpListen = $existingListen
+            $listenMatch = [regex]::Match($existingListen, ':(\d+)$')
+            if ($listenMatch.Success) { $httpPort = [int]$listenMatch.Groups[1].Value }
+        }
+        $existingOrigins = Get-Field $existingHttp 'allowed_origins'
+        if ($null -ne $existingOrigins -and @($existingOrigins).Count -gt 0) {
+            $allowedOrigins = @($existingOrigins | ForEach-Object { [string]$_ })
+        }
+    }
+    if ($mcpToken -eq '') {
         $mcpToken = New-HexToken
+        while ($mcpToken -eq $agentToken -or $mcpToken -eq $controlToken) {
+            $mcpToken = New-HexToken
+        }
     }
 
     $mcpConfig = [ordered]@{
@@ -114,43 +190,36 @@ try {
         http      = [ordered]@{
             listen          = $httpListen
             token           = $mcpToken
-            allowed_origins = @($allowedOrigin)
+            allowed_origins = @($allowedOrigins)
         }
     }
     Write-Utf8NoBom -Path $mcpConfigPath -Text ($mcpConfig | ConvertTo-Json -Depth 5)
     $null = & icacls $mcpConfigPath /inheritance:r /grant:r "$($env:USERNAME):(R,W)" 2>&1
     if ($LASTEXITCODE -ne 0) { throw 'mcp_config_acl_failed' }
-    Write-Output 'config refreshed path=.state/mcp-config.json permissions=owner-only'
+    Write-Output ('config refreshed path=.state/mcp-config.json token=' +
+        $(if ($tokenReused) { 'reused' } else { 'created' }) + ' permissions=owner-only')
 
-    if (-not $SkipBuild) {
-        $previousExperiment = $env:GOEXPERIMENT
-        try {
-            $env:GOEXPERIMENT = 'jsonv2'
-            Push-Location $repository
-            try {
-                & go build -o $adapterBinary ./cmd/device-mcp
-                if ($LASTEXITCODE -ne 0) { throw 'adapter_build_failed' }
-                & go build -o $probeBinary ./scripts/mcp-probe
-                if ($LASTEXITCODE -ne 0) { throw 'probe_build_failed' }
-            } finally {
-                Pop-Location
-            }
-        } finally {
-            if ($null -eq $previousExperiment) {
-                Remove-Item Env:GOEXPERIMENT -ErrorAction SilentlyContinue
-            } else {
-                $env:GOEXPERIMENT = $previousExperiment
-            }
-        }
-        Write-Output 'build adapter=build/device-mcp.exe probe=build/mcp-probe.exe'
+    if ($SkipBuild) {
+        & (Join-Path $PSScriptRoot 'build-host-tools.ps1') -VerifyOnly
+        if ($LASTEXITCODE -ne 0) { throw 'host_tools_verify_failed' }
+        Write-Output 'host tools verified (build skipped)'
     } else {
-        foreach ($required in @($adapterBinary, $probeBinary)) {
-            if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
-                throw 'binary_missing_build_required'
-            }
-        }
-        Write-Output 'build skipped'
+        & (Join-Path $PSScriptRoot 'build-host-tools.ps1')
+        if ($LASTEXITCODE -ne 0) { throw 'host_tools_build_failed' }
+        Write-Output 'host tools built path=build/device-mcp.exe,probe=build/mcp-probe.exe'
     }
+
+    if (-not (Test-Path -LiteralPath $hostManifestPath -PathType Leaf)) {
+        throw 'host_tools_manifest_missing'
+    }
+    $hostManifest = Get-Content -LiteralPath $hostManifestPath -Raw | ConvertFrom-Json
+    $hostCatalog = Get-Field $hostManifest 'tool_catalog'
+    $toolCount = [int](Get-Field $hostCatalog 'count')
+    if ($toolCount -ne 11) { throw 'host_tools_catalog_count_not_11' }
+    Write-Output ('host tools identity: PASS release=' + [string](Get-Field $hostManifest 'release_version') +
+        ' contract=' + [string](Get-Field $hostManifest 'contract_version') +
+        ' tool_catalog=' + [string]$toolCount)
+    Assert-AdapterStartupLog -Binary $adapterBinary -ConfigPath $mcpConfigPath -ExpectedTools $toolCount
 
     $modes = @()
     switch ($Transport) {

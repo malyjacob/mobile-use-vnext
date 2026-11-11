@@ -18,8 +18,8 @@ func TestInternalUncertainKeepsSessionActiveAndOrdinaryWorkUsable(t *testing.T) 
 			shellRequestFor(first.Observation, "synthetic"))
 	}
 	openAppCall := func(h *harness, first *protocol.Result) (*protocol.Result, *protocol.APIError) {
-		return h.engine.OpenApp(context.Background(), "agent", "Pinternaluncertain",
-			openAppRequest(first.Observation, "com.example"))
+		return h.engine.App(context.Background(), "agent", "Pinternaluncertain",
+			appOpenRequest(first.Observation, "com.example"))
 	}
 	attributionSetup := func(multiple bool) func(*harness) {
 		return func(h *harness) {

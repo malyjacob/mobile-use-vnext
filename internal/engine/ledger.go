@@ -45,6 +45,41 @@ type Ledger struct {
 	// Retired holds the bounded ownership records that no longer have ordinary
 	// dispatch authority but may still need exact cleanup.
 	Retired []LedgerRetired `json:"retired,omitempty"`
+	// TaskTransfers is the root-level protection pool of prepared and confirmed
+	// task transfers. Every delete path consults it; retired records never
+	// embed it.
+	TaskTransfers []LedgerTransfer `json:"task_transfers,omitempty"`
+}
+
+// Task transfer directions and states.
+const (
+	TransferIn  = "in"
+	TransferOut = "out"
+
+	TransferPrepared      = "prepared"
+	TransferMayDispatch   = "may_dispatch"
+	TransferTerminated    = "terminated"
+	TransferNotDispatched = "not_dispatched"
+	TransferUnknown       = "unknown"
+	TransferReleased      = "released"
+)
+
+// LedgerTransfer is one durable task transfer responsibility. It records only
+// identity and state, never the request, a tree or free text.
+type LedgerTransfer struct {
+	OperationID      string    `json:"operation_id"`
+	Direction        string    `json:"direction"`
+	State            string    `json:"state"`
+	Epoch            int64     `json:"epoch,omitempty"`
+	BootID           string    `json:"boot_id,omitempty"`
+	AppInstanceID    string    `json:"app_instance_id,omitempty"`
+	Package          string    `json:"package"`
+	LeafTaskID       int       `json:"leaf_task_id"`
+	RootTaskID       int       `json:"root_task_id,omitempty"`
+	SourceDisplayID  int       `json:"source_display_id"`
+	SourceGeneration string    `json:"source_generation,omitempty"`
+	TargetDisplayID  int       `json:"target_display_id"`
+	CreatedAt        time.Time `json:"created_at"`
 }
 
 // LedgerRetired wraps one frozen ownership record with the bounded cleanup
@@ -110,12 +145,22 @@ type LedgerSession struct {
 	StartedAt         time.Time `json:"started_at"`
 }
 
-// LedgerTask is one exact owned window identity. It carries no window content.
+// LedgerTask is one exact window identity with its ownership evidence. It
+// carries no window content.
 type LedgerTask struct {
 	TaskID    int    `json:"task_id"`
 	Package   string `json:"package"`
 	DisplayID int    `json:"display_id"`
-	Proven    bool   `json:"proven"`
+	// RootTaskID is the containing root task id; zero means the source never
+	// reported one and the task is not movable.
+	RootTaskID int `json:"root_task_id,omitempty"`
+	// Ownership is owned, borrowed or shared. A version 1-4 task upgrades to
+	// owned; no package-name inference is ever applied.
+	Ownership string `json:"ownership,omitempty"`
+	// OriginDisplay is the original-ownership display of a borrowed task.
+	OriginDisplay *int   `json:"origin_display,omitempty"`
+	Generation    string `json:"generation,omitempty"`
+	Proven        bool   `json:"proven"`
 }
 
 // LedgerUI is one durable UI input responsibility. State records the dispatch
@@ -211,7 +256,17 @@ func cloneLedger(record *Ledger, includeRetired bool) *Ledger {
 		clone.Cleanup = &value
 	}
 	if record.Tasks != nil {
-		clone.Tasks = append([]LedgerTask{}, record.Tasks...)
+		clone.Tasks = make([]LedgerTask, len(record.Tasks))
+		copy(clone.Tasks, record.Tasks)
+		for i := range record.Tasks {
+			if record.Tasks[i].OriginDisplay != nil {
+				origin := *record.Tasks[i].OriginDisplay
+				clone.Tasks[i].OriginDisplay = &origin
+			}
+		}
+	}
+	if record.TaskTransfers != nil {
+		clone.TaskTransfers = append([]LedgerTransfer{}, record.TaskTransfers...)
 	}
 	if record.Stop != nil {
 		value := *record.Stop
@@ -252,5 +307,5 @@ func cloneLedger(record *Ledger, includeRetired bool) *Ledger {
 // Ledger format constants.
 const (
 	ledgerFormat  = "mobile-use-vnext-ledger"
-	ledgerVersion = 4
+	ledgerVersion = 5
 )

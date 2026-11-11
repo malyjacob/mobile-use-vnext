@@ -285,9 +285,23 @@ final class ServiceClient implements AutoCloseable {
                 nullableString(json, "ended_at"), nullableString(json, "reason"));
     }
 
-    /** work 只保留 P、类别与阶段；不解析也不展示节点、坐标、输入正文或命令。 */
+    /** work 只保留 P、类别、阶段与可选受控 app_kind；不解析节点、坐标、输入正文或命令。 */
     private static Work work(JSONObject json) throws JSONException {
-        return new Work(text(json, "operation_id"), text(json, "kind"), text(json, "phase"));
+        return new Work(text(json, "operation_id"), text(json, "kind"), text(json, "phase"),
+                optionalAppKind(json));
+    }
+
+    /**
+     * app_kind 是可选展示提示：缺失或显式 null 都合法，不使整份响应作废。
+     * 取值不在这里判定受控性；展示层只认七个受控子类，其余一律回落为通用文案。
+     */
+    private static String optionalAppKind(JSONObject json) throws JSONException {
+        String value = nullableString(json, "app_kind");
+        if (value == null) {
+            return null;
+        }
+        String trimmed = value.trim();
+        return trimmed.isEmpty() ? null : trimmed;
     }
 
     private static Cleanup cleanup(JSONObject json) throws JSONException {
@@ -692,20 +706,23 @@ final class ServiceClient implements AutoCloseable {
         }
     }
 
-    /** 当前设备工作位置；只有类别与阶段，不放节点、坐标、输入正文或命令。 */
+    /** 当前设备工作位置；只有类别、可选 app 子类与阶段，不放节点、坐标、输入正文或命令。 */
     static final class Work {
         final String operationId;
         final String kind;
         final String phase;
+        /** 服务可选的 app 子类提示；缺失或未知时为 null，本地只作展示用。 */
+        final String appKind;
 
-        Work(String operationId, String kind, String phase) {
+        Work(String operationId, String kind, String phase, String appKind) {
             this.operationId = operationId;
             this.kind = kind;
             this.phase = phase;
+            this.appKind = appKind;
         }
 
         String identity() {
-            return operationId + '|' + kind + '|' + phase;
+            return operationId + '|' + kind + '|' + phase + '|' + appKind;
         }
     }
 

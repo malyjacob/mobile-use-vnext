@@ -143,7 +143,8 @@ func (e *Engine) statusOperationLocked(agent, reference string,
 			Cleanup: cleanupValue(cleanup),
 		})
 	}
-	result.Recovery = e.durabilityRecoveryLocked(protocol.RecoveryReferenceP, inputStateFor(op.Kind, op.Reference, "", op.Claimed), result.Recovery)
+	result.Recovery = e.durabilityRecoveryLocked(protocol.RecoveryReferenceP,
+		inputStateFor(op.Kind, op.AppKind, op.Reference, "", op.Claimed), result.Recovery)
 	return result, nil
 }
 

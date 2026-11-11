@@ -27,6 +27,13 @@ func (r *reporter) fail(name, reason string, fields ...string) {
 	r.write("FAIL", name, reason, fields)
 }
 
+// skip records an environment-dependent check that was deliberately not
+// exercised. It is not a failure and it is not a PASS either: the operator can
+// see that the fact was not verified in this run.
+func (r *reporter) skip(name, reason string, fields ...string) {
+	r.write("SKIP", name, reason, fields)
+}
+
 func (r *reporter) write(kind, name, reason string, fields []string) {
 	line := kind + " " + token(name)
 	if reason != "" {

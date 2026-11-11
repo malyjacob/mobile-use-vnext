@@ -250,8 +250,8 @@ func TestSettleUsesOpenAppTierForLaunchConfirmation(t *testing.T) {
 	first := h.startSession()
 	h.device.launchTask = &device.Task{TaskID: 77, Package: "com.example.app"}
 	begin := time.Now()
-	result, apiErr := h.engine.OpenApp(context.Background(), "agent", "Papp",
-		openAppRequest(first.Observation, "com.example.app"))
+	result, apiErr := h.engine.App(context.Background(), "agent", "Papp",
+		appOpenRequest(first.Observation, "com.example.app"))
 	if apiErr != nil {
 		t.Fatalf("OpenApp: %v", apiErr)
 	}

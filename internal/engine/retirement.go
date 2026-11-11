@@ -25,7 +25,10 @@ type retiredState struct {
 	budgetIssued  bool
 	attempts      int
 	stoppedReason string
-	cancel        context.CancelFunc
+	// compressed marks a record whose oversized task list was already closed
+	// out into a bounded owner summary.
+	compressed bool
+	cancel     context.CancelFunc
 }
 
 // WithProjectorFactory gives every new session its own continuity state.
@@ -169,7 +172,23 @@ func (e *Engine) freezeWorkLocked(work *workState) {
 	}
 	work.Revoked = true
 	if op := e.operations[work.OperationID]; op != nil && op.State == OperationRunning {
-		op.State, op.Phase, op.FinishedAt = OperationFinished, "work_deadline", time.Now()
+		op.State, op.FinishedAt = OperationFinished, time.Now()
+		if op.AppKind == protocol.AppKindFind || op.AppKind == protocol.AppKindList {
+			// A query never has an action outcome. A closed query is only a
+			// closed query; an expired work budget is a read failure.
+			if work.Ctx.Err() == context.DeadlineExceeded {
+				op.Phase = "query_timeout"
+				op.Error = protocol.NewError(503, protocol.CodeDeviceUnavailable,
+					"查询已超出工作期限").Public()
+			} else {
+				op.Phase = "query_cancelled"
+				op.Error = nil
+			}
+			op.Outcome = ""
+			op.Recovery = nil
+			return
+		}
+		op.Phase = "work_deadline"
 		op.Outcome = OutcomeNotExecuted
 		if work.DispatchUnknown || work.UI != nil && work.UI.record.State != uiStateNotDispatched {
 			op.Outcome = OutcomeUncertain
@@ -219,8 +238,48 @@ func (r *retiredState) ledger() LedgerRetired {
 	return LedgerRetired{Record: record, BudgetIssued: r.budgetIssued, Attempts: r.attempts, StoppedReason: r.stoppedReason}
 }
 
-func (e *Engine) trimRetiredLocked() {
-	for len(e.retired) > 0 {
+// compressOversizedRetiredLocked closes one oversized retired record's delete
+// eligibility and reduces it to a bounded owner summary. The task ids are
+// dropped only after the cleanup is stopped, so no target that could still be
+// deleted is silently truncated. It returns true when a record changed.
+func (e *Engine) compressOversizedRetiredLocked() bool {
+	for _, r := range e.retired {
+		if r == nil || r.compressed {
+			continue
+		}
+		entry, err := json.Marshal(r.ledger())
+		if err != nil || len(entry) <= 21*1024 {
+			continue
+		}
+		if r.cleanup.State != protocol.CleanupComplete && e.droppedUnconfirmed != ^uint64(0) {
+			e.droppedUnconfirmed++
+		}
+		stopCleanup(r.cleanup, "cleanup_capacity_exhausted")
+		r.session.Tasks = nil
+		r.cleanup.checkedTaskIDs = nil
+		r.compressed = true
+		for _, op := range e.operations {
+			if op != nil && op.SessionOrigin == r.session.Origin {
+				op.SessionSnapshot = e.sessionViewLocked(r.session)
+				op.CleanupSnapshot = cleanupViewOf(r.cleanup)
+			}
+		}
+		for _, obs := range e.observations {
+			if obs != nil && obs.SessionEpoch == r.session.Epoch {
+				obs.SessionSnapshot = e.sessionViewLocked(r.session)
+				obs.CleanupSnapshot = cleanupViewOf(r.cleanup)
+			}
+		}
+		if e.log != nil {
+			e.log.Event(eventlog.Warn, "retirement.compressed",
+				eventlog.Str("origin", r.session.Origin))
+		}
+		return true
+	}
+	return false
+}
+
+func (e *Engine) trimRetiredLocked() {	for len(e.retired) > 0 {
 		items := make([]LedgerRetired, 0, len(e.retired))
 		for _, r := range e.retired {
 			items = append(items, r.ledger())
@@ -228,6 +287,9 @@ func (e *Engine) trimRetiredLocked() {
 		encoded, _ := json.Marshal(items)
 		if len(items) <= 8 && len(encoded) <= 24*1024 {
 			return
+		}
+		if e.compressOversizedRetiredLocked() {
+			continue
 		}
 		index := e.retirementDropIndexLocked()
 		r := e.retired[index]
@@ -458,11 +520,17 @@ func (e *Engine) noteKnownOutcome(op *operationState, outcome string) {
 }
 
 // A detached handler may return later, but its response cannot contradict the
-// outcome frozen by the clock or attach a later session's observation.
+// outcome frozen by the clock or attach a later session's observation. A query
+// frozen as cancelled or timed out is equally final.
 func (e *Engine) applyFrozenResult(op *operationState, result **protocol.Result) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if op == nil || op.Phase != "work_deadline" || *result == nil {
+	if op == nil || *result == nil {
+		return
+	}
+	switch op.Phase {
+	case "work_deadline", "query_cancelled", "query_timeout":
+	default:
 		return
 	}
 	v := e.operationViewLocked(op)

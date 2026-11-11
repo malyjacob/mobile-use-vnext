@@ -68,6 +68,27 @@ type fakeDevice struct {
 	imageErr         error
 	imageSFID        uint64
 	shell            fakeShellHooks
+
+	// App lifecycle facts: task moves/removals, process inventories and the
+	// kill guards. Nil receipt pointers default to a terminated dispatch.
+	moveCalls     []moveCall
+	moveReceipt   *device.DispatchReceipt
+	moveErr       error
+	moveNoop      bool
+	removeReceipt *device.DispatchReceipt
+	removeScript  []device.DispatchReceipt
+	taskErr       error
+	processes     device.PackageProcesses
+	processErr    error
+	processFail   bool
+	processCalls  int
+	killCalls     []int
+	killReceipt   *device.DispatchReceipt
+	killErr       error
+	media         device.MediaState
+	service       device.ServiceState
+	mediaErr      error
+	serviceErr    error
 }
 
 func newFakeDevice() *fakeDevice {
@@ -113,6 +134,9 @@ func (f *fakeDevice) Foreground(_ context.Context, displayID int) (device.Foregr
 func (f *fakeDevice) TaskList(context.Context) ([]device.Task, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.taskErr != nil {
+		return nil, f.taskErr
+	}
 	return append([]device.Task(nil), f.tasks...), nil
 }
 func (f *fakeDevice) StartDisplayHelper(context.Context, string, string) error {

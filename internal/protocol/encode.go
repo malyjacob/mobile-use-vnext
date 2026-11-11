@@ -337,17 +337,90 @@ func (r *DiagnoseRequest) Encode() ([]byte, error) {
 	})
 }
 
-// Encode writes the canonical apps(query=None) body.
-func (r *AppsRequest) Encode() ([]byte, error) {
+// Encode writes the canonical app kind branch body.
+func (r *AppRequest) Encode() ([]byte, error) {
+	if appKindMembers(r.Kind) == nil {
+		return nil, errors.New("unsupported app kind")
+	}
 	return encodeRequest(func(enc *jsontext.Encoder) error {
 		if err := enc.WriteToken(jsontext.BeginObject); err != nil {
 			return err
 		}
-		if r.HasQuery {
-			if err := writeName(enc, "query"); err != nil {
+		if err := writeName(enc, "kind"); err != nil {
+			return err
+		}
+		if err := writeString(enc, r.Kind); err != nil {
+			return err
+		}
+		switch r.Kind {
+		case AppKindFind:
+			if r.HasQuery {
+				if err := writeName(enc, "query"); err != nil {
+					return err
+				}
+				if err := writeString(enc, r.Query); err != nil {
+					return err
+				}
+			}
+		case AppKindList:
+			if r.Reference == "" {
+				return errors.New("app.list requires reference")
+			}
+			if err := writeName(enc, "reference"); err != nil {
 				return err
 			}
-			if err := writeString(enc, r.Query); err != nil {
+			if err := writeString(enc, r.Reference); err != nil {
+				return err
+			}
+			if r.Scope != "" {
+				if err := writeName(enc, "scope"); err != nil {
+					return err
+				}
+				if err := writeString(enc, r.Scope); err != nil {
+					return err
+				}
+			}
+			if r.HasFilter {
+				if err := writeName(enc, "app"); err != nil {
+					return err
+				}
+				if err := writeString(enc, r.FilterApp); err != nil {
+					return err
+				}
+			}
+		case AppKindOpen:
+			if r.ObservationID == "" || r.App == "" {
+				return errors.New("app.open requires observation_id and app")
+			}
+			if err := writeName(enc, "observation_id"); err != nil {
+				return err
+			}
+			if err := writeString(enc, r.ObservationID); err != nil {
+				return err
+			}
+			if err := writeName(enc, "app"); err != nil {
+				return err
+			}
+			if err := writeString(enc, r.App); err != nil {
+				return err
+			}
+		case AppKindClaim, AppKindHandoff, AppKindClose, AppKindKill:
+			if r.ObservationID == "" || r.Target == nil {
+				return errors.New("app target kind requires observation_id and target")
+			}
+			if err := writeName(enc, "observation_id"); err != nil {
+				return err
+			}
+			if err := writeString(enc, r.ObservationID); err != nil {
+				return err
+			}
+			if err := writeName(enc, "target"); err != nil {
+				return err
+			}
+			if err := encodeAppTarget(enc, r.Kind, r.Target); err != nil {
+				return err
+			}
+			if err := encodeAppOptions(enc, r); err != nil {
 				return err
 			}
 		}
@@ -355,29 +428,59 @@ func (r *AppsRequest) Encode() ([]byte, error) {
 	})
 }
 
-// Encode writes the canonical open_app(observation_id, app) body.
-func (r *OpenAppRequest) Encode() ([]byte, error) {
-	if r.ObservationID == "" || r.App == "" {
-		return nil, errors.New("open_app requires observation_id and app")
+// encodeAppTarget writes the single admitted selector object.
+func encodeAppTarget(enc *jsontext.Encoder, kind string, target *AppTarget) error {
+	if err := enc.WriteToken(jsontext.BeginObject); err != nil {
+		return err
 	}
-	return encodeRequest(func(enc *jsontext.Encoder) error {
-		if err := enc.WriteToken(jsontext.BeginObject); err != nil {
+	if target.UseTask {
+		if target.TaskID <= 0 {
+			return errors.New("app target task id must be positive")
+		}
+		if err := writeName(enc, "task_id"); err != nil {
 			return err
 		}
-		if err := writeName(enc, "observation_id"); err != nil {
+		if err := writeInt(enc, target.TaskID); err != nil {
 			return err
 		}
-		if err := writeString(enc, r.ObservationID); err != nil {
-			return err
+	} else {
+		if kind == AppKindKill {
+			return errors.New("app.kill requires a task id target")
+		}
+		if target.App == "" {
+			return errors.New("app target requires a package")
 		}
 		if err := writeName(enc, "app"); err != nil {
 			return err
 		}
-		if err := writeString(enc, r.App); err != nil {
+		if err := writeString(enc, target.App); err != nil {
 			return err
 		}
-		return enc.WriteToken(jsontext.EndObject)
-	})
+	}
+	return enc.WriteToken(jsontext.EndObject)
+}
+
+// encodeAppOptions writes the explicit boolean options of one branch.
+func encodeAppOptions(enc *jsontext.Encoder, r *AppRequest) error {
+	option := func(name string, value bool) error {
+		if !value {
+			return nil
+		}
+		if err := writeName(enc, name); err != nil {
+			return err
+		}
+		return writeBool(enc, true)
+	}
+	if r.Kind == AppKindHandoff && r.RestoreForeground {
+		return option("restore_foreground", true)
+	}
+	if r.Kind == AppKindClose {
+		return option("allow_borrowed", r.AllowBorrowed)
+	}
+	if r.Kind == AppKindKill {
+		return option("allow_stop_playback", r.AllowStopPlayback)
+	}
+	return nil
 }
 
 // Encode writes the canonical notify(text) body.

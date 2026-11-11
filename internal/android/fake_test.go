@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -31,6 +32,13 @@ var fakeTranscripts = []string{
 	"focus-exit", "shell", "identity-comma", "identity-lines",
 	"features-missing", "features-partial", "identity-bad-device",
 	"identity-bad-boot",
+	"task-move", "task-move-exit", "task-move-transport",
+	"task-remove-exit", "task-remove-transport",
+	"processes", "processes-empty", "processes-unreadable",
+	"processes-ticks-changed", "processes-root", "processes-no-root",
+	"processes-kill-no-root", "processes-kill-denied",
+	"media-playing", "media-stopped", "media-unknown",
+	"fgs-hit", "fgs-none", "fgs-unknown",
 }
 
 // fakeDigestOf returns the sentinel value for one transcript.
@@ -303,6 +311,88 @@ var stubTranscripts = map[string][]stubAnswer{
 	"focus-exit": {
 		{contains: "am task focus", stderr: "error: task focus denied\n", exit: 5},
 	},
+	"task-move": {
+		{contains: "am display move-stack", stdout: ""},
+	},
+	"task-move-exit": {
+		{contains: "am display move-stack", stderr: "error: move denied\n", exit: 4},
+	},
+	"task-move-transport": {
+		{contains: "am display move-stack", stderr: "adb: device offline\n", exit: 1},
+	},
+	"task-remove-exit": {
+		{contains: "am stack remove", stderr: "error: removal denied\n", exit: 3},
+	},
+	"task-remove-transport": {
+		{contains: "am stack remove", stderr: "adb: device offline\n", exit: 1},
+	},
+	"processes": {
+		{contains: "cat /proc/sys/kernel/random/boot_id", stdout: testBootID + "\n"},
+		{contains: "list packages -U", stdout: "package:com.example.app uid:10140\n"},
+		{contains: "ps -A -o PID,UID,NAME", stdout: processListingFixture},
+		{contains: "for p in 101 202; do", stdout: processTicksFixture},
+		{contains: "for p in 101; do",
+			stdout: "stat " + processStatFixture(101, "com.example.app", 98765) + "\n"},
+		{contains: "grep '^Name:'", stdout: "com.example.app\n10140\n"},
+		{contains: "su -c 'kill -9", stdout: ""},
+	},
+	"processes-kill-no-root": {
+		{contains: "for p in 101; do", stdout: "stat 101 -\n"},
+		{contains: "su -c 'for p in 101; do", stderr: "su: not found\n", exit: 127},
+	},
+	"processes-kill-denied": {
+		{contains: "for p in 101; do",
+			stdout: "stat " + processStatFixture(101, "com.example.app", 98765) + "\n"},
+		{contains: "grep '^Name:'", stdout: "com.example.app\n10140\n"},
+		{contains: "su -c 'kill -9", stderr: "su: permission denied\n", exit: 1},
+	},
+	"processes-empty": {
+		{contains: "cat /proc/sys/kernel/random/boot_id", stdout: testBootID + "\n"},
+		{contains: "list packages -U", stdout: "package:com.example.app uid:10140\n"},
+		{contains: "ps -A -o PID,UID,NAME", stdout: processHeaderFixture +
+			"1   0     init\n"},
+	},
+	"processes-unreadable": {
+		{contains: "cat /proc/sys/kernel/random/boot_id", stdout: testBootID + "\n"},
+		{contains: "list packages -U", stdout: "package records unavailable\n"},
+	},
+	"processes-ticks-changed": {
+		{contains: "for p in 101; do", stdout: "stat " + processStatFixture(101,
+			"com.example.app", 11111) + "\n"},
+	},
+	"processes-root": {
+		{contains: "cat /proc/sys/kernel/random/boot_id", stdout: testBootID + "\n"},
+		{contains: "list packages -U", stdout: "package:com.example.app uid:10140\n"},
+		{contains: "ps -A -o PID,UID,NAME", stdout: processListingFixture},
+		// The direct read sees neither /proc entry; the root path reads both.
+		{contains: "for p in 101 202; do", stdout: "stat 101 -\nstat 202 -\n"},
+		{contains: "su -c 'for p in 101 202; do", stdout: processTicksFixture},
+	},
+	"processes-no-root": {
+		{contains: "cat /proc/sys/kernel/random/boot_id", stdout: testBootID + "\n"},
+		{contains: "list packages -U", stdout: "package:com.example.app uid:10140\n"},
+		{contains: "ps -A -o PID,UID,NAME", stdout: processListingFixture},
+		{contains: "for p in 101 202; do", stdout: "stat 101 -\nstat 202 -\n"},
+		{contains: "su -c 'for p in 101 202; do", stderr: "su: not found\n", exit: 127},
+	},
+	"media-playing": {
+		{contains: "dumpsys media_session", stdout: mediaPlayingFixture},
+	},
+	"media-stopped": {
+		{contains: "dumpsys media_session", stdout: mediaStoppedFixture},
+	},
+	"media-unknown": {
+		{contains: "dumpsys media_session", stdout: "unexpected dump\n"},
+	},
+	"fgs-hit": {
+		{contains: "dumpsys activity services", stdout: serviceForegroundFixture(true)},
+	},
+	"fgs-none": {
+		{contains: "dumpsys activity services", stdout: serviceForegroundFixture(false)},
+	},
+	"fgs-unknown": {
+		{contains: "dumpsys activity services", stdout: "unexpected services dump\n"},
+	},
 }
 
 const testBootID = "01234567-89ab-4cde-8fab-0123456789ab"
@@ -366,3 +456,62 @@ const (
 		`<node class="android.widget.TextView" package="com.example.app" text="Other display" display-id="61" visible-to-user="true" bounds="[0,0][1080,2400]" />` +
 		`</hierarchy>`
 )
+
+// Process fixtures reproduce the measured column shape of the process, media and
+// service reads. Only placeholder packages appear.
+
+// processHeaderFixture is the fixed column header of `ps -A -o PID,UID,NAME`.
+const processHeaderFixture = "PID UID   NAME\n"
+
+// processListingFixture holds one target package's main process, its :remote
+// child and one unrelated entry.
+var processListingFixture = processHeaderFixture +
+	"1   0     init\n" +
+	"101 10140 com.example.app\n" +
+	"202 10140 com.example.app:remote\n" +
+	"303 10141 com.example.other\n"
+
+// processStatFixture renders one /proc/<pid>/stat line with the given start tick
+// (field 22). The comm is parenthesised like the kernel prints it.
+func processStatFixture(pid int, comm string, startTicks uint64) string {
+	return strconv.Itoa(pid) + " (" + comm + ") S 1 101 101 0 -1 4194624 1234 0 0 0 " +
+		"10 20 0 0 20 0 8 0 " + strconv.FormatUint(startTicks, 10) + " 12345678 4096"
+}
+
+// processTicksFixture is the batched start-tick read of the two target PIDs.
+var processTicksFixture = "stat " + processStatFixture(101, "com.example.app", 98765) + "\n" +
+	"stat " + processStatFixture(202, "com.example.app:remote", 98800) + "\n"
+
+// mediaPlayingFixture carries one PLAYING PlaybackState record.
+const mediaPlayingFixture = "MEDIA SESSION SERVICE (dumpsys media_session)\n" +
+	"\n" +
+	"MediaSessionService:\n" +
+	"  Sessions Stack - have 1 sessions:\n" +
+	"    * SessionRecord{a1b2c3d}\n" +
+	"      package=com.example.app\n" +
+	"      state=PlaybackState {state=3, position=1000, speed=1.0, updated=1700000000}\n"
+
+// mediaStoppedFixture carries one paused PlaybackState record.
+const mediaStoppedFixture = "MEDIA SESSION SERVICE (dumpsys media_session)\n" +
+	"\n" +
+	"MediaSessionService:\n" +
+	"  Sessions Stack - have 1 sessions:\n" +
+	"    * SessionRecord{a1b2c3d}\n" +
+	"      package=com.example.app\n" +
+	"      state=PlaybackState {state=2, position=1000, speed=0.0, updated=1700000000}\n"
+
+// serviceForegroundFixture renders one ServiceRecord for the target package.
+func serviceForegroundFixture(foreground bool) string {
+	flag, notificationID := "false", "0"
+	if foreground {
+		flag, notificationID = "true", "1234"
+	}
+	return "ACTIVITY MANAGER SERVICES (dumpsys activity services)\n" +
+		"  User 0 active services:\n" +
+		"  * ServiceRecord{a1b2c3d u0 com.example.app/.MusicService}\n" +
+		"    intent={cmp=com.example.app/.MusicService}\n" +
+		"    packageName=com.example.app\n" +
+		"    processName=com.example.app\n" +
+		"    isForeground=" + flag + "\n" +
+		"    foregroundId=" + notificationID + "\n"
+}

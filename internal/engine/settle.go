@@ -98,8 +98,10 @@ func (e *Engine) settlePolicy(phase string) SettlePolicy {
 		return e.cfg.Settle.Act
 	case "start":
 		return e.cfg.Settle.Start
-	case "open_app":
+	case "open_app", "app.open":
 		return e.cfg.Settle.OpenApp
+	case "app.claim", "app.handoff", "app.close", "app.kill":
+		return e.cfg.Settle.Act
 	default:
 		return SettlePolicy{}
 	}

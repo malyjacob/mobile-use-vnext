@@ -7,14 +7,15 @@ HTTP 协议配对。
 
 - 模块：`github.com/malyjacob/mobile-use-vnext`
 - Go：1.27.1，启用 `GOEXPERIMENT=jsonv2`
-- 契约：`contract_version = "8"`，服务、HTTP 客户端、控制 App 精确相等才做普通工作
-- 发行：`0.8.0`；`release/versions.json` 是发行号、契约号与 Android versionCode 的唯一来源，
-  构建生成 Go/Java 常量
+- 契约：`contract_version = "9"`，服务、HTTP 客户端、控制 App 精确相等才做普通工作
+- 发行：`0.9.0`；`release/versions.json` 是发行号、契约号与 Android versionCode（11）的唯一
+  来源，构建生成 Go/Java 常量
 
 ## 能力边界
 
-- Agent 工具为 `POST /api/<tool>`，当前注册 `start`/`status`/`observe`/`act`/`end`/
-  `inspect`/`keepalive`/`diagnose`/`apps`/`open_app`/`notify`/`shell`；逐项字段、错误码与
+- Agent 工具为 `POST /api/<tool>`，共 11 个：`start`/`status`/`observe`/`act`/`inspect`/
+  `keepalive`/`end`/`app`/`notify`/`shell`/`diagnose`；`app` 以一个工具承载
+  `find`/`list`/`open`/`claim`/`handoff`/`close`/`kill` 七个互斥 kind。逐项字段、错误码与
   空值规则见 [接口契约](docs/interface.md)。
 - `observe`/`act` 的 `image=true` 返回与本次树同次采集的一张 JPEG 图片；图片元数据在
   `observation.image`，HTTP 载体为 `observation.image.base64`。
@@ -40,13 +41,13 @@ internal/engine/        唯一业务入口：会话、O/P、工作位置、STOP�
 internal/android/       ADB、u2 RPC、制品管理与受管执行链
 internal/httpapi/       认证 HTTP 接入、/api/<tool>、控制端同步与最小 STOP
 internal/client/        强类型 HTTP 客户端（发送前 P、结构化结果、图片字节）
-internal/mcp/           12 工具注册/schema/结果投影、取消包装、HTTP 认证与 Origin
+internal/mcp/           11 工具注册/schema/结果投影、取消包装、HTTP 认证与 Origin
 internal/store/         私有恢复账本与 Agent 消息文件（原子文件、单写者）
 internal/eventlog/      有界事件/字段白名单日志
 android-control/        Java 控制 App 源码与构建入口（含 test-target 验证探针）
 third_party/uiautomator/固定 JAR 输入/补丁/哈希/来源/许可证
 release/versions.json   发行号、共同契约号与 Android versionCode 的唯一来源
-scripts/                构建、整组发布、部署与手机内 service.sh
+scripts/                构建（含主机工具）、整组发布、部署与手机内 service.sh
 docs/                   正式文档
 maintenance/            决策、验证记录、spike 与未决项
 ```
@@ -73,17 +74,23 @@ go build ./...
 ./scripts/build.ps1                              # 输出 build/device-service 与 build/device-mcp
 ./scripts/build-release.ps1                      # 整组发布：Go 产物、APK、固定制品与 manifest.json
 ./scripts/build-release.ps1 -SkipAndroid         # 仅 Go 与固定制品；清单标记 complete=false，不可部署
+./scripts/build-host-tools.ps1                   # Windows device-mcp.exe/mcp-probe.exe + host-tools-manifest.json
+./scripts/build-host-tools.ps1 -VerifyOnly       # 只核验已有主机清单与两个 exe
 ```
 
 `release/versions.json` 是唯一版本源；`scripts/generate-version.ps1` 生成 Go/Java/XML 常量，
 `-Check` 只校验。`build/release/manifest.json` 记录源码提交、Go/MCP 版本、各产物 SHA-256 与
 大小、Android 版本与工具目录指纹；`scripts/verify-manifest.ps1` 按清单复核。
 
-MCP 适配进程若运行在 Windows 宿主上（stdio/HTTP 验证），用宿主工具链单独构建：
+MCP 适配进程若运行在 Windows 宿主上（stdio/HTTP 验证），用宿主工具入口统一构建与核验：
 
 ```powershell
-$env:GOEXPERIMENT = 'jsonv2'; go build -o build/device-mcp.exe ./cmd/device-mcp
+./scripts/build-host-tools.ps1
+./scripts/build-host-tools.ps1 -VerifyOnly
 ```
+
+产物为 `build/device-mcp.exe` 与 `build/mcp-probe.exe`；`build/host-tools-manifest.json` 记录
+发行/契约、源码身份、工具目录 count/sha256 与两个 exe 的大小/SHA-256。
 
 控制 App 由 `android-control/build.ps1` 用本机 SDK/JDK 直接构建（无 Gradle），输出
 `android-control/build/control.apk`。验证探针 App 由 `scripts/build-probe.ps1` 构建，仅用于
@@ -108,7 +115,7 @@ $env:GOEXPERIMENT = 'jsonv2'; go build -o build/device-mcp.exe ./cmd/device-mcp
 | 项 | 值 |
 | --- | --- |
 | chroot | `/data/local/chroots/debian13` |
-| 服务目录 | `/opt/mobile-use-vnext`（`device-service`、`device-mcp`、`mcp-config.json`、`u2.jar`、`service.sh`、`config.json`） |
+| 服务目录 | `/opt/mobile-use-vnext`（`device-service`、`device-mcp`、`mcp-config.json`、`u2.jar`、`applist.dex`、`service.sh`、`config.json`） |
 | 状态目录 | `/var/lib/mobile-use-vnext`（恢复账本、消息文件、服务/MCP 的 pid 与日志；目录 0700） |
 | 服务端口 | `18880`（仅 `127.0.0.1`） |
 | 手机 MCP 端口 | `18882`（仅 `127.0.0.1`，默认安装并启动） |
@@ -136,14 +143,14 @@ $env:GOEXPERIMENT = 'jsonv2'; go test ./...
 ```
 
 包内测试覆盖 `internal/protocol`、`internal/observation`、`internal/imaging`、`internal/engine`、
-`internal/android`（ADB/u2 走本地桩，不需要真机）、`internal/client`、`internal/mcp`、
-`internal/store` 与 `scripts/mcp-probe`；`internal/httpapi`、`internal/eventlog`、
-`internal/device` 没有包内测试。Windows 上的通过不证明设备路径或账本耐久性。
+`internal/android`（ADB/u2 走本地桩，不需要真机）、`internal/client`、`internal/httpapi`、
+`internal/mcp`、`internal/store`、`internal/device` 与 `scripts/mcp-probe`；`internal/eventlog`
+没有包内测试。Windows 上的通过不证明设备路径或账本耐久性。
 
 ## 接口
 
 Agent 工具（`POST /api/<tool>`，`Authorization: Bearer <agent_token>`，
-`X-Mobile-Use-Contract: 8`）：
+`X-Mobile-Use-Contract: 9`）：
 
 | 工具 | 说明 |
 | --- | --- |
@@ -154,8 +161,7 @@ Agent 工具（`POST /api/<tool>`，`Authorization: Bearer <agent_token>`，
 | `inspect` | `observation_id` 可选 `node` 或 `query`；只读历史树 |
 | `keepalive` | `reference`（O/P）+ 可选 `duration_minutes`（1～120，默认 2）；从应用时重设当前活动会话租期，可延长或缩短；普通活动仅按两分钟取最大值 |
 | `end` | `reference`（O/P）；撤权并启动独立收尾 |
-| `apps` | 可选 `query`；发现可启动应用 |
-| `open_app` | `observation_id` + `app`；在会话屏打开/复用应用并返回新观察 |
+| `app` | `kind` + 分支成员：`find`/`list` 查询应用与 live task；`open`/`claim`/`handoff`/`close`/`kill` 管理会话窗口与精确进程 |
 | `notify` | `text`；保存一条 Agent 消息，经控制同步投递到 App 消息中心 |
 | `shell` | `reference` + `command` + 可选 `root`；受管命令执行（不发布观察，原 O 仍可用） |
 | `diagnose` | 可选 `reference`；有界诊断事实 |

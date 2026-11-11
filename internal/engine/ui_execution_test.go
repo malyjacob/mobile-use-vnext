@@ -42,8 +42,8 @@ func TestOpenAppAttributionFailureDoesNotRetainUIExecution(t *testing.T) {
 				}
 				return nil, nil
 			}}
-			opened, apiErr := h.engine.OpenApp(context.Background(), "agent", "Pattribution",
-				openAppRequest(first.Observation, "com.example"))
+			opened, apiErr := h.engine.App(context.Background(), "agent", "Pattribution",
+				appOpenRequest(first.Observation, "com.example"))
 			if apiErr != nil || opened.Outcome != OutcomeUncertain || opened.Error == nil || opened.Error.Code != protocol.CodeAppLaunchUnknown {
 				t.Fatal("launch did not reach task attribution failure")
 			}
@@ -436,7 +436,7 @@ func TestOpenAppNotDispatchedKeepsNotExecuted(t *testing.T) {
 					h.device.tasks = []device.Task{{TaskID: 77, DisplayID: displayID, Package: "com.example"}}
 				}
 				h.engine.dev = uiNotSentDevice{Device: h.device, focus: focus}
-				result, apiErr := h.engine.OpenApp(context.Background(), "agent", "Pnotdispatched", openAppRequest(first.Observation, "com.example"))
+				result, apiErr := h.engine.App(context.Background(), "agent", "Pnotdispatched", appOpenRequest(first.Observation, "com.example"))
 				if apiErr != nil || result.Outcome != OutcomeNotExecuted {
 					t.Fatal("explicit non-dispatch was reported as a possibly executed action")
 				}
@@ -456,7 +456,7 @@ func TestPrimaryFocusRequiresForegroundEvidence(t *testing.T) {
 	first := startUIEvidenceSession(t, h, true)
 	h.device.tasks = []device.Task{{TaskID: 77, DisplayID: 0, Package: "com.example"}}
 	h.device.foreground = &device.Foreground{State: device.ForegroundUnknown, Reason: "synthetic"}
-	result, apiErr := h.engine.OpenApp(context.Background(), "agent", "Pprimaryfocus", openAppRequest(first.Observation, "com.example"))
+	result, apiErr := h.engine.App(context.Background(), "agent", "Pprimaryfocus", appOpenRequest(first.Observation, "com.example"))
 	if apiErr != nil || result.Outcome != OutcomeUncertain || result.Error == nil || result.Error.Code != protocol.CodeTaskFocus {
 		t.Fatal("primary focus returned executed without foreground evidence")
 	}

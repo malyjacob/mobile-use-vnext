@@ -500,7 +500,6 @@ type Result struct {
 	Phase               string
 	Observation         *Observation
 	Inspection          *InspectionView
-	Apps                *AppsView
 	App                 *AppView
 	Shell               *ShellView
 	Notification        *NotificationView
@@ -660,14 +659,6 @@ func (r *Result) MarshalJSONTo(enc *jsontext.Encoder) error {
 			return err
 		}
 		if err := MarshalJSONTo(enc, r.Inspection); err != nil {
-			return err
-		}
-	}
-	if r.Apps != nil {
-		if err := writeName(enc, "apps"); err != nil {
-			return err
-		}
-		if err := MarshalJSONTo(enc, r.Apps); err != nil {
 			return err
 		}
 	}
@@ -923,10 +914,12 @@ type ControlSession struct {
 	Reason    string `json:"reason,omitempty"`
 }
 
-// ControlWork is the current ordinary device work projection.
+// ControlWork is the current ordinary device work projection. AppKind names the
+// app-tool branch when Kind is "app"; it never carries device facts.
 type ControlWork struct {
 	OperationID string `json:"operation_id"`
 	Kind        string `json:"kind"`
+	AppKind     string `json:"app_kind,omitempty"`
 	Phase       string `json:"phase"`
 }
 

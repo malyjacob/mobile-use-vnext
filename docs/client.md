@@ -28,7 +28,7 @@ instance, err := c.Discover(ctx)
 
 | 工具 | P |
 | --- | --- |
-| `start`、`observe`、`act`、`keepalive`、`end`、`apps`、`open_app`、`notify`、`shell` | 生成并放在 `X-Mobile-Use-Operation` |
+| `start`、`observe`、`act`、`keepalive`、`end`、`app`、`notify`、`shell` | 生成并放在 `X-Mobile-Use-Operation` |
 | `status`、`inspect`、`diagnose` | 不生成、不发送该头 |
 
 - 默认 P 形状为 `P` + 24 位小写十六进制；调用方可用 `client.WithOperationID` 指定一个
@@ -58,8 +58,8 @@ type Response struct {
 ```
 
 `Result` 与服务 HTTP 结果同形：`outcome`、`phase`、`session`、`observation`、`inspection`、
-`apps`、`app`、`shell`、`notification`、`diagnosis`、`cleanup`、`error`、`recovery` 等字段
-只在本次确有该事实时出现；`recovery` 缺失表示本次结果没有待恢复事实。客户端不改写主事实：
+`app`、`shell`、`notification`、`diagnosis`、`cleanup`、`error`、`recovery` 等字段只在本次
+确有该事实时出现；`recovery` 缺失表示本次结果没有待恢复事实。客户端不改写主事实：
 `observation.status=failed` 的 503 仍是带 `Result` 的正常响应，不降成无归属异常。
 
 失败结果可以携带 `observation`：`act` 的重验在派发前失败且已发布新帧时，`not_executed` 结果带
@@ -78,8 +78,7 @@ type Response struct {
 | `Inspect` | `*protocol.InspectRequest` | 否 |
 | `Keepalive` | `reference`（省略时长，显式重设为两分钟） | 是 |
 | `KeepaliveWithDuration` | `reference` + `durationMinutes`（1～120，显式覆盖） | 是 |
-| `Apps` | `*protocol.AppsRequest` | 是 |
-| `OpenApp` | `*protocol.OpenAppRequest` | 是 |
+| `App` | `*protocol.AppRequest`（`kind` 选择七个互斥分支） | 是 |
 | `Notify` | `*protocol.NotifyRequest` | 是 |
 | `Shell` | `*protocol.ShellRequest` | 是 |
 | `Diagnose` | `*protocol.DiagnoseRequest` | 否 |
@@ -87,6 +86,14 @@ type Response struct {
 请求体由 `internal/protocol` 的 `Encode` 生成，只包含该工具声明的成员；未知字段、类型
 混用与显式 `null` 不会被客户端补成默认值。客户端每条逻辑调用最多发出一次 HTTP 请求
 （`Discover` 固定两次只读请求），不排队、不重试、不跟随重定向。
+
+`Client.App(ctx, *protocol.AppRequest, ...Option)` 按 `Kind` 编码七个互斥分支：分支不完整、
+包含其他 kind 的成员或 `target` 不是恰好一个选择器时，`Encode` 在发送前拒绝。`App` 的每次
+新调用都生成自己的 P（或用 `WithOperationID` 预分配）；`find` 是 detached P，不绑定调用时
+恰有的全局活动会话；`list` 的 P 绑定 `reference` 解析到的原会话。`find`/`list` 成功与失败
+都没有 `outcome`；响应丢失时用 `Status(ctx, p)` 只能读取摘要，集合需要以新 P 重新查询。
+重复 P 只返回原操作视图，不再次读取或派发。`app` 的五个变更 kind 在响应中带 `outcome` 与
+后观察，消费失败或重试规则与其他工作工具一致。
 
 `Keepalive(ctx, reference)` 表示显式重设为两分钟；`KeepaliveWithDuration` 发送显式
 `duration_minutes`。两者共用同一发送路径与 P 校验；直接传入 0、负数、超过 120 或把时长

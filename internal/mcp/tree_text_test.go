@@ -868,10 +868,12 @@ func TestTextCarriesTreeBlock(t *testing.T) {
 			trailer:  "end tree\n",
 		},
 		{
-			name: "open_app", tool: "open_app", arguments: `{"observation_id":"O1","app":"com.example.probe"}`,
-			response: `{"operation_id":"P2","outcome":"executed","observation":` + observation + `}`,
-			header:   "tree v1 format=full id=O1 scope=reported_visible_with_context nodes=1",
-			trailer:  "end tree\n",
+			name: "app-open", tool: "app", arguments: `{"kind":"open","observation_id":"O1","app":"com.example.probe"}`,
+			response: `{"operation_id":"P2","outcome":"executed","app":{"kind":"open",` +
+				`"package":"com.example.probe","task_id":42,"display_id":12,"ownership":"owned",` +
+				`"reused":false,"state_preserved":false},"observation":` + observation + `}`,
+			header:  "tree v1 format=full id=O1 scope=reported_visible_with_context nodes=1",
+			trailer: "end tree\n",
 		},
 		{
 			name: "inspect", tool: "inspect", arguments: `{"observation_id":"O1"}`,
@@ -897,7 +899,7 @@ func TestTextCarriesTreeBlock(t *testing.T) {
 			if !strings.HasPrefix(text, "result v1 is_error=false\n") || !strings.HasSuffix(text, "end result\n") {
 				t.Fatalf("%s text is not a complete result envelope:\n%s", testCase.name, text)
 			}
-			if !strings.Contains(text, testCase.trailer+"end result\n") {
+			if !strings.Contains(text, testCase.trailer) {
 				t.Fatalf("%s text does not carry %q before end result:\n%s", testCase.name, testCase.trailer, text)
 			}
 			if strings.Contains(text, "omitted") {

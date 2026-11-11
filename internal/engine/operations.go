@@ -152,10 +152,10 @@ func (e *Engine) finishOperation(op *operationState, outcome, phase string, apiE
 	}
 	inputState := op.InputState
 	if inputState == "" {
-		inputState = inputStateFor(op.Kind, op.Reference, code, op.Claimed)
+		inputState = inputStateFor(op.Kind, op.AppKind, op.Reference, code, op.Claimed)
 	}
 	op.Recovery = planRecovery(recoveryInput{
-		Tool: op.Kind, Reference: op.Reference, Code: code, Phase: phase,
+		Tool: op.Kind, AppKind: op.AppKind, Reference: op.Reference, Code: code, Phase: phase,
 		Outcome: outcome, Claimed: op.Claimed, Delivered: op.Delivered,
 		InputState: inputState,
 		Cleanup:    cleanupValue(e.cleanupForOriginLocked(op.SessionOrigin)),
@@ -206,9 +206,9 @@ func (e *Engine) acquireWork(op *operationState, kind string) (*workState, *prot
 		timeout = e.cfg.WorkTimeout + 15*time.Second
 	case WorkAct:
 		timeout = 2*e.cfg.WorkTimeout + 10*time.Second
-	case WorkApps:
+	case WorkAppQuery:
 		timeout = e.cfg.WorkTimeout + 10*time.Second
-	case WorkOpenApp:
+	case WorkAppAction:
 		timeout = 2*e.cfg.WorkTimeout + 10*time.Second
 	case WorkShell:
 		timeout = 65 * time.Second

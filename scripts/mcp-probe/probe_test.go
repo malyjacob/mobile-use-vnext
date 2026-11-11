@@ -100,6 +100,12 @@ func testSchema(name string, additional bool) map[string]any {
 		properties["observation_id"] = map[string]any{"type": "string"}
 		properties["operation"] = map[string]any{"type": "object"}
 		required = []string{"observation_id", "operation"}
+	case "app":
+		properties["kind"] = map[string]any{
+			"type": "string",
+			"enum": []any{"find", "list", "open", "claim", "handoff", "close", "kill"},
+		}
+		required = []string{"kind"}
 	}
 	return map[string]any{
 		"type":                 "object",
@@ -322,15 +328,16 @@ func TestNegativeHTTPChecks(t *testing.T) {
 // ---------------------------------------------------------------- fake MCP adapter
 
 type fakeAdapter struct {
-	mutex      sync.Mutex
-	canStart   bool
-	counter    int
-	sessions   map[string]bool
-	image      []byte
-	leakImage  bool
-	startCalls int
-	endCalls   int
-	resultMode string
+	mutex            sync.Mutex
+	canStart         bool
+	counter          int
+	sessions         map[string]bool
+	image            []byte
+	leakImage        bool
+	startCalls       int
+	endCalls         int
+	resultMode       string
+	primaryCandidate bool
 }
 
 func newFakeAdapter() *fakeAdapter {
@@ -499,14 +506,118 @@ func (f *fakeAdapter) handle(ctx context.Context, name string, request *sdk.Call
 				},
 			},
 		}, text), nil
-	case "apps":
+	case "app":
+		kind, _ := arguments["kind"].(string)
+		if kind == "find" {
+			if _, crossKind := arguments["reference"]; crossKind {
+				return f.errorResult(map[string]any{
+					"error": map[string]any{"code": "invalid_request"},
+				}), nil
+			}
+			query, _ := arguments["query"].(string)
+			items := []any{map[string]any{"name": "Probe App", "package": "com.example.probe"}}
+			total := 1
+			if query == probeEmptyQuery {
+				items = []any{}
+				total = 0
+			}
+			return f.result(map[string]any{
+				"operation_id": f.nextID("P"),
+				"app": map[string]any{
+					"kind": "find", "items": items, "total": total,
+					"truncated": false, "captured_at": "2026-01-01T00:00:00Z",
+				},
+			}, ""), nil
+		}
+		displayID := 12
+		scope, _ := arguments["scope"].(string)
+		if scope == "primary" {
+			displayID = 0
+		}
+		filterPackage, _ := arguments["app"].(string)
+		if scope == "primary" && filterPackage != "" {
+			// The controlled app-lifecycle claim step only claims a task it can
+			// prove is the controlled target.
+			items := []any{}
+			total := 0
+			if f.primaryCandidate {
+				items = []any{map[string]any{
+					"task_id": 77, "package": controlledAppPackage, "ownership": "shared",
+				}}
+				total = 1
+			}
+			return f.result(map[string]any{
+				"operation_id": f.nextID("P"),
+				"app": map[string]any{
+					"kind": "list", "display_id": 0,
+					"items": items, "total": total, "truncated": false,
+					"captured_at": "2026-01-01T00:00:00Z",
+					"foreground":  map[string]any{"state": "unknown", "reason": "foreground_unavailable"},
+				},
+			}, ""), nil
+		}
+		if kind == "open" {
+			target, _ := arguments["app"].(string)
+			o := f.nextID("O")
+			return f.result(map[string]any{
+				"operation_id": f.nextID("P"),
+				"outcome":      outcomeExecuted,
+				"app": map[string]any{
+					"kind": "open", "package": target, "task_id": 42,
+					"display_id": 12, "ownership": "owned",
+					"reused": false, "state_preserved": false,
+				},
+				"observation": f.observation(o, "P1", 2, false),
+			}, ""), nil
+		}
+		if kind == "kill" {
+			return f.errorResult(map[string]any{
+				"operation_id": f.nextID("P"),
+				"outcome":      "not_executed",
+				"app": map[string]any{
+					"kind": "kill", "package": controlledAppPackage,
+					"source_task_id": 42, "display_id": 12,
+				},
+				"error": map[string]any{"code": "kill_refused_foreground"},
+			}), nil
+		}
+		if kind == "claim" {
+			o := f.nextID("O")
+			return f.result(map[string]any{
+				"operation_id": f.nextID("P"),
+				"outcome":      outcomeExecuted,
+				"app": map[string]any{
+					"kind": "claim", "package": controlledAppPackage, "task_id": 77,
+					"source_display_id": 0, "display_id": 12,
+					"ownership": "borrowed", "state_preserved": true,
+				},
+				"observation": f.observation(o, "P1", 2, false),
+			}, ""), nil
+		}
+		if kind == "close" {
+			o := f.nextID("O")
+			return f.result(map[string]any{
+				"operation_id": f.nextID("P"),
+				"outcome":      outcomeExecuted,
+				"app": map[string]any{
+					"kind": "close", "display_id": 12,
+					"tasks": []any{map[string]any{
+						"task_id": 42, "outcome": outcomeExecuted, "recents_cleaned": true,
+					}},
+					"complete": true,
+				},
+				"observation": f.observation(o, "P1", 2, false),
+			}, ""), nil
+		}
 		return f.result(map[string]any{
 			"operation_id": f.nextID("P"),
-			"apps": map[string]any{
-				"items": []any{
-					map[string]any{"name": "Probe App", "package": "com.example.probe"},
-				},
+			"app": map[string]any{
+				"kind": "list", "display_id": displayID,
+				"items": []any{map[string]any{
+					"task_id": 42, "package": "com.example.probe", "ownership": "owned",
+				}},
 				"total": 1, "truncated": false, "captured_at": "2026-01-01T00:00:00Z",
+				"foreground": map[string]any{"state": "unknown", "reason": "foreground_unavailable"},
 			},
 		}, ""), nil
 	case "shell":
@@ -585,8 +696,8 @@ func fakeResultText(payload map[string]any, isError bool) string {
 			writeFakeObservation(&builder, value)
 		case "inspection":
 			writeFakeInspection(&builder, value)
-		case "apps":
-			writeFakeApps(&builder, value)
+		case "app":
+			writeFakeApp(&builder, value)
 		case "shell":
 			writeFakeShell(&builder, value)
 		case "diagnosis":
@@ -671,34 +782,56 @@ func writeFakeInspection(builder *strings.Builder, value any) {
 	writeFakeBlock(builder, block)
 }
 
-func writeFakeApps(builder *strings.Builder, value any) {
-	apps, _ := value.(map[string]any)
-	if apps == nil {
-		writeFakeField(builder, "apps", value)
+// writeFakeApp renders one app result using the declared typed lines. It is a
+// test-side emitter only; the probe decoder is exercised against hand-written
+// golden text in app_matrix_test.go.
+func writeFakeApp(builder *strings.Builder, value any) {
+	app, _ := value.(map[string]any)
+	if app == nil {
+		writeFakeField(builder, "app", value)
 		return
 	}
-	items, _ := apps["items"].([]any)
-	total, _ := apps["total"].(int)
-	truncated, _ := apps["truncated"].(bool)
-	capturedAt, _ := apps["captured_at"].(string)
-	var block strings.Builder
-	block.WriteString("apps v1 items=")
-	block.WriteString(strconv.Itoa(len(items)))
-	block.WriteString(" total=")
-	block.WriteString(strconv.Itoa(total))
-	block.WriteString(" truncated=")
-	block.WriteString(strconv.FormatBool(truncated))
-	block.WriteString(" captured_at=")
-	block.WriteString(capturedAt)
-	block.WriteByte('\n')
-	for _, item := range items {
-		encoded, _ := json.Marshal(item)
-		block.WriteString("item ")
-		block.Write(encoded)
-		block.WriteByte('\n')
+	for _, key := range []string{
+		"kind", "items", "tasks", "foreground", "target_pids", "killed_pids",
+		"remaining_pids", "package", "task_id", "source_task_id", "display_id",
+		"source_display_id", "total", "reused", "state_preserved", "complete",
+		"truncated", "restarted", "captured_at", "ownership", "foreground_restore",
+	} {
+		child, present := app[key]
+		if !present {
+			continue
+		}
+		builder.WriteString("app.")
+		builder.WriteString(key)
+		builder.WriteByte('=')
+		switch key {
+		case "kind", "ownership", "captured_at", "foreground_restore":
+			if text, ok := child.(string); ok && fakeAppToken(text) {
+				builder.WriteString(text)
+				builder.WriteByte('\n')
+				continue
+			}
+		}
+		encoded, err := json.Marshal(child)
+		if err != nil {
+			encoded = []byte("null")
+		}
+		builder.Write(encoded)
+		builder.WriteByte('\n')
 	}
-	block.WriteString("end apps\n")
-	writeFakeBlock(builder, block.String())
+}
+
+func fakeAppToken(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, character := range value {
+		if character <= ' ' || character >= 127 || character == '=' ||
+			character == '"' || character == '\\' {
+			return false
+		}
+	}
+	return true
 }
 
 func writeFakeShell(builder *strings.Builder, value any) {
@@ -791,9 +924,9 @@ func startFakeAdapter(t *testing.T, adapter *fakeAdapter) *sdk.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 	server := sdk.NewServer(&sdk.Implementation{Name: "fake-adapter", Version: "1"}, nil)
-	for _, name := range toolNames {
-		name := name
-		server.AddTool(&sdk.Tool{Name: name, InputSchema: testSchema(name, false)},
+	for _, tool := range sourceCatalogTools(t) {
+		name := tool.Name
+		server.AddTool(tool,
 			func(ctx context.Context, request *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
 				return adapter.handle(ctx, name, request)
 			})
@@ -893,13 +1026,19 @@ func TestAdapterChecksAgainstFakeAdapter(t *testing.T) {
 				t.Fatalf("checks failed (exit %d):\n%s", code, output.String())
 			}
 			for _, want := range []string{
-				"PASS tools count=12",
-				"PASS schema objects=12",
+				"PASS tools count=11",
+				"PASS catalog tools=11",
+				"PASS catalog_fingerprint",
+				"PASS schema objects=11",
 				"PASS result_error",
 				"PASS status can_start=true",
 				"PASS start",
+				"PASS app_find",
+				"PASS app_find_empty",
+				"PASS app_list",
+				"PASS app_list_primary",
+				"PASS app_admission",
 				"PASS observe",
-				"PASS apps_projection",
 				"PASS shell_projection",
 				"PASS timeline_projection",
 				"PASS inspect",
@@ -966,8 +1105,14 @@ func TestAdapterChecksImageLeakFails(t *testing.T) {
 	if code := reporter.finish(blocked); code != 1 {
 		t.Fatalf("exit = %d, want 1:\n%s", code, output.String())
 	}
-	if !strings.Contains(output.String(), "FAIL observe reason=text_carries_base64") {
+	if !strings.Contains(output.String(), "FAIL observe") {
 		t.Fatalf("missing leak failure:\n%s", output.String())
+	}
+	// A leaked carrier is either caught by the explicit base64 scan or, in both
+	// mode, by the text/structured object comparison; either way it must fail.
+	if !strings.Contains(output.String(), "reason=text_carries_base64") &&
+		!strings.Contains(output.String(), "reason=both_mode_object_mismatch") {
+		t.Fatalf("leak was not attributed:\n%s", output.String())
 	}
 }
 
@@ -1039,8 +1184,8 @@ func (f *fakeRecoveryService) serve(writer http.ResponseWriter, request *http.Re
 		f.writeInspect(writer, body)
 	case "/api/end":
 		f.writeEnd(writer, operationID, body)
-	case "/api/apps":
-		f.writeApps(writer, operationID)
+	case "/api/app":
+		f.writeApp(writer, operationID, body)
 	case "/api/shell":
 		f.writeShell(writer, operationID, body)
 	case "/api/diagnose":
@@ -1193,21 +1338,59 @@ func (f *fakeRecoveryService) writeInspect(writer http.ResponseWriter, body []by
 	f.writeResult(writer, &protocol.Result{Inspection: view})
 }
 
-func (f *fakeRecoveryService) writeApps(writer http.ResponseWriter, operationID string) {
+func (f *fakeRecoveryService) writeApp(writer http.ResponseWriter, operationID string, body []byte) {
+	var appBody struct {
+		Kind   string `json:"kind"`
+		Query  string `json:"query"`
+		Scope  string `json:"scope"`
+		App    string `json:"app"`
+		Target struct {
+			TaskID int    `json:"task_id"`
+			App    string `json:"app"`
+		} `json:"target"`
+	}
+	_ = json.Unmarshal(body, &appBody)
 	f.mutex.Lock()
 	f.operations[operationID] = operationFinished
 	f.outcomes[operationID] = outcomeExecuted
-	result := &protocol.Result{
-		OperationID: operationID,
-		Apps: &protocol.AppsView{
-			Items: []protocol.AppEntry{
-				{Name: "Probe App", Package: "com.example.probe"},
-			},
-			Total:      1,
-			Truncated:  false,
+	var view *protocol.AppView
+	switch appBody.Kind {
+	case protocol.AppKindFind:
+		items := []protocol.AppItem{{Name: "Probe App", Package: "com.example.probe"}}
+		total := 1
+		if appBody.Query == probeEmptyQuery {
+			items = []protocol.AppItem{}
+			total = 0
+		}
+		truncated := false
+		view = &protocol.AppView{
+			Kind: protocol.AppKindFind, Items: items, HasItems: true,
+			Total: total, HasTotal: true,
+			Truncated: &truncated, CapturedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		}
+	case protocol.AppKindList:
+		displayID := 12
+		if appBody.Scope == protocol.AppScopePrimary {
+			displayID = 0
+		}
+		truncated := false
+		view = &protocol.AppView{
+			Kind: protocol.AppKindList, DisplayID: &displayID,
+			TaskItems: []protocol.AppTaskItem{}, HasItems: true,
+			Total: 0, HasTotal: true, Truncated: &truncated,
 			CapturedAt: time.Now().UTC().Format(time.RFC3339Nano),
-		},
+			Foreground: &protocol.Foreground{State: "unknown", Reason: "foreground_unavailable"},
+		}
+	default:
+		f.mutex.Unlock()
+		f.writeResult(writer, &protocol.Result{
+			OperationID: operationID, Outcome: "not_executed",
+			App:   &protocol.AppView{Kind: appBody.Kind},
+			Error: &protocol.Error{Code: "invalid_request", Message: "probe does not exercise this kind"},
+		})
+		return
 	}
+	result := &protocol.Result{OperationID: operationID, App: view}
 	f.mutex.Unlock()
 	f.writeResult(writer, result)
 }
@@ -1451,12 +1634,18 @@ func TestProbeAgainstRealAdapter(t *testing.T) {
 				t.Fatalf("checks failed (exit %d):\n%s", code, output.String())
 			}
 			for _, want := range []string{
-				"PASS tools count=12",
+				"PASS tools count=11",
+				"PASS catalog",
+				"PASS catalog_fingerprint",
 				"PASS schema",
 				"PASS result_error",
 				"PASS start",
+				"PASS app_find",
+				"PASS app_find_empty",
+				"PASS app_list",
+				"PASS app_list_primary",
+				"PASS app_admission",
 				"PASS observe",
-				"PASS apps_projection",
 				"PASS shell_projection",
 				"PASS timeline_projection",
 				"PASS inspect",

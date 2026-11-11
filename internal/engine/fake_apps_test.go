@@ -69,26 +69,6 @@ func (f *fakeDevice) FocusTask(_ context.Context, taskID int) (device.DispatchRe
 	return device.DispatchTerminated, f.focusErr
 }
 
-func (f *fakeDevice) RemoveTask(_ context.Context, taskID int) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.removeCalls = append(f.removeCalls, taskID)
-	if f.removeErr != nil {
-		return f.removeErr
-	}
-	kept := f.tasks[:0]
-	for _, task := range f.tasks {
-		if task.TaskID != taskID {
-			kept = append(kept, task)
-		}
-	}
-	f.tasks = kept
-	if f.recentIDs != nil {
-		delete(f.recentIDs, taskID)
-	}
-	return nil
-}
-
 func (f *fakeDevice) RecentTaskIDs(context.Context) (map[int]bool, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

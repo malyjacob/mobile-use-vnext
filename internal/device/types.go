@@ -201,13 +201,65 @@ type Input struct {
 	Key       string
 }
 
-// Task is one foreground task fact from the activity dump.
+// Task is one live leaf task fact from the activity container listing. RootID is
+// the containing root task id; zero means the source did not report it and the
+// task must not be moved.
 type Task struct {
 	TaskID    int
+	RootID    int
 	DisplayID int
 	Package   string
 	Component string
 	Visible   bool
+}
+
+// TaskMoveResult is one `am display move-stack` dispatch fact. The adapter
+// reports only what the command boundary proves; the engine confirms the leaf's
+// actual landing point with a separate live read.
+type TaskMoveResult struct {
+	Receipt         DispatchReceipt
+	RootID          int
+	LeafTaskID      int
+	SourceDisplayID int
+	TargetDisplayID int
+}
+
+// TaskRemoveResult is one exact task removal dispatch fact.
+type TaskRemoveResult struct {
+	Receipt DispatchReceipt
+	TaskID  int
+}
+
+// ProcessInstance is one process identity of a package: the external PID plus
+// the private instance evidence used to avoid PID reuse. It is never published
+// except as a PID.
+type ProcessInstance struct {
+	PID        int
+	StartTicks uint64
+	Name       string
+}
+
+// PackageProcesses is one bounded process inventory of a package. Known is
+// false when the read could not be completed; an empty known inventory is a
+// proven absence, not a failed read.
+type PackageProcesses struct {
+	Known      bool
+	UserID     int
+	BootID     string
+	Instances  []ProcessInstance
+	ReadFailed bool
+}
+
+// MediaState is the device-wide media playback fact used by the kill guard.
+type MediaState struct {
+	Known   bool
+	Playing bool
+}
+
+// ServiceState is the foreground-service fact of one package.
+type ServiceState struct {
+	Known      bool
+	Foreground bool
 }
 
 // AppEntry is one launchable application discovered through the fixed

@@ -24,15 +24,29 @@ const (
 	// MaxRetiredBytes bounds the serialized retired slice, excluding the rest
 	// of the current ownership record.
 	MaxRetiredBytes = 24 * 1024
+	// MaxBaseBytes bounds the serialized ledger excluding the retired and
+	// task_transfers arrays.
+	MaxBaseBytes = 20 * 1024
+	// MaxTaskTransferBytes bounds the serialized task_transfers array.
+	MaxTaskTransferBytes = 16 * 1024
+	// MaxTaskTransferEntryBytes bounds one serialized task transfer.
+	MaxTaskTransferEntryBytes = 1000
+	// MaxRootWrapperBytes bounds the root object members that join the base to
+	// the two arrays: property names, separators and braces.
+	MaxRootWrapperBytes = 512
+	// MaxTaskTransfers bounds the number of task transfer records.
+	MaxTaskTransfers = 16
 
 	ledgerFormat      = "mobile-use-vnext-ledger"
 	ledgerVersionV1   = 1
 	ledgerVersionV2   = 2
 	ledgerVersionV3   = 3
 	ledgerVersionV4   = 4
+	ledgerVersionV5   = 5
 	maxDeviceIDLen    = 128
 	maxCheckedTaskID  = 256
 	maxRetiredEntries = 8
+	maxTaskTransfers  = MaxTaskTransfers
 )
 
 // Ledger is the only implementation of the engine's recovery store. One
@@ -90,15 +104,19 @@ func (l *Ledger) readLocked() (*engine.Ledger, error) {
 	if len(data) > MaxLedgerBytes {
 		return nil, errors.New("ledger exceeds the size budget")
 	}
+	return decodeLedger(data, ledgerVersionV5)
+}
+
+// decodeLedger parses and validates one encoded record while accepting at most
+// maxVersion. Load uses the current maximum; tests use it to exercise the
+// controlled rejection of an older reader without a second implementation.
+func decodeLedger(data []byte, maxVersion int) (*engine.Ledger, error) {
 	var record engine.Ledger
 	if err := json.Unmarshal(data, &record, json.RejectUnknownMembers(true)); err != nil {
 		return nil, errors.New("ledger is corrupt")
 	}
 	if record.Format != ledgerFormat ||
-		(record.Version != ledgerVersionV1 &&
-			record.Version != ledgerVersionV2 &&
-			record.Version != ledgerVersionV3 &&
-			record.Version != ledgerVersionV4) {
+		record.Version < ledgerVersionV1 || record.Version > maxVersion {
 		return nil, errors.New("ledger format is unsupported")
 	}
 	if record.Revision < 0 {
@@ -106,6 +124,9 @@ func (l *Ledger) readLocked() (*engine.Ledger, error) {
 	}
 	if record.Version < ledgerVersionV4 && hasVersionFourEvidence(data) {
 		return nil, fmt.Errorf("version %d ledger contains version 4 evidence", record.Version)
+	}
+	if record.Version < ledgerVersionV5 && hasVersionFiveEvidence(data) {
+		return nil, fmt.Errorf("version %d ledger contains version 5 evidence", record.Version)
 	}
 	switch record.Version {
 	case ledgerVersionV1:
@@ -133,6 +154,28 @@ func (l *Ledger) readLocked() (*engine.Ledger, error) {
 			return nil, err
 		}
 		if err := validateRetiredJSON(data); err != nil {
+			return nil, err
+		}
+	case ledgerVersionV5:
+		if hasExplicitEvidenceBooleanNull(data) {
+			return nil, errors.New("ledger evidence boolean cannot be null")
+		}
+		if err := validateEvidence(&record); err != nil {
+			return nil, err
+		}
+		if err := validateRetiredRecord(&record); err != nil {
+			return nil, err
+		}
+		if err := validateRetiredJSON(data); err != nil {
+			return nil, err
+		}
+		if err := validateTaskTransferJSON(data); err != nil {
+			return nil, err
+		}
+		if err := validateTaskTransfers(&record); err != nil {
+			return nil, err
+		}
+		if err := validateLedgerCapacity(&record); err != nil {
 			return nil, err
 		}
 	}
@@ -215,6 +258,39 @@ func hasVersionFourEvidence(data []byte) bool {
 	return false
 }
 
+func hasVersionFiveEvidence(data []byte) bool {
+	var presence struct {
+		TaskTransfers jsontext.Value `json:"task_transfers"`
+		Tasks         []struct {
+			RootTaskID    jsontext.Value `json:"root_task_id"`
+			Ownership     jsontext.Value `json:"ownership"`
+			OriginDisplay jsontext.Value `json:"origin_display"`
+			Generation    jsontext.Value `json:"generation"`
+		} `json:"tasks"`
+		Retired []struct {
+			Record jsontext.Value `json:"record"`
+		} `json:"retired"`
+	}
+	if err := json.Unmarshal(data, &presence); err != nil {
+		return true
+	}
+	if len(presence.TaskTransfers) > 0 {
+		return true
+	}
+	for _, task := range presence.Tasks {
+		if len(task.RootTaskID) > 0 || len(task.Ownership) > 0 ||
+			len(task.OriginDisplay) > 0 || len(task.Generation) > 0 {
+			return true
+		}
+	}
+	for _, retired := range presence.Retired {
+		if hasVersionFiveEvidence(retired.Record) {
+			return true
+		}
+	}
+	return false
+}
+
 func validateEvidence(record *engine.Ledger) error {
 	if session := record.Session; session != nil {
 		if session.DeviceID != "" && !validDeviceID(session.DeviceID) {
@@ -283,12 +359,102 @@ func validateRetiredRecord(record *engine.Ledger) error {
 		if retired.Record.Retired != nil {
 			return errors.New("ledger retired record is recursive")
 		}
+		if retired.Record.TaskTransfers != nil {
+			return errors.New("ledger retired record contains task transfers")
+		}
 		if retired.Attempts < 0 || retired.Attempts > 3 {
 			return errors.New("ledger retired attempts are invalid")
 		}
 		if err := validateEvidence(retired.Record); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// validateTaskTransferJSON rejects explicit null where the record shape would
+// otherwise silently collapse to an absent array.
+func validateTaskTransferJSON(data []byte) error {
+	var presence struct {
+		TaskTransfers jsontext.Value `json:"task_transfers"`
+	}
+	if err := json.Unmarshal(data, &presence); err != nil {
+		return errors.New("ledger task transfers are invalid")
+	}
+	value := bytes.TrimSpace(presence.TaskTransfers)
+	if len(value) == 0 {
+		return nil
+	}
+	if bytes.Equal(value, []byte("null")) {
+		return errors.New("ledger task transfers cannot be null")
+	}
+	return nil
+}
+
+func validateTaskTransfers(record *engine.Ledger) error {
+	if len(record.TaskTransfers) > maxTaskTransfers {
+		return errors.New("ledger task transfers exceed the limit")
+	}
+	if len(record.TaskTransfers) > 0 {
+		data, err := json.Marshal(record.TaskTransfers)
+		if err != nil {
+			return errors.New("ledger task transfers are invalid")
+		}
+		if len(data) > MaxTaskTransferBytes {
+			return errors.New("ledger task transfers exceed the size budget")
+		}
+	}
+	for _, transfer := range record.TaskTransfers {
+		data, err := json.Marshal(transfer)
+		if err != nil {
+			return errors.New("ledger task transfer is invalid")
+		}
+		if len(data) > MaxTaskTransferEntryBytes {
+			return errors.New("ledger task transfer exceeds the size budget")
+		}
+	}
+	return nil
+}
+
+// validateLedgerCapacity applies the independent v5 budgets in addition to the
+// complete encoding gate. The base copy clears both bounded arrays; their exact
+// encoded lengths and the remaining root wrapper are measured separately.
+func validateLedgerCapacity(record *engine.Ledger) error {
+	base := *record
+	base.Retired = nil
+	base.TaskTransfers = nil
+	baseData, err := json.Marshal(&base)
+	if err != nil {
+		return errors.New("ledger base is invalid")
+	}
+	if len(baseData) > MaxBaseBytes {
+		return errors.New("ledger base exceeds the size budget")
+	}
+	retiredBytes := 0
+	if len(record.Retired) > 0 {
+		data, err := json.Marshal(record.Retired)
+		if err != nil {
+			return errors.New("ledger retired entries are invalid")
+		}
+		retiredBytes = len(data)
+	}
+	transferBytes := 0
+	if len(record.TaskTransfers) > 0 {
+		data, err := json.Marshal(record.TaskTransfers)
+		if err != nil {
+			return errors.New("ledger task transfers are invalid")
+		}
+		transferBytes = len(data)
+	}
+	fullData, err := json.Marshal(record)
+	if err != nil {
+		return errors.New("ledger encoding is invalid")
+	}
+	if len(fullData) > MaxLedgerBytes {
+		return errors.New("ledger exceeds the size budget")
+	}
+	if wrapper := len(fullData) - len(baseData) - retiredBytes - transferBytes; wrapper > MaxRootWrapperBytes {
+		return errors.New("ledger root wrapper exceeds the size budget")
 	}
 	return nil
 }
@@ -338,13 +504,17 @@ func validateRetiredJSON(data []byte) error {
 			return errors.New("ledger retired stop reason cannot be null")
 		}
 		var nested struct {
-			Retired jsontext.Value `json:"retired"`
+			Retired       jsontext.Value `json:"retired"`
+			TaskTransfers jsontext.Value `json:"task_transfers"`
 		}
 		if err := json.Unmarshal(recordJSON, &nested); err != nil {
 			return errors.New("ledger retired record is invalid")
 		}
 		if len(nested.Retired) > 0 {
 			return errors.New("ledger retired record is recursive")
+		}
+		if len(nested.TaskTransfers) > 0 {
+			return errors.New("ledger retired record contains task transfers")
 		}
 		if hasExplicitEvidenceBooleanNull(recordJSON) {
 			return errors.New("ledger evidence boolean cannot be null")
@@ -440,17 +610,26 @@ func (l *Ledger) Save(ctx context.Context, record *engine.Ledger) (int64, error)
 		}
 		l.loaded = true
 	}
+	if record.Version > ledgerVersionV5 {
+		return 0, errors.New("ledger version is unsupported")
+	}
 	if err := validateEvidence(record); err != nil {
 		return 0, err
 	}
 	if err := validateRetiredRecord(record); err != nil {
 		return 0, err
 	}
+	if err := validateTaskTransfers(record); err != nil {
+		return 0, err
+	}
 	next := l.revision + 1
 	snapshot := engine.CloneLedger(record)
 	snapshot.Format = ledgerFormat
-	snapshot.Version = ledgerVersionV4
+	snapshot.Version = ledgerVersionV5
 	snapshot.Revision = next
+	if err := validateLedgerCapacity(snapshot); err != nil {
+		return 0, err
+	}
 	data, err := json.Marshal(snapshot)
 	if err != nil {
 		return 0, fmt.Errorf("encode ledger: %w", err)

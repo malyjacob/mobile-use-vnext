@@ -34,14 +34,23 @@ type rmfFixture struct {
 }
 
 var rmfKnownExclusions = map[string]string{
-	"protocol.Result.IncludeSession":   "presence flag",
-	"protocol.Foreground.HasTask":      "presence flag",
-	"protocol.InspectionView.HasTotal": "presence flag",
-	"protocol.ImageMeta.Base64":        "transport-only",
-	"protocol.TreeValue.Full":          "variant wrapper",
-	"protocol.TreeValue.Delta":         "variant wrapper",
-	"protocol.Field.Set":               "generic Field wrapper",
-	"protocol.Field.Value":             "generic Field wrapper",
+	"protocol.Result.IncludeSession":     "presence flag",
+	"protocol.Foreground.HasTask":        "presence flag",
+	"protocol.InspectionView.HasTotal":   "presence flag",
+	"protocol.AppView.HasTotal":          "presence flag",
+	"protocol.AppView.HasStatePreserved": "presence flag",
+	"protocol.AppView.HasItems": "presence flag",
+	"protocol.AppCloseTask.HasRecentsCleaned": "presence flag",
+	"protocol.AppView.HasTasks":          "presence flag",
+	"protocol.AppView.HasTargetPIDs":     "presence flag",
+	"protocol.AppView.HasKilledPIDs":     "presence flag",
+	"protocol.AppView.HasRemainingPIDs":  "presence flag",
+	"protocol.AppView.HasRestarted":      "presence flag",
+	"protocol.ImageMeta.Base64":          "transport-only",
+	"protocol.TreeValue.Full":            "variant wrapper",
+	"protocol.TreeValue.Delta":           "variant wrapper",
+	"protocol.Field.Set":                 "generic Field wrapper",
+	"protocol.Field.Value":               "generic Field wrapper",
 }
 
 // Explicit inventories close the reflection loophole where a new field always
@@ -56,8 +65,9 @@ var rmfCompositeInventory = map[string]string{
 	"Node":            "Ref Role Bounds Label Actions Enabled Focused Selected Checked Value Hint Protected Axis Resource Context Children",
 	"Delta":           "Format Base Set Add Remove Children Replace",
 	"SetNode":         "Label Actions Bounds Enabled Focused Selected Checked Value Hint Protected Axis Resource",
-	"AppsView":        "Items Total Truncated CapturedAt",
-	"AppEntry":        "Name Package",
+	"AppItem":         "Name Package",
+	"AppTaskItem":     "TaskID Package Ownership OriginDisplay",
+	"AppCloseTask":    "TaskID Outcome RecentsCleaned HasRecentsCleaned Error",
 	"ShellView":       "Termination ExitCode Output Truncated OutputError",
 	"InspectionView":  "ObservationID Origin Revision CapturedAt Scope Tree Root Matches Total HasTotal Truncated",
 	"InspectionMatch": "Node Path",
@@ -80,9 +90,16 @@ func TestResultFieldManifest(t *testing.T) {
 	}
 
 	requiredPresence := map[string]string{
-		"protocol.Result.IncludeSession":   "session",
-		"protocol.Foreground.HasTask":      "observation.foreground.task_id",
-		"protocol.InspectionView.HasTotal": "inspection.total",
+		"protocol.Result.IncludeSession":     "session",
+		"protocol.Foreground.HasTask":        "observation.foreground.task_id",
+		"protocol.InspectionView.HasTotal":   "inspection.total",
+		"protocol.AppView.HasTotal":          "app.total",
+		"protocol.AppView.HasStatePreserved": "app.state_preserved",
+		"protocol.AppView.HasTasks":          "app.tasks",
+		"protocol.AppView.HasTargetPIDs":     "app.target_pids",
+		"protocol.AppView.HasKilledPIDs":     "app.killed_pids",
+		"protocol.AppView.HasRemainingPIDs":  "app.remaining_pids",
+		"protocol.AppView.HasRestarted":      "app.restarted",
 	}
 	for exclusion, fieldPath := range requiredPresence {
 		if manifest.exclusions[exclusion] != "presence flag" {
@@ -162,8 +179,8 @@ func TestCanonicalJSONCoversManifest(t *testing.T) {
 		}
 	}
 	for _, field := range []string{
-		"apps.items[*].name",
-		"apps.items[*].package",
+		"app.items[*].name",
+		"app.items[*].package",
 		"diagnosis.timeline[*].at",
 		"diagnosis.timeline[*].phase",
 		"diagnosis.timeline[*].code",
@@ -613,6 +630,14 @@ func rmfFieldWireName(owner reflect.Type, field reflect.StructField) (string, bo
 		return "start_operation_id", true
 	case "protocol.DiagnosisView.Operation":
 		return "operation_id", true
+	case "protocol.AppView.TaskItems":
+		return "items", true
+	case "protocol.AppView.TargetPIDs":
+		return "target_pids", true
+	case "protocol.AppView.KilledPIDs":
+		return "killed_pids", true
+	case "protocol.AppView.RemainingPIDs":
+		return "remaining_pids", true
 	}
 	if tag := field.Tag.Get("json"); tag != "" {
 		name := strings.Split(tag, ",")[0]
@@ -756,21 +781,6 @@ func rmfResultFixtures() []rmfFixture {
 				Scope:         "tree",
 				Tree:          rmfFullTreeValue("N1").Full,
 			},
-			Apps: &protocol.AppsView{
-				Items: []protocol.AppEntry{
-					{Name: "设置", Package: "com.android.settings"},
-				},
-				Total:      1,
-				Truncated:  false,
-				CapturedAt: "2026-11-10T00:00:02Z",
-			},
-			App: &protocol.AppView{
-				Package:        "com.android.settings",
-				TaskID:         42,
-				DisplayID:      7,
-				Reused:         false,
-				StatePreserved: rmfPtr(false),
-			},
 			Shell: &protocol.ShellView{
 				Termination: "exited",
 				ExitCode:    rmfPtr(0),
@@ -891,7 +901,151 @@ func rmfResultFixtures() []rmfFixture {
 			},
 		},
 	}
-	return []rmfFixture{full, delta, query}
+	appFind := rmfFixture{
+		name: "app_find",
+		result: protocol.Result{
+			OperationID: "P4",
+			App: &protocol.AppView{
+				Kind: protocol.AppKindFind,
+				Items: []protocol.AppItem{
+					{Name: "设置", Package: "com.android.settings"},
+				},
+				Total:      1,
+				HasTotal:   true,
+				Truncated:  rmfPtr(false),
+				CapturedAt: "2026-11-10T00:00:06Z",
+			},
+		},
+	}
+	appList := rmfFixture{
+		name: "app_list",
+		result: protocol.Result{
+			OperationID: "P5",
+			App: &protocol.AppView{
+				Kind:      protocol.AppKindList,
+				DisplayID: rmfPtr(12),
+				TaskItems: []protocol.AppTaskItem{
+					{
+						TaskID: 42, Package: "com.android.settings",
+						Ownership: protocol.TaskOwnershipOwned,
+					},
+					{
+						TaskID: 43, Package: "com.example.probe",
+						Ownership: protocol.TaskOwnershipBorrowed, OriginDisplay: rmfPtr(0),
+					},
+				},
+				Total:      2,
+				HasTotal:   true,
+				Truncated:  rmfPtr(false),
+				CapturedAt: "2026-11-10T00:00:07Z",
+				Foreground: &protocol.Foreground{
+					State: "present", Package: "com.android.settings",
+					TaskID: rmfPtr(42), HasTask: true,
+				},
+			},
+		},
+	}
+	appListUnknownForeground := rmfFixture{
+		name: "app_list_unknown_foreground",
+		result: protocol.Result{
+			OperationID: "P11",
+			App: &protocol.AppView{
+				Kind:       protocol.AppKindList,
+				DisplayID:  rmfPtr(12),
+				TaskItems:  []protocol.AppTaskItem{},
+				Total:      0,
+				HasTotal:   true,
+				Truncated:  rmfPtr(false),
+				CapturedAt: "2026-11-10T00:00:08Z",
+				Foreground: &protocol.Foreground{State: "unknown", Reason: "window_read_failed"},
+			},
+		},
+	}
+	appOpen := rmfFixture{
+		name: "app_open",
+		result: protocol.Result{
+			OperationID: "P6",
+			Outcome:     "executed",
+			App: &protocol.AppView{
+				Kind: protocol.AppKindOpen, Package: "com.android.settings",
+				TaskID: rmfPtr(42), DisplayID: rmfPtr(12),
+				Ownership:      protocol.TaskOwnershipOwned,
+				Reused:         rmfPtr(false),
+				StatePreserved: rmfPtr(false), HasStatePreserved: true,
+			},
+		},
+	}
+	appClaim := rmfFixture{
+		name: "app_claim",
+		result: protocol.Result{
+			OperationID: "P7",
+			Outcome:     "executed",
+			App: &protocol.AppView{
+				Kind: protocol.AppKindClaim, Package: "com.example.probe",
+				TaskID: rmfPtr(43), SourceDisplayID: rmfPtr(0), DisplayID: rmfPtr(12),
+				Ownership:      protocol.TaskOwnershipBorrowed,
+				StatePreserved: rmfPtr(true), HasStatePreserved: true,
+			},
+		},
+	}
+	appHandoff := rmfFixture{
+		name: "app_handoff",
+		result: protocol.Result{
+			OperationID: "P8",
+			Outcome:     "executed",
+			App: &protocol.AppView{
+				Kind: protocol.AppKindHandoff, Package: "com.example.probe",
+				TaskID: rmfPtr(43), SourceDisplayID: rmfPtr(12), DisplayID: rmfPtr(0),
+				Ownership:         protocol.TaskOwnershipShared,
+				HasStatePreserved: true,
+				ForegroundRestore: protocol.ForegroundRestoreUnconfirmed,
+			},
+		},
+	}
+	appClose := rmfFixture{
+		name: "app_close",
+		result: protocol.Result{
+			OperationID: "P9",
+			Outcome:     "uncertain",
+			App: &protocol.AppView{
+				Kind:      protocol.AppKindClose,
+				DisplayID: rmfPtr(12),
+				Tasks: []protocol.AppCloseTask{
+					{TaskID: 42, Outcome: "executed", RecentsCleaned: rmfPtr(true), HasRecentsCleaned: true},
+					{
+						TaskID: 43, Outcome: "uncertain",
+						RecentsCleaned: nil, HasRecentsCleaned: true,
+						Error: &protocol.Error{
+							Code:    protocol.CodeCleanupUnconfirmed,
+							Message: "关闭结果未确认",
+							Details: map[string]any{"phase": "close"},
+						},
+					},
+				},
+				HasTasks: true,
+				Complete: rmfPtr(false),
+			},
+		},
+	}
+	appKill := rmfFixture{
+		name: "app_kill",
+		result: protocol.Result{
+			OperationID: "P10",
+			Outcome:     "executed",
+			App: &protocol.AppView{
+				Kind: protocol.AppKindKill, Package: "com.example.probe",
+				SourceTaskID: rmfPtr(42), DisplayID: rmfPtr(12),
+				TargetPIDs: []int{1234, 1235}, HasTargetPIDs: true,
+				KilledPIDs: []int{1234, 1235}, HasKilledPIDs: true,
+				RemainingPIDs: []int{}, HasRemainingPIDs: true,
+				HasRestarted: true,
+			},
+		},
+	}
+	return []rmfFixture{
+		full, delta, query,
+		appFind, appList, appListUnknownForeground, appOpen, appClaim, appHandoff, appClose, appKill,
+	}
 }
 
 func rmfFullTree(ref string) *protocol.Tree {

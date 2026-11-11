@@ -15,9 +15,9 @@
 | 方法 | 所有业务端点只接受 `POST`；其他方法返回 `405`，错误码 `invalid_request` |
 | 认证 | `/api/*` 用 `agent_token`；`/v1/control/*` 用 `control_token`；`Authorization: Bearer <token>` |
 | 身份隔离 | agent token 不能访问 `/v1/control/*`，control token 不能访问 `/api/*`；错误为 `401 unauthorized` |
-| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 8`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
+| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 9`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
 | 预分配 P | `/api/*` 可带 `X-Mobile-Use-Operation: P…`；缺省由服务分配。`status` 不使用该头 |
-| 请求体 | 必须是一个 JSON 对象；大小上限：`start`/`status`/`end` 16 KiB，`observe` 32 KiB，`act` 64 KiB，`inspect`/`keepalive`/`diagnose`/`apps`/`open_app` 8 KiB，`notify` 16 KiB，`shell` 32 KiB，`sync` 32 KiB，`stop` 8 KiB |
+| 请求体 | 必须是一个 JSON 对象；大小上限：`start`/`status`/`end` 16 KiB，`observe` 32 KiB，`act` 64 KiB，`inspect`/`keepalive`/`diagnose`/`app` 8 KiB，`notify` 16 KiB，`shell` 32 KiB，`sync` 32 KiB，`stop` 8 KiB |
 | 响应 | `Content-Type: application/json; charset=utf-8`，`Cache-Control: no-store` |
 | 健康检查 | `GET /health` 无认证，见 §10 |
 
@@ -28,14 +28,15 @@
   （`status` 的 `reference`、`observe` 的 `full`/`image`/`wait_ms`、`act` 的 `image`、
   `text`/`key` 的值等）；
 - 请求体为空、只有空白或不是对象 → `422 invalid_request`；
-- 编号规则：`O…` 为观察，`P…` 为操作；长度 1–64，首字符必须是 `O` 或 `P`。编号是不透明句柄，
+- 编号规则：`O…` 为观察，`P…` 为操作；引用长度 1–64，首字符必须是 `O` 或 `P`。
+  客户端预分配的 P 至少 2 个字符。编号是不透明句柄，
   服务生成的编号含服务实例前缀，调用方不得解析其中数值，也不得跨服务实例复用；客户端预分配的
   P 按原值登记，不由服务改写。
 
-会话内做收敛采样的三个自动观察点——`start` 的首个观察、`act` 与 `open_app` 的后观察——在
-目标树收敛后发布：连续两帧的节点内容身份、公开树与前台/显示语境一致才停止采样。静默窗口与
-总预算按阶段固定（`docs/architecture.md` §4），不是请求字段，也不改变任何端点的字段与错误
-码；页面持续动画时这三次观察最多多花该阶段的预算（`act(image=true)` 另加一次刷新读取）。
+会话内做收敛采样的自动观察点——`start` 的首个观察、`act` 的后观察与 `app` 五个变更 kind 的
+后观察——在目标树收敛后发布：连续两帧的节点内容身份、公开树与前台/显示语境一致才停止采样。
+静默窗口与总预算按阶段固定（`docs/architecture.md` §4），不是请求字段，也不改变任何端点的
+字段与错误码；页面持续动画时这些观察最多多花该阶段的预算（`act(image=true)` 另加一次刷新读取）。
 
 `act` 的重验在派发前失败时另有一个交付观察点：重验已经读取的那一帧直接发布为新的 `ready`
 观察，随失败结果返回（见 §6）。该点不做收敛采样，也不重新采集。`observe` 由调用方决定节奏
@@ -56,7 +57,7 @@
 operation_id, operation_state, outcome, phase, target_reference, request_closed,
 blocking_operation_id, can_start, blocking_code, start_operation_id,
 observation_state, input_state, message_id, saved, session, observation, inspection,
-apps, app, shell, notification, diagnosis, cleanup, error, recovery
+app, shell, notification, diagnosis, cleanup, error, recovery
 ```
 
 四层事实互不替代：`outcome`（动作执行）、`observation.status`（观察）、`session.state`
@@ -69,7 +70,8 @@ apps, app, shell, notification, diagnosis, cleanup, error, recovery
 ```
 
 - `code` 稳定，`message` 是受控中文短句，调用方只依赖 `code`；
-- `/api/*` 的 `details` 仅可能出现白名单事实（如 `limit`、`limit_ms`、`app_code`）；
+- `/api/*` 的 `details` 仅可能出现白名单事实：`limit`、`limit_ms`、`app_code`、`field`、
+  `task_ids`、`allowed_kinds`、`allowed_scopes`、`blocking_operation_id`、`start_operation_id`；
   `mcp.*` 是 [MCP 适配器](mcp.md) 的保留命名空间，仅由该适配器向结果投影注入，服务端
   `/api/*` 永不产生这些键；
 - `recovery` 是下一个请求的投影：本次结果没有待恢复事实时整个对象省略；出现时 `entry` 与
@@ -103,10 +105,9 @@ apps, app, shell, notification, diagnosis, cleanup, error, recovery
 - `update`：契约版本不匹配；`reference=none`。
 
 成功结果通常不带 `recovery`；降级成功（动作已执行但后观察失败、执行期间被撤销，或 `end`
-的收尾未完成）带 `cause`。`diagnose` 的工具结果不带 `recovery`。`apps`/`notify` 是
-会话无关工具、`shell` 可能留下未确认执行链，三者都不产生 `retry`。`recovery` 与旧恢复字段
-不兼容（破坏性契约变更）：只认识旧字段的客户端不会报错，只会静默丢失恢复提示，必须
-整组升级。
+的收尾未完成）带 `cause`。`diagnose` 的工具结果不带 `recovery`。`notify` 是会话无关工具、
+`app` 的 `find`/`list` 查询与 `shell` 都不产生 `retry`。`recovery` 与旧恢复字段不兼容
+（破坏性契约变更）：只认识旧字段的客户端不会报错，只会静默丢失恢复提示，必须整组升级。
 
 HTTP 状态映射（`protocol.Status`）：
 
@@ -114,10 +115,10 @@ HTTP 状态映射（`protocol.Status`）：
 | --- | --- |
 | 200 | 成功；含 `end`/`status` 的同帧 `cleanup=pending`/`unconfirmed`（退休收尾事实不是 HTTP 错误） |
 | 401 | `unauthorized` |
-| 409 | `contract_mismatch`、`device_busy`、`session_*`、`reference_*`、`operation_*`、`observation_*`、`node_not_found`、`node_disabled`、`stale_screen`、`target_changed`、`foreground_changed`、`foreground_unknown`、`control_revoked`、`request_closed`、`control_unavailable`、`stop_unavailable`、`mode_not_selected`、`device_locked`、`device_not_interactive`、`recovering`、`no_ready_observation`、`display_unavailable`、`text_target_uncertain`、`text_result_uncertain`、`control_ui_on_virtual_display`、`app_not_found`、`application_moved`、`task_focus_unavailable`、`task_remove_unconfirmed`、`content_unavailable`、`inspection_too_large`、`root_unavailable` |
-| 422 | `invalid_request`、`invalid_coordinates`、`ambiguous_point`、`unsupported_key`、`unsupported_node_action`、`text_too_long`、`reference_invalid` |
+| 409 | `contract_mismatch`、`device_busy`、`session_*`、`reference_has_no_session`、`operation_*`、`observation_*`、`node_not_found`、`node_disabled`、`stale_screen`、`target_changed`、`foreground_changed`、`foreground_unknown`、`control_revoked`、`request_closed`、`control_unavailable`、`stop_unavailable`、`mode_not_selected`、`device_locked`、`device_not_interactive`、`recovering`、`no_ready_observation`、`display_unavailable`、`text_target_uncertain`、`text_result_uncertain`、`control_ui_on_virtual_display`、`app_not_found`、`application_moved`、`task_focus_unavailable`、`task_remove_unconfirmed`、`content_unavailable`、`inspection_too_large`、`root_unavailable`、`window_action_not_supported_on_primary_display`、`task_not_found`、`task_not_tracked`、`task_target_ambiguous`、`task_root_shared`、`task_move_unconfirmed`、`close_refused_borrowed`、`kill_refused_not_owned`、`kill_refused_task_elsewhere`、`kill_refused_foreground`、`kill_refused_playback`、`kill_refused_process_shared`、`kill_unconfirmed`、`app_capacity_exceeded`、`task_lifecycle_busy` |
+| 422 | `invalid_request`、`invalid_coordinates`、`ambiguous_point`、`unsupported_key`、`unsupported_node_action`、`text_too_long`、`reference_invalid`；`app` 的未知 kind、分支外成员、`target` 形状错误与显式 `null` 也归入 `invalid_request` |
 | 503 | `device_unavailable`、`display_create_failed`、`hierarchy_unavailable`、`tree_too_large`、`app_launch_failed`、`app_list_unavailable`、`shell_start_failed`、`delivery_unavailable`；以及 `observation.status=failed` 或没有新 O 的 `partial` 结果 |
-| 504 | `action_result_uncertain`（输入已派发但无法确认完成）、`app_launch_unconfirmed`、`shell_result_unconfirmed` |
+| 504 | `action_result_uncertain`（输入已派发但无法确认完成）、`app_launch_unconfirmed`、`shell_result_unconfirmed`；`app` 的 `app_launch_unconfirmed` 仅用于 `open` |
 | 500 | `internal_error`（接入层自身失败）；工具结果中的 500 会被改写为 409 |
 
 接入层错误（认证、方法、契约、JSON）直接返回 `{"error":{…}}`，不带 `operation_id`。只有
@@ -269,6 +270,10 @@ HTTP 状态映射（`protocol.Status`）：
   `409 reference_has_no_session`。
   `observe` 不要求 O 仍为 `ready`（`claimed`/`expired` 也可再次观察），但只有
   `ready` 的 full 候选会被确认为基线。
+
+`observe({reference:"P9"})` 的 `reference` 引用本 Agent 已有的 P9 原操作，不是本次 `observe`
+的请求体 P。本次 `observe` 仍是一次新调用，响应 `operation_id` 是本次新分配或由请求头预分配
+的 P；把 P9 当作本次调用的 P 只会得到重复 P 的原操作视图，不会执行新采集。
 
 成功响应只含操作号与新观察：
 
@@ -434,7 +439,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 
 | 字段 | 必填 | 类型 | 说明 |
 | --- | --- | --- | --- |
-| `contract_version` | 是 | 字符串 | 必须为 `"8"`，否则 `409 contract_mismatch` |
+| `contract_version` | 是 | 字符串 | 必须为 `"9"`，否则 `409 contract_mismatch` |
 | `app_instance_id` | 是 | UUID | App 进程实例；变化会撤销旧归属 |
 | `app_version` | 是 | 字符串 | 仅发行标识 |
 | `selected_mode` | 是 | `virtual`/`primary` | 用户选择 |
@@ -445,8 +450,8 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 | `background_running` | 是 | 布尔 | 前台服务运行中 |
 | `power_interactive` | 否 | 布尔或 `null` | 未知为 `null`/省略 |
 | `keyguard_locked` | 否 | 布尔或 `null` | 未知为 `null`/省略 |
-| `primary_display` | 否 | 对象或 `null` | 出现时 `display_id` 必须为 0，宽/高/密度 >0，旋转 0–3，`generation` 非空 |
-| `display` | 否 | 对象或 `null` | 自有虚拟屏；出现时 `display_id` >0，其余同上 |
+| `primary_display` | 否 | 对象或 `null` | 出现时 `display_id` 必须为 0，宽/高/密度 >0，旋转 0–3，`generation` 非空；可选 `ime_hide`（布尔） |
+| `display` | 否 | 对象或 `null` | 自有虚拟屏；出现时 `display_id` >0，其余同上；可选 `ime_hide`（布尔） |
 | `command_results` | 否 | 数组 | 省略/null 按 `[]`；元素 `{command_id(1–64), ok(bool), error_code(string 或 null, ≤64)}` |
 | `stop_pending` | 否 | 对象或 `null` | `{seq(>0), reason(≤64)}`，表示未被服务受理的本地停止 |
 | `message_acks` | 否 | 数组 | 省略/null 按 `[]`；App 已保存的消息 ID，至多 32 个；ID 为 `M` + 正整数；未知/已释放 ID 忽略 |
@@ -461,7 +466,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 
 ```json
 {
-  "contract_version": "8",
+  "contract_version": "9",
   "service_instance_id": "…",
   "control": {
     "revision": 42,
@@ -479,7 +484,8 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 
 - `availability.state`：`ready`/`recovering`/`blocked`；非 `ready` 时可带 `reason`；
 - `session`：`null` 或 `{origin, agent?, mode, state, started_at?, expires_at?, ended_at?, reason?}`；
-- `work`：`null` 或 `{operation_id, kind, phase}`；`kind` 为 `start`/`observe`/`act`/`apps`/`open_app`/`shell`；
+- `work`：`null` 或 `{operation_id, kind, phase}`；`kind` 为 `start`/`observe`/`act`/`app`/`shell`；
+  `kind=app` 时另带可选 `app_kind`，取 `find`/`list`/`open`/`claim`/`handoff`/`close`/`kill`；
 - `cleanup`：`null` 或 `{state, execution?, tasks?, recents?, display?}`；只与同一
   `control.session` 同属一个原会话；
 - `commands`：数组，每拍至多一条显示命令；`create_display` 仅在有 `starting` 会话且显示助手
@@ -495,7 +501,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 ## 9. `POST /v1/control/stop`
 
 ```json
-{"contract_version":"8","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
+{"contract_version":"9","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
 ```
 
 - **不校验普通契约**：`contract_version` 字段存在但不参与准入，服务与 App 契约版本
@@ -505,7 +511,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 - 重复或过期 `seq` 不报错，只返回 `state=duplicate`。
 
 ```json
-{"contract_version":"8","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
+{"contract_version":"9","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
 ```
 
 `accepted` 恒为 `true`；`state` 为 `revoked`（绑定时撤销了活动会话）、`recorded`
@@ -518,7 +524,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 无认证，只表示进程可应答，不代表设备就绪或资源干净：
 
 ```json
-{"status":"ok","contract_version":"8","service_instance_id":"…","release_version":"…"}
+{"status":"ok","contract_version":"9","service_instance_id":"…","release_version":"…"}
 ```
 
 ## 11. 数据对象
@@ -617,7 +623,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 
 ## 12. 发现、应用、只读、通知与受管执行工具
 
-本节列出 `inspect`、`keepalive`、`diagnose`、`apps`、`open_app`、`notify`、`shell` 的请求与结果。
+本节列出 `inspect`、`keepalive`、`diagnose`、`app`、`notify`、`shell` 的请求与结果。
 
 ### `POST /api/inspect`
 
@@ -686,47 +692,114 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 未知或他人引用是正常查询事实：`coverage=record_unavailable`，不返回顶层错误。
 指定 P 且原操作仍可解析时，`diagnosis` 另带 `operation_id` 与已知 `outcome`。
 
-### `POST /api/apps`
+### `POST /api/app`
 
-```json
-{}
-{"query":"设置"}
-```
+`app` 是统一的应用生命周期入口。根对象必须带 `kind`，七个取值大小写敏感：
+`find`、`list`、`open`、`claim`、`handoff`、`close`、`kill`。每个 kind 都是互斥分支，只接受
+下表列出的成员；请求体上限 8 KiB。`Result` 只使用 `app` 成员承载本工具的查询或变更结果。
 
-`query` 对本地化应用名或包名做字面 Unicode 折叠子串匹配，不是正则或选择器。成功返回：
+| kind | 必填（除 kind） | 可选与默认 | 不接受 |
+| --- | --- | --- | --- |
+| `find` | 无 | `query`：省略为全部；≤256 个 Unicode 码点；按本地化名称或包名做字面 Unicode 折叠子串匹配 | `reference`、`observation_id`、`target`、`app`、`scope` |
+| `list` | `reference`：当前 ready O，或能解析到活动原会话的 P | `scope=session`（默认）或 `primary`；`app`：明确包名过滤 | `observation_id`、`target`、`query` |
+| `open` | `observation_id`：当前 ready O；`app`：明确包名 | 无 | `reference`、`scope`、`target`、`query` |
+| `claim` | `observation_id`；`target` | 无 | `reference`、`scope`、`app`、`query` |
+| `handoff` | `observation_id`；`target` | `restore_foreground=false` | `reference`、`scope`、`app`、`query` |
+| `close` | `observation_id`；`target` | `allow_borrowed=false` | `reference`、`scope`、`app`、`query` |
+| `kill` | `observation_id`；`target={task_id}` | `allow_stop_playback=false` | 包名 `target`、`reference`、`scope`、`app`、`query` |
 
-```json
-{"operation_id":"P7","apps":{"items":[{"name":"设置","package":"com.android.settings"}],
-  "total":1,"truncated":false,"captured_at":"…"}}
-```
+`target` 为 `{"task_id": 正整数}` 或 `{"app": 包名}`，恰好一种；`task_id` 与 `app` 互斥，
+两者都不出现、`task_id` 不是正整数或 `app` 不是明确包名都按 `422 invalid_request` 拒绝。
+`kill` 只接受 `task_id`；包名先由 `list` 解析。`target` 是选择器，不单独授予权限。
 
-`items` 总是数组；`total` 是预算前匹配数；`truncated` 表示只返回了完整条目前缀；
-`captured_at` 是设备清单的实际读取时间（缓存命中时保持原时间）。`apps` 不返回
-`outcome`，不占 UI 输入权、不续租。设备清单读取占普通工作位置；另一项工作占用时，
-只有仍可信的新鲜缓存可直接返回，否则 `409 device_busy`。无会话时可调用。
-常见失败：`503 app_list_unavailable`、`409 control_revoked`、`409 device_busy`。
+`find`/`list` 是查询：不消耗当前 ready O、不续租、不改变阅读基线，成功与失败都不带
+`outcome`。`open`/`claim`/`handoff`/`close`/`kill` 消费当前 ready O；成功后返回原会话屏的一次
+full 无图观察。主屏会话只允许 `find`/`list`/`open`；`claim`/`handoff`/`close`/`kill` 在消费 O
+之前以 `409 window_action_not_supported_on_primary_display` 拒绝。`list` 的 `reference` 必须
+是当前 ready O，或是指向本 Agent 活动原会话的 P；`scope=primary` 在主屏会话与 `session`
+指向同一主屏，不形成第二种授权。`find` 无会话也可调用；新鲜可信的应用清单缓存可直接返回，否则读取占查询工作
+位置，另一项工作占用时返回 `409 device_busy`（同一 Agent 带 `blocking_operation_id`）。
+`find`/`list` 各按 32 KiB 完整条目前缀返回，`total` 为预算前数量，`truncated` 表示只返回了
+完整前缀；无法完整解析任务清单时不把截断当作读取成功。
 
-### `POST /api/open_app`
+`app` 结果对象以 `kind` 判别，只带本次已经证明的成员：
 
-```json
-{"observation_id":"O4","app":"com.android.settings"}
-```
+- `find`：`items`（每项 `name`/`package`）、`total`（预算前匹配数）、`truncated`、
+  `captured_at`；`items` 是预算内的完整条目前缀。
+- `list`：`display_id`（会话虚屏或主屏 `0`）、`items`（每项 `task_id`/`package`/`ownership`，
+  有原归属记录时带 `origin_display`）、`total`、`truncated`、`captured_at`、`foreground`
+  （沿用 `present`/`none`/`unknown`）。任务可读但前台未知时仍返回集合与 `foreground.unknown`。
+- `open`：`package`、`task_id`、`display_id`、`ownership`、`reused`、`state_preserved`。
+- `claim`：`package`、`task_id`、`source_display_id`、`display_id`、`ownership=borrowed`、
+  `state_preserved`。
+- `handoff`：`package`、`task_id`、`source_display_id`、`display_id`、`ownership=shared`、
+  `state_preserved`、`foreground_restore`（`not_requested`/`confirmed`/`unconfirmed`）。
+- `close`：`display_id`、`tasks`（每项 `task_id`、`outcome`，适用时 `recents_cleaned`，
+  项级拒绝或未确认可带 `error`）、`complete`。
+- `kill`：`package`、`source_task_id`、`display_id`、`target_pids`、`killed_pids`；后验清单
+  可读时 `remaining_pids`；`restarted` 为布尔或 `null`，表示后验出现了原集合外的新实例；
+  三个 PID 数组按数值排序。
 
-`app` 只接受明确包名。它和 `act` 一样消费当前 `ready` O；静态/只读拒绝（包名不存在、
-控制界面出现在虚拟屏）发生在认领之前，不消费 O。
+`state_preserved` 与 `restarted` 是声明 nullable 的标量：状态未知或比较证据不足时保留显式
+`null`，不能填写 `false`；已知没有变化为 `true`，已知变化为 `false`。`open` 新建时
+`state_preserved=false`；复用或 `claim`/`handoff` 的同一 task 与顶部 Activity 可比较且未变时
+为 `true`，已知变化为 `false`，证据不足为 `null`。`open` 的成功结果必须出现 `reused` 与
+`state_preserved`（后者值可为 `null`）；`claim`/`handoff` 的成功结果必须出现
+`state_preserved`（值可为 `null`）；`kill` 的成功结果
+必须出现 `restarted`（值可为 `null`）。
+`state_preserved` 是尽力延续证据，不保证像素、滚动、网络数据、输入法或未保存表单不变。
+`close.tasks[*].recents_cleaned` 适用但未确认时为 `null`，不适用时省略。读取失败的集合不
+伪造 `items: []` 或 `total: 0`：首次读取失败时省略 `items`/`total`/`truncated`；`list` 的
+任务清单读取失败时连同 `foreground` 一并省略，只有任务集合完整而前台独立失败才返回
+`foreground.unknown`。`close` 的整体前置拒绝只保留已知 `display_id` 并省略 `tasks`/`complete`；
+`kill` 的前置拒绝不伪造 `killed_pids`，只有进入执行阶段才出现该数组。其他未知标量与不适用
+字段省略而不是填 `0`；`display_id=0` 是合法的主屏值。
 
-- 虚拟屏：优先复用目标屏上该包已有的 live 窗口（`reused=true`），否则在目标屏新建窗口；
-  不搬走/认领用户主屏任务；新语境后置一次 full 观察；
-- 主屏：按普通同屏应用打开，不登记/不关闭用户任务；
-- 返回 `app`（`package`、`task_id`、`display_id`、`reused`、`state_preserved`）与
-  `observation`；只有已证明的任务才返回 `app`；
-- 常见失败：`409 app_not_found`（`recovery` 为 `entry=user`、`reference=none`、
-  `input_state=effective`）、`503 app_launch_failed`、
-  `504 app_launch_unconfirmed`、`409 application_moved`、`409 task_focus_unavailable`。
-  派发后无法证明任务归属为 `uncertain`，不重放。
+`open` 在虚拟会话中优先复用目标屏上该包的 live 窗口（前台 task 命中优先，否则 task ID
+最小），否则在目标屏新建并登记为 `owned`；主屏打开只按同屏应用处理，返回
+`ownership=shared`，不登记用户任务。`claim` 把主屏 `0` 上的单个精确 live 任务移入本会话
+虚屏并登记 `borrowed`，`source_display_id=0`。`handoff` 把本会话虚屏的单个任务移回主屏
+`0`，登记 `shared`；默认不
+恢复前台，`restore_foreground=true` 时只做一次有界尽力恢复。虚拟屏 `open`、`claim`、
+`handoff` 与 `kill` 拒绝控制 App 包，控制界面不能作为虚拟屏任务目标。
 
-虚拟会话收尾按精确任务 id 移除目标屏任务并核验 `dumpsys activity recents`，再关闭显示；
-`cleanup.tasks`/`cleanup.recents` 分别表达。主屏收尾不关闭用户应用。
+`close` 在消费 O 前冻结最多 16 个本会话管理的 live 目标；零个 live 目标以 `task_not_found`
+拒绝，超过 16 个以 `app_capacity_exceeded` 整体拒绝而不截断。`allow_borrowed=false` 时目标中
+包含借入窗口即整体拒绝。每项独立给出 `outcome` 与 `recents_cleaned`；`complete=true` 当且仅当
+全部项 `executed` 且 `recents_cleaned=true`，仅 recents 未确认不把顶层 outcome 改成失败。
+
+`kill` 只接受本会话 live `owned` 任务，且该包在本屏没有其他窗口、在其他显示屏没有 live
+task；应用在本屏前台、前台未知、前台服务或播放状态未知或正在播放（未显式
+`allow_stop_playback=true`）、或 root 不可用时拒绝。派发前按 boot、PID、start ticks 复核原
+进程实例，对每个原实例发送一次精确 `kill -9`；只读后验给出已结束、仍存在与新实例事实，
+不 force-stop、不追杀重启后的新进程。原目标进程集合已确认空时，`target_pids=[]`、
+`killed_pids=[]`、`remaining_pids=[]`、`restarted=false`，无需发信号。
+
+`open` 的常见失败包括 `app_not_found`、`app_launch_failed`、`app_launch_unconfirmed`、
+`application_moved`、`task_focus_unavailable`；其中 `app_not_found` 的 `recovery` 为
+`entry=user`、`reference=none`、`input_state=effective`。`claim`/`handoff`/`close`/`kill` 的
+目标选择失败按 `task_not_found`、`task_not_tracked`、`task_target_ambiguous`、
+`close_refused_borrowed` 或对应的 `kill_refused_*` 返回。所有拒绝都保留已证明的身份与
+作用屏，不伪造已派发事实。
+
+每次成功变更后服务发布原会话屏的一次 full 无图观察；后观察失败保留主 outcome 与已证明字段，
+`observation.status=failed` 与 `error` 表达采集失败。STOP 撤权后的迟到结果不发布新观察。
+
+`app` 的七种 kind 在 MCP 适配器都预分配 P。HTTP 每次新调用同样分配自己的 P；`reference`
+只用于定位既有会话，不是本次调用的 P。`find` 使用 detached P，不因调用时恰有全局活动会话
+而绑定；`list` 的 P 绑定 `reference` 解析到的原会话。查询成功与失败都不带 `outcome`，
+`status(P)`/重复 P 只返回操作摘要（`app.kind`）而不重新读取或补回集合；查询取消的摘要为
+`operation_state=finished`、`phase=query_cancelled`、无 outcome/error/集合，只表示该查询
+已关闭，需要集合的调用方以新 P 重做 `find`/`list`。
+
+`app` 业务错误的 HTTP 状态：`window_action_not_supported_on_primary_display`、
+`task_not_found`、`task_not_tracked`、`task_target_ambiguous`（`details.task_ids`）、
+`task_root_shared`、`task_move_unconfirmed`、`close_refused_borrowed`、`kill_refused_not_owned`、
+`kill_refused_task_elsewhere`、`kill_refused_foreground`、`kill_refused_playback`、
+`kill_refused_process_shared`、`kill_unconfirmed`、`app_capacity_exceeded`（`details.limit`）与
+`task_lifecycle_busy` 均为 `409`；请求形状错误为 `422 invalid_request`；应用清单、任务或进程
+读取失败为 `503`（`app_list_unavailable`/`device_unavailable`）；`open` 的启动未确认为
+`504 app_launch_unconfirmed`。
 
 ### `POST /api/notify`
 
@@ -795,7 +868,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 | `act`：`tap`、`long_press`、`swipe`、`key`、`text` | 定义于 §6；其他动作类型不被接受 |
 | `observe`/`act` 的 `image=true` | 见 §5 图片；图片是本次观察的附加材料，不是单独工具 |
 | 截图、图片块 | HTTP/SDK 用同一 `observation.image` 元数据与 `base64` 载体；MCP `ImageContent` 承载图片字节 |
-| `open_app`、`apps`、`keepalive`、`inspect`、`notify`、`diagnose` | 定义于 §12 |
+| `app`、`keepalive`、`inspect`、`notify`、`diagnose` | 定义于 §12 |
 | `shell` | 定义于 §12 |
 | MCP stdio / Streamable HTTP、Go client | 由独立入口提供，见 [MCP 入口](mcp.md) 与 [Go 客户端](client.md)；不改变本页 `/api/*` 契约 |
 | `/v1/control/sync`、`/v1/control/stop`、`create_display`/`close_display`/`cancel_create` | 定义于 [控制端协议](control-protocol.md) |

@@ -8,255 +8,322 @@ import (
 	"github.com/malyjacob/mobile-use-vnext/internal/protocol"
 )
 
-// Owned window registry values. A virtual session owns every task on its own
-// display; primary sessions never register user windows.
+// Owned window registry values. A virtual session owns the windows it created
+// and the primary tasks it explicitly claimed. Everything else is shared.
 const (
-	TaskOwned  = "owned"
-	TaskShared = "shared"
+	TaskOwned    = "owned"
+	TaskBorrowed = "borrowed"
+	TaskShared   = "shared"
 )
 
-// taskEntry is one session-owned window. The registry is a cache: every
+// taskEntry is one session-managed window. The registry is a cache: every
 // decision reconciles it against a fresh task read by task id.
 type taskEntry struct {
 	TaskID     int
+	RootID     int
 	Package    string
 	DisplayID  int
 	Generation string
 	Ownership  string
-	Proven     bool
-	CreatedAt  time.Time
+	// OriginDisplay is the original-ownership display of a borrowed task.
+	OriginDisplay *int
+	Proven        bool
+	CreatedAt     time.Time
 }
 
-// OpenApp starts or reuses one application window on the session display. It
-// consumes the same current ready observation as act and returns one fresh
-// full observation.
-func (e *Engine) OpenApp(ctx context.Context, agent, p string, req *protocol.OpenAppRequest) (finalResult *protocol.Result, finalErr *protocol.APIError) {
-	op, duplicate, apiErr := e.registerOperation(p, agent, "open_app")
-	if apiErr != nil {
-		return nil, apiErr
-	}
-	if duplicate != nil {
-		return duplicate, nil
-	}
-	defer func() { e.applyFrozenResult(op, &finalResult) }()
-	e.setOperationReference(op, protocol.RecoveryReferenceO)
-	if req == nil || req.App == "" {
-		return e.finishWithError(op, "admission", protocol.Invalid("open_app 需要 app 包名")), nil
-	}
+// appOpen starts or reuses one application window on the session display. It
+// consumes the same current ready observation as act and returns one fresh full
+// observation. A primary open never registers a user task.
+func (e *Engine) appOpen(ctx context.Context, op *operationState, req *protocol.AppRequest) (*protocol.Result, *protocol.APIError) {
 	now := time.Now()
 	e.mu.Lock()
-	obs, session, staticErr := e.openAppStaticCheckLocked(agent, req.ObservationID, now)
+	_, session, staticErr := e.appStaticCheckLocked(op.Agent, req.ObservationID, now)
 	if staticErr == nil && session.Mode == "virtual" && req.App == e.cfg.ControlPackage {
 		staticErr = protocol.NewError(409, protocol.CodeControlUI,
 			"控制界面不能在虚拟屏上打开")
 	}
 	e.mu.Unlock()
 	if staticErr != nil {
-		return e.finishWithError(op, "admission", staticErr), nil
+		return e.finishAppError(op, "admission", appKindOnly(req.Kind), staticErr)
 	}
 
-	work, busy := e.acquireWork(op, WorkOpenApp)
+	work, busy := e.acquireWork(op, WorkAppAction)
 	if busy != nil {
-		return e.finishWithError(op, "admission", busy), nil
+		return e.finishAppError(op, "admission", appKindOnly(req.Kind), busy)
 	}
 	defer e.releaseWork(work)
-	_ = obs
 
-	// Read-only evidence is gathered before the claim so an unknown package or
-	// an unreadable task list does not consume the observation.
-	component, found, resolveErr := e.dev.ResolveLauncher(work.Ctx, req.App)
-	if resolveErr != nil {
-		if e.detachedWorkRevoked(work) {
-			return e.finishWithError(op, "admission",
-				protocol.NewError(409, protocol.CodeStopped, "应用启动已撤销")), nil
-		}
-		return e.finishWithError(op, "admission",
-			protocol.NewError(503, protocol.CodeDeviceUnavailable, "无法确认应用启动入口")), nil
-	}
-	if !found {
-		return e.finishWithError(op, "admission",
-			protocol.NewError(409, protocol.CodeAppNotFound, "手机上找不到可启动的该应用")), nil
-	}
+	// Reuse is decided from the live task list before any launcher resolution:
+	// an unrelated broken launcher entry must not block an existing window.
 	preTasks, tasksKnown := e.dev.TasksOnDisplay(work.Ctx, session.Display.ID)
 	if !tasksKnown {
-		return e.finishWithError(op, "admission",
-			protocol.NewError(503, protocol.CodeDeviceUnavailable, "无法读取目标屏幕任务")), nil
+		return e.finishAppError(op, "admission",
+			&protocol.AppView{Kind: req.Kind, Package: req.App},
+			protocol.NewError(503, protocol.CodeDeviceUnavailable, "无法读取目标屏幕任务"))
+	}
+	foreground, _ := e.dev.Foreground(work.Ctx, session.Display.ID)
+	reuse := selectReusableTask(preTasks, req.App, session.Display.ID, foreground)
+
+	component := ""
+	if reuse == nil {
+		resolved, found, resolveErr := e.dev.ResolveLauncher(work.Ctx, req.App)
+		if resolveErr != nil {
+			if e.detachedWorkRevoked(work) {
+				return e.finishAppError(op, "admission",
+					&protocol.AppView{Kind: req.Kind, Package: req.App},
+					protocol.NewError(409, protocol.CodeStopped, "应用启动已撤销"))
+			}
+			return e.finishAppError(op, "admission",
+				&protocol.AppView{Kind: req.Kind, Package: req.App},
+				protocol.NewError(503, protocol.CodeDeviceUnavailable, "无法确认应用启动入口"))
+		}
+		if !found {
+			return e.finishAppError(op, "admission",
+				&protocol.AppView{Kind: req.Kind, Package: req.App},
+				protocol.NewError(409, protocol.CodeAppNotFound, "手机上找不到可启动的该应用"))
+		}
+		component = resolved
+	}
+
+	// Reserve the bounded ownership record before the observation is consumed.
+	// Reusing an already registered window grows nothing.
+	if session.Mode == "virtual" && (reuse == nil || e.isNewSessionTask(session, reuse.TaskID)) {
+		e.mu.Lock()
+		refusal := e.appCapacityRefusalLocked(&LedgerTask{
+			TaskID: 2147483647, Package: req.App, DisplayID: session.Display.ID,
+			RootTaskID: 2147483647, Ownership: TaskOwned, Proven: true,
+		}, nil)
+		e.mu.Unlock()
+		if refusal != nil {
+			return e.finishAppError(op, "admission",
+				&protocol.AppView{Kind: req.Kind, Package: req.App}, refusal)
+		}
 	}
 
 	e.mu.Lock()
-	if e.work != work || work.Revoked {
-		e.mu.Unlock()
-		return e.finishWithError(op, "admission",
-			protocol.NewError(409, protocol.CodeStopped, "应用启动已撤销")), nil
-	}
-	claimErr := e.claimObservationLocked(op, agent, work, e.observations[req.ObservationID],
+	claimErr := e.claimObservationLocked(op, op.Agent, work, e.observations[req.ObservationID],
 		e.session, time.Now())
 	e.mu.Unlock()
 	if claimErr != nil {
-		return e.finishWithError(op, "claim", claimErr), nil
+		return e.finishAppError(op, "claim",
+			&protocol.AppView{Kind: req.Kind, Package: req.App}, claimErr)
 	}
 
 	probeCtx, cancel := context.WithTimeout(work.Ctx, 5*time.Second)
 	displayState, probeErr := e.dev.ProbeDisplay(probeCtx, session.Display.ID)
 	cancel()
 	if probeErr != nil || !displayState.Exists {
-		return e.finishWithError(op, "revalidate",
-			protocol.NewError(503, protocol.CodeDisplayUnavailable, "目标屏幕不可用")), nil
+		return e.finishAppError(op, "revalidate",
+			&protocol.AppView{Kind: req.Kind, Package: req.App},
+			protocol.NewError(503, protocol.CodeDisplayUnavailable, "目标屏幕不可用"))
 	}
 	if e.detachedWorkRevoked(work) {
-		return e.finishWithError(op, "revalidate",
-			protocol.NewError(409, protocol.CodeStopped, "应用启动已撤销")), nil
+		return e.finishAppError(op, "revalidate",
+			&protocol.AppView{Kind: req.Kind, Package: req.App},
+			protocol.NewError(409, protocol.CodeStopped, "应用启动已撤销"))
 	}
 	if session.Mode == "primary" {
-		return e.openAppPrimary(work, op, session, req.App, component, preTasks)
+		return e.finishOpenPrimary(work, op, session, req.App, component, reuse, preTasks)
 	}
-	return e.openAppVirtual(work, op, session, req.App, component, preTasks)
+	return e.finishOpenVirtual(work, op, session, req.App, component, reuse, preTasks)
 }
 
-// openAppStaticCheckLocked validates the session and the ready observation
-// without claiming or dispatching anything.
-func (e *Engine) openAppStaticCheckLocked(agent, observationID string, now time.Time) (*observationState, *sessionState, *protocol.APIError) {
-	session := e.session
-	if session == nil || session.State != SessionActive {
-		return nil, nil, protocol.NewError(409, protocol.CodeSessionEnded, "原会话已结束")
-	}
-	if !sessionBeforeDeadline(session, now) {
-		return nil, nil, protocol.NewError(409, protocol.CodeSessionExpired, "原会话已过期")
-	}
-	obs := e.observations[observationID]
-	if obs == nil || obs.Agent != agent || obs.SessionEpoch != session.Epoch {
-		return nil, nil, protocol.NewError(409, protocol.CodeObservationGone, "原观察不可用")
-	}
-	if e.current != obs {
-		return nil, nil, protocol.NewError(409, protocol.CodeObservationRetired, "观察已被替换")
-	}
-	switch obs.Status {
-	case ObservationReady:
-	case ObservationClaimed:
-		return nil, nil, protocol.NewError(409, protocol.CodeObservationClaimed, "观察已被消费")
-	case ObservationExpired:
-		return nil, nil, protocol.NewError(409, protocol.CodeObservationExpired, "观察已过期")
-	default:
-		return nil, nil, protocol.NewError(409, protocol.CodeObservationRetired, "观察已退役")
-	}
-	if now.After(obs.ActionableUntil) {
-		obs.Status = ObservationExpired
-		return nil, nil, protocol.NewError(409, protocol.CodeObservationExpired, "观察已过期")
-	}
-	return obs, session, nil
+// isNewSessionTask reports whether this task id is not yet in the registry.
+func (e *Engine) isNewSessionTask(session *sessionState, taskID int) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.sessionTaskLocked(e.session, taskID) == nil
 }
 
-// openAppVirtual reuses an owned live window or creates a new one on the
+// selectReusableTask chooses one existing window of the package on the display:
+// the frontmost window when the foreground names it, otherwise the lowest task
+// id. The rule is deterministic and never used for claim/handoff selection.
+func selectReusableTask(tasks []device.Task, app string, displayID int,
+	foreground device.Foreground) *device.Task {
+	var candidates []device.Task
+	for _, task := range tasks {
+		if task.Package == app && task.DisplayID == displayID && task.TaskID > 0 {
+			candidates = append(candidates, task)
+		}
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+	sortTasks(candidates)
+	if foreground.State == device.ForegroundPresent && foreground.TaskID != nil {
+		for i := range candidates {
+			if candidates[i].TaskID == *foreground.TaskID {
+				return &candidates[i]
+			}
+		}
+	}
+	return &candidates[0]
+}
+
+// finishOpenVirtual reuses an owned live window or creates a new one on the
 // session display. A reused window is focused and re-verified before it is
 // reported as owned.
-func (e *Engine) openAppVirtual(work *workState, op *operationState, session *sessionState,
-	app, component string, preTasks []device.Task) (*protocol.Result, *protocol.APIError) {
-	if task := reusableTask(preTasks, app, session.Display.ID); task != nil {
+func (e *Engine) finishOpenVirtual(work *workState, op *operationState, session *sessionState,
+	app, component string, reuse *device.Task, preTasks []device.Task) (*protocol.Result, *protocol.APIError) {
+	if reuse != nil {
 		if dispatchErr := e.beginUIDispatch(work, "focus"); dispatchErr != nil {
-			return e.finishWithError(op, "dispatch",
-				dispatchErr), nil
+			return e.finishAppError(op, "dispatch",
+				&protocol.AppView{
+					Kind: protocol.AppKindOpen, Package: app,
+					TaskID: appIntPtr(reuse.TaskID), DisplayID: appIntPtr(session.Display.ID),
+					Ownership: TaskOwned,
+				}, dispatchErr)
 		}
-		receipt, focusErr := e.dev.FocusTask(work.Ctx, task.TaskID)
+		receipt, focusErr := e.dev.FocusTask(work.Ctx, reuse.TaskID)
 		e.recordUIReceipt(work, receipt)
 		if receipt == device.DispatchNotDispatched {
-			return e.finishOpenAppNotDispatched(work, op), nil
+			return e.finishOpenNotDispatched(work, op, session, app, reuse.TaskID, true)
 		}
 		if focusErr != nil || receipt != device.DispatchTerminated {
 			e.markDispatchUnknown(work)
-			return e.finishOpenAppUncertain(op, protocol.CodeTaskFocus,
-				"已请求复用窗口，但无法确认置前", nil)
+			return e.finishAppUncertainWork(work, op, &protocol.AppView{
+				Kind: protocol.AppKindOpen, Package: app,
+				TaskID: appIntPtr(reuse.TaskID), DisplayID: appIntPtr(session.Display.ID),
+				Ownership: TaskOwned, Reused: appBoolPtr(true),
+				StatePreserved: nil, HasStatePreserved: true,
+			}, protocol.CodeTaskFocus, "已请求复用窗口，但无法确认置前", nil)
 		}
-		if !e.verifyForeground(work, session.Display.ID, app, task.TaskID) {
+		if !e.verifyForeground(work, session.Display.ID, app, reuse.TaskID) {
 			e.markDispatchUnknown(work)
-			return e.finishOpenAppUncertain(op, protocol.CodeTaskFocus,
-				"已请求复用窗口，但无法确认置前", nil)
+			return e.finishAppUncertainWork(work, op, &protocol.AppView{
+				Kind: protocol.AppKindOpen, Package: app,
+				TaskID: appIntPtr(reuse.TaskID), DisplayID: appIntPtr(session.Display.ID),
+				Ownership: TaskOwned, Reused: appBoolPtr(true),
+				StatePreserved: nil, HasStatePreserved: true,
+			}, protocol.CodeTaskFocus, "已请求复用窗口，但无法确认置前", nil)
 		}
 		e.clearDispatchUnknown(work)
-		e.rememberTask(session, *task, true)
-		return e.finishOpenAppSuccess(work, op, session, app, task.TaskID,
-			true, true, OutcomeExecuted, nil)
+		e.rememberTask(session, *reuse, true)
+		return e.finishAppExecuted(work, op, &protocol.AppView{
+			Kind: protocol.AppKindOpen, Package: app,
+			TaskID: appIntPtr(reuse.TaskID), DisplayID: appIntPtr(session.Display.ID),
+			Ownership: TaskOwned, Reused: appBoolPtr(true),
+			StatePreserved: e.reuseStatePreserved(work, session, reuse),
+			HasStatePreserved: true,
+		})
 	}
 
 	if dispatchErr := e.beginUIDispatch(work, "launch"); dispatchErr != nil {
-		return e.finishWithError(op, "dispatch",
-			dispatchErr), nil
+		return e.finishAppError(op, "dispatch",
+			&protocol.AppView{Kind: protocol.AppKindOpen, Package: app}, dispatchErr)
 	}
 	launch, launchErr := e.dev.LaunchApp(work.Ctx, session.Display.ID, component)
 	e.recordUIReceipt(work, launch.Receipt)
 	if launch.Receipt == device.DispatchNotDispatched {
-		return e.finishOpenAppNotDispatched(work, op), nil
+		return e.finishOpenNotDispatched(work, op, session, app, 0, false)
 	}
 	if launchErr != nil || launch.State == device.LaunchUnknown || launch.Receipt == device.DispatchUnknown {
 		e.markDispatchUnknown(work)
-		return e.finishOpenAppUncertain(op, protocol.CodeAppLaunchUnknown,
-			"已派发应用启动，但无法确认结果", nil)
+		return e.finishAppUncertainWork(work, op, &protocol.AppView{
+			Kind: protocol.AppKindOpen, Package: app, Reused: appBoolPtr(false),
+			StatePreserved: nil, HasStatePreserved: true,
+		}, protocol.CodeAppLaunchUnknown, "已派发应用启动，但无法确认结果", nil)
 	}
 	if launch.State == device.LaunchRejected || launch.State == device.LaunchNotStarted {
 		e.clearDispatchUnknown(work)
-		return e.finishWithError(op, "dispatch",
-			protocol.NewError(503, protocol.CodeAppLaunchFailed, "应用启动被设备拒绝")), nil
+		return e.finishAppError(op, "dispatch",
+			&protocol.AppView{Kind: protocol.AppKindOpen, Package: app},
+			protocol.NewError(503, protocol.CodeAppLaunchFailed, "应用启动被设备拒绝"))
 	}
 	task, moved, ok := e.verifyLaunchedTask(work, session, app, preTasks)
 	if !ok {
 		e.markDispatchUnknown(work)
-		return e.finishOpenAppUncertain(op, protocol.CodeAppLaunchUnknown,
-			"已派发应用启动，但无法确认任务归属", nil)
+		return e.finishAppUncertainWork(work, op, &protocol.AppView{
+			Kind: protocol.AppKindOpen, Package: app, Reused: appBoolPtr(false),
+			StatePreserved: nil, HasStatePreserved: true,
+		}, protocol.CodeAppLaunchUnknown, "已派发应用启动，但无法确认任务归属", nil)
 	}
 	if moved {
 		e.clearDispatchUnknown(work)
-		return e.finishOpenAppUncertain(op, protocol.CodeAppMoved,
-			"应用任务未落在目标屏幕", nil)
+		return e.finishAppUncertainWork(work, op, &protocol.AppView{
+			Kind: protocol.AppKindOpen, Package: app,
+			TaskID: appIntPtr(task.TaskID), Reused: appBoolPtr(false),
+			StatePreserved: nil, HasStatePreserved: true,
+		}, protocol.CodeAppMoved, "应用任务未落在目标屏幕", nil)
 	}
 	e.clearDispatchUnknown(work)
 	e.rememberTask(session, *task, true)
-	return e.finishOpenAppSuccess(work, op, session, app, task.TaskID,
-		false, false, OutcomeExecuted, nil)
+	return e.finishAppExecuted(work, op, &protocol.AppView{
+		Kind: protocol.AppKindOpen, Package: app,
+		TaskID: appIntPtr(task.TaskID), DisplayID: appIntPtr(session.Display.ID),
+		Ownership: TaskOwned, Reused: appBoolPtr(false),
+		StatePreserved: appBoolPtr(false), HasStatePreserved: true,
+	})
 }
 
-// openAppPrimary opens an ordinary same-screen window. It never registers or
-// removes a user task; the response only carries the correlated task fact.
-func (e *Engine) openAppPrimary(work *workState, op *operationState, session *sessionState,
-	app, component string, preTasks []device.Task) (*protocol.Result, *protocol.APIError) {
-	if task := reusableTask(preTasks, app, 0); task != nil {
+// finishOpenPrimary opens an ordinary same-screen window. It never registers or
+// removes a user task; the response only carries the verified task fact.
+func (e *Engine) finishOpenPrimary(work *workState, op *operationState, session *sessionState,
+	app, component string, reuse *device.Task, preTasks []device.Task) (*protocol.Result, *protocol.APIError) {
+	if reuse != nil {
 		if dispatchErr := e.beginUIDispatch(work, "focus"); dispatchErr != nil {
-			return e.finishWithError(op, "dispatch",
-				dispatchErr), nil
+			return e.finishAppError(op, "dispatch", &protocol.AppView{
+				Kind: protocol.AppKindOpen, Package: app,
+				TaskID: appIntPtr(reuse.TaskID), DisplayID: appIntPtr(0),
+				Ownership: TaskShared, Reused: appBoolPtr(true),
+			}, dispatchErr)
 		}
-		receipt, focusErr := e.dev.FocusTask(work.Ctx, task.TaskID)
+		receipt, focusErr := e.dev.FocusTask(work.Ctx, reuse.TaskID)
 		e.recordUIReceipt(work, receipt)
 		if receipt == device.DispatchNotDispatched {
-			return e.finishOpenAppNotDispatched(work, op), nil
+			return e.finishOpenNotDispatched(work, op, session, app, reuse.TaskID, true)
 		}
 		if focusErr != nil || receipt != device.DispatchTerminated {
 			e.markDispatchUnknown(work)
-			return e.finishOpenAppUncertain(op, protocol.CodeTaskFocus,
-				"已请求复用窗口，但无法确认置前", nil)
+			return e.finishAppUncertainWork(work, op, &protocol.AppView{
+				Kind: protocol.AppKindOpen, Package: app,
+				TaskID: appIntPtr(reuse.TaskID), DisplayID: appIntPtr(0),
+				Ownership: TaskShared, Reused: appBoolPtr(true),
+				StatePreserved: nil, HasStatePreserved: true,
+			}, protocol.CodeTaskFocus, "已请求复用窗口，但无法确认置前", nil)
 		}
-		if !e.verifyForeground(work, 0, app, task.TaskID) {
-			return e.finishOpenAppUncertain(op, protocol.CodeTaskFocus, "已请求复用窗口，但无法确认置前", nil)
+		if !e.verifyForeground(work, 0, app, reuse.TaskID) {
+			return e.finishAppUncertainWork(work, op, &protocol.AppView{
+				Kind: protocol.AppKindOpen, Package: app,
+				TaskID: appIntPtr(reuse.TaskID), DisplayID: appIntPtr(0),
+				Ownership: TaskShared, Reused: appBoolPtr(true),
+				StatePreserved: nil, HasStatePreserved: true,
+			}, protocol.CodeTaskFocus, "已请求复用窗口，但无法确认置前", nil)
 		}
 		e.clearDispatchUnknown(work)
-		return e.finishOpenAppSuccess(work, op, session, app, task.TaskID,
-			true, true, OutcomeExecuted, nil)
+		return e.finishAppExecuted(work, op, &protocol.AppView{
+			Kind: protocol.AppKindOpen, Package: app,
+			TaskID: appIntPtr(reuse.TaskID), DisplayID: appIntPtr(0),
+			Ownership: TaskShared, Reused: appBoolPtr(true),
+			StatePreserved: e.reuseStatePreserved(work, session, reuse),
+			HasStatePreserved: true,
+		})
 	}
 	if dispatchErr := e.beginUIDispatch(work, "launch"); dispatchErr != nil {
-		return e.finishWithError(op, "dispatch",
-			dispatchErr), nil
+		return e.finishAppError(op, "dispatch", &protocol.AppView{
+			Kind: protocol.AppKindOpen, Package: app, DisplayID: appIntPtr(0),
+			Ownership: TaskShared,
+		}, dispatchErr)
 	}
 	launch, launchErr := e.dev.LaunchApp(work.Ctx, 0, component)
 	e.recordUIReceipt(work, launch.Receipt)
 	if launch.Receipt == device.DispatchNotDispatched {
-		return e.finishOpenAppNotDispatched(work, op), nil
+		return e.finishOpenNotDispatched(work, op, session, app, 0, false)
 	}
 	if launchErr != nil || launch.State == device.LaunchUnknown || launch.Receipt == device.DispatchUnknown {
 		e.markDispatchUnknown(work)
-		return e.finishOpenAppUncertain(op, protocol.CodeAppLaunchUnknown,
-			"已派发应用启动，但无法确认结果", nil)
+		return e.finishAppUncertainWork(work, op, &protocol.AppView{
+			Kind: protocol.AppKindOpen, Package: app, DisplayID: appIntPtr(0),
+			Ownership: TaskShared, Reused: appBoolPtr(false),
+			StatePreserved: nil, HasStatePreserved: true,
+		}, protocol.CodeAppLaunchUnknown, "已派发应用启动，但无法确认结果", nil)
 	}
 	if launch.State == device.LaunchRejected || launch.State == device.LaunchNotStarted {
 		e.clearDispatchUnknown(work)
-		return e.finishWithError(op, "dispatch",
-			protocol.NewError(503, protocol.CodeAppLaunchFailed, "应用启动被设备拒绝")), nil
+		return e.finishAppError(op, "dispatch", &protocol.AppView{
+			Kind: protocol.AppKindOpen, Package: app, DisplayID: appIntPtr(0),
+			Ownership: TaskShared,
+		}, protocol.NewError(503, protocol.CodeAppLaunchFailed, "应用启动被设备拒绝"))
 	}
 	task, moved, ok := e.verifyLaunchedTask(work, session, app, preTasks)
 	if !ok || moved {
@@ -265,11 +332,63 @@ func (e *Engine) openAppPrimary(work *workState, op *operationState, session *se
 		if moved {
 			code = protocol.CodeAppMoved
 		}
-		return e.finishOpenAppUncertain(op, code, "已派发应用启动，但无法确认任务归属", nil)
+		return e.finishAppUncertainWork(work, op, &protocol.AppView{
+			Kind: protocol.AppKindOpen, Package: app, DisplayID: appIntPtr(0),
+			Ownership: TaskShared, Reused: appBoolPtr(false),
+			StatePreserved: nil, HasStatePreserved: true,
+		}, code, "已派发应用启动，但无法确认任务归属", nil)
 	}
 	e.clearDispatchUnknown(work)
-	return e.finishOpenAppSuccess(work, op, session, app, task.TaskID,
-		false, false, OutcomeExecuted, nil)
+	return e.finishAppExecuted(work, op, &protocol.AppView{
+		Kind: protocol.AppKindOpen, Package: app,
+		TaskID: appIntPtr(task.TaskID), DisplayID: appIntPtr(0),
+		Ownership: TaskShared, Reused: appBoolPtr(false),
+		StatePreserved: appBoolPtr(false), HasStatePreserved: true,
+	})
+}
+
+// reuseStatePreserved compares the same task's top activity before and after the
+// focus dispatch. A missing comparison stays null rather than true.
+func (e *Engine) reuseStatePreserved(work *workState, session *sessionState, before *device.Task) *bool {
+	if before == nil {
+		return nil
+	}
+	after, err := e.dev.TaskList(work.Ctx)
+	if err != nil {
+		return nil
+	}
+	for _, task := range after {
+		if task.TaskID != before.TaskID {
+			continue
+		}
+		if task.DisplayID != before.DisplayID || task.Component != before.Component {
+			return appBoolPtr(false)
+		}
+		return appBoolPtr(true)
+	}
+	return nil
+}
+
+func (e *Engine) finishOpenNotDispatched(work *workState, op *operationState, session *sessionState,
+	app string, taskID int, reused bool) (*protocol.Result, *protocol.APIError) {
+	code, message := protocol.CodeAppLaunchFailed, "应用启动或置前未派发"
+	if e.workRevoked(work) {
+		code, message = protocol.CodeStopped, "应用启动已撤销，未派发"
+	}
+	view := &protocol.AppView{Kind: protocol.AppKindOpen, Package: app}
+	if taskID > 0 {
+		view.TaskID = appIntPtr(taskID)
+	}
+	if session != nil {
+		display := session.Display.ID
+		view.DisplayID = &display
+		view.Ownership = TaskOwned
+		if session.Mode == "primary" {
+			view.Ownership = TaskShared
+		}
+		view.Reused = appBoolPtr(reused)
+	}
+	return e.finishAppError(op, "dispatch", view, protocol.NewError(protocol.Status(code), code, message))
 }
 
 func ledgerTasksOf(tasks []taskEntry) []LedgerTask {
@@ -281,10 +400,19 @@ func ledgerTasksOf(tasks []taskEntry) []LedgerTask {
 		if i >= 16 || task.TaskID <= 0 {
 			break
 		}
-		out = append(out, LedgerTask{
-			TaskID: task.TaskID, Package: task.Package,
-			DisplayID: task.DisplayID, Proven: task.Proven,
-		})
+		ownership := task.Ownership
+		if ownership == "" {
+			ownership = TaskOwned
+		}
+		entry := LedgerTask{
+			TaskID: task.TaskID, Package: task.Package, DisplayID: task.DisplayID,
+			RootTaskID: task.RootID, Ownership: ownership, Proven: task.Proven,
+			Generation: task.Generation,
+		}
+		if task.OriginDisplay != nil {
+			entry.OriginDisplay = appIntPtr(*task.OriginDisplay)
+		}
+		out = append(out, entry)
 	}
 	return out
 }
@@ -295,22 +423,25 @@ func tasksFromLedger(tasks []LedgerTask) []taskEntry {
 		if i >= 16 || task.TaskID <= 0 {
 			break
 		}
-		out = append(out, taskEntry{
-			TaskID: task.TaskID, Package: task.Package, DisplayID: task.DisplayID,
-			Ownership: TaskOwned, Proven: task.Proven,
-		})
+		ownership := task.Ownership
+		switch ownership {
+		case TaskOwned, TaskBorrowed, TaskShared:
+		default:
+			// A version 1-4 record carries no ownership and upgrades to owned.
+			// No package-name inference is ever applied.
+			ownership = TaskOwned
+		}
+		entry := taskEntry{
+			TaskID: task.TaskID, RootID: task.RootTaskID, Package: task.Package,
+			DisplayID: task.DisplayID, Generation: task.Generation,
+			Ownership: ownership, Proven: task.Proven,
+		}
+		if task.OriginDisplay != nil {
+			entry.OriginDisplay = appIntPtr(*task.OriginDisplay)
+		}
+		out = append(out, entry)
 	}
 	return out
-}
-
-// reusableTask returns one live pre-task for the package on the display.
-func reusableTask(tasks []device.Task, app string, displayID int) *device.Task {
-	for i := range tasks {
-		if tasks[i].Package == app && tasks[i].DisplayID == displayID && tasks[i].TaskID > 0 {
-			return &tasks[i]
-		}
-	}
-	return nil
 }
 
 // verifyForeground polls the target display until the expected task or package
@@ -390,7 +521,8 @@ func (e *Engine) verifyLaunchedTask(work *workState, session *sessionState,
 	return nil, false, false
 }
 
-// rememberTask records one proven owned window on the virtual session.
+// rememberTask records one proven window on the virtual session. A task that a
+// transfer record still protects is never re-adopted as owned.
 func (e *Engine) rememberTask(session *sessionState, task device.Task, proven bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -400,81 +532,25 @@ func (e *Engine) rememberTask(session *sessionState, task device.Task, proven bo
 	for i := range e.session.Tasks {
 		if e.session.Tasks[i].TaskID == task.TaskID {
 			e.session.Tasks[i].DisplayID = task.DisplayID
+			e.session.Tasks[i].RootID = task.RootID
+			if e.session.Tasks[i].Ownership == TaskShared {
+				// A handed-off task never becomes owned again.
+				return
+			}
 			e.session.Tasks[i].Proven = e.session.Tasks[i].Proven || proven
 			return
 		}
+	}
+	if e.transferProtectsLocked(task.TaskID) {
+		return
 	}
 	if len(e.session.Tasks) >= 16 {
 		return
 	}
 	e.session.Tasks = append(e.session.Tasks, taskEntry{
-		TaskID: task.TaskID, Package: task.Package, DisplayID: task.DisplayID,
-		Generation: e.session.Display.Generation, Ownership: TaskOwned,
-		Proven: proven, CreatedAt: time.Now(),
+		TaskID: task.TaskID, RootID: task.RootID, Package: task.Package,
+		DisplayID: task.DisplayID, Generation: e.session.Display.Generation,
+		Ownership: TaskOwned, Proven: proven, CreatedAt: time.Now(),
 	})
 	e.persistAsync()
-}
-
-// finishOpenAppSuccess commits the action fact and performs one full post
-// observation. A post-observation failure never rewrites executed.
-func (e *Engine) finishOpenAppSuccess(work *workState, op *operationState, session *sessionState,
-	app string, taskID int, reused, preserved bool, outcome string, apiErr *protocol.APIError) (*protocol.Result, *protocol.APIError) {
-	e.noteKnownOutcome(op, outcome)
-	result := newResult(op)
-	result.Outcome = outcome
-	result.App = &protocol.AppView{
-		Package: app, TaskID: taskID, DisplayID: session.Display.ID,
-		Reused: reused, StatePreserved: &preserved,
-	}
-	if apiErr != nil {
-		result.Error = apiErr.Public()
-	}
-	if e.detachedWorkRevoked(work) {
-		result.Recovery = e.finishOperation(op, outcome, "executed_revoked", nil)
-		e.addSessionIfEnded(result)
-		return result, nil
-	}
-	current := e.sessionForWork(work)
-	if current == nil {
-		result.Recovery = e.finishOperation(op, outcome, "executed_revoked", nil)
-		e.addSessionIfEnded(result)
-		return result, nil
-	}
-	public, _, postErr := e.captureAndPublish(work.Ctx, work, current, true, false, "open_app")
-	if postErr != nil {
-		result.Observation = &protocol.Observation{
-			Status: "failed", Missing: []string{"tree"}, Error: postErr.Public(),
-		}
-		result.Recovery = e.finishOperation(op, outcome, "post_observation_failed", nil)
-		return result, nil
-	}
-	result.Observation = public
-	result.Recovery = e.finishOperation(op, outcome, "finished", nil)
-	return result, nil
-}
-
-func (e *Engine) finishOpenAppUncertain(op *operationState, code, message string, details map[string]any) (*protocol.Result, *protocol.APIError) {
-	apiErr := protocol.NewError(504, code, message)
-	if code == protocol.CodeAppMoved || code == protocol.CodeTaskFocus {
-		apiErr.HTTPStatus = 409
-	}
-	apiErr.Outcome = OutcomeUncertain
-	for key, value := range details {
-		apiErr.WithDetail(key, value)
-	}
-	result := newResult(op)
-	result.Outcome = OutcomeUncertain
-	result.Error = apiErr.Public()
-	result.Recovery = e.finishOperation(op, OutcomeUncertain, "dispatch", apiErr)
-	e.addSessionIfEnded(result)
-	return result, nil
-}
-
-// A definite non-dispatch is independent of a transport/semantic error.
-func (e *Engine) finishOpenAppNotDispatched(work *workState, op *operationState) *protocol.Result {
-	code, message := protocol.CodeAppLaunchFailed, "应用启动或置前未派发"
-	if e.workRevoked(work) {
-		code, message = protocol.CodeStopped, "应用启动已撤销，未派发"
-	}
-	return e.finishWithError(op, "dispatch", protocol.NewError(protocol.Status(code), code, message))
 }

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"time"
 
@@ -506,8 +507,8 @@ func (e *Engine) removeRecoveryTasks(ctx context.Context, displayID int) (bool, 
 			return true, nil
 		}
 		for _, task := range tasks {
-			if task.TaskID > 0 {
-				_ = e.dev.RemoveTask(ctx, task.TaskID)
+			if task.TaskID > 0 && !e.transferProtected(task.TaskID) {
+				_, _ = e.dev.RemoveTask(ctx, task.TaskID)
 			}
 		}
 		timer := time.NewTimer(120 * time.Millisecond)
@@ -557,6 +558,11 @@ func (e *Engine) removeOwnedTasksIdentity(ctx context.Context, displayID int, or
 	for _, t := range all {
 		live[t.TaskID] = t.DisplayID
 		if t.DisplayID == displayID && t.TaskID > 0 {
+			if e.transferProtected(t.TaskID) {
+				// A handed-off or in-flight moved window is never adopted back
+				// into the delete list by a local live scan.
+				continue
+			}
 			if len(owned) >= 256 && !owned[t.TaskID] {
 				return false, false, nil
 			}
@@ -570,6 +576,10 @@ func (e *Engine) removeOwnedTasksIdentity(ctx context.Context, displayID int, or
 		}
 		if place, present := live[id]; present && place != displayID {
 			return false, false, nil
+		}
+		if e.transferProtected(id) {
+			// An unresolved or released transfer still protects the exact id.
+			continue
 		}
 		if _, present := live[id]; !present && (!known || !recent[id]) {
 			continue
@@ -720,7 +730,27 @@ func (e *Engine) cleanupLiveTasks(ctx context.Context, id int) ([]device.Task, b
 func (e *Engine) cleanupRemoveTask(ctx context.Context, id int) error {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	return e.dev.RemoveTask(ctx, id)
+	result, err := e.dev.RemoveTask(ctx, id)
+	if err != nil {
+		return err
+	}
+	if result.Receipt != device.DispatchTerminated {
+		return errTaskRemoveUnconfirmed
+	}
+	return nil
+}
+
+// errTaskRemoveUnconfirmed reports a removal whose dispatch end was not proven.
+var errTaskRemoveUnconfirmed = errors.New("task removal unconfirmed")
+
+// transferProtected reports whether a transfer record forbids deleting this id.
+func (e *Engine) transferProtected(taskID int) bool {
+	if taskID <= 0 {
+		return false
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.transferProtectsLocked(taskID)
 }
 
 func (e *Engine) cleanupOwnerValidLocked(epoch int64) bool {

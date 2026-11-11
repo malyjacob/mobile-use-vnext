@@ -123,7 +123,7 @@ func configuredResultMode(flags *flag.FlagSet, flagValue string, lookupEnv func(
 }
 
 func logMCPStart(logger *slog.Logger, transport string, resultMode mcpserver.ResultMode) {
-	logger.Info("mcp.start", "transport", transport, "tools", 12, "result_mode", resultMode.String())
+	logger.Info("mcp.start", "transport", transport, "tools", mcpserver.ToolCount(), "result_mode", resultMode.String())
 }
 
 // serveHTTP runs the Streamable HTTP entry behind its own bearer identity and

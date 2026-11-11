@@ -40,8 +40,9 @@ func TestLaunchFocusAndRemoveDispatch(t *testing.T) {
 	if err != nil || receipt != device.DispatchTerminated {
 		t.Fatalf("FocusTask: receipt=%d err=%v", receipt, err)
 	}
-	if err := d.RemoveTask(ctx, 42); err != nil {
-		t.Fatalf("RemoveTask: %v", err)
+	removed, removeErr := d.RemoveTask(ctx, 42)
+	if removeErr != nil || removed.Receipt != device.DispatchTerminated || removed.TaskID != 42 {
+		t.Fatalf("RemoveTask: %+v err=%v", removed, removeErr)
 	}
 	invalid, err := d.LaunchApp(ctx, 82, "not a component")
 	if err == nil || invalid.Receipt != device.DispatchNotDispatched {
@@ -102,6 +103,87 @@ func TestLaunchAndFocusReceiptsSeparateDispatchFromResult(t *testing.T) {
 			t.Fatalf("receipt=%d code=%q err=%v", receipt, CodeOf(err), err)
 		}
 	})
+}
+
+func TestRemoveTaskReceipts(t *testing.T) {
+	cases := []struct {
+		name       string
+		transcript string
+		taskID     int
+		receipt    device.DispatchReceipt
+		code       string
+	}{
+		{"terminated", "launch", 42, device.DispatchTerminated, ""},
+		{"device exit is unconfirmed", "task-remove-exit", 42, device.DispatchUnknown, CodeExitCode},
+		{"transport is unknown", "task-remove-transport", 42, device.DispatchUnknown, CodeTransport},
+		{"invalid task is not dispatched", "launch", 0, device.DispatchNotDispatched, CodeInvalidArgs},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newStubDevice(t, tc.transcript)
+			d.setShellV2(true)
+			result, err := d.RemoveTask(t.Context(), tc.taskID)
+			if result.Receipt != tc.receipt {
+				t.Fatalf("receipt=%d want=%d", result.Receipt, tc.receipt)
+			}
+			if result.TaskID != tc.taskID {
+				t.Fatalf("task id=%d want=%d", result.TaskID, tc.taskID)
+			}
+			if code := CodeOf(err); code != tc.code {
+				t.Fatalf("code=%q want=%q err=%v", code, tc.code, err)
+			}
+		})
+	}
+}
+
+func TestMoveTaskReceipts(t *testing.T) {
+	cases := []struct {
+		name       string
+		transcript string
+		rootID     int
+		leafID     int
+		target     int
+		receipt    device.DispatchReceipt
+		code       string
+	}{
+		{"terminated", "task-move", 42, 43, 61, device.DispatchTerminated, ""},
+		{"device exit is unconfirmed", "task-move-exit", 42, 43, 61, device.DispatchUnknown, CodeExitCode},
+		{"transport is unknown", "task-move-transport", 42, 43, 61, device.DispatchUnknown, CodeTransport},
+		{"invalid root is not dispatched", "task-move", 0, 43, 61, device.DispatchNotDispatched, CodeInvalidArgs},
+		{"invalid leaf is not dispatched", "task-move", 42, 0, 61, device.DispatchNotDispatched, CodeInvalidArgs},
+		{"invalid display is not dispatched", "task-move", 42, 43, -1, device.DispatchNotDispatched, CodeInvalidArgs},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newStubDevice(t, tc.transcript)
+			d.setShellV2(true)
+			result, err := d.MoveTask(t.Context(), tc.rootID, tc.leafID, tc.target)
+			if result.Receipt != tc.receipt {
+				t.Fatalf("receipt=%d want=%d", result.Receipt, tc.receipt)
+			}
+			if result.RootID != tc.rootID || result.LeafTaskID != tc.leafID ||
+				result.TargetDisplayID != tc.target {
+				t.Fatalf("ids=%+v", result)
+			}
+			if code := CodeOf(err); code != tc.code {
+				t.Fatalf("code=%q want=%q err=%v", code, tc.code, err)
+			}
+		})
+	}
+}
+
+func TestMoveTaskDoesNotClaimSourceDisplay(t *testing.T) {
+	d := newStubDevice(t, "task-move")
+	d.setShellV2(true)
+	result, err := d.MoveTask(t.Context(), 42, 43, 61)
+	if err != nil {
+		t.Fatalf("MoveTask: %v", err)
+	}
+	// The dispatch boundary never names a source display, so the adapter must not
+	// invent one (zero is the primary display, not "unknown").
+	if result.SourceDisplayID != 0 {
+		t.Fatalf("source display=%d", result.SourceDisplayID)
+	}
 }
 
 func TestRecentTaskIDs(t *testing.T) {

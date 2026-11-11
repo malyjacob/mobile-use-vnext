@@ -278,8 +278,10 @@ func (c *Client) keepalive(ctx context.Context, request *protocol.KeepaliveReque
 	return c.post(ctx, "keepalive", body, operation)
 }
 
-// Apps calls POST /api/apps.
-func (c *Client) Apps(ctx context.Context, request *protocol.AppsRequest, opts ...CallOption) (*Response, error) {
+// App calls POST /api/app with one strict kind branch. The kind decides the
+// admitted members; Encode rejects a branch that is not fully specified before
+// any request is sent. The pre-assigned P is retained for every kind.
+func (c *Client) App(ctx context.Context, request *protocol.AppRequest, opts ...CallOption) (*Response, error) {
 	operation, operationErr := c.newOperation(opts)
 	if operationErr != nil {
 		return nil, operationErr
@@ -291,23 +293,7 @@ func (c *Client) Apps(ctx context.Context, request *protocol.AppsRequest, opts .
 	if err != nil {
 		return nil, invalidRequest(operation, messageInvalidRequest)
 	}
-	return c.post(ctx, "apps", body, operation)
-}
-
-// OpenApp calls POST /api/open_app.
-func (c *Client) OpenApp(ctx context.Context, request *protocol.OpenAppRequest, opts ...CallOption) (*Response, error) {
-	operation, operationErr := c.newOperation(opts)
-	if operationErr != nil {
-		return nil, operationErr
-	}
-	if request == nil {
-		return nil, invalidRequest(operation, messageMissingRequest)
-	}
-	body, err := request.Encode()
-	if err != nil {
-		return nil, invalidRequest(operation, messageInvalidRequest)
-	}
-	return c.post(ctx, "open_app", body, operation)
+	return c.post(ctx, "app", body, operation)
 }
 
 // Notify calls POST /api/notify.
@@ -607,10 +593,10 @@ func NewOperationID() (string, error) {
 	return "P" + hex.EncodeToString(entropy[:]), nil
 }
 
-// validOperationID accepts 1..64 characters: a leading P followed by ASCII
-// letters, digits, hyphen or underscore.
+// validOperationID accepts 2..64 characters: a leading P followed by ASCII
+// letters, digits, hyphen or underscore. The service requires the same minimum.
 func validOperationID(operation string) bool {
-	if len(operation) < 1 || len(operation) > 64 || operation[0] != 'P' {
+	if len(operation) < 2 || len(operation) > 64 || operation[0] != 'P' {
 		return false
 	}
 	for index := 1; index < len(operation); index++ {

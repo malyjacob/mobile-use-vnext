@@ -138,10 +138,15 @@ func resultModeFixtures() []resultModeFixture {
 		add("end", state, `{"outcome":"executed","cleanup":{"state":"`+state+`","execution":"confirmed","tasks":"pending","recents":"pending","display":"unconfirmed"}}`)
 	}
 	for _, items := range []string{`[]`, `[{"name":"设置","package":"com.android.settings"}]`} {
-		add("apps", "items", `{"apps":{"items":`+items+`,"total":2,"truncated":true,"captured_at":"now"}}`)
+		add("app", "find_items", `{"operation_id":"P4","app":{"kind":"find","items":`+items+`,"total":2,"truncated":true,"captured_at":"now"}}`)
 	}
-	add("apps", "error", `{"error":{"code":"apps_unavailable","message":"不可用"}}`)
-	add("open_app", "reused", `{"outcome":"executed","app":{"package":"p","task_id":0,"display_id":0,"reused":true,"state_preserved":false}}`)
+	add("app", "find_error", `{"error":{"code":"app_unavailable","message":"不可用"}}`)
+	add("app", "list", `{"operation_id":"P5","app":{"kind":"list","display_id":12,"items":[{"task_id":42,"package":"p","ownership":"owned"}],"total":1,"truncated":false,"captured_at":"now","foreground":{"state":"present","package":"p","task_id":42}}}`)
+	add("app", "open", `{"operation_id":"P6","outcome":"executed","app":{"kind":"open","package":"p","task_id":42,"display_id":12,"ownership":"owned","reused":true,"state_preserved":false}}`)
+	add("app", "claim", `{"operation_id":"P7","outcome":"executed","app":{"kind":"claim","package":"p","task_id":42,"source_display_id":0,"display_id":12,"ownership":"borrowed","state_preserved":true}}`)
+	add("app", "handoff", `{"operation_id":"P8","outcome":"executed","app":{"kind":"handoff","package":"p","task_id":42,"source_display_id":12,"display_id":0,"ownership":"shared","state_preserved":null,"foreground_restore":"not_requested"}}`)
+	add("app", "close_partial", `{"operation_id":"P9","outcome":"uncertain","app":{"kind":"close","display_id":12,"tasks":[{"task_id":42,"outcome":"executed","recents_cleaned":true},{"task_id":43,"outcome":"uncertain","recents_cleaned":null}],"complete":false},"error":{"code":"task_remove_unconfirmed","message":"部分任务的关闭结果未确认"}}`)
+	add("app", "kill", `{"operation_id":"P10","outcome":"executed","app":{"kind":"kill","package":"p","source_task_id":42,"display_id":12,"target_pids":[1234,1235],"killed_pids":[1234,1235],"remaining_pids":[],"restarted":null}}`)
 	for _, state := range []string{"queued", "unavailable"} {
 		add("notify", state, `{"outcome":"executed","message_id":"M1","saved":true,"notification":{"state":"`+state+`"}}`)
 	}
@@ -159,7 +164,7 @@ func resultModeFixtures() []resultModeFixture {
 }
 
 func TestStructuredMinimalErrorText(t *testing.T) {
-	for _, tool := range []string{"observe", "act", "inspect", "apps", "status"} {
+	for _, tool := range []string{"observe", "act", "inspect", "app", "status"} {
 		out := projectExecution(&execution{result: &protocol.Result{OperationID: "P1", OperationState: "request_closed", Observation: &protocol.Observation{Status: "failed"}}}, tool, ResultModeStructured)
 		if out.IsError {
 			text := testTextContent(t, out)
@@ -195,13 +200,13 @@ func TestAdmissionParity(t *testing.T) {
 
 func TestNoContentInLogs(t *testing.T) {
 	fake := newTestDeviceService(t)
-	fake.setHandler("apps", func(w http.ResponseWriter, r *http.Request, body string) {
-		writeTestJSON(w, 200, `{"apps":{"items":[{"name":"sensitive-app-name","package":"p"}],"total":1,"truncated":false,"captured_at":"now"}}`)
+	fake.setHandler("app", func(w http.ResponseWriter, r *http.Request, body string) {
+		writeTestJSON(w, 200, `{"operation_id":"P1","app":{"kind":"find","items":[{"name":"sensitive-app-name","package":"p"}],"total":1,"truncated":false,"captured_at":"now"}}`)
 	})
 	var buffer bytes.Buffer
 	a := &adapter{client: newTestDeviceClient(t, fake), logger: slog.New(slog.NewJSONHandler(&buffer, nil))}
 	for _, mode := range []ResultMode{ResultModeBoth, ResultModeText, ResultModeStructured} {
-		a.handle(context.Background(), testDefinitionByName(t, "apps"), []byte(`{}`), mode)
+		a.handle(context.Background(), testDefinitionByName(t, "app"), []byte(`{"kind":"find"}`), mode)
 	}
 	for _, line := range strings.Split(strings.TrimSpace(buffer.String()), "\n") {
 		var record map[string]any
@@ -273,10 +278,11 @@ func TestHTTPModesSelectProjectionPerCall(t *testing.T) {
 	}
 }
 
-func TestCatalogFingerprintExplicitKeepaliveDuration(t *testing.T) {
-	// Start and keepalive descriptions explain the lease reset semantics;
-	// keepalive alone adds the optional duration schema. Result modes stay intact.
-	const baseline = "7326317c03b6a654da7e2df5a517bb4aaf24365f21a45551e9a1492b83666c31"
+func TestCatalogFingerprintBaseline(t *testing.T) {
+	// The catalog now has eleven tools with the unified app kind branches.
+	// Start/keepalive still explain the lease reset semantics and keepalive
+	// alone adds the optional duration schema. Result modes stay intact.
+	const baseline = "7f71caf0a5348bf1c9474f8ca2445bda4ba05f132c62a80aa705cf4070521b6a"
 	if got := CatalogFingerprint(); got != baseline {
 		t.Fatalf("catalog changed: %s", got)
 	}

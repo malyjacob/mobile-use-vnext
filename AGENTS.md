@@ -82,7 +82,7 @@ internal/engine/        唯一业务入口：会话、O/P、工作位置、STOP�
 internal/android/       ADB、u2 RPC、制品管理与受管执行链
 internal/httpapi/       认证 HTTP 接入、/api/<tool>、控制端同步与最小 STOP
 internal/client/        强类型 HTTP 客户端（发送前 P、结构化结果、图片字节）
-internal/mcp/           12 工具注册/schema/投影、取消包装、HTTP 认证与 Origin
+internal/mcp/           11 工具注册/schema/投影、取消包装、HTTP 认证与 Origin
 internal/store/         私有恢复账本与有界消息文件（原子文件、单写者）
 internal/eventlog/      有界事件/字段白名单日志
 android-control/        Java 控制 App 源码与构建入口

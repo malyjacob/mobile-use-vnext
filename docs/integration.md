@@ -41,7 +41,7 @@ adb forward          主机 18881 → 服务；主机 18883 → 手机 MCP
    `adb forward`，也不需要 Agent token。
 
 只需要直连 HTTP 的 Agent 则使用 `http://127.0.0.1:18881/api/<tool>`、`agent_token` 与
-`X-Mobile-Use-Contract: 8`。
+`X-Mobile-Use-Contract: 9`。
 
 ## 1. 默认部署后的网络与进程
 
@@ -180,8 +180,8 @@ Header: Authorization: Bearer <mcp_token>
 
 1. 完全退出并重启 MCP 客户端/宿主进程；
 2. 执行 `server/discover` 与 `tools/list`；
-3. 应看到固定 12 个工具：`start`、`status`、`observe`、`act`、`inspect`、`keepalive`、
-   `end`、`apps`、`open_app`、`notify`、`shell`、`diagnose`。
+3. 应看到固定 11 个工具：`start`、`status`、`observe`、`act`、`inspect`、`keepalive`、
+   `end`、`app`、`notify`、`shell`、`diagnose`。
 
 只替换手机上的二进制或重启 service 进程，不会让已连接的宿主自动刷新工具；必须重启宿主进程/
 连接。MCP 适配器本身不保存会话，重启后重新发现即可。
@@ -266,7 +266,7 @@ HTTP 宿主在原有 `Authorization` 头之外按需添加：
 
 ```text
 Authorization: Bearer <agent_token>
-X-Mobile-Use-Contract: 8
+X-Mobile-Use-Contract: 9
 Content-Type: application/json; charset=utf-8
 ```
 
@@ -274,7 +274,7 @@ Content-Type: application/json; charset=utf-8
 $deploy = Get-Content .state/deploy.json -Raw | ConvertFrom-Json
 $headers = @{
     Authorization           = "Bearer $($deploy.agent_token)"
-    'X-Mobile-Use-Contract' = '8'
+    'X-Mobile-Use-Contract' = '9'
 }
 Invoke-RestMethod http://127.0.0.1:18881/api/status -Method Post `
   -Headers $headers -ContentType 'application/json' -Body '{}'
@@ -286,6 +286,31 @@ Invoke-RestMethod http://127.0.0.1:18881/api/status -Method Post `
 - 不自动重试、不跟随重定向、不排队；同一 P 重复到达只返回原操作视图。
 - `409 device_busy` 表示已有普通工作，应串行化调用，不要并发重试。
 
+### 5.1 `app` 接入示例
+
+`app` 必须是严格 JSON，根对象只含 `kind` 与该分支成员；未知字段、重复键、显式 `null`、
+其他分支成员与尾随第二个 JSON 值都会被 `422 invalid_request` 拒绝，请求体上限 8 KiB。
+
+```json
+{"kind":"find","query":"设置"}
+{"kind":"list","reference":"O1"}
+{"kind":"list","reference":"P1","scope":"primary","app":"com.example.target"}
+{"kind":"open","observation_id":"O1","app":"com.example.target"}
+{"kind":"claim","observation_id":"O1","target":{"task_id":42}}
+{"kind":"handoff","observation_id":"O1","target":{"task_id":42},"restore_foreground":true}
+{"kind":"close","observation_id":"O1","target":{"app":"com.example.target"}}
+{"kind":"kill","observation_id":"O1","target":{"task_id":42}}
+```
+
+`target` 的 `task_id` 与 `app` 互斥；`kill` 只接受 `task_id`，包名先由 `list` 解析。
+`find`/`list` 是查询，成功或失败都不返回 `outcome`；其余五个 kind 成功返回
+`outcome=executed` 与原会话屏的一次 full 无图观察。`find` 使用 detached P；`list` 的 P 绑定
+`reference` 解析到的原会话。每次新调用都使用自己的新 P；重复 P 只返回原摘要。
+
+P 的两种用法：`observe({"reference":"P9"})` 的 `reference` 引用本 Agent 已有的 P9 原操作，
+不是本次 `observe` 的请求体 P；本次调用仍使用自己的新 P。`status(P9)` 只返回操作摘要，
+不重新采集，也不补回业务集合。
+
 ## 6. 路径 C：主机自建 MCP 适配器
 
 只有需要 stdio，或希望在主机本地监听 MCP 时才使用。手机适配器已经满足 HTTP MCP 场景时，
@@ -294,9 +319,12 @@ Invoke-RestMethod http://127.0.0.1:18881/api/status -Method Post `
 ### 6.1 构建
 
 ```powershell
-$env:GOEXPERIMENT = 'jsonv2'
-go build -o build/device-mcp.exe ./cmd/device-mcp
+./scripts/build-host-tools.ps1
+./scripts/build-host-tools.ps1 -VerifyOnly
 ```
+
+脚本在 Windows/amd64 下构建 `build/device-mcp.exe` 与 `build/mcp-probe.exe`，并写
+`build/host-tools-manifest.json`；发布前按清单核验，不把 linux/arm64 产物改后缀当 exe。
 
 ### 6.2 创建主机适配器配置
 
@@ -355,7 +383,7 @@ $json = $config | ConvertTo-Json -Depth 5
 }
 ```
 
-宿主只引用二进制和配置路径，不把 token 写进宿主文件。重启宿主后应看到 12 个工具。
+宿主只引用二进制和配置路径，不把 token 写进宿主文件。重启宿主后应看到 11 个工具。
 只读文本的 stdio 宿主在 `args` 中追加 `"-result-mode", "text"`；结构化宿主可用
 `structured`；不写时默认 `both`。结果模式不是 JSON 配置成员，选择规则见第 4.5 节。
 
@@ -411,7 +439,7 @@ Header: Authorization: Bearer <mcp_token>
 两种选择：
 
 ```text
-直连 HTTP:  http://127.0.0.1:18880/api/<tool>   + agent_token + X-Mobile-Use-Contract: 8
+直连 HTTP:  http://127.0.0.1:18880/api/<tool>   + agent_token + X-Mobile-Use-Contract: 9
 MCP HTTP:   http://127.0.0.1:18882/mcp          + mcp_token
 ```
 
@@ -573,6 +601,12 @@ GET 判断工具是否可用。
 | 适配器启动即退出 | 端口被占用、配置错误或二进制不匹配 | 看 `device-mcp.log`；确认手机 `18882` 只有一个进程 |
 | `409 contract_mismatch` | 普通契约版本不一致 | 整组更新服务/App/客户端，不要只升一侧 |
 | `409 device_busy` | 已有普通工作 | 读 `blocking_operation_id`，串行化后重试 |
+| `409 task_target_ambiguous` | `claim`/`handoff`/`close` 按包名匹配到多个任务 | 读 `details.task_ids`，用精确 `task_id` 加新 P 重试；不取第一个 |
+| `409 close_refused_borrowed` | 关闭目标含借入窗口且 `allow_borrowed=false` | 先 `handoff` 该窗口，或显式传 `allow_borrowed=true` 并接受销毁 |
+| `409 kill_refused_*` / `409 root_unavailable` | 目标非本会话 owned、跨屏/同屏冲突、前台、FGS/播放，或 root 不可用 | 按受控原因处理；不绕过身份、前台与播放检查 |
+| `409 task_lifecycle_busy` | 该 task 仍有未确认的旧搬移/删除责任 | 用 `status` 与 `app.list` 核验现状；只限制该任务，稍后新 P 重试 |
+| `503 app_list_unavailable` | 应用清单读取失败 | 条件恢复后用新 P 重新 `app.find`，不伪造空列表 |
+| `504 app_launch_unconfirmed` | `app.open` 已派发启动但归属未确认 | 用 `status(P)` 查询原结果，再用新 `observe`/`app.list` 核验；不重放启动 |
 | `409 observation_expired`/`target_changed` | O 过期或目标变化 | `target_changed` 的重验失败结果通常已带新观察：用它的 O 加新 P 重试；没有 `observation` 时再 `observe`。不要重放旧动作 |
 | `503 delivery_unavailable` | 慢交付额度不足 | 等待既有结果交付后再试，不排队 |
 | `504 action_result_uncertain` | 输入已派发但结果未知 | `status(P)`/重新观察，不重放 |
@@ -590,7 +624,7 @@ GET 判断工具是否可用。
 $deploy = Get-Content .state/deploy.json -Raw | ConvertFrom-Json
 $headers = @{
     Authorization           = "Bearer $($deploy.agent_token)"
-    'X-Mobile-Use-Contract' = '8'
+    'X-Mobile-Use-Contract' = '9'
 }
 $start = Invoke-RestMethod http://127.0.0.1:18881/api/start -Method Post `
   -Headers $headers -ContentType 'application/json' -Body '{}'

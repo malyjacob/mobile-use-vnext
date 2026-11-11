@@ -11,8 +11,8 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
   SDK 服务只发布 `2026-07-28`。收到旧版 `initialize` 时，SDK 按生命周期规范回答
   `2025-11-25` 并期望客户端断开；该回答不是本适配器的新协议协商结果，也不对应第二套工具、
   别名或旧协议回退。
-- 工具目录固定为 12 个，与 [接口契约](interface.md) 同名同义：`start`、`status`、`observe`、
-  `act`、`inspect`、`keepalive`、`end`、`apps`、`open_app`、`notify`、`shell`、`diagnose`。
+- 工具目录固定为 11 个，与 [接口契约](interface.md) 同名同义：`start`、`status`、`observe`、
+  `act`、`inspect`、`keepalive`、`end`、`app`、`notify`、`shell`、`diagnose`。
   不注册 `/health`、认证初始化、旧工具别名或旧协议回退。
 - stdio 模式的 stdout 只承载 MCP 协议帧；日志与诊断一律写 stderr。
 - 私有配置把适配进程绑定到一个可信 Agent 的服务凭据；该凭据不是工具参数，不进入日志、
@@ -33,6 +33,25 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
 时长或改写成单调续租。工具描述与参数说明明确：每个新 P 覆盖原截止时间且可缩短，省略也
 重设为两分钟；普通活动只按两分钟取最大值，不继承本次时长；start 使用五分钟租期，会话没有
 累计时长硬上限。调用取消仍按第 6 节撤销授权，长租约不覆盖取消边界。
+
+`app` 的根 schema 继续声明统一的 `properties`、`required=["kind"]` 与
+`additionalProperties=false`，再按 kind 列出互斥成员；服务端严格解码是权威，不依赖宿主
+是否完整执行条件子 schema：
+
+| kind | 必填（除 kind） | 可选与默认 |
+| --- | --- | --- |
+| `find` | 无 | `query`（≤256 码点） |
+| `list` | `reference` | `scope=session`（默认）或 `primary`、`app`（包名过滤） |
+| `open` | `observation_id`、`app` | 无 |
+| `claim` | `observation_id`、`target` | 无 |
+| `handoff` | `observation_id`、`target` | `restore_foreground=false` |
+| `close` | `observation_id`、`target` | `allow_borrowed=false` |
+| `kill` | `observation_id`、`target={task_id}` | `allow_stop_playback=false` |
+
+`target` 为 `{"task_id": 正整数}` 或 `{"app": 包名}`，恰好一种；`kill` 只接受 `task_id`。
+`find`/`list` 是查询，成功与失败均无 `outcome`；结果各按 32 KiB 完整条目前缀返回，
+`total`/`truncated` 说明预算前数量与截断；其余五个 kind 消费当前 ready O，成功返回原会话屏
+的一次 full 无图观察。查询与变更的 P 绑定、IsError 与取消差异见第 3、6 节。
 
 ## 3. 结果投影
 
@@ -62,17 +81,35 @@ json v1 path="/observation/tree" value={"format":"full","scope":"","root":null}
 
 `path` 为 RFC 6901 JSON Pointer，`~`、`/` 分别转义为 `~0`、`~1`。每个事实路径只编码
 一次。块前恰好一个空行，块后接字段或结果终止行时没有额外空行；相邻块之间恰好一个空行。
-块头的 `nodes`、`changes`、`items`、`events`、`output_bytes` 仅为派生计数；delta 的
+块头的 `nodes`、`changes`、`events`、`output_bytes` 仅为派生计数；delta 的
 `scope`、subtree/query 的 `tree_scope` 也是派生显示，不新增 `A` 的成员。
 
 `structured` 的错误文本使用 `diagnostic v1 is_error=true` / `end diagnostic`，只包含
 操作号、操作状态、outcome、phase、目标引用、准入/消息状态、观察 status/id、会话、收尾、
-错误与恢复等存在的解释字段；它不代表完整 `A`。所有字段均从同一份 `A` 生成。
+错误与恢复等存在的解释字段；它不代表完整 `A`。所有字段均从同一份 `A` 生成。`app` 只在
+diagnostic 中补充 `app.kind`，不展开 `items`、`tasks`、PID 或其他业务事实。
 
-文本格式的兼容边界：`result v1` 取代旧摘要格式，取消统一标为 `isError=true`；依赖旧文本
-字节的调用方须固定旧适配器版本或迁移。引入 `result v1` 的迁移本身未改变工具名称、描述、入参
-schema 与目录指纹；后续契约变更可以改描述并改变指纹，部署按清单核验；
-目录描述中关于 `omitted` 的旧格式提示不适用于 `result v1`。
+`app` 结果字段在完整文本中的分类固定如下；复合字段使用紧凑完整 JSON，保留嵌套成员、
+数组顺序、显式 `null` 与 `[]`：
+
+| `app` 路径 | 文本编码 |
+| --- | --- |
+| `kind`、`ownership`、`foreground_restore`、`captured_at` | token |
+| `package` | JSON 字符串 |
+| `task_id`、`source_task_id`、`display_id`、`source_display_id`、`total` | 数字字面量 |
+| `reused`、`state_preserved`、`complete`、`truncated`、`restarted` | true/false/null 字面量 |
+| `items`、`tasks`、`foreground`、`target_pids`、`killed_pids`、`remaining_pids` | 紧凑 JSON |
+
+`state_preserved:null`、`restarted:null`、`recents_cleaned:null` 与空数组都必须保留；未知或
+不可表示的字段仍走整值 `json v1 path=... value=...` 兜底，不能只发计数或丢成员。
+
+适配器严格解码成功并预分配 P、但服务结果未知时，只能从已接纳的请求补 `app.kind` 作为调用
+元数据；不得补 `task_id`、`display_id`、PID、`ownership` 或其他设备事实，也不得声称服务已
+登记或已 finished。适配器自身的参数接入拒绝不分配 P，也不补 `app`。
+
+文本字节是稳定契约：`result v1` 的成员顺序、分类与兜底规则不变；取消统一标为
+`isError=true`。工具名称、描述、入参 schema 与目录指纹随发布清单核验，描述变更会改变
+目录指纹，部署必须按清单重新核验。
 
 树、图片与 shell 输出的事实来源都是服务的同一份结果。base64 只出现在 HTTP 载体
 `observation.image.base64` 与 MCP `ImageContent.data`；可读正文与 `structuredContent`
@@ -82,7 +119,7 @@ schema 与目录指纹；后续契约变更可以改描述并改变指纹，部�
 
 | 事实 | isError |
 | --- | --- |
-| 主动作 `executed`，仅后树/图片/清理独立失败（`act`/`open_app` 的后树；含 shell 自然非零） | `false` |
+| 主动作 `executed`，仅后树/图片/清理独立失败（`act`/`app` 的后树；含 shell 自然非零） | `false` |
 | 主动作 `not_executed` / `uncertain` | `true` |
 | 纯 `observe` 有合法核心 O，仅缺图 | `false` |
 | 纯 `observe` 没有合法核心 O（含只有只读图） | `true` |
@@ -92,7 +129,13 @@ schema 与目录指纹；后续契约变更可以改描述并改变指纹，部�
 | `inspect` 内容不可用、准入/协议/传输错误 | `true` |
 | `start` 已建立会话但首个观察失败 | `false`（主操作 `executed`） |
 | `act` 已派发但完成未知 | `true`（`uncertain`） |
+| `app` 的 `find`/`list`：首次完整查询或已明确标记的无 error 操作摘要 | `false`；读取、接入或传输错误为 `true`，查询取消调用本身为 `true` |
+| `app` 的五个变更 kind：主 outcome `executed` | `false`；`not_executed`/`uncertain` 为 `true` |
+| `app.close` 仅 `complete=false`（recents 未确认）、`app.handoff` 仅前台恢复未确认、主动作后树失败 | 不改写主 outcome 与 isError |
 | MCP 调用取消（含已确认 `executed` 的结果） | `true`，保留原执行事实 |
+
+`status(P)` 的 `query_cancelled` 摘要在没有 `error` 时 `IsError=false`，只表示摘要已提供，
+不代表原查询成功或包含集合；查询调用本身的取消仍按上一行记为 `true`。
 
 ### 3.1 树块
 
@@ -167,16 +210,12 @@ end tree
 `structured`，或通过 `inspect` 的 node/query 收窄。`both` 同时发送两种完整编码，会增加
 传输与上下文占用。
 
-### 3.2 shell、apps 与 timeline 块
+### 3.2 shell 与 timeline 块
 
 ```text
 shell v1 termination=exited exit_code=0 truncated=false output_bytes=6
 output "hello\n"
 end shell
-
-apps v1 items=1 total=1 truncated=false captured_at=2026-11-10T03:00:00Z
-item {"name":"设置","package":"com.android.settings"}
-end apps
 
 timeline v1 events=1
 event {"at":"2026-11-10T03:00:00Z","phase":"dispatch","code":"executed"}
@@ -185,9 +224,8 @@ end timeline
 
 shell 的 `output` 按换行分块，每块包含原换行并编码为 JSON 字符串，拼接后保留原输出；空串
 有一行 `output ""`，`null` 对应 `output_bytes=null` 且无 output 行。`output_error` 使用
-完整 JSON。apps 的 item 与 timeline 的 event 均为完整 canonical 对象，保持数组顺序与
-未来成员；timeline 为空时按 JSON 兜底。shell/apps 的额外成员按 JSON Pointer 输出。
-这些内容只进入响应，不写日志。
+完整 JSON。timeline 的 event 为完整 canonical 对象，保持数组顺序与未来成员；timeline 为空
+时按 JSON 兜底。shell 的额外成员按 JSON Pointer 输出。这些内容只进入响应，不写日志。
 
 ## 4. stdio
 
@@ -226,15 +264,27 @@ device-mcp -transport http -config <private-config>
 
 ## 6. 取消、P 与漏收边界
 
-有本次新 P 的工具调用（`start`、`observe`、`act`、`keepalive`、`end`、`apps`、
-`open_app`、`notify`、`shell`）在取消时：
+有本次新 P 的工具调用（`start`、`observe`、`act`、`keepalive`、`end`、`app`、`notify`、`shell`）
+在取消时：
 
 1. 停止等待本次调用结果；
-2. 用独立的有界上下文调用 `end(P)`（上限 5 秒），不等待设备工作完成；若服务已不认识原 P，
-   没有原结果时保留其 `operation_unknown`、`request_closed=true`、`uncertain` 事实；已知原执行事实优先；
+2. 对需要 `end` 的分支用独立的有界上下文调用 `end(P)`（上限 5 秒），不等待设备工作完成；
+   若服务已不认识原 P，没有原结果时保留其 `operation_unknown`、`request_closed=true`、
+   `uncertain` 事实；已知原执行事实优先；
 3. 保留取消前已取得的服务结果；没有结果时不伪造 `not_executed`；
 4. 返回结构化取消结果，说明 P 与已发起的有界 `end(P)`，但不声称设备动作已撤回、资源已释放
    或原执行链已结束。未知 `end` 只封闭该 P 的未来接纳，绝不能用来结束当前其它会话。
+
+`app` 整工具不是只读，七个 kind 都预分配 P，但取消策略按 kind 区分：
+
+- `find`/`list` 查询取消不调用 `end`。结果保留已预分配 `operation_id` 与 `app.kind`，没有
+  `outcome`、集合与 `recovery`。没有已知服务错误时生成 `error.code=call_cancelled`；已有
+  服务错误则保留原 code/message/details。两种情况都在 `error.details` 注入
+  `mcp.cancelled=true` 与受控文案 `mcp.cancellation="查询已取消；未发起 end"`。已知业务集合
+  不因取消删除；集合未取得时不伪造 `items`/`tasks`。
+- 五个变更 kind（`open`/`claim`/`handoff`/`close`/`kill`）按通用步骤 2 发起有界 `end(P)`，
+  保留真实的 end 文案、session/cleanup 与恢复入口；不能把查询的“未发起 end”文案复制给
+  变更，也不能省略实际发起的 end。
 
 `status`、`inspect`、`diagnose` 只取消本次读取，不登记 P、不调用 `end`。调用参数中的
 `reference` 是原观察/操作定位，不是本次取消的 P；不得把它当成本次调用的操作编号。

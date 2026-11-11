@@ -56,9 +56,18 @@ SDK/JDK（构建 App 用）；chroot 已存在且可 `su` 进入。
 ```powershell
 ./scripts/build-release.ps1                   # 整组产物 + build/release/manifest.json
 ./scripts/verify-manifest.ps1 -Manifest build/release/manifest.json
+./scripts/build-host-tools.ps1                # Windows 主机工具 + build/host-tools-manifest.json
+./scripts/build-host-tools.ps1 -VerifyOnly    # 只核验已有主机清单/两个 exe，不构建
 ./scripts/deploy.ps1                          # 构建、核验并按清单部署
 ./scripts/deploy.ps1 -SkipBuild               # 复用已核验的 build/release
 ```
+
+`build-host-tools.ps1` 使用同一 `release/versions.json`，生成 `build/device-mcp.exe` 与
+`build/mcp-probe.exe`，并记录 `build/host-tools-manifest.json`（格式/版本、release/contract、
+source_commit/source_dirty、构建目标、两个 exe 的路径/大小/SHA-256 与工具目录 count/sha256）。
+`-VerifyOnly` 不构建、不访问设备，核验清单身份、两个 exe 大小与哈希，并在手机发布清单是
+同一配套版本时核验提交、契约与目录指纹；失败返回非零且不改写清单。单独运行
+`device-mcp.exe -version` 只打印发行标签，不能代替清单核验。
 
 `build-release.ps1` 的实际动作：
 
@@ -96,10 +105,11 @@ STOP 可用与 MCP 宿主已重新发现工具。手机适配器的安装/监听
 部署过程不触发手机重启。设备服务通过 `service.sh stop/start` 重启；APK 使用
 `adb install -r` 覆盖安装并保留 App 私有数据。
 
-版本 1/2/3 账本由当前服务读取并保存为版本 4；旧 session 直接转入退休记录，待保存迁移快照后
+版本 1–4 账本由当前服务读取并保存为版本 5；旧 session 直接转入退休记录，待保存迁移快照后
 才允许有限补偿。升级继续使用同一次 `deploy.ps1 -SkipBuild`，覆盖安装保留 App 私有数据；
-legacy UI、旧 cleanup 或版本 3/4 中已发出预算且未完成的退休补偿不作为再次部署或新会话准入门禁。
-版本 4 账本不能交给旧二进制解释，回退必须使用支持版本 4 的兼容产物。
+legacy UI、旧 cleanup 或版本 3/4/5 中已发出预算且未完成的退休补偿不作为再次部署或新会话
+准入门禁。首次 0.9.0 写入 v5 后不支持回退到 0.8.0，只能使用同为 v5 的候选或前滚修复；
+不得删除账本、清 App 数据或忽略迁移字段。
 
 ## 4. 启动、停止、状态
 
@@ -148,7 +158,7 @@ adb -s 127.0.0.1:5555 forward tcp:18881 tcp:18880
 curl -s http://127.0.0.1:18881/health
 ```
 
-`/health` 无认证，返回 `status`、`contract_version`（当前 `"8"`）、`service_instance_id`、
+`/health` 无认证，返回 `status`、`contract_version`（当前 `"9"`）、`service_instance_id`、
 `release_version`。它只证明进程能应答，**不是** `can_start`。
 
 就绪以 `POST /api/status` 为准（令牌从 `.state/deploy.json` 读取，下面用占位符）：
@@ -156,7 +166,7 @@ curl -s http://127.0.0.1:18881/health
 ```bash
 curl -s -X POST http://127.0.0.1:18881/api/status \
   -H "Authorization: Bearer $AGENT_TOKEN" \
-  -H "X-Mobile-Use-Contract: 8" \
+  -H "X-Mobile-Use-Contract: 9" \
   -H "Content-Type: application/json" -d '{}'
 ```
 
@@ -205,11 +215,11 @@ adb -s 127.0.0.1:5555 shell su -c 'tail -n 100 /data/data/com.mobileuse.vnext/fi
 | `can_start=false`、`blocking_code=device_busy`，且原会话刚结束 | 旧 work/UI/shell 正在最多 5 秒的逻辑交接 | 等待交接或查看原 `blocking_operation_id`；不杀设备进程、不删账本 |
 | `can_start=false`、`blocking_code=recovery_pending`/`control_sync_pending` | 当前服务仍在恢复入口或等待 App 当前同步 | 保持服务与 App 运行，修当前 ADB/App/模式/STOP 能力；旧 cleanup 未确认本身不是原因；不需要重启手机 |
 | `can_start=false`、`blocking_code=ledger_corrupt` / `ledger_unavailable` | 账本损坏或不可写 | 检查 `/var/lib/mobile-use-vnext` 权限与磁盘；损坏账本需要明确的人工处置（移走并重新部署），不能带病启动 |
-| `can_start=false`、`blocking_code=device_busy` | 已有普通工作（start/observe/act/apps/open_app/shell）在进行 | 等该操作完成或用 `status` 查 `blocking_operation_id`；不建队列，不重试并发动作 |
+| `can_start=false`、`blocking_code=device_busy` | 已有普通工作（start/observe/act/app/shell）在进行 | 等该操作完成或用 `status` 查 `blocking_operation_id`；不建队列，不重试并发动作 |
 | `can_start=false`、`blocking_code=device_locked` / `device_not_interactive` | 锁屏或熄屏 | 解锁并点亮屏幕；服务不绕过锁屏 |
 | `can_start=false`、`blocking_code=control_revoked` | 收到 STOP 后未完成一次新同步 | 等 App 下一拍同步（不再携带 `stop_pending`）后再 `start` |
 | `can_start=false`、`blocking_code=mode_not_selected`/`stop_unavailable` | App 模式/通知/停止通道不可用 | 在 App 选择虚拟屏或确认主屏共享；授予通知权限并确认通知频道可用 |
-| `409 contract_mismatch` | `X-Mobile-Use-Contract` 缺失/不是 `8`，或 App 契约版本不符；错误体带 `recovery`（`entry=update`、`reference=none`） | 服务与客户端必须同为 `contract_version=8`；升级整组产物，不要只升一侧 |
+| `409 contract_mismatch` | `X-Mobile-Use-Contract` 缺失/不是 `9`，或 App 契约版本不符；错误体带 `recovery`（`entry=update`、`reference=none`） | 服务与客户端必须同为 `contract_version=9`；升级整组产物，不要只升一侧 |
 | `401 unauthorized` | Bearer 令牌错误，或用了另一身份的令牌 | 从私有配置核对 agent/control 令牌；两者不能互换 |
 | 主机 `18883/mcp` 不通或 401 | 手机适配器未运行、转发失效、填错 token | 看 `device-mcp.log` 与 `pgrep`；重建 `adb forward tcp:18883 tcp:18882`；手机路径填 `.state/deploy.json` 的 `mcp_token` |
 | MCP 客户端 403 | `Origin` 未在 `allowed_origins` | 部署时用 `-McpAllowedOrigins` 精确放行并重启适配器；不要填 `*` |
@@ -282,12 +292,16 @@ MCP 客户端应使用 POST。手机内 Android 宿主直接使用 `127.0.0.1:18
 
 ### 10.2 可选：主机适配器
 
-只有宿主只支持 stdio，或要在主机本地监听 MCP 时才需要：
+只有宿主只支持 stdio，或要在主机本地监听 MCP 时才需要。主机工具与探针由同一入口构建：
 
 ```powershell
-$env:GOEXPERIMENT = 'jsonv2'
-go build -o build/device-mcp.exe ./cmd/device-mcp
+./scripts/build-host-tools.ps1
+./scripts/build-host-tools.ps1 -VerifyOnly
 ```
+
+产物为 `build/device-mcp.exe` 与 `build/mcp-probe.exe`；`build/host-tools-manifest.json` 记录
+发行号、契约号、源码身份、工具目录 count/sha256 与两个 exe 的路径/大小/SHA-256。Windows
+工具必须在 Windows/amd64 下构建，不把 linux/arm64 的 `device-mcp` 改后缀当 exe。
 
 主机私有配置 `.state/mcp-config.json`（0600，不入库）：
 
@@ -351,6 +365,31 @@ HTTP 进程也可用同一参数设置默认值，每请求头优先。完整文
 go run ./scripts/mcp-probe -config .state/mcp-config.json -binary build/device-mcp.exe -transport stdio -result-mode text
 ```
 
+### 10.4 验证脚本与探针
+
+- `verify-p4.ps1` 使用统一 `/api/app`：`Core` 覆盖 `app.find`、`diagnose`、`notify` 与静态错误；
+  `App`/`OpenApp` 覆盖 `app.list`（session/primary）、`app.open` 复用、受限 `claim`/`kill`
+  拒绝、`app.close`、`end` 收尾与 STOP 场景。
+- `verify-m5.ps1` 通过 `build-host-tools.ps1`（`-SkipBuild` 时调用 `-VerifyOnly`）准备主机
+  `device-mcp.exe`/`mcp-probe.exe`，断言工具目录 count=11，并运行 stdio、主机 HTTP 与
+  p-recovery 探针；宿主 token 仅在缺失时创建。
+- `verify-m6.ps1` 核验发布清单、`/health`、安装后的 App versionName/versionCode 与工具目录
+  count=11；明确用上一发行 `contract 8` 验证同步与普通 API 都返回 `409 contract_mismatch`。
+  手机 MCP 只做 `server/discover`（并说明不做 `tools/list`、进程身份与生命周期验收）。
+- `mcp-probe` 的 `-transport http-remote` 只连接已运行的手机适配器，不启动或停止远端进程；
+  `-suite app-lifecycle` 只操作受控 test-target 包，要求原会话为 virtual，不自动切换显示模式。
+
+```powershell
+./build/mcp-probe.exe -transport stdio -binary ./build/device-mcp.exe -config .state/mcp-config.json -result-mode text
+./build/mcp-probe.exe -transport http -binary ./build/device-mcp.exe -config .state/mcp-config.json -result-mode structured
+# http-remote：操作者准备的私有配置（transport=http、service.base_url=http://127.0.0.1:18881、
+# http.listen=127.0.0.1:18883、http.token=mcp_token）；该入口对应手机适配器，不启动本地子进程。
+./build/mcp-probe.exe -transport http-remote -config .state/probe-phone-config.json -result-mode text -suite app-lifecycle -timeout 600
+```
+
+`http-remote` 与 `app-lifecycle` 只证明本次配置指向的手机入口与受控 test-target 路径；仍需
+配合实际宿主的 `tools/list` 与发布清单身份，不把探针子进程结果当成宿主刷新证明。
+
 ## 11. 消息中心
 
 - Agent 调用 `POST /api/notify` 后，消息先进入服务有界队列；App 每秒同步取下未确认消息，
@@ -382,7 +421,10 @@ adb -s 127.0.0.1:5555 shell su -c 'ls -l /data/data/com.mobileuse.vnext/files/me
 4. 启动新服务、手机侧 MCP 适配器与 App；要求 release/contract 与清单一致、
    `can_start=true`、STOP 可用，当前 App/设备/账本能力就绪。旧 cleanup 可仍为
    `unconfirmed` 并与原 session 同帧展示。默认虚拟屏，主屏共享需要用户重新确认。
-5. 重启实际 MCP 宿主进程/连接，重新发现工具目录；只替换磁盘文件不算完成。
+5. 若使用主机侧适配器，先辨认实际镜像路径与承载进程，结束旧活动调用并停止该精确进程，
+   按 `build/host-tools-manifest.json` 替换 `build/device-mcp.exe` 与 `build/mcp-probe.exe`；
+   再重启实际 MCP 宿主进程/连接并重新发现 11 工具目录。只替换磁盘文件不算完成，也不宽泛
+   终止所有同名进程。
 6. 运行相关最小闭环与回归；任何阶段失败都保持普通准入关闭并记录失败阶段。
 
 回退是另一轮受控部署：安装上一组已核验产物、重新确认资源与准入；不自动回放旧操作、不恢复
@@ -392,7 +434,7 @@ adb -s 127.0.0.1:5555 shell su -c 'ls -l /data/data/com.mobileuse.vnext/files/me
 
 1. 构造活动会话并使用虚拟屏；记录 `status` 的会话、`cleanup` 与显示。
 2. 停止服务：`service.sh stop`（SIGTERM 路径）或受控 `SIGKILL` 路径；不得删除账本。
-3. 启动服务与 App。旧 session 转退休记录；版本 3/4 中已发出预算且未完成的补偿先持久化为 `unconfirmed`。
+3. 启动服务与 App。旧 session 转退休记录；版本 3/4/5 中已发出预算且未完成的补偿先持久化为 `unconfirmed`。
    不恢复旧会话、不重放动作。新会话只需等待当前 App/设备/账本能力与最多 5 秒逻辑交接。
 4. 按 `status.cleanup` 记录执行链、task/recents/display；`unconfirmed` 作为原会话事实保留，
    不阻止 `can_start=true`。

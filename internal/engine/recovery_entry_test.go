@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"reflect"
 	"strings"
@@ -89,7 +90,7 @@ func recoveryCases() []planCase {
 			Outcome: outcome, Claimed: isClaimed, InputState: input}
 	}
 	openApp := func(code, phase, outcome string, isClaimed bool, input string) recoveryInput {
-		return recoveryInput{Tool: "open_app", Reference: o, Code: code, Phase: phase,
+		return recoveryInput{Tool: "app", AppKind: protocol.AppKindOpen, Reference: o, Code: code, Phase: phase,
 			Outcome: outcome, Claimed: isClaimed, InputState: input}
 	}
 
@@ -326,17 +327,28 @@ func recoveryCases() []planCase {
 			Code: protocol.CodeSessionEnded, Outcome: notExecuted, InputState: revoked},
 			wantRecovery(protocol.RecoveryEntryEnd, p, revoked, "")},
 
-		// apps / notify: session-free discovery.
-		{"apps device busy", recoveryInput{Tool: "apps", Code: protocol.CodeDeviceBusy},
+		// app queries / notify: no action outcome, no advancing recovery except a
+		// global readiness fact.
+		{"app find device busy", recoveryInput{Tool: "app", AppKind: protocol.AppKindFind,
+			Code: protocol.CodeDeviceBusy},
 			wantRecovery(protocol.RecoveryEntryStatus, p, "", "")},
-		{"apps device unavailable", recoveryInput{Tool: "apps", Code: protocol.CodeDeviceUnavailable},
+		{"app find device unavailable", recoveryInput{Tool: "app", AppKind: protocol.AppKindFind,
+			Code: protocol.CodeDeviceUnavailable}, nil},
+		{"app find list unavailable", recoveryInput{Tool: "app", AppKind: protocol.AppKindFind,
+			Code: protocol.CodeAppListUnavailable}, nil},
+		{"app list read unavailable", recoveryInput{Tool: "app", AppKind: protocol.AppKindList,
+			Code: protocol.CodeDeviceUnavailable}, nil},
+		{"app find control revoked", recoveryInput{Tool: "app", AppKind: protocol.AppKindFind,
+			Code: protocol.CodeStopped},
 			wantRecovery(protocol.RecoveryEntryStatus, p, "", "")},
-		{"apps list unavailable", recoveryInput{Tool: "apps", Code: protocol.CodeAppListUnavailable},
-			wantRecovery(protocol.RecoveryEntryStatus, p, "", "")},
-		{"apps control revoked", recoveryInput{Tool: "apps", Code: protocol.CodeStopped},
-			wantRecovery(protocol.RecoveryEntryEnd, p, "", "")},
-		{"apps invalid request", recoveryInput{Tool: "apps", Code: protocol.CodeInvalidRequest}, nil},
-		{"apps success", recoveryInput{Tool: "apps", Phase: "finished"}, nil},
+		{"app find invalid request", recoveryInput{Tool: "app", AppKind: protocol.AppKindFind,
+			Code: protocol.CodeInvalidRequest}, nil},
+		{"app find finished", recoveryInput{Tool: "app", AppKind: protocol.AppKindFind,
+			Phase: "finished"}, nil},
+		{"app find query cancelled", recoveryInput{Tool: "app", AppKind: protocol.AppKindFind,
+			Phase: "query_cancelled"}, nil},
+		{"app list query cancelled", recoveryInput{Tool: "app", AppKind: protocol.AppKindList,
+			Phase: "query_cancelled"}, nil},
 		{"notify operation unknown", recoveryInput{Tool: "notify", Code: protocol.CodeOperationUnknown},
 			wantRecovery(protocol.RecoveryEntryStatus, p, "", "")},
 		{"notify device unavailable", recoveryInput{Tool: "notify", Code: protocol.CodeDeviceUnavailable},
@@ -709,8 +721,8 @@ func TestContractVersionMatchesGenerated(t *testing.T) {
 	if err := json.Unmarshal(data, &versions); err != nil {
 		t.Fatalf("decode version source: %v", err)
 	}
-	if versions.ContractVersion != 8 || protocol.ContractVersion != "8" {
-		t.Fatalf("contract version source=%d compiled=%q, want 8",
+	if fmt.Sprint(versions.ContractVersion) != protocol.ContractVersion {
+		t.Fatalf("contract version source=%d compiled=%q",
 			versions.ContractVersion, protocol.ContractVersion)
 	}
 	if versions.ReleaseVersion != protocol.ReleaseVersion {

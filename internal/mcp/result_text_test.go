@@ -110,7 +110,7 @@ func decodeResultText(t *testing.T, text string) (map[string]any, bool, error) {
 			}
 			continue
 		}
-		if strings.HasPrefix(line, "tree v1 ") || strings.HasPrefix(line, "inspect v1 ") || strings.HasPrefix(line, "shell v1 ") || strings.HasPrefix(line, "apps v1 ") || strings.HasPrefix(line, "timeline v1 ") {
+		if strings.HasPrefix(line, "tree v1 ") || strings.HasPrefix(line, "inspect v1 ") || strings.HasPrefix(line, "shell v1 ") || strings.HasPrefix(line, "timeline v1 ") {
 			kind := strings.Fields(line)[0]
 			end := "end " + kind
 			j := i + 1
@@ -202,14 +202,10 @@ func decodeResultText(t *testing.T, text string) (map[string]any, bool, error) {
 						return nil, false, err
 					}
 				}
-			case "apps", "timeline":
-				prefix, path, countKey := "item ", "/apps/items", "items"
-				if kind == "timeline" {
-					prefix, path, countKey = "event ", "/diagnosis/timeline", "events"
-				}
+			case "timeline":
 				items := []any{}
 				for _, row := range lines[i+1 : j] {
-					s, ok := strings.CutPrefix(row, prefix)
+					s, ok := strings.CutPrefix(row, "event ")
 					if !ok {
 						return bad()
 					}
@@ -219,23 +215,12 @@ func decodeResultText(t *testing.T, text string) (map[string]any, bool, error) {
 					}
 					items = append(items, v)
 				}
-				n, err := strconv.Atoi(header[countKey])
+				n, err := strconv.Atoi(header["events"])
 				if err != nil || n != len(items) {
 					return bad()
 				}
-				if err := put(path, items); err != nil {
+				if err := put("/diagnosis/timeline", items); err != nil {
 					return nil, false, err
-				}
-				if kind == "apps" {
-					for _, key := range []string{"total", "truncated", "captured_at"} {
-						raw := header[key]
-						if key == "captured_at" {
-							raw = quoteResult(raw)
-						}
-						if err := putJSON("/apps/"+key, []byte(raw)); err != nil {
-							return nil, false, err
-						}
-					}
 				}
 			default:
 				return bad()
@@ -330,7 +315,7 @@ func TestTextCodecPresenceAndEscaping(t *testing.T) {
 		`{"session":null,"can_start":false,"saved":true,"observation":{"status":"partial","id":"","revision":0,"missing":[],"image":null},"error":{"code":"bad = token","message":"\r\n\t\u0000 end result","details":{"a":null,"b":false,"c":0,"d":"","e":[],"large":9007199254740993}}}`,
 		`{"shell":{"termination":"unknown","exit_code":null,"output":null,"truncated":null}}`,
 		`{"shell":{"termination":"exited","exit_code":0,"output":"","truncated":false,"future/key":{"~":0}}}`,
-		`{"apps":{"items":[],"total":0,"truncated":false,"captured_at":"now"},"diagnosis":{"timeline":[],"summary":""}}`,
+		`{"app":{"kind":"find","items":[],"total":0,"truncated":false,"captured_at":"now"},"diagnosis":{"timeline":[],"summary":""}}`,
 		`{"future/~key":{"x":[null,false,0,"",[]]},"session":{},"observation":{"status":"complete","tree":{"format":"full","scope":"","root":null}}}`,
 	} {
 		t.Run(raw[:min(len(raw), 40)], func(t *testing.T) { assertResultTextParity(t, []byte(raw), true) })
@@ -341,7 +326,7 @@ func TestFutureFieldFallback(t *testing.T) {
 	for _, raw := range []string{
 		`{"observation":{"status":"complete","id":"O1","tree":{"format":"full","scope":"reported_visible_with_context","root":{"ref":"n1","role":"root","bounds":null,"future":true}}}}`,
 		`{"inspection":{"observation_id":"O1","origin":"P1","revision":1,"captured_at":"now","scope":"tree","future":0}}`,
-		`{"apps":{"items":[{"name":"N","package":"P","future":false}],"total":1,"truncated":false,"captured_at":"now","future":[]},"diagnosis":{"timeline":[{"at":"now","phase":"p","future":null}],"future/x":{}}}`,
+		`{"app":{"kind":"find","items":[{"name":"N","package":"P","future":false}],"total":1,"truncated":false,"captured_at":"now","future":[]},"diagnosis":{"timeline":[{"at":"now","phase":"p","future":null}],"future/x":{}}}`,
 	} {
 		assertResultTextParity(t, []byte(raw), false)
 	}
@@ -383,9 +368,9 @@ func TestTextCodecTrailer(t *testing.T) {
 }
 
 func TestTextCodecBlockInterleaving(t *testing.T) {
-	raw := []byte(`{"session":{"origin":"P1","state":"active","mode":"virtual"},"apps":{"items":[],"total":0,"truncated":false,"captured_at":"now"},"diagnosis":{"timeline":[{"at":"now"}]},"error":{"code":"e","message":"m"}}`)
+	raw := []byte(`{"session":{"origin":"P1","state":"active","mode":"virtual"},"app":{"kind":"find","items":[],"total":0,"truncated":false,"captured_at":"now"},"diagnosis":{"timeline":[{"at":"now"}]},"error":{"code":"e","message":"m"}}`)
 	text := assertResultTextParity(t, raw, true)
-	for _, part := range []string{"session.mode=virtual\n\napps v1", "end apps\n\ntimeline v1", "end timeline\nerror.code=e", "error.message=\"m\"\nend result"} {
+	for _, part := range []string{"session.mode=virtual\napp.kind=find", "app.items=[]", "end timeline\nerror.code=e", "error.message=\"m\"\nend result"} {
 		requireTestContains(t, text, part)
 	}
 	text = assertResultTextParity(t, []byte(`{"shell":{"termination":"exited","exit_code":0,"output":"x","truncated":false}}`), false)
@@ -401,8 +386,8 @@ func TestTextCodecLargeContent(t *testing.T) {
 		{"shell", 64 * 1024, func(s string) string {
 			return `{"shell":{"termination":"exited","exit_code":0,"output":` + quoteResult(s) + `,"truncated":false}}`
 		}},
-		{"apps", 32 * 1024, func(s string) string {
-			return `{"apps":{"items":[{"name":` + quoteResult(s) + `,"package":"p"}],"total":1,"truncated":false,"captured_at":"now"}}`
+		{"app", 32 * 1024, func(s string) string {
+			return `{"app":{"kind":"find","items":[{"name":` + quoteResult(s) + `,"package":"p"}],"total":1,"truncated":false,"captured_at":"now"}}`
 		}},
 	} {
 		t.Run(c.name, func(t *testing.T) {

@@ -144,7 +144,7 @@ final class ControlState {
         if (work == null) {
             return agent + " · 会话有效，当前无设备操作";
         }
-        return agent + " · " + workText(work.kind);
+        return agent + " · " + workText(work);
     }
 
     /** 常驻通知与悬浮入口共用的短文案；与主文案同一事实来源。 */
@@ -177,7 +177,7 @@ final class ControlState {
         if (work == null) {
             return "阶段：空闲";
         }
-        return "阶段：" + workText(work.kind) + phaseSuffix(work.phase);
+        return "阶段：" + workText(work) + phaseSuffix(work.phase);
     }
 
     /**
@@ -259,7 +259,7 @@ final class ControlState {
             detail.append("\n设备操作：无");
             return;
         }
-        detail.append("\n设备操作：").append(workText(work.kind));
+        detail.append("\n设备操作：").append(workText(work));
         detail.append("\n阶段：").append(phaseLabel(work.phase));
     }
 
@@ -336,24 +336,44 @@ final class ControlState {
         return "未知";
     }
 
-    /** work.kind 只有类别；未知类别不展开任何执行材料，统一显示通用文案。 */
-    static String workText(String kind) {
-        if ("act".equals(kind)) {
+    /**
+     * work.kind 只有类别；app 类别再按可选 app_kind 收窄为受控短文案。
+     * 未知类别或未知子类不展开任何执行材料，统一显示通用文案。
+     */
+    static String workText(ServiceClient.Work work) {
+        if (work == null) {
+            return "正在执行其他设备操作";
+        }
+        if ("act".equals(work.kind)) {
             return "正在操作";
         }
-        if ("open_app".equals(kind)) {
-            return "正在打开应用";
-        }
-        if ("observe".equals(kind)) {
+        if ("observe".equals(work.kind)) {
             return "正在观察";
         }
-        if ("apps".equals(kind)) {
-            return "正在读取应用清单";
-        }
-        if ("shell".equals(kind)) {
+        if ("shell".equals(work.kind)) {
             return "正在执行命令";
         }
+        if ("app".equals(work.kind)) {
+            return "app · " + appKindText(work.appKind);
+        }
         return "正在执行其他设备操作";
+    }
+
+    /** app 的七个受控子类；缺失、未知或非受控取值一律回落为通用“应用操作”。 */
+    static String appKindText(String appKind) {
+        if (!hasText(appKind)) {
+            return "应用操作";
+        }
+        switch (appKind.trim()) {
+            case "find": return "查找应用";
+            case "list": return "列出任务";
+            case "open": return "打开应用";
+            case "claim": return "认领任务";
+            case "handoff": return "交还任务";
+            case "close": return "关闭窗口";
+            case "kill": return "终止进程";
+            default: return "应用操作";
+        }
     }
 
     static String phaseSuffix(String phase) {
@@ -401,7 +421,7 @@ final class ControlState {
         if (work == null) {
             return null;
         }
-        return workText(work.kind) + " · 阶段 " + phaseLabel(work.phase);
+        return workText(work) + " · 阶段 " + phaseLabel(work.phase);
     }
 
     static String cleanupLabel(String value) {

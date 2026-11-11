@@ -60,8 +60,7 @@ func New(cfg Config, eng *engine.Engine, log *eventlog.Logger) *Server {
 	mux.HandleFunc("/api/keepalive", s.agent(s.keepalive))
 	mux.HandleFunc("/api/diagnose", s.agent(s.diagnose))
 	mux.HandleFunc("/api/notify", s.agent(s.notify))
-	mux.HandleFunc("/api/apps", s.agent(s.apps))
-	mux.HandleFunc("/api/open_app", s.agent(s.openApp))
+	mux.HandleFunc("/api/app", s.agent(s.app))
 	mux.HandleFunc("/api/shell", s.agent(s.shell))
 	mux.HandleFunc("/v1/control/sync", s.control(s.sync))
 	mux.HandleFunc("/v1/control/stop", s.control(s.stop))
@@ -344,46 +343,37 @@ func (s *Server) notify(w http.ResponseWriter, r *http.Request, p string) {
 	s.finish(w, result, apiErr)
 }
 
-func (s *Server) apps(w http.ResponseWriter, r *http.Request, p string) {
+func (s *Server) app(w http.ResponseWriter, r *http.Request, p string) {
 	body, ok := readBody(w, r, 8*1024)
 	if !ok {
 		return
 	}
-	req, apiErr := protocol.DecodeApps(body)
+	req, apiErr := protocol.DecodeApp(body)
 	if apiErr != nil {
 		writeAPIError(w, apiErr)
 		return
 	}
-	release, ok := s.delivery.acquire(deliveryReserveApps)
+	// The kind decides the delivery budget before the engine does device work.
+	reserve := appDeliveryReserve(req)
+	release, ok := s.delivery.acquire(reserve)
 	if !ok {
 		writeAPIError(w, protocol.NewError(503, protocol.CodeDeliveryUnavailable,
 			"结果交付容量不足，请在当前结果交付后再试"))
 		return
 	}
 	defer release()
-	result, apiErr := s.engine.Apps(r.Context(), s.cfg.AgentName, p, req)
+	result, apiErr := s.engine.App(r.Context(), s.cfg.AgentName, p, req)
 	s.finish(w, result, apiErr)
 }
 
-func (s *Server) openApp(w http.ResponseWriter, r *http.Request, p string) {
-	body, ok := readBody(w, r, 8*1024)
-	if !ok {
-		return
+// appDeliveryReserve returns the delivery budget of one admitted app kind.
+// Queries publish only bounded collections; every mutating kind also publishes
+// the full post-action observation.
+func appDeliveryReserve(req *protocol.AppRequest) int64 {
+	if req.IsQuery() {
+		return deliveryReserveApps
 	}
-	req, apiErr := protocol.DecodeOpenApp(body)
-	if apiErr != nil {
-		writeAPIError(w, apiErr)
-		return
-	}
-	release, ok := s.delivery.acquire(deliveryReserveTree)
-	if !ok {
-		writeAPIError(w, protocol.NewError(503, protocol.CodeDeliveryUnavailable,
-			"结果交付容量不足，请在当前结果交付后再试"))
-		return
-	}
-	defer release()
-	result, apiErr := s.engine.OpenApp(r.Context(), s.cfg.AgentName, p, req)
-	s.finish(w, result, apiErr)
+	return deliveryReserveTree
 }
 
 func (s *Server) shell(w http.ResponseWriter, r *http.Request, p string) {

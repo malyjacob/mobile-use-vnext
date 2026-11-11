@@ -258,7 +258,7 @@ type controlComparable struct {
 	reason                                     string
 	sessOrigin, sessAgent, sessMode, sessState string
 	sessExpires, sessEnded, sessReason         string
-	workOp, workKind, workPhase                string
+	workOp, workKind, workAppKind, workPhase   string
 	cleanupState, cleanupExec, cleanupTasks    string
 	cleanupRecents, cleanupDisplay             string
 }
@@ -288,8 +288,16 @@ func (e *Engine) controlViewLocked(now time.Time) protocol.ControlView {
 		}
 	}
 	if e.work != nil {
+		kind, appKind := e.work.Kind, ""
+		if kind == WorkAppQuery || kind == WorkAppAction {
+			kind = appTool
+			if op := e.operations[e.work.OperationID]; op != nil {
+				appKind = op.AppKind
+			}
+		}
 		view.Work = &protocol.ControlWork{
-			OperationID: e.work.OperationID, Kind: e.work.Kind, Phase: e.work.Phase,
+			OperationID: e.work.OperationID, Kind: kind, AppKind: appKind,
+			Phase: e.work.Phase,
 		}
 	}
 	if e.cleanup != nil && view.Session != nil && view.Session.State == SessionEnded {
@@ -316,6 +324,7 @@ func (e *Engine) controlViewLocked(now time.Time) protocol.ControlView {
 	if view.Work != nil {
 		fingerprint.workOp = view.Work.OperationID
 		fingerprint.workKind = view.Work.Kind
+		fingerprint.workAppKind = view.Work.AppKind
 		fingerprint.workPhase = view.Work.Phase
 	}
 	if e.lastFingerprint == nil || *e.lastFingerprint != fingerprint {
@@ -583,6 +592,13 @@ func (e *Engine) restoreRecoveryLocked(record *Ledger) {
 		}
 	}
 	e.restoreUIRecoveryLocked(record)
+	if len(record.TaskTransfers) > 0 {
+		e.transfers = nil
+		for _, transfer := range record.TaskTransfers {
+			copy := transfer
+			e.transfers = append(e.transfers, &transferState{record: copy, durable: true})
+		}
+	}
 }
 
 // enqueueCloseCommand adds one precise close command for the original display.
@@ -637,6 +653,12 @@ func (e *Engine) ledgerRecordLocked() *Ledger {
 	}
 	for _, r := range e.retired {
 		record.Retired = append(record.Retired, r.ledger())
+	}
+	for _, transfer := range e.transfers {
+		if transfer == nil {
+			continue
+		}
+		record.TaskTransfers = append(record.TaskTransfers, transfer.record)
 	}
 	if e.stopBoundary != nil {
 		record.Stop = &LedgerStop{AppInstanceID: e.stopBoundary.AppInstanceID, Seq: e.stopBoundary.Seq, AcceptedAt: e.stopBoundary.AcceptedAt}

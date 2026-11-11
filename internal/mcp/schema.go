@@ -25,7 +25,7 @@ const treeTextGuide = "可读正文在 key=value 阶段事实之后附带一个�
 	"`n<ref>` 可直接用作 target.ref。delta 相对 base 累计，新 delta 覆盖旧 delta，不叠加。" +
 	"补看块以 `inspect v1 scope=<tree|subtree|query> observation=<O> revision=<n> … nodes=<n>` " +
 	"开头，tree/subtree 后接节点行，query 后接 `match i/N path=[…]` 与命中子树，并以 " +
-	"`end inspect` 结尾。`omitted` 表示整块超过文本上限未渲染，可用 inspect 的 node/query 收窄。"
+	"`end inspect` 结尾。"
 
 // toolCatalog is the complete public tool surface. Order is stable for tests
 // and for clients that display tools in registration order.
@@ -36,7 +36,7 @@ var toolCatalog = []toolDefinition{
 			"目标屏幕与模式来自控制端当前选择，不接受尺寸、模式或凭据参数。" +
 			"启动初始化、激活与首观察成功发布使用五分钟租期。正常启动且无并发更新时，" +
 			"首观察成功发布将租期推至发布时起五分钟，已有更晚期限则保留；以响应 session.expires_at 为准，网络交付会消耗剩余时间。" +
-			"后续 observe/act/open_app/shell 等仅在既有续期点取 max(当前截止时间, now + 2分钟)，不截短启动租期。" +
+			"后续 observe/act/app/shell 等仅在既有续期点取 max(当前截止时间, now + 2分钟)，不截短启动租期。" +
 			"显式 keepalive 可重设并缩短它。五分钟不延长单次 start 工作期限，也不延长首个 O 的独立输入有效期；" +
 			"重放原 start 操作不重新获得五分钟。" +
 			treeTextGuide,
@@ -293,49 +293,167 @@ var toolCatalog = []toolDefinition{
 }`),
 	},
 	{
-		name: "apps",
-		description: "只读发现本机可启动应用，可按本地化名称或包名做字面 Unicode " +
-			"折叠子串过滤；不返回应用列表正文以外的执行事实。",
-		schema: json.RawMessage(`{
-  "type": "object",
-  "properties": {
-    "query": {
-      "type": "string",
-      "maxLength": 256,
-      "description": "可选的本地化名称或包名子串；省略表示列出全部。"
-    }
-  },
-  "required": [],
-  "additionalProperties": false,
-  "description": "apps 的 query 可选，最多 256 个 Unicode 码点。"
-}`),
-	},
-	{
-		name: "open_app",
-		description: "消费一个 ready 观察并在其会话的显示上打开指定包名的应用。" +
-			"app 只接受明确包名；返回 app 身份与后置观察。" +
+		name: "app",
+		description: "统一应用生命周期入口，按 kind 选择互斥分支。" +
+			"find：无会话应用发现，可选 query（最多 256 码点）按本地化名称或包名做字面 Unicode 折叠子串过滤；成功/失败均无 outcome。" +
+			"list：查询本 Agent 原会话（reference 必填）的 live 任务；scope=session（默认）列原会话虚屏任务，" +
+			"scope=primary 列主屏候选；app 可选作明确包名过滤；成功/失败均无 outcome。" +
+			"open：消费当前 ready O，在会话屏复用同包窗口或新建；主屏只打开、不登记用户任务。" +
+			"claim：把主屏精确 live 任务移入本会话虚屏并登记 borrowed。" +
+			"handoff：把本会话虚屏的单个任务移回主屏 0，默认不恢复前台（restore_foreground=false）。" +
+			"close：关闭本会话虚屏目标窗口，默认拒绝 borrowed 窗口（allow_borrowed=false）。" +
+			"kill：终止本会话 live owned 且同屏唯一可归因任务对应的应用精确进程；target 只接受 task_id，" +
+			"默认拒绝已知前台服务或播放（allow_stop_playback=false）。" +
+			"claim/handoff/close 的 target 为 {task_id: 正整数} 或 {app: 包名} 二选一；kill 只接受 task_id。" +
+			"target 是选择器，不单独授予权限。模式来自原会话：主屏会话只允许 find/list/open，" +
+			"claim/handoff/close/kill 在消费 O 前拒绝。" +
+			"五个变更 kind（open/claim/handoff/close/kill）的主 outcome 为 executed/not_executed/uncertain，" +
+			"成功后返回原会话屏 full 无图观察。" +
 			treeTextGuide,
 		schema: json.RawMessage(`{
   "type": "object",
   "properties": {
-    "observation_id": {
+    "kind": {
+      "type": "string",
+      "enum": ["find", "list", "open", "claim", "handoff", "close", "kill"],
+      "description": "必填且大小写敏感的互斥分支。"
+    },
+    "query": {
+      "type": "string",
+      "maxLength": 256,
+      "description": "find 可选：本地化名称或包名子串；省略表示全部，最多 256 个 Unicode 码点。"
+    },
+    "reference": {
       "type": "string",
       "minLength": 1,
       "maxLength": 64,
       "pattern": "^[OP]",
-      "description": "必填的 ready O 编号。"
+      "description": "list 必填：本 Agent 活动原会话的 O 或 P。"
+    },
+    "scope": {
+      "type": "string",
+      "enum": ["session", "primary"],
+      "default": "session",
+      "description": "list 可选：session 列原会话虚屏任务（默认）；primary 列主屏候选元数据。"
     },
     "app": {
       "type": "string",
       "minLength": 1,
       "maxLength": 255,
       "pattern": "^[A-Za-z0-9_]+(\\.[A-Za-z0-9_]+)*$",
-      "description": "必填的 Android 包名。"
+      "description": "明确 Android 包名：open 必填；list 可作过滤。"
+    },
+    "observation_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[OP]",
+      "description": "open/claim/handoff/close/kill 必填的当前 ready O 编号。"
+    },
+    "target": {
+      "description": "claim/handoff/close：task_id 与 app 恰好一种；kill 只接受 task_id。",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "task_id": {"type": "integer", "minimum": 1, "description": "精确 leaf task ID。"}
+          },
+          "required": ["task_id"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "app": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255,
+              "pattern": "^[A-Za-z0-9_]+(\\.[A-Za-z0-9_]+)*$",
+              "description": "按包名精确匹配；零个或多个候选时拒绝。"
+            }
+          },
+          "required": ["app"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "restore_foreground": {
+      "type": "boolean",
+      "default": false,
+      "description": "handoff 可选：true 时尽力恢复原前台；默认 false。"
+    },
+    "allow_borrowed": {
+      "type": "boolean",
+      "default": false,
+      "description": "close 可选：true 才允许关闭借入窗口；默认 false 整体拒绝。"
+    },
+    "allow_stop_playback": {
+      "type": "boolean",
+      "default": false,
+      "description": "kill 可选：true 只越过已知前台服务/播放拒绝；默认 false。"
     }
   },
-  "required": ["observation_id", "app"],
+  "required": ["kind"],
   "additionalProperties": false,
-  "description": "open_app 需要 observation_id 与 app。"
+  "allOf": [
+    {
+      "if": {"properties": {"kind": {"const": "find"}}, "required": ["kind"]},
+      "then": {"not": {"anyOf": [
+        {"required": ["reference"]}, {"required": ["observation_id"]}, {"required": ["target"]},
+        {"required": ["app"]}, {"required": ["scope"]}, {"required": ["restore_foreground"]},
+        {"required": ["allow_borrowed"]}, {"required": ["allow_stop_playback"]}
+      ]}}
+    },
+    {
+      "if": {"properties": {"kind": {"const": "list"}}, "required": ["kind"]},
+      "then": {"required": ["reference"], "not": {"anyOf": [
+        {"required": ["observation_id"]}, {"required": ["target"]}, {"required": ["query"]},
+        {"required": ["restore_foreground"]}, {"required": ["allow_borrowed"]},
+        {"required": ["allow_stop_playback"]}
+      ]}}
+    },
+    {
+      "if": {"properties": {"kind": {"const": "open"}}, "required": ["kind"]},
+      "then": {"required": ["observation_id", "app"], "not": {"anyOf": [
+        {"required": ["reference"]}, {"required": ["scope"]}, {"required": ["target"]},
+        {"required": ["query"]}, {"required": ["restore_foreground"]},
+        {"required": ["allow_borrowed"]}, {"required": ["allow_stop_playback"]}
+      ]}}
+    },
+    {
+      "if": {"properties": {"kind": {"const": "claim"}}, "required": ["kind"]},
+      "then": {"required": ["observation_id", "target"], "not": {"anyOf": [
+        {"required": ["reference"]}, {"required": ["scope"]}, {"required": ["app"]},
+        {"required": ["query"]}, {"required": ["restore_foreground"]},
+        {"required": ["allow_borrowed"]}, {"required": ["allow_stop_playback"]}
+      ]}}
+    },
+    {
+      "if": {"properties": {"kind": {"const": "handoff"}}, "required": ["kind"]},
+      "then": {"required": ["observation_id", "target"], "not": {"anyOf": [
+        {"required": ["reference"]}, {"required": ["scope"]}, {"required": ["app"]},
+        {"required": ["query"]}, {"required": ["allow_borrowed"]},
+        {"required": ["allow_stop_playback"]}
+      ]}}
+    },
+    {
+      "if": {"properties": {"kind": {"const": "close"}}, "required": ["kind"]},
+      "then": {"required": ["observation_id", "target"], "not": {"anyOf": [
+        {"required": ["reference"]}, {"required": ["scope"]}, {"required": ["app"]},
+        {"required": ["query"]}, {"required": ["restore_foreground"]},
+        {"required": ["allow_stop_playback"]}
+      ]}}
+    },
+    {
+      "if": {"properties": {"kind": {"const": "kill"}}, "required": ["kind"]},
+      "then": {"required": ["observation_id", "target"], "not": {"anyOf": [
+        {"required": ["reference"]}, {"required": ["scope"]}, {"required": ["app"]},
+        {"required": ["query"]}, {"required": ["restore_foreground"]},
+        {"required": ["allow_borrowed"]}
+      ]}}
+    }
+  ],
+  "description": "app 需要 kind；各分支只接受自己的成员，服务严格解码为权威。"
 }`),
 	},
 	{

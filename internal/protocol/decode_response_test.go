@@ -235,29 +235,100 @@ func TestDecodeInspectQueryMatches(t *testing.T) {
 	roundTripDecode(t, original)
 }
 
-func TestDecodeAppsView(t *testing.T) {
-	original := &Result{Apps: &AppsView{
-		Items: []AppEntry{
+func TestDecodeAppFindView(t *testing.T) {
+	yes := true
+	original := &Result{App: &AppView{
+		Kind: AppKindFind,
+		Items: []AppItem{
 			{Name: "Camera", Package: "com.android.camera"},
 			{Name: "Maps", Package: "com.example.maps"},
 		},
+		HasItems:   true,
 		Total:      5,
-		Truncated:  true,
+		HasTotal:   true,
+		Truncated:  &yes,
 		CapturedAt: "2026-11-09T03:00:03Z",
 	}}
 	roundTripDecode(t, original)
 }
 
-func TestDecodeAppView(t *testing.T) {
-	no := false
+func TestDecodeAppListView(t *testing.T) {
+	origin := 0
 	original := &Result{App: &AppView{
-		Package:        "com.example.app",
-		TaskID:         77,
-		DisplayID:      12,
-		Reused:         true,
-		StatePreserved: &no,
+		Kind:      AppKindList,
+		DisplayID: intPtrForTest(12),
+		TaskItems: []AppTaskItem{
+			{TaskID: 42, Package: "com.example", Ownership: TaskOwnershipBorrowed,
+				OriginDisplay: &origin},
+			{TaskID: 43, Package: "com.other", Ownership: TaskOwnershipShared},
+		},
+		HasItems:   true,
+		Total:      2,
+		HasTotal:   true,
+		CapturedAt: "2026-11-09T03:00:04Z",
+		Foreground: &Foreground{State: "present", Package: "com.example", TaskID: intPtrForTest(42), HasTask: true},
 	}}
 	roundTripDecode(t, original)
+}
+
+func TestDecodeAppActionViews(t *testing.T) {
+	no := false
+	original := &Result{App: &AppView{
+		Kind: AppKindClaim, Package: "com.example.app",
+		TaskID: intPtrForTest(77), DisplayID: intPtrForTest(12),
+		SourceDisplayID: intPtrForTest(0),
+		Ownership:       TaskOwnershipBorrowed, StatePreserved: &no, HasStatePreserved: true,
+	}}
+	roundTripDecode(t, original)
+
+	handoff := &Result{App: &AppView{
+		Kind: AppKindHandoff, Package: "com.example.app",
+		TaskID: intPtrForTest(77), DisplayID: intPtrForTest(0),
+		SourceDisplayID: intPtrForTest(12),
+		Ownership:       TaskOwnershipShared,
+		StatePreserved:  nil, HasStatePreserved: true,
+		ForegroundRestore: ForegroundRestoreUnconfirmed,
+	}}
+	roundTripDecode(t, handoff)
+
+	original = &Result{App: &AppView{
+		Kind: AppKindOpen, Package: "com.example.app", TaskID: intPtrForTest(77),
+		DisplayID: intPtrForTest(12), Ownership: TaskOwnershipOwned,
+		Reused: &no, StatePreserved: &no, HasStatePreserved: true,
+	}}
+	roundTripDecode(t, original)
+}
+
+func TestDecodeAppCloseView(t *testing.T) {
+	yes := true
+	original := &Result{App: &AppView{
+		Kind: AppKindClose, DisplayID: intPtrForTest(12), HasTasks: true,
+		Tasks: []AppCloseTask{
+			{TaskID: 42, Outcome: "executed", RecentsCleaned: &yes, HasRecentsCleaned: true},
+			{TaskID: 43, Outcome: "uncertain", RecentsCleaned: nil, HasRecentsCleaned: true},
+			{TaskID: 44, Outcome: "not_executed", Error: &Error{
+				Code: CodeStopped, Message: "任务关闭已停止"}},
+		},
+		Complete: &yes,
+	}}
+	roundTripDecode(t, original)
+}
+
+func TestDecodeAppKillView(t *testing.T) {
+	original := &Result{App: &AppView{
+		Kind: AppKindKill, Package: "com.example.app",
+		SourceTaskID: intPtrForTest(42), DisplayID: intPtrForTest(12),
+		TargetPIDs: []int{1234, 1235}, KilledPIDs: []int{1234}, RemainingPIDs: []int{1235},
+		HasTargetPIDs: true, HasKilledPIDs: true, HasRemainingPIDs: true,
+		Restarted: nil, HasRestarted: true,
+	}}
+	roundTripDecode(t, original)
+}
+
+// intPtrForTest returns a pointer to one literal for response fixtures.
+func intPtrForTest(value int) *int {
+	copy := value
+	return &copy
 }
 
 func TestDecodeShellView(t *testing.T) {
@@ -446,8 +517,10 @@ func TestDecodeRejectsInvalidResponseShapes(t *testing.T) {
 		{"observation status number", `{"observation":{"status":1}}`},
 		{"observation array", `{"observation":[]}`},
 		{"foreground task id string", `{"observation":{"status":"complete","foreground":{"state":"present","task_id":"1"}}}`},
-		{"apps items null", `{"apps":{"items":null,"total":0,"truncated":false,"captured_at":"x"}}`},
-		{"apps missing captured at", `{"apps":{"items":[],"total":0,"truncated":false}}`},
+		{"app missing kind", `{"app":{"items":[]}}`},
+		{"app kind null", `{"app":{"kind":null}}`},
+		{"app items null", `{"app":{"kind":"find","items":null}}`},
+		{"app pids null", `{"app":{"kind":"kill","target_pids":null}}`},
 		{"shell missing exit code", `{"shell":{"termination":"x","output":"","truncated":null}}`},
 		{"error code null", `{"error":{"code":null,"message":"x"}}`},
 		{"duplicate member", `{"operation_id":"P1","operation_id":"P2"}`},
