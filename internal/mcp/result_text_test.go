@@ -359,6 +359,96 @@ func TestResultJSONComparisonPreservesLargeIntegers(t *testing.T) {
 	}
 }
 
+// TestTextCodecEffectAndQuality pins the readable projection of the two
+// contract-10 facts. The ordered writer already follows wire order: effect is
+// emitted between phase and target_reference, and observation.quality between
+// actionable_until and screen.
+func TestTextCodecEffectAndQuality(t *testing.T) {
+	raw := []byte(`{"operation_id":"P1","outcome":"executed","phase":"completed",` +
+		`"effect":{"state":"unknown"},"target_reference":"O1",` +
+		`"observation":{"status":"complete","id":"O2","origin":"P1","revision":2,` +
+		`"captured_at":"2026-11-10T00:00:00Z","actionable_until":"2026-11-10T00:01:00Z",` +
+		`"quality":{"state":"unknown","samples":0,"stop_reason":"not_sampled"},` +
+		`"screen":{"width":1080,"height":2400,"rotation":0},` +
+		`"tree":{"format":"full","scope":"reported_visible_with_context",` +
+		`"root":{"ref":"n1","role":"root","bounds":[0,0,1080,2400]}}}}`)
+	text := assertResultTextParity(t, raw, false)
+	for _, line := range []string{
+		"effect.state=unknown",
+		"observation.quality.state=unknown",
+		"observation.quality.samples=0",
+		"observation.quality.stop_reason=not_sampled",
+	} {
+		requireTestContains(t, text, "\n"+line+"\n")
+	}
+	ordered := []string{
+		"\nphase=completed\n",
+		"\neffect.state=unknown\n",
+		"\ntarget_reference=O1\n",
+		"\nobservation.actionable_until=2026-11-10T00:01:00Z\n",
+		"\nobservation.quality.state=unknown\n",
+		"\nobservation.quality.stop_reason=not_sampled\n",
+		"\nobservation.screen=",
+	}
+	last := -1
+	for _, fragment := range ordered {
+		index := strings.Index(text, fragment)
+		if index <= last {
+			t.Fatalf("readable projection order broke at %q:\n%s", fragment, text)
+		}
+		last = index
+	}
+}
+
+// TestTextCodecQualityAndEffectStates proves every declared enum value is
+// emitted as the same readable token, including the explicit samples=0 fact.
+func TestTextCodecQualityAndEffectStates(t *testing.T) {
+	for _, quality := range []struct {
+		state   string
+		samples int
+		stop    string
+	}{
+		{protocol.QualityStable, 3, protocol.QualityStopStable},
+		{protocol.QualityUnstable, 5, protocol.QualityStopMaxSamples},
+		{protocol.QualityUnknown, 1, protocol.QualityStopUnreadable},
+		{protocol.QualityUnknown, 0, protocol.QualityStopNotSampled},
+	} {
+		raw := []byte(fmt.Sprintf(
+			`{"observation":{"status":"complete","id":"O1","quality":{`+
+				`"state":%q,"samples":%d,"stop_reason":%q}}}`,
+			quality.state, quality.samples, quality.stop))
+		text := assertResultTextParity(t, raw, false)
+		requireTestContains(t, text, "observation.quality.state="+quality.state+"\n")
+		requireTestContains(t, text, fmt.Sprintf("observation.quality.samples=%d\n", quality.samples))
+		requireTestContains(t, text, "observation.quality.stop_reason="+quality.stop+"\n")
+	}
+	for _, state := range []string{protocol.EffectObserved, protocol.EffectNotObserved, protocol.EffectUnknown} {
+		raw := []byte(fmt.Sprintf(`{"effect":{"state":%q}}`, state))
+		text := assertResultTextParity(t, raw, false)
+		requireTestContains(t, text, "effect.state="+state+"\n")
+	}
+}
+
+// TestDiagnosticDoesNotProjectQuality pins the existing diagnostic whitelist:
+// diagnostic v1 carries only observation.status/id, so the observation quality
+// object never becomes a diagnostic fact even when the result is an error.
+func TestDiagnosticDoesNotProjectQuality(t *testing.T) {
+	raw := []byte(`{"operation_id":"P1","outcome":"not_executed","phase":"revalidate",` +
+		`"observation":{"status":"complete","id":"O2",` +
+		`"quality":{"state":"unknown","samples":0,"stop_reason":"not_sampled"},` +
+		`"tree":{"format":"full","scope":"reported_visible_with_context",` +
+		`"root":{"ref":"n1","role":"root","bounds":[0,0,1080,2400]}}},` +
+		`"error":{"code":"target_changed","message":"目标变化"}}`)
+	text, err := encodeResultDiagnostic(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireTestContains(t, text, "diagnostic v1 is_error=true\n")
+	requireTestContains(t, text, "observation.status=complete\n")
+	requireTestContains(t, text, "error.code=target_changed\n")
+	requireTestNotContains(t, text, "quality")
+}
+
 func TestTextCodecTrailer(t *testing.T) {
 	for _, text := range []string{"result v1 is_error=false\n", "result v1 is_error=false\noperation_id=P1\noperation_id=P2\nend result\n", "result v1 is_error=false\nresult v1 is_error=false\nend result\n", "diagnostic v1 is_error=true\nend diagnostic\n"} {
 		if _, _, err := decodeResultText(t, text); err == nil {

@@ -25,7 +25,10 @@ const treeTextGuide = "可读正文在 key=value 阶段事实之后附带一个�
 	"`n<ref>` 可直接用作 target.ref。delta 相对 base 累计，新 delta 覆盖旧 delta，不叠加。" +
 	"补看块以 `inspect v1 scope=<tree|subtree|query> observation=<O> revision=<n> … nodes=<n>` " +
 	"开头，tree/subtree 后接节点行，query 后接 `match i/N path=[…]` 与命中子树，并以 " +
-	"`end inspect` 结尾。"
+	"`end inspect` 结尾。" +
+	"滚动用 `operation.type=scroll` + `operation.container` 表达；raw `swipe` 是原始手势，不承诺滚动语义。" +
+	"树块 `tap|long_press|text|swipe` 动作列（`Node.actions`）中的 `swipe` 只是节点的源能力，不是 raw swipe 授权。" +
+	"`scroll` 不承诺真实方向、触摸消费者或业务安全；`unstable`/`unknown` 的观察质量不阻止输入。"
 
 // toolCatalog is the complete public tool surface. Order is stable for tests
 // and for clients that display tools in registration order.
@@ -110,11 +113,14 @@ var toolCatalog = []toolDefinition{
 	},
 	{
 		name: "act",
-		description: "消费一个 ready 观察并派发 tap、long_press、text、swipe 或 key。" +
+		description: "消费一个 ready 观察并派发 tap、long_press、text、swipe、scroll 或 key。" +
 			"operation 只接受对应分支的成员；image=true 在动作后的同一次采集中附加 ImageContent。" +
+			"滚动用 operation.type=scroll + container 表达：direction 声明阅读方向，amount 选 page 或 half；" +
+			"swipe 是原始手势，只接受 from/to 与可选 duration_ms，不承诺滚动语义。" +
 			"坐标目标会在派发前按点解析节点并证明未变化，变化时返回 target_changed。" +
 			"重验失败且已取得新帧时，结果另带一个新观察与 retry 入口：用该 O 加新 P 重试，不必再 observe。" +
 			"派发回执不可用时结果记为 uncertain，本次调用即关闭该窗口，不阻塞后续 observe 或其他普通调用，应以一次新 observe 收窄不确定性。" +
+			"观察的 `unstable`/`unknown` 质量（observation.quality）不阻止输入。" +
 			treeTextGuide,
 		schema: json.RawMessage(`{
   "type": "object",
@@ -131,8 +137,8 @@ var toolCatalog = []toolDefinition{
       "properties": {
         "type": {
           "type": "string",
-          "enum": ["tap", "long_press", "text", "swipe", "key"],
-          "description": "动作类型。"
+          "enum": ["tap", "long_press", "text", "swipe", "scroll", "key"],
+          "description": "动作类型；scroll 用 container/direction/amount，swipe 用 from/to/duration_ms。"
         },
         "target": {
           "description": "tap/long_press/text 的目标：ref 或 x/y 坐标，二选一。",
@@ -156,6 +162,39 @@ var toolCatalog = []toolDefinition{
             }
           ]
         },
+        "container": {
+          "description": "scroll 的滚动容器选择器：ref 或 x/y 坐标，二选一。ref 必须直接指向 role=scroll 节点（不做祖先晋升）；x/y 取该点所在的滚动容器。",
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "ref": {"type": "string", "minLength": 1, "maxLength": 64}
+              },
+              "required": ["ref"],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "x": {"type": "integer", "minimum": 0},
+                "y": {"type": "integer", "minimum": 0}
+              },
+              "required": ["x", "y"],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "direction": {
+          "type": "string",
+          "enum": ["up", "down", "left", "right"],
+          "description": "scroll 必填的阅读/视口前进方向，大小写敏感；不证明设备滚动轴。"
+        },
+        "amount": {
+          "type": "string",
+          "enum": ["page", "half"],
+          "default": "page",
+          "description": "scroll 可选幅度：page（默认）或 half；不接受其他值。"
+        },
         "from": {
           "type": "object",
           "properties": {
@@ -176,6 +215,12 @@ var toolCatalog = []toolDefinition{
           "additionalProperties": false,
           "description": "swipe 终点坐标，不能与 from 相同。"
         },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 50,
+          "maximum": 2000,
+          "description": "swipe 可选手势时长毫秒，50–2000，默认 300；其他分支出现即拒绝。"
+        },
         "key": {
           "type": "string",
           "enum": ["BACK", "ENTER", "DEL", "TAB", "ESCAPE", "DPAD_UP", "DPAD_DOWN", "HOME", "APP_SWITCH"],
@@ -189,7 +234,7 @@ var toolCatalog = []toolDefinition{
       },
       "required": ["type"],
       "additionalProperties": false,
-      "description": "tap/long_press 接受 target；text 接受 target 与 text；swipe 接受 from 与 to；key 接受 key。"
+      "description": "tap/long_press 接受 target；text 接受 target 与 text；scroll 接受 container、direction 与可选 amount；swipe 接受 from、to 与可选 duration_ms；key 接受 key。"
     },
     "image": {
       "type": "boolean",

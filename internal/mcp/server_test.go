@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -421,6 +422,144 @@ func TestToolCatalog(t *testing.T) {
 	}
 	if capabilities.Prompts != nil || capabilities.Resources != nil {
 		t.Fatalf("unexpected prompts/resources capability: %+v", capabilities)
+	}
+}
+
+// TestActScrollSchema pins the contract-10 act surface: scroll is a declared
+// branch, container has target's selector shape, direction/amount are bounded
+// enums, duration_ms is the swipe-only bounded integer, and the public
+// description explains scroll instead of raw swipe.
+func TestActScrollSchema(t *testing.T) {
+	definition := testDefinitionByName(t, "act")
+	var top struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(definition.schema, &top); err != nil {
+		t.Fatalf("act schema: %v", err)
+	}
+	var operation struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+		Required   []string                   `json:"required"`
+	}
+	if err := json.Unmarshal(top.Properties["operation"], &operation); err != nil {
+		t.Fatalf("act operation schema: %v", err)
+	}
+	enumOf := func(raw json.RawMessage) []string {
+		t.Helper()
+		var value struct {
+			Enum []string `json:"enum"`
+		}
+		if err := json.Unmarshal(raw, &value); err != nil {
+			t.Fatalf("enum schema: %v", err)
+		}
+		return value.Enum
+	}
+	if got, want := enumOf(operation.Properties["type"]), []string{"tap", "long_press", "text", "swipe", "scroll", "key"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("operation.type enum = %v, want %v", got, want)
+	}
+	if got, want := enumOf(operation.Properties["direction"]), []string{"up", "down", "left", "right"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("direction enum = %v, want %v", got, want)
+	}
+	var amount struct {
+		Enum    []string `json:"enum"`
+		Default string   `json:"default"`
+	}
+	if err := json.Unmarshal(operation.Properties["amount"], &amount); err != nil {
+		t.Fatalf("amount schema: %v", err)
+	}
+	if !reflect.DeepEqual(amount.Enum, []string{"page", "half"}) || amount.Default != "page" {
+		t.Fatalf("amount schema = %+v", amount)
+	}
+	var duration struct {
+		Type    string `json:"type"`
+		Minimum int    `json:"minimum"`
+		Maximum int    `json:"maximum"`
+	}
+	if err := json.Unmarshal(operation.Properties["duration_ms"], &duration); err != nil {
+		t.Fatalf("duration_ms schema: %v", err)
+	}
+	if duration.Type != "integer" || duration.Minimum != protocol.MinSwipeDurationMS || duration.Maximum != protocol.MaxSwipeDurationMS {
+		t.Fatalf("duration_ms schema = %+v", duration)
+	}
+	var target, container struct {
+		Description string          `json:"description"`
+		OneOf       json.RawMessage `json:"oneOf"`
+	}
+	if err := json.Unmarshal(operation.Properties["target"], &target); err != nil {
+		t.Fatalf("target schema: %v", err)
+	}
+	if err := json.Unmarshal(operation.Properties["container"], &container); err != nil {
+		t.Fatalf("container schema: %v", err)
+	}
+	var targetShape, containerShape any
+	if err := json.Unmarshal(target.OneOf, &targetShape); err != nil {
+		t.Fatalf("target oneOf: %v", err)
+	}
+	if err := json.Unmarshal(container.OneOf, &containerShape); err != nil {
+		t.Fatalf("container oneOf: %v", err)
+	}
+	if !reflect.DeepEqual(targetShape, containerShape) {
+		t.Fatal("container selector shape differs from the target selector shape")
+	}
+	requireTestContains(t, container.Description, "role=scroll")
+	for _, fragment := range []string{
+		"operation.type=scroll + container",
+		"swipe 是原始手势",
+		"`swipe` 只是节点的源能力，不是 raw swipe 授权",
+		"`scroll` 不承诺真实方向、触摸消费者或业务安全",
+		"`unstable`/`unknown` 质量（observation.quality）不阻止输入",
+	} {
+		requireTestContains(t, definition.description, fragment)
+	}
+}
+
+// TestActScrollForwarded proves the admitted scroll branch reaches the device
+// service with the canonical container/direction/amount body and that the
+// returned effect/quality are projected to both text and structured forms.
+func TestActScrollForwarded(t *testing.T) {
+	fake := newTestDeviceService(t)
+	fake.setHandler("act", func(writer http.ResponseWriter, request *http.Request, body string) {
+		writeTestJSON(writer, http.StatusOK, fmt.Sprintf(
+			`{"operation_id":%q,"outcome":"executed","phase":"completed",`+
+				`"effect":{"state":"observed"},"target_reference":"O1",`+
+				`"observation":{"status":"complete","id":"O2","origin":%q,"revision":2,`+
+				`"quality":{"state":"unstable","samples":3,"stop_reason":"max_samples"}}}`,
+			testOperationHeader(request), testOperationHeader(request)))
+	})
+	session := connectTestInMemory(t, newTestMCPServer(t, fake))
+	result := callTestTool(t, session, "act", map[string]any{
+		"observation_id": "O1",
+		"operation": map[string]any{
+			"type":      "scroll",
+			"container": map[string]any{"ref": "n372"},
+			"direction": "down",
+			"amount":    "page",
+		},
+	})
+	if result.IsError {
+		t.Fatalf("scroll act reported an error: %s", testTextContent(t, result))
+	}
+	requests := fake.requestsFor("act")
+	wantBody := `{"observation_id":"O1","operation":{"type":"scroll",` +
+		`"container":{"ref":"n372"},"direction":"down","amount":"page"},"image":false}`
+	if len(requests) != 1 || requests[0].Body != wantBody {
+		t.Fatalf("scroll body changed: %+v", requests)
+	}
+	text := testTextContent(t, result)
+	requireTestContains(t, text, "effect.state=observed")
+	requireTestContains(t, text, "observation.quality.state=unstable")
+	requireTestContains(t, text, "observation.quality.samples=3")
+	requireTestContains(t, text, "observation.quality.stop_reason=max_samples")
+	structured := testStructuredObject(t, result)
+	effect, _ := structured["effect"].(map[string]any)
+	if effect["state"] != "observed" {
+		t.Fatalf("structured effect = %#v", structured["effect"])
+	}
+	observation, _ := structured["observation"].(map[string]any)
+	quality, _ := observation["quality"].(map[string]any)
+	if quality["state"] != "unstable" || quality["samples"] != float64(3) ||
+		quality["stop_reason"] != "max_samples" {
+		t.Fatalf("structured quality = %#v", observation["quality"])
 	}
 }
 

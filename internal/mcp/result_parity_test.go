@@ -95,6 +95,61 @@ func TestAgentResultLosslessParity(t *testing.T) {
 	}
 }
 
+// TestEffectQualityModeParity proves text, both and structured expose the same
+// effect/quality values from the one decoded protocol.Result, including the
+// explicit samples=0 and not_sampled facts.
+func TestEffectQualityModeParity(t *testing.T) {
+	source := &protocol.Result{
+		OperationID:     "P1",
+		Outcome:         "executed",
+		Phase:           "completed",
+		Effect:          &protocol.Effect{State: protocol.EffectUnknown},
+		TargetReference: "O1",
+		Observation: &protocol.Observation{
+			Status: "complete",
+			ID:     "O2",
+			Quality: &protocol.Quality{
+				State: protocol.QualityUnknown, Samples: 0, StopReason: protocol.QualityStopNotSampled,
+			},
+		},
+	}
+	e := &execution{result: source}
+	canonical, err := canonicalResult(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := decodeResultJSON(canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []ResultMode{ResultModeBoth, ResultModeText, ResultModeStructured} {
+		out := projectExecution(e, "act", mode)
+		if out.IsError {
+			t.Fatalf("mode %v: unexpected error", mode)
+		}
+		if mode == ResultModeStructured {
+			got, err := decodeResultJSON([]byte(testStructuredJSON(t, out)))
+			if err != nil || !reflect.DeepEqual(want, got) {
+				t.Fatalf("structured parity err=%v got=%#v", err, got)
+			}
+			continue
+		}
+		text := testTextContent(t, out)
+		decoded, flag, err := decodeResultText(t, text)
+		if err != nil || flag || !reflect.DeepEqual(want, decoded) {
+			t.Fatalf("text parity mode=%v err=%v", mode, err)
+		}
+		for _, line := range []string{
+			"effect.state=unknown",
+			"observation.quality.state=unknown",
+			"observation.quality.samples=0",
+			"observation.quality.stop_reason=not_sampled",
+		} {
+			requireTestContains(t, text, "\n"+line+"\n")
+		}
+	}
+}
+
 type resultModeFixture struct {
 	tool, name, raw string
 	cancelled       bool
@@ -118,6 +173,8 @@ func resultModeFixtures() []resultModeFixture {
 	for _, outcome := range []string{"executed", "not_executed", "uncertain"} {
 		add("act", outcome, `{"operation_id":"P1","outcome":"`+outcome+`","error":{"code":"target_changed","message":"目标变化"},"recovery":{"entry":"observe","reference":"P"}}`)
 	}
+	add("act", "scroll_effect_quality", `{"operation_id":"P1","outcome":"executed","phase":"completed","effect":{"state":"observed"},"target_reference":"O1","observation":{"status":"complete","id":"O2","origin":"P1","revision":2,"quality":{"state":"unstable","samples":5,"stop_reason":"max_samples"},"tree":`+testFullTreeJSON+`}}`)
+	add("act", "scroll_effect_unknown", `{"operation_id":"P1","outcome":"uncertain","effect":{"state":"unknown"},"observation":{"status":"complete","id":"O3","quality":{"state":"unknown","samples":0,"stop_reason":"not_sampled"}},"error":{"code":"action_unknown","message":"动作结果不确定"}}`)
 	fixtures = append(fixtures, resultModeFixture{tool: "act", name: "executed_cancelled", raw: `{"outcome":"executed"}`, cancelled: true})
 	for _, scope := range []struct{ name, fields string }{
 		{"tree", `"tree":` + testFullTreeJSON},
@@ -279,10 +336,10 @@ func TestHTTPModesSelectProjectionPerCall(t *testing.T) {
 }
 
 func TestCatalogFingerprintBaseline(t *testing.T) {
-	// The catalog now has eleven tools with the unified app kind branches.
-	// Start/keepalive still explain the lease reset semantics and keepalive
-	// alone adds the optional duration schema. Result modes stay intact.
-	const baseline = "7f71caf0a5348bf1c9474f8ca2445bda4ba05f132c62a80aa705cf4070521b6a"
+	// The catalog still has eleven tools. Contract 10 adds the act scroll
+	// branch (container/direction/amount/duration_ms); keepalive's optional
+	// duration schema and the result modes are unchanged.
+	const baseline = "23957b25098f4cec6b959d1fc02fc0ee5639563899aee3bdec5190df5c8b9913"
 	if got := CatalogFingerprint(); got != baseline {
 		t.Fatalf("catalog changed: %s", got)
 	}

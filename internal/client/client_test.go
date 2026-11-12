@@ -887,6 +887,120 @@ func TestAppDecodesKillPIDs(t *testing.T) {
 		t.Fatal("explicit restarted=null was not preserved")
 	}
 }
+// TestActDecodesEffectAndQuality pins the contract-10 response decoder behind
+// Client: effect.state and observation.quality.state/samples/stop_reason keep
+// the same values, including the valid explicit samples=0 fact. The client is
+// one decode hop, not a second projection layer.
+func TestActDecodesEffectAndQuality(t *testing.T) {
+	cases := []struct {
+		name    string
+		effect  string
+		quality string
+		samples int
+		stop    string
+	}{
+		{"observed_unstable", "observed", "unstable", 3, "max_samples"},
+		{"not_observed_stable", "not_observed", "stable", 5, "stable"},
+		{"unknown_not_sampled", "unknown", "unknown", 0, "not_sampled"},
+	}
+	for _, testCase := range cases {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			body := fmt.Sprintf(
+				`{"operation_id":"Pscroll","outcome":"executed","phase":"completed",`+
+					`"effect":{"state":%q},"target_reference":"O1",`+
+					`"observation":{"status":"complete","id":"O2","origin":"Pscroll","revision":2,`+
+					`"captured_at":"2026-11-10T00:00:00Z","actionable_until":"2026-11-10T00:01:00Z",`+
+					`"quality":{"state":%q,"samples":%d,"stop_reason":%q},`+
+					`"screen":{"width":1080,"height":2400,"rotation":0}}}`,
+				testCase.effect, testCase.quality, testCase.samples, testCase.stop)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				writeResponse(w, http.StatusOK, body)
+			}))
+			defer server.Close()
+
+			client := newTestClient(t, server.URL)
+			response, err := client.Act(context.Background(), &protocol.ActRequest{
+				ObservationID: "O1",
+				Operation: protocol.Operation{
+					Type:      "scroll",
+					Container: &protocol.Target{UseRef: true, Ref: "n372"},
+					Direction: protocol.ScrollDirectionDown,
+					Amount:    protocol.ScrollAmountPage,
+				},
+			}, WithOperationID("Pscroll"))
+			if err != nil {
+				t.Fatalf("Act() error: %v", err)
+			}
+			if response == nil || response.Result == nil || response.Result.Observation == nil {
+				t.Fatal("scroll result was not decoded")
+			}
+			result := response.Result
+			if result.Effect == nil || result.Effect.State != testCase.effect {
+				t.Fatalf("effect = %+v, want state %q", result.Effect, testCase.effect)
+			}
+			quality := result.Observation.Quality
+			if quality == nil {
+				t.Fatal("observation.quality was not decoded")
+			}
+			if quality.State != testCase.quality || quality.Samples != testCase.samples ||
+				quality.StopReason != testCase.stop {
+				t.Fatalf("quality = %+v, want %s/%d/%s",
+					quality, testCase.quality, testCase.samples, testCase.stop)
+			}
+			if result.Phase != "completed" || result.TargetReference != "O1" {
+				t.Fatalf("surrounding facts changed: %+v", result)
+			}
+		})
+	}
+}
+
+// TestRejectsInvalidEffectAndQualityResponses proves the decoder behind Client
+// rejects unknown enums, an explicit-null quality object, and absent or
+// negative samples instead of manufacturing a quality fact.
+func TestRejectsInvalidEffectAndQualityResponses(t *testing.T) {
+	bodies := []struct {
+		name string
+		body string
+	}{
+		{"unknown quality state", `{"observation":{"status":"complete","id":"O1","quality":{"state":"bogus","samples":1,"stop_reason":"stable"}}}`},
+		{"unknown quality stop reason", `{"observation":{"status":"complete","id":"O1","quality":{"state":"stable","samples":1,"stop_reason":"bogus"}}}`},
+		{"unknown effect state", `{"effect":{"state":"bogus"}}`},
+		{"null quality object", `{"observation":{"status":"complete","id":"O1","quality":null}}`},
+		{"missing samples", `{"observation":{"status":"complete","id":"O1","quality":{"state":"stable","stop_reason":"stable"}}}`},
+		{"negative samples", `{"observation":{"status":"complete","id":"O1","quality":{"state":"stable","samples":-1,"stop_reason":"stable"}}}`},
+		{"null effect object", `{"effect":null}`},
+	}
+	var index atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		current := int(index.Add(1)) - 1
+		if current >= len(bodies) {
+			current = len(bodies) - 1
+		}
+		writeResponse(w, http.StatusOK, bodies[current].body)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	for _, testCase := range bodies {
+		t.Run(testCase.name, func(t *testing.T) {
+			response, err := client.Observe(context.Background(), &protocol.ObserveRequest{
+				Reference: "O1",
+			}, WithOperationID("Pbadquality"))
+			if response != nil {
+				t.Fatalf("invalid response produced a result: %+v", response)
+			}
+			clientErr := requireClientError(t, err)
+			if clientErr.Code != ErrorResponse {
+				t.Fatalf("code = %q, want %q", clientErr.Code, ErrorResponse)
+			}
+			if clientErr.OperationID != "Pbadquality" {
+				t.Fatal("decode rejection lost the operation ID")
+			}
+		})
+	}
+}
+
 func TestStatusEncodingAndNoOperation(t *testing.T) {
 	captures := make(chan requestCapture, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {

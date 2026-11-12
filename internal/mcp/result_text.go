@@ -33,6 +33,8 @@ var resultFields = func() map[string]resultFieldKind {
 		}
 	}
 	add("", "operation_id operation_state outcome phase target_reference request_closed blocking_operation_id can_start blocking_code start_operation_id observation_state input_state message_id saved", fieldToken)
+	add("", "effect", fieldObject)
+	add("effect.", "state", fieldToken)
 	add("", "session cleanup error recovery observation app notification diagnosis", fieldObject)
 	add("", "inspection shell", fieldBlock)
 	add("session.", "origin state mode started_at expires_at ended_at reason", fieldToken)
@@ -44,6 +46,9 @@ var resultFields = func() map[string]resultFieldKind {
 	add("error.", "details", fieldJSON)
 	add("recovery.", "entry reference input_state cause", fieldToken)
 	add("observation.", "status id origin revision captured_at actionable_until", fieldToken)
+	add("observation.", "quality", fieldObject)
+	add("observation.quality.", "state stop_reason", fieldToken)
+	add("observation.quality.", "samples", fieldLiteral)
 	add("observation.", "screen foreground missing image error", fieldJSON)
 	add("observation.", "tree", fieldBlock)
 	add("inspection.", "origin", fieldToken)

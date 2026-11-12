@@ -74,6 +74,8 @@ var rmfCompositeInventory = map[string]string{
 	"DiagnosisIssue":  "Phase Code",
 	"DiagnosisEvent":  "At Phase Code",
 	"Error":           "Code Message Details",
+	"Quality":         "State Samples StopReason",
+	"Effect":          "State",
 }
 
 func TestResultFieldManifest(t *testing.T) {
@@ -716,6 +718,7 @@ func rmfResultFixtures() []rmfFixture {
 			OperationState:      "claimed",
 			Outcome:             "executed",
 			Phase:               "completed",
+			Effect:              &protocol.Effect{State: protocol.EffectObserved},
 			TargetReference:     "O1",
 			RequestClosed:       rmfPtr(false),
 			BlockingOperationID: "P2",
@@ -742,6 +745,11 @@ func rmfResultFixtures() []rmfFixture {
 				Revision:        1,
 				CapturedAt:      "2026-11-10T00:00:01Z",
 				ActionableUntil: "2026-11-10T00:01:01Z",
+				Quality: &protocol.Quality{
+					State:      protocol.QualityStable,
+					Samples:    3,
+					StopReason: protocol.QualityStopStable,
+				},
 				Screen: &protocol.Screen{
 					Width: 1080, Height: 1920, Rotation: 0,
 				},
@@ -1042,9 +1050,77 @@ func rmfResultFixtures() []rmfFixture {
 			},
 		},
 	}
+	scrollNotObserved := rmfFixture{
+		name: "scroll_effect_not_observed",
+		result: protocol.Result{
+			OperationID: "P12",
+			Outcome:     "executed",
+			Phase:       "completed",
+			Effect:      &protocol.Effect{State: protocol.EffectNotObserved},
+			Observation: &protocol.Observation{
+				Status:          "complete",
+				ID:              "O4",
+				Origin:          "P12",
+				Revision:        4,
+				CapturedAt:      "2026-11-10T00:00:09Z",
+				ActionableUntil: "2026-11-10T00:01:09Z",
+				Quality: &protocol.Quality{
+					State:      protocol.QualityStable,
+					Samples:    5,
+					StopReason: protocol.QualityStopMaxSamples,
+				},
+				Tree: rmfFullTreeValue("N7"),
+			},
+		},
+	}
+	scrollUnknownEffect := rmfFixture{
+		name: "scroll_effect_unknown_unstable",
+		result: protocol.Result{
+			OperationID: "P13",
+			Outcome:     "executed",
+			Phase:       "completed",
+			Effect:      &protocol.Effect{State: protocol.EffectUnknown},
+			Observation: &protocol.Observation{
+				Status:          "partial",
+				ID:              "O5",
+				Origin:          "P13",
+				Revision:        5,
+				CapturedAt:      "2026-11-10T00:00:10Z",
+				ActionableUntil: "2026-11-10T00:01:10Z",
+				Quality: &protocol.Quality{
+					State:      protocol.QualityUnstable,
+					Samples:    4,
+					StopReason: protocol.QualityStopBudget,
+				},
+				Tree: rmfFullTreeValue("N8"),
+			},
+		},
+	}
+	notSampled := rmfFixture{
+		name: "observation_quality_not_sampled",
+		result: protocol.Result{
+			OperationID: "P14",
+			Outcome:     "executed",
+			Observation: &protocol.Observation{
+				Status:          "complete",
+				ID:              "O6",
+				Origin:          "observe",
+				Revision:        6,
+				CapturedAt:      "2026-11-10T00:00:11Z",
+				ActionableUntil: "2026-11-10T00:01:11Z",
+				Quality: &protocol.Quality{
+					State:      protocol.QualityUnknown,
+					Samples:    0,
+					StopReason: protocol.QualityStopNotSampled,
+				},
+				Tree: rmfFullTreeValue("N9"),
+			},
+		},
+	}
 	return []rmfFixture{
 		full, delta, query,
 		appFind, appList, appListUnknownForeground, appOpen, appClaim, appHandoff, appClose, appKill,
+		scrollNotObserved, scrollUnknownEffect, notSampled,
 	}
 }
 
