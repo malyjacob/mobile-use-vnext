@@ -17,22 +17,32 @@
     paths; only the two executables and the manifest are replaced. The build
     directory is never cleared recursively.
 
-    -VerifyOnly performs no build and does not touch a device. It validates the
-    host-tools manifest format/target/release/contract/source/catalog identity,
-    both executable sizes and SHA-256 values, and (when the phone release
-    manifest build/release/manifest.json is the companion of this release) the
-    shared commit/contract/catalog correspondence. A failed verification never
-    rewrites the manifest to make it match. The separate `device-mcp.exe
-    -version` output is only a release label and does not replace any check.
+    -VerifyOnly performs no build and does not touch a device. It is the release
+    gate: it validates the host-tools manifest format/target/release/contract/
+    source/catalog identity, both executable sizes and SHA-256 values, requires
+    the manifest and the current tree to be at HEAD with source_dirty=false,
+    requires the complete phone release manifest build/release/manifest.json to
+    be the companion of this release, and verifies the shared commit/contract/
+    catalog correspondence. A missing or partial phone manifest, a non-companion
+    release, and companion SKIP all fail; a failed verification never rewrites
+    the manifest to make it match.
+
+    The build path refuses a dirty source tree unless -AllowDirtySource is
+    passed explicitly. That flag is development-only: the manifest records
+    source_dirty=true and can never pass -VerifyOnly. The separate
+    `device-mcp.exe -version` output is only a release label and does not
+    replace any check.
 
     Exit codes: 0 = PASS, 1 = FAIL.
 
 .EXAMPLE
     ./scripts/build-host-tools.ps1
     ./scripts/build-host-tools.ps1 -VerifyOnly
+    ./scripts/build-host-tools.ps1 -AllowDirtySource
 #>
 param(
-    [switch]$VerifyOnly
+    [switch]$VerifyOnly,
+    [switch]$AllowDirtySource
 )
 
 $ErrorActionPreference = 'Stop'
@@ -228,6 +238,11 @@ function Invoke-HostBuild {
 
     $catalog = Get-ToolCatalogFingerprint
     $gitState = Get-SourceState
+    if ($gitState.Dirty -and -not $AllowDirtySource) {
+        Fail (("Source tree is dirty (source_commit={0}); commit the source before building a release manifest, " +
+            'or pass -AllowDirtySource for a development-only build. A -AllowDirtySource manifest records ' +
+            'source_dirty=true and cannot pass -VerifyOnly.') -f $gitState.Commit)
+    }
 
     New-Item -ItemType Directory -Path $script:buildRoot -Force | Out-Null
     $staging = Join-Path $script:buildRoot ('.host-tools-' + [guid]::NewGuid().ToString('N'))
@@ -314,7 +329,11 @@ function Invoke-HostBuild {
             Write-Output ("artifact {0} sha256={1} bytes={2}" -f
                 $artifact.name, $artifact.sha256, $artifact.bytes)
         }
-        Write-Output 'RESULT PASS'
+        if ($gitState.Dirty) {
+            Write-Output 'RESULT PASS (development build: -AllowDirtySource, source_dirty=true, not releasable; cannot pass -VerifyOnly)'
+        } else {
+            Write-Output 'RESULT PASS'
+        }
     } finally {
         foreach ($name in $previous.Keys) {
             if ($null -eq $previous[$name]) {
@@ -333,8 +352,9 @@ function Test-PhoneManifestCompanion {
     param($HostManifest, $HostSource)
     $phoneManifestPath = Join-Path $script:buildRoot 'release/manifest.json'
     if (-not (Test-Path -LiteralPath $phoneManifestPath -PathType Leaf)) {
-        Write-Output 'phone release manifest: SKIP (build/release/manifest.json is absent)'
-        return
+        Fail (("Phone release manifest is missing: {0}. Build the complete phone release first " +
+            '(scripts/build-release.ps1 without -SkipAndroid); a host-only check is not a release gate.') -f
+            $phoneManifestPath)
     }
     try {
         $phone = Get-Content -LiteralPath $phoneManifestPath -Raw | ConvertFrom-Json
@@ -344,6 +364,33 @@ function Test-PhoneManifestCompanion {
     $phoneFormat = [string](Get-Field $phone 'format')
     if ($phoneFormat -ne 'mobile-use-vnext-release') {
         Fail "Phone release manifest format is '$phoneFormat', expected 'mobile-use-vnext-release'."
+    }
+    $phoneComplete = Get-Field $phone 'complete'
+    if ($null -ne $phoneComplete -and $phoneComplete -isnot [bool]) {
+        Fail "Phone release manifest complete field is not a JSON boolean: $phoneComplete"
+    }
+    if ($null -ne $phoneComplete -and -not [bool]$phoneComplete) {
+        Fail 'Phone release manifest is marked complete=false (partial -SkipAndroid build); a complete phone release is required.'
+    }
+    $phoneSourceDirty = Get-Field $phone 'source_dirty'
+    if ($phoneSourceDirty -isnot [bool]) {
+        Fail 'Phone release manifest has no JSON boolean source_dirty.'
+    }
+    if ([bool]$phoneSourceDirty) {
+        Fail 'Phone release manifest has source_dirty=true; rebuild the phone release from a clean committed tree.'
+    }
+    $phoneArtifacts = @(Get-Field $phone 'artifacts')
+    $phoneArtifactNames = @{}
+    foreach ($artifact in $phoneArtifacts) {
+        $name = [string](Get-Field $artifact 'name')
+        if ($name -ne '') {
+            $phoneArtifactNames[$name] = $true
+        }
+    }
+    foreach ($name in @('device-service', 'device-mcp', 'control.apk', 'u2.jar', 'applist.dex', 'service.sh')) {
+        if (-not $phoneArtifactNames.ContainsKey($name)) {
+            Fail "Phone release manifest is missing required artifact '$name'; the phone release is incomplete."
+        }
     }
     $phoneRelease = [string](Get-Field $phone 'release_version')
     $phoneContract = [string](Get-Field $phone 'contract_version')
@@ -355,35 +402,32 @@ function Test-PhoneManifestCompanion {
     }
     $hostRelease = [string](Get-Field $HostManifest 'release_version')
     $hostContract = [string](Get-Field $HostManifest 'contract_version')
-    if ($phoneRelease -eq $hostRelease -and $phoneContract -eq $hostContract) {
-        $phoneCommit = ([string](Get-Field $phone 'source_commit')).ToLowerInvariant()
-        if ($phoneCommit -ne [string](Get-Field $HostSource 'Commit')) {
-            Fail ("Phone release manifest source_commit '$phoneCommit' does not match host-tools source_commit '" +
-                [string](Get-Field $HostSource 'Commit') + "'.")
-        }
-        $phoneCatalog = Get-Field $phone 'tool_catalog'
-        $phoneCount = [int](Get-Field $phoneCatalog 'count')
-        $phoneHash = ([string](Get-Field $phoneCatalog 'sha256')).ToLowerInvariant()
-        $hostCatalog = Get-Field $HostManifest 'tool_catalog'
-        if ($phoneCount -ne [int](Get-Field $hostCatalog 'count')) {
-            Fail ("Phone release manifest tool_catalog.count $phoneCount does not match host-tools count " +
-                [string](Get-Field $hostCatalog 'count') + '.')
-        }
-        if ($phoneHash -ne ([string](Get-Field $hostCatalog 'sha256')).ToLowerInvariant()) {
-            Fail 'Phone release manifest tool_catalog.sha256 does not match the host-tools fingerprint.'
-        }
-        Write-Output ("phone release manifest: PASS companion release={0} contract={1} source_commit={2} tool_catalog={3}/{4}" -f
-            $phoneRelease, $phoneContract, $phoneCommit, $phoneCount, $phoneHash)
-        return
+    if ($phoneRelease -ne $hostRelease -or $phoneContract -ne $hostContract) {
+        Fail ("Phone release manifest is not a companion of this host release: phone release=$phoneRelease " +
+            "contract=$phoneContract; host release=$hostRelease contract=$hostContract.")
     }
-    if ($phoneContract -match '^[0-9]+$' -and $hostContract -match '^[0-9]+$' -and
-            [int]$phoneContract -lt [int]$hostContract) {
-        Write-Output ("phone release manifest: SKIP previous release={0} contract={1} (host release={2} contract={3})" -f
-            $phoneRelease, $phoneContract, $hostRelease, $hostContract)
-        return
+    $phoneCommit = ([string](Get-Field $phone 'source_commit')).ToLowerInvariant()
+    if ($phoneCommit -notmatch '^[0-9a-f]{7,40}$') {
+        Fail "Phone release manifest source_commit is not a git commit id: $phoneCommit"
     }
-    Fail ("Phone release manifest is not a companion of this host release: phone release=$phoneRelease contract=$phoneContract; " +
-        "host release=$hostRelease contract=$hostContract.")
+    $hostCommit = [string](Get-Field $HostSource 'Commit')
+    if (-not $hostCommit.StartsWith($phoneCommit, [System.StringComparison]::Ordinal)) {
+        Fail ("Phone release manifest source_commit '$phoneCommit' does not match host-tools source_commit '" +
+            $hostCommit + "'.")
+    }
+    $phoneCatalog = Get-Field $phone 'tool_catalog'
+    $phoneCount = [int](Get-Field $phoneCatalog 'count')
+    $phoneHash = ([string](Get-Field $phoneCatalog 'sha256')).ToLowerInvariant()
+    $hostCatalog = Get-Field $HostManifest 'tool_catalog'
+    if ($phoneCount -ne [int](Get-Field $hostCatalog 'count')) {
+        Fail ("Phone release manifest tool_catalog.count $phoneCount does not match host-tools count " +
+            [string](Get-Field $hostCatalog 'count') + '.')
+    }
+    if ($phoneHash -ne ([string](Get-Field $hostCatalog 'sha256')).ToLowerInvariant()) {
+        Fail 'Phone release manifest tool_catalog.sha256 does not match the host-tools fingerprint.'
+    }
+    Write-Output ("phone release manifest: PASS companion release={0} contract={1} source_commit={2} source_dirty=false tool_catalog={3}/{4}" -f
+        $phoneRelease, $phoneContract, $phoneCommit, $phoneCount, $phoneHash)
 }
 
 function Test-HostManifest {
@@ -437,11 +481,17 @@ function Test-HostManifest {
         Fail ("Host tools manifest source_commit '$manifestCommit' does not match the current HEAD '$($gitState.Commit)'.")
     }
     $manifestDirty = Get-Field $manifest 'source_dirty'
-    if ($null -eq $manifestDirty) {
-        Fail 'Host tools manifest has no source_dirty.'
+    if ($manifestDirty -isnot [bool]) {
+        Fail 'Host tools manifest has no JSON boolean source_dirty.'
     }
-    if ([bool]$manifestDirty -ne [bool]$gitState.Dirty) {
-        Fail ("Host tools manifest source_dirty=$([bool]$manifestDirty) does not match the current source state $([bool]$gitState.Dirty).")
+    if ([bool]$manifestDirty) {
+        Fail ("Host tools manifest source_dirty=true (source_commit={0}); rebuild from a clean committed tree." -f
+            $manifestCommit)
+    }
+    if ($gitState.Dirty) {
+        Fail (("Current source tree is dirty (HEAD {0}); -VerifyOnly requires the clean committed tree that " +
+            'produced the manifest. Commit or restore the changes instead of using a development tree for verification.') -f
+            $gitState.Commit)
     }
 
     $manifestCatalog = Get-Field $manifest 'tool_catalog'
@@ -510,6 +560,9 @@ function Test-HostManifest {
 }
 
 try {
+    if ($VerifyOnly -and $AllowDirtySource) {
+        Fail '-AllowDirtySource is only valid when building; -VerifyOnly always requires a clean committed tree.'
+    }
     if ($VerifyOnly) {
         Test-HostManifest
     } else {

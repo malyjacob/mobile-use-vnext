@@ -8,8 +8,7 @@ param(
     [int]$PhoneMcpHostPort = 18883,
     [string[]]$McpAllowedOrigins = @(),
     [switch]$SkipPhoneMcp,
-    [switch]$SkipBuild,
-    [switch]$SkipOldServiceStop
+    [switch]$SkipBuild
 )
 
 $ErrorActionPreference = 'Stop'
@@ -205,9 +204,6 @@ $expectedVersionCode = [int](Get-Field $manifestAndroid 'version_code')
 if ($expectedPackage -eq '' -or $expectedVersionName -eq '' -or $expectedVersionCode -lt 1) {
     throw 'Release manifest has an incomplete android identity.'
 }
-if ($sourceDirty) {
-    Write-Warning "Release source tree was dirty at build time (source_commit=$sourceCommit); artifact hashes still match the manifest."
-}
 
 # The manifest hashes are the only accepted proof of what was deployed. Build
 # the map once and reject a manifest that lacks a required digest.
@@ -293,21 +289,13 @@ Write-Utf8NoBom -Path $deployStatePath -Text ($deployState | ConvertTo-Json -Dep
 $installDirectory = "$Chroot/opt/mobile-use-vnext"
 $stateOnDevice = "$Chroot/var/lib/mobile-use-vnext"
 
-# ---------------------------------------------------------------- stop old deployments
-if (-not $SkipOldServiceStop) {
-    Write-Output 'Stopping the old Python device service (if present)...'
-    $null = Invoke-DeviceScriptAllowFailure -Script @"
-su -c 'if [ -x /opt/mobile-use-platform/scripts/service.sh ]; then chroot $Chroot /bin/sh -c "export PATH=/usr/local/bin:/usr/bin:/bin; /opt/mobile-use-platform/scripts/service.sh stop"; fi'
-su -c 'pkill -f "mobile-use-service serve" || true'
-"@
-}
+# ---------------------------------------------------------------- stop this repository's deployment
 
 # Private App data is never removed: no uninstall, no pm clear and no deletion
 # under /data/data/com.mobileuse.vnext. Only the process is stopped so the new
 # APK can be installed over the existing one with adb install -r.
 Write-Output 'Stopping the installed control App...'
 $null = Invoke-Adb -Arguments @('shell', 'am', 'force-stop', 'com.mobileuse.vnext') -AllowFailure
-$null = Invoke-Adb -Arguments @('shell', 'am', 'force-stop', 'com.mobileuse.control') -AllowFailure
 
 # The Go service must be restarted for a new binary/config; a running instance
 # keeps the old package/tokens until it is stopped.

@@ -8,7 +8,12 @@
     contract_version and the Android identity against release/versions.json and
     AndroidManifest.xml, recomputes every artifact SHA-256 and size, recomputes
     the MCP tool catalog fingerprint with scripts/toolcatalog, and refuses any
-    manifest marked complete=false.
+    manifest marked complete=false or missing a required artifact.
+
+    Verification is a release gate: it also refuses a build tree with tracked
+    changes, a manifest source_commit that is not the actual git HEAD (a commit
+    prefix is accepted), and source_dirty=true. Run it from the committed clean
+    tree that produced the artifacts; a development tree cannot pass.
 
     Exit codes: 0 = PASS, 1 = FAIL with a specific message.
 
@@ -40,6 +45,29 @@ function Get-Field {
     $property = $Object.PSObject.Properties[$Name]
     if ($null -eq $property) { return $null }
     return $property.Value
+}
+
+# The manifest is only valid for the commit it was built from. Read the actual
+# HEAD and refuse tracked changes: a release verification must run from the
+# committed clean tree. Untracked/ignored build output is not a source change.
+function Get-GitState {
+    Push-Location $repository
+    try {
+        $commit = (& git rev-parse HEAD).Trim()
+        if ($LASTEXITCODE -ne 0 -or $commit -notmatch '^[0-9a-fA-F]{40}$') {
+            Fail 'git rev-parse HEAD failed.'
+        }
+        $trackedChanges = @(& git status --porcelain --untracked-files=no)
+        if ($LASTEXITCODE -ne 0) {
+            Fail 'git status --porcelain failed.'
+        }
+    } finally {
+        Pop-Location
+    }
+    return [pscustomobject]@{
+        Commit         = $commit.ToLowerInvariant()
+        TrackedChanges = $trackedChanges
+    }
 }
 
 function Resolve-AndroidVersionName {
@@ -143,13 +171,29 @@ try {
     if ($manifestContract -ne $expectedContract) {
         Fail "Manifest contract_version '$manifestContract' does not match release/versions.json '$expectedContract'."
     }
-    $manifestSourceCommit = [string](Get-Field $manifestObject 'source_commit')
+    $manifestSourceCommit = ([string](Get-Field $manifestObject 'source_commit')).ToLowerInvariant()
     $manifestSourceDirty = Get-Field $manifestObject 'source_dirty'
     if ($manifestSourceCommit -eq '' -or $null -eq $manifestSourceDirty) {
         Fail 'Manifest has no source_commit/source_dirty.'
     }
-    if ($manifestSourceCommit -notmatch '^[0-9a-f]{40}$') {
-        Fail "Manifest source_commit is not a 40-character commit id: $manifestSourceCommit"
+    if ($manifestSourceCommit -notmatch '^[0-9a-f]{7,40}$') {
+        Fail "Manifest source_commit is not a git commit id (7-40 lowercase hex characters): $manifestSourceCommit"
+    }
+    if ($manifestSourceDirty -isnot [bool]) {
+        Fail "Manifest source_dirty is not a JSON boolean: $manifestSourceDirty"
+    }
+    if ([bool]$manifestSourceDirty) {
+        Fail ("Manifest source_dirty=true (source_commit={0}); a release manifest must be built from a clean tree." -f
+            $manifestSourceCommit)
+    }
+    $gitState = Get-GitState
+    if ($gitState.TrackedChanges.Count -gt 0) {
+        Fail ("Build tree has {0} tracked change(s); verification requires the clean committed tree that produced the artifacts." -f
+            $gitState.TrackedChanges.Count)
+    }
+    if (-not $gitState.Commit.StartsWith($manifestSourceCommit, [System.StringComparison]::Ordinal)) {
+        Fail ("Manifest source_commit '{0}' does not match the actual HEAD '{1}'." -f
+            $manifestSourceCommit, $gitState.Commit)
     }
 
     # ------------------------------------------------------------ android identity
@@ -256,13 +300,10 @@ try {
         Fail "Tool catalog fingerprint mismatch: manifest=$expectedFingerprint actual=$actualFingerprint."
     }
 
-    if ([bool]$manifestSourceDirty) {
-        Write-Output ("WARNING manifest source_dirty=true (source_commit=$manifestSourceCommit); artifact hashes still verified.")
-    }
-    Write-Output ("PASS manifest={0} release={1} contract={2} android={3}/{4} artifacts={5} tool_catalog={6}/{7} source_commit={8} source_dirty={9}" -f
+    Write-Output ("PASS manifest={0} release={1} contract={2} android={3}/{4} artifacts={5} tool_catalog={6}/{7} source_commit={8} source_dirty={9} head={10}" -f
         $manifestPath, $manifestRelease, $manifestContract, $manifestAndroidVersionName,
         $manifestAndroidVersionCode, $artifactList.Count, $actualCount, $actualFingerprint,
-        $manifestSourceCommit, [bool]$manifestSourceDirty)
+        $manifestSourceCommit, [bool]$manifestSourceDirty, $gitState.Commit)
     exit 0
 } catch {
     Write-Output ('FAIL manifest verification: ' + $_.Exception.Message)
