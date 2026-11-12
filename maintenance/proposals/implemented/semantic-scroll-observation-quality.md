@@ -1044,7 +1044,7 @@ C. 契约、构建与部署：
 | 实际起终点 scope 判定 | 实现要求每个候选的最近滚动作用域为 C 或 C 的外层祖先，且至少一个候选归约为 C；内层/不可比/其它 scope 拒绝。这是对“最内层必须是 C”与“外层包裹祖先允许”两条判据的合并读法；字面集合相等会误杀允许的外层祖先情形。 |
 | `effect` 提交门禁失效时的首个结果 | 计算成功但 `commitScrollEffect` 门禁不再成立（撤销/冻结）时，首个结果给 `effect=unknown`，不声明保留 P 无法投影的事实。 |
 | 实机部署与验收 | 已执行（有限）：手机整组部署与 App/服务/MCP 哈希、`can_start` 核验通过；Windows DSH 宿主重连、11 工具、act schema 与 `mcp-probe` catalog 比对通过；Settings 实机 5 次受控 scroll 全部 `executed`、0 次 `target_changed`，`effect` 得到 `not_observed`/`unknown`，未取得实机 `observed`。跨应用、长文/嵌套/overlay/STOP 时序、阈值校准与手机侧另一旧 stdio 宿主重启未做；见验证记录 §4.1–§4.3、§7。 |
-| issue #10、推送 | 未执行：按提案 §8.4/§10 只在实现、部署/实测、版本与远端记录齐备后回复/关闭和推送；本仓库当前没有推送记录。 |
+| issue #10、推送 | 已执行：`master` 已推送到 `origin`（未 force），远端包含实现提交与验证记录；issue #10 已回复差异与实测范围并以 `COMPLETED` 关闭（<https://github.com/malyjacob/mobile-use-vnext/issues/10#issuecomment-6827481941>），回读 `CLOSED/COMPLETED`；#7 未关闭、未重开。 |
 | 提案头部状态 | 原“提案，未实现”与“本会话不进入实施”按流程更新为“已实现”并补 §11；原确认日期与确认事实保留。 |
 
 ---

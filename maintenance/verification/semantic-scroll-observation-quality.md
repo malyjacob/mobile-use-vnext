@@ -223,3 +223,12 @@ Windows DSH 连接已按上表刷新，11 工具与契约 10 的实际连接验�
   `quality` 均为 `stable`；`effect` 固定判据按实机证据得到 `not_observed`/`unknown`，未取得
   `effect=observed` 或跨应用样本；raw `swipe` duration 500 成功。`shell exited 0` 不等于屏移等
   既有边界仍按提案原文保留，本记录不冒认。
+
+## 9. 交付闭环
+
+| 项 | 实际结果 |
+| --- | --- |
+| 推送 | `master` 推送到 `origin`（`https://github.com/malyjacob/mobile-use-vnext`），未 force；远端包含实现提交 `273bda4`…`2cc559a` 与部署/实机补记 `d15d047`。本补充提交随同一分支再次推送。 |
+| issue #10 | 已回复迁移/验证/差异说明：<https://github.com/malyjacob/mobile-use-vnext/issues/10#issuecomment-6827481941>；随后以 `COMPLETED` 关闭，回读 `state=CLOSED`、`stateReason=COMPLETED`、`closedAt=2026-11-12T15:13:11Z`。<https://github.com/malyjacob/mobile-use-vnext/issues/10> |
+| issue #7 | 未关闭、未重开；回读仍为 `CLOSED / NOT_PLANNED`。 |
+| 未随本闭环完成 | 实机 `effect=observed`、跨应用/长文/嵌套/overlay/STOP 时序与阈值校准；手机侧另一旧 stdio 宿主重启。 |

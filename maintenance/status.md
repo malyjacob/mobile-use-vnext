@@ -95,3 +95,5 @@
   指纹与清单一致（[记录](verification/semantic-scroll-observation-quality.md)）。手机侧仍有一个
   由 `dsh-mcp-connector` 托管的旧 stdio `device-mcp` 进程，需该宿主自行重启；旧 0.7.0 及
   更早产物仍作为不匹配验证材料。
+- 契约 10 的实现、部署与实机补记已推送到 `origin`；issue #10 已回复并以 `COMPLETED`
+  关闭，`#7` 未关闭、未重开（[记录](verification/semantic-scroll-observation-quality.md) §9）。
