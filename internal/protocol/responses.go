@@ -150,6 +150,91 @@ func (m ImageMeta) MarshalJSONTo(enc *jsontext.Encoder) error {
 	return enc.WriteToken(jsontext.EndObject)
 }
 
+// Quality state values describe whether the published tree converged. They are
+// observation material, never input authorization.
+const (
+	QualityStable   = "stable"
+	QualityUnstable = "unstable"
+	QualityUnknown  = "unknown"
+)
+
+// Quality stop reasons name why settle ended.
+const (
+	QualityStopStable     = "stable"
+	QualityStopMaxSamples = "max_samples"
+	QualityStopBudget     = "budget"
+	QualityStopUnreadable = "unreadable"
+	QualityStopNotSampled = "not_sampled"
+)
+
+// Quality is the settle quality of one published observation. All three members
+// are explicit facts: samples=0 and stop_reason=not_sampled must be encoded.
+type Quality struct {
+	State      string
+	Samples    int
+	StopReason string
+}
+
+// MarshalJSONTo writes the quality object in its fixed member order.
+func (q *Quality) MarshalJSONTo(enc *jsontext.Encoder) error {
+	if q == nil {
+		return writeNull(enc)
+	}
+	if err := enc.WriteToken(jsontext.BeginObject); err != nil {
+		return err
+	}
+	if err := writeName(enc, "state"); err != nil {
+		return err
+	}
+	if err := writeString(enc, q.State); err != nil {
+		return err
+	}
+	if err := writeName(enc, "samples"); err != nil {
+		return err
+	}
+	if err := writeInt(enc, q.Samples); err != nil {
+		return err
+	}
+	if err := writeName(enc, "stop_reason"); err != nil {
+		return err
+	}
+	if err := writeString(enc, q.StopReason); err != nil {
+		return err
+	}
+	return enc.WriteToken(jsontext.EndObject)
+}
+
+// Effect state values report whether content displacement was observed. They
+// never restate the action outcome and never claim direction or causality.
+const (
+	EffectObserved    = "observed"
+	EffectNotObserved = "not_observed"
+	EffectUnknown     = "unknown"
+)
+
+// Effect is the bounded scroll-effect fact of one result. It carries one
+// member only; coverage, anchors and reasons stay in controlled logs.
+type Effect struct {
+	State string
+}
+
+// MarshalJSONTo writes the effect object.
+func (e *Effect) MarshalJSONTo(enc *jsontext.Encoder) error {
+	if e == nil {
+		return writeNull(enc)
+	}
+	if err := enc.WriteToken(jsontext.BeginObject); err != nil {
+		return err
+	}
+	if err := writeName(enc, "state"); err != nil {
+		return err
+	}
+	if err := writeString(enc, e.State); err != nil {
+		return err
+	}
+	return enc.WriteToken(jsontext.EndObject)
+}
+
 // Observation is the single observation shape for all valid/missing branches.
 type Observation struct {
 	Status          string
@@ -158,6 +243,7 @@ type Observation struct {
 	Revision        int
 	CapturedAt      string
 	ActionableUntil string
+	Quality         *Quality
 	Screen          *Screen
 	Foreground      *Foreground
 	Tree            *TreeValue
@@ -217,6 +303,14 @@ func (o *Observation) MarshalJSONTo(enc *jsontext.Encoder) error {
 			return err
 		}
 		if err := writeString(enc, o.ActionableUntil); err != nil {
+			return err
+		}
+	}
+	if o.Quality != nil {
+		if err := writeName(enc, "quality"); err != nil {
+			return err
+		}
+		if err := MarshalJSONTo(enc, o.Quality); err != nil {
 			return err
 		}
 	}
@@ -498,6 +592,7 @@ type Result struct {
 	OperationState      string
 	Outcome             string
 	Phase               string
+	Effect              *Effect
 	Observation         *Observation
 	Inspection          *InspectionView
 	App                 *AppView
@@ -555,6 +650,14 @@ func (r *Result) MarshalJSONTo(enc *jsontext.Encoder) error {
 			return err
 		}
 		if err := writeString(enc, r.Phase); err != nil {
+			return err
+		}
+	}
+	if r.Effect != nil {
+		if err := writeName(enc, "effect"); err != nil {
+			return err
+		}
+		if err := MarshalJSONTo(enc, r.Effect); err != nil {
 			return err
 		}
 	}

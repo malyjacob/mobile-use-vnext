@@ -151,10 +151,22 @@ func encodeOperation(enc *jsontext.Encoder, op *Operation) error {
 	}
 	switch op.Type {
 	case "tap", "long_press":
+		if err := rejectScrollMembers(op); err != nil {
+			return err
+		}
+		if err := rejectSwipeDuration(op); err != nil {
+			return err
+		}
 		if err := writeTargetOrPoint(enc, "target", op.Target, nil); err != nil {
 			return err
 		}
 	case "text":
+		if err := rejectScrollMembers(op); err != nil {
+			return err
+		}
+		if err := rejectSwipeDuration(op); err != nil {
+			return err
+		}
 		if err := writeTargetOrPoint(enc, "target", op.Target, nil); err != nil {
 			return err
 		}
@@ -165,8 +177,18 @@ func encodeOperation(enc *jsontext.Encoder, op *Operation) error {
 			return err
 		}
 	case "swipe":
+		if op.Target != nil || op.Container != nil || op.Direction != "" || op.Amount != "" {
+			return errors.New("swipe accepts only from, to and duration_ms")
+		}
 		if op.From == nil || op.To == nil {
 			return errors.New("swipe requires from and to")
+		}
+		if *op.From == *op.To {
+			return errors.New("swipe from and to must differ")
+		}
+		if op.DurationMS < 0 ||
+			(op.DurationMS > 0 && (op.DurationMS < MinSwipeDurationMS || op.DurationMS > MaxSwipeDurationMS)) {
+			return errors.New("swipe duration_ms is out of range")
 		}
 		if err := writePointField(enc, "from", op.From); err != nil {
 			return err
@@ -174,7 +196,57 @@ func encodeOperation(enc *jsontext.Encoder, op *Operation) error {
 		if err := writePointField(enc, "to", op.To); err != nil {
 			return err
 		}
+		if op.DurationMS > 0 {
+			if err := writeName(enc, "duration_ms"); err != nil {
+				return err
+			}
+			if err := writeInt(enc, op.DurationMS); err != nil {
+				return err
+			}
+		}
+	case "scroll":
+		if op.Target != nil || op.From != nil || op.To != nil || op.Key != "" || op.Text != "" {
+			return errors.New("scroll accepts only container, direction and amount")
+		}
+		if err := rejectSwipeDuration(op); err != nil {
+			return err
+		}
+		if op.Container == nil {
+			return errors.New("scroll requires a container")
+		}
+		if err := validateContainer(op.Container); err != nil {
+			return err
+		}
+		if !validScrollDirection(op.Direction) {
+			return errors.New("scroll requires a valid direction")
+		}
+		if op.Amount != "" && op.Amount != ScrollAmountPage && op.Amount != ScrollAmountHalf {
+			return errors.New("scroll amount must be page or half")
+		}
+		if err := writeTargetOrPoint(enc, "container", op.Container, nil); err != nil {
+			return err
+		}
+		if err := writeName(enc, "direction"); err != nil {
+			return err
+		}
+		if err := writeString(enc, op.Direction); err != nil {
+			return err
+		}
+		if op.Amount != "" {
+			if err := writeName(enc, "amount"); err != nil {
+				return err
+			}
+			if err := writeString(enc, op.Amount); err != nil {
+				return err
+			}
+		}
 	case "key":
+		if err := rejectScrollMembers(op); err != nil {
+			return err
+		}
+		if err := rejectSwipeDuration(op); err != nil {
+			return err
+		}
 		if err := writeName(enc, "key"); err != nil {
 			return err
 		}
@@ -185,6 +257,51 @@ func encodeOperation(enc *jsontext.Encoder, op *Operation) error {
 		return errors.New("unsupported operation type")
 	}
 	return enc.WriteToken(jsontext.EndObject)
+}
+
+// rejectScrollMembers refuses the scroll-only members on another branch.
+func rejectScrollMembers(op *Operation) error {
+	if op.Container != nil {
+		return errors.New("container is only valid for scroll")
+	}
+	if op.Direction != "" {
+		return errors.New("direction is only valid for scroll")
+	}
+	if op.Amount != "" {
+		return errors.New("amount is only valid for scroll")
+	}
+	return nil
+}
+
+// rejectSwipeDuration refuses duration_ms on a non-swipe branch.
+func rejectSwipeDuration(op *Operation) error {
+	if op.DurationMS != 0 {
+		return errors.New("duration_ms is only valid for swipe")
+	}
+	return nil
+}
+
+// validateContainer checks the caller-supplied scroll container selector.
+func validateContainer(container *Target) error {
+	if container.UseRef {
+		if container.Ref == "" {
+			return errors.New("scroll container ref must not be empty")
+		}
+		return nil
+	}
+	if container.X < 0 || container.Y < 0 {
+		return errors.New("scroll container coordinates must not be negative")
+	}
+	return nil
+}
+
+// validScrollDirection reports whether direction is one of the four values.
+func validScrollDirection(direction string) bool {
+	switch direction {
+	case ScrollDirectionUp, ScrollDirectionDown, ScrollDirectionLeft, ScrollDirectionRight:
+		return true
+	}
+	return false
 }
 
 // writeTargetOrPoint writes the strict reference-or-coordinate target.

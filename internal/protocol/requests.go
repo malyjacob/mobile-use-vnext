@@ -38,6 +38,29 @@ type EndRequest struct {
 	Reference string
 }
 
+// Scroll direction values name the requested reading/viewport direction. They
+// are case-sensitive; the service never proves a device scroll axis from them.
+const (
+	ScrollDirectionUp    = "up"
+	ScrollDirectionDown  = "down"
+	ScrollDirectionLeft  = "left"
+	ScrollDirectionRight = "right"
+)
+
+// Scroll amount values bound one controlled scroll attempt.
+const (
+	ScrollAmountPage = "page"
+	ScrollAmountHalf = "half"
+)
+
+// Swipe duration bounds in milliseconds. An omitted duration means
+// DefaultSwipeDurationMS; zero is not a valid explicit duration.
+const (
+	DefaultSwipeDurationMS = 300
+	MinSwipeDurationMS     = 50
+	MaxSwipeDurationMS     = 2000
+)
+
 // Target is exactly one of a public ref or absolute screen coordinates.
 type Target struct {
 	UseRef bool
@@ -53,6 +76,18 @@ type Operation struct {
 	To     *Point
 	Key    string
 	Text   string
+	// Container is the scroll-only container selector; it has the same
+	// reference-or-coordinate semantics as Target.
+	Container *Target
+	// Direction is the scroll-only reading direction; it is one of the
+	// ScrollDirection* values.
+	Direction string
+	// Amount is the scroll-only travel amount: ScrollAmountPage (the decode
+	// default) or ScrollAmountHalf.
+	Amount string
+	// DurationMS is the swipe-only gesture duration. An omitted wire duration
+	// decodes to DefaultSwipeDurationMS; the encoder omits it when zero.
+	DurationMS int
 }
 
 // Point is one absolute screen coordinate.
@@ -199,18 +234,48 @@ func DecodeAct(body []byte) (*ActRequest, *APIError) {
 }
 
 type rawOperation struct {
-	Type   string         `json:"type"`
-	Target *rawTarget     `json:"target"`
-	From   *rawTarget     `json:"from"`
-	To     *rawTarget     `json:"to"`
-	Key    jsontext.Value `json:"key"`
-	Text   jsontext.Value `json:"text"`
+	Type       string         `json:"type"`
+	Target     optionalObject `json:"target"`
+	From       optionalObject `json:"from"`
+	To         optionalObject `json:"to"`
+	Key        jsontext.Value `json:"key"`
+	Text       jsontext.Value `json:"text"`
+	Container  optionalObject `json:"container"`
+	Direction  jsontext.Value `json:"direction"`
+	Amount     jsontext.Value `json:"amount"`
+	DurationMS jsontext.Value `json:"duration_ms"`
 }
 
 type rawTarget struct {
 	Ref jsontext.Value `json:"ref"`
 	X   jsontext.Value `json:"x"`
 	Y   jsontext.Value `json:"y"`
+}
+
+// optionalObject records whether an object-typed operation member appeared.
+// Explicit null is a presence without an object so the branch mutex can reject
+// it; nested unknown members are still rejected like the typed pass.
+type optionalObject struct {
+	Present bool
+	Value   *rawTarget
+}
+
+// UnmarshalJSONFrom records member presence and decodes a non-null object.
+func (o *optionalObject) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	raw, err := dec.ReadValue()
+	if err != nil {
+		return err
+	}
+	o.Present = true
+	if isJSONNull(raw) {
+		return nil
+	}
+	var value rawTarget
+	if err := json.Unmarshal(raw, &value, json.RejectUnknownMembers(true)); err != nil {
+		return err
+	}
+	o.Value = &value
+	return nil
 }
 
 func parseOperation(raw *rawOperation) (*Operation, *APIError) {
@@ -220,24 +285,29 @@ func parseOperation(raw *rawOperation) (*Operation, *APIError) {
 	op := &Operation{Type: raw.Type}
 	hasKey := len(raw.Key) > 0
 	hasText := len(raw.Text) > 0
+	hasDirection := len(raw.Direction) > 0
+	hasAmount := len(raw.Amount) > 0
+	hasDuration := len(raw.DurationMS) > 0
 	switch raw.Type {
 	case "tap", "long_press":
-		if raw.Target == nil {
+		if raw.Target.Value == nil {
 			return nil, Invalid("该操作需要 target")
 		}
-		if raw.From != nil || raw.To != nil || hasKey || hasText {
+		if raw.From.Present || raw.To.Present || hasKey || hasText ||
+			raw.Container.Present || hasDirection || hasAmount || hasDuration {
 			return nil, Invalid("该操作只接受 target")
 		}
-		target, err := parseTarget(raw.Target)
+		target, err := parseTarget(raw.Target.Value)
 		if err != nil {
 			return nil, err
 		}
 		op.Target = target
 	case "text":
-		if raw.Target == nil {
+		if raw.Target.Value == nil {
 			return nil, Invalid("text 操作需要 target")
 		}
-		if raw.From != nil || raw.To != nil || hasKey {
+		if raw.From.Present || raw.To.Present || hasKey ||
+			raw.Container.Present || hasDirection || hasAmount || hasDuration {
 			return nil, Invalid("text 操作只接受 target 与 text")
 		}
 		if !hasText || string(raw.Text) == "null" {
@@ -250,33 +320,75 @@ func parseOperation(raw *rawOperation) (*Operation, *APIError) {
 		if utf8.RuneCountInString(text) > MaxTextRunes {
 			return nil, Invalid("text 超过长度上限").WithDetail("limit", MaxTextRunes)
 		}
-		target, err := parseTarget(raw.Target)
+		target, err := parseTarget(raw.Target.Value)
 		if err != nil {
 			return nil, err
 		}
 		op.Target = target
 		op.Text = text
 	case "swipe":
-		if raw.Target != nil || hasKey || hasText {
-			return nil, Invalid("swipe 只接受 from 与 to")
+		if raw.Target.Present || raw.Container.Present || hasKey || hasText ||
+			hasDirection || hasAmount {
+			return nil, Invalid("swipe 只接受 from、to 与 duration_ms")
 		}
-		if raw.From == nil || raw.To == nil {
+		if raw.From.Value == nil || raw.To.Value == nil {
+			if raw.From.Present || raw.To.Present {
+				return nil, Invalid("swipe 的 from 与 to 不接受 null")
+			}
 			return nil, Invalid("swipe 需要 from 与 to")
 		}
-		from, err := parsePoint(raw.From)
+		from, err := parsePoint(raw.From.Value)
 		if err != nil {
 			return nil, err
 		}
-		to, err := parsePoint(raw.To)
+		to, err := parsePoint(raw.To.Value)
 		if err != nil {
 			return nil, err
 		}
 		if *from == *to {
 			return nil, Invalid("swipe 起终点不能相同")
 		}
-		op.From, op.To = from, to
+		duration := DefaultSwipeDurationMS
+		if hasDuration {
+			duration, err = parseSwipeDuration(raw.DurationMS)
+			if err != nil {
+				return nil, err
+			}
+		}
+		op.From, op.To, op.DurationMS = from, to, duration
+	case "scroll":
+		if raw.Target.Present || raw.From.Present || raw.To.Present ||
+			hasKey || hasText || hasDuration {
+			return nil, Invalid("scroll 只接受 container、direction 与 amount")
+		}
+		if !raw.Container.Present {
+			return nil, Invalid("scroll 操作需要 container")
+		}
+		if raw.Container.Value == nil {
+			return nil, Invalid("container 不接受 null")
+		}
+		container, err := parseTarget(raw.Container.Value)
+		if err != nil {
+			return nil, err
+		}
+		if !hasDirection {
+			return nil, Invalid("scroll 操作需要 direction")
+		}
+		direction, err := parseScrollDirection(raw.Direction)
+		if err != nil {
+			return nil, err
+		}
+		amount := ScrollAmountPage
+		if hasAmount {
+			amount, err = parseScrollAmount(raw.Amount)
+			if err != nil {
+				return nil, err
+			}
+		}
+		op.Container, op.Direction, op.Amount = container, direction, amount
 	case "key":
-		if raw.Target != nil || raw.From != nil || raw.To != nil || hasText {
+		if raw.Target.Present || raw.From.Present || raw.To.Present || hasText ||
+			raw.Container.Present || hasDirection || hasAmount || hasDuration {
 			return nil, Invalid("key 操作只接受 key")
 		}
 		if !hasKey || string(raw.Key) == "null" {
@@ -294,6 +406,55 @@ func parseOperation(raw *rawOperation) (*Operation, *APIError) {
 		return nil, Invalid("不支持的 operation.type")
 	}
 	return op, nil
+}
+
+// parseScrollDirection admits exactly the four declared lowercase directions.
+func parseScrollDirection(raw jsontext.Value) (string, *APIError) {
+	if isJSONNull(raw) {
+		return "", Invalid("direction 不接受 null")
+	}
+	var direction string
+	if err := json.Unmarshal(raw, &direction); err != nil {
+		return "", Invalid("direction 必须是字符串")
+	}
+	switch direction {
+	case ScrollDirectionUp, ScrollDirectionDown, ScrollDirectionLeft, ScrollDirectionRight:
+		return direction, nil
+	default:
+		return "", Invalid("direction 只接受 up、down、left、right")
+	}
+}
+
+// parseScrollAmount admits the bounded page/half travel amounts.
+func parseScrollAmount(raw jsontext.Value) (string, *APIError) {
+	if isJSONNull(raw) {
+		return "", Invalid("amount 不接受 null")
+	}
+	var amount string
+	if err := json.Unmarshal(raw, &amount); err != nil {
+		return "", Invalid("amount 必须是字符串")
+	}
+	switch amount {
+	case ScrollAmountPage, ScrollAmountHalf:
+		return amount, nil
+	default:
+		return "", Invalid("amount 只接受 page 或 half")
+	}
+}
+
+// parseSwipeDuration admits one integer duration inside the fixed bounds.
+func parseSwipeDuration(raw jsontext.Value) (int, *APIError) {
+	if isJSONNull(raw) {
+		return 0, Invalid("duration_ms 不接受 null")
+	}
+	var duration int
+	if err := json.Unmarshal(raw, &duration); err != nil {
+		return 0, Invalid("duration_ms 必须是整数")
+	}
+	if duration < MinSwipeDurationMS || duration > MaxSwipeDurationMS {
+		return 0, Invalid("duration_ms 超出允许范围").WithDetail("limit_ms", MaxSwipeDurationMS)
+	}
+	return duration, nil
 }
 
 func parseTarget(raw *rawTarget) (*Target, *APIError) {

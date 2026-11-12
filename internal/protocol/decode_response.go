@@ -206,6 +206,70 @@ func (m *ImageMeta) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 	return nil
 }
 
+// UnmarshalJSONFrom decodes the observation quality object. All three members
+// are required; explicit null for the object or any member is an error, an
+// unknown enum value is an error, and samples=0 is a valid explicit fact.
+func (q *Quality) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	var wire struct {
+		State      member[string] `json:"state"`
+		Samples    member[int]    `json:"samples"`
+		StopReason member[string] `json:"stop_reason"`
+	}
+	if err := readObject(dec, "quality", &wire); err != nil {
+		return err
+	}
+	state, err := requireResponseMember(wire.State, "quality.state")
+	if err != nil {
+		return err
+	}
+	switch state {
+	case QualityStable, QualityUnstable, QualityUnknown:
+	default:
+		return fmt.Errorf("invalid quality.state")
+	}
+	samples, err := requireResponseMember(wire.Samples, "quality.samples")
+	if err != nil {
+		return err
+	}
+	if samples < 0 {
+		return fmt.Errorf("quality.samples must not be negative")
+	}
+	stopReason, err := requireResponseMember(wire.StopReason, "quality.stop_reason")
+	if err != nil {
+		return err
+	}
+	switch stopReason {
+	case QualityStopStable, QualityStopMaxSamples, QualityStopBudget,
+		QualityStopUnreadable, QualityStopNotSampled:
+	default:
+		return fmt.Errorf("invalid quality.stop_reason")
+	}
+	*q = Quality{State: state, Samples: samples, StopReason: stopReason}
+	return nil
+}
+
+// UnmarshalJSONFrom decodes the bounded scroll-effect object. state is
+// required and enum-bound; explicit null for the object or member is an error.
+func (e *Effect) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	var wire struct {
+		State member[string] `json:"state"`
+	}
+	if err := readObject(dec, "effect", &wire); err != nil {
+		return err
+	}
+	state, err := requireResponseMember(wire.State, "effect.state")
+	if err != nil {
+		return err
+	}
+	switch state {
+	case EffectObserved, EffectNotObserved, EffectUnknown:
+	default:
+		return fmt.Errorf("invalid effect.state")
+	}
+	*e = Effect{State: state}
+	return nil
+}
+
 // UnmarshalJSONFrom decodes the single observation shape used by every
 // valid, partial and failed branch.
 func (o *Observation) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
@@ -216,6 +280,7 @@ func (o *Observation) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 		Revision        member[int]      `json:"revision"`
 		CapturedAt      member[string]   `json:"captured_at"`
 		ActionableUntil member[string]   `json:"actionable_until"`
+		Quality         member[*Quality] `json:"quality"`
 		Screen          *Screen          `json:"screen"`
 		Foreground      *Foreground      `json:"foreground"`
 		Tree            *TreeValue       `json:"tree"`
@@ -237,6 +302,7 @@ func (o *Observation) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 		Revision:        wire.Revision.Value,
 		CapturedAt:      wire.CapturedAt.Value,
 		ActionableUntil: wire.ActionableUntil.Value,
+		Quality:         wire.Quality.Value,
 		Screen:          wire.Screen,
 		Foreground:      wire.Foreground,
 		Tree:            wire.Tree,
@@ -322,6 +388,7 @@ func (r *Result) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 		OperationState      member[string]           `json:"operation_state"`
 		Outcome             member[string]           `json:"outcome"`
 		Phase               member[string]           `json:"phase"`
+		Effect              member[*Effect]          `json:"effect"`
 		TargetReference     member[string]           `json:"target_reference"`
 		RequestClosed       *bool                    `json:"request_closed"`
 		BlockingOperationID member[string]           `json:"blocking_operation_id"`
@@ -351,6 +418,7 @@ func (r *Result) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 		OperationState:      wire.OperationState.Value,
 		Outcome:             wire.Outcome.Value,
 		Phase:               wire.Phase.Value,
+		Effect:              wire.Effect.Value,
 		TargetReference:     wire.TargetReference.Value,
 		RequestClosed:       wire.RequestClosed,
 		BlockingOperationID: wire.BlockingOperationID.Value,

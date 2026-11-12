@@ -3,6 +3,7 @@ package protocol
 import (
 	"encoding/json/v2"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -550,4 +551,243 @@ func TestDecodeDirectScalarTypesRejectNull(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"code":"x"}`), &apiErr); err == nil {
 		t.Fatal("expected missing error.message to fail")
 	}
+}
+
+// TestObservationQualityEncodingOrder pins the fixed public member order and
+// the explicit zero-sample facts. Reverse control: dropping the quality member,
+// or omitting samples=0 / stop_reason (for example by adding omitempty), makes
+// the exact comparison fail.
+func TestObservationQualityEncodingOrder(t *testing.T) {
+	observation := &Observation{
+		Status:          "complete",
+		ID:              "O1",
+		Origin:          "P1",
+		Revision:        1,
+		CapturedAt:      "2026-11-12T00:00:00Z",
+		ActionableUntil: "2026-11-12T00:01:00Z",
+		Quality:         &Quality{State: QualityUnknown, Samples: 0, StopReason: QualityStopNotSampled},
+		Screen:          &Screen{Width: 1080, Height: 2400, Rotation: 0},
+	}
+	got, err := JSON(observation)
+	if err != nil {
+		t.Fatalf("marshal observation: %v", err)
+	}
+	want := `{"status":"complete","id":"O1","origin":"P1","revision":1,` +
+		`"captured_at":"2026-11-12T00:00:00Z","actionable_until":"2026-11-12T00:01:00Z",` +
+		`"quality":{"state":"unknown","samples":0,"stop_reason":"not_sampled"},` +
+		`"screen":{"width":1080,"height":2400,"rotation":0}}`
+	if string(got) != want {
+		t.Fatalf("observation quality encoding:\n got %s\nwant %s", got, want)
+	}
+}
+
+// TestFailedObservationHasNoQuality proves a failed observation with no tree
+// publishes its error material without a manufactured quality fact.
+func TestFailedObservationHasNoQuality(t *testing.T) {
+	observation := &Observation{
+		Status:  "failed",
+		Missing: []string{"tree"},
+		Error:   &Error{Code: CodeHierarchyFailed, Message: "tree unavailable"},
+	}
+	got, err := JSON(observation)
+	if err != nil {
+		t.Fatalf("marshal observation: %v", err)
+	}
+	if strings.Contains(string(got), "quality") {
+		t.Fatalf("failed observation carried quality: %s", got)
+	}
+	if !strings.Contains(string(got), `"status":"failed"`) {
+		t.Fatalf("failed status missing: %s", got)
+	}
+}
+
+// TestResultEffectEncodingOrder pins effect between phase and target_reference.
+// Reverse control: moving or dropping the member makes the exact comparison
+// fail.
+func TestResultEffectEncodingOrder(t *testing.T) {
+	result := &Result{
+		OperationID:     "P1",
+		OperationState:  "finished",
+		Outcome:         "executed",
+		Phase:           "post_observe",
+		Effect:          &Effect{State: EffectObserved},
+		TargetReference: "O2",
+	}
+	got, err := JSON(result)
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	want := `{"operation_id":"P1","operation_state":"finished","outcome":"executed",` +
+		`"phase":"post_observe","effect":{"state":"observed"},"target_reference":"O2"}`
+	if string(got) != want {
+		t.Fatalf("result effect encoding:\n got %s\nwant %s", got, want)
+	}
+}
+
+// TestDecodeObservationQuality is the quality decode matrix: every member is
+// required and enum-bound, explicit null is rejected, samples=0 stays valid,
+// and an absent object stays nil for failed/legacy shapes.
+func TestDecodeObservationQuality(t *testing.T) {
+	valid := []struct {
+		name string
+		body string
+		want Quality
+	}{
+		{
+			name: "stable",
+			body: `{"status":"complete","quality":{"state":"stable","samples":3,"stop_reason":"stable"}}`,
+			want: Quality{State: QualityStable, Samples: 3, StopReason: QualityStopStable},
+		},
+		{
+			name: "zero samples is explicit",
+			body: `{"status":"complete","quality":{"state":"unknown","samples":0,"stop_reason":"not_sampled"}}`,
+			want: Quality{State: QualityUnknown, Samples: 0, StopReason: QualityStopNotSampled},
+		},
+		{
+			name: "unstable max samples",
+			body: `{"status":"complete","quality":{"state":"unstable","samples":5,"stop_reason":"max_samples"}}`,
+			want: Quality{State: QualityUnstable, Samples: 5, StopReason: QualityStopMaxSamples},
+		},
+		{
+			name: "unreadable",
+			body: `{"status":"partial","quality":{"state":"unknown","samples":1,"stop_reason":"unreadable"}}`,
+			want: Quality{State: QualityUnknown, Samples: 1, StopReason: QualityStopUnreadable},
+		},
+		{
+			name: "budget",
+			body: `{"status":"complete","quality":{"state":"unstable","samples":2,"stop_reason":"budget"}}`,
+			want: Quality{State: QualityUnstable, Samples: 2, StopReason: QualityStopBudget},
+		},
+	}
+	for _, tc := range valid {
+		t.Run(tc.name, func(t *testing.T) {
+			var observation Observation
+			if err := json.Unmarshal([]byte(tc.body), &observation); err != nil {
+				t.Fatalf("decode %s: %v", tc.body, err)
+			}
+			if observation.Quality == nil || *observation.Quality != tc.want {
+				t.Fatalf("quality = %#v, want %#v", observation.Quality, tc.want)
+			}
+		})
+	}
+
+	t.Run("absent stays nil", func(t *testing.T) {
+		var observation Observation
+		if err := json.Unmarshal([]byte(`{"status":"complete"}`), &observation); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if observation.Quality != nil {
+			t.Fatalf("absent quality became %#v", observation.Quality)
+		}
+	})
+
+	// The response wire keeps its documented forward-compatibility rule: unknown
+	// members of a known object are ignored rather than failing the result.
+	t.Run("unknown member ignored", func(t *testing.T) {
+		var observation Observation
+		body := `{"status":"complete","quality":{"state":"stable","samples":2,"stop_reason":"stable","future":true}}`
+		if err := json.Unmarshal([]byte(body), &observation); err != nil {
+			t.Fatalf("unknown member should stay readable: %v", err)
+		}
+		if observation.Quality == nil || observation.Quality.Samples != 2 {
+			t.Fatalf("quality lost: %#v", observation.Quality)
+		}
+	})
+
+	invalid := []struct {
+		name string
+		body string
+	}{
+		{"null object", `{"status":"complete","quality":null}`},
+		{"missing state", `{"status":"complete","quality":{"samples":0,"stop_reason":"not_sampled"}}`},
+		{"missing samples", `{"status":"complete","quality":{"state":"unknown","stop_reason":"not_sampled"}}`},
+		{"missing stop reason", `{"status":"complete","quality":{"state":"unknown","samples":0}}`},
+		{"null state", `{"status":"complete","quality":{"state":null,"samples":0,"stop_reason":"not_sampled"}}`},
+		{"null samples", `{"status":"complete","quality":{"state":"unknown","samples":null,"stop_reason":"not_sampled"}}`},
+		{"null stop reason", `{"status":"complete","quality":{"state":"unknown","samples":0,"stop_reason":null}}`},
+		{"unknown state", `{"status":"complete","quality":{"state":"settled","samples":0,"stop_reason":"not_sampled"}}`},
+		{"unknown stop reason", `{"status":"complete","quality":{"state":"unknown","samples":0,"stop_reason":"timeout"}}`},
+		{"negative samples", `{"status":"complete","quality":{"state":"unknown","samples":-1,"stop_reason":"budget"}}`},
+		{"fractional samples", `{"status":"complete","quality":{"state":"unknown","samples":1.5,"stop_reason":"budget"}}`},
+		{"string samples", `{"status":"complete","quality":{"state":"unknown","samples":"1","stop_reason":"budget"}}`},
+		{"bool state", `{"status":"complete","quality":{"state":true,"samples":1,"stop_reason":"budget"}}`},
+		{"array object", `{"status":"complete","quality":[]}`},
+		{"string object", `{"status":"complete","quality":"stable"}`},
+	}
+	for _, tc := range invalid {
+		t.Run(tc.name, func(t *testing.T) {
+			var observation Observation
+			if err := json.Unmarshal([]byte(tc.body), &observation); err == nil {
+				t.Fatalf("expected decode error for %s", tc.body)
+			}
+		})
+	}
+}
+
+// TestDecodeResultEffect is the effect decode matrix: state is required and
+// enum-bound, explicit null is rejected, and an absent object stays nil.
+func TestDecodeResultEffect(t *testing.T) {
+	for _, state := range []string{EffectObserved, EffectNotObserved, EffectUnknown} {
+		t.Run(state, func(t *testing.T) {
+			var result Result
+			body := `{"operation_id":"P1","effect":{"state":"` + state + `"}}`
+			if err := json.Unmarshal([]byte(body), &result); err != nil {
+				t.Fatalf("decode %s: %v", body, err)
+			}
+			if result.Effect == nil || result.Effect.State != state {
+				t.Fatalf("effect = %#v, want %q", result.Effect, state)
+			}
+		})
+	}
+
+	t.Run("absent stays nil", func(t *testing.T) {
+		var result Result
+		if err := json.Unmarshal([]byte(`{"operation_id":"P1"}`), &result); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if result.Effect != nil {
+			t.Fatalf("absent effect became %#v", result.Effect)
+		}
+	})
+
+	invalid := []struct {
+		name string
+		body string
+	}{
+		{"null object", `{"effect":null}`},
+		{"missing state", `{"effect":{}}`},
+		{"null state", `{"effect":{"state":null}}`},
+		{"unknown state", `{"effect":{"state":"moved"}}`},
+		{"array object", `{"effect":[]}`},
+		{"string object", `{"effect":"observed"}`},
+	}
+	for _, tc := range invalid {
+		t.Run(tc.name, func(t *testing.T) {
+			var result Result
+			if err := json.Unmarshal([]byte(tc.body), &result); err == nil {
+				t.Fatalf("expected decode error for %s", tc.body)
+			}
+		})
+	}
+}
+
+// TestDecodeQualityEffectRoundTrip proves the public encoder and the strict
+// decoder agree on the new facts, including samples=0.
+func TestDecodeQualityEffectRoundTrip(t *testing.T) {
+	original := testObservation()
+	original.Quality = &Quality{State: QualityUnstable, Samples: 5, StopReason: QualityStopMaxSamples}
+	roundTripDecode(t, original)
+
+	original.Quality = &Quality{State: QualityUnknown, Samples: 0, StopReason: QualityStopNotSampled}
+	roundTripDecode(t, original)
+
+	roundTripDecode(t, &Result{
+		OperationID:     "P9",
+		OperationState:  "finished",
+		Outcome:         "executed",
+		Phase:           "post_observe",
+		Effect:          &Effect{State: EffectNotObserved},
+		TargetReference: "O9",
+		Observation:     original,
+	})
 }
