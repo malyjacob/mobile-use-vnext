@@ -22,7 +22,18 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
 
 每个工具以显式 JSON Schema 发布：`type=object`、`properties`、`required` 与
 `additionalProperties=false`。可选参数缺省等于其声明默认值；`act.operation` 只允许
-`tap`、`long_press`、`text`、`swipe`、`key` 五个分支及其声明成员。
+`tap`、`long_press`、`text`、`swipe`、`scroll`、`key` 六个分支及其声明成员。
+
+`act` 的滚动与手势输入与 [接口契约](interface.md) §6 一致：`scroll` 用 `container`（ref 或
+坐标）与 `direction`（`up`/`down`/`left`/`right`）表达，可选 `amount`（`page` 默认或
+`half`）；`swipe` 仍以 `from`/`to` 表达原始手势，并接受可选 `duration_ms`（50–2000，默认
+300）。分支成员互斥：`scroll` 不接受 `target`/`from`/`to`/`key`/`text`/`duration_ms`，其他
+分支也不接受 `container`/`direction`/`amount`。`operation` schema 因此暴露 `scroll`、
+`container`、`direction`、`amount` 与 `duration_ms`；服务端严格解码仍是权威。
+
+工具描述中的树引导与树块词表一致：树节点行的动作列仍只有 `tap`、`long_press`、`text`、
+`swipe`（`Node.actions` 不新增枚举）；`actions=swipe` 只是节点的源能力，不是 raw `swipe`
+授权，滚动用 `operation.type=scroll` 与 `container` 表达。
 
 调用参数在进入客户端前由 `internal/protocol` 的严格解码器接入：未知成员、重复键、大小写
 变体、尾随第二个 JSON 值、类型混用与未声明 `null` 都被拒绝，且不产生设备调用。参数错误
@@ -68,6 +79,15 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
 编码必须无损还原同一结果：缺失、`null`、`false`、`0`、`""`、`[]` 与数组顺序均保留。
 图片只在 `ImageContent` 中发送。`structured` 成功且无图时 `content=[]`；不接受空 content
 的宿主应使用 `both` 或 `text`。模式不用于脱敏或截断，不发布 `outputSchema`。
+
+`effect` 与 `observation.quality` 按同一份 `Result` 投影，三种模式承载相同字段与值：
+`result v1` 在 `phase` 之后投影 `effect.state`，在观察字段中投影
+`observation.quality.state`、`observation.quality.samples` 与
+`observation.quality.stop_reason`；`structured` 与 `both` 的 `structuredContent` 保留同一份
+对象，`text` 不发送结构化内容。适配器不重算或补投影这两个事实；`effect` 只由 `scroll` 的
+操作结果与保留的 P 视图携带，带树的观察都携带 `observation.quality`（未采样或重验交付为
+`unknown`/`0`/`not_sampled`），只有没有树的失败观察不携带它。两者的成员与取值见
+[接口契约](interface.md) §11。
 
 完整文本第一行为 `result v1 is_error=<true|false>`，最后为 `end result`。已知字段按
 `Result` 的公共顺序输出，字段行和块可以交错；例如 shell 块之后仍可有错误与恢复字段。
@@ -164,7 +184,8 @@ end tree
 
 节点行固定列序：2 空格/层缩进、`n<ref>`、`role`、`[l,t,r,b]`（未知为 `-`）、每个
 `label` 一个 JSON 字符串、`value=` / `hint=`、动作词、标志。动作词为 `tap`、
-`long_press`、`text`、`swipe`；标志为 `enabled=false|null`、
+`long_press`、`text`、`swipe`，来自 `Node.actions` 的源能力词表；受控滚动不增加动作词，
+以 `act.operation.type=scroll` 表达。标志为 `enabled=false|null`、
 `focused`/`selected`/`protected` 的 `true|null`、`checked=true|false`、
 `axis=x|y|both`、`resource="…"` 与 `context`。设备来源字符串按 JSON 字符串字面量转义，
 `<`、`>`、`&` 保持原样；缺省值按协议省略规则不输出。

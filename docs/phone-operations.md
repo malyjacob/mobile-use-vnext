@@ -61,6 +61,12 @@ Agent 宿主接入见[Agent 接入指南](integration.md)。
 `build/host-tools-manifest.json` 核验；两者使用同一 `release/versions.json`。覆盖安装保留
 App 私有数据，不卸载、不清库。
 
+构建与核验在已提交的干净树上执行：`verify-manifest.ps1` 要求清单 `source_commit` 是实际
+`HEAD` 的前缀（等值也通过）、`source_dirty=false` 且六个手机产物齐全；主机工具的
+`-VerifyOnly` 还要求完整的手机清单作为同一配套版本。对脏树使用 `-AllowDirtySource` 只用于
+开发构建，该清单永远不能通过核验。部署只停止本仓库的 `com.mobileuse.vnext`、`device-service` 与 `device-mcp`，不
+操作其他项目的服务、脚本或包。
+
 ```bash
 # 以下命令在主机执行，由 adb + su 送入 chroot
 adb shell su -c 'chroot /data/local/chroots/debian13 /bin/sh -c "export PATH=/usr/local/bin:/usr/bin:/bin; /opt/mobile-use-vnext/service.sh status"'
@@ -231,7 +237,7 @@ adb shell su -c 'tail -n 100 /data/data/com.mobileuse.vnext/files/diagnostics.lo
    $control = (Get-Content .state/deploy.json -Raw | ConvertFrom-Json).control_token
    Invoke-RestMethod http://127.0.0.1:18881/v1/control/stop -Method Post `
      -Headers @{ Authorization = "Bearer $control" } -ContentType 'application/json' `
-     -Body '{"contract_version":"9","app_instance_id":"<uuid>","stop_seq":1,"reason":"operator_stop"}'
+     -Body '{"contract_version":"10","app_instance_id":"<uuid>","stop_seq":1,"reason":"operator_stop"}'
    ```
 
    `accepted=true` 只表示停止边界已绑定；仍需用 App/`status.cleanup` 核验执行链、任务与

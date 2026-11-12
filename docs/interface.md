@@ -15,7 +15,7 @@
 | 方法 | 所有业务端点只接受 `POST`；其他方法返回 `405`，错误码 `invalid_request` |
 | 认证 | `/api/*` 用 `agent_token`；`/v1/control/*` 用 `control_token`；`Authorization: Bearer <token>` |
 | 身份隔离 | agent token 不能访问 `/v1/control/*`，control token 不能访问 `/api/*`；错误为 `401 unauthorized` |
-| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 9`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
+| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 10`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
 | 预分配 P | `/api/*` 可带 `X-Mobile-Use-Operation: P…`；缺省由服务分配。`status` 不使用该头 |
 | 请求体 | 必须是一个 JSON 对象；大小上限：`start`/`status`/`end` 16 KiB，`observe` 32 KiB，`act` 64 KiB，`inspect`/`keepalive`/`diagnose`/`app` 8 KiB，`notify` 16 KiB，`shell` 32 KiB，`sync` 32 KiB，`stop` 8 KiB |
 | 响应 | `Content-Type: application/json; charset=utf-8`，`Cache-Control: no-store` |
@@ -34,14 +34,16 @@
   P 按原值登记，不由服务改写。
 
 会话内做收敛采样的自动观察点——`start` 的首个观察、`act` 的后观察与 `app` 五个变更 kind 的
-后观察——在目标树收敛后发布：连续两帧的节点内容身份、公开树与前台/显示语境一致才停止采样。
-静默窗口与总预算按阶段固定（`docs/architecture.md` §4），不是请求字段，也不改变任何端点的
-字段与错误码；页面持续动画时这些观察最多多花该阶段的预算（`act(image=true)` 另加一次刷新读取）。
+后观察——在目标树收敛后或该阶段采样预算耗尽时发布：连续两帧的节点内容身份、公开树与前台/
+显示语境一致才停止采样，预算耗尽照常发布最后一帧。静默窗口与总预算按阶段固定
+（`docs/architecture.md` §4），不是请求字段，也不改变任何端点的字段与错误码；页面持续动画时
+这些观察最多多花该阶段的预算（`act(image=true)` 另加一次刷新读取）。这些观察发布
+`observation.quality`，记录收敛状态与有效样本数（见 §11）。
 
 `act` 的重验在派发前失败时另有一个交付观察点：重验已经读取的那一帧直接发布为新的 `ready`
-观察，随失败结果返回（见 §6）。该点不做收敛采样，也不重新采集。`observe` 由调用方决定节奏
-（`wait_ms` 与 `full`），不做收敛采样；`shell` 不发布观察，命令是否改变屏幕由下一次 `act` 的
-实时重验或一次 `observe` 回答。
+观察，随失败结果返回（见 §6）。该点不做收敛采样，也不重新采集，其质量固定为
+`unknown`/`0`/`not_sampled`。`observe` 由调用方决定节奏（`wait_ms` 与 `full`），不做收敛
+采样；`shell` 不发布观察，命令是否改变屏幕由下一次 `act` 的实时重验或一次 `observe` 回答。
 
 ## 2. 结果分层与错误
 
@@ -54,14 +56,15 @@
 工具响应是一个 `Result` 对象，字段只在本次调用确有该事实时出现，固定顺序为：
 
 ```text
-operation_id, operation_state, outcome, phase, target_reference, request_closed,
+operation_id, operation_state, outcome, phase, effect, target_reference, request_closed,
 blocking_operation_id, can_start, blocking_code, start_operation_id,
 observation_state, input_state, message_id, saved, session, observation, inspection,
 app, shell, notification, diagnosis, cleanup, error, recovery
 ```
 
-四层事实互不替代：`outcome`（动作执行）、`observation.status`（观察）、`session.state`
-（会话）、`cleanup.*`（物理收尾）。`error` 只在失败时出现：
+事实互不替代：`outcome`（动作执行）、`effect`（本次受控滚动的位移观察）、
+`observation.status` 与 `observation.quality`（观察及其收敛质量）、`session.state`（会话）、
+`cleanup.*`（物理收尾）。`error` 只在失败时出现：
 
 ```json
 {"operation_id":"P2","outcome":"not_executed",
@@ -75,10 +78,15 @@ app, shell, notification, diagnosis, cleanup, error, recovery
   `mcp.*` 是 [MCP 适配器](mcp.md) 的保留命名空间，仅由该适配器向结果投影注入，服务端
   `/api/*` 永不产生这些键；
 - `recovery` 是下一个请求的投影：本次结果没有待恢复事实时整个对象省略；出现时 `entry` 与
-  `reference` 必出，`input_state` 与 `cause` 按需出现。它不改变上面四层事实。
+  `reference` 必出，`input_state` 与 `cause` 按需出现。它不改变上面的动作、效果、观察、
+  会话与收尾事实。
 - `observation` 不是成功专属：`act` 的重验在派发前失败且已完成交付时，失败结果同样携带
   `observation`（新 O）。交付时它表示本次调用提交了一个新 O；`observation.status=failed` 的
   失败结果没有新 O。
+- `effect` 只出现在首次受理的 `scroll` 结果与仍保留该原操作的 P 视图，且只在
+  `outcome=executed`（含 `executed_revoked`）或 `uncertain` 时出现；`not_executed` 永不出现。
+  对象缺失表示本次结果没有该事实（可能是原操作不是 `scroll`、未执行，或原操作事实已封闭、
+  已淘汰而不可用），缺失不表示“未观察到位移”。
 
 `recovery` 的成员：
 
@@ -145,6 +153,7 @@ HTTP 状态映射（`protocol.Status`）：
     "started_at":"…","expires_at":"…"},
   "observation": {"status":"complete","id":"O1","origin":"P1","revision":1,
     "captured_at":"…","actionable_until":"…",
+    "quality":{"state":"stable","samples":2,"stop_reason":"stable"},
     "screen":{"width":1080,"height":2400,"rotation":0},
     "foreground":{"state":"present","package":"com.example.probe","task_id":12},
     "tree":{"format":"full","scope":"reported_visible_with_context",
@@ -153,6 +162,8 @@ HTTP 状态映射（`protocol.Status`）：
 ```
 
 - `start` 的首个观察固定为 full（`forceFull=true`），即使已有基线。
+- 首个观察带 `observation.quality`：`start` 的收敛采样最多 4 帧，状态按该次收敛结果填写，
+  规则见 §11。
 - 会话租期在接纳时初始化为 `started_at + 5min`；激活与首个 full 观察成功发布各按
   `max(expires_at, now + 5min)` 更新。首个观察失败但会话保留时不额外续期，也不回滚期间
   已应用的显式 `keepalive` 结果；重放或被拒绝的 `start` 不重新给已有会话五分钟。
@@ -225,7 +236,8 @@ HTTP 状态映射（`protocol.Status`）：
 
 ```json
 {"operation_id":"P2","operation_state":"finished","outcome":"executed",
- "phase":"finished","session":{"origin":"P1","state":"active","mode":"virtual",
+ "phase":"finished","effect":{"state":"observed"},
+ "session":{"origin":"P1","state":"active","mode":"virtual",
    "agent":"local-agent","started_at":"…","expires_at":"…"}}
 ```
 
@@ -233,6 +245,10 @@ HTTP 状态映射（`protocol.Status`）：
 - `finished` 时带 `outcome`、`phase`，操作错误在 `error`，`recovery` 由错误码与结果事实决定；
   该视图不带 `observation`，原操作交付过新观察时 `recovery` 为 `entry=observe`、`reference=P`、
   `input_state=retired`；
+- `scroll` 的操作视图复制原操作已保存的 `effect`；没有已保存值但 `executed`（含撤销后保留的
+  `executed`）或 `uncertain` 时投影 `unknown`，`not_executed` 不出现；视图不重算、不附观察。
+  原操作事实已封闭，或已完成记录被淘汰而不可用时，整个 `effect` 可省略，省略不表示未观察
+  到位移。上方示例是 `scroll` 原操作的 P 视图；其他 P 不带 `effect`。
 - 不存在的 P：`409 operation_unknown`，不返回 `not_seen`；
 - 有正面“未接纳”证据的已封闭 P：`request_closed=true`、`outcome=not_executed`、`session=null`；
 - 仅保留“未来接纳已封闭”证据的 P：仍为 `409 operation_unknown`；`end(P)` 会带
@@ -279,10 +295,16 @@ HTTP 状态映射（`protocol.Status`）：
 
 ```json
 {"operation_id":"P2","observation":{"status":"complete","id":"O2","origin":"P1","revision":2,
- "captured_at":"…","actionable_until":"…","screen":{"width":1080,"height":2400,"rotation":0},
+ "captured_at":"…","actionable_until":"…",
+ "quality":{"state":"unknown","samples":0,"stop_reason":"not_sampled"},
+ "screen":{"width":1080,"height":2400,"rotation":0},
  "foreground":{"state":"unknown","reason":"display_section_missing"},
  "tree":{"format":"delta","base":"O1"}}}
 ```
+
+`observe` 不做收敛采样，其观察的质量固定为 `unknown`/`0`/`not_sampled`；`act` 重验失败交付的
+新观察同样如此。`quality` 是观察材料事实，不是输入授权：`unstable`/`unknown` 的 O 仍可作为
+下一次 `act` 的输入，质量不改变 O 的 `status`、`actionable_until` 或基线确认，规则见 §11。
 
 采集失败：HTTP 503，`observation.status=failed`、`missing=["tree"]`、`error` 为
 `hierarchy_unavailable`/`display_unavailable`/`tree_too_large`/`stale_screen`/
@@ -323,26 +345,61 @@ HTTP 状态映射（`protocol.Status`）：
 | `operation` | 是 | 非 null 对象，见下表 |
 | `image` | 否 | 布尔，默认 `false`；`true` 为本次后观察附加一张图片，规则见 §5 图片 |
 
-`operation` 的五个分支（成员出现即校验，多余成员一律拒绝）：
+`operation` 的六个分支（成员出现即校验，多余成员一律拒绝）：
 
 | `type` | 允许成员 | 约束 |
 | --- | --- | --- |
 | `tap` | `target` | `target` 为 `{"ref":"n1"}` 或 `{"x":1,"y":2}` |
 | `long_press` | `target` | 同上 |
 | `text` | `target` + `text` | `ref` 目标必须指向可确认的输入对象（坐标目标在派发时绑定焦点输入）；`text` 必填字符串，可 `""`，≤4096 个 Unicode 码点 |
-| `swipe` | `from` + `to` | 两个坐标对象，起终点不能相同，不接受 `ref` |
+| `swipe` | `from` + `to` + 可选 `duration_ms` | 两个坐标对象，起终点不能相同，不接受 `ref`；`duration_ms` 为 50–2000 的整数，省略为 300 |
+| `scroll` | `container` + `direction` + 可选 `amount` | `container` 为 `{"ref":"n1"}` 或 `{"x":1,"y":2}`；`direction` 为 `up`/`down`/`left`/`right`（大小写敏感）；`amount` 为 `page`（默认）或 `half` |
 | `key` | `key` | 固定白名单：`BACK`、`ENTER`、`DEL`、`TAB`、`ESCAPE`、`DPAD_UP`、`DPAD_DOWN`、`HOME`、`APP_SWITCH` |
 
-`target`/`from`/`to` 的规则：`ref` 与坐标互斥；坐标必须同时有 `x`、`y`，为 ≥0 的整数；
-`ref` 不能为空或 `null`；`key`/`text` 不能是 `null`。
+`target`/`container`/`from`/`to` 的规则：`ref` 与坐标互斥；坐标必须同时有 `x`、`y`，为 ≥0
+的整数；`ref` 不能为空或 `null`；`key`/`text` 不能是 `null`。分支成员互斥：`scroll` 不接受
+`target`/`from`/`to`/`key`/`text`/`duration_ms`，其他分支也不接受 `container`/`direction`/
+`amount`；`duration_ms` 只在 `swipe` 上出现。`duration_ms` 的显式 `null`、0、负数、非整数与
+越界一律拒绝。`swipe` 仍是原始手势，不承诺滚动语义；表达滚动意图用 `scroll`。
+
+`scroll` 是受控滚动尝试：`container` 与 `direction` 必填，`amount` 省略为 `page`；
+`direction` 是调用方声明的阅读/视口方向，不是服务证明的设备滚动轴。映射固定为：
+
+| `direction` | 查看的内容 | 注入手势 |
+| --- | --- | --- |
+| `down` | 更靠后的内容 | 容器下部 → 上部 |
+| `up` | 更靠前的内容 | 容器上部 → 下部 |
+| `right` | 更靠右的内容 | 容器右部 → 左部 |
+| `left` | 更靠左的内容 | 容器左部 → 右部 |
+
+```json
+{"observation_id":"O1","operation":{"type":"scroll","container":{"ref":"n1"},
+ "direction":"down","amount":"page"}}
+```
+
+`container` 是容器选择器：
+
+- `ref` 必须直接指向公开节点，且该节点 `role=scroll`、`actions` 含 `swipe`、非 root、非
+  context、有 bounds、`enabled` 不为已知 `false`。服务不做“叶 ref 向上晋升”：ref 不存在时按
+  既有 `node_not_found` 拒绝，存在但不是可滚动容器时返回 `422 unsupported_node_action`。
+- 坐标为 `{"x":1,"y":2}` 时，服务取包含该点的全部公开候选，逐个归约到最近的可滚动祖先
+  （含自身），按容器原始节点去重：恰好一个容器时使用它；出现多个不同容器时返回
+  `422 ambiguous_point`，要求调用方显式给 `container.ref`；没有容器时返回
+  `422 unsupported_node_action`。同一容器内的多个内容候选（例如同点同深度的 `view`/`text`）
+  不是歧义。服务不自动选择“最大的滚动容器”，也不校验滚动轴。
+
+容器 bounds 必须非空、可裁剪且有正面积；服务用与认领后重验相同的固定几何判据计算起止点，
+静态阶段不可执行时在认领前返回 `422 unsupported_node_action`，不采集、不认领，O 保持
+`ready`。
 
 静态检查（不认领、不派发）：会话必须 `active`；O 必须为 `ready` 且未过期；ref 节点存在、
 非 root、非 context、有 bounds、`enabled` 不为已知 `false`，并具备对应动作能力；`text` 还要
-求 `role=input`、`actions` 含 `text`、`protected` 明确为 `false`；坐标必须落在目标逻辑屏内；
-`HOME`/`APP_SWITCH` 仅在主屏（`display.ID==0`）可用。坐标目标（`tap`/`long_press`/`text`
+求 `role=input`、`actions` 含 `text`、`protected` 明确为 `false`；坐标目标必须落在目标逻辑屏
+内；`HOME`/`APP_SWITCH` 仅在主屏（`display.ID==0`）可用。坐标目标（`tap`/`long_press`/`text`
 的 `target`、`swipe` 的 `from`）还要在观察的公开树中解析到唯一节点：取包含该点、有 bounds、
 非 root、非 context 的最深节点；同级并列候选返回 `422 ambiguous_point`，不认领、不采集；
-解析不到节点时维持前台级检查。
+解析不到节点时维持前台级检查。`scroll` 不在此列：它以 `container` 的解析结果与容器几何为
+静态授权，不要求起点叶节点可解析。
 
 静态拒绝且 O 仍可用时（`node_not_found`、`node_disabled`、`unsupported_node_action`、
 `invalid_coordinates`、`ambiguous_point`、`unsupported_key` 等），什么都没派发、O 未被认领，
@@ -354,6 +411,16 @@ HTTP 状态映射（`protocol.Status`）：
 坐标目标解析到唯一节点时，该节点也必须按同一身份与祖先链唯一匹配，且同一坐标在不推进
 ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动作所需的输入（`text` 为焦点点击 +
 显示绑定写入，任何一步失败都不重放）。
+
+`scroll` 的认领后重验以观察到的容器为授权单位，不要求起点叶节点身份不变：新鲜树只对选定
+容器按“完整内容身份 + 祖先链”唯一匹配，容器 bounds 变化视为 `target_changed`；随后从新鲜
+容器用同一份几何判据计算实际注入的起点与终点，并在不推进 ref 连续号的新鲜公开树中证明两端
+的**最内层**可滚动作用域都是选定容器。外层包裹祖先允许；容器内层后代、不可比或其他滚动
+作用域拒绝；实际终点必须仍在容器内。ref 与坐标两种容器选择器都执行这一步。任一失败与其他
+重验失败一致：`target_changed` 并在已取得可用新帧时交付该帧；服务不搜索替代轨迹。
+`scroll` 只证明容器与真实注入轨迹，不证明真实滚动方向、触摸消费者或业务安全；raw `swipe`
+仍是原始手势，`from` 继续走完整内容身份、祖先链与同点解析证明，内容移动时仍可
+`target_changed`，不承诺滚动语义。
 
 重验失败且已取得可用新帧并完成交付时，服务把该帧发布为新的 `ready` 观察随结果返回：
 `target_changed`、`foreground_changed` 与重验阶段的 `node_not_found` 返回 `409`，结果带
@@ -373,9 +440,15 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 
 | `outcome` | 含义 | 附带 |
 | --- | --- | --- |
-| `executed` | 输入已派发且有完成证据（`text` 以独立读回确认） | 后观察（full 或 delta）；若期间被撤销，则 `recovery` 为 `entry=status`、`reference=P`、`input_state=revoked`、`cause=executed_revoked`，且无后观察 |
-| `not_executed` | 未派发（静态拒绝、重验失败、工作被撤销等） | `error`、`recovery`；重验失败且已交付新帧时另带 `observation` |
-| `uncertain` | 已派发但无法确认完成（传输失败、读回失败、超时） | `error`（`action_result_uncertain` / `text_target_uncertain` / `text_result_uncertain`）、`recovery` 为 `entry=status`、`reference=P`、`input_state=retired` |
+| `executed` | 输入已派发且有完成证据（`text` 以独立读回确认） | 后观察（full 或 delta）；若期间被撤销，则 `recovery` 为 `entry=status`、`reference=P`、`input_state=revoked`、`cause=executed_revoked`，且无后观察。`scroll` 必带 `effect`：有后树时为计算结果，撤销或无法计算时为 `unknown` |
+| `not_executed` | 未派发（静态拒绝、重验失败、工作被撤销等） | `error`、`recovery`；重验失败且已交付新帧时另带 `observation`。`not_executed` 不带 `effect` |
+| `uncertain` | 已派发但无法确认完成（传输失败、读回失败、超时） | `error`（`action_result_uncertain` / `text_target_uncertain` / `text_result_uncertain`）、`recovery` 为 `entry=status`、`reference=P`、`input_state=retired`；`scroll` 必带 `effect=unknown`（没有可计算的后树） |
+
+`scroll` 的 `effect` 只表示是否观察到容器内内容位移：`observed`/`not_observed`/`unknown` 的
+含义与固定判据见 §11。`effect` 不改写 `outcome`、`error`、`recovery` 或 `observation.status`；
+`executed + effect=unknown` 是合法结果。首次受理的 `scroll` 结果与仍保留原操作的 P 视图携带
+它；`executed`/`uncertain` 时不得省略（没有可计算的结果时投影 `unknown`），`not_executed`
+永不携带，只有原操作事实已封闭或已完成记录被淘汰时才整体省略。
 
 - 每次派发只有一个窗口，`may_dispatch` 仅表示调用仍未返回。派发调用返回时，窗口一次性
   关闭为 `terminated`、`not_dispatched` 或缺少可用结束回执的持久终态 `unknown`；后者保持
@@ -389,7 +462,8 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
   `setTextOnDisplay`，最后以独立采集重新绑定并读回；读回值必须精确等于写入值才判
   `executed`。
 - 坐标目标只证明一个点：`tap`/`long_press`/`text` 证明其 `target`，`swipe` 只证明起点
-  `from`；终点是方向与幅度，不参与节点身份。观察时点解析不到节点时按前台级派发。
+  `from`；终点是方向与幅度，不参与节点身份。观察时点解析不到节点时按前台级派发。`scroll`
+  不证明叶节点或单点：它证明选定容器与真实注入的起终点作用域，坐标只是容器选择器。
 - 后观察失败时：HTTP 503，但 `outcome` 仍是 `executed`，`observation.status=failed`，
   `recovery` 为 `entry=observe`、`reference=P`、`input_state=retired`、
   `cause=post_observation_failed`；不能因后观察失败改判未执行。
@@ -399,6 +473,12 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
   `display_unavailable`、`hierarchy_unavailable`、`stale_screen`、`device_busy`、
   `session_ended`、`observation_retired`、`observation_expired`、`observation_claimed`、
   `control_revoked`。
+
+`scroll` 不新增错误码：`container.ref` 指向不存在的节点沿用 `node_not_found`；ref 存在但不是
+可滚动容器、点选择器找不到容器或静态几何不可执行返回 `unsupported_node_action`；点选择器
+出现多个不同滚动作用域返回 `ambiguous_point`；容器或真实注入轨迹在新鲜树中不成立返回
+`target_changed`。`ambiguous_point` 对 raw `swipe` 的提示是可执行的：调整起点，或改用
+`scroll` 的 `container` 显式指定容器；错误码与判定不变，raw `swipe` 仍不接受 `ref`。
 
 ## 7. `POST /api/end`
 
@@ -439,7 +519,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 
 | 字段 | 必填 | 类型 | 说明 |
 | --- | --- | --- | --- |
-| `contract_version` | 是 | 字符串 | 必须为 `"9"`，否则 `409 contract_mismatch` |
+| `contract_version` | 是 | 字符串 | 必须为 `"10"`，否则 `409 contract_mismatch` |
 | `app_instance_id` | 是 | UUID | App 进程实例；变化会撤销旧归属 |
 | `app_version` | 是 | 字符串 | 仅发行标识 |
 | `selected_mode` | 是 | `virtual`/`primary` | 用户选择 |
@@ -466,7 +546,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 
 ```json
 {
-  "contract_version": "9",
+  "contract_version": "10",
   "service_instance_id": "…",
   "control": {
     "revision": 42,
@@ -501,7 +581,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 ## 9. `POST /v1/control/stop`
 
 ```json
-{"contract_version":"9","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
+{"contract_version":"10","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
 ```
 
 - **不校验普通契约**：`contract_version` 字段存在但不参与准入，服务与 App 契约版本
@@ -511,7 +591,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 - 重复或过期 `seq` 不报错，只返回 `state=duplicate`。
 
 ```json
-{"contract_version":"9","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
+{"contract_version":"10","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
 ```
 
 `accepted` 恒为 `true`；`state` 为 `revoked`（绑定时撤销了活动会话）、`recorded`
@@ -524,7 +604,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 无认证，只表示进程可应答，不代表设备就绪或资源干净：
 
 ```json
-{"status":"ok","contract_version":"9","service_instance_id":"…","release_version":"…"}
+{"status":"ok","contract_version":"10","service_instance_id":"…","release_version":"…"}
 ```
 
 ## 11. 数据对象
@@ -540,6 +620,64 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 
 `present` 时 `package` 可省略（未知），`task_id` 可为 `null`；`unknown` 带受控 `reason`；
 `none` 表示已确认无前台应用。
+
+### Observation 与 Quality
+
+```json
+{"status":"complete","id":"O3","origin":"P1","revision":3,"captured_at":"…",
+ "actionable_until":"…",
+ "quality":{"state":"unstable","samples":5,"stop_reason":"max_samples"},
+ "screen":{"width":1080,"height":2400,"rotation":0},
+ "foreground":{"state":"present","package":"com.example","task_id":12},
+ "tree":{"format":"full","scope":"reported_visible_with_context",
+   "root":{"ref":"n1","role":"root","bounds":[0,0,1080,2400]}}}
+```
+
+Observation 的编码顺序固定为 `status`、`id`、`origin`、`revision`、`captured_at`、
+`actionable_until`、`quality`、`screen`、`foreground`、`tree`、`missing`、`image`、`error`。
+`quality` 是对象；出现时三个成员总是编码，成员顺序固定为 `state`、`samples`、`stop_reason`：
+
+| 成员 | 取值与规则 |
+| --- | --- |
+| `state` | `stable`/`unstable`/`unknown` |
+| `samples` | 本次 settle 的有效可比较帧数，非负整数；未做收敛采样的观察为 `0` |
+| `stop_reason` | `stable`/`max_samples`/`budget`/`unreadable`/`not_sampled` |
+
+- `samples` 受固定采样策略与刷新次数约束：`observe` 与重验失败交付的观察为 `0`；
+  `act` 无图最多 5 帧，`act(image=true)` 的图片绑定刷新可再加 1 帧（最多 6）；`start` 最多
+  4 帧；`app` 的五个变更 kind 后观察最多 5 帧。请求不能改变这些上限。
+- `unknown`：`samples<2`，或本次观察没有做收敛采样（`stop_reason=not_sampled`）。
+- `unstable`：`samples>=2`，且最终发布帧与紧邻前一帧的最新比较不一致。
+- `stable`：最终发布帧与紧邻前一帧形成相等对，样本数达到该阶段固定的最少样本门限，且
+  `stop_reason=stable`；历史上有过相等对但最终帧不同不算 `stable`。
+- `stop_reason` 说明采样为何结束：`stable` 收敛停止、`max_samples` 达到帧数上限、`budget`
+  达到总预算、`unreadable` 某次采样读取失败并提前结束（失败不增加 `samples`）、
+  `not_sampled` 未做收敛采样。
+- `quality` 是观察材料事实，不是输入授权：`unstable`/`unknown` 的 O 仍可发布、仍可被认领；
+  它不改变 `status`、`actionable_until`、基线确认或 O 状态机。`complete+unstable` 与
+  `partial+stable` 都是合法组合；没有树的失败观察不发布 `quality`，只保留错误与图片材料。
+
+### Result 与 Effect
+
+```json
+{"operation_id":"P7","operation_state":"finished","outcome":"executed",
+ "phase":"finished","effect":{"state":"observed"},"target_reference":"O3"}
+```
+
+`effect` 只有一个成员 `state`：`observed`/`not_observed`/`unknown`。对象在结果中的位置固定为
+`phase` 之后、`target_reference` 之前。只有首次受理的 `scroll` 结果与仍保留该原操作的 P 视图
+在 `outcome=executed`（含 `executed_revoked`）或 `uncertain` 时出现；`not_executed` 不出现。
+
+| 值 | 含义 |
+| --- | --- |
+| `observed` | 后观察中至少两个匹配内容单元沿请求轴出现同号位移，且同号单元比例达到固定门限；不要求全覆盖。只表示观察到内容位移，不证明动作因果、方向、距离或滚动成功 |
+| `not_observed` | 只在观察质量为 `stable`、至少 2 个匹配内容单元、前后内容单元计数相同且 100% 唯一匹配、沿请求轴的中心位移与尺寸变化都不超过固定容差时成立；不证明到达边界或手势失败 |
+| `unknown` | 无后观察树、后观察失败或撤销、容器不唯一或发生变化、匹配不足、尺寸变化，或一致位移不足；不表示“未移动” |
+
+固定判据由服务策略界定，不是请求字段：`observed` 需至少 2 个匹配内容单元沿请求轴的中心
+位移不小于 2px，且同号比例不低于 75%，不要求 100% 覆盖；`not_observed` 需至少 2 个匹配
+内容单元、前后内容单元 100% 唯一匹配、沿请求轴的中心位移不超过 1px、宽高变化不超过 1px。
+这些数值只界定状态含义，不承诺滚动距离、到达边界或业务成功。
 
 ### Node
 
@@ -562,7 +700,9 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 | `context` | 仅在 `true` 时出现，表示非可见的必要祖先（`role=group`、`bounds=null`、无动作/标签） |
 
 合成根固定为 `role=root`、目标屏矩形、`enabled=true`、其余布尔已知 `false`；虚拟屏没有
-任何子节点时，合法的公开树就是“只有根、没有 `children`”。
+任何子节点时，合法的公开树就是“只有根、没有 `children`”。`actions` 是节点的源能力词表，
+不随受控滚动增加枚举；`scroll` 由 `act.operation.type=scroll` 与 `container` 表达，
+`actions=swipe` 不构成 raw `swipe` 授权。
 
 ### Tree 与 Delta
 
@@ -865,7 +1005,7 @@ task；应用在本屏前台、前台未知、前台服务或播放状态未知�
 | 端点/能力 | 契约行为 |
 | --- | --- |
 | `start`、`status`、`observe`、`end` | 见 §3、§4、§5、§7 |
-| `act`：`tap`、`long_press`、`swipe`、`key`、`text` | 定义于 §6；其他动作类型不被接受 |
+| `act`：`tap`、`long_press`、`swipe`、`scroll`、`key`、`text` | 定义于 §6；其他动作类型不被接受 |
 | `observe`/`act` 的 `image=true` | 见 §5 图片；图片是本次观察的附加材料，不是单独工具 |
 | 截图、图片块 | HTTP/SDK 用同一 `observation.image` 元数据与 `base64` 载体；MCP `ImageContent` 承载图片字节 |
 | `app`、`keepalive`、`inspect`、`notify`、`diagnose` | 定义于 §12 |

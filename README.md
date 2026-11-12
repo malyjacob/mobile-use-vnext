@@ -7,8 +7,8 @@ HTTP 协议配对。
 
 - 模块：`github.com/malyjacob/mobile-use-vnext`
 - Go：1.27.1，启用 `GOEXPERIMENT=jsonv2`
-- 契约：`contract_version = "9"`，服务、HTTP 客户端、控制 App 精确相等才做普通工作
-- 发行：`0.9.0`；`release/versions.json` 是发行号、契约号与 Android versionCode（11）的唯一
+- 契约：`contract_version = "10"`，服务、HTTP 客户端、控制 App 精确相等才做普通工作
+- 发行：`0.10.0`；`release/versions.json` 是发行号、契约号与 Android versionCode（12）的唯一
   来源，构建生成 Go/Java 常量
 
 ## 能力边界
@@ -75,12 +75,15 @@ go build ./...
 ./scripts/build-release.ps1                      # 整组发布：Go 产物、APK、固定制品与 manifest.json
 ./scripts/build-release.ps1 -SkipAndroid         # 仅 Go 与固定制品；清单标记 complete=false，不可部署
 ./scripts/build-host-tools.ps1                   # Windows device-mcp.exe/mcp-probe.exe + host-tools-manifest.json
-./scripts/build-host-tools.ps1 -VerifyOnly       # 只核验已有主机清单与两个 exe
+./scripts/build-host-tools.ps1 -VerifyOnly       # 发布门禁：清单、干净树/HEAD 与完整手机配套清单
+./scripts/build-host-tools.ps1 -AllowDirtySource # 仅开发：脏树构建记 source_dirty=true，不能通过 -VerifyOnly
 ```
 
 `release/versions.json` 是唯一版本源；`scripts/generate-version.ps1` 生成 Go/Java/XML 常量，
 `-Check` 只校验。`build/release/manifest.json` 记录源码提交、Go/MCP 版本、各产物 SHA-256 与
-大小、Android 版本与工具目录指纹；`scripts/verify-manifest.ps1` 按清单复核。
+大小、Android 版本与工具目录指纹；`scripts/verify-manifest.ps1` 复核清单、产物哈希与工具目录
+指纹，并要求干净已提交树（清单 `source_commit` 是 `HEAD` 的前缀、`source_dirty=false`）与
+完整手机产物；开发树不能通过。
 
 MCP 适配进程若运行在 Windows 宿主上（stdio/HTTP 验证），用宿主工具入口统一构建与核验：
 
@@ -99,9 +102,10 @@ MCP 适配进程若运行在 Windows 宿主上（stdio/HTTP 验证），用宿�
 ## 部署
 
 `scripts/deploy.ps1` 面向当前单一机型/单一 chroot 的受控部署，要求已有一台在线 adb 设备；
-默认先构建整组发布并核验 manifest，然后：读取或生成令牌 → 写私有配置 → 停止旧控制
-（含旧 Python 服务，尽力而为）→ 推送并安装到 chroot → 覆盖安装并启动控制 App（保留 App
-私有数据）→ 安装并启动手机 MCP 适配器 → 建立 `adb forward` `18881→18880` 与
+默认先构建整组发布并通过 `verify-manifest.ps1` 核验，然后：读取或生成令牌 → 写私有配置 →
+停止本仓库的控制 App、设备服务与手机 MCP 适配器（不操作其他项目的服务、脚本与包）→
+推送并安装到 chroot → 覆盖安装并启动控制 App（保留 App 私有数据）→ 安装并启动手机 MCP
+适配器 → 建立 `adb forward` `18881→18880` 与
 `18883→18882` → 轮询 `/health` 与 `/api/status`，直到 `can_start=true`。
 
 ```powershell
@@ -150,14 +154,14 @@ $env:GOEXPERIMENT = 'jsonv2'; go test ./...
 ## 接口
 
 Agent 工具（`POST /api/<tool>`，`Authorization: Bearer <agent_token>`，
-`X-Mobile-Use-Contract: 9`）：
+`X-Mobile-Use-Contract: 10`）：
 
 | 工具 | 说明 |
 | --- | --- |
 | `start` | 请求体必须为 `{}`；创建/绑定目标屏幕并发布首个 full 观察；初始化、激活与首观察成功发布使用五分钟租期 |
 | `status` | 无参数、`{"reference":"O…"}` 或 `{"reference":"P…"}`；只读查询 |
 | `observe` | `reference`（O/P）；按服务端基线返回 full 或 delta；`observe(P)` 与 `full=true` 强制 full；`image=true` 附加本次图片 |
-| `act` | `observation_id` + `operation`：`tap`、`long_press`、`swipe`、`key`、`text`；`image=true` 为后观察附图 |
+| `act` | `observation_id` + `operation`：`tap`、`long_press`、`swipe`（可选 `duration_ms`）、`scroll`（`container`/`direction`/`amount`）、`key`、`text`；`image=true` 为后观察附图 |
 | `inspect` | `observation_id` 可选 `node` 或 `query`；只读历史树 |
 | `keepalive` | `reference`（O/P）+ 可选 `duration_minutes`（1～120，默认 2）；从应用时重设当前活动会话租期，可延长或缩短；普通活动仅按两分钟取最大值 |
 | `end` | `reference`（O/P）；撤权并启动独立收尾 |

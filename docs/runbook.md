@@ -57,7 +57,7 @@ SDK/JDK（构建 App 用）；chroot 已存在且可 `su` 进入。
 ./scripts/build-release.ps1                   # 整组产物 + build/release/manifest.json
 ./scripts/verify-manifest.ps1 -Manifest build/release/manifest.json
 ./scripts/build-host-tools.ps1                # Windows 主机工具 + build/host-tools-manifest.json
-./scripts/build-host-tools.ps1 -VerifyOnly    # 只核验已有主机清单/两个 exe，不构建
+./scripts/build-host-tools.ps1 -VerifyOnly    # 发布门禁：清单、干净树/HEAD 与完整手机配套清单
 ./scripts/deploy.ps1                          # 构建、核验并按清单部署
 ./scripts/deploy.ps1 -SkipBuild               # 复用已核验的 build/release
 ```
@@ -65,9 +65,18 @@ SDK/JDK（构建 App 用）；chroot 已存在且可 `su` 进入。
 `build-host-tools.ps1` 使用同一 `release/versions.json`，生成 `build/device-mcp.exe` 与
 `build/mcp-probe.exe`，并记录 `build/host-tools-manifest.json`（格式/版本、release/contract、
 source_commit/source_dirty、构建目标、两个 exe 的路径/大小/SHA-256 与工具目录 count/sha256）。
-`-VerifyOnly` 不构建、不访问设备，核验清单身份、两个 exe 大小与哈希，并在手机发布清单是
-同一配套版本时核验提交、契约与目录指纹；失败返回非零且不改写清单。单独运行
+构建路径默认拒绝脏工作树；对脏树显式传入 `-AllowDirtySource` 只用于开发构建，该清单记录
+`source_dirty=true`，永远不能通过 `-VerifyOnly`。`-VerifyOnly` 不构建、不访问设备，核验
+清单身份、两个 exe 大小与哈希，并要求当前树是产生清单的干净已提交树（`source_commit` 等于
+`HEAD`），以及 `build/release/manifest.json` 是同一配套版本的完整手机清单（release/contract
+与工具目录指纹一致，手机清单源码提交匹配当前 `HEAD`，六个手机产物齐全）；手机清单缺失、
+`complete=false`、不配套或跳过核验都失败。失败返回非零且不改写清单。单独运行
 `device-mcp.exe -version` 只打印发行标签，不能代替清单核验。
+
+整组构建与核验必须在已提交的干净树上运行：`verify-manifest.ps1` 要求清单 `source_commit`
+是实际 `HEAD` 的前缀（等值也通过）、`source_dirty=false`、六个手机产物齐全且 `complete`
+不为 `false`；开发树或 `-SkipAndroid` 的部分产物不能通过。`deploy.ps1` 每次部署前都会运行
+该核验。
 
 `build-release.ps1` 的实际动作：
 
@@ -80,10 +89,10 @@ source_commit/source_dirty、构建目标、两个 exe 的路径/大小/SHA-256 
 
 `deploy.ps1` 的实际动作：
 
-1. 未 `-SkipBuild` 时先构建整组发布，然后始终运行 `verify-manifest.ps1`；
+1. 未 `-SkipBuild` 时先构建整组发布，然后始终运行 `verify-manifest.ps1` 的发布门禁；
 2. 读取或生成 `.state/deploy.json`，写 `.state/config.json`、`.state/phone-mcp-config.json`
    与 `.state/connection.json`；
-3. 尽力停止旧 Python 服务与现有 Go 服务、旧手机 MCP 适配器，再停止控制 App；
+3. 停止本仓库的控制 App、设备服务与手机 MCP 适配器；不停止或卸载其他项目的服务、脚本与包；
 4. 推送 manifest 指向的产物到 `/data/local/tmp/mobile-use-vnext-deploy`，`su` 复制进 chroot；
 5. 用 `adb install -r` 覆盖安装 APK（**不卸载、不清库**），重写 `connection.json` 并授予
    通知权限与悬浮窗 appops；
@@ -158,7 +167,7 @@ adb -s 127.0.0.1:5555 forward tcp:18881 tcp:18880
 curl -s http://127.0.0.1:18881/health
 ```
 
-`/health` 无认证，返回 `status`、`contract_version`（当前 `"9"`）、`service_instance_id`、
+`/health` 无认证，返回 `status`、`contract_version`（当前 `"10"`）、`service_instance_id`、
 `release_version`。它只证明进程能应答，**不是** `can_start`。
 
 就绪以 `POST /api/status` 为准（令牌从 `.state/deploy.json` 读取，下面用占位符）：
@@ -166,7 +175,7 @@ curl -s http://127.0.0.1:18881/health
 ```bash
 curl -s -X POST http://127.0.0.1:18881/api/status \
   -H "Authorization: Bearer $AGENT_TOKEN" \
-  -H "X-Mobile-Use-Contract: 9" \
+  -H "X-Mobile-Use-Contract: 10" \
   -H "Content-Type: application/json" -d '{}'
 ```
 
@@ -219,7 +228,7 @@ adb -s 127.0.0.1:5555 shell su -c 'tail -n 100 /data/data/com.mobileuse.vnext/fi
 | `can_start=false`、`blocking_code=device_locked` / `device_not_interactive` | 锁屏或熄屏 | 解锁并点亮屏幕；服务不绕过锁屏 |
 | `can_start=false`、`blocking_code=control_revoked` | 收到 STOP 后未完成一次新同步 | 等 App 下一拍同步（不再携带 `stop_pending`）后再 `start` |
 | `can_start=false`、`blocking_code=mode_not_selected`/`stop_unavailable` | App 模式/通知/停止通道不可用 | 在 App 选择虚拟屏或确认主屏共享；授予通知权限并确认通知频道可用 |
-| `409 contract_mismatch` | `X-Mobile-Use-Contract` 缺失/不是 `9`，或 App 契约版本不符；错误体带 `recovery`（`entry=update`、`reference=none`） | 服务与客户端必须同为 `contract_version=9`；升级整组产物，不要只升一侧 |
+| `409 contract_mismatch` | `X-Mobile-Use-Contract` 缺失/不是 `10`，或 App 契约版本不符；错误体带 `recovery`（`entry=update`、`reference=none`） | 服务与客户端必须同为 `contract_version=10`；升级整组产物，不要只升一侧 |
 | `401 unauthorized` | Bearer 令牌错误，或用了另一身份的令牌 | 从私有配置核对 agent/control 令牌；两者不能互换 |
 | 主机 `18883/mcp` 不通或 401 | 手机适配器未运行、转发失效、填错 token | 看 `device-mcp.log` 与 `pgrep`；重建 `adb forward tcp:18883 tcp:18882`；手机路径填 `.state/deploy.json` 的 `mcp_token` |
 | MCP 客户端 403 | `Origin` 未在 `allowed_origins` | 部署时用 `-McpAllowedOrigins` 精确放行并重启适配器；不要填 `*` |
@@ -372,9 +381,10 @@ go run ./scripts/mcp-probe -config .state/mcp-config.json -binary build/device-m
   拒绝、`app.close`、`end` 收尾与 STOP 场景。
 - `verify-m5.ps1` 通过 `build-host-tools.ps1`（`-SkipBuild` 时调用 `-VerifyOnly`）准备主机
   `device-mcp.exe`/`mcp-probe.exe`，断言工具目录 count=11，并运行 stdio、主机 HTTP 与
-  p-recovery 探针；宿主 token 仅在缺失时创建。
+  p-recovery 探针；宿主 token 仅在缺失时创建。`-VerifyOnly` 是完整发布门禁（干净已提交树、
+  完整手机配套清单与 companion 比对），开发树或缺少配套手机清单时会失败。
 - `verify-m6.ps1` 核验发布清单、`/health`、安装后的 App versionName/versionCode 与工具目录
-  count=11；明确用上一发行 `contract 8` 验证同步与普通 API 都返回 `409 contract_mismatch`。
+  count=11；明确用上一发行契约版本验证同步与普通 API 都返回 `409 contract_mismatch`。
   手机 MCP 只做 `server/discover`（并说明不做 `tools/list`、进程身份与生命周期验收）。
 - `mcp-probe` 的 `-transport http-remote` 只连接已运行的手机适配器，不启动或停止远端进程；
   `-suite app-lifecycle` 只操作受控 test-target 包，要求原会话为 virtual，不自动切换显示模式。
@@ -416,8 +426,8 @@ adb -s 127.0.0.1:5555 shell su -c 'ls -l /data/data/com.mobileuse.vnext/files/me
 2. 用旧版本结束活动会话/STOP，并等待最多 5 秒的旧逻辑交接。记录执行链、
    task/recents/display 的 `pending`/`complete`/`unconfirmed`；不等待物理清理无限完成，
    也不强停 App 把缺少描述当已清理。
-3. 停止旧服务/App，安装整组产物（`adb install -r`，保留 App 私有数据）；过渡期保持不可
-   准入。安装失败时保留现场，不以卸载/清库重试。
+3. 停止本仓库的控制 App、设备服务与手机 MCP 适配器，安装整组产物（`adb install -r`，保留
+   App 私有数据）；过渡期保持不可准入。安装失败时保留现场，不以卸载/清库重试。
 4. 启动新服务、手机侧 MCP 适配器与 App；要求 release/contract 与清单一致、
    `can_start=true`、STOP 可用，当前 App/设备/账本能力就绪。旧 cleanup 可仍为
    `unconfirmed` 并与原 session 同帧展示。默认虚拟屏，主屏共享需要用户重新确认。

@@ -30,7 +30,8 @@
 - **背景**：新旧实现必须能在同一台手机上并存/替换，且服务需要精确识别自己的配对 App，
   不能按子串或旧包名猜测。
 - **选择**：控制 App 固定 `com.mobileuse.vnext`；服务默认 `control_package` 同名；部署脚本
-  会卸载旧包 `com.mobileuse.control`，但不会把旧包当作配对对象。控制令牌与 Agent 令牌分离。
+  只操作 `com.mobileuse.vnext`，不停止、不卸载旧项目包，也不把旧包当作配对对象。控制令牌与
+  Agent 令牌分离。
 - **影响**：App 私有目录、`connection.json` 路径、root 显示助手入口
   （`com.mobileuse.vnext.RootDisplayMain`）与控制包可见性检查都以该包名为准；改包名等于
   破坏性升级。

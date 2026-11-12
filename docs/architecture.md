@@ -153,6 +153,25 @@ engine 的状态锁只做有限内存检查与转换：锁内不等待 ADB、u2 
 - 五个变更成功提交后统一做一次原会话屏 full 无图后观察；后观察失败保留 executed 与
   `observation.status=failed`，不改写主 outcome；STOP 撤权后的迟到候选不发布。
 
+### 受控滚动与原始手势
+
+`act.operation.type=scroll` 是受控滚动尝试：调用方声明阅读方向与幅度，服务在几何合法且作用域
+可证明的容器内选择起止点。授权单位是观察到的滚动容器与实际注入的起终点作用域，不是起点
+叶节点：
+
+- 容器在观察的公开树中解析：`ref` 必须直接是 `role=scroll`、`actions` 含 `swipe` 的节点，
+  服务不做祖先晋升；坐标候选归约到最近的可滚动祖先，出现多个不同滚动作用域时要求调用方
+  显式给 `container.ref`；
+- 认领后只对容器做“完整内容身份 + 祖先链”唯一匹配，容器 bounds 变化按 `target_changed`
+  处理；
+- 从新鲜容器计算的实际起终点，其最内层可滚动作用域必须仍是该容器；外层包裹祖先允许，容器
+  内层后代或不可比作用域拒绝，实际终点必须仍在容器内；
+- 静态几何不可执行在认领前拒绝，新鲜几何不可执行走重验失败的交付路径。
+
+raw `swipe` 仍是原始手势：起点 `from` 继续走完整内容身份、祖先链与同点解析证明，只增加有界
+`duration_ms`，不承诺滚动语义。`scroll` 不证明真实滚动方向、触摸消费者、业务安全或到达边界；
+设备事实仍只有 `Scrollable bool`，公开 `axis` 没有生产者。
+
 ## 4. full/delta 与提交条件
 
 一次采集（`captureAndPublish`）的固定步骤：
@@ -167,7 +186,9 @@ engine 的状态锁只做有限内存检查与转换：锁内不等待 ADB、u2 
    `start` 300ms/1.5s、`app.open` 600ms/3s（其余 app 变更沿用 `act` 档）；它们是服务端固定
    策略，不是请求字段；
 4. 取得发布用层级与前台：有收敛采样时用收敛帧，否则 `Capture` 读取一次；两者在同一次读取
-   中取得；
+   中取得；该次收敛结果投影为 `observation.quality`：`samples` 是本次有效可比较帧数，
+   `state` 由最终发布帧参与的最新比较决定；`observe` 与重验失败交付不做收敛采样，填
+   `unknown`/`0`/`not_sampled`。质量是观察材料事实，不改变 O 状态、输入授权与提交门禁；
 5. 采集龄超过 `CaptureMaxAge=15s` → `stale_screen`；
 6. 虚拟屏上出现控制 App 的可见节点 → `control_ui_on_virtual_display`，采集失败；
 7. `observation.Builder` 构造公开树（合成根、必要祖先、保守保号）；
@@ -197,8 +218,8 @@ O，图片成功也不单独发布；核心树有效而图片失败只把本次�
 
 `act(image=true)` 的收敛采样在源图读取之前完成：采样插在图与树之间会把两者的跨度撑过固定
 预算。源图读取之后再读一次树作为发布用层级，使图片与树描述同一时刻附近的状态；这次读取
-与收敛帧不一致时，在剩余预算内继续收敛，预算耗尽则发布该帧，并在事件日志记 `stable=false`
-（不进入观察结果）。
+与收敛帧不一致时，在剩余预算内继续收敛，预算耗尽则发布该帧。刷新帧计入 `samples`，其最新
+比较决定 `observation.quality.state`；历史相等对不会把最终发布帧改判为 `stable`。
 
 - 图片来源必须绑定本次目标逻辑屏与运行时标识；不读取主屏代替，不跨屏跟随。
 - 源图尺寸必须与目标显示几何一致；只做一次等比缩小（不放大）与一次 JPEG 编码，输出
@@ -420,19 +441,29 @@ P 已无法定位时，`end(P)` 返回 `409 operation_unknown`、`phase=referenc
 
 ## 9. 事实分层与日志
 
-同一次请求可能同时表达四层事实，互不替代：
+同一次请求可能同时表达多层事实，互不替代：
 
 | 层 | 字段 | 含义 |
 | --- | --- | --- |
 | 动作执行 | `outcome` | `executed` / `not_executed` / `uncertain`；只描述本次输入是否已派发并有完成证据 |
+| 滚动效果 | `effect.state` | `observed` / `not_observed` / `unknown`；只在 `scroll` 结果与仍保留该原操作的 P 视图中出现，只表示是否观察到容器内内容位移，不表示动作因果、方向、距离或到达边界 |
 | 观察 | `observation.status` | `complete` / `partial` / `failed`；后观察失败不改写已确认的 `executed` |
+| 观察质量 | `observation.quality` | `state` / `samples` / `stop_reason`；只表示树是否收敛、经过多少有效采样，不限制输入授权 |
 | 图片 | `observation.image` | 本次附图的元数据或受控错误；图片失败不改写核心树与主动作 |
 | 会话 | `session.state` | `starting` / `active` / `ended` |
 | 物理收尾 | `cleanup.*` | 显示/任务/执行链是否确认释放 |
 
+`outcome`、`effect` 与 `observation.quality` 各自独立：`executed + effect=unknown` 是合法
+结果；`unstable`/`unknown` 的观察仍可发布、仍可被认领，是否执行由动作自己的判据决定；
+`effect` 与 `quality` 都不改写 `outcome`、`observation.status`、错误或恢复入口，也不改变 O
+的 `status`、`actionable_until` 与基线确认。
+
 事件日志只记白名单键（ID、枚举、布尔、计数、时长），值经过单行截断；不记录树、差异、输入
 正文、命令、原始响应或异常文本。每个 UI 窗口关闭只记一条 `ui.window_closed`，
-`state=terminated|not_dispatched|unknown`；该事件不进入任何工具响应。
+`state=terminated|not_dispatched|unknown`；该事件不进入任何工具响应。受控滚动的规划、重验与
+效果事件只带 `operation_id`（必要时 `observation_id`）与受控枚举/布尔/计数，不记 ref、坐标、
+标签或树；观察质量事件只记可取得的 `operation_id`、`observation_id`、阶段与受控枚举/数值。
+新增键必须先进入 `internal/eventlog` 的单一白名单，否则事件被静默丢弃。
 
 ## 10. 消息投递与发布边界
 
@@ -446,12 +477,25 @@ P 已无法定位时，`end(P)` 返回 `409 operation_unknown`、`phase=referenc
 
 ### 发布
 
-`release/versions.json` 是发行号、共同契约号与 Android versionCode 的唯一来源，构建生成
-Go/Java 常量；`scripts/build-release.ps1` 产出整组产物与 `build/release/manifest.json`
+`release/versions.json` 是发行号、共同契约号与 Android versionCode 的唯一来源；当前为
+`release_version=0.10.0`、`contract_version=10`、`android_version_code=12`，构建生成
+Go/Java 常量。`scripts/build-release.ps1` 产出整组产物与 `build/release/manifest.json`
 （源码提交、Go 版本、MCP SDK/协议、各产物 SHA-256/大小、Android 包名/版本、工具目录指纹）。
+清单必须来自干净的已提交工作树：`scripts/verify-manifest.ps1` 拒绝已有跟踪改动的工作树、
+`source_commit` 不是实际 `HEAD` 前缀、`source_dirty=true`、`complete=false`（部分构建）与
+缺失必需产物的清单，并重算产物哈希、Android 身份与工具目录指纹。
+
 主机侧工具由 `scripts/build-host-tools.ps1` 用同一版本源构建，并在
 `build/host-tools-manifest.json` 记录发行/契约、源码身份、工具目录 count/sha256 与两个
-exe 的大小/SHA-256；`-VerifyOnly` 只核验而不构建。
+exe 的大小/SHA-256。`-VerifyOnly` 只核验而不构建，并且是发布门禁：清单与当前工作树都必须
+在 `HEAD` 且 `source_dirty=false`，完整手机发布清单 `build/release/manifest.json` 必须存在
+并与本次主机发布互为 companion（发行、契约、工具目录一致，手机清单的 `source_commit` 必须
+是主机清单提交的前缀，且手机清单 `source_dirty=false`），companion 比对必须 PASS；清单缺失、
+部分构建、非 companion 或比对 SKIP 都失败。`-AllowDirtySource` 只用于开发构建：清单记录 `source_dirty=true`，永远不能通过
+`-VerifyOnly`。
+
 部署按清单核验后覆盖安装，服务与 App 的契约必须精确相等；App 私有数据保留，不使用卸载/
-清库解决签名或配对。MCP 宿主必须重启实际进程并重新发现工具，替换磁盘文件不等于发布完成。
+清库解决签名或配对。部署脚本只停启本仓库的 `com.mobileuse.vnext` 控制 App 与
+`device-service`（含手机侧 MCP 适配器进程），不包含对其他项目的兼容停启。MCP 宿主必须重启
+实际进程并重新发现工具，替换磁盘文件不等于发布完成。
 发布与回退的受控顺序见[发布与回退](release.md)。

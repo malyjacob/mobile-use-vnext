@@ -41,7 +41,7 @@ adb forward          主机 18881 → 服务；主机 18883 → 手机 MCP
    `adb forward`，也不需要 Agent token。
 
 只需要直连 HTTP 的 Agent 则使用 `http://127.0.0.1:18881/api/<tool>`、`agent_token` 与
-`X-Mobile-Use-Contract: 9`。
+`X-Mobile-Use-Contract: 10`。
 
 ## 1. 默认部署后的网络与进程
 
@@ -183,6 +183,10 @@ Header: Authorization: Bearer <mcp_token>
 3. 应看到固定 11 个工具：`start`、`status`、`observe`、`act`、`inspect`、`keepalive`、
    `end`、`app`、`notify`、`shell`、`diagnose`。
 
+MCP 的 `act` schema 含 `scroll` 分支（`container`/`direction`/`amount`）与 `swipe` 的可选
+`duration_ms`；观察质量与滚动效果的字段和投影见[接口契约](interface.md)与
+[MCP 入口](mcp.md)，本页不重复滚动判据。
+
 只替换手机上的二进制或重启 service 进程，不会让已连接的宿主自动刷新工具；必须重启宿主进程/
 连接。MCP 适配器本身不保存会话，重启后重新发现即可。
 
@@ -266,7 +270,7 @@ HTTP 宿主在原有 `Authorization` 头之外按需添加：
 
 ```text
 Authorization: Bearer <agent_token>
-X-Mobile-Use-Contract: 9
+X-Mobile-Use-Contract: 10
 Content-Type: application/json; charset=utf-8
 ```
 
@@ -274,7 +278,7 @@ Content-Type: application/json; charset=utf-8
 $deploy = Get-Content .state/deploy.json -Raw | ConvertFrom-Json
 $headers = @{
     Authorization           = "Bearer $($deploy.agent_token)"
-    'X-Mobile-Use-Contract' = '9'
+    'X-Mobile-Use-Contract' = '10'
 }
 Invoke-RestMethod http://127.0.0.1:18881/api/status -Method Post `
   -Headers $headers -ContentType 'application/json' -Body '{}'
@@ -324,7 +328,9 @@ P 的两种用法：`observe({"reference":"P9"})` 的 `reference` 引用本 Agen
 ```
 
 脚本在 Windows/amd64 下构建 `build/device-mcp.exe` 与 `build/mcp-probe.exe`，并写
-`build/host-tools-manifest.json`；发布前按清单核验，不把 linux/arm64 产物改后缀当 exe。
+`build/host-tools-manifest.json`；构建路径默认拒绝脏工作树，对脏树使用 `-AllowDirtySource`
+只用于开发构建且永远不能通过 `-VerifyOnly`；`-VerifyOnly` 要求干净树/HEAD 与完整的手机配套
+清单。发布前按清单核验，不把 linux/arm64 产物改后缀当 exe。
 
 ### 6.2 创建主机适配器配置
 
@@ -439,7 +445,7 @@ Header: Authorization: Bearer <mcp_token>
 两种选择：
 
 ```text
-直连 HTTP:  http://127.0.0.1:18880/api/<tool>   + agent_token + X-Mobile-Use-Contract: 9
+直连 HTTP:  http://127.0.0.1:18880/api/<tool>   + agent_token + X-Mobile-Use-Contract: 10
 MCP HTTP:   http://127.0.0.1:18882/mcp          + mcp_token
 ```
 
@@ -624,7 +630,7 @@ GET 判断工具是否可用。
 $deploy = Get-Content .state/deploy.json -Raw | ConvertFrom-Json
 $headers = @{
     Authorization           = "Bearer $($deploy.agent_token)"
-    'X-Mobile-Use-Contract' = '9'
+    'X-Mobile-Use-Contract' = '10'
 }
 $start = Invoke-RestMethod http://127.0.0.1:18881/api/start -Method Post `
   -Headers $headers -ContentType 'application/json' -Body '{}'

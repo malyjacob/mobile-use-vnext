@@ -32,7 +32,7 @@
 | `android_version_code` | Android versionCode，写入 `AndroidManifest.xml` 与清单 |
 | `source_commit` | 该版本号冻结时的基线提交（仅供校验）；清单记录构建时的 HEAD |
 
-当前版本源为 `release_version=0.9.0`、`contract_version=9`、`android_version_code=11`；三者
+当前版本源为 `release_version=0.10.0`、`contract_version=10`、`android_version_code=12`；三者
 只能在本文件手改，其他位置由生成脚本写入。
 
 `scripts/generate-version.ps1` 生成：
@@ -68,8 +68,8 @@ PowerShell、docs 或 Manifest 中另写一份版本号；`contract_version` 只
 {
   "format": "mobile-use-vnext-release",
   "version": 1,
-  "release_version": "0.9.0",
-  "contract_version": 9,
+  "release_version": "0.10.0",
+  "contract_version": 10,
   "source_commit": "<40 位提交>",
   "source_dirty": false,
   "built_at": "…",
@@ -77,7 +77,7 @@ PowerShell、docs 或 Manifest 中另写一份版本号；`contract_version` 只
   "go_experiment": "jsonv2",
   "build_target": {"goos": "linux", "goarch": "arm64", "cgo_enabled": false},
   "mcp": {"sdk": "github.com/modelcontextprotocol/go-sdk v1.8.0", "protocol": "2026-07-28"},
-  "android": {"package": "com.mobileuse.vnext", "version_name": "0.9.0", "version_code": 11},
+  "android": {"package": "com.mobileuse.vnext", "version_name": "0.10.0", "version_code": 12},
   "tool_catalog": {"count": 11, "sha256": "…"},
   "artifacts": [{"name": "device-service", "path": "device-service", "sha256": "…", "bytes": 0}]
 }
@@ -85,6 +85,11 @@ PowerShell、docs 或 Manifest 中另写一份版本号；`contract_version` 只
 
 `-SkipAndroid` 只用于开发验证，产出的清单带 `complete=false` 且缺少 `control.apk`；
 `verify-manifest.ps1` 与 `deploy.ps1` 都拒绝这种清单。
+
+`verify-manifest.ps1` 是不可跳过的发布门禁，`deploy.ps1` 每次部署前都会运行它。除了清单
+格式、版本源与 Android 身份、每个产物的 SHA-256/大小、六个必需产物与工具目录指纹，它还
+要求当前工作树没有已跟踪改动、清单 `source_commit` 是实际 `HEAD` 的前缀（等值也通过）、
+清单 `source_dirty=false`、`complete` 不为 `false`；开发树或只构建了部分产物的清单不能通过。
 
 清单不包含 `.state/`、令牌、账本、消息、截图、节点树或日志。工具目录指纹用于运维比对本次
 构建的 `tools/list`，不证明任何宿主已读取它。
@@ -96,9 +101,11 @@ PowerShell、docs 或 Manifest 中另写一份版本号；`contract_version` 只
 ./scripts/build-host-tools.ps1 -VerifyOnly
 ```
 
-脚本校验 `release/versions.json` 与生成常量一致，在 Windows/amd64、`CGO_ENABLED=0`、
-`GOEXPERIMENT=jsonv2` 下用 `go build -trimpath -buildvcs=false` 构建 `build/device-mcp.exe`
-与 `build/mcp-probe.exe`，并写 `build/host-tools-manifest.json`：
+脚本校验 `release/versions.json` 与生成常量一致，默认拒绝脏工作树；对脏树显式传入
+`-AllowDirtySource` 只用于开发构建，该清单记录 `source_dirty=true`，永远不能通过
+`-VerifyOnly`。脚本在 Windows/amd64、`CGO_ENABLED=0`、`GOEXPERIMENT=jsonv2` 下用
+`go build -trimpath -buildvcs=false` 构建 `build/device-mcp.exe` 与 `build/mcp-probe.exe`，
+并写 `build/host-tools-manifest.json`：
 
 | 字段 | 内容 |
 | --- | --- |
@@ -111,8 +118,12 @@ PowerShell、docs 或 Manifest 中另写一份版本号；`contract_version` 只
 | `artifacts` | 两个 exe 的 `name`/`path`/`sha256`/`bytes` |
 
 `-VerifyOnly` 不构建、不访问设备：校验主机清单的格式、目标、共同版本、源码与目录身份、
-两个 exe 的大小和 SHA-256，并在手机发布清单是同一配套版本时核验提交、契约与目录指纹一致；
-失败返回非零且不改写清单。单独的 `device-mcp.exe -version` 只是发行标签，不能代替清单核验。
+两个 exe 的大小和 SHA-256，并要求当前工作树是产生该清单的干净已提交树（`source_commit`
+等于 `HEAD`、`source_dirty=false`）。它还要求完整的手机发布清单
+`build/release/manifest.json` 作为同一次发布的配套：release/contract 与工具目录指纹必须
+一致，手机清单的源码提交必须是当前 `HEAD` 的前缀，手机清单 `source_dirty=false`，六个手机
+产物必须齐全；手机清单缺失、`complete=false`、不配套或跳过核验都判失败。失败返回非零且不
+改写清单。单独的 `device-mcp.exe -version` 只是发行标签，不能代替清单核验。
 
 ## 4. 部署顺序
 
@@ -120,7 +131,9 @@ PowerShell、docs 或 Manifest 中另写一份版本号；`contract_version` 只
 2. 暂停新的普通工作；用旧版本结束活动会话或 STOP，等待最多 5 秒的旧逻辑交接，并记录
    执行链、task/recents 与 display 的 `pending`/`complete`/`unconfirmed`。旧物理事实可以在
    安装窗口继续保留；不强停 App 把缺少描述当作已清理，也不以未确认单独阻断新版本启动。
-3. 尝试停止旧服务与 App（停止失败不阻断安装）；安装整组产物。chroot 内的文件产物
+3. 停止本仓库已安装的控制 App、设备服务与手机 MCP 适配器（停止失败不阻断安装）；部署脚本
+   只停止 `device-service`、`device-mcp` 与 `com.mobileuse.vnext`，不停止或卸载其他项目的
+   服务、脚本与包。安装整组产物。chroot 内的文件产物
    与 `connection.json` 先写临时文件再原子替换，APK 用 `adb install -r` 覆盖安装；部署脚本
    复核已部署文件：chroot 内清单产物对清单 SHA-256，生成的配置与 `connection.json` 对宿主
    生成值；APK 以安装后的 versionName/versionCode 核验。不一致就停止。部署脚本不单独断言

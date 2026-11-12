@@ -19,8 +19,8 @@ instance, err := c.Discover(ctx)
 `POST /api/status {}` 取得当前准入事实（`can_start`、`blocking_code`、本 Agent 的
 `session`、`start_operation_id` 与 `cleanup`）。它不生成 P、不续租、不创建会话。
 
-契约版本不等时返回 `contract_mismatch`；客户端不刷新版本、不重发业务动作。端口可应答、
-`/health` 正常都不等于 `can_start=true`。
+当前共同契约为 `"10"`。契约版本不等时返回 `contract_mismatch`；客户端不刷新版本、不重发
+业务动作。端口可应答、`/health` 正常都不等于 `can_start=true`。
 
 ## 2. 操作编号 P
 
@@ -62,6 +62,12 @@ type Response struct {
 确有该事实时出现；`recovery` 缺失表示本次结果没有待恢复事实。客户端不改写主事实：
 `observation.status=failed` 的 503 仍是带 `Result` 的正常响应，不降成无归属异常。
 
+`effect` 与 `observation.quality` 也来自同一份 `Result`：客户端用 `internal/protocol` 的
+响应解码器直接读取，不另建投影层、不补默认值。`effect` 对象出现时 `state` 必填且枚举受限；
+`observation.quality` 对象出现时 `state`/`samples`/`stop_reason` 三个成员都必填，显式
+`null`、未知枚举或负 `samples` 使整次响应按 `invalid_response` 拒绝。`samples=0` 是合法
+值；对象缺失只表示本次结果没有该事实，不能当作 `not_observed` 或 `unknown` 的替代来源。
+
 失败结果可以携带 `observation`：`act` 的重验在派发前失败且已发布新帧时，`not_executed` 结果带
 一个新 O 与 `recovery`（`entry=retry`、`reference=O`、`input_state=effective`）。客户端必须在
 错误响应上同样解码 `observation`（本仓库客户端已如此），不得丢弃；`retry` 指向的 O 以结果里的
@@ -86,6 +92,12 @@ type Response struct {
 请求体由 `internal/protocol` 的 `Encode` 生成，只包含该工具声明的成员；未知字段、类型
 混用与显式 `null` 不会被客户端补成默认值。客户端每条逻辑调用最多发出一次 HTTP 请求
 （`Discover` 固定两次只读请求），不排队、不重试、不跟随重定向。
+
+`Act` 仍接收 `*protocol.ActRequest`，编码器只写所选分支的成员：`scroll` 的
+`container`/`direction`/`amount` 与 `swipe` 的 `from`/`to`/`duration_ms` 互斥，缺成员、
+混用或 `duration_ms` 为负数、1–49/2001 以上都会在发送前被拒绝；`duration_ms=0` 表示省略并
+使用服务端默认 300，不表示一个显式的零时长。客户端不新增滚动、质量或效果参数，也不在本地
+选择容器或起止点；`status(P)` 与重复 P 视图中的 `effect` 只按服务返回值读取，不重算。
 
 `Client.App(ctx, *protocol.AppRequest, ...Option)` 按 `Kind` 编码七个互斥分支：分支不完整、
 包含其他 kind 的成员或 `target` 不是恰好一个选择器时，`Encode` 在发送前拒绝。`App` 的每次
