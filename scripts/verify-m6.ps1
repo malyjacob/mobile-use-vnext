@@ -12,7 +12,7 @@
 
     Checks:
       1. release manifest, health identity, installed App identity, tool catalog;
-      2. ordinary contract pairing: the previous release contract 8 is refused
+      2. ordinary contract pairing: the previous release contract 9 is refused
          on both the control sync and an ordinary API header, minimal STOP still
          binds, and admission recovers;
       3. notify -> App private store -> acknowledgement -> notification -> UI list
@@ -576,10 +576,10 @@ try {
     Write-Output 'CHECK phone MCP lifecycle: NOT VERIFIED by verify-m6 (discovery and process checks are not a lifecycle pass)'
 
     # ---------------------------------------------------------------- contract pairing
-    # The previous published ordinary contract for this release line is 8. A
+    # The previous published ordinary contract for this release line is 9. A
     # generic old number would not prove the documented upgrade boundary.
     $previousContract = [int]$script:contractVersion - 1
-    Assert-True ($previousContract -eq 8) ("expected previous release contract 8, computed " + $previousContract)
+    Assert-True ($previousContract -eq 9) ("expected previous release contract 9, computed " + $previousContract)
     $oldApp = New-Uuid
     $oldMode = New-Uuid
     $oldSync = Invoke-Http -Url ($baseUrl + '/v1/control/sync') -Body (SyncBody -Contract ([string]$previousContract) `
