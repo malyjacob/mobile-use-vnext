@@ -188,6 +188,9 @@ func (p *probe) catalogCheck(ctx context.Context) bool {
 	if !p.catalogIdentityCheck() {
 		return false
 	}
+	p.reporter.pass("act_scroll_schema",
+		"type=scroll", "container=declared", "direction=up/down/left/right",
+		"duration=50-2000")
 
 	if failure := checkSchemas(list.Tools); failure != nil {
 		p.reporter.fail("schema", failure.reason, failure.fields...)
@@ -661,6 +664,36 @@ func requireTextBlock(projected *callResult, prefix, end, reason string) *checkE
 	return nil
 }
 
+// requireTextLine asserts one complete readable line is present. It proves the
+// text projection carries a fact without trusting the decoder that already
+// parsed it.
+func requireTextLine(projected *callResult, wanted string) *checkError {
+	for _, text := range projected.texts {
+		for _, line := range strings.Split(strings.TrimSuffix(text, "\n"), "\n") {
+			if line == wanted {
+				return nil
+			}
+		}
+	}
+	return failf("text_line_missing", field("line", wanted))
+}
+
+// requireQualityTextLines asserts the readable projection spells out all three
+// quality members with the same values as the typed projection. samples=0 must
+// be rendered explicitly.
+func requireQualityTextLines(projected *callResult, quality *qualityView) *checkError {
+	for _, wanted := range []string{
+		"observation.quality.state=" + quality.State,
+		"observation.quality.samples=" + strconv.Itoa(quality.Samples),
+		"observation.quality.stop_reason=" + quality.StopReason,
+	} {
+		if failure := requireTextLine(projected, wanted); failure != nil {
+			return failure
+		}
+	}
+	return nil
+}
+
 func integerString(value *int) string {
 	if value == nil {
 		return "none"
@@ -762,12 +795,33 @@ func (p *probe) actCheck(ctx context.Context, observationID string) bool {
 			return false
 		}
 	}
+	// The live service always emits quality for an act post observation. A
+	// missing or invalid object is a contract failure, and the safe key action
+	// must never carry a scroll effect.
+	if failure := checkObservationQuality(projected, observation); failure != nil {
+		p.reporter.fail("act", failure.reason, failure.fields...)
+		return false
+	}
+	if failure := checkScrollEffect(view, projected.object, false); failure != nil {
+		p.reporter.fail("act", failure.reason, failure.fields...)
+		return false
+	}
+	if p.mode() != resultModeStructured {
+		if failure := requireQualityTextLines(projected, observation.Quality); failure != nil {
+			p.reporter.fail("act", failure.reason, failure.fields...)
+			return false
+		}
+	}
 	p.reporter.pass("act",
 		"outcome=executed", "key=BACK", field("id", observation.ID),
 		field("status", observation.Status), "image_mime="+imageJPEG,
 		field("image_bytes", strconv.Itoa(len(raw))),
 		field("width", strconv.Itoa(observation.Image.Width)),
-		field("height", strconv.Itoa(observation.Image.Height)))
+		field("height", strconv.Itoa(observation.Image.Height)),
+		field("quality", observation.Quality.State),
+		field("samples", strconv.Itoa(observation.Quality.Samples)),
+		field("stop_reason", observation.Quality.StopReason),
+		"effect=absent")
 	return true
 }
 

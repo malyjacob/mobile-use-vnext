@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json/v2"
 	"io"
 	"net/http"
 	"strings"
@@ -161,6 +162,288 @@ func TestProjectResultModes(t *testing.T) {
 		}
 		if projected.view.Error == nil || projected.view.Error.Code != "invalid_request" {
 			t.Fatalf("unexpected projection: %+v", projected.view)
+		}
+	})
+}
+
+// qualityProjected builds one probe projection from a hand-written observation
+// object. The expected values stay literals in each case table.
+func qualityProjected(t *testing.T, observation string) *callResult {
+	t.Helper()
+	body := `{"observation":` + observation + `}`
+	object, err := exactObject([]byte(body))
+	if err != nil {
+		t.Fatalf("observation fixture: %v", err)
+	}
+	var view resultView
+	if err := json.Unmarshal([]byte(body), &view); err != nil {
+		t.Fatalf("observation fixture: %v", err)
+	}
+	return &callResult{object: object, structured: []byte(body), view: view}
+}
+
+func TestCheckObservationQuality(t *testing.T) {
+	cases := []struct {
+		name        string
+		observation string
+		reason      string
+	}{
+		{
+			name:        "stable sampled",
+			observation: `{"status":"complete","quality":{"state":"stable","samples":2,"stop_reason":"stable"}}`,
+		},
+		{
+			name:        "unknown not sampled zero",
+			observation: `{"status":"complete","quality":{"state":"unknown","samples":0,"stop_reason":"not_sampled"}}`,
+		},
+		{
+			name:        "unknown budget one sample",
+			observation: `{"quality":{"state":"unknown","samples":1,"stop_reason":"budget"}}`,
+		},
+		{
+			name:        "missing quality",
+			observation: `{"status":"complete"}`,
+			reason:      "observation_quality_missing",
+		},
+		{
+			name:        "explicit null quality",
+			observation: `{"quality":null}`,
+			reason:      "observation_quality_missing",
+		},
+		{
+			name:        "missing samples member",
+			observation: `{"quality":{"state":"stable","stop_reason":"stable"}}`,
+			reason:      "observation_quality_member_missing",
+		},
+		{
+			name:        "invalid state",
+			observation: `{"quality":{"state":"moving","samples":2,"stop_reason":"stable"}}`,
+			reason:      "observation_quality_state_invalid",
+		},
+		{
+			name:        "negative samples",
+			observation: `{"quality":{"state":"stable","samples":-1,"stop_reason":"stable"}}`,
+			reason:      "observation_quality_samples_invalid",
+		},
+		{
+			name:        "invalid stop reason",
+			observation: `{"quality":{"state":"stable","samples":2,"stop_reason":"timeout"}}`,
+			reason:      "observation_quality_stop_reason_invalid",
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			projected := qualityProjected(t, testCase.observation)
+			failure := checkObservationQuality(projected, projected.view.Observation)
+			if testCase.reason == "" {
+				if failure != nil {
+					t.Fatalf("valid quality rejected: %s", failure.reason)
+				}
+				return
+			}
+			if failure == nil || failure.reason != testCase.reason {
+				t.Fatalf("failure = %v, want %s", failure, testCase.reason)
+			}
+		})
+	}
+	t.Run("missing observation", func(t *testing.T) {
+		projected := qualityProjected(t, `{"status":"complete"}`)
+		if failure := checkObservationQuality(projected, nil); failure == nil ||
+			failure.reason != "post_observation_missing" {
+			t.Fatalf("failure = %v", failure)
+		}
+	})
+}
+
+// TestRequireQualityTextLines proves the readable-line assertion accepts the
+// explicit samples=0 fact and still rejects a missing member.
+func TestRequireQualityTextLines(t *testing.T) {
+	quality := &qualityView{State: "unknown", Samples: 0, StopReason: "not_sampled"}
+	projected := &callResult{texts: []string{
+		"result v1 is_error=false\n" +
+			"observation.quality.state=unknown\n" +
+			"observation.quality.samples=0\n" +
+			"observation.quality.stop_reason=not_sampled\n" +
+			"end result\n",
+	}}
+	if failure := requireQualityTextLines(projected, quality); failure != nil {
+		t.Fatalf("samples=0 lines rejected: %s", failure.reason)
+	}
+	projected.texts = []string{"observation.quality.state=unknown\nobservation.quality.samples=0\n"}
+	if failure := requireQualityTextLines(projected, quality); failure == nil {
+		t.Fatal("missing stop_reason line accepted")
+	}
+}
+
+func TestCheckScrollEffect(t *testing.T) {
+	cases := []struct {
+		name   string
+		effect *effectView
+		object map[string]any
+		scroll bool
+		reason string
+	}{
+		{name: "scroll observed", effect: &effectView{State: "observed"}, scroll: true},
+		{name: "scroll not observed", effect: &effectView{State: "not_observed"}, scroll: true},
+		{name: "scroll unknown", effect: &effectView{State: "unknown"}, scroll: true},
+		{name: "scroll missing", scroll: true, reason: "scroll_effect_missing"},
+		{
+			name: "scroll invalid state", effect: &effectView{State: "moved"},
+			scroll: true, reason: "scroll_effect_state_invalid",
+		},
+		{name: "key has no effect"},
+		{
+			name: "key carries effect", effect: &effectView{State: "observed"},
+			reason: "effect_on_non_scroll",
+		},
+		{
+			name:   "key carries explicit null effect",
+			object: map[string]any{"effect": nil},
+			reason: "effect_on_non_scroll",
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			failure := checkScrollEffect(
+				resultView{Effect: testCase.effect}, testCase.object, testCase.scroll)
+			if testCase.reason == "" {
+				if failure != nil {
+					t.Fatalf("valid effect rejected: %s", failure.reason)
+				}
+				return
+			}
+			if failure == nil || failure.reason != testCase.reason {
+				t.Fatalf("failure = %v, want %s", failure, testCase.reason)
+			}
+		})
+	}
+}
+
+// TestDecodeResultTextQualityAndEffect pins the generic oracle: effect and
+// observation quality are ordinary dotted paths, not a special block.
+func TestDecodeResultTextQualityAndEffect(t *testing.T) {
+	text := "result v1 is_error=false\n" +
+		"operation_id=Pscroll000000000000000001\n" +
+		"outcome=executed\n" +
+		"effect.state=observed\n" +
+		"observation.status=complete\n" +
+		"observation.id=Oscroll00000000000000001\n" +
+		"observation.quality.state=unstable\n" +
+		"observation.quality.samples=5\n" +
+		"observation.quality.stop_reason=max_samples\n" +
+		"end result\n"
+	decoded, failure := decodeResultText(text)
+	if failure != nil {
+		t.Fatalf("decodeResultText: %s", failure.reason)
+	}
+	view := decoded.view
+	if view.Effect == nil || view.Effect.State != "observed" {
+		t.Fatalf("effect = %+v", view.Effect)
+	}
+	if view.Observation == nil || view.Observation.Quality == nil {
+		t.Fatal("observation quality missing")
+	}
+	quality := view.Observation.Quality
+	if quality.State != "unstable" || quality.Samples != 5 || quality.StopReason != "max_samples" {
+		t.Fatalf("quality = %+v", quality)
+	}
+	state, found := lookupPath(decoded.object, []string{"effect", "state"})
+	if !found || state != "observed" {
+		t.Fatalf("effect object = %#v, %v", state, found)
+	}
+	samples, found := lookupPath(decoded.object,
+		[]string{"observation", "quality", "samples"})
+	number, integer := exactInteger(samples)
+	if !found || !integer || number != 5 {
+		t.Fatalf("samples object = %#v, %v", samples, found)
+	}
+}
+
+// TestProjectQualityAndEffectChannels proves text and structuredContent carry
+// the same effect/quality facts in every result mode, and that a channel that
+// drops one of them is rejected.
+func TestProjectQualityAndEffectChannels(t *testing.T) {
+	observation := map[string]any{
+		"status": observationComplete,
+		"id":     "Oscroll00000000000000001",
+		"quality": map[string]any{
+			"state": "stable", "samples": 2, "stop_reason": "stable",
+		},
+		"tree": map[string]any{"format": treeFull, "scope": "reported_visible_with_context"},
+	}
+	payload := map[string]any{
+		"operation_id": "Pscroll000000000000000001",
+		"outcome":      outcomeExecuted,
+		"effect":       map[string]any{"state": "observed"},
+		"observation":  observation,
+	}
+	text := fakeResultText(payload, false)
+
+	for _, mode := range []string{resultModeBoth, resultModeText, resultModeStructured} {
+		t.Run(mode, func(t *testing.T) {
+			result := &sdk.CallToolResult{}
+			switch mode {
+			case resultModeText:
+				result.Content = []sdk.Content{&sdk.TextContent{Text: text}}
+			case resultModeStructured:
+				result.Content = []sdk.Content{}
+				result.StructuredContent = payload
+			default:
+				result.Content = []sdk.Content{&sdk.TextContent{Text: text}}
+				result.StructuredContent = payload
+			}
+			projected, failure := project(result, mode)
+			if failure != nil {
+				t.Fatalf("project: %s", failure.reason)
+			}
+			if projected.view.Effect == nil || projected.view.Effect.State != "observed" {
+				t.Fatalf("effect = %+v", projected.view.Effect)
+			}
+			if projected.view.Observation == nil || projected.view.Observation.Quality == nil {
+				t.Fatal("observation quality missing")
+			}
+			quality := projected.view.Observation.Quality
+			if quality.State != "stable" || quality.Samples != 2 ||
+				quality.StopReason != "stable" {
+				t.Fatalf("quality = %+v", quality)
+			}
+		})
+	}
+
+	t.Run("both mode rejects text without effect", func(t *testing.T) {
+		withoutEffect := map[string]any{
+			"operation_id": payload["operation_id"],
+			"outcome":      outcomeExecuted,
+			"observation":  observation,
+		}
+		result := &sdk.CallToolResult{
+			Content:           []sdk.Content{&sdk.TextContent{Text: fakeResultText(withoutEffect, false)}},
+			StructuredContent: payload,
+		}
+		if _, failure := project(result, resultModeBoth); failure == nil ||
+			failure.reason != "both_mode_object_mismatch" {
+			t.Fatalf("failure = %v, want both_mode_object_mismatch", failure)
+		}
+	})
+
+	t.Run("both mode rejects text without quality", func(t *testing.T) {
+		withoutQuality := map[string]any{
+			"operation_id": payload["operation_id"],
+			"outcome":      outcomeExecuted,
+			"effect":       payload["effect"],
+			"observation": map[string]any{
+				"status": observationComplete,
+				"id":     observation["id"],
+				"tree":   observation["tree"],
+			},
+		}
+		result := &sdk.CallToolResult{
+			Content:           []sdk.Content{&sdk.TextContent{Text: fakeResultText(withoutQuality, false)}},
+			StructuredContent: payload,
+		}
+		if _, failure := project(result, resultModeBoth); failure == nil ||
+			failure.reason != "both_mode_object_mismatch" {
+			t.Fatalf("failure = %v, want both_mode_object_mismatch", failure)
 		}
 	})
 }

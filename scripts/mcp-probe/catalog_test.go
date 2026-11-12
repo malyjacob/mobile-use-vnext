@@ -150,6 +150,123 @@ func TestCheckLiveCatalog(t *testing.T) {
 	})
 }
 
+func actToolFrom(t *testing.T, tools []*sdk.Tool) *sdk.Tool {
+	t.Helper()
+	for _, tool := range tools {
+		if tool.Name == "act" {
+			return tool
+		}
+	}
+	t.Fatal("act tool missing")
+	return nil
+}
+
+// actOperationSchema decodes the act schema into mutable JSON so a reverse
+// control can remove or change one member without touching the source catalog.
+func actOperationSchema(t *testing.T, tool *sdk.Tool) (map[string]any, map[string]any) {
+	t.Helper()
+	encoded, err := json.Marshal(tool.InputSchema)
+	if err != nil {
+		t.Fatalf("act schema: %v", err)
+	}
+	var schema map[string]any
+	if err := json.Unmarshal(encoded, &schema); err != nil {
+		t.Fatalf("act schema: %v", err)
+	}
+	properties, ok := schema["properties"].(map[string]any)
+	if !ok {
+		t.Fatal("act schema properties missing")
+	}
+	operation, ok := properties["operation"].(map[string]any)
+	if !ok {
+		t.Fatal("act operation missing")
+	}
+	operationProperties, ok := operation["properties"].(map[string]any)
+	if !ok {
+		t.Fatal("act operation properties missing")
+	}
+	return schema, operationProperties
+}
+
+// TestCheckActScrollSchema pins the contract-10 act surface the probe requires
+// from the live tool: scroll declared, all scroll members present, exact
+// direction enum and duration bounds. Each subtest is a reverse control that
+// removes or changes one member and expects the matching distinct reason.
+func TestCheckActScrollSchema(t *testing.T) {
+	t.Run("source act schema passes", func(t *testing.T) {
+		if failure := checkActScrollSchema(actToolFrom(t, sourceCatalogTools(t))); failure != nil {
+			t.Fatalf("source act schema rejected: %s %v", failure.reason, failure.fields)
+		}
+	})
+	t.Run("tool count is frozen eleven", func(t *testing.T) {
+		if count := mcpsource.ToolCount(); count != 11 || count != len(toolNames) {
+			t.Fatalf("tool count = %d, probe = %d, want 11", count, len(toolNames))
+		}
+	})
+	t.Run("scroll enum missing", func(t *testing.T) {
+		act := actToolFrom(t, sourceCatalogTools(t))
+		schema, operation := actOperationSchema(t, act)
+		actionType, ok := operation["type"].(map[string]any)
+		if !ok {
+			t.Fatal("operation.type missing")
+		}
+		enum, ok := actionType["enum"].([]any)
+		if !ok {
+			t.Fatal("operation.type enum missing")
+		}
+		kept := make([]any, 0, len(enum))
+		for _, member := range enum {
+			if member != "scroll" {
+				kept = append(kept, member)
+			}
+		}
+		actionType["enum"] = kept
+		act.InputSchema = schema
+		if failure := checkActScrollSchema(act); failure == nil ||
+			failure.reason != "act_type_scroll_missing" {
+			t.Fatalf("failure = %v", failure)
+		}
+	})
+	t.Run("scroll member missing", func(t *testing.T) {
+		act := actToolFrom(t, sourceCatalogTools(t))
+		schema, operation := actOperationSchema(t, act)
+		delete(operation, "duration_ms")
+		act.InputSchema = schema
+		if failure := checkActScrollSchema(act); failure == nil ||
+			failure.reason != "act_scroll_member_missing" {
+			t.Fatalf("failure = %v", failure)
+		}
+	})
+	t.Run("direction enum mismatch", func(t *testing.T) {
+		act := actToolFrom(t, sourceCatalogTools(t))
+		schema, operation := actOperationSchema(t, act)
+		direction, ok := operation["direction"].(map[string]any)
+		if !ok {
+			t.Fatal("operation.direction missing")
+		}
+		direction["enum"] = []any{"up", "down"}
+		act.InputSchema = schema
+		if failure := checkActScrollSchema(act); failure == nil ||
+			failure.reason != "act_direction_enum_mismatch" {
+			t.Fatalf("failure = %v", failure)
+		}
+	})
+	t.Run("duration bounds mismatch", func(t *testing.T) {
+		act := actToolFrom(t, sourceCatalogTools(t))
+		schema, operation := actOperationSchema(t, act)
+		duration, ok := operation["duration_ms"].(map[string]any)
+		if !ok {
+			t.Fatal("operation.duration_ms missing")
+		}
+		duration["maximum"] = 2001
+		act.InputSchema = schema
+		if failure := checkActScrollSchema(act); failure == nil ||
+			failure.reason != "act_duration_bounds_mismatch" {
+			t.Fatalf("failure = %v", failure)
+		}
+	})
+}
+
 func TestCatalogFingerprint(t *testing.T) {
 	fingerprint := mcpsource.CatalogFingerprint()
 	if !isLowerHex64(fingerprint) {

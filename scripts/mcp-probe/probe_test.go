@@ -360,7 +360,10 @@ func (f *fakeAdapter) observation(id, origin string, revision int, withImage boo
 		"id":       id,
 		"origin":   origin,
 		"revision": revision,
-		"tree":     map[string]any{"format": treeFull, "scope": "reported_visible_with_context"},
+		"quality": map[string]any{
+			"state": "stable", "samples": 2, "stop_reason": "stable",
+		},
+		"tree": map[string]any{"format": treeFull, "scope": "reported_visible_with_context"},
 	}
 	if withImage {
 		observation["image"] = map[string]any{
@@ -473,11 +476,17 @@ func (f *fakeAdapter) handle(ctx context.Context, name string, request *sdk.Call
 		}), nil
 	case "act":
 		o := f.nextID("O")
-		return f.imageResult(map[string]any{
+		payload := map[string]any{
 			"operation_id": f.nextID("P"),
 			"outcome":      outcomeExecuted,
 			"observation":  f.observation(o, "P1", 3, true),
-		}), nil
+		}
+		if operation, ok := arguments["operation"].(map[string]any); ok {
+			if actionType, _ := operation["type"].(string); actionType == "scroll" {
+				payload["effect"] = map[string]any{"state": "observed"}
+			}
+		}
+		return f.imageResult(payload), nil
 	case "inspect":
 		observationID, _ := arguments["observation_id"].(string)
 		if observationID == probeUnknownObservation {
@@ -684,7 +693,7 @@ func fakeResultText(payload map[string]any, isError bool) string {
 	builder.WriteByte('\n')
 	for key, value := range payload {
 		switch key {
-		case "session", "cleanup", "error", "recovery":
+		case "session", "cleanup", "error", "recovery", "effect":
 			if object, ok := value.(map[string]any); ok {
 				for childKey, childValue := range object {
 					writeFakeField(&builder, key+"."+childKey, childValue)
@@ -739,6 +748,25 @@ func writeFakeObservation(builder *strings.Builder, value any) {
 	} {
 		if child, ok := observation[key]; ok {
 			writeFakeField(builder, "observation."+key, child)
+		}
+	}
+	if quality, present := observation["quality"]; present {
+		qualityObject, ok := quality.(map[string]any)
+		if !ok {
+			writeFakeField(builder, "observation.quality", quality)
+		} else {
+			// The contract renders state/stop_reason as unquoted tokens and
+			// samples as a bare number; the fake must replay that shape so the
+			// probe's readable-line assertions are exercised.
+			if state, ok := qualityObject["state"].(string); ok && fakeAppToken(state) {
+				builder.WriteString("observation.quality.state=" + state + "\n")
+			}
+			if samples, ok := qualityObject["samples"].(int); ok && samples >= 0 {
+				builder.WriteString("observation.quality.samples=" + strconv.Itoa(samples) + "\n")
+			}
+			if stopReason, ok := qualityObject["stop_reason"].(string); ok && fakeAppToken(stopReason) {
+				builder.WriteString("observation.quality.stop_reason=" + stopReason + "\n")
+			}
 		}
 	}
 	tree, _ := observation["tree"].(map[string]any)
@@ -1029,6 +1057,7 @@ func TestAdapterChecksAgainstFakeAdapter(t *testing.T) {
 				"PASS tools count=11",
 				"PASS catalog tools=11",
 				"PASS catalog_fingerprint",
+				"PASS act_scroll_schema",
 				"PASS schema objects=11",
 				"PASS result_error",
 				"PASS status can_start=true",
@@ -1132,6 +1161,10 @@ type fakeRecoveryService struct {
 	operations    map[string]string // P -> finished/running
 	outcomes      map[string]string
 	image         []byte
+	// The two omission switches are reverse controls: removing a fact from a
+	// fixture must make the matching probe check fail.
+	omitActQuality   bool
+	omitScrollEffect bool
 }
 
 func startFakeRecoveryService(t *testing.T) *fakeRecoveryService {
@@ -1250,7 +1283,7 @@ func (f *fakeRecoveryService) writeStart(writer http.ResponseWriter, operationID
 	}
 	f.canStart = false
 	f.revision++
-	observation := f.observationLocked(false)
+	observation := f.observationLocked(false, stableTestQuality())
 	f.operations[operationID] = operationFinished
 	f.outcomes[operationID] = outcomeExecuted
 	result := &protocol.Result{
@@ -1279,7 +1312,7 @@ func (f *fakeRecoveryService) writeObserve(writer http.ResponseWriter, request *
 	}
 	f.mutex.Lock()
 	f.revision++
-	observation := f.observationLocked(observeBody.Image)
+	observation := f.observationLocked(observeBody.Image, unsampledTestQuality())
 	f.operations[operationID] = operationFinished
 	f.outcomes[operationID] = outcomeExecuted
 	result := &protocol.Result{OperationID: operationID, Observation: observation}
@@ -1291,16 +1324,28 @@ func (f *fakeRecoveryService) writeAct(writer http.ResponseWriter, operationID s
 	var actBody struct {
 		ObservationID string `json:"observation_id"`
 		Image         bool   `json:"image"`
+		Operation     struct {
+			Type string `json:"type"`
+		} `json:"operation"`
 	}
 	_ = json.Unmarshal(body, &actBody)
 	f.mutex.Lock()
 	f.revision++
-	observation := f.observationLocked(actBody.Image)
+	quality := stableTestQuality()
+	if f.omitActQuality {
+		quality = nil
+	}
+	observation := f.observationLocked(actBody.Image, quality)
 	f.operations[operationID] = operationFinished
 	f.outcomes[operationID] = outcomeExecuted
 	result := &protocol.Result{
 		OperationID: operationID, Outcome: outcomeExecuted,
 		Observation: observation, TargetReference: actBody.ObservationID,
+	}
+	// Only a scroll act result carries an effect fact; key/tap/swipe results
+	// must omit it entirely.
+	if actBody.Operation.Type == "scroll" && !f.omitScrollEffect {
+		result.Effect = &protocol.Effect{State: protocol.EffectObserved}
 	}
 	f.mutex.Unlock()
 	f.writeResult(writer, result)
@@ -1436,15 +1481,38 @@ func (f *fakeRecoveryService) writeDiagnosis(writer http.ResponseWriter) {
 	})
 }
 
+// stableTestQuality is the settled, sampled quality an act post observation
+// carries: samples>0 with stop_reason=stable is the normal controlled branch.
+func stableTestQuality() *protocol.Quality {
+	return &protocol.Quality{
+		State:      protocol.QualityStable,
+		Samples:    2,
+		StopReason: protocol.QualityStopStable,
+	}
+}
+
+// unsampledTestQuality is the explicit observe/delivery branch: unknown state,
+// zero samples and not_sampled, never a missing object.
+func unsampledTestQuality() *protocol.Quality {
+	return &protocol.Quality{
+		State:      protocol.QualityUnknown,
+		Samples:    0,
+		StopReason: protocol.QualityStopNotSampled,
+	}
+}
+
 // observationLocked builds one complete observation. Image bytes travel only
-// in the HTTP carrier, exactly as the real service sends them.
-func (f *fakeRecoveryService) observationLocked(withImage bool) *protocol.Observation {
+// in the HTTP carrier, exactly as the real service sends them. Every returned
+// observation carries the explicit quality object; nil is only used by the
+// missing-quality reverse control.
+func (f *fakeRecoveryService) observationLocked(withImage bool, quality *protocol.Quality) *protocol.Observation {
 	observation := &protocol.Observation{
 		Status:     observationComplete,
 		ID:         fmt.Sprintf("O%d", f.revision),
 		Origin:     f.sessionOrigin,
 		Revision:   f.revision,
 		CapturedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		Quality:    quality,
 		Tree:       testFullTree(),
 	}
 	if withImage {
@@ -1637,6 +1705,7 @@ func TestProbeAgainstRealAdapter(t *testing.T) {
 				"PASS tools count=11",
 				"PASS catalog",
 				"PASS catalog_fingerprint",
+				"PASS act_scroll_schema",
 				"PASS schema",
 				"PASS result_error",
 				"PASS start",
@@ -1730,5 +1799,165 @@ func TestProbeAgainstRealHTTPAdapter(t *testing.T) {
 				t.Fatalf("shell dispatched %d times, want 1", shells)
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------- act quality/effect
+
+// scrollActArguments is the contract-10 scroll operation the fake service
+// accepts: a container ref plus a declared direction, never a device target.
+func scrollActArguments() map[string]any {
+	return map[string]any{
+		"observation_id": "O1",
+		"operation": map[string]any{
+			"type":      "scroll",
+			"container": map[string]any{"ref": "n2"},
+			"direction": "down",
+		},
+	}
+}
+
+// checkScrollActResult asserts the complete scroll projection. The positive
+// matrix and the reverse controls both call it, so omitting a member from the
+// fixture must fail the same assertion instead of a test-specific shortcut.
+func checkScrollActResult(projected *callResult, mode string) *checkError {
+	view := projected.view
+	if projected.result.IsError {
+		return failf("scroll_act_is_error", field("code", codeOf(view)))
+	}
+	if view.Outcome != outcomeExecuted {
+		return failf("scroll_act_not_executed", field("outcome", view.Outcome))
+	}
+	if failure := checkScrollEffect(view, projected.object, true); failure != nil {
+		return failure
+	}
+	if failure := checkObservationQuality(projected, view.Observation); failure != nil {
+		return failure
+	}
+	quality := view.Observation.Quality
+	if mode != resultModeStructured {
+		for _, wanted := range []string{
+			"effect.state=" + view.Effect.State,
+			"observation.quality.state=" + quality.State,
+			"observation.quality.samples=" + strconv.Itoa(quality.Samples),
+			"observation.quality.stop_reason=" + quality.StopReason,
+		} {
+			if failure := requireTextLine(projected, wanted); failure != nil {
+				return failure
+			}
+		}
+	}
+	effectState, found := lookupPath(projected.object, []string{"effect", "state"})
+	if !found || effectState != view.Effect.State {
+		return failf("effect_object_mismatch")
+	}
+	samples, found := lookupPath(projected.object,
+		[]string{"observation", "quality", "samples"})
+	number, integer := exactInteger(samples)
+	if !found || !integer || number != int64(quality.Samples) {
+		return failf("quality_object_mismatch")
+	}
+	return nil
+}
+
+// TestActScrollResultProjection drives one scroll act through the real adapter
+// and asserts the same effect/quality facts in text, structured and both modes.
+// The parallel key act proves a non-scroll result never carries an effect.
+func TestActScrollResultProjection(t *testing.T) {
+	for _, mode := range []string{resultModeBoth, resultModeText, resultModeStructured} {
+		t.Run(mode, func(t *testing.T) {
+			fake := startFakeRecoveryService(t)
+			session, service := newRealAdapterSession(t, fake, mode)
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			runner := &probe{
+				reporter: newReporter(io.Discard), session: session,
+				service: service, resultMode: mode,
+			}
+
+			projected, failure := runner.call(ctx, "act", scrollActArguments())
+			if failure != nil {
+				t.Fatalf("scroll act: %s %v", failure.reason, failure.fields)
+			}
+			if failure := checkScrollActResult(projected, mode); failure != nil {
+				t.Fatalf("scroll projection: %s %v", failure.reason, failure.fields)
+			}
+			// Expected values are literals, not read back from the same struct.
+			if projected.view.Effect == nil || projected.view.Effect.State != "observed" {
+				t.Fatalf("effect = %+v, want observed", projected.view.Effect)
+			}
+			quality := projected.view.Observation.Quality
+			if quality.State != "stable" || quality.Samples != 2 ||
+				quality.StopReason != "stable" {
+				t.Fatalf("quality = %+v", quality)
+			}
+
+			key, failure := runner.call(ctx, "act", map[string]any{
+				"observation_id": "O2",
+				"operation":      map[string]any{"type": "key", "key": "BACK"},
+			})
+			if failure != nil {
+				t.Fatalf("key act: %s %v", failure.reason, failure.fields)
+			}
+			if key.view.Effect != nil {
+				t.Fatalf("key result carries effect %+v", key.view.Effect)
+			}
+			if failure := checkScrollEffect(key.view, key.object, false); failure != nil {
+				t.Fatalf("key result effect: %s", failure.reason)
+			}
+			if _, present := lookupPath(key.object, []string{"effect"}); present {
+				t.Fatal("key result object carries effect")
+			}
+			if mode != resultModeStructured {
+				for _, text := range key.texts {
+					for _, line := range strings.Split(text, "\n") {
+						if strings.HasPrefix(line, "effect.") {
+							t.Fatal("key result carries a readable effect line")
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestActCheckRejectsMissingQuality is the reverse control for the new live
+// assertion: the same act check must fail when the fixture omits the quality
+// object the live service always emits.
+func TestActCheckRejectsMissingQuality(t *testing.T) {
+	fake := startFakeRecoveryService(t)
+	fake.omitActQuality = true
+	session, service := newRealAdapterSession(t, fake, resultModeBoth)
+	var output bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	runner := &probe{reporter: newReporter(&output), session: session, service: service}
+	if runner.actCheck(ctx, "O1") {
+		t.Fatalf("act without observation quality passed:\n%s", output.String())
+	}
+	if !strings.Contains(output.String(), "FAIL act reason=observation_quality_missing") {
+		t.Fatalf("missing quality failure:\n%s", output.String())
+	}
+}
+
+// TestActScrollEffectOmissionFails is the reverse control for the scroll
+// fixture: dropping effect must fail the complete scroll projection.
+func TestActScrollEffectOmissionFails(t *testing.T) {
+	fake := startFakeRecoveryService(t)
+	fake.omitScrollEffect = true
+	session, service := newRealAdapterSession(t, fake, resultModeBoth)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	runner := &probe{
+		reporter: newReporter(io.Discard), session: session,
+		service: service, resultMode: resultModeBoth,
+	}
+	projected, failure := runner.call(ctx, "act", scrollActArguments())
+	if failure != nil {
+		t.Fatalf("scroll act: %s %v", failure.reason, failure.fields)
+	}
+	if failure := checkScrollActResult(projected, resultModeBoth); failure == nil ||
+		failure.reason != "scroll_effect_missing" {
+		t.Fatalf("omitted effect accepted: %v", failure)
 	}
 }

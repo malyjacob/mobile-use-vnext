@@ -33,6 +33,22 @@ const (
 	imageJPEG           = "image/jpeg"
 )
 
+// Frozen public enumerations of the act quality/effect projection. The probe
+// repeats them instead of importing protocol constants so the live wire is
+// compared with an independent copy of the contract.
+var (
+	qualityStates = map[string]bool{
+		"stable": true, "unstable": true, "unknown": true,
+	}
+	qualityStopReasons = map[string]bool{
+		"stable": true, "max_samples": true, "budget": true,
+		"unreadable": true, "not_sampled": true,
+	}
+	effectStates = map[string]bool{
+		"observed": true, "not_observed": true, "unknown": true,
+	}
+)
+
 // sessionView is the public session projection of one structured result.
 type sessionView struct {
 	Origin    string `json:"origin"`
@@ -100,16 +116,32 @@ type inspectionView struct {
 	Revision      int    `json:"revision"`
 }
 
+// qualityView is the settle quality of one observation. All three members are
+// explicit facts; samples=0 with stop_reason=not_sampled is valid and must be
+// carried, not omitted.
+type qualityView struct {
+	State      string `json:"state"`
+	Samples    int    `json:"samples"`
+	StopReason string `json:"stop_reason"`
+}
+
+// effectView is the bounded scroll-effect fact. Only a scroll act result
+// carries it; a tap/key result must not.
+type effectView struct {
+	State string `json:"state"`
+}
+
 // observationView is the observation header; tree bodies are not interpreted.
 type observationView struct {
-	Status   string     `json:"status"`
-	ID       string     `json:"id"`
-	Origin   string     `json:"origin"`
-	Revision int        `json:"revision"`
-	Missing  []string   `json:"missing"`
-	Tree     *treeView  `json:"tree"`
-	Image    *imageView `json:"image"`
-	Error    *errorView `json:"error"`
+	Status   string       `json:"status"`
+	ID       string       `json:"id"`
+	Origin   string       `json:"origin"`
+	Revision int          `json:"revision"`
+	Quality  *qualityView `json:"quality"`
+	Missing  []string     `json:"missing"`
+	Tree     *treeView    `json:"tree"`
+	Image    *imageView   `json:"image"`
+	Error    *errorView   `json:"error"`
 }
 
 type cleanupView struct {
@@ -126,6 +158,7 @@ type resultView struct {
 	OperationState   string           `json:"operation_state"`
 	Outcome          string           `json:"outcome"`
 	Phase            string           `json:"phase"`
+	Effect           *effectView      `json:"effect"`
 	TargetReference  string           `json:"target_reference"`
 	RequestClosed    *bool            `json:"request_closed"`
 	CanStart         *bool            `json:"can_start"`
@@ -347,6 +380,66 @@ func sessionStateOf(session *sessionView) string {
 		return "none"
 	}
 	return session.State
+}
+
+// checkObservationQuality asserts the act post observation carries a complete,
+// valid quality object. The typed view supplies the values; the decoded object
+// proves every member was present, so an omitted samples member can never be
+// mistaken for the valid samples=0 fact.
+func checkObservationQuality(projected *callResult, observation *observationView) *checkError {
+	if observation == nil {
+		return failf("post_observation_missing")
+	}
+	quality := observation.Quality
+	if quality == nil {
+		return failf("observation_quality_missing")
+	}
+	value, found := lookupPath(projected.object, []string{"observation", "quality"})
+	qualityObject, isObject := value.(map[string]any)
+	if !found || !isObject {
+		return failf("observation_quality_invalid")
+	}
+	for _, member := range []string{"state", "samples", "stop_reason"} {
+		if _, present := qualityObject[member]; !present {
+			return failf("observation_quality_member_missing", field("member", member))
+		}
+	}
+	if !qualityStates[quality.State] {
+		return failf("observation_quality_state_invalid", field("state", quality.State))
+	}
+	if quality.Samples < 0 {
+		return failf("observation_quality_samples_invalid",
+			field("samples", strconv.Itoa(quality.Samples)))
+	}
+	if !qualityStopReasons[quality.StopReason] {
+		return failf("observation_quality_stop_reason_invalid",
+			field("stop_reason", quality.StopReason))
+	}
+	return nil
+}
+
+// checkScrollEffect asserts the effect fact appears exactly on scroll results:
+// every scroll result must carry a valid state, and no non-scroll result may
+// carry the member at all, not even as an explicit null.
+func checkScrollEffect(view resultView, object map[string]any, scroll bool) *checkError {
+	if !scroll {
+		if view.Effect != nil {
+			return failf("effect_on_non_scroll")
+		}
+		if object != nil {
+			if _, present := object["effect"]; present {
+				return failf("effect_on_non_scroll")
+			}
+		}
+		return nil
+	}
+	if view.Effect == nil {
+		return failf("scroll_effect_missing")
+	}
+	if !effectStates[view.Effect.State] {
+		return failf("scroll_effect_state_invalid", field("state", view.Effect.State))
+	}
+	return nil
 }
 
 // validReference accepts the public P and O identifiers: one prefix byte and

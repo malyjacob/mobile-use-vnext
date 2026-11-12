@@ -82,6 +82,71 @@ func checkLiveCatalog(tools []*sdk.Tool) *checkError {
 			return failf("catalog_schema_mismatch", field("tool", wanted))
 		}
 	}
+	if failure := checkActScrollSchema(live["act"]); failure != nil {
+		return failure
+	}
+	return nil
+}
+
+// actSchemaProperty is the probe's explicit view of one act operation member.
+// Only the members this check asserts are declared; everything else is ignored
+// after the semantic source comparison has already proven the whole schema.
+type actSchemaProperty struct {
+	Enum       []string                     `json:"enum"`
+	Minimum    *int                         `json:"minimum"`
+	Maximum    *int                         `json:"maximum"`
+	Properties map[string]actSchemaProperty `json:"properties"`
+}
+
+// actToolSchema is the top-level property view of the act input schema.
+type actToolSchema struct {
+	Properties map[string]actSchemaProperty `json:"properties"`
+}
+
+// checkActScrollSchema asserts the live act tool declares the contract-10
+// scroll surface: operation.type includes scroll, all four scroll members are
+// published, direction is exactly up/down/left/right and duration_ms is bounded
+// by 50/2000. The whole-schema semantic equality and the 11-tool count are
+// proven by the caller before this focused check runs.
+func checkActScrollSchema(tool *sdk.Tool) *checkError {
+	if tool == nil {
+		return failf("act_tool_missing")
+	}
+	encoded, err := json.Marshal(tool.InputSchema)
+	if err != nil {
+		return failf("act_schema_unusable")
+	}
+	var schema actToolSchema
+	if err := json.Unmarshal(encoded, &schema); err != nil {
+		return failf("act_schema_unusable")
+	}
+	operation, declared := schema.Properties["operation"]
+	if !declared {
+		return failf("act_operation_missing")
+	}
+	actionType, declared := operation.Properties["type"]
+	if !declared {
+		return failf("act_type_missing")
+	}
+	if !containsString(actionType.Enum, "scroll") {
+		return failf("act_type_scroll_missing")
+	}
+	for _, member := range []string{"container", "direction", "amount", "duration_ms"} {
+		if _, present := operation.Properties[member]; !present {
+			return failf("act_scroll_member_missing", field("member", member))
+		}
+	}
+	if !sameStringSet(operation.Properties["direction"].Enum,
+		[]string{"up", "down", "left", "right"}) {
+		return failf("act_direction_enum_mismatch")
+	}
+	duration := operation.Properties["duration_ms"]
+	if duration.Minimum == nil || duration.Maximum == nil ||
+		*duration.Minimum != 50 || *duration.Maximum != 2000 {
+		return failf("act_duration_bounds_mismatch",
+			field("minimum", integerString(duration.Minimum)),
+			field("maximum", integerString(duration.Maximum)))
+	}
 	return nil
 }
 
