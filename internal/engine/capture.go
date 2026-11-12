@@ -200,6 +200,7 @@ func (e *Engine) captureAndPublish(ctx context.Context, work *workState, session
 		}
 		image = imageFailure(attempt.err)
 		e.log.Event(eventlog.Warn, "observation.image",
+			eventlog.Str("operation_id", work.OperationID),
 			eventlog.Str("code", attempt.err.Code), eventlog.Bool("available", attempt.read))
 	}
 
@@ -209,7 +210,15 @@ func (e *Engine) captureAndPublish(ctx context.Context, work *workState, session
 	if attempt.meta != nil && attempt.source.CapturedAt.Before(base) {
 		base = attempt.source.CapturedAt
 	}
-	return e.publishTreeAttempt(work, session, phase, tree, base, forceFull, status, image)
+	// The quality is the projection of the run whose frame is published; a
+	// phase without a settle policy never sampled and says exactly that.
+	quality := qualityOf(policy, run)
+	public, obs, publishErr := e.publishTreeAttempt(work, session, phase, tree, base,
+		forceFull, status, image, quality)
+	// The quality fact is recorded after the commit outcome is known and outside
+	// the state lock; a failed commit never invents an observation id.
+	e.logQuality(work.OperationID, phase, public, quality)
+	return public, obs, publishErr
 }
 
 // publishTreeAttempt commits exactly one already-read frame as the session's
@@ -217,10 +226,12 @@ func (e *Engine) captureAndPublish(ctx context.Context, work *workState, session
 // every commit gate live here, so the ordinary acquisition and the frame a
 // rejected act delivers share one funnel: a candidate never reaches the public
 // state unless the session, the work ownership, the display generation and the
-// capture age all still hold at this moment.
+// capture age all still hold at this moment. quality is the fixed quality fact
+// of the attempt; the object is immutable per call and shared with the public
+// projection.
 func (e *Engine) publishTreeAttempt(work *workState, session *sessionState, phase string,
 	tree *treeAttempt, base time.Time, forceFull bool, status string,
-	image *protocol.ImageMeta) (*protocol.Observation, *observationState, *protocol.APIError) {
+	image *protocol.ImageMeta, quality *protocol.Quality) (*protocol.Observation, *observationState, *protocol.APIError) {
 	stopped := protocol.NewError(409, protocol.CodeStopped, "原会话已撤销")
 	if tree == nil || tree.projection == nil || session == nil {
 		return nil, nil, protocol.NewError(503, protocol.CodeHierarchyFailed, "公开树构造失败")
@@ -288,7 +299,8 @@ func (e *Engine) publishTreeAttempt(work *workState, session *sessionState, phas
 		Agent: e.session.Agent, SessionEpoch: e.session.Epoch,
 		DisplayID: e.session.Display.ID, DisplayGeneration: e.session.Display.Generation,
 		CapturedAt: tree.capture.CapturedAt, ActionableUntil: actionableUntil,
-		Screen: e.session.Display, Foreground: tree.capture.Foreground,
+		Quality: quality,
+		Screen:  e.session.Display, Foreground: tree.capture.Foreground,
 		Projector: work.Projector, Projection: tree.projection, Status: ObservationReady, Full: !useDelta,
 	}
 	e.current = obs
@@ -299,7 +311,7 @@ func (e *Engine) publishTreeAttempt(work *workState, session *sessionState, phas
 		ttl = e.cfg.StartSessionTTL
 	}
 	e.extendSessionLocked(time.Now(), ttl)
-	public := e.observationPublicLocked(obs, status, tree.full, delta, image)
+	public := e.observationPublicLocked(obs, status, tree.full, delta, image, quality)
 	return public, obs, nil
 }
 
@@ -316,9 +328,12 @@ func (e *Engine) captureTree(ctx context.Context, work *workState, session *sess
 
 // captureSettledTree turns a converged frame into the acquisition's tree.
 // When an image was read after the settle loop one more read refreshes the
-// tree so both materials describe nearly the same moment. A changed tree
-// continues the loop inside the remaining budget; when nothing is left it
-// publishes the newest frame as unstable evidence instead of failing.
+// tree so both materials describe nearly the same moment. The refresh is part
+// of the same quality accounting: an equal refresh frame is the later frame of
+// the pair and makes the run stable, a different one invalidates the earlier
+// pair and continues the loop inside the remaining policy. The image refresh is
+// the only sample that may take an act run past MaxSamples, and it may do so at
+// most once.
 func (e *Engine) captureSettledTree(ctx context.Context, work *workState, session *sessionState,
 	phase string, policy SettlePolicy, run *settleRun, imageRead bool) (*treeAttempt, *protocol.APIError) {
 	if imageRead {
@@ -328,13 +343,20 @@ func (e *Engine) captureSettledTree(ctx context.Context, work *workState, sessio
 			return nil, apiErr
 		case apiErr != nil:
 			// The refresh failed; the settled frame remains valid evidence and
-			// the image stays paired with the tree that gets published.
+			// the image stays paired with the tree that gets published. A failed
+			// read is not a sample: the run and its quality are untouched.
 		case frame.digest == run.frame.digest && run.samples+1 >= policy.MinSamples:
 			// The page did not move while the image was read: publish the later
-			// of the two equal frames, never the earlier one after a wait.
+			// of the two equal frames, never the earlier one after a wait, and
+			// credit the pair the refresh just completed.
 			run.frame = frame
 			run.samples++
+			run.stable = true
+			run.stopReason = protocol.QualityStopStable
 		default:
+			// A different refresh frame (or an equal one that still cannot meet
+			// MinSamples) invalidates any earlier pair. The final state comes
+			// from the comparisons that follow, never from the old one.
 			run.frame = frame
 			run.samples++
 			run.lastTook = frame.took
@@ -344,7 +366,7 @@ func (e *Engine) captureSettledTree(ctx context.Context, work *workState, sessio
 			}
 		}
 	}
-	e.logSettle(phase, run)
+	e.logSettle(work.OperationID, phase, run)
 	return e.projectCapture(work, phase, run.frame.capture)
 }
 
@@ -527,13 +549,14 @@ func failedObservation(coreErr *protocol.APIError, image *protocol.ImageMeta,
 }
 
 // observationPublicLocked is the single committed observation projection. The
-// status and an optional image are decided by the acquisition; everything else
-// keeps its fixed public meaning.
+// status, the optional image and the settle quality are decided by the
+// acquisition; everything else keeps its fixed public meaning.
 func (e *Engine) observationPublicLocked(obs *observationState, status string, full *protocol.Tree,
-	delta *protocol.Delta, image *protocol.ImageMeta) *protocol.Observation {
+	delta *protocol.Delta, image *protocol.ImageMeta, quality *protocol.Quality) *protocol.Observation {
 	observation := &protocol.Observation{
 		Status: status, ID: obs.ID, Origin: obs.Origin, Revision: obs.Revision,
 		CapturedAt: formatTime(obs.CapturedAt), ActionableUntil: formatTime(obs.ActionableUntil),
+		Quality: quality,
 		Screen: &protocol.Screen{
 			Width: obs.Screen.Width, Height: obs.Screen.Height, Rotation: obs.Screen.Rotation,
 		},

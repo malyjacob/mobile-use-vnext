@@ -25,40 +25,48 @@ var deliverRejection = (*Engine).deliverRejectedObservation
 func (e *Engine) deliverRejectedObservation(work *workState, session *sessionState,
 	obs *observationState, fresh *device.Capture, code string) *protocol.Observation {
 	if obs == nil || session == nil || fresh == nil || !deliverableRejection(code) {
-		e.logDelivery("skipped", code, "")
+		e.logDelivery(work, "skipped", code, "")
 		return nil
 	}
 	// The next act must be able to prove the same foreground; delivering a frame
 	// whose foreground is unknown would only produce another rejection.
 	if fresh.Foreground.State != device.ForegroundPresent &&
 		fresh.Foreground.State != device.ForegroundNone {
-		e.logDelivery("skipped", code, "")
+		e.logDelivery(work, "skipped", code, "")
 		return nil
 	}
 	if session.Display.ID != 0 {
 		for _, node := range fresh.Nodes {
 			if node.Package == e.cfg.ControlPackage && node.Visible {
-				e.logDelivery("skipped", code, "")
+				e.logDelivery(work, "skipped", code, "")
 				return nil
 			}
 		}
 	}
 	tree, apiErr := e.projectCapture(work, "act.delivery", *fresh)
 	if apiErr != nil {
-		e.logDelivery("failed", apiErr.Code, "")
+		e.logDelivery(work, "failed", apiErr.Code, "")
 		return nil
+	}
+	// A delivered frame never settled: it is the single fresh frame the
+	// revalidation already read, so its quality is the fixed not_sampled fact.
+	quality := &protocol.Quality{
+		State: protocol.QualityUnknown, Samples: 0,
+		StopReason: protocol.QualityStopNotSampled,
 	}
 	// forceFull keeps every delivered delta's base equal to the observation this
 	// rejected request actually used: a full reference was just confirmed as the
 	// baseline at claim time, while a delta reference would silently fall back to
 	// an older base the caller did not just read.
 	public, _, publishErr := e.publishTreeAttempt(work, session, "act.delivery", tree,
-		tree.capture.CapturedAt, !obs.Full, "complete", nil)
+		tree.capture.CapturedAt, !obs.Full, "complete", nil, quality)
 	if publishErr != nil {
-		e.logDelivery("failed", publishErr.Code, "")
+		e.logQuality(work.OperationID, "act.delivery", nil, quality)
+		e.logDelivery(work, "failed", publishErr.Code, "")
 		return nil
 	}
-	e.logDelivery("published", code, treeFormat(public))
+	e.logQuality(work.OperationID, "act.delivery", public, quality)
+	e.logDelivery(work, "published", code, treeFormat(public))
 	return public
 }
 
@@ -96,8 +104,13 @@ func treeFormat(public *protocol.Observation) string {
 
 // logDelivery records only the decision and the controlled code: never the
 // observation identity, tree content, point or text.
-func (e *Engine) logDelivery(state, code, format string) {
+func (e *Engine) logDelivery(work *workState, state, code, format string) {
+	operationID := ""
+	if work != nil {
+		operationID = work.OperationID
+	}
 	e.log.Event(eventlog.Debug, "act.delivered",
+		eventlog.Str("operation_id", operationID),
 		eventlog.Str("state", state), eventlog.Str("code", code),
 		eventlog.Str("format", format))
 }

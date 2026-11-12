@@ -74,8 +74,16 @@ var allowedKeys = map[string]struct{}{
 	// commands, output text and paths are never whitelisted.
 	"root": {}, "termination": {}, "exit_code": {}, "truncated": {},
 	// Settle facts. They are a frame count and a completion flag, never tree
-	// content.
-	"samples": {}, "stable": {},
+	// content. stop_reason is a closed enum and quality is a closed enum used
+	// by the controlled-scroll revalidation fact.
+	"samples": {}, "stable": {}, "stop_reason": {}, "quality": {},
+	// Controlled-scroll plan/revalidation facts. Direction, amount, container
+	// role and axis are closed enums; edges and proof flags are booleans;
+	// anchors and coverage are counters. No ref, coordinate, label or tree is
+	// ever whitelisted.
+	"direction": {}, "amount": {}, "container_role": {}, "start_edge": {},
+	"end_edge": {}, "container_proven": {}, "start_scope_proven": {},
+	"end_scope_proven": {}, "anchors": {}, "coverage": {}, "dominant_axis": {},
 	"execution": {}, "tasks": {}, "recents": {}, "display": {},
 	// Coordinate point proof facts. The resolution state and completion flag
 	// describe one pure-CPU decision; points, refs and labels are never

@@ -131,13 +131,16 @@ type sampleFrame struct {
 }
 
 // settleRun is the accumulated state of one convergence attempt. It is local
-// to the acquisition and never reaches the state lock or the public result.
+// to the acquisition; only the three fixed quality facts reach the published
+// observation. stopReason is always one of the protocol quality stop reasons
+// once the run is complete, so a projection can never leave it empty.
 type settleRun struct {
-	frame    *sampleFrame
-	samples  int
-	stable   bool
-	started  time.Time
-	lastTook time.Duration
+	frame      *sampleFrame
+	samples    int
+	stable     bool
+	stopReason string
+	started    time.Time
+	lastTook   time.Duration
 }
 
 // captureSample reads one frame and digests it without touching continuity
@@ -166,7 +169,9 @@ func (e *Engine) captureSample(ctx context.Context, work *workState, session *se
 // an expired context is reported as stopped, and the caller must not publish.
 func (e *Engine) settleCapture(ctx context.Context, work *workState, session *sessionState,
 	phase string, policy SettlePolicy) (*settleRun, *protocol.APIError) {
-	run := &settleRun{started: time.Now()}
+	// not_sampled is the zero fact of a run that never reached its first
+	// comparison; every completed exit below overwrites it with the real reason.
+	run := &settleRun{started: time.Now(), stopReason: protocol.QualityStopNotSampled}
 	frame, apiErr := e.captureSample(ctx, work, session, phase)
 	if apiErr != nil {
 		return nil, apiErr
@@ -196,10 +201,17 @@ func (e *Engine) settleUntilStable(ctx context.Context, work *workState, session
 		if gap < 0 {
 			gap = 0
 		}
+		// Frame limit and budget are checked before the wait so a run never
+		// starts a sample it cannot keep. They stay separate so the published
+		// quality can name the real reason the run ended.
+		if run.samples+1 > policy.MaxSamples {
+			run.stopReason = protocol.QualityStopMaxSamples
+			return nil
+		}
 		// Budget pre-check: estimate the next sample from the measured cost of
 		// the previous one and never start a sample that cannot fit.
-		if run.samples+1 > policy.MaxSamples ||
-			time.Since(run.started)+gap+run.lastTook > policy.MaxBudget {
+		if time.Since(run.started)+gap+run.lastTook > policy.MaxBudget {
+			run.stopReason = protocol.QualityStopBudget
 			return nil
 		}
 		if !pauseInterruptible(ctx, gap) {
@@ -211,7 +223,9 @@ func (e *Engine) settleUntilStable(ctx context.Context, work *workState, session
 				return apiErr
 			}
 			// One unreadable sample is not a failed post observation: the frame
-			// before it is still valid evidence of the same acquisition.
+			// before it is still valid evidence of the same acquisition. The
+			// failed read never counts as a sample.
+			run.stopReason = protocol.QualityStopUnreadable
 			return nil
 		}
 		run.samples++
@@ -219,9 +233,48 @@ func (e *Engine) settleUntilStable(ctx context.Context, work *workState, session
 		if next.digest == run.frame.digest && run.samples >= policy.MinSamples {
 			run.frame = next
 			run.stable = true
+			run.stopReason = protocol.QualityStopStable
 			return nil
 		}
 		run.frame = next
+	}
+}
+
+// qualityOf projects one settle run onto the public observation quality. The
+// run itself never reaches the observation: only the state, the counted frames
+// and the reason the run ended do.
+//
+// The state follows the latest comparison of the published frame, never a pair
+// seen earlier: a run that once converged but was invalidated by a later frame
+// stays unstable. A stable run always names stable as its reason.
+func qualityOf(policy SettlePolicy, run *settleRun) *protocol.Quality {
+	if !policy.Enabled || run == nil {
+		return &protocol.Quality{
+			State: protocol.QualityUnknown, Samples: 0,
+			StopReason: protocol.QualityStopNotSampled,
+		}
+	}
+	stopReason := run.stopReason
+	if stopReason == "" {
+		// Defensive: a completed settle run always sets a reason, and an empty
+		// one must never escape as an invalid enum.
+		stopReason = protocol.QualityStopNotSampled
+	}
+	if run.stable {
+		return &protocol.Quality{
+			State: protocol.QualityStable, Samples: run.samples,
+			StopReason: protocol.QualityStopStable,
+		}
+	}
+	if run.samples >= 2 {
+		return &protocol.Quality{
+			State: protocol.QualityUnstable, Samples: run.samples,
+			StopReason: stopReason,
+		}
+	}
+	return &protocol.Quality{
+		State: protocol.QualityUnknown, Samples: run.samples,
+		StopReason: stopReason,
 	}
 }
 
@@ -361,14 +414,38 @@ func writeBool(h hash.Hash, value bool) {
 }
 
 // logSettle records the convergence facts of one post observation. They are
-// diagnostic only and never part of the published observation.
-func (e *Engine) logSettle(phase string, run *settleRun) {
+// diagnostic only; the published observation carries only the bounded quality
+// object.
+func (e *Engine) logSettle(operationID, phase string, run *settleRun) {
 	if run == nil {
 		return
 	}
 	e.log.Event(eventlog.Debug, "observation.settle",
+		eventlog.Str("operation_id", operationID),
 		eventlog.Str("phase", phase),
 		eventlog.Int("samples", run.samples),
 		eventlog.Bool("stable", run.stable),
+		eventlog.Str("stop_reason", run.stopReason),
 		eventlog.Duration("ms", time.Since(run.started)))
+}
+
+// logQuality records the quality of one publication attempt after its commit
+// outcome is known. The observation id is written only when an observation was
+// actually published; a failed commit never invents a post observation id.
+func (e *Engine) logQuality(operationID, phase string, published *protocol.Observation,
+	quality *protocol.Quality) {
+	if quality == nil {
+		return
+	}
+	fields := []eventlog.Field{
+		eventlog.Str("operation_id", operationID),
+		eventlog.Str("phase", phase),
+		eventlog.Str("state", quality.State),
+		eventlog.Int("samples", quality.Samples),
+		eventlog.Str("stop_reason", quality.StopReason),
+	}
+	if published != nil && published.ID != "" {
+		fields = append(fields, eventlog.Str("observation_id", published.ID))
+	}
+	e.log.Event(eventlog.Debug, "observation.quality", fields...)
 }

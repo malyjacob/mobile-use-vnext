@@ -401,6 +401,7 @@ type observationState struct {
 	DisplayGeneration string
 	CapturedAt        time.Time
 	ActionableUntil   time.Time
+	Quality           *protocol.Quality
 	Screen            device.Display
 	Foreground        device.Foreground
 	Projection        *Projection

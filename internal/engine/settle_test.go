@@ -88,6 +88,9 @@ func TestSettlePublishesLaterFrameOfEqualPair(t *testing.T) {
 	if run.samples != 3 || !run.stable {
 		t.Fatalf("run = %d samples, stable=%v; want 3 and stable", run.samples, run.stable)
 	}
+	if run.stopReason != protocol.QualityStopStable {
+		t.Fatalf("stop reason = %q, want %q", run.stopReason, protocol.QualityStopStable)
+	}
 	if label := rawButtonLabel(&run.frame.capture); label != "B" {
 		t.Fatalf("published frame label = %q, want the later frame", label)
 	}
@@ -108,6 +111,9 @@ func TestSettleBudgetExhaustionPublishesNewestFrame(t *testing.T) {
 	}
 	if run.samples != 4 || run.stable {
 		t.Fatalf("run = %d samples, stable=%v; want 4 and unstable", run.samples, run.stable)
+	}
+	if run.stopReason != protocol.QualityStopMaxSamples {
+		t.Fatalf("stop reason = %q, want %q", run.stopReason, protocol.QualityStopMaxSamples)
 	}
 	if label := rawButtonLabel(&run.frame.capture); label != "D" {
 		t.Fatalf("published frame label = %q, want the newest frame", label)
@@ -175,6 +181,9 @@ func TestSettleUnreadableSampleKeepsPreviousFrame(t *testing.T) {
 	if run.samples != 1 || run.stable {
 		t.Fatalf("run = %d samples, stable=%v; want the first frame and unstable",
 			run.samples, run.stable)
+	}
+	if run.stopReason != protocol.QualityStopUnreadable {
+		t.Fatalf("stop reason = %q, want %q", run.stopReason, protocol.QualityStopUnreadable)
 	}
 	if label := rawButtonLabel(&run.frame.capture); label != "A" {
 		t.Fatalf("published frame label = %q, want the frame before the failure", label)
@@ -409,8 +418,9 @@ func TestSettleDigestFollowsThePublicTree(t *testing.T) {
 	}
 }
 
-// TestSettleKeepsObservationShape proves the convergence work stays invisible
-// in the public result.
+// TestSettleKeepsObservationShape proves the convergence work reaches the
+// public result only through the bounded quality object. The diagnostic settle
+// fields (stable flag, timing) never appear as observation members.
 func TestSettleKeepsObservationShape(t *testing.T) {
 	h := newHarness(t)
 	start := h.startSession()
@@ -430,11 +440,19 @@ func TestSettleKeepsObservationShape(t *testing.T) {
 	if result.Observation == nil || result.Observation.ID == "" {
 		t.Fatalf("act returned no post observation: %+v", result.Observation)
 	}
+	if result.Observation.Quality == nil {
+		t.Fatal("published observation carries no settle quality")
+	}
 	encoded, err := json.Marshal(result.Observation)
 	if err != nil {
 		t.Fatalf("encode observation: %v", err)
 	}
-	for _, field := range []string{`"stable"`, `"samples"`, `"settle"`} {
+	if !strings.Contains(string(encoded), `"quality":{"state":`) {
+		t.Fatalf("observation carries no quality object: %s", encoded)
+	}
+	// "stable" is a legitimate enum value of quality.state/stop_reason, but a
+	// boolean "stable" member or any other settle diagnostic is not public.
+	for _, field := range []string{`"stable":`, `"settle":`, `"stopReason":`} {
 		if strings.Contains(string(encoded), field) {
 			t.Fatalf("observation carries settle metadata %s: %s", field, encoded)
 		}
@@ -465,7 +483,11 @@ func TestSettleRecordsConvergenceFacts(t *testing.T) {
 	}
 	logger.Close()
 	recorded := buffer.String()
-	for _, want := range []string{"observation.settle", "samples=2", "stable=true"} {
+	for _, want := range []string{
+		"observation.settle", "observation.quality",
+		`operation_id="Psettlelog"`, "samples=2", "stable=true",
+		`stop_reason="stable"`, `state="stable"`,
+	} {
 		if !strings.Contains(recorded, want) {
 			t.Fatalf("event log lacks %q: %s", want, recorded)
 		}
