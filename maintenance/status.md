@@ -42,6 +42,7 @@
 | `act` 重验失败交付新观察（契约 6） | 已实现 | 已实测：probe 与 Settings 两个场景的 `target_changed` 都返回新 O 与 `retry/O/effective`，交付 O 为 `ready`，用新 P 一步重试成功、旧 O 返回 `observation_retired`；被拒的 `act` 零派发，`end` 后准入屏障恢复；主机 stdio 探针 12 工具 PASS（[记录](verification/act-revalidation-observation-delivery.md)） |
 | 工作期限与未决输入的会话级封锁（契约 7） | 已实现 | 已实测：`act` 后静默 60 秒会话仍 `active`；未确认回执不再阻止 `observe`；受管 `shell` 超预算返回后立即 `observe` 成功；服务进程重启（不重启手机）后 `can_start=true` 且旧会话记 `service_restarted`；账本为版本 4；stdio 与手机 HTTP `mcp-probe` 均 PASS。真实回执未知注入与 `termination=unknown` 实机样本未执行（[记录](verification/remove-work-ui-deadline-lockdown.md)） |
 | 显式重设会话租期并取消累计硬上限（契约 8） | 已实现 | 已实测：start 首观察后五分钟期限；120 分钟显式租约跨过 `started_at+1h`；普通 observe 不截短 30 分钟长租约；省略/1 分钟可缩短；同一 P 重放不再次计时；一分钟真实到期记 `lease_expired` 且 cleanup 完成；长租约下 STOP 立即 `revoked`。已发布 0.8.0 / versionCode 10，手机 HTTP 与主机 stdio `mcp-probe` PASS（[记录](verification/explicit-keepalive-duration.md)） |
+| 受控滚动、raw swipe duration 与观察质量/效果（契约 10） | 已实现 | 单元测试、反向对照与 0.10.0/契约 10/versionCode 12 整组构建/清单核验通过；实机部署与受控滚动/effect 验收未执行（[记录](verification/semantic-scroll-observation-quality.md)） |
 
 ## 3. 未验证 / 未实现
 
@@ -66,6 +67,7 @@
 | 真实 input 回执未知的实机注入 / shell `termination=unknown` 实机样本 | 未执行：发布二进制无注入面，打断 adbd 会同时切断恢复观察；受管链在本机总能确认超时终止。两条路径均由先红复现与单元测试覆盖（[记录](verification/remove-work-ui-deadline-lockdown.md)） |
 | 实等会话累计超过一小时 | 未执行：由受控时间单测证明硬上限已删除；实机 120 分钟显式租约返回的绝对期限已超过 `started_at+1h`（[记录](verification/explicit-keepalive-duration.md)） |
 | 实机 MCP 调用带 `duration_minutes` 的 keepalive | 未单独构造：MCP 转发由单测覆盖，实机 keepalive 语义由直接 HTTP 调用验证（[记录](verification/explicit-keepalive-duration.md)） |
+| 受控 scroll/raw duration/quality/effect 的实机与跨应用证据 | 未执行：需按 [发布与回退](../docs/release.md) §4 整组部署，并从实际 MCP 连接与真实设备取证；本次未部署、未触碰设备，阈值也未实机校准（[记录](verification/semantic-scroll-observation-quality.md)） |
 
 ## 4. 证据入口
 
@@ -87,6 +89,9 @@
 ## 5. 暂缓事项
 
 - 第 3 节的验证缺口暂不单独补测；待其后按真实使用路径补齐证据。
+- 0.10.0 已从干净提交 `2cc559a` 完成整组构建、两套清单与工具目录核验；该版本未部署，
+  手机与主机实际运行版本、宿主 MCP 连接和实机滚动验收仍待后续部署窗口执行
+  （[记录](verification/semantic-scroll-observation-quality.md)）。
 - 当前部署为 `0.8.0`（`contract_version=8`、`android_version_code=10`），`can_start=true`；
   发布产物构建自提交 `9046cb1`，`source_dirty=false`；`device-service` 与
   `build/release-clean/manifest.json` 一致；手机 HTTP MCP 适配器二进制与清单一致，主机
