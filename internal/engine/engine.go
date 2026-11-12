@@ -164,7 +164,7 @@ type Device interface {
 	ExecutionIdentity(ctx context.Context) (device.BootIdentity, error)
 	Tap(ctx context.Context, displayID, x, y int) (device.DispatchReceipt, error)
 	LongPress(ctx context.Context, displayID, x, y int) (device.DispatchReceipt, error)
-	Swipe(ctx context.Context, displayID, x1, y1, x2, y2 int) (device.DispatchReceipt, error)
+	Swipe(ctx context.Context, displayID, x1, y1, x2, y2, durationMS int) (device.DispatchReceipt, error)
 	Key(ctx context.Context, displayID int, key string) (device.DispatchReceipt, error)
 	GetTextOnDisplay(ctx context.Context, target device.TextTarget) (device.TextResult, error)
 	SetTextOnDisplay(ctx context.Context, target device.TextTarget, text string) (device.TextResult, error)
@@ -432,6 +432,14 @@ type operationState struct {
 	// Reference is the kind of reference the request already used ("O"/"P").
 	// It is a planning fact only: it never grants authority.
 	Reference string
+	// ActAction is the semantic act branch recorded before the work position
+	// is taken ("scroll"). It is the only extra fact status(P) needs to know
+	// that a retained P was a controlled-scroll attempt. It is never overwritten.
+	ActAction string
+	// Effect is the bounded scroll-effect fact committed before the operation
+	// finishes. A frozen/finished operation never accepts a later value; the
+	// view projects unknown for a retained scroll fact without one.
+	Effect *protocol.Effect
 	// Claimed records the one-way ready->claimed transition of this operation.
 	// It outlives the work position so status(P) can replay the same plan.
 	Claimed bool
@@ -1072,6 +1080,18 @@ func (e *Engine) operationViewLocked(op *operationState) *protocol.Result {
 	}
 	if op.Error != nil {
 		result.Error = op.Error
+	}
+	// The effect is one saved bounded fact: a duplicate P or status(P) copies
+	// it and never recomputes or attaches an observation. A retained scroll
+	// P that finished executed/uncertain without a committed effect projects
+	// unknown; not_executed never projects an effect.
+	switch {
+	case op.Effect != nil:
+		effect := *op.Effect
+		result.Effect = &effect
+	case op.ActAction == "scroll" && op.State == OperationFinished &&
+		(op.Outcome == OutcomeExecuted || op.Outcome == OutcomeUncertain):
+		result.Effect = &protocol.Effect{State: protocol.EffectUnknown}
 	}
 	// A finished operation replays the projection it already returned; the
 	// status tool applies its own live cleanup override on top. Only a delivered

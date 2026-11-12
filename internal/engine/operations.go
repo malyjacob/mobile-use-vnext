@@ -121,6 +121,41 @@ func (e *Engine) evictOperationsLocked() {
 	}
 }
 
+// recordScrollAction records the semantic action of one controlled-scroll
+// attempt before the work position is taken. The status lock is held only for
+// the one bounded write; an existing action is never overwritten.
+func (e *Engine) recordScrollAction(op *operationState) {
+	if op == nil {
+		return
+	}
+	e.mu.Lock()
+	if op.State == OperationRunning && op.ActAction == "" {
+		op.ActAction = "scroll"
+	}
+	e.mu.Unlock()
+}
+
+// commitScrollEffect saves the computed effect as a bounded operation fact. It
+// is the last conditional gate before finishOperation: a revoked work, an
+// ended/frozen operation or a changed owner leaves the fact uncommitted, so a
+// late CPU result can never write back to a frozen P. No device I/O and no tree
+// algorithm runs under the lock.
+func (e *Engine) commitScrollEffect(work *workState, op *operationState, state string) bool {
+	if op == nil || state == "" {
+		return false
+	}
+	now := time.Now()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if op.State != OperationRunning || e.work != work ||
+		!e.workAuthorizedLocked(work, now) || work.Ctx.Err() != nil ||
+		op.ActAction != "scroll" {
+		return false
+	}
+	op.Effect = &protocol.Effect{State: state}
+	return true
+}
+
 func (e *Engine) setOperationPhase(op *operationState, phase string) {
 	if op == nil {
 		return

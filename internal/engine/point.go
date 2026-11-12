@@ -120,8 +120,14 @@ func resolveObservedPoint(obs *observationState, operation *protocol.Operation) 
 	}
 	check.took = time.Since(started)
 	if check.state == pointAmbiguous {
-		return check, protocol.NewError(422, protocol.CodeAmbiguousPoint,
-			"坐标落在多个同级节点上，请改用 ref")
+		// The error code and behavior are unchanged; only the hint must be
+		// executable for the branch that saw it. Raw swipe accepts no ref, so
+		// it is pointed at its own adjustable start point or controlled scroll.
+		message := "坐标落在多个同级节点上，请改用 ref"
+		if operation != nil && operation.Type == "swipe" {
+			message = "起点落在多个同级节点上；raw swipe 请调整起点，或改用 scroll 的 container 指定容器"
+		}
+		return check, protocol.NewError(422, protocol.CodeAmbiguousPoint, message)
 	}
 	return check, nil
 }

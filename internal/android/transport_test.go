@@ -207,6 +207,8 @@ func TestInputArgvOnTheWire(t *testing.T) {
 		{"tap", "input -d 61 tap 100 200"},
 		{"long_press", "input -d 61 swipe 100 200 100 200 700"},
 		{"swipe", "input -d 61 swipe 10 20 30 40 300"},
+		{"swipe_fast", "input -d 61 swipe 10 20 30 40 50"},
+		{"swipe_slow", "input -d 61 swipe 10 20 30 40 2000"},
 		{"key", "input -d 61 keyevent BACK"},
 	}
 	for _, testCase := range cases {
@@ -223,7 +225,11 @@ func TestInputArgvOnTheWire(t *testing.T) {
 		case "long_press":
 			receipt, err = d.LongPress(ctx, 61, 100, 200)
 		case "swipe":
-			receipt, err = d.Swipe(ctx, 61, 10, 20, 30, 40)
+			receipt, err = d.Swipe(ctx, 61, 10, 20, 30, 40, 300)
+		case "swipe_fast":
+			receipt, err = d.Swipe(ctx, 61, 10, 20, 30, 40, 50)
+		case "swipe_slow":
+			receipt, err = d.Swipe(ctx, 61, 10, 20, 30, 40, 2000)
 		case "key":
 			receipt, err = d.Key(ctx, 61, "BACK")
 		}
@@ -238,6 +244,26 @@ func TestInputArgvOnTheWire(t *testing.T) {
 		want := []string{"-s", "127.0.0.1:5555", "shell", testCase.argv}
 		if strings.Join(lines, "|") != strings.Join(want, "|") {
 			t.Fatalf("%s: argv=%q want %q", testCase.command, lines, want)
+		}
+	}
+}
+
+func TestSwipeDurationBounds(t *testing.T) {
+	d := newStubDevice(t, "input")
+	ctx := t.Context()
+	for _, invalid := range []int{-1, 0, 49, 2001, 10000} {
+		receipt, err := d.Swipe(ctx, 61, 10, 20, 30, 40, invalid)
+		if err == nil || CodeOf(err) != CodeInvalidArgs {
+			t.Fatalf("duration %d: receipt=%d err=%v want code %s", invalid, receipt, err, CodeInvalidArgs)
+		}
+	}
+	// A valid duration reaches the transport; the stub accepts it and the
+	// receipt is the ordinary terminated fact.
+	d.setShellV2(true)
+	for _, valid := range []int{50, 300, 2000} {
+		receipt, err := d.Swipe(ctx, 61, 10, 20, 30, 40, valid)
+		if err != nil || receipt != device.DispatchTerminated {
+			t.Fatalf("duration %d: receipt=%d err=%v", valid, receipt, err)
 		}
 	}
 }

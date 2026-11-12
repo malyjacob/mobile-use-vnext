@@ -17,18 +17,26 @@ import (
 // ---------------------------------------------------------------- fake device
 
 type fakeDevice struct {
-	bootID         string
-	deviceID       string
-	identityErr    error
-	mu             sync.Mutex
-	width, height  int
-	density        int
-	displayExists  bool
-	sfid           uint64
-	helperCalls    int
-	taps           [][2]int
-	keys           []string
-	texts          []string
+	bootID        string
+	deviceID      string
+	identityErr   error
+	mu            sync.Mutex
+	width, height int
+	density       int
+	displayExists bool
+	sfid          uint64
+	helperCalls   int
+	taps          [][2]int
+	keys          []string
+	texts         []string
+	// swipes records every raw/controlled swipe with the exact display,
+	// trajectory and duration that reached the adapter. A test may script the
+	// receipt/error and run one hook after the call is recorded (outside the
+	// device lock) to interleave a STOP with the dispatch window.
+	swipes         []swipeCall
+	swipeReceipt   *device.DispatchReceipt
+	swipeErr       error
+	swipeHook      func()
 	inputFocused   bool
 	inputText      string
 	checked        bool
@@ -176,8 +184,22 @@ func (f *fakeDevice) Tap(_ context.Context, displayID, x, y int) (device.Dispatc
 func (f *fakeDevice) LongPress(_ context.Context, displayID, x, y int) (device.DispatchReceipt, error) {
 	return f.Tap(nil, displayID, x, y)
 }
-func (f *fakeDevice) Swipe(context.Context, int, int, int, int, int) (device.DispatchReceipt, error) {
-	return device.DispatchTerminated, nil
+func (f *fakeDevice) Swipe(_ context.Context, displayID, x1, y1, x2, y2, durationMS int) (device.DispatchReceipt, error) {
+	f.mu.Lock()
+	f.swipes = append(f.swipes, swipeCall{
+		displayID: displayID, x1: x1, y1: y1, x2: x2, y2: y2, durationMS: durationMS,
+	})
+	receipt := device.DispatchTerminated
+	if f.swipeReceipt != nil {
+		receipt = *f.swipeReceipt
+	}
+	err := f.swipeErr
+	hook := f.swipeHook
+	f.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	return receipt, err
 }
 func (f *fakeDevice) Key(_ context.Context, displayID int, key string) (device.DispatchReceipt, error) {
 	f.mu.Lock()
@@ -258,6 +280,11 @@ func (f *fakeDevice) captureLocked(display device.Display) (device.Capture, erro
 		Foreground: device.Foreground{State: device.ForegroundPresent, Package: "com.example", TaskID: intPtr(42)},
 		CapturedAt: time.Now(),
 	}, nil
+}
+
+// swipeCall is one recorded device swipe.
+type swipeCall struct {
+	displayID, x1, y1, x2, y2, durationMS int
 }
 
 func intPtr(v int) *int { return &v }

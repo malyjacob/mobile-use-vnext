@@ -28,12 +28,20 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 	staticObs := e.observations[req.ObservationID]
 	e.mu.Unlock()
 	var point *pointCheck
+	var scroll *scrollPlan
 	if staticErr == nil {
-		point, staticErr = staticActContentCheck(staticObs, &req.Operation)
+		point, scroll, staticErr = staticActContentCheck(staticObs, &req.Operation)
 	}
 	if staticErr != nil {
-		e.logActPoint(point, false)
+		e.logActPoint(op.ID, point, false)
 		return e.finishWithError(op, "admission", staticErr), nil
+	}
+	if scroll != nil {
+		e.logScrollPlan(op.ID, scroll)
+		// The action fact must exist before the work position is taken: busy,
+		// dispatch-unknown, revoked and post-failure exits must still let
+		// status(P) know the original action.
+		e.recordScrollAction(op)
 	}
 
 	work, busy := e.acquireWork(op, WorkAct)
@@ -54,9 +62,17 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 	e.mu.Unlock()
 
 	e.setOperationPhase(op, "revalidate")
-	fresh, raw, revalidateErr := e.revalidateActTarget(work, obs, &req.Operation, point)
+	var fresh *device.Capture
+	var raw *device.RawNode
+	var frame *scrollFrame
+	var revalidateErr *protocol.APIError
+	if scroll != nil {
+		fresh, frame, revalidateErr = e.revalidateScrollTarget(work, obs, scroll)
+	} else {
+		fresh, raw, revalidateErr = e.revalidateActTarget(work, obs, &req.Operation, point)
+	}
 	if revalidateErr != nil {
-		e.logActPoint(point, false)
+		e.logActPoint(op.ID, point, false)
 		revalidateErr.Outcome = OutcomeNotExecuted
 		// The rejected revalidation has already read one frame. Publishing it
 		// hands the caller fresh evidence instead of making it observe again;
@@ -71,15 +87,26 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 		}
 		return result, nil
 	}
-	e.logActPoint(point, point != nil && point.state == pointUnique)
+	e.logActPoint(op.ID, point, point != nil && point.state == pointUnique)
 
 	e.setOperationPhase(op, "dispatch")
-	outcome, dispatchErr := e.dispatchAct(work, obs, &req.Operation, fresh, raw)
+	var outcome string
+	var dispatchErr *protocol.APIError
+	if scroll != nil {
+		outcome, dispatchErr = e.dispatchScroll(work, frame)
+	} else {
+		outcome, dispatchErr = e.dispatchAct(work, obs, &req.Operation, fresh, raw)
+	}
 	if outcome == OutcomeUncertain {
 		e.markDispatchUnknown(work)
 		result := newResult(op)
 		result.Outcome = OutcomeUncertain
 		result.Error = dispatchErr.Public()
+		if scroll != nil {
+			// A dispatched scroll whose receipt is unconfirmed has no effect
+			// fact: unknown is the honest projection, never not_observed.
+			result.Effect = &protocol.Effect{State: protocol.EffectUnknown}
+		}
 		result.Recovery = e.finishOperation(op, OutcomeUncertain, "dispatch", dispatchErr)
 		e.addSessionIfEnded(result)
 		return result, nil
@@ -95,6 +122,7 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 	if e.workRevoked(work) {
 		result := newResult(op)
 		result.Outcome = OutcomeExecuted
+		addScrollUnknownEffect(result, scroll)
 		result.Recovery = e.finishOperation(op, OutcomeExecuted, "executed_revoked", nil)
 		e.addSessionIfEnded(result)
 		return result, nil
@@ -103,17 +131,19 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 	if session == nil {
 		result := newResult(op)
 		result.Outcome = OutcomeExecuted
+		addScrollUnknownEffect(result, scroll)
 		result.Recovery = e.finishOperation(op, OutcomeExecuted, "executed_revoked", nil)
 		e.addSessionIfEnded(result)
 		return result, nil
 	}
-	public, _, postErr := e.captureAndPublish(work.Ctx, work, session, false, req.Image, "act")
+	public, postObs, postErr := e.captureAndPublish(work.Ctx, work, session, false, req.Image, "act")
 	if postErr != nil && postErr.Code == protocol.CodeStopped {
 		// A revoked session has no post observation to publish; the action
 		// itself stays executed. This is the same fact as the pre-capture
 		// revocation check above, only observed one step later.
 		result := newResult(op)
 		result.Outcome = OutcomeExecuted
+		addScrollUnknownEffect(result, scroll)
 		result.Recovery = e.finishOperation(op, OutcomeExecuted, "executed_revoked", nil)
 		e.addSessionIfEnded(result)
 		return result, nil
@@ -130,13 +160,33 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 				Status: "failed", Missing: []string{"tree"}, Error: postErr.Public(),
 			}
 		}
+		addScrollUnknownEffect(result, scroll)
 		result.Recovery = e.finishOperation(op, OutcomeExecuted, "post_observation_failed", nil)
 		return result, nil
 	}
 	result.Outcome = OutcomeExecuted
 	result.Observation = public
+	if scroll != nil {
+		state := e.inferScrollEffect(work, frame, postObs, public, scroll.direction)
+		if e.commitScrollEffect(work, op, state) {
+			result.Effect = &protocol.Effect{State: state}
+		} else {
+			// The effect was computed outside the state lock but its commit
+			// gate no longer holds (revoked/frozen): the first result must not
+			// claim a fact the retained P cannot project.
+			result.Effect = &protocol.Effect{State: protocol.EffectUnknown}
+		}
+	}
 	result.Recovery = e.finishOperation(op, OutcomeExecuted, "finished", nil)
 	return result, nil
+}
+
+// addScrollUnknownEffect projects the bounded unknown effect of a scroll
+// attempt that ended before any effect could be computed.
+func addScrollUnknownEffect(result *protocol.Result, plan *scrollPlan) {
+	if result != nil && plan != nil {
+		result.Effect = &protocol.Effect{State: protocol.EffectUnknown}
+	}
 }
 
 func (e *Engine) addSessionIfEnded(result *protocol.Result) {
@@ -186,68 +236,77 @@ func (e *Engine) staticActCheckLocked(agent, observationID string, operation *pr
 }
 
 // The projection is immutable; all node traversal happens outside e.mu.
-func staticActContentCheck(obs *observationState, operation *protocol.Operation) (*pointCheck, *protocol.APIError) {
+func staticActContentCheck(obs *observationState, operation *protocol.Operation) (*pointCheck, *scrollPlan, *protocol.APIError) {
 	screen := obs.Screen
 	switch operation.Type {
 	case "tap", "long_press", "text":
 		if operation.Target == nil {
-			return nil, protocol.Invalid("操作缺少 target")
+			return nil, nil, protocol.Invalid("操作缺少 target")
 		}
 		if operation.Target.UseRef {
 			node := findPublicNode(obs.Projection.Tree.Root, operation.Target.Ref)
 			if node == nil {
-				return nil, protocol.NewError(409, protocol.CodeNodeNotFound, "目标节点不存在")
+				return nil, nil, protocol.NewError(409, protocol.CodeNodeNotFound, "目标节点不存在")
 			}
 			if node.Role == protocol.RoleRoot || node.Context || node.Bounds == nil {
-				return nil, protocol.NewError(422, protocol.CodeNodeUnsupported, "该节点不能作为操作目标")
+				return nil, nil, protocol.NewError(422, protocol.CodeNodeUnsupported, "该节点不能作为操作目标")
 			}
 			if node.Enabled != nil && !*node.Enabled {
-				return nil, protocol.NewError(409, protocol.CodeNodeDisabled, "目标节点已禁用")
+				return nil, nil, protocol.NewError(409, protocol.CodeNodeDisabled, "目标节点已禁用")
 			}
 			switch operation.Type {
 			case "tap":
 				if !hasAction(node, protocol.ActionTap) {
-					return nil, protocol.NewError(422, protocol.CodeNodeUnsupported, "目标节点不支持点击")
+					return nil, nil, protocol.NewError(422, protocol.CodeNodeUnsupported, "目标节点不支持点击")
 				}
 			case "long_press":
 				if !hasAction(node, protocol.ActionLongPress) {
-					return nil, protocol.NewError(422, protocol.CodeNodeUnsupported, "目标节点不支持长按")
+					return nil, nil, protocol.NewError(422, protocol.CodeNodeUnsupported, "目标节点不支持长按")
 				}
 			case "text":
 				if node.Role != protocol.RoleInput || !hasAction(node, protocol.ActionText) {
-					return nil, protocol.NewError(422, protocol.CodeTextTargetUnknown,
+					return nil, nil, protocol.NewError(422, protocol.CodeTextTargetUnknown,
 						"文字操作需要可确认的真实输入对象")
 				}
 				if node.Protected == nil || *node.Protected {
-					return nil, protocol.NewError(422, protocol.CodeTextTargetUnknown,
+					return nil, nil, protocol.NewError(422, protocol.CodeTextTargetUnknown,
 						"无法确认该输入对象不受保护")
 				}
 			}
-			return nil, nil
+			return nil, nil, nil
 		}
 		if !inScreen(operation.Target.X, operation.Target.Y, screen) {
-			return nil, protocol.NewError(422, protocol.CodeInvalidCoordinates, "坐标超出目标屏幕")
+			return nil, nil, protocol.NewError(422, protocol.CodeInvalidCoordinates, "坐标超出目标屏幕")
 		}
-		return resolveObservedPoint(obs, operation)
+		check, apiErr := resolveObservedPoint(obs, operation)
+		return check, nil, apiErr
 	case "swipe":
 		if operation.From == nil || operation.To == nil {
-			return nil, protocol.Invalid("swipe 缺少起终点")
+			return nil, nil, protocol.Invalid("swipe 缺少起终点")
+		}
+		if operation.Target != nil || operation.Container != nil || operation.Key != "" ||
+			operation.Text != "" || operation.Direction != "" || operation.Amount != "" {
+			return nil, nil, protocol.Invalid("swipe 不接受 target/container/key/text/direction/amount")
 		}
 		if !inScreen(operation.From.X, operation.From.Y, screen) ||
 			!inScreen(operation.To.X, operation.To.Y, screen) {
-			return nil, protocol.NewError(422, protocol.CodeInvalidCoordinates, "坐标超出目标屏幕")
+			return nil, nil, protocol.NewError(422, protocol.CodeInvalidCoordinates, "坐标超出目标屏幕")
 		}
-		return resolveObservedPoint(obs, operation)
+		check, apiErr := resolveObservedPoint(obs, operation)
+		return check, nil, apiErr
+	case "scroll":
+		plan, apiErr := resolveScrollPlan(obs, operation)
+		return nil, plan, apiErr
 	case "key":
 		if screen.Rotation < 0 {
-			return nil, protocol.Invalid("屏幕信息无效")
+			return nil, nil, protocol.Invalid("屏幕信息无效")
 		}
 		if screen.ID != 0 && (operation.Key == "HOME" || operation.Key == "APP_SWITCH") {
-			return nil, protocol.NewError(422, protocol.CodeInvalidKey,
+			return nil, nil, protocol.NewError(422, protocol.CodeInvalidKey,
 				"HOME/APP_SWITCH 需要共享主屏")
 		}
 	}
-	return nil, nil
+	return nil, nil, nil
 }
 
 // claimObservationLocked performs the one-way ready->claimed transition and
@@ -373,14 +432,15 @@ func targetChangedAtPoint() *protocol.APIError {
 		"目标点上的节点已变化，本次未派发")
 }
 
-// logActPoint records one coordinate-target decision. Only the resolution
-// state, whether the node-level proof succeeded and the pure-CPU cost are
-// written; the point, refs, labels and tree content never are.
-func (e *Engine) logActPoint(point *pointCheck, proven bool) {
+// logActPoint records one coordinate-target decision. Only the operation, the
+// resolution state, whether the node-level proof succeeded and the pure-CPU
+// cost are written; the point, refs, labels and tree content never are.
+func (e *Engine) logActPoint(operationID string, point *pointCheck, proven bool) {
 	if point == nil {
 		return
 	}
 	e.log.Event(eventlog.Debug, "act.point",
+		eventlog.Str("operation_id", operationID),
 		eventlog.Str("state", string(point.state)),
 		eventlog.Bool("proven", proven),
 		eventlog.Duration("ms", point.took))
@@ -447,7 +507,14 @@ func (e *Engine) dispatchAct(work *workState, obs *observationState,
 	case "long_press":
 		receipt, dispatchErr = e.dev.LongPress(work.Ctx, displayID, x, y)
 	case "swipe":
-		receipt, dispatchErr = e.dev.Swipe(work.Ctx, displayID, operation.From.X, operation.From.Y, operation.To.X, operation.To.Y)
+		duration := operation.DurationMS
+		if duration == 0 {
+			// An engine-internal construction may omit the decoded default;
+			// the adapter requires an explicit bounded duration.
+			duration = protocol.DefaultSwipeDurationMS
+		}
+		receipt, dispatchErr = e.dev.Swipe(work.Ctx, displayID, operation.From.X, operation.From.Y,
+			operation.To.X, operation.To.Y, duration)
 	default:
 		receipt = device.DispatchNotDispatched
 		dispatchErr = protocol.Invalid("不支持的操作")

@@ -93,21 +93,30 @@ func (d *Device) TaskList(ctx context.Context) ([]device.Task, error) {
 
 // Tap issues one display-bound tap. It never retries or changes display.
 func (d *Device) Tap(ctx context.Context, displayID, x, y int) (device.DispatchReceipt, error) {
-	return d.dispatchInput(ctx, device.InputTap, displayID, x, y, x, y, "")
+	return d.dispatchInput(ctx, device.InputTap, displayID, x, y, x, y, 0, "")
 }
 
 // LongPress issues one 700 ms swipe at the point.
 func (d *Device) LongPress(ctx context.Context, displayID, x, y int) (device.DispatchReceipt, error) {
-	return d.dispatchInput(ctx, device.InputLongPress, displayID, x, y, x, y, "")
+	return d.dispatchInput(ctx, device.InputLongPress, displayID, x, y, x, y, longPressDurationMS, "")
 }
 
-// Swipe issues one display-bound swipe gesture.
-func (d *Device) Swipe(ctx context.Context, displayID, x1, y1, x2, y2 int) (device.DispatchReceipt, error) {
-	return d.dispatchInput(ctx, device.InputSwipe, displayID, x1, y1, x2, y2, "")
+// Swipe issues one display-bound swipe gesture with an explicit bounded
+// duration. The adapter rejects an out-of-range duration instead of silently
+// substituting a default; the engine always sends the decoded/default value.
+func (d *Device) Swipe(ctx context.Context, displayID, x1, y1, x2, y2, durationMS int) (device.DispatchReceipt, error) {
+	if durationMS < minSwipeDurationMS || durationMS > maxSwipeDurationMS {
+		return device.DispatchNotDispatched,
+			newErr(CodeInvalidArgs, "swipe duration is outside the allowed range", nil)
+	}
+	return d.dispatchInput(ctx, device.InputSwipe, displayID, x1, y1, x2, y2, durationMS, "")
 }
 
-// swipeDurationMS is the plain swipe duration.
-const swipeDurationMS = 300
+// Bounded duration range of the raw swipe gesture.
+const (
+	minSwipeDurationMS = 50
+	maxSwipeDurationMS = 2000
+)
 
 // keyPattern is the accepted Android key-event token shape.
 var keyPattern = regexp.MustCompile(`^[A-Z0-9_]{1,64}$`)
@@ -125,7 +134,7 @@ func (d *Device) Key(ctx context.Context, displayID int, key string) (device.Dis
 		return device.DispatchNotDispatched,
 			newErr(CodeInvalidKey, "the key token is not a supported key name", nil)
 	}
-	return d.dispatchInput(ctx, device.InputKey, displayID, 0, 0, 0, 0, key)
+	return d.dispatchInput(ctx, device.InputKey, displayID, 0, 0, 0, 0, 0, key)
 }
 
 func (d *Device) validatePoint(displayID, x, y int) error {
@@ -143,7 +152,7 @@ func (d *Device) validatePoint(displayID, x, y int) error {
 
 // dispatchInput validates one primitive, builds its exact argv and runs it.
 func (d *Device) dispatchInput(ctx context.Context, kind device.InputKind,
-	displayID, x, y, toX, toY int, key string,
+	displayID, x, y, toX, toY, durationMS int, key string,
 ) (device.DispatchReceipt, error) {
 	if kind != device.InputKey {
 		if err := d.validatePoint(displayID, x, y); err != nil {
@@ -155,7 +164,7 @@ func (d *Device) dispatchInput(ctx context.Context, kind device.InputKind,
 			}
 		}
 	}
-	argv, err := inputArgv(kind, displayID, x, y, toX, toY, key)
+	argv, err := inputArgv(kind, displayID, x, y, toX, toY, durationMS, key)
 	if err != nil {
 		return device.DispatchNotDispatched, err
 	}
@@ -193,8 +202,9 @@ func (d *Device) inputCommand(ctx context.Context, kind device.InputKind,
 }
 
 // inputArgv builds the argv for one input primitive. It exists so the command
-// construction is unit-testable without a device.
-func inputArgv(kind device.InputKind, displayID, x, y, toX, toY int, key string) ([]string, error) {
+// construction is unit-testable without a device. A swipe keeps the explicit
+// duration it was given; a long press keeps its fixed 700 ms.
+func inputArgv(kind device.InputKind, displayID, x, y, toX, toY, durationMS int, key string) ([]string, error) {
 	if displayID < 0 {
 		return nil, newErr(CodeInvalidArgs, "invalid display id", nil)
 	}
@@ -209,7 +219,7 @@ func inputArgv(kind device.InputKind, displayID, x, y, toX, toY int, key string)
 	case device.InputSwipe:
 		return append(prefix, "swipe",
 			strconv.Itoa(x), strconv.Itoa(y), strconv.Itoa(toX), strconv.Itoa(toY),
-			strconv.Itoa(swipeDurationMS)), nil
+			strconv.Itoa(durationMS)), nil
 	case device.InputKey:
 		if !keyPattern.MatchString(key) {
 			return nil, newErr(CodeInvalidKey, "the key token is not a supported key name", nil)
