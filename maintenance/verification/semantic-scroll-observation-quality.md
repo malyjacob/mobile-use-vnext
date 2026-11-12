@@ -1,6 +1,6 @@
 # 受控 scroll、raw swipe duration 与观察质量/效果：实现与验证记录
 
-- 提案：[semantic-scroll-observation-quality.md](../proposals/semantic-scroll-observation-quality.md)（确认后实施；归档移动后路径见归档提交）。
+- 提案：[semantic-scroll-observation-quality.md](../proposals/implemented/semantic-scroll-observation-quality.md)（确认后实施）。
 - 实现提交（按顺序）：
   1. `273bda4` 契约 10 协议与版本源（scroll/swipe duration/quality/effect 线格式）；
   2. `c939f79` 发布/部署脚本门禁与旧项目部署兼容清理；

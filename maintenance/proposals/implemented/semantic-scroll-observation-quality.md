@@ -1,8 +1,8 @@
 # 提案：受控 scroll 尝试、raw swipe 与观察质量分层（contract 10）
 
-状态：提案，未实现。
-确认记录：2026-11-12 用户已通过本提案；本会话仅提交提案与配套工程规范，不进入实施，
-实施由后续会话另行启动。
+状态：已实现（实现提交 `2cc559a`，2026-11-12）。
+实现与验证记录：[semantic-scroll-observation-quality.md](../../verification/semantic-scroll-observation-quality.md)。
+确认记录：2026-11-12 用户已通过本提案；提案提交后由后续会话实施，结果见 §11。
 基线提交：`fcfd593e6829389361f0d7c0eb59faccb3d6e378`（分支 `master`，2026-11-12）。
 适用范围：`act` 的 `scroll` 新分支、`swipe` 的可选 `duration_ms`、所有成功发布的 `Observation` 的质量标记、`act scroll` 的滚动效果；HTTP/MCP/Go client/控制同步的 contract 10 对接；手机与主机整组重建；实现后的提交/推送/issue #10 闭环。
 影响范围：`internal/protocol`、`internal/engine`、`internal/observation`、`internal/android`、`internal/eventlog`、`internal/mcp`、`internal/client`、`internal/httpapi`（契约、投影与测试）、`docs/interface.md`、`docs/architecture.md`、`docs/mcp.md`、`docs/release.md`、`docs/runbook.md`、`docs/client.md`、`docs/integration.md`、`docs/control-protocol.md`、`docs/phone-operations.md`、`release/versions.json` 与生成版本文件、`scripts/mcp-probe` 及发布/验证脚本、`maintenance/verification/`。
@@ -72,54 +72,54 @@
 代码可确认的部分：
 
 1. **swipe 只有 from/to，固定 300ms，静态检查不查 scrollable。**
-   `Operation` 只有 `Type/Target/From/To/Key/Text`（[requests.go:49-56](../../internal/protocol/requests.go#L49-L56)）；
-   `swipe` 分支只校验 from/to、同屏、起点点解析（[act.go:232-240](../../internal/engine/act.go#L232-L240)）；
-   执行层固定 `swipeDurationMS = 300`（[foreground.go:104-110](../../internal/android/foreground.go#L104-L110)、
-   [209-212](../../internal/android/foreground.go#L209-L212)）。
+   `Operation` 只有 `Type/Target/From/To/Key/Text`（[requests.go:49-56](../../../internal/protocol/requests.go#L49-L56)）；
+   `swipe` 分支只校验 from/to、同屏、起点点解析（[act.go:232-240](../../../internal/engine/act.go#L232-L240)）；
+   执行层固定 `swipeDurationMS = 300`（[foreground.go:104-110](../../../internal/android/foreground.go#L104-L110)、
+   [209-212](../../../internal/android/foreground.go#L209-L212)）。
 2. **swipe 起点仍走完整身份证明。**
-   `revalidateActTarget` 对坐标目标调用 `provePointTarget`（[act.go:292-333](../../internal/engine/act.go#L292-L333)）；
+   `revalidateActTarget` 对坐标目标调用 `provePointTarget`（[act.go:292-333](../../../internal/engine/act.go#L292-L333)）；
    `provePointTarget` 先用 `matchFreshNode` 要求完整 identity + 祖先唯一，再要求新鲜公开树
-   把同一点解析到同一来源节点（[act.go:341-369](../../internal/engine/act.go#L341-L369)）。
-   `rawIdentity` 含 `Bounds`（[identity.go:27](../../internal/engine/identity.go#L27)）。
+   把同一点解析到同一来源节点（[act.go:341-369](../../../internal/engine/act.go#L341-L369)）。
+   `rawIdentity` 含 `Bounds`（[identity.go:27](../../../internal/engine/identity.go#L27)）。
 3. **settle 摘要与重验同源，也含 bounds。**
    `sampleDigest` 的三层摘要包含节点身份链、公开树和前台/显示语境
-   （[settle.go:110-124](../../internal/engine/settle.go#L110-L124)）；
-   身份指纹写入 bounds（[settle.go:293-318](../../internal/engine/settle.go#L293-L318)）。
-   滚动中的页面因此天然不收敛；预算/帧数耗尽时仍发布最后一帧（[settle.go:201-204](../../internal/engine/settle.go#L201-L204)；
-   [capture.go:317-348](../../internal/engine/capture.go#L317-L348)）。
+   （[settle.go:110-124](../../../internal/engine/settle.go#L110-L124)）；
+   身份指纹写入 bounds（[settle.go:293-318](../../../internal/engine/settle.go#L293-L318)）。
+   滚动中的页面因此天然不收敛；预算/帧数耗尽时仍发布最后一帧（[settle.go:201-204](../../../internal/engine/settle.go#L201-L204)；
+   [capture.go:317-348](../../../internal/engine/capture.go#L317-L348)）。
 4. **stable/samples 只进日志，不进 O。**
    `logSettle` 明确写着“diagnostic only and never part of the published observation”
-   （[settle.go:363-373](../../internal/engine/settle.go#L363-L373)）。O 的公开形状没有质量字段
-   （[responses.go:154-167](../../internal/protocol/responses.go#L154-L167)）。
+   （[settle.go:363-373](../../../internal/engine/settle.go#L363-L373)）。O 的公开形状没有质量字段
+   （[responses.go:154-167](../../../internal/protocol/responses.go#L154-L167)）。
 5. **后观察无论是否稳定都按普通 ready O 发布。**
    `Act` 在 `executed` 后调用 `captureAndPublish`，成功后把观察放进结果
-   （[act.go:110-138](../../internal/engine/act.go#L110-L138)）；O 的有效期从采集起点算
-   （[capture.go:206-212](../../internal/engine/capture.go#L206-L212)），不因未收敛而缩短。
+   （[act.go:110-138](../../../internal/engine/act.go#L110-L138)）；O 的有效期从采集起点算
+   （[capture.go:206-212](../../../internal/engine/capture.go#L206-L212)），不因未收敛而缩短。
 6. **observe 不做收敛采样。**
-   `observe` 只处理 `wait_ms` 后单次 `captureAndPublish`（[observe.go:51-70](../../internal/engine/observe.go#L51-L70)）；
-   settle 策略只对 `act`/`start`/`app` 阶段启用（[settle.go:95-107](../../internal/engine/settle.go#L95-L107)）。
+   `observe` 只处理 `wait_ms` 后单次 `captureAndPublish`（[observe.go:51-70](../../../internal/engine/observe.go#L51-L70)）；
+   settle 策略只对 `act`/`start`/`app` 阶段启用（[settle.go:95-107](../../../internal/engine/settle.go#L95-L107)）。
    4 次 wait1500 后成功，只能说明动作时锚点未变，不能说明 O 稳定。
 7. **ref 不是稳定对象 ID。**
-   连续性规则是“唯一候选才续号，歧义一律新号”（[match.go:8-30](../../internal/observation/match.go#L8-L30)、
-   [475-482](../../internal/observation/match.go#L475-L482)）；容器 `n372` 的几何稳定不等于文章身份稳定。
+   连续性规则是“唯一候选才续号，歧义一律新号”（[match.go:8-30](../../../internal/observation/match.go#L8-L30)、
+   [475-482](../../../internal/observation/match.go#L475-L482)）；容器 `n372` 的几何稳定不等于文章身份稳定。
 8. **当前证据没有 window/activity/z-order 与滚动轴。**
-   设备 `RawNode` 只有 `Scrollable bool`（[types.go:76-119](../../internal/device/types.go#L76-L119)），
-   XML 只读 `scrollable`（[hierarchy.go:201-218](../../internal/android/hierarchy.go#L201-L218)）；
-   `Axis` 字段存在于公开节点（[node.go:59-72](../../internal/protocol/node.go#L59-L72)、
-   [141](../../internal/protocol/node.go#L141)），但 `newPublicNode` 从不赋值
-   （[build.go:333-381](../../internal/observation/build.go#L333-L381)）。
+   设备 `RawNode` 只有 `Scrollable bool`（[types.go:76-119](../../../internal/device/types.go#L76-L119)），
+   XML 只读 `scrollable`（[hierarchy.go:201-218](../../../internal/android/hierarchy.go#L201-L218)）；
+   `Axis` 字段存在于公开节点（[node.go:59-72](../../../internal/protocol/node.go#L59-L72)、
+   [141](../../../internal/protocol/node.go#L141)），但 `newPublicNode` 从不赋值
+   （[build.go:333-381](../../../internal/observation/build.go#L333-L381)）。
 
 代码路径与现象一致的推断：起点叶节点 bounds 变化会直接令 `matchFreshNode` 失败；即使
 `matchFreshNode` 通过，点在新树中也可能落到别的叶节点；点落空时又会走前台级回退
-（[point.go:54-92](../../internal/engine/point.go#L54-L92)、[point.go:13](../../internal/engine/point.go#L13)，
-[act.go:315-321](../../internal/engine/act.go#L315-L321)）。这解释了“正文密集处更容易 R、
+（[point.go:54-92](../../../internal/engine/point.go#L54-L92)、[point.go:13](../../../internal/engine/point.go#L13)，
+[act.go:315-321](../../../internal/engine/act.go#L315-L321)）。这解释了“正文密集处更容易 R、
 空白边距反而可能 E”的反常，也解释了容器不动而 R 仍发生。是否唯一根因仍需一次受控的
 “容器不动、叶节点移动”复现；本提案不把推断写成实机结论。
 
 ### 1.3 为什么直觉会出错
 
 - **删除 `Bounds` 或全局放宽 identity**：`identityOf` 同时服务 tap 重验与 settle
-  （[identity.go:19-23](../../internal/engine/identity.go#L19-L23)）；全局放宽会让移动后的
+  （[identity.go:19-23](../../../internal/engine/identity.go#L19-L23)）；全局放宽会让移动后的
   tap 仍可能命中，并改变 settle 的定义。不能用一个共享判据换取 swipe 的吞吐。
 - **只加 duration/延迟**：duration 只改变手势速度；不改变“起点叶节点完整身份”和
   “不稳定 O 照常授权”这两条。长 duration 甚至可能让内容在重验窗口内继续移动。
@@ -129,7 +129,7 @@
 - **把 ref 当稳定对象**：同模板换文章可以保持容器 ref、bounds、class/resource 不变；
   ref 只能证明“会话内保守连续的公开单位”，不能证明文章或业务对象。
 - **做一个通用 gesture DSL（路径/多点/曲线/压力）**：当前执行层只有两点的 `input swipe`
-  （[foreground.go:197-219](../../internal/android/foreground.go#L197-L219)），路径数组无法
+  （[foreground.go:197-219](../../../internal/android/foreground.go#L197-L219)），路径数组无法
   真实执行，除非另建执行栈；这会把一个滚动可用性问题升级为无限手势协议。
 
 ---
@@ -238,7 +238,7 @@ R6 是另一条执行能力路线，当前没有执行面，不在本提案假�
   只有 `swipe` 接受该字段。
 - 起点仍沿用现有“唯一最深点 + 完整 identity + 祖先 + 同点解析”的证明；raw swipe 不承诺
   滚动，因此内容移动时仍可 `target_changed`。调用方要受控滚动尝试应使用 `scroll`。
-- `ambiguous_point` 的错误码/行为不变；当前 [point.go:122-125](../../internal/engine/point.go#L122-L125)
+- `ambiguous_point` 的错误码/行为不变；当前 [point.go:122-125](../../../internal/engine/point.go#L122-L125)
   的“请改用 ref”对 raw swipe 不可执行，改为操作相关文案：
   “起点落在多个同级节点上；raw swipe 请调整起点，或改用 scroll 的 container 指定容器”，
   不再提示“改用 ref”（raw swipe 不接受 ref）。这只修提示，不解决 #7 的完整歧义/重验问题。
@@ -390,9 +390,9 @@ closed/淘汰等短结果按 §4.6 允许省略，不能据重放 payload 补造
 ### 4.6 P 事实、冻结、去重与 effect 存在性
 
 `status(P)`/重复 P 当前只复制 `operationState` 的短事实（`operationViewLocked`，当前
-[engine.go:1061-1099](../../internal/engine/engine.go#L1061-L1099)），不会重算、不会附 O；
-`finishOperation`（[operations.go:135-164](../../internal/engine/operations.go#L135-L164)）
-也当前不保存 action/effect，冻结投影（[retirement.go:525-538](../../internal/engine/retirement.go#L525-L538)）
+[engine.go:1061-1099](../../../internal/engine/engine.go#L1061-L1099)），不会重算、不会附 O；
+`finishOperation`（[operations.go:135-164](../../../internal/engine/operations.go#L135-L164)）
+也当前不保存 action/effect，冻结投影（[retirement.go:525-538](../../../internal/engine/retirement.go#L525-L538)）
 只替换 Result。effect 必须进入同一份有界 op 事实，但不能把“缺失”伪装成“未移动”：
 
 - **首次受理的 scroll**：新 P 通过静态 scroll 解析后、acquire/claim/dispatch 之前，在短锁内
@@ -407,13 +407,13 @@ closed/淘汰等短结果按 §4.6 允许省略，不能据重放 payload 补造
   已提交 effect 时投影 `unknown`；`not_executed`/未派发不出现 effect。status/重复 P 只复制
   已保存值，不附 observation、不重算、不重新采集。
 - **closed tombstone**：`closedKnown=true` 的 status 返回 `not_executed`/`closed_before_admission`；
-  `closedKnown=false` 的 status 返回 `operation_unknown`（[status.go:96-106](../../internal/engine/status.go#L96-L106)）。
-  同一 closed P 再次登记时，[operations.go:71-80](../../internal/engine/operations.go#L71-L80)
+  `closedKnown=false` 的 status 返回 `operation_unknown`（[status.go:96-106](../../../internal/engine/status.go#L96-L106)）。
+  同一 closed P 再次登记时，[operations.go:71-80](../../../internal/engine/operations.go#L71-L80)
   按 `closedOutcome` 返回 `not_executed`（known）或 `uncertain`（unknown），均带
   `request_closed`；两者都没有原 action/effect，允许省略。缺失不是 `not_observed`，不得用
   重放 body 猜原 action 再补 `unknown`。
 - **已淘汰 finished P**：`evictOperationsLocked` 可删除 finished op
-  （[operations.go:99-121](../../internal/engine/operations.go#L99-L121)）。若现有接纳把完全
+  （[operations.go:99-121](../../../internal/engine/operations.go#L99-L121)）。若现有接纳把完全
   淘汰的 P 视为新登记，就按新操作事实返回；不得声称恢复了旧 P、旧 action 或旧 effect，也
   不扩大有界去重承诺/不改 ledger。进程重启后同样只按当前实例事实回答。
 - effect 不写 LEDGER；P 记录本身有界。`closed`/`request_closed`/已淘汰或原事实不可用时，
@@ -616,7 +616,7 @@ quality 由 settle run 投影（§4.4）：`samples<2` 为 `unknown`，`samples>
 
 复用 `act.*`、`observation.settle`、work/UI 事件。新增键必须先加入
 `internal/eventlog/log.go` 的单一白名单（当前白名单
-[log.go:63-86](../../internal/eventlog/log.go#L63-L86)），否则当前会被静默丢弃：
+[log.go:63-86](../../../internal/eventlog/log.go#L63-L86)），否则当前会被静默丢弃：
 
 | 事件 | 受控键 | 约束 |
 | --- | --- | --- |
@@ -706,7 +706,7 @@ issue 记录只引用本仓库的事实。实现后同步 `docs/interface.md`/`d
 产物为 `build/release/device-service`、`device-mcp`、`control.apk`、固定 u2/applist/
 service.sh 与 manifest；清单必须记录 contract 10、release 0.10.0、Android 12、实际构建
 HEAD 与 `source_dirty=false`。**不能只依赖现有脚本返回 0**：
-[verify-manifest.ps1:146-153](../../scripts/verify-manifest.ps1#L146-L153) 当前不强制
+[verify-manifest.ps1:146-153](../../../scripts/verify-manifest.ps1#L146-L153) 当前不强制
 dirty=false/HEAD，必须另加显式断言或用新脚本证明构建树 clean、两处 source_commit 等于
 实际 HEAD、phone manifest 完整存在（无 SkipAndroid/缺失）。
 
@@ -719,7 +719,7 @@ dirty=false/HEAD，必须另加显式断言或用新脚本证明构建树 clean�
 
 `build/device-mcp.exe` 与 `build/mcp-probe.exe` 必须与手机清单同源实现提交、同 contract 10、
 同 catalog 指纹；不得用 linux/arm64 文件改后缀冒充。
-[build-host-tools.ps1:439-445](../../scripts/build-host-tools.ps1#L439-L445) 当前在
+[build-host-tools.ps1:439-445](../../../scripts/build-host-tools.ps1#L439-L445) 当前在
 dirty=true 一致时仍可能 PASS，334–337 在缺 phone manifest 时可能 SKIP/PASS；最终交付必须
 显式断言两个 manifest 的 `source_dirty=false`、`source_commit==实际构建 HEAD`，phone
 manifest 存在且 companion 比对 PASS，不接受 SKIP，不得把脚本返回 0 当成这些条件已满足。
@@ -900,7 +900,7 @@ C. 契约、构建与部署：
 
 ### 8.4 交付门禁（实施完成后才执行）
 
-本提案当前只到“提案，未实现”；以下步骤本轮都不执行，不得提前创建实现 hash、部署记录、
+本提案起草时只到“提案，未实现”；以下步骤在起草轮都不执行，不得提前创建实现 hash、部署记录、
 评论或关闭 issue。
 
 1. 按本仓库 `maintenance/process.md` 完成实现 + 必要 docs；若涉及 `docs/`，做独立只读文档
@@ -957,7 +957,7 @@ C. 契约、构建与部署：
 建议，没有留给实现者临时猜测的产品语义。
 
 - **实施启动**：用户已于 2026-11-12 通过本文，并明确本会话只提交规范与提案、不进入
-  实施；后续会话另行启动实施。当前状态保持“提案，未实现”。
+  实施；后续会话另行启动实施，结果见 §11。
 - **发布前校准**：`scrollPageRatio/scrollHalfRatio/scrollDurationMS/effect*` 的初始值可在
   首次发布前按 §8.2 A/B 校准；改变判据/字段/时序或公开 effect 语义必须回写提案并重新
   确认。实现提交/发布后再改比例、速度、效果阈值属于默认行为/执行语义变更，按
@@ -1005,20 +1005,47 @@ C. 契约、构建与部署：
 
 ---
 
-## 11. 实现结果（归档时补写）
+## 11. 实现结果
 
-实现提交：`<hash>`。实现与验证记录：`../../verification/semantic-scroll-observation-quality.md`
-（本节在归档移动之后补写，届时文件在 `implemented/` 下，故链接比新建时多一层）。
+实现提交：`2cc559a`（正式文档）；实现按顺序为 `273bda4`（协议与版本源）、`c939f79`
+（发布/部署脚本门禁）、`383bca5`（MCP/client 投影）、`90fedf1`（engine 观察质量）、
+`4563621`（probe）、`65385a2`（verify-m6 上一契约）、`552acea`（engine scroll/effect）、
+`2cc559a`（文档）。实现与验证记录：
+[semantic-scroll-observation-quality.md](../../verification/semantic-scroll-observation-quality.md)。
 
 ### 11.1 已落地
 
 | 提案条目 | 落点 |
 | --- | --- |
+| 契约 10：`scroll` 的 container/direction/amount、`swipe.duration_ms`、`quality`/`effect` 线格式与严格解码 | `internal/protocol/requests.go`、`encode.go`、`responses.go`、`decode_response.go` |
+| 版本源 0.10.0 / 契约 10 / versionCode 12 | `release/versions.json` 与生成 Go/Java/XML/Manifest |
+| 静态容器解析、点候选归约、共用几何谓词 | `internal/engine/scroll.go`（`resolveScrollPlan`、`scrollContainerAtPoint`、`scrollGeometry`） |
+| 认领后容器完整身份/祖先、实际起终点最内层 scope、fresh 新帧交付 | `internal/engine/scroll.go`（`revalidateScrollTarget`、`scrollScopeMatches`）、`act.go` |
+| 受控轨迹派发（物理原语/账本仍 `swipe`，400ms） | `internal/engine/scroll.go`（`dispatchScroll`）、`act.go` |
+| raw swipe duration 与 `ambiguous_point` 可执行提示 | `internal/engine/act.go`、`point.go`、`internal/android/foreground.go` |
+| `Observation.quality`：settle stop_reason、image 刷新计入样本、交付/observe not_sampled、失败树无 quality | `internal/engine/settle.go`（`qualityOf`）、`capture.go`、`delivery.go` |
+| `Result.effect`：容器匹配、叶子内容单元、覆盖/尺寸/同号位移、CPU/ctx 预算 | `internal/engine/scroll.go`（`computeScrollEffect` 等） |
+| `ActAction`/`Effect` P 事实、条件化提交、status/重复 P 只复制、冻结不升级 | `internal/engine/engine.go`（`operationState`、`operationViewLocked`）、`operations.go` |
+| 受控日志事件与白名单 | `internal/engine/act.go`、`scroll.go`、`capture.go`、`delivery.go`、`internal/eventlog/log.go` |
+| MCP schema/guide/结果投影、client 解码 | `internal/mcp/schema.go`、`result_text.go`、`internal/client/client_test.go` |
+| probe 契约 10、scroll schema、quality/effect 断言 | `scripts/mcp-probe/` |
+| 发布门禁、开发-only `-AllowDirtySource`、部署只停本仓库、旧项目兼容清理 | `scripts/verify-manifest.ps1`、`build-host-tools.ps1`、`deploy.ps1`、`verify-m6.ps1` |
+| 正式文档与文档审计 | `docs/*.md`、`README.md`、`maintenance/decisions.md`；独立只读审计 CLEAN |
+| 单元/回归与反向对照 | `internal/engine/scroll_*_test.go`、`quality_test.go`、`internal/protocol/*_test.go`、`internal/mcp/*_test.go`、`internal/client/client_test.go`、`internal/android/transport_test.go`、`scripts/mcp-probe/*_test.go` |
 
 ### 11.2 与提案不同或未执行
 
 | 项 | 结论与理由 |
 | --- | --- |
+| companion 门禁位置 | 提案 §6.1 把“phone manifest 完整 + companion PASS”列在 `verify-manifest.ps1`；实现把 companion 比对放在 `build-host-tools.ps1 -VerifyOnly`，因为发布顺序先构建手机整组（`verify-manifest`）再构建主机工具，`verify-manifest` 时 host-tools manifest 尚不存在。两处合计覆盖提案门禁；`verify-manifest` 仍要求干净树、HEAD 前缀、`source_dirty=false` 与完整手机产物。 |
+| `-AllowDirtySource` | 提案未列出该开关。实现新增开发-only 参数：默认拒绝脏树；显式使用时清单记 `source_dirty=true`，且永远不能通过 `-VerifyOnly`。正式门禁不依赖它。 |
+| `verify-m6.ps1` | 契约 10 后其“上一发行契约”断言必须从 8 改为 9；只改常量与帮助文本，不改核验流程。 |
+| `scroll.revalidate` 的 `quality` 字段 | 实现记录重验时原观察的 quality state（受控枚举）；提案只要求该事件带 quality、不记录 raw identity，未规定取哪个观察的质量。 |
+| 实际起终点 scope 判定 | 实现要求每个候选的最近滚动作用域为 C 或 C 的外层祖先，且至少一个候选归约为 C；内层/不可比/其它 scope 拒绝。这是对“最内层必须是 C”与“外层包裹祖先允许”两条判据的合并读法；字面集合相等会误杀允许的外层祖先情形。 |
+| `effect` 提交门禁失效时的首个结果 | 计算成功但 `commitScrollEffect` 门禁不再成立（撤销/冻结）时，首个结果给 `effect=unknown`，不声明保留 P 无法投影的事实。 |
+| 实机部署与验收 | 未执行：手机整组部署、安装后 App/服务/MCP 哈希与 `can_start`、受控 scroll/raw/quality/effect 的跨应用实机样本、阈值校准、实际宿主 MCP 连接刷新与 catalog 比对均未做；见验证记录 §7。 |
+| issue #10、推送 | 未执行：按提案 §8.4/§10 只在实现、部署/实测、版本与远端记录齐备后回复/关闭和推送；本仓库当前没有推送记录。 |
+| 提案头部状态 | 原“提案，未实现”与“本会话不进入实施”按流程更新为“已实现”并补 §11；原确认日期与确认事实保留。 |
 
 ---
 
@@ -1038,4 +1065,5 @@ C. 契约、构建与部署：
 - 不把 `axis`、window/activity/z-order、滚动偏移新增为公开事实。
 - 不新增调用方 timeout/TTL/settle/速度/路径参数。
 - 不声称 `shell exited 0` 等同于会话屏移动。
-- 本轮不实现、不部署、不推送、不创建实现 hash、不发 issue 评论、不提前关闭 #10。
+- 提案起草本轮不实现、不部署、不推送、不创建实现 hash、不发 issue 评论、不提前关闭 #10；
+  实施结果见 §11。
