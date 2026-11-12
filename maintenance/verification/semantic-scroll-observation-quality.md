@@ -10,10 +10,12 @@
   6. `65385a2` verify-m6 的上一发行契约修正；
   7. `552acea` engine 受控 scroll / raw swipe duration / effect / P 事实；
   8. `2cc559a` 正式文档（含独立只读审计 CLEAN）。
-- 构建基线：`2cc559a`（干净工作树，`source_dirty=false`）。
+- 构建基线：首次构建 `2cc559a`；部署所用构建 `bd6aae7`（归档后最终 HEAD，源码与 `2cc559a`
+  相同，仅 maintenance 提交不同；清单 `source_commit=bd6aae7`、`source_dirty=false`）。
 - 环境：Windows 主机（Go 1.27.1 windows/amd64，`GOEXPERIMENT=jsonv2`，JDK 17.0.20.1、
-  Android SDK 可用）；未做手机部署、未触碰设备服务与 App。
-- 本记录分开写“已实现 / 已单测 / 已构建 / 未实测”。本次没有实机结论；未执行项见 §7，
+  Android SDK、adb 设备 `17efb04a`）；手机为 `24117RK2CC`，部署后服务
+  `0.10.0 / contract 10`、App `0.10.0 / versionCode 12`，会话为 `virtual` 模式。
+- 本记录分开写“已实现 / 已单测 / 已构建 / 已部署 / 已实测（有限范围）”；未执行项见 §7，
   不把单元测试或清单 PASS 写成设备验收。
 
 ## 1. 分诊与提案
@@ -97,18 +99,76 @@
 
 ## 4. 已构建与清单核验
 
-以下均在干净提交 `2cc559a` 上执行，工作树无已跟踪改动；构建不访问设备。
+首次构建在 `2cc559a`；部署前因 HEAD 前进到 `bd6aae7`（只增加归档记录）在干净树上重新构建，
+以下为部署所用构建的事实。构建不访问设备。
 
 | 步骤 | 实际结果 |
 | --- | --- |
-| `pwsh scripts/build-release.ps1` | 退出 0；`release=0.10.0 contract=10 android=12 source_commit=2cc559a source_dirty=False`；工具目录 `count=11 sha256=23957b25098f4cec6b959d1fc02fc0ee5639563899aee3bdec5190df5c8b9913`；六个产物齐全 |
+| `pwsh scripts/build-release.ps1` | 退出 0；`release=0.10.0 contract=10 android=12 source_commit=bd6aae7 source_dirty=False`；工具目录 `count=11 sha256=23957b25098f4cec6b959d1fc02fc0ee5639563899aee3bdec5190df5c8b9913`；六个产物齐全 |
 | `device-service` | SHA-256 `6e4f4a3712dd6115ff05fd1e72c234a39cef686e9ac87735567fe0a8499df726`，8,585,376 字节 |
 | `device-mcp`（linux/arm64） | SHA-256 `46b54cfce3203370bcbffe824188c9230ce3e49874f21dc992ed700dd0f59c97`，9,109,664 字节 |
-| `control.apk` | SHA-256 `7bdbec43c261e66d2c74e6023f104244f658e66665ba78954cc02bd215722fa7`，103,965 字节 |
+| `control.apk` | SHA-256 `fb9a48078f46cfa1941b5d4516eedfd13caedd79105ba93bb628aebc6840011e`，103,965 字节（沙箱内 Android 构建非字节可复现；同源码两次构建 APK 哈希不同） |
 | `u2.jar` / `applist.dex` / `service.sh` | 已在清单记录 SHA-256/大小；`u2.jar=28361193…`、`applist.dex=63818f32…`、`service.sh=4b568a9a…` |
-| `pwsh scripts/verify-manifest.ps1 -Manifest build/release/manifest.json` | PASS；6 个产物、Android 0.10.0/12、`source_dirty=False`、`head=2cc559a…` |
+| `pwsh scripts/verify-manifest.ps1 -Manifest build/release/manifest.json` | PASS；6 个产物、Android 0.10.0/12、`source_dirty=False`、`head=bd6aae7…` |
 | `pwsh scripts/build-host-tools.ps1` | PASS；`device-mcp.exe` SHA-256 `80af12971b82cdf32e273e627a5d68d7756bc5e7a0f0876ca10c3948a05e0baf`（10,034,688 字节）、`mcp-probe.exe` SHA-256 `117d592846f4f2ebb2ed3378977367677051e9911a4d41d3d9b3fa5baf8c1801`（9,644,032 字节） |
-| `pwsh scripts/build-host-tools.ps1 -VerifyOnly` | PASS；phone companion release=0.10.0 contract=10、`source_dirty=false`、工具目录 11/`23957b25…`、`head=2cc559a…` |
+| `pwsh scripts/build-host-tools.ps1 -VerifyOnly` | PASS；phone companion release=0.10.0 contract=10、`source_dirty=false`、工具目录 11/`23957b25…`、`head=bd6aae7…` |
+
+## 4.1 手机整组部署
+
+部署在干净提交 `bd6aae7` 的构建上执行，命令与结果：
+
+| 检查 | 实际结果 |
+| --- | --- |
+| `pwsh -NoProfile -File scripts/deploy.ps1 -SkipBuild -Manifest build/release/manifest.json` | 退出 0；`Deployment ready` |
+| `/health` | `{"status":"ok","contract_version":"10","release_version":"0.10.0"}`（实例 `e9e5f14f…`） |
+| 安装后的 App | `versionName=0.10.0`、`versionCode=12` |
+| 手机服务进程 | PID 21376，`/proc/21376/exe` SHA-256 `6e4f4a37…`，与清单一致 |
+| 手机 HTTP MCP 适配器 | PID 21471，`/proc/21471/exe` SHA-256 `46b54cfc…`，与清单一致；监听 `127.0.0.1:18882`，主机转发 `18883` |
+| 会话与准入 | `end` 后 `session.state=ended`、`cleanup=complete`（execution/tasks/recents/display 全 confirmed）、`can_start=true` |
+| 旧会话 | 部署前会话因服务重启记为 `service_restarted`，`cleanup=complete`；没有发现未收尾的活动工作 |
+| 遗留进程 | 手机侧另有一个旧 stdio 适配器 PID 20408（`/proc/20408/exe` 为已删除的旧二进制，SHA-256 `ad7b874b…`），由手机侧另一个 DSH `dsh-mcp-connector` 宿主托管；本仓库的 Windows 宿主不使用它，需由该宿主自行重启才能加载新二进制 |
+
+## 4.2 主机刷新与探针
+
+| 检查 | 实际结果 |
+| --- | --- |
+| `mcp_connector_reconnect`（`json-mobile-use-vnext`） | 成功；宿主重新注册 11 个工具；连接状态 `ok` |
+| 主机 `device-mcp.exe` 进程 | PID 12964，23:02 启动，路径 `build/device-mcp.exe`，磁盘 SHA-256 `80af1297…` 与 host-tools 清单一致 |
+| `mcp_connector_tool_detail act` | description 与 schema 含 `scroll`/`container`/`direction`/`amount`/`duration_ms`，六分支枚举 |
+| `build/mcp-probe.exe -config .state/mcp-config.json -binary build/device-mcp.exe -transport stdio -result-mode both -timeout 180` | `RESULT PASS`；`tools=11`、catalog 指纹 `23957b25…`、act scroll schema、`status can_start=true`、`start/observe/act/end`、`act` 后 `quality=stable samples=3 stop_reason=stable effect=absent（key）` |
+
+手机上另有一个由该设备上的 DSH web 宿主托管的旧 stdio 适配器进程（见 4.1）；本会话使用的
+Windows DSH 连接已按上表刷新，11 工具与契约 10 的实际连接验证通过。
+
+## 4.3 实机受控滚动与 raw swipe 样本
+
+在 Settings 虚拟屏上执行（`virtual` 模式，1080×2400）；所有受控 `scroll` 都使用公开
+`role=scroll` 容器与 `direction`/`amount`，raw `swipe` 显式 `duration_ms=500`。
+
+| 动作 | outcome | effect | quality | 证据/说明 |
+| --- | --- | --- | --- | --- |
+| `start` | executed | — | stable/2/stable | 首个 full 观察；virtual 屏 |
+| `app.open com.android.settings` | executed | — | stable/3/stable | 进入设置列表，容器 `n19` |
+| `scroll down page`（容器 `n19`） | executed | unknown（`container_changed`） | stable/3/stable | 折叠标题使容器 bounds 从 `[0,349,…]` 变为 `[0,0,…]`；无 `target_changed` |
+| 再次 `scroll down page` | executed | not_observed（anchors=21，coverage=100） | stable/3/stable | 列表已到底、树 delta=0；`not_observed` 只在 stable+全覆盖+无位移时成立 |
+| `scroll up page` | executed | unknown（`container_changed`） | stable/3/stable | 标题重新展开，容器 bounds 再次变化 |
+| 通知与状态栏页 `scroll down page` | executed | unknown（`container_changed`） | stable/3/stable | 折叠/结构变化改变了容器作用域 |
+| 我的设备页 `scroll down page` | executed | unknown（`size_changed`，anchors=23，coverage=76） | stable/3/stable | 边界单元裁剪改变尺寸，按固定判据拒绝推测 |
+| raw `swipe` `540,1800 → 540,600`，duration 500 | executed | 不出现（非 scroll） | stable/3/stable | duration 实际到达适配器；无 effect 事实 |
+
+关键结论与边界：
+
+- 5 次受控 `scroll` 全部 `executed`，**没有一次 `target_changed`**；容器解析、真实起终点
+  scope 证明与派发在实机上成立（`scroll.revalidate` 日志 `container_proven=true`、
+  `start_scope_proven=true`、`end_scope_proven=true`）。
+- 实机没有取得 `effect=observed`：设置主列表/通知页的容器 bounds 会随折叠标题变化，判为
+  `container_changed`；内容页滚动时边界裁剪造成尺寸差，判为 `size_changed`；列表到底时得到
+  `not_observed`。这与提案 §4.5 的固定判据和 §7.2 的能力边界一致，不把 `unknown` 写成未移动，
+  也不据此声称阈值已校准。
+- raw `swipe` 仍保持起点完整身份证明；本次样本成功，但内容重排时仍可能 `target_changed`，
+  不能拿本样本声称 issue #10 的“raw swipe 10 次 0R”目标已达成。
+- 本次样本只覆盖 Settings 一个应用与本机系统级页面，不构成跨应用结论；`observed` 的实机样本、
+  跨应用分布与 P50/P95 仍未取得。
 
 ## 5. 反向对照（实际执行，恢复后复跑绿）
 
@@ -143,12 +203,12 @@
 
 | 项 | 结论与原因 |
 | --- | --- |
-| 手机整组部署（`deploy.ps1 -SkipBuild`） | 未执行。本次只做到从干净提交构建并核验整组清单；部署会停止当前服务/App 并改变已配对设备的运行版本，且需要按 `docs/release.md` §4 在部署窗口保持准入关闭。未取得部署/安装后 App versionName/versionCode、`can_start`、手机 HTTP MCP `/proc/<pid>/exe` 哈希等事实，不写成已部署。 |
-| 实际宿主 MCP 连接刷新与 `tools/list` catalog 比对 | 未执行。主机 exe 已重建并核验，但未替换/重启实际宿主的 MCP 进程或连接；未用实际 DSH MCP 连接重算 catalog 指纹，也未经该连接做 scroll。 |
-| 受控 scroll/raw/quality/effect 的实机与跨应用验收 | 未执行。提案 §8.2 的长文、设置、B 站/WebView、嵌套容器、边界、overlay、STOP 时序、破坏性手势 fixture 等均未在真实设备上取数；没有实机 success rate、`quality`/`effect` 分布或阈值校准。 |
-| 发布前阈值校准 | 未执行。`scrollPageRatio/scrollHalfRatio/scrollDurationMS/effect*` 保持提案初始值；这些值未经实机校准，不写成已验证。 |
-| issue #10 回复/关闭、分支推送 | 未执行。按提案 §8.4/§10，这些只在实现、部署/实测、版本与远端记录齐备后进行；本次不提前关闭，不伪报已推送。 |
-| `scripts/verify-m6.ps1` 实机运行 | 未执行（未部署）；只修正了其上一发行契约常量 8→9，并通过 PowerShell 解析检查。 |
+| 手机整组部署（`deploy.ps1 -SkipBuild`） | 已执行；见 §4.1。部署前无未收尾活动会话，旧会话记 `service_restarted`；部署后 `can_start=true`。 |
+| 实际宿主 MCP 连接刷新与 `tools/list` catalog 比对 | 已执行（Windows DSH 连接）：重连后 11 工具、act schema 含 scroll、`mcp-probe` catalog 指纹 `23957b25…` 与清单一致；见 §4.2。 |
+| 受控 scroll/raw/quality/effect 的实机与跨应用验收 | 部分执行。Settings 一个应用 5 次受控 scroll 全部 `executed`、0 次 `target_changed`；`effect` 得到 `not_observed` 与 `unknown`，未取得实机 `observed`。长文、B 站/WebView、嵌套容器、边界、overlay、STOP 时序与破坏性手势 fixture 未执行；没有跨应用成功率或 P50/P95。 |
+| 发布前阈值校准 | 未执行。`scrollPageRatio/scrollHalfRatio/scrollDurationMS/effect*` 保持提案初始值；实机样本不足以校准，不写成已验证。 |
+| `scripts/verify-m6.ps1` 实机运行 | 未执行；只修正了其上一发行契约常量 8→9，并通过 PowerShell 解析检查。 |
+| 手机侧其余 stdio 宿主 | 未重启：手机侧 DSH web 宿主托管的旧 stdio 适配器（PID 20408，旧二进制已删除）仍存活；本会话使用的 Windows DSH 宿主已刷新。该宿主需自行重启才能加载新二进制。 |
 
 ## 8. 结论边界
 
@@ -157,5 +217,9 @@
 - 已单测：上述行为均有单元/回归测试；关键判据有反向对照。
 - 已构建：0.10.0 / 契约 10 / versionCode 12 的整组产物与主机工具从干净提交构建，两套清单
   与工具目录指纹核验 PASS。
-- 未实测：没有任何设备部署或实机滚动/质量/效果结论；`shell exited 0` 不等于屏移等既有边界
-  仍按提案原文保留，本记录不冒认。
+- 已部署：手机服务/App/HTTP MCP 适配器与 Windows DSH 宿主均升级到契约 10；手机侧另一个旧
+  stdio 宿主仍待其自身重启。
+- 已实测（有限）：Settings 实机 5 次受控 scroll 全部 `executed`、0 次 `target_changed`，
+  `quality` 均为 `stable`；`effect` 固定判据按实机证据得到 `not_observed`/`unknown`，未取得
+  `effect=observed` 或跨应用样本；raw `swipe` duration 500 成功。`shell exited 0` 不等于屏移等
+  既有边界仍按提案原文保留，本记录不冒认。
