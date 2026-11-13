@@ -580,11 +580,12 @@ build/mcp-probe.exe -config <既有私有配置路径> -binary <实际新适配�
 | 历史观察不再保存投影器 | `observationState.Projector` 字段被删除而不是保留为 nil；点命中证明使用引擎默认投影器，因为它只需投影的 `Source` 映射、不依赖 ref 连续性 |
 | 生产侧文本解析 | 未新增；文本逆解析只在测试与探针侧实现。产品代码只编码，未知成员继续走 `json v1` 兜底 |
 | 配置命名 | §6.2 表中的 `MaxObservationBytes` 未采用；实际为 `MaxFullTreeBytes`、`MaxInspectionUnitBytes`、`MaxSnapshotCostBytes`、`MaxRetainedSnapshotCostBytes` |
-| 整组发布构建、清单核验、主机工具构建 | **未执行**：主机 MCP 适配器正从 `build/device-mcp.exe` 运行，而构建输出路径就是该运行镜像；按 §8.2 必须先停止精确旧进程或改在干净发布工作区构建，本会话不重启用户宿主进程。没有由本次源码身份产生的清单，因此也没有 `verify-manifest.ps1` 可核验的对象 |
-| 手机整组部署与 §8.2 实机验收 | **未执行**：没有受控设备窗口，部署会更换用户手机版本。compact/detailed 真机、三模式、双端目录刷新、最小闭环均未取得证据 |
-| 真实 Capture 压缩比、token、耗时与进程峰值 | **未执行**：原始采集与树不入库，本次未连接设备；只用合成高冗余 fixture 证明 ≥25%，不外推真实比例 |
-| `verify-m6.ps1` 运行 | **未执行**：需要已部署手机。只修订了它的上一契约断言（9→10），修订后未运行 |
-| 契约 10 拒绝的实机闭环 | **未执行**：没有部署 0.11.0 与旧客户端联调窗口；该边界由既有精确版本检查实现 |
+| 整组发布构建、清单核验、主机工具构建 | **已执行**（后续补充）：干净树 `3a4f579` 构建 `0.11.0`/契约 11/versionCode 13 整组产物与 `manifest.json`；`verify-manifest.ps1` PASS；`build-host-tools.ps1` 与 `-VerifyOnly` PASS，两份清单 source_commit/契约/目录指纹一致 |
+| 手机整组部署与实机验收 | **已执行**（后续补充）：`deploy.ps1 -SkipBuild` 原子替换 6 个产物并逐项 SHA-256 一致，`adb install -r` 覆盖安装保留私有数据；`/health` 为 0.11.0/11，`can_start=true`，手机 HTTP MCP 镜像与清单一致。实机完成契约 10 的普通 API 头与控制同步拒绝、最小 STOP 在契约不匹配下仍被接纳、`start→full`、同基线空 delta、inspect 插入不改基线、query 与 end；stdio 与手机 HTTP 两个 MCP 入口的三模式探针均 PASS。`act` 重验失败交付的实机样本未构造（无可靠、不干扰用户的注入方式），`verify-m6.ps1` 由用户排除 |
+| 真实 Capture 压缩比、token、耗时与进程峰值 | **未执行**：用户明确排除；原始采集与树不入库，未做离线新旧表示对比。合成高冗余 fixture 只证明 ≥25%，不外推真实比例 |
+| `verify-m6.ps1` 运行 | **未执行**：用户明确排除该脚本的破坏性重启演练。只把它的上一契约断言从 9 修订为 10，未运行 |
+| 契约 10 拒绝的实机闭环 | **已执行**（后续补充）：`/api/status` 带契约 10 头与控制同步 body `contract_version="10"` 均返回 `409 contract_mismatch`；最小 STOP 仍接纳。现场 App 已随整组升级，未用旧 App 二进制联调 |
+| 主机宿主加载新适配器镜像 | **未执行**：按用户要求由其自行恢复宿主依赖。新 `build/device-mcp.exe` 已由 stdio 探针实际拉起并 PASS，运行中的宿主子进程仍执行旧镜像直到宿主重启 |
 
 
 ---
