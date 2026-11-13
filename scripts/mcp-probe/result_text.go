@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// decodedTextResult is the probe-local oracle for result v1. It is deliberately
+// decodedTextResult is the probe-local oracle for result v2. It is deliberately
 // narrow: it restores the facts this external probe checks, while keeping the
 // decoded object available to prove that readable blocks preserve complete
 // item/event JSON.
@@ -17,7 +17,7 @@ type decodedTextResult struct {
 	object  map[string]any
 }
 
-// decodeResultText parses one complete result v1 projection. It rejects a
+// decodeResultText parses one complete result v2 projection. It rejects a
 // missing/repeated envelope, omitted readable blocks and duplicate paths.
 func decodeResultText(text string) (*decodedTextResult, *checkError) {
 	if strings.Contains(text, "\r") {
@@ -31,7 +31,7 @@ func decodeResultText(text string) (*decodedTextResult, *checkError) {
 	if len(lines) < 2 {
 		return nil, failf("text_result_incomplete")
 	}
-	rawError, found := strings.CutPrefix(lines[0], "result v1 is_error=")
+	rawError, found := strings.CutPrefix(lines[0], "result v2 is_error=")
 	if !found || (rawError != "true" && rawError != "false") {
 		return nil, failf("text_result_header_invalid")
 	}
@@ -114,7 +114,7 @@ func decodeResultText(text string) (*decodedTextResult, *checkError) {
 
 func isResultBlockHeader(line string) bool {
 	for _, prefix := range []string{
-		"tree v1 ", "inspect v1 ", "shell v1 ", "timeline v1 ",
+		"tree v2 ", "inspect v2 ", "shell v1 ", "timeline v1 ",
 	} {
 		if strings.HasPrefix(line, prefix) {
 			return true
@@ -129,9 +129,9 @@ func decodeResultBlock(lines []string, start int, object map[string]any,
 		return 0, failf("text_result_block_omitted")
 	}
 	switch {
-	case strings.HasPrefix(lines[start], "tree v1 "):
+	case strings.HasPrefix(lines[start], "tree v2 "):
 		return decodeTreeBlock(lines, start, object, seen)
-	case strings.HasPrefix(lines[start], "inspect v1 "):
+	case strings.HasPrefix(lines[start], "inspect v2 "):
 		return decodeInspectionBlock(lines, start, object, seen)
 	case strings.HasPrefix(lines[start], "shell v1 "):
 		return decodeShellBlock(lines, start, object, seen)
@@ -144,7 +144,7 @@ func decodeResultBlock(lines []string, start int, object map[string]any,
 
 func decodeTreeBlock(lines []string, start int, object map[string]any,
 	seen map[string]bool) (int, *checkError) {
-	fields, failure := decodeBlockHeader(lines[start], "tree v1 ")
+	fields, failure := decodeBlockHeader(lines[start], "tree v2 ")
 	if failure != nil {
 		return 0, failure
 	}
@@ -166,20 +166,55 @@ func decodeTreeBlock(lines []string, start int, object map[string]any,
 	if format == treeFull && fields["scope"] == "" {
 		return 0, failf("text_tree_scope_missing")
 	}
+	if fields["view"] != "compact" {
+		return 0, failf("text_tree_view_invalid")
+	}
+	defaults, failure := decodeDefaultsLine(lines, start, "text_tree_defaults_invalid")
+	if failure != nil {
+		return 0, failure
+	}
 	if failure := setDecodedPath(object, seen, []string{"observation", "tree", "format"}, format); failure != nil {
 		return 0, failure
+	}
+	for key, value := range map[string]any{"view": fields["view"], "defaults": defaults} {
+		if failure := setDecodedPath(object, seen, []string{"observation", "tree", key}, value); failure != nil {
+			return 0, failure
+		}
 	}
 	if format == treeDelta {
 		if failure := setDecodedPath(object, seen, []string{"observation", "tree", "base"}, fields["base"]); failure != nil {
 			return 0, failure
 		}
+	} else {
+		if failure := setDecodedPath(object, seen, []string{"observation", "tree", "scope"}, fields["scope"]); failure != nil {
+			return 0, failure
+		}
 	}
-	return findBlockEnd(lines, start, "end tree", "text_tree_unterminated")
+	return findBlockEnd(lines, start+2, "end tree", "text_tree_unterminated")
+}
+
+// decodeDefaultsLine verifies the fixed defaults declaration that follows every
+// tree and inspection block header, its blank separator, and returns the decoded
+// object. Neither an omission nor an extended default policy is representable.
+func decodeDefaultsLine(lines []string, start int, reason string) (map[string]any, *checkError) {
+	if start+2 >= len(lines) || lines[start+1] != `defaults {"checked":false}` ||
+		lines[start+2] != "" {
+		return nil, failf(reason)
+	}
+	body, failure := decodeJSONValue(strings.TrimPrefix(lines[start+1], "defaults "))
+	if failure != nil {
+		return nil, failure
+	}
+	object, ok := body.(map[string]any)
+	if !ok {
+		return nil, failf(reason)
+	}
+	return object, nil
 }
 
 func decodeInspectionBlock(lines []string, start int, object map[string]any,
 	seen map[string]bool) (int, *checkError) {
-	fields, failure := decodeBlockHeader(lines[start], "inspect v1 ")
+	fields, failure := decodeBlockHeader(lines[start], "inspect v2 ")
 	if failure != nil {
 		return 0, failure
 	}
@@ -190,6 +225,9 @@ func decodeInspectionBlock(lines []string, start int, object map[string]any,
 	scope := fields["scope"]
 	if scope != "tree" && scope != "subtree" && scope != "query" {
 		return 0, failf("text_inspect_scope_invalid")
+	}
+	if fields["view"] != "detailed" {
+		return 0, failf("text_inspect_view_invalid")
 	}
 	revision, ok := parseInteger(fields["revision"])
 	if !ok {
@@ -210,7 +248,25 @@ func decodeInspectionBlock(lines []string, start int, object map[string]any,
 			return 0, failure
 		}
 	}
-	return findBlockEnd(lines, start, "end inspect", "text_inspect_unterminated")
+	defaults, failure := decodeDefaultsLine(lines, start, "text_inspect_defaults_invalid")
+	if failure != nil {
+		return 0, failure
+	}
+	// The tree scope declares view and defaults in the nested complete tree; the
+	// subtree and query scopes declare them once on the inspection envelope.
+	viewPath := []string{"inspection", "view"}
+	defaultsPath := []string{"inspection", "defaults"}
+	if scope == "tree" {
+		viewPath = []string{"inspection", "tree", "view"}
+		defaultsPath = []string{"inspection", "tree", "defaults"}
+	}
+	if failure := setDecodedPath(object, seen, viewPath, fields["view"]); failure != nil {
+		return 0, failure
+	}
+	if failure := setDecodedPath(object, seen, defaultsPath, defaults); failure != nil {
+		return 0, failure
+	}
+	return findBlockEnd(lines, start+2, "end inspect", "text_inspect_unterminated")
 }
 
 func decodeShellBlock(lines []string, start int, object map[string]any,

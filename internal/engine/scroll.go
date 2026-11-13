@@ -371,9 +371,6 @@ func (e *Engine) revalidateScrollTarget(work *workState, obs *observationState,
 	}
 	projector := work.Projector
 	if projector == nil {
-		projector = obs.Projector
-	}
-	if projector == nil {
 		projector = e.projector
 	}
 	if projector == nil {

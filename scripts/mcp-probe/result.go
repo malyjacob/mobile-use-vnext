@@ -313,8 +313,8 @@ func comparableResultObject(object map[string]any) map[string]any {
 			observationClone[key] = value
 		}
 		if tree, ok := observation["tree"].(map[string]any); ok {
-			treeHeader := make(map[string]any, 2)
-			for _, key := range []string{"format", "base"} {
+			treeHeader := make(map[string]any, 5)
+			for _, key := range []string{"format", "base", "scope", "view", "defaults"} {
 				if value, exists := tree[key]; exists {
 					treeHeader[key] = value
 				}
@@ -324,13 +324,23 @@ func comparableResultObject(object map[string]any) map[string]any {
 		clone["observation"] = observationClone
 	}
 	if inspection, ok := object["inspection"].(map[string]any); ok {
-		header := make(map[string]any, 5)
+		header := make(map[string]any, 8)
 		for _, key := range []string{
 			"observation_id", "origin", "revision", "captured_at", "scope",
+			"view", "defaults",
 		} {
 			if value, exists := inspection[key]; exists {
 				header[key] = value
 			}
+		}
+		if tree, ok := inspection["tree"].(map[string]any); ok {
+			treeHeader := make(map[string]any, 2)
+			for _, key := range []string{"view", "defaults"} {
+				if value, exists := tree[key]; exists {
+					treeHeader[key] = value
+				}
+			}
+			header["tree"] = treeHeader
 		}
 		clone["inspection"] = header
 	}
@@ -522,7 +532,7 @@ func imageBytes(projected *callResult, observation *observationView) ([]byte, *c
 func treeBlockText(projected *callResult, headerPrefix string) (string, *checkError) {
 	end := "end inspect"
 	reason := "text_inspect_block_missing"
-	if strings.HasPrefix(headerPrefix, "tree v1 ") {
+	if strings.HasPrefix(headerPrefix, "tree v2 ") {
 		end = "end tree"
 		reason = "text_tree_block_missing"
 	}

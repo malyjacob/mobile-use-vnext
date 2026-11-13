@@ -283,7 +283,7 @@ func (o *Observation) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 		Quality         member[*Quality] `json:"quality"`
 		Screen          *Screen          `json:"screen"`
 		Foreground      *Foreground      `json:"foreground"`
-		Tree            *TreeValue       `json:"tree"`
+		Tree            *ReadTreeValue   `json:"tree"`
 		Missing         member[[]string] `json:"missing"`
 		Image           *ImageMeta       `json:"image"`
 		Error           *Error           `json:"error"`
@@ -467,7 +467,9 @@ func (r *Recovery) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 	return nil
 }
 
-// UnmarshalJSONFrom decodes the historical inspection material.
+// UnmarshalJSONFrom decodes the historical inspection material. The tree scope
+// declares its view and defaults in the nested complete tree; the subtree and
+// query scopes declare them once on this envelope.
 func (v *InspectionView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 	var wire struct {
 		ObservationID member[string]            `json:"observation_id"`
@@ -475,8 +477,10 @@ func (v *InspectionView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 		Revision      member[int]               `json:"revision"`
 		CapturedAt    member[string]            `json:"captured_at"`
 		Scope         member[string]            `json:"scope"`
-		Tree          *Tree                     `json:"tree"`
-		Root          *Node                     `json:"root"`
+		View          member[string]            `json:"view"`
+		Defaults      *Defaults                 `json:"defaults"`
+		Tree          *ReadTree                 `json:"tree"`
+		Root          *ReadNode                 `json:"root"`
 		Matches       member[[]InspectionMatch] `json:"matches"`
 		Total         member[int]               `json:"total"`
 		Truncated     *bool                     `json:"truncated"`
@@ -510,11 +514,33 @@ func (v *InspectionView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 		Revision:      revision,
 		CapturedAt:    capturedAt,
 		Scope:         scope,
+		View:          wire.View.Value,
 		Tree:          wire.Tree,
 		Root:          wire.Root,
 		Total:         wire.Total.Value,
 		HasTotal:      wire.Total.Present,
 		Truncated:     wire.Truncated,
+	}
+	if wire.Defaults != nil {
+		v.Defaults = *wire.Defaults
+	}
+	switch scope {
+	case "tree":
+		if wire.View.Present || wire.Defaults != nil {
+			return fmt.Errorf("inspection tree scope declares view and defaults in the nested tree")
+		}
+		if wire.Tree == nil || wire.Tree.View != ViewDetailed {
+			return fmt.Errorf("inspection tree scope requires a detailed complete tree")
+		}
+	case "subtree", "query":
+		if !wire.View.Present || wire.Defaults == nil {
+			return fmt.Errorf("inspection %s scope requires view and defaults", scope)
+		}
+		if v.View != ViewDetailed {
+			return fmt.Errorf("inspection view must be detailed")
+		}
+	default:
+		return fmt.Errorf("unsupported inspection scope %q", scope)
 	}
 	if wire.Matches.Present {
 		v.Matches = wire.Matches.Value
@@ -525,7 +551,7 @@ func (v *InspectionView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 // UnmarshalJSONFrom decodes one matched subtree and its ancestor ref path.
 func (m *InspectionMatch) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 	var wire struct {
-		Node *Node            `json:"node"`
+		Node *ReadNode        `json:"node"`
 		Path member[[]string] `json:"path"`
 	}
 	if err := readObject(dec, "inspection match", &wire); err != nil {

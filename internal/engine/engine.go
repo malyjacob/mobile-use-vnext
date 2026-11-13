@@ -76,8 +76,14 @@ type Config struct {
 	AppFreshness        time.Duration // 6s control heartbeat freshness
 	CleanupTimeout      time.Duration // 12s physical cleanup wait
 	LedgerTimeout       time.Duration // 3s durable write wait
-	MaxFullTreeBytes    int           // 128 KiB canonical full tree
-	MaxObservations     int           // bounded retained observations
+	MaxFullTreeBytes    int           // 128 KiB canonical compact/full read tree
+	// MaxInspectionUnitBytes bounds one detailed inspect subtree or one query
+	// hit. MaxSnapshotCostBytes bounds one internal candidate snapshot and
+	// MaxRetainedSnapshotCostBytes bounds the unique retained snapshots.
+	MaxInspectionUnitBytes       int
+	MaxSnapshotCostBytes         int
+	MaxRetainedSnapshotCostBytes int
+	MaxObservations              int // bounded retained observations
 	MaxOperations       int           // bounded P records
 	MaxAcceptanceAge    time.Duration // 5min P acceptance window
 	ControlPackage      string        // paired control App package
@@ -123,6 +129,9 @@ func DefaultConfig(instanceID, agentName string) Config {
 		CleanupTimeout:      12 * time.Second,
 		LedgerTimeout:       3 * time.Second,
 		MaxFullTreeBytes:    128 * 1024,
+		MaxInspectionUnitBytes:       32 * 1024,
+		MaxSnapshotCostBytes:         4 * 1024 * 1024,
+		MaxRetainedSnapshotCostBytes: 32 * 1024 * 1024,
 		MaxObservations:     32,
 		MaxOperations:       256,
 		MaxAcceptanceAge:    5 * time.Minute,
@@ -212,15 +221,20 @@ type Projection struct {
 // Projector builds the public tree and keeps conservative ref continuity.
 type Projector interface {
 	Build(capture *device.Capture) (*Projection, error)
+	// Candidate projects one capture without publishing it as the new
+	// continuity state. The returned commit function publishes exactly that
+	// candidate; a discarded candidate leaves ref numbering untouched, so a
+	// rejected acquisition never shifts the refs of a later published tree.
+	Candidate(capture *device.Capture) (*Projection, func(), error)
 	// Preview projects a candidate frame without advancing ref continuity, so
 	// a settle sample never shifts the refs of already published observations.
 	Preview(capture *device.Capture) (*Projection, error)
 	Reset()
 }
 
-// Differ computes and applies the fixed-baseline delta.
+// Differ computes the fixed-baseline delta of the public read representation.
 type Differ interface {
-	Diff(baseID string, base, current *protocol.Tree) (*protocol.Delta, error)
+	Diff(baseID string, base, current *protocol.ReadTree) (*protocol.ReadDelta, error)
 }
 
 // ImageEncoder turns one source image into the single bounded output image.
@@ -385,13 +399,15 @@ type baselineState struct {
 	Origin        string
 	Revision      int
 	CapturedAt    time.Time
-	Tree          *protocol.Tree
+	// Tree is the confirmed compact public read tree that a delta of this
+	// baseline is expressed against. The complete internal snapshot stays with
+	// its retained observation.
+	Tree *protocol.ReadTree
 }
 
 type observationState struct {
 	SessionSnapshot   *protocol.Session
 	CleanupSnapshot   *protocol.Cleanup
-	Projector         Projector
 	ID                string
 	Origin            string
 	Revision          int
@@ -405,11 +421,15 @@ type observationState struct {
 	Screen            device.Display
 	Foreground        device.Foreground
 	Projection        *Projection
-	Status            string
-	ClaimedBy         string
-	RetiredAt         time.Time
-	Full              bool
-	Error             *protocol.Error
+	// Compact is the published compact read tree of this observation and Cost
+	// is the internal accounting size of its snapshot. Both are immutable.
+	Compact *protocol.ReadTree
+	Cost    int
+	Status  string
+	ClaimedBy string
+	RetiredAt time.Time
+	Full      bool
+	Error     *protocol.Error
 }
 
 type operationState struct {

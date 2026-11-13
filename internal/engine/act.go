@@ -408,11 +408,9 @@ func (e *Engine) provePointTarget(fresh *device.Capture, obs *observationState,
 		return targetChangedAtPoint()
 	}
 	started := time.Now()
-	projector := obs.Projector
-	if projector == nil || e.projectorFactory == nil {
-		projector = e.projector
-	}
-	projection, err := projector.Preview(fresh)
+	// The proof maps a display point to a fresh raw node; it needs a projection
+	// with a correct source map, never the session's ref continuity.
+	projection, err := e.projector.Preview(fresh)
 	if err != nil {
 		point.took += time.Since(started)
 		return protocol.NewError(503, protocol.CodeHierarchyFailed, "公开树构造失败")

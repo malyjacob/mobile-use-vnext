@@ -276,7 +276,7 @@ func TestInspectBudgetsRejectOversizedUnits(t *testing.T) {
 	if _, apiErr := h.engine.Inspect("agent", &protocol.InspectRequest{
 		ObservationID: "O903", Node: "n2", HasNode: true,
 	}); apiErr == nil || apiErr.Code != protocol.CodeInspectionTooLarge ||
-		apiErr.Details["limit"] != inspectionUnitBytes {
+		apiErr.Details["limit"] != h.engine.cfg.MaxInspectionUnitBytes {
 		t.Fatalf("oversized subtree: %+v", apiErr)
 	}
 	if _, apiErr := h.engine.Inspect("agent", &protocol.InspectRequest{
@@ -327,8 +327,8 @@ func TestInspectQueryTruncatesOnlyCompleteUnits(t *testing.T) {
 		}
 		used += len(encoded)
 	}
-	if used > inspectionUnitBytes {
-		t.Fatalf("returned units use %d bytes, budget %d", used, inspectionUnitBytes)
+	if used > h.engine.cfg.MaxInspectionUnitBytes {
+		t.Fatalf("returned units use %d bytes, budget %d", used, h.engine.cfg.MaxInspectionUnitBytes)
 	}
 }
 

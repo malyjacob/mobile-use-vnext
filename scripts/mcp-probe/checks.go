@@ -400,7 +400,7 @@ func (p *probe) observeCheck(ctx context.Context, reference string) (string, boo
 // complete observation tree block with the matching format and id.
 func checkObservationTreeBlock(projected *callResult, observation *observationView) *checkError {
 	format := treeFormatOf(observation)
-	block, failure := treeBlockText(projected, "tree v1 format="+format+" id="+observation.ID)
+	block, failure := treeBlockText(projected, "tree v2 format="+format+" id="+observation.ID)
 	if failure != nil {
 		return failure
 	}
@@ -724,7 +724,7 @@ func (p *probe) inspectCheck(ctx context.Context, observationID string) bool {
 			"structured=true")
 		return true
 	}
-	prefix := "inspect v1 scope=" + view.Inspection.Scope + " observation=" + observationID
+	prefix := "inspect v2 scope=" + view.Inspection.Scope + " observation=" + observationID
 	block, failure := treeBlockText(projected, prefix)
 	if failure != nil {
 		p.reporter.fail("inspect", failure.reason, failure.fields...)

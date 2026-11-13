@@ -222,15 +222,16 @@ func TestShellViewNullTriState(t *testing.T) {
 func TestInspectionEncoding(t *testing.T) {
 	view := &InspectionView{
 		ObservationID: "O2", Origin: "P1", Revision: 2, CapturedAt: "2026-11-09T00:00:00Z",
-		Scope: "query", Total: 1, HasTotal: true,
+		Scope: "query", View: ViewDetailed, Total: 1, HasTotal: true,
 		Matches: []InspectionMatch{{
-			Node: &Node{Ref: "n2", Role: RoleButton, Bounds: &Bounds{1, 2, 3, 4}},
+			Node: &ReadNode{Ref: "n2", Role: RoleButton, Bounds: KnownBounds(Bounds{1, 2, 3, 4})},
 			Path: []string{"n1"},
 		}},
 	}
 	got := string(marshal(t, view))
 	for _, want := range []string{
-		`"scope":"query"`, `"matches":[`, `"node":{`, `"path":["n1"]`, `"total":1`,
+		`"scope":"query"`, `"view":"detailed"`, `"defaults":{"checked":false}`,
+		`"matches":[`, `"node":{`, `"path":["n1"]`, `"total":1`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("missing %s in %s", want, got)

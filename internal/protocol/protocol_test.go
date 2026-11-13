@@ -495,13 +495,16 @@ func TestTreeValueDecode(t *testing.T) {
 }
 
 func TestObservationEncoding(t *testing.T) {
-	full := &Tree{Root: &Node{Ref: "n1", Role: RoleRoot, Bounds: &Bounds{0, 0, 10, 10}}}
+	full := &ReadTree{
+		Format: "full", Scope: Scope, View: ViewCompact,
+		Root: &ReadNode{Ref: "n1", Role: RoleRoot, Bounds: KnownBounds(Bounds{0, 0, 10, 10})},
+	}
 	obs := &Observation{
 		Status: "complete", ID: "O1", Origin: "P1", Revision: 1,
 		CapturedAt: "2026-11-08T00:00:00Z", ActionableUntil: "2026-11-08T00:01:00Z",
 		Screen:     &Screen{Width: 1080, Height: 2400, Rotation: 0},
 		Foreground: &Foreground{State: "present", Package: "example.app", TaskID: intptr(42), HasTask: true},
-		Tree:       &TreeValue{Full: full},
+		Tree:       &ReadTreeValue{Full: full},
 	}
 	got := string(marshal(t, obs))
 	for _, want := range []string{`"id":"O1"`, `"origin":"P1"`, `"revision":1`, `"task_id":42`, `"format":"full"`} {

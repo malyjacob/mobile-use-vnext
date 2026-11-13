@@ -363,7 +363,10 @@ func (f *fakeAdapter) observation(id, origin string, revision int, withImage boo
 		"quality": map[string]any{
 			"state": "stable", "samples": 2, "stop_reason": "stable",
 		},
-		"tree": map[string]any{"format": treeFull, "scope": "reported_visible_with_context"},
+		"tree": map[string]any{
+			"format": treeFull, "scope": "reported_visible_with_context",
+			"view": protocol.ViewCompact, "defaults": map[string]any{"checked": false},
+		},
 	}
 	if withImage {
 		observation["image"] = map[string]any{
@@ -495,9 +498,10 @@ func (f *fakeAdapter) handle(ctx context.Context, name string, request *sdk.Call
 			}), nil
 		}
 		text := "inspection.observation_id=" + observationID +
-			"\n\ninspect v1 scope=tree observation=" + observationID +
+			"\n\ninspect v2 scope=tree observation=" + observationID +
 			" revision=2 captured_at=2026-01-01T00:00:00Z" +
-			" tree_scope=reported_visible_with_context nodes=1\n\n" +
+			" tree_scope=reported_visible_with_context view=detailed nodes=1 entries=1\n" +
+			"defaults {\"checked\":false}\n\n" +
 			"n1 root [0,0,1080,2400]\nend inspect\n"
 		return f.result(map[string]any{
 			"inspection": map[string]any{
@@ -507,8 +511,10 @@ func (f *fakeAdapter) handle(ctx context.Context, name string, request *sdk.Call
 				"captured_at":    "2026-01-01T00:00:00Z",
 				"scope":          "tree",
 				"tree": map[string]any{
-					"format": treeFull,
-					"scope":  "reported_visible_with_context",
+					"format":   treeFull,
+					"scope":    "reported_visible_with_context",
+					"view":     protocol.ViewDetailed,
+					"defaults": map[string]any{"checked": false},
 					"root": map[string]any{
 						"ref": "n1", "role": "root", "bounds": []int{0, 0, 1080, 2400},
 					},
@@ -688,7 +694,7 @@ func fakeDiagnosticText(payload map[string]any) string {
 
 func fakeResultText(payload map[string]any, isError bool) string {
 	var builder strings.Builder
-	builder.WriteString("result v1 is_error=")
+	builder.WriteString("result v2 is_error=")
 	builder.WriteString(strconv.FormatBool(isError))
 	builder.WriteByte('\n')
 	for key, value := range payload {
@@ -780,11 +786,12 @@ func writeFakeObservation(builder *strings.Builder, value any) {
 		scope = "reported_visible_with_context"
 	}
 	base, _ := tree["base"].(string)
-	block := "tree v1 format=" + format + " id=" + id + " scope=" + scope
+	block := "tree v2 format=" + format + " id=" + id + " scope=" + scope
 	if format == treeDelta && base != "" {
 		block += " base=" + base
 	}
-	block += " nodes=1 changes=0\n\n"
+	block += " view=compact nodes=1 entries=1 changes=0\n"
+	block += "defaults {\"checked\":false}\n\n"
 	block += "n1 root [0,0,1080,2400]\nend tree\n"
 	writeFakeBlock(builder, block)
 }
@@ -802,11 +809,13 @@ func writeFakeInspection(builder *strings.Builder, value any) {
 	scope, _ := inspection["scope"].(string)
 	revision, _ := inspection["revision"].(int)
 	capturedAt, _ := inspection["captured_at"].(string)
-	block := "inspect v1 scope=" + scope +
+	block := "inspect v2 scope=" + scope +
 		" observation=" + observationID +
 		" revision=" + strconv.Itoa(revision) +
 		" captured_at=" + capturedAt +
-		" nodes=1\n\nn1 root [0,0,1080,2400]\nend inspect\n"
+		" tree_scope=reported_visible_with_context view=detailed" +
+		" nodes=1 entries=1\n" +
+		"defaults {\"checked\":false}\n\nn1 root [0,0,1080,2400]\nend inspect\n"
 	writeFakeBlock(builder, block)
 }
 
@@ -1377,7 +1386,8 @@ func (f *fakeRecoveryService) writeInspect(writer http.ResponseWriter, body []by
 		Revision:      f.revision,
 		CapturedAt:    time.Now().UTC().Format(time.RFC3339Nano),
 		Scope:         "tree",
-		Tree:          testFullTree().Full,
+		View:          protocol.ViewDetailed,
+		Tree:          testDetailedTree(),
 	}
 	f.mutex.Unlock()
 	f.writeResult(writer, &protocol.Result{Inspection: view})
@@ -1560,14 +1570,26 @@ func (f *fakeRecoveryService) writeResult(writer http.ResponseWriter, result *pr
 	_, _ = writer.Write(encoded)
 }
 
-func testFullTree() *protocol.TreeValue {
-	return &protocol.TreeValue{Full: &protocol.Tree{
+func testFullTree() *protocol.ReadTreeValue {
+	return &protocol.ReadTreeValue{Full: &protocol.ReadTree{
 		Format: treeFull,
-		Root: &protocol.Node{
+		Scope:  protocol.Scope,
+		View:   protocol.ViewCompact,
+		Root: &protocol.ReadNode{
 			Ref: "n1", Role: protocol.RoleRoot,
-			Bounds: &protocol.Bounds{Right: 1080, Bottom: 2400},
+			Bounds: protocol.KnownBounds(protocol.Bounds{Right: 1080, Bottom: 2400}),
 		},
 	}}
+}
+
+// testDetailedTree is the historical inspect tree of the same observation: the
+// detailed view expands every retained field and never hides geometry.
+func testDetailedTree() *protocol.ReadTree {
+	compact := testFullTree().Full
+	return &protocol.ReadTree{
+		Format: compact.Format, Scope: compact.Scope, View: protocol.ViewDetailed,
+		Root: compact.Root.Clone(),
+	}
 }
 
 func writeTestJSON(writer http.ResponseWriter, value any) {

@@ -73,6 +73,24 @@ func treeHasLabel(root *protocol.Node, want string) bool {
 	return false
 }
 
+// readTreeHasLabel is the public read-tree counterpart of treeHasLabel.
+func readTreeHasLabel(root *protocol.ReadNode, want string) bool {
+	if root == nil {
+		return false
+	}
+	for _, label := range root.Label {
+		if label == want {
+			return true
+		}
+	}
+	for _, child := range root.Children {
+		if readTreeHasLabel(child, want) {
+			return true
+		}
+	}
+	return false
+}
+
 func TestSettlePublishesLaterFrameOfEqualPair(t *testing.T) {
 	h := settleHarness(t)
 	h.startSession()

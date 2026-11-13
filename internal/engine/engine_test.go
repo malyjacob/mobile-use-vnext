@@ -375,6 +375,14 @@ func (p *testProjector) Build(capture *device.Capture) (*Projection, error) {
 	return &Projection{Tree: snapshot.Tree, Capture: snapshot.Capture, Source: snapshot.Source}, nil
 }
 
+func (p *testProjector) Candidate(capture *device.Capture) (*Projection, func(), error) {
+	snapshot, commit, err := p.builder.Candidate(capture)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &Projection{Tree: snapshot.Tree, Capture: snapshot.Capture, Source: snapshot.Source}, commit, nil
+}
+
 func (p *testProjector) Preview(capture *device.Capture) (*Projection, error) {
 	snapshot, err := p.builder.Preview(capture)
 	if err != nil {
@@ -387,8 +395,8 @@ func (p *testProjector) Reset() { p.builder.Reset() }
 
 type testDiffer struct{}
 
-func (testDiffer) Diff(baseID string, base, current *protocol.Tree) (*protocol.Delta, error) {
-	return observation.Diff(baseID, base, current)
+func (testDiffer) Diff(baseID string, base, current *protocol.ReadTree) (*protocol.ReadDelta, error) {
+	return observation.ReadDiff(baseID, base, current)
 }
 
 // ---------------------------------------------------------------- harness
@@ -629,11 +637,11 @@ func TestStartObserveActTextEnd(t *testing.T) {
 	}
 	delta := textResult.Observation.Tree.Delta
 	if delta != nil {
-		rebuilt, applyErr := observation.Apply(baseline.Tree, delta)
+		rebuilt, applyErr := observation.ReadApply(baseline.Tree, delta)
 		if applyErr != nil {
 			t.Fatalf("apply delta: %v", applyErr)
 		}
-		if !observation.Equal(rebuilt, current.Projection.Tree) {
+		if !observation.ReadEqual(rebuilt, current.Compact) {
 			t.Fatalf("delta does not reconstruct the current tree")
 		}
 	}

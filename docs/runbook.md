@@ -167,7 +167,7 @@ adb -s 127.0.0.1:5555 forward tcp:18881 tcp:18880
 curl -s http://127.0.0.1:18881/health
 ```
 
-`/health` 无认证，返回 `status`、`contract_version`（当前 `"10"`）、`service_instance_id`、
+`/health` 无认证，返回 `status`、`contract_version`（当前 `"11"`）、`service_instance_id`、
 `release_version`。它只证明进程能应答，**不是** `can_start`。
 
 就绪以 `POST /api/status` 为准（令牌从 `.state/deploy.json` 读取，下面用占位符）：
@@ -175,7 +175,7 @@ curl -s http://127.0.0.1:18881/health
 ```bash
 curl -s -X POST http://127.0.0.1:18881/api/status \
   -H "Authorization: Bearer $AGENT_TOKEN" \
-  -H "X-Mobile-Use-Contract: 10" \
+  -H "X-Mobile-Use-Contract: 11" \
   -H "Content-Type: application/json" -d '{}'
 ```
 
@@ -228,7 +228,7 @@ adb -s 127.0.0.1:5555 shell su -c 'tail -n 100 /data/data/com.mobileuse.vnext/fi
 | `can_start=false`、`blocking_code=device_locked` / `device_not_interactive` | 锁屏或熄屏 | 解锁并点亮屏幕；服务不绕过锁屏 |
 | `can_start=false`、`blocking_code=control_revoked` | 收到 STOP 后未完成一次新同步 | 等 App 下一拍同步（不再携带 `stop_pending`）后再 `start` |
 | `can_start=false`、`blocking_code=mode_not_selected`/`stop_unavailable` | App 模式/通知/停止通道不可用 | 在 App 选择虚拟屏或确认主屏共享；授予通知权限并确认通知频道可用 |
-| `409 contract_mismatch` | `X-Mobile-Use-Contract` 缺失/不是 `10`，或 App 契约版本不符；错误体带 `recovery`（`entry=update`、`reference=none`） | 服务与客户端必须同为 `contract_version=10`；升级整组产物，不要只升一侧 |
+| `409 contract_mismatch` | `X-Mobile-Use-Contract` 缺失/不是 `11`，或 App 契约版本不符；错误体带 `recovery`（`entry=update`、`reference=none`） | 服务与客户端必须同为 `contract_version=11`；升级整组产物，不要只升一侧 |
 | `401 unauthorized` | Bearer 令牌错误，或用了另一身份的令牌 | 从私有配置核对 agent/control 令牌；两者不能互换 |
 | 主机 `18883/mcp` 不通或 401 | 手机适配器未运行、转发失效、填错 token | 看 `device-mcp.log` 与 `pgrep`；重建 `adb forward tcp:18883 tcp:18882`；手机路径填 `.state/deploy.json` 的 `mcp_token` |
 | MCP 客户端 403 | `Origin` 未在 `allowed_origins` | 部署时用 `-McpAllowedOrigins` 精确放行并重启适配器；不要填 `*` |
@@ -362,7 +362,7 @@ Remove-Item Env:MOBILE_USE_MCP_RESULT_MODE
 ```
 
 优先级为显式 `-result-mode` > 环境变量 > `both`。显式空值与非法值退出 `2`，不回退。
-HTTP 进程也可用同一参数设置默认值，每请求头优先。完整文本以 `result v1 is_error=…`
+HTTP 进程也可用同一参数设置默认值，每请求头优先。完整文本以 `result v2 is_error=…`
 开头、`end result` 结束；错误最小诊断以 `diagnostic v1 is_error=true` 开头、
 `end diagnostic` 结束。缺尾表示对应文本被宿主截断，可改用 `structured` 或收窄 inspect。
 文本格式取代旧摘要，解析旧文本的宿主须迁移；成功的 `structured` 结果可以是 `content=[]`，

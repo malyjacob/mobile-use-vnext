@@ -5,11 +5,13 @@ import (
 	"encoding/base64"
 	"encoding/json/v2"
 	"errors"
+	"sort"
 	"time"
 
 	"github.com/malyjacob/mobile-use-vnext/internal/device"
 	"github.com/malyjacob/mobile-use-vnext/internal/eventlog"
 	"github.com/malyjacob/mobile-use-vnext/internal/imaging"
+	"github.com/malyjacob/mobile-use-vnext/internal/observation"
 	"github.com/malyjacob/mobile-use-vnext/internal/protocol"
 )
 
@@ -77,11 +79,17 @@ type imageAttempt struct {
 }
 
 // treeAttempt is one complete public tree candidate plus its source capture.
+// The compact read tree and its canonical bytes are produced once, outside the
+// state lock, and never recomputed at commit time.
 type treeAttempt struct {
-	capture    device.Capture
-	projection *Projection
-	full       *protocol.Tree
-	fullBytes  []byte
+	capture      device.Capture
+	projection   *Projection
+	compact      *protocol.ReadTree
+	compactBytes []byte
+	cost         int
+	// commit publishes the candidate's continuity state. It runs at the single
+	// commit point; a rejected candidate is simply dropped.
+	commit func()
 }
 
 // captureAndPublish performs one complete read-only acquisition and, if all
@@ -247,16 +255,19 @@ func (e *Engine) publishTreeAttempt(work *workState, session *sessionState, phas
 	revision := currentSession.Revision
 	e.mu.Unlock()
 
-	useDelta := !forceFull && baseline != nil && baseline.Origin == session.Origin &&
+	useDelta := !forceFull && baseline != nil && baseline.Tree != nil &&
+		baseline.Origin == session.Origin &&
 		revision-baseline.Revision < 12 && time.Since(baseline.CapturedAt) < 180*time.Second
-	var delta *protocol.Delta
+	var delta *protocol.ReadDelta
 	if useDelta {
-		diff, diffErr := e.differ.Diff(baseline.ObservationID, baseline.Tree, tree.projection.Tree)
+		diff, diffErr := e.differ.Diff(baseline.ObservationID, baseline.Tree, tree.compact)
 		if diffErr != nil {
 			useDelta = false
 		} else {
 			encoded, encodeErr := json.Marshal(diff)
-			if encodeErr == nil && len(encoded) < int(float64(len(tree.fullBytes))*0.70) {
+			// The 70% rule is a bounded integer relation: an equal-size delta
+			// is not smaller and therefore falls back to the full tree.
+			if encodeErr == nil && 10*len(encoded) < 7*len(tree.compactBytes) {
 				delta = diff
 			} else {
 				useDelta = false
@@ -277,6 +288,13 @@ func (e *Engine) publishTreeAttempt(work *workState, session *sessionState, phas
 	}
 	if time.Since(tree.capture.CapturedAt) > e.cfg.CaptureMaxAge {
 		return nil, nil, protocol.NewError(409, protocol.CodeStaleScreen, "节点采集已过期")
+	}
+	// Retention is decided before anything changes: the candidate, the
+	// protected set and every retained snapshot must fit one bounded budget, or
+	// the whole acquisition is rejected without deleting history.
+	victims, fits := e.planRetentionLocked(tree.cost)
+	if !fits {
+		return nil, nil, budgetError("retained_snapshots", e.cfg.MaxRetainedSnapshotCostBytes)
 	}
 	e.session.Revision++
 	observationID := e.nextObservationIDLocked()
@@ -301,7 +319,16 @@ func (e *Engine) publishTreeAttempt(work *workState, session *sessionState, phas
 		CapturedAt: tree.capture.CapturedAt, ActionableUntil: actionableUntil,
 		Quality: quality,
 		Screen:  e.session.Display, Foreground: tree.capture.Foreground,
-		Projector: work.Projector, Projection: tree.projection, Status: ObservationReady, Full: !useDelta,
+		Projection: tree.projection, Compact: tree.compact, Cost: tree.cost,
+		Status: ObservationReady, Full: !useDelta,
+	}
+	for _, victim := range victims {
+		delete(e.observations, victim.ID)
+	}
+	// The candidate's continuity state becomes visible only here: every commit
+	// gate and the retention dry-run already passed.
+	if tree.commit != nil {
+		tree.commit()
 	}
 	e.current = obs
 	e.observations[observationID] = obs
@@ -311,8 +338,68 @@ func (e *Engine) publishTreeAttempt(work *workState, session *sessionState, phas
 		ttl = e.cfg.StartSessionTTL
 	}
 	e.extendSessionLocked(time.Now(), ttl)
-	public := e.observationPublicLocked(obs, status, tree.full, delta, image, quality)
+	public := e.observationPublicLocked(obs, status, tree.compact, delta, image, quality)
 	return public, obs, nil
+}
+
+// budgetError builds the controlled tree budget failure. The details name the
+// budget and its numeric limit; no tree content is ever attached.
+func budgetError(budget string, limit int) *protocol.APIError {
+	message := "完整公开树超过服务上限"
+	switch budget {
+	case "internal_snapshot":
+		message = "节点快照超过服务上限"
+	case "retained_snapshots":
+		message = "留存节点快照超过服务上限"
+	}
+	return protocol.NewError(503, protocol.CodeTreeTooLarge, message).
+		WithDetail("budget", budget).WithDetail("limit", limit)
+}
+
+// planRetentionLocked is a bounded dry-run over the retained observation
+// metadata. It returns the oldest unprotected victims that make room for one
+// new snapshot, or fits=false without changing anything.
+func (e *Engine) planRetentionLocked(newCost int) ([]*observationState, bool) {
+	total := 0
+	for _, obs := range e.observations {
+		if obs != nil {
+			total += obs.Cost
+		}
+	}
+	if total+newCost <= e.cfg.MaxRetainedSnapshotCostBytes {
+		return nil, true
+	}
+	protected := map[string]bool{}
+	if e.current != nil {
+		protected[e.current.ID] = true
+	}
+	if e.baseline != nil {
+		protected[e.baseline.ObservationID] = true
+	}
+	for id, obs := range e.observations {
+		if obs != nil && obs.Status == ObservationClaimed {
+			protected[id] = true
+		}
+	}
+	candidates := make([]*observationState, 0, len(e.observations))
+	for id, obs := range e.observations {
+		if obs == nil || protected[id] {
+			continue
+		}
+		candidates = append(candidates, obs)
+	}
+	sort.Slice(candidates, func(left, right int) bool {
+		return candidates[left].CapturedAt.Before(candidates[right].CapturedAt)
+	})
+	var victims []*observationState
+	for _, victim := range candidates {
+		total -= victim.Cost
+		victims = append(victims, victim)
+		if total+newCost <= e.cfg.MaxRetainedSnapshotCostBytes {
+			return victims, true
+		}
+	}
+	return nil, false
 }
 
 // captureTree reads the hierarchy and builds the complete public tree
@@ -399,22 +486,39 @@ func (e *Engine) readCapture(ctx context.Context, work *workState, session *sess
 	return cap, nil
 }
 
-// projectCapture builds the public tree and its canonical full encoding. It is
-// the single projection step of a published tree.
+// projectCapture builds the public reading tree candidate: the complete
+// internal projection, its compact public representation, the canonical bytes
+// of that representation and the internal accounting size. The public budget
+// is checked on the compact encoding; the internal budget is checked on the
+// complete snapshot. Neither check may delete or crop content.
 func (e *Engine) projectCapture(work *workState, phase string, cap device.Capture) (*treeAttempt, *protocol.APIError) {
 	e.setWorkPhase(work, phase+".project")
-	projection, err := work.Projector.Build(&cap)
+	projection, commit, err := work.Projector.Candidate(&cap)
 	if err != nil {
 		return nil, protocol.NewError(503, protocol.CodeHierarchyFailed, "公开树构造失败")
 	}
-	fullTree := &protocol.Tree{
-		Format: "full", Scope: protocol.Scope, Root: projection.Tree.Root,
+	compact := observation.ProjectCompactTree(projection.Tree)
+	if compact == nil || compact.Validate() != nil {
+		return nil, protocol.NewError(503, protocol.CodeHierarchyFailed, "公开树构造失败")
 	}
-	fullBytes, err := json.Marshal(fullTree)
-	if err != nil || len(fullBytes) > e.cfg.MaxFullTreeBytes {
-		return nil, protocol.NewError(503, protocol.CodeTreeTooLarge, "完整公开树超过服务上限")
+	compactBytes, err := json.Marshal(compact)
+	if err != nil {
+		return nil, protocol.NewError(503, protocol.CodeHierarchyFailed, "公开树构造失败")
 	}
-	return &treeAttempt{capture: cap, projection: projection, full: fullTree, fullBytes: fullBytes}, nil
+	if len(compactBytes) > e.cfg.MaxFullTreeBytes {
+		return nil, budgetError("public_full", e.cfg.MaxFullTreeBytes)
+	}
+	cost, err := observation.SnapshotCost(&cap, projection.Tree)
+	if err != nil {
+		return nil, protocol.NewError(503, protocol.CodeHierarchyFailed, "公开树构造失败")
+	}
+	if cost > e.cfg.MaxSnapshotCostBytes {
+		return nil, budgetError("internal_snapshot", e.cfg.MaxSnapshotCostBytes)
+	}
+	return &treeAttempt{
+		capture: cap, projection: projection, compact: compact,
+		compactBytes: compactBytes, cost: cost, commit: commit,
+	}, nil
 }
 
 // readImageForAcquisition reads the requested image and confirms that the
@@ -551,8 +655,8 @@ func failedObservation(coreErr *protocol.APIError, image *protocol.ImageMeta,
 // observationPublicLocked is the single committed observation projection. The
 // status, the optional image and the settle quality are decided by the
 // acquisition; everything else keeps its fixed public meaning.
-func (e *Engine) observationPublicLocked(obs *observationState, status string, full *protocol.Tree,
-	delta *protocol.Delta, image *protocol.ImageMeta, quality *protocol.Quality) *protocol.Observation {
+func (e *Engine) observationPublicLocked(obs *observationState, status string, full *protocol.ReadTree,
+	delta *protocol.ReadDelta, image *protocol.ImageMeta, quality *protocol.Quality) *protocol.Observation {
 	observation := &protocol.Observation{
 		Status: status, ID: obs.ID, Origin: obs.Origin, Revision: obs.Revision,
 		CapturedAt: formatTime(obs.CapturedAt), ActionableUntil: formatTime(obs.ActionableUntil),
@@ -574,9 +678,9 @@ func (e *Engine) observationPublicLocked(obs *observationState, status string, f
 	}
 	observation.Foreground = foreground
 	if delta != nil {
-		observation.Tree = &protocol.TreeValue{Delta: delta}
+		observation.Tree = &protocol.ReadTreeValue{Delta: delta}
 	} else {
-		observation.Tree = &protocol.TreeValue{Full: full}
+		observation.Tree = &protocol.ReadTreeValue{Full: full}
 	}
 	if image != nil {
 		observation.Image = image
@@ -622,12 +726,14 @@ func (e *Engine) pruneObservationsLocked() {
 
 // confirmBaselineLocked promotes one received full candidate to the confirmed
 // baseline. Only an admitted observe(O) or a successful act claim may call it.
+// The baseline keeps the compact public read tree the delta is expressed
+// against; the complete internal snapshot stays with the retained observation.
 func (e *Engine) confirmBaselineLocked(obs *observationState) {
-	if obs == nil || !obs.Full || obs.Projection == nil {
+	if obs == nil || !obs.Full || obs.Compact == nil {
 		return
 	}
 	e.baseline = &baselineState{
 		ObservationID: obs.ID, Origin: obs.Origin, Revision: obs.Revision,
-		CapturedAt: obs.CapturedAt, Tree: obs.Projection.Tree,
+		CapturedAt: obs.CapturedAt, Tree: obs.Compact,
 	}
 }

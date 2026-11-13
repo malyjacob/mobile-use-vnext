@@ -23,6 +23,16 @@ func (p *hookedProjector) Build(c *device.Capture) (*Projection, error) {
 	}
 	return p.Projector.Build(c)
 }
+
+// Candidate applies the same hook so a test that blocks inside projection also
+// observes the ordinary acquisition path, which now builds a candidate.
+func (p *hookedProjector) Candidate(c *device.Capture) (*Projection, func(), error) {
+	if p.build != nil {
+		projection, err := p.build(c)
+		return projection, func() {}, err
+	}
+	return p.Projector.Candidate(c)
+}
 func (p *hookedProjector) Reset() {
 	if p.reset != nil {
 		p.reset()

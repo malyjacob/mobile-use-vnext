@@ -191,16 +191,28 @@ raw `swipe` 仍是原始手势：起点 `from` 继续走完整内容身份、祖
    `unknown`/`0`/`not_sampled`。质量是观察材料事实，不改变 O 状态、输入授权与提交门禁；
 5. 采集龄超过 `CaptureMaxAge=15s` → `stale_screen`；
 6. 虚拟屏上出现控制 App 的可见节点 → `control_ui_on_virtual_display`，采集失败；
-7. `observation.Builder` 构造公开树（合成根、必要祖先、保守保号）；
-8. 始终先编码一份完整树；超过 `MaxFullTreeBytes=128 KiB` → `tree_too_large`；
+7. `observation.Builder` 构造完整的内部公开树（合成根、必要祖先、保守保号）；投影、折链、
+   序列化与计量都在锁外完成；
+8. 从内部树生成 compact 阅读表示并按它的规范 JSON 计量：超过 `MaxFullTreeBytes=128 KiB`
+   → `tree_too_large`（`details.budget=public_full`）；同一快照的内部计费对象
+   （`raw_capture` + 完整内部树）超过 `MaxSnapshotCostBytes=4 MiB`
+   → `tree_too_large`（`details.budget=internal_snapshot`）；
 9. 在锁内重验：会话仍 `active`、`epoch` 不变、工作未被撤销、仍持有工作位置、显示 ID 与
    `generation` 未变、采集未过期；
-10. 通过后 `session.Revision++`，分配 O，发布，退休上一个 ready O，续租。
+10. 对唯一留存快照做有限 dry-run；连同受保护集合仍超过
+    `MaxRetainedSnapshotCostBytes=32 MiB` → `tree_too_large`
+    （`details.budget=retained_snapshots`），且不先删除历史；可容纳时一次应用淘汰、扣费、
+    提交构造器连续性并发布新 O。
 
 第 9–10 步与 full/delta 选择抽成单一发布步骤 `publishTreeAttempt`（第 7–8 步由
 `projectCapture` 完成）：普通采集与 `act` 重验失败交付的帧共用同一提交门禁。交付路径在
 派发前失败时复用重验已经读取的那一帧，不重新采集、不做收敛采样、不确认基线，只把该帧投影、
 校验并提交为新的 ready O。
+
+公开 delta 相对已确认基线的同一 compact 阅读表示计算：先展开双方 chain，按原 ref 比较逻辑
+节点，再把 `add`/`replace` 定义折回 chain 并校验 `Apply` 守恒。70% 判据用有界整数关系
+`10×deltaBytes < 7×fullBytes`；等值退 full。构造器在投影阶段只产生候选，提交门禁通过后
+才推进 `prev` 与 ref 计数器；被拒绝的候选不改变下一次发布树的 ref。
 
 保号依据公开事实与已匹配的公开父锚点：role、label、公开时出现的 resource、actions、
 protected 与结构位置。未发布的 raw class/package/visible 不构成公开身份；context 节点保留
@@ -246,7 +258,7 @@ full/delta 的选择（`useDelta`）：
 并把空差异 delta 返回给调用方。客户端必须保留基线树，按 `delta.base` 应用到本地副本。
 
 delta 的五类块：`set`（逐字段完整新值，显式保留 `false`/`0`/`""`/`[]`/`null`）、`add`、
-`remove`、`children`（完整子列表）、`replace`（整段替换）。空差异只含 `format` 与 `base`。
+`remove`、`children`（完整子列表）、`replace`（整段替换）。空差异只含 `format`、`base`、`view` 与 `defaults`。
 
 ## 5. 工作位置与并发
 
@@ -478,7 +490,7 @@ P 已无法定位时，`end(P)` 返回 `409 operation_unknown`、`phase=referenc
 ### 发布
 
 `release/versions.json` 是发行号、共同契约号与 Android versionCode 的唯一来源；当前为
-`release_version=0.10.0`、`contract_version=10`、`android_version_code=12`，构建生成
+`release_version=0.11.0`、`contract_version=11`、`android_version_code=13`，构建生成
 Go/Java 常量。`scripts/build-release.ps1` 产出整组产物与 `build/release/manifest.json`
 （源码提交、Go 版本、MCP SDK/协议、各产物 SHA-256/大小、Android 包名/版本、工具目录指纹）。
 清单必须来自干净的已提交工作树：`scripts/verify-manifest.ps1` 拒绝已有跟踪改动的工作树、

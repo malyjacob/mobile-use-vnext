@@ -47,10 +47,18 @@ var rmfKnownExclusions = map[string]string{
 	"protocol.AppView.HasRemainingPIDs":  "presence flag",
 	"protocol.AppView.HasRestarted":      "presence flag",
 	"protocol.ImageMeta.Base64":          "transport-only",
-	"protocol.TreeValue.Full":            "variant wrapper",
-	"protocol.TreeValue.Delta":           "variant wrapper",
-	"protocol.Field.Set":                 "generic Field wrapper",
-	"protocol.Field.Value":               "generic Field wrapper",
+	"protocol.ReadTreeValue.Full":        "variant wrapper",
+	"protocol.ReadTreeValue.Delta":       "variant wrapper",
+	// A read node carries exactly one definition anchor: its own ref or the
+	// consecutive refs a chain folds. The chain form is never the root of a
+	// complete tree, an add or a replace, so it cannot appear on every scanned
+	// definition path; the composite inventory still pins both members.
+	"protocol.ReadNode.Chain": "definition anchor variant",
+	// ReadBounds selects the wire geometry form (null, "hidden" or one
+	// rectangle). Only the rectangle is a tuple that needs per-member coverage.
+	"protocol.ReadBounds.Kind":  "public geometry variant",
+	"protocol.Field.Set":        "generic Field wrapper",
+	"protocol.Field.Value":      "generic Field wrapper",
 }
 
 // Explicit inventories close the reflection loophole where a new field always
@@ -61,15 +69,17 @@ var rmfCompositeInventory = map[string]string{
 	"Screen":          "Width Height Rotation",
 	"Foreground":      "State Package TaskID HasTask Reason",
 	"ImageMeta":       "CapturedAt Width Height MediaType ReadOnly Screen Error Base64",
-	"Tree":            "Format Scope Root",
-	"Node":            "Ref Role Bounds Label Actions Enabled Focused Selected Checked Value Hint Protected Axis Resource Context Children",
-	"Delta":           "Format Base Set Add Remove Children Replace",
-	"SetNode":         "Label Actions Bounds Enabled Focused Selected Checked Value Hint Protected Axis Resource",
+	"ReadTree":        "Format Scope View Defaults Root",
+	"ReadNode":        "Ref Chain Role Bounds Label Actions Enabled Focused Selected Protected Checked Value Hint Axis Resource Context Children",
+	"ReadDelta":       "Format Base View Defaults Set Add Remove Children Replace",
+	"ReadSetNode":     "Label Actions Bounds Enabled Focused Selected Checked Value Hint Protected Axis Resource",
+	"ReadBounds":      "Kind Rect",
+	"Defaults":        "",
 	"AppItem":         "Name Package",
 	"AppTaskItem":     "TaskID Package Ownership OriginDisplay",
 	"AppCloseTask":    "TaskID Outcome RecentsCleaned HasRecentsCleaned Error",
 	"ShellView":       "Termination ExitCode Output Truncated OutputError",
-	"InspectionView":  "ObservationID Origin Revision CapturedAt Scope Tree Root Matches Total HasTotal Truncated",
+	"InspectionView":  "ObservationID Origin Revision CapturedAt Scope View Defaults Tree Root Matches Total HasTotal Truncated",
 	"InspectionMatch": "Node Path",
 	"DiagnosisIssue":  "Phase Code",
 	"DiagnosisEvent":  "At Phase Code",
@@ -114,10 +124,16 @@ func TestResultFieldManifest(t *testing.T) {
 	if manifest.exclusions["protocol.ImageMeta.Base64"] != "transport-only" {
 		t.Error("ImageMeta.Base64 is not declared transport-only")
 	}
-	for _, exclusion := range []string{"protocol.TreeValue.Full", "protocol.TreeValue.Delta"} {
+	for _, exclusion := range []string{"protocol.ReadTreeValue.Full", "protocol.ReadTreeValue.Delta"} {
 		if manifest.exclusions[exclusion] != "variant wrapper" {
-			t.Errorf("%s is not declared as a TreeValue variant wrapper", exclusion)
+			t.Errorf("%s is not declared as a ReadTreeValue variant wrapper", exclusion)
 		}
+	}
+	if manifest.exclusions["protocol.ReadNode.Chain"] != "definition anchor variant" {
+		t.Error("ReadNode.Chain is not declared as the definition anchor variant")
+	}
+	if manifest.exclusions["protocol.ReadBounds.Kind"] != "public geometry variant" {
+		t.Error("ReadBounds.Kind is not declared as the public geometry variant")
 	}
 	for _, exclusion := range []string{"protocol.Field.Set", "protocol.Field.Value"} {
 		if manifest.exclusions[exclusion] != "generic Field wrapper" {
@@ -378,8 +394,8 @@ func TestReadOnlyCancelWithoutError(t *testing.T) {
 		!bytes.Equal(rmfStructuredBytes(t, structuredMode.StructuredContent), canonical) {
 		t.Fatal("both/structured modes do not expose the canonical cancellation value")
 	}
-	if !strings.HasPrefix(testTextContent(t, textMode), "result v1 is_error=true\n") {
-		t.Fatal("text mode did not use result v1 cancellation override")
+	if !strings.HasPrefix(testTextContent(t, textMode), "result v2 is_error=true\n") {
+		t.Fatal("text mode did not use result v2 cancellation override")
 	}
 	if !strings.HasPrefix(testTextContent(t, structuredMode), "diagnostic v1 is_error=true\n") {
 		t.Fatal("structured mode did not use diagnostic v1 cancellation override")
@@ -458,16 +474,31 @@ func rmfAnalyzeManifest() rmfManifest {
 			return
 		}
 
-		if valueType.PkgPath() == reflect.TypeOf(protocol.Result{}).PkgPath() && valueType.Name() == "TreeValue" {
-			rmfRecordExclusion(&manifest, "protocol.TreeValue.Full")
-			rmfRecordExclusion(&manifest, "protocol.TreeValue.Delta")
+		if valueType.PkgPath() == reflect.TypeOf(protocol.Result{}).PkgPath() && valueType.Name() == "ReadTreeValue" {
+			rmfRecordExclusion(&manifest, "protocol.ReadTreeValue.Full")
+			rmfRecordExclusion(&manifest, "protocol.ReadTreeValue.Delta")
 			if valueType.NumField() != 2 ||
 				valueType.Field(0).Name != "Full" ||
 				valueType.Field(1).Name != "Delta" {
-				manifest.problems = append(manifest.problems, "TreeValue variant wrapper shape changed")
+				manifest.problems = append(manifest.problems, "ReadTreeValue variant wrapper shape changed")
 				return
 			}
 			scanValue(valueType.Field(0).Type, wirePath, coveredBy, stack)
+			scanValue(valueType.Field(1).Type, wirePath, coveredBy, stack)
+			return
+		}
+
+		// ReadBounds selects the wire geometry form: null, the controlled
+		// string "hidden" or one rectangle tuple. Only the rectangle carries
+		// delivered members, and it is encoded at the bounds position itself.
+		if valueType == reflect.TypeOf(protocol.ReadBounds{}) {
+			rmfRecordExclusion(&manifest, "protocol.ReadBounds.Kind")
+			if valueType.NumField() != 2 ||
+				valueType.Field(0).Name != "Kind" ||
+				valueType.Field(1).Name != "Rect" {
+				manifest.problems = append(manifest.problems, "ReadBounds public geometry shape changed")
+				return
+			}
 			scanValue(valueType.Field(1).Type, wirePath, coveredBy, stack)
 			return
 		}
@@ -705,7 +736,7 @@ func rmfHasWirePath(fields []rmfWireField, path string) bool {
 }
 
 func rmfResultFixtures() []rmfFixture {
-	fullTree := rmfFullTreeValue("N1")
+	fullTree := rmfFullTreeValue("n1")
 	imageError := &protocol.Error{
 		Code:    protocol.CodeImageCapture,
 		Message: "图片不可用",
@@ -787,7 +818,7 @@ func rmfResultFixtures() []rmfFixture {
 				Revision:      1,
 				CapturedAt:    "2026-11-10T00:00:01Z",
 				Scope:         "tree",
-				Tree:          rmfFullTreeValue("N1").Full,
+				Tree:          rmfInspectionTree("n1"),
 			},
 			Shell: &protocol.ShellView{
 				Termination: "exited",
@@ -874,7 +905,7 @@ func rmfResultFixtures() []rmfFixture {
 					State:  "unknown",
 					Reason: "no_window",
 				},
-				Tree: &protocol.TreeValue{Delta: rmfDelta("O1")},
+				Tree: &protocol.ReadTreeValue{Delta: rmfDelta("O1")},
 			},
 			Inspection: &protocol.InspectionView{
 				ObservationID: "O2",
@@ -882,7 +913,8 @@ func rmfResultFixtures() []rmfFixture {
 				Revision:      2,
 				CapturedAt:    "2026-11-10T00:00:04Z",
 				Scope:         "subtree",
-				Root:          rmfNode("N5", protocol.RoleButton, true),
+				View:          protocol.ViewDetailed,
+				Root:          rmfNode("n5", protocol.RoleButton, true),
 			},
 		},
 	}
@@ -897,10 +929,11 @@ func rmfResultFixtures() []rmfFixture {
 				Revision:      3,
 				CapturedAt:    "2026-11-10T00:00:05Z",
 				Scope:         "query",
+				View:          protocol.ViewDetailed,
 				Matches: []protocol.InspectionMatch{
 					{
-						Node: rmfNode("N6", protocol.RoleButton, true),
-						Path: []string{"N1", "N6"},
+						Node: rmfNode("n6", protocol.RoleButton, true),
+						Path: []string{"n1", "n6"},
 					},
 				},
 				Total:     1,
@@ -1069,7 +1102,7 @@ func rmfResultFixtures() []rmfFixture {
 					Samples:    5,
 					StopReason: protocol.QualityStopMaxSamples,
 				},
-				Tree: rmfFullTreeValue("N7"),
+				Tree: rmfFullTreeValue("n1"),
 			},
 		},
 	}
@@ -1092,7 +1125,7 @@ func rmfResultFixtures() []rmfFixture {
 					Samples:    4,
 					StopReason: protocol.QualityStopBudget,
 				},
-				Tree: rmfFullTreeValue("N8"),
+				Tree: rmfFullTreeValue("n1"),
 			},
 		},
 	}
@@ -1113,7 +1146,7 @@ func rmfResultFixtures() []rmfFixture {
 					Samples:    0,
 					StopReason: protocol.QualityStopNotSampled,
 				},
-				Tree: rmfFullTreeValue("N9"),
+				Tree: rmfFullTreeValue("n1"),
 			},
 		},
 	}
@@ -1124,42 +1157,54 @@ func rmfResultFixtures() []rmfFixture {
 	}
 }
 
-func rmfFullTree(ref string) *protocol.Tree {
-	return &protocol.Tree{
+// rmfFullTree builds one compact public tree. ReadTreeValue.Full is always a
+// compact complete tree; inspection material is built by rmfInspectionTree.
+func rmfFullTree(ref string) *protocol.ReadTree {
+	return &protocol.ReadTree{
 		Format: "full",
 		Scope:  protocol.Scope,
+		View:   protocol.ViewCompact,
 		Root:   rmfNode(ref, protocol.RoleRoot, true),
 	}
 }
 
-func rmfFullTreeValue(ref string) *protocol.TreeValue {
-	return &protocol.TreeValue{Full: rmfFullTree(ref)}
+// rmfInspectionTree builds the detailed complete tree of the inspection tree
+// scope: detailed view, no hidden geometry.
+func rmfInspectionTree(ref string) *protocol.ReadTree {
+	tree := rmfFullTree(ref)
+	tree.View = protocol.ViewDetailed
+	return tree
 }
 
-func rmfDelta(base string) *protocol.Delta {
-	return &protocol.Delta{
+func rmfFullTreeValue(ref string) *protocol.ReadTreeValue {
+	return &protocol.ReadTreeValue{Full: rmfFullTree(ref)}
+}
+
+func rmfDelta(base string) *protocol.ReadDelta {
+	return &protocol.ReadDelta{
 		Format: "delta",
 		Base:   base,
-		Set: map[string]protocol.SetNode{
-			"N1": rmfSetNode(),
-			"N2": rmfSetNode(),
+		View:   protocol.ViewCompact,
+		Set: map[string]protocol.ReadSetNode{
+			"n1": rmfSetNode(),
+			"n2": rmfSetNode(),
 		},
-		Add:    []*protocol.Node{rmfNode("N2", protocol.RoleButton, true)},
-		Remove: []string{"N0"},
+		Add:    []*protocol.ReadNode{rmfNode("n4", protocol.RoleButton, true)},
+		Remove: []string{"n9"},
 		Children: map[string][]string{
-			"N1": {"N2"},
+			"n1": {"n2"},
 		},
-		Replace: map[string]*protocol.Node{
-			"N3": rmfNode("N3", protocol.RoleGroup, true),
+		Replace: map[string]*protocol.ReadNode{
+			"n3": rmfNode("n3", protocol.RoleGroup, true),
 		},
 	}
 }
 
-func rmfSetNode() protocol.SetNode {
-	return protocol.SetNode{
+func rmfSetNode() protocol.ReadSetNode {
+	return protocol.ReadSetNode{
 		Label:     protocol.Field[[]string]{Set: true, Value: []string{}},
 		Actions:   protocol.Field[[]protocol.Action]{Set: true, Value: []protocol.Action{}},
-		Bounds:    protocol.Field[*protocol.Bounds]{Set: true, Value: &protocol.Bounds{Left: 1, Top: 2, Right: 3, Bottom: 4}},
+		Bounds:    protocol.Field[protocol.ReadBounds]{Set: true, Value: protocol.KnownBounds(protocol.Bounds{Left: 1, Top: 2, Right: 3, Bottom: 4})},
 		Enabled:   protocol.Field[*bool]{Set: true, Value: rmfPtr(false)},
 		Focused:   protocol.Field[*bool]{Set: true, Value: nil},
 		Selected:  protocol.Field[*bool]{Set: true, Value: rmfPtr(true)},
@@ -1172,17 +1217,19 @@ func rmfSetNode() protocol.SetNode {
 	}
 }
 
-func rmfNode(ref string, role protocol.Role, withChildren bool) *protocol.Node {
-	node := &protocol.Node{
+func rmfNode(ref string, role protocol.Role, withChildren bool) *protocol.ReadNode {
+	node := &protocol.ReadNode{
 		Ref:       ref,
 		Role:      role,
-		Bounds:    &protocol.Bounds{Left: 1, Top: 2, Right: 3, Bottom: 4},
+		Bounds:    protocol.KnownBounds(protocol.Bounds{Left: 1, Top: 2, Right: 3, Bottom: 4}),
 		Label:     []string{"label"},
 		Actions:   []protocol.Action{protocol.ActionTap},
 		Enabled:   nil,
 		Focused:   nil,
 		Selected:  rmfPtr(true),
-		Checked:   rmfPtr(false),
+		// checked=false is the public default and is omitted; the fixture uses
+		// a known true so the member appears in the canonical document.
+		Checked:   rmfPtr(true),
 		Value:     rmfPtr(""),
 		Hint:      rmfPtr(""),
 		Protected: nil,
@@ -1191,11 +1238,11 @@ func rmfNode(ref string, role protocol.Role, withChildren bool) *protocol.Node {
 		Context:   true,
 	}
 	if withChildren {
-		node.Children = []*protocol.Node{
+		node.Children = []*protocol.ReadNode{
 			{
-				Ref:      ref + "C",
+				Ref:      ref + "1",
 				Role:     protocol.RoleText,
-				Bounds:   &protocol.Bounds{Left: 5, Top: 6, Right: 7, Bottom: 8},
+				Bounds:   protocol.KnownBounds(protocol.Bounds{Left: 5, Top: 6, Right: 7, Bottom: 8}),
 				Label:    []string{"child"},
 				Actions:  []protocol.Action{},
 				Selected: rmfPtr(false),
@@ -1207,20 +1254,20 @@ func rmfNode(ref string, role protocol.Role, withChildren bool) *protocol.Node {
 }
 
 func rmfDeterministicResult(iteration int) *protocol.Result {
-	keys := []string{"zeta", "alpha", "middle"}
-	values := map[string]int64{"zeta": 0, "alpha": 1, "middle": 2}
+	keys := []string{"n3", "n1", "n2"}
+	values := map[string]int64{"n3": 0, "n1": 1, "n2": 2}
 	rotate := iteration % len(keys)
 	details := make(map[string]any, len(keys))
 	timing := make(map[string]int64, len(keys))
-	set := make(map[string]protocol.SetNode, len(keys))
+	set := make(map[string]protocol.ReadSetNode, len(keys))
 	children := make(map[string][]string, len(keys))
-	replace := make(map[string]*protocol.Node, len(keys))
+	replace := make(map[string]*protocol.ReadNode, len(keys))
 	for offset := range keys {
 		key := keys[(offset+rotate)%len(keys)]
 		details[key] = values[key]
 		timing[key] = values[key]
 		set[key] = rmfSetNode()
-		children[key] = []string{"N1", "N2"}
+		children[key] = []string{"n1", "n2"}
 		replace[key] = rmfNode(key, protocol.RoleButton, false)
 	}
 	return &protocol.Result{
@@ -1232,9 +1279,10 @@ func rmfDeterministicResult(iteration int) *protocol.Result {
 		},
 		Observation: &protocol.Observation{
 			ID: "O1",
-			Tree: &protocol.TreeValue{Delta: &protocol.Delta{
+			Tree: &protocol.ReadTreeValue{Delta: &protocol.ReadDelta{
 				Format:   "delta",
 				Base:     "O0",
+				View:     protocol.ViewCompact,
 				Set:      set,
 				Children: children,
 				Replace:  replace,

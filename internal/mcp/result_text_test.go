@@ -29,7 +29,7 @@ func decodeResultText(t *testing.T, text string) (map[string]any, bool, error) {
 	if len(lines) < 2 || lines[len(lines)-1] != "end result" {
 		return bad()
 	}
-	flag, ok := strings.CutPrefix(lines[0], "result v1 is_error=")
+	flag, ok := strings.CutPrefix(lines[0], "result v2 is_error=")
 	if !ok || (flag != "true" && flag != "false") {
 		return bad()
 	}
@@ -110,7 +110,7 @@ func decodeResultText(t *testing.T, text string) (map[string]any, bool, error) {
 			}
 			continue
 		}
-		if strings.HasPrefix(line, "tree v1 ") || strings.HasPrefix(line, "inspect v1 ") || strings.HasPrefix(line, "shell v1 ") || strings.HasPrefix(line, "timeline v1 ") {
+		if strings.HasPrefix(line, "tree v2 ") || strings.HasPrefix(line, "inspect v2 ") || strings.HasPrefix(line, "shell v1 ") || strings.HasPrefix(line, "timeline v1 ") {
 			kind := strings.Fields(line)[0]
 			end := "end " + kind
 			j := i + 1
@@ -280,15 +280,16 @@ func assertResultTextParity(t *testing.T, raw []byte, isError bool) string {
 func TestTextCodecDeliveredObservationOnError(t *testing.T) {
 	raw := []byte(`{"operation_id":"P7","operation_state":"finished","outcome":"not_executed","phase":"revalidate",` +
 		`"observation":{"status":"complete","id":"O2","origin":"P1","revision":2,"tree":{"format":"full",` +
-		`"scope":"reported_visible_with_context","root":{"ref":"n1","role":"root","bounds":[0,0,1080,2400]}}},` +
+		`"scope":"reported_visible_with_context","view":"compact","defaults":{"checked":false},` +
+		`"root":{"ref":"n1","role":"root","bounds":[0,0,1080,2400]}}},` +
 		`"error":{"code":"target_changed","message":"目标元素已变化，本次未派发"},` +
 		`"recovery":{"entry":"retry","reference":"O","input_state":"effective"}}`)
 	text := assertResultTextParity(t, raw, true)
 	for _, want := range []string{
-		"result v1 is_error=true",
+		"result v2 is_error=true",
 		"observation.status=complete",
 		"observation.id=O2",
-		"tree v1 format=full id=O2",
+		"tree v2 format=full id=O2",
 		"recovery.entry=retry",
 		"recovery.reference=O",
 		"end result",
@@ -302,7 +303,7 @@ func TestTextCodecDeliveredObservationOnError(t *testing.T) {
 func TestTextCodecGolden(t *testing.T) {
 	raw := []byte(`{"operation_id":"P1","outcome":"executed","shell":{"termination":"exited","exit_code":0,"output":"hello\r\n世界\n","truncated":false},"error":{"code":"example","message":"a=b\n\"quoted\""}}`)
 	text := assertResultTextParity(t, raw, false)
-	want := "result v1 is_error=false\noperation_id=P1\noutcome=executed\n\nshell v1 termination=exited exit_code=0 truncated=false output_bytes=14\noutput \"hello\\r\\n\"\noutput \"世界\\n\"\nend shell\nerror.code=example\nerror.message=\"a=b\\n\\\"quoted\\\"\"\nend result\n"
+	want := "result v2 is_error=false\noperation_id=P1\noutcome=executed\n\nshell v1 termination=exited exit_code=0 truncated=false output_bytes=14\noutput \"hello\\r\\n\"\noutput \"世界\\n\"\nend shell\nerror.code=example\nerror.message=\"a=b\\n\\\"quoted\\\"\"\nend result\n"
 	if text != want {
 		t.Fatalf("golden mismatch\n%s", text)
 	}
@@ -324,7 +325,7 @@ func TestTextCodecPresenceAndEscaping(t *testing.T) {
 
 func TestFutureFieldFallback(t *testing.T) {
 	for _, raw := range []string{
-		`{"observation":{"status":"complete","id":"O1","tree":{"format":"full","scope":"reported_visible_with_context","root":{"ref":"n1","role":"root","bounds":null,"future":true}}}}`,
+		`{"observation":{"status":"complete","id":"O1","tree":{"format":"full","scope":"reported_visible_with_context","view":"compact","defaults":{"checked":false},"root":{"ref":"n1","role":"root","bounds":null,"future":true}}}}`,
 		`{"inspection":{"observation_id":"O1","origin":"P1","revision":1,"captured_at":"now","scope":"tree","future":0}}`,
 		`{"app":{"kind":"find","items":[{"name":"N","package":"P","future":false}],"total":1,"truncated":false,"captured_at":"now","future":[]},"diagnosis":{"timeline":[{"at":"now","phase":"p","future":null}],"future/x":{}}}`,
 	} {
@@ -334,15 +335,15 @@ func TestFutureFieldFallback(t *testing.T) {
 
 func TestTextCodecUnrepresentableTreeMetadata(t *testing.T) {
 	for _, raw := range []string{
-		`{"observation":{"status":"complete","id":"中文","tree":{"format":"full","scope":"reported_visible_with_context","root":{"ref":"n1","role":"root","bounds":null}}}}`,
-		`{"observation":{"status":"complete","id":"O1","tree":{"format":"delta","base":"O0","replace":{"n1":{"ref":"n2","role":"text","bounds":null}}}}}`,
+		`{"observation":{"status":"complete","id":"中文","tree":{"format":"full","scope":"reported_visible_with_context","view":"compact","defaults":{"checked":false},"root":{"ref":"n1","role":"root","bounds":null}}}}`,
+		`{"observation":{"status":"complete","id":"O1","tree":{"format":"delta","base":"O0","view":"compact","defaults":{"checked":false},"replace":{"n1":{"ref":"n2","role":"text","bounds":null}}}}}`,
 	} {
 		t.Run(raw, func(t *testing.T) {
 			text, err := encodeResultText([]byte(raw), false)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if strings.Contains(text, "\ntree v1 ") {
+			if strings.Contains(text, "\ntree v2 ") {
 				t.Fatal("unrepresentable metadata entered readable block")
 			}
 			assertResultTextParity(t, []byte(raw), false)
@@ -371,6 +372,7 @@ func TestTextCodecEffectAndQuality(t *testing.T) {
 		`"quality":{"state":"unknown","samples":0,"stop_reason":"not_sampled"},` +
 		`"screen":{"width":1080,"height":2400,"rotation":0},` +
 		`"tree":{"format":"full","scope":"reported_visible_with_context",` +
+		`"view":"compact","defaults":{"checked":false},` +
 		`"root":{"ref":"n1","role":"root","bounds":[0,0,1080,2400]}}}}`)
 	text := assertResultTextParity(t, raw, false)
 	for _, line := range []string{
@@ -450,7 +452,7 @@ func TestDiagnosticDoesNotProjectQuality(t *testing.T) {
 }
 
 func TestTextCodecTrailer(t *testing.T) {
-	for _, text := range []string{"result v1 is_error=false\n", "result v1 is_error=false\noperation_id=P1\noperation_id=P2\nend result\n", "result v1 is_error=false\nresult v1 is_error=false\nend result\n", "diagnostic v1 is_error=true\nend diagnostic\n"} {
+	for _, text := range []string{"result v2 is_error=false\n", "result v2 is_error=false\noperation_id=P1\noperation_id=P2\nend result\n", "result v2 is_error=false\nresult v2 is_error=false\nend result\n", "diagnostic v1 is_error=true\nend diagnostic\n"} {
 		if _, _, err := decodeResultText(t, text); err == nil {
 			t.Fatalf("accepted malformed %q", text)
 		}
@@ -500,7 +502,7 @@ func TestTextCodecMetadataPaths(t *testing.T) {
 				t.Fatal(err)
 			}
 			text := assertResultTextParity(t, raw, false)
-			if strings.Contains(text, "tree v1 format=delta") && strings.Contains(text, "observation.tree.scope=") {
+			if strings.Contains(text, "tree v2 format=delta") && strings.Contains(text, "observation.tree.scope=") {
 				t.Fatal("derived delta scope became fact")
 			}
 		}
@@ -520,20 +522,22 @@ func TestTextCodecServiceLimitFixtures(t *testing.T) {
 		{"observation", "", 128 * 1024}, {"inspection-tree", "tree", 128 * 1024}, {"inspection-subtree", "subtree", 32 * 1024}, {"inspection-query", "query", 32 * 1024},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			node := testNode("n1", protocol.RoleRoot, nil)
+			node := testNode("n1", protocol.RoleRoot, protocol.UnknownBounds())
 			node.Label = []string{strings.Repeat("x", c.limit-1024)}
 			r := &protocol.Result{}
 			if c.scope == "" {
-				r.Observation = &protocol.Observation{Status: "complete", ID: "O1", Tree: &protocol.TreeValue{Full: &protocol.Tree{Format: "full", Scope: protocol.Scope, Root: node}}}
+				r.Observation = &protocol.Observation{Status: "complete", ID: "O1", Tree: &protocol.ReadTreeValue{Full: &protocol.ReadTree{Format: "full", Scope: protocol.Scope, View: protocol.ViewCompact, Root: node}}}
 			} else {
 				view := &protocol.InspectionView{Origin: "P1", ObservationID: "O1", Revision: 1, CapturedAt: "now", Scope: c.scope}
 				r.Inspection = view
 				switch c.scope {
 				case "tree":
-					view.Tree = &protocol.Tree{Format: "full", Scope: protocol.Scope, Root: node}
+					view.Tree = &protocol.ReadTree{Format: "full", Scope: protocol.Scope, View: protocol.ViewDetailed, Root: node}
 				case "subtree":
+					view.View = protocol.ViewDetailed
 					view.Root = node
 				case "query":
+					view.View = protocol.ViewDetailed
 					view.Matches = []protocol.InspectionMatch{{Node: node, Path: []string{}}}
 					view.HasTotal = true
 					view.Total = 1

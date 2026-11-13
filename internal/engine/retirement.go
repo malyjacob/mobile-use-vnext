@@ -104,6 +104,12 @@ func (e *Engine) retireLocked(session *sessionState, cleanup *cleanupState) *ret
 	}
 	r := &retiredState{session: session, cleanup: cleanup, ui: e.ui, shell: shell, legacy: e.legacyUI,
 		service: e.cfg.ServiceInstanceID}
+	// A retired session keeps only evidence and scalar facts. Its continuity
+	// projector may still be held by an in-flight work handler, which keeps its
+	// own pointer; the engine drops its reference so a terminated session never
+	// keeps a published tree alive, and no Reset races a handler that still uses
+	// it.
+	session.Projector = nil
 	if session.CreateCommand != "" {
 		r.create = &LedgerCommand{ID: session.CreateCommand, Kind: "create_display", AppInstanceID: session.AppInstanceID, RequestedAt: session.StartedAt}
 	}

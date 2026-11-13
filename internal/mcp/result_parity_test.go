@@ -176,11 +176,15 @@ func resultModeFixtures() []resultModeFixture {
 	add("act", "scroll_effect_quality", `{"operation_id":"P1","outcome":"executed","phase":"completed","effect":{"state":"observed"},"target_reference":"O1","observation":{"status":"complete","id":"O2","origin":"P1","revision":2,"quality":{"state":"unstable","samples":5,"stop_reason":"max_samples"},"tree":`+testFullTreeJSON+`}}`)
 	add("act", "scroll_effect_unknown", `{"operation_id":"P1","outcome":"uncertain","effect":{"state":"unknown"},"observation":{"status":"complete","id":"O3","quality":{"state":"unknown","samples":0,"stop_reason":"not_sampled"}},"error":{"code":"action_unknown","message":"动作结果不确定"}}`)
 	fixtures = append(fixtures, resultModeFixture{tool: "act", name: "executed_cancelled", raw: `{"outcome":"executed"}`, cancelled: true})
+	// The inspection tree scope carries the detailed view inside the nested
+	// complete tree; subtree and query declare it on the envelope together with
+	// the fixed defaults declaration.
+	inspectionEnvelope := `"view":"detailed","defaults":{"checked":false},`
 	for _, scope := range []struct{ name, fields string }{
-		{"tree", `"tree":` + testFullTreeJSON},
-		{"subtree", `"root":{"ref":"n1","role":"root","bounds":null}`},
-		{"query", `"matches":[{"node":{"ref":"n2","role":"text","bounds":null,"label":["a"]},"path":["n1"]}],"total":2,"truncated":true`},
-		{"query", `"matches":[],"total":0,"truncated":false`},
+		{"tree", `"tree":` + testDetailedTreeJSON},
+		{"subtree", inspectionEnvelope + `"root":{"ref":"n1","role":"root","bounds":null}`},
+		{"query", inspectionEnvelope + `"matches":[{"node":{"ref":"n2","role":"text","bounds":null,"label":["a"]},"path":["n1"]}],"total":2,"truncated":true`},
+		{"query", inspectionEnvelope + `"matches":[],"total":0,"truncated":false`},
 	} {
 		add("inspect", scope.name, `{"inspection":{"observation_id":"O1","origin":"P1","revision":1,"captured_at":"now","scope":"`+scope.name+`",`+scope.fields+`}}`)
 	}
@@ -336,10 +340,10 @@ func TestHTTPModesSelectProjectionPerCall(t *testing.T) {
 }
 
 func TestCatalogFingerprintBaseline(t *testing.T) {
-	// The catalog still has eleven tools. Contract 10 adds the act scroll
-	// branch (container/direction/amount/duration_ms); keepalive's optional
-	// duration schema and the result modes are unchanged.
-	const baseline = "23957b25098f4cec6b959d1fc02fc0ee5639563899aee3bdec5190df5c8b9913"
+	// The catalog still has eleven tools. Contract 11 replaces the public
+	// reading representation and therefore the shared tree text legend;
+	// keepalive's optional duration schema and the result modes are unchanged.
+	const baseline = "fcf3ca140bdf5fc84b922f79af64480a488d8c5be6967b1a94b56094771f9d5d"
 	if got := CatalogFingerprint(); got != baseline {
 		t.Fatalf("catalog changed: %s", got)
 	}

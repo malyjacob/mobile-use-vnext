@@ -33,7 +33,8 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
 
 工具描述中的树引导与树块词表一致：树节点行的动作列仍只有 `tap`、`long_press`、`text`、
 `swipe`（`Node.actions` 不新增枚举）；`actions=swipe` 只是节点的源能力，不是 raw `swipe`
-授权，滚动用 `operation.type=scroll` 与 `container` 表达。
+授权，滚动用 `operation.type=scroll` 与 `container` 表达。引导同时声明块头 `view=`、
+固定 `defaults` 行、`entries` 计数与 `chain` 行，避免同一语法出现两份漂移表述。
 
 调用参数在进入客户端前由 `internal/protocol` 的严格解码器接入：未知成员、重复键、大小写
 变体、尾随第二个 JSON 值、类型混用与未声明 `null` 都被拒绝，且不产生设备调用。参数错误
@@ -70,8 +71,8 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
 
 | 模式 | `content` | `structuredContent` |
 | --- | --- | --- |
-| `both`（默认） | 完整 `result v1` 文本与图片 | 完整 `Result` JSON |
-| `text` | 完整 `result v1` 文本与图片 | 不发送 |
+| `both`（默认） | 完整 `result v2` 文本与图片 | 完整 `Result` JSON |
+| `text` | 完整 `result v2` 文本与图片 | 不发送 |
 | `structured` | 图片；`isError=true` 时附最小 `diagnostic v1` 文本 | 完整 `Result` JSON |
 
 完整结果是 `(canonical A, CallToolResult.IsError, ImageContent)`。`A` 是去除图片 base64
@@ -81,7 +82,7 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
 的宿主应使用 `both` 或 `text`。模式不用于脱敏或截断，不发布 `outputSchema`。
 
 `effect` 与 `observation.quality` 按同一份 `Result` 投影，三种模式承载相同字段与值：
-`result v1` 在 `phase` 之后投影 `effect.state`，在观察字段中投影
+`result v2` 在 `phase` 之后投影 `effect.state`，在观察字段中投影
 `observation.quality.state`、`observation.quality.samples` 与
 `observation.quality.stop_reason`；`structured` 与 `both` 的 `structuredContent` 保留同一份
 对象，`text` 不发送结构化内容。适配器不重算或补投影这两个事实；`effect` 只由 `scroll` 的
@@ -89,7 +90,7 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
 `unknown`/`0`/`not_sampled`），只有没有树的失败观察不携带它。两者的成员与取值见
 [接口契约](interface.md) §11。
 
-完整文本第一行为 `result v1 is_error=<true|false>`，最后为 `end result`。已知字段按
+完整文本第一行为 `result v2 is_error=<true|false>`，最后为 `end result`。已知字段按
 `Result` 的公共顺序输出，字段行和块可以交错；例如 shell 块之后仍可有错误与恢复字段。
 字段行为 `key=value`，受控 ID、枚举、时间戳、整数、布尔可用无空白、`=`、引号、反斜杠的
 ASCII token；任意文本与设备来源字符串使用 JSON 字符串，空串和非法 token 也使用 JSON
@@ -127,7 +128,7 @@ diagnostic 中补充 `app.kind`，不展开 `items`、`tasks`、PID 或其他业
 元数据；不得补 `task_id`、`display_id`、PID、`ownership` 或其他设备事实，也不得声称服务已
 登记或已 finished。适配器自身的参数接入拒绝不分配 P，也不补 `app`。
 
-文本字节是稳定契约：`result v1` 的成员顺序、分类与兜底规则不变；取消统一标为
+文本字节是稳定契约：`result v2` 的成员顺序、分类与兜底规则不变；取消统一标为
 `isError=true`。工具名称、描述、入参 schema 与目录指纹随发布清单核验，描述变更会改变
 目录指纹，部署必须按清单重新核验。
 
@@ -162,70 +163,82 @@ diagnostic 中补充 `app.kind`，不展开 `items`、`tasks`、PID 或其他业
 树块只投影本次 `Result` 中已有的树或补看内容：不新增采集、不展开 delta、不缓存基线，
 也不读取请求参数、时间或随机数；同一个 `Result` 重复渲染逐字节相同。
 
-在 `result v1` 文本里（`text`/`both` 模式），错误结果同样按成员投影：`act` 重验失败交付的
+在 `result v2` 文本里（`text`/`both` 模式），错误结果同样按成员投影：`act` 重验失败交付的
 新观察会带树块，`is_error=true` 与树块可以出现在同一个结果里。交付与否不改变 `is_error` 的
 判定：`act` 看 `outcome` 是否为 `executed`，其余工具按 `error` 与各自的查询事实。
 `structured` 模式的错误文本是 `diagnostic v1`，不含树块。
 
-**观察块。** 块头之后是一个空行、节点行，最后是终止行：
+**观察块。** 块头之后固定一行 `defaults {"checked":false}`，再一个空行、节点行，最后是终止行：
 
 ```text
-tree v1 format=full id=O3 scope=reported_visible_with_context nodes=7
+tree v2 format=full id=O3 scope=reported_visible_with_context view=compact nodes=9 entries=9
+defaults {"checked":false}
 
-n1 root [0,0,1080,2400]
-  n2 group [0,0,1080,220]
+n1 root [0,0,1080,2400] checked=null
+  n2 group
     n3 button [24,60,144,180] "返回" tap
     n4 text [300,80,780,160] "设置"
+    n6 switch [900,60,1032,180] "启用" tap checked=true
   n5 scroll [0,220,1080,2400] axis=y
     n12 group -
       n13 input [48,1850,1032,1990] "搜索设置" value="" hint="输入关键词" tap text
+    n14 group -
 end tree
 ```
 
-节点行固定列序：2 空格/层缩进、`n<ref>`、`role`、`[l,t,r,b]`（未知为 `-`）、每个
+节点行固定列序：2 空格/层缩进、`n<ref>` 或 `chain [n2 n3]`、`role`、几何列、每个
 `label` 一个 JSON 字符串、`value=` / `hint=`、动作词、标志。动作词为 `tap`、
 `long_press`、`text`、`swipe`，来自 `Node.actions` 的源能力词表；受控滚动不增加动作词，
 以 `act.operation.type=scroll` 表达。标志为 `enabled=false|null`、
-`focused`/`selected`/`protected` 的 `true|null`、`checked=true|false`、
+`focused`/`selected`/`protected` 的 `true|null`、`checked=true|null`、
 `axis=x|y|both`、`resource="…"` 与 `context`。设备来源字符串按 JSON 字符串字面量转义，
 `<`、`>`、`&` 保持原样；缺省值按协议省略规则不输出。
 
+几何列与节点定义一一对应：已知矩形写 `[l,t,r,b]`，源未提供几何写 `-`；观察视图里按匿名
+规则隐藏的已知矩形直接没有该列，`-` 不表示隐藏。连续匿名单子节点折成一条
+`chain [n2 n3]`，成员共享其余列，孩子属于末成员。`nodes` 是展开后的逻辑节点数，
+`entries` 是普通节点或 `chain` 定义行数；详细补看视图里两者相同。`checked` 默认
+`false`（省略），只有 `true` 与 `null` 显式出现。
+
 delta 块头为
-`tree v1 format=delta id=<O> base=<O2> scope=<scope> changes=<n>`，正文按
+`tree v2 format=delta id=<O> base=<O2> view=compact scope=<scope> changes=<n>`，正文按
 `set → add → remove → children → replace` 顺序输出。`changes` 是五个块的顶层声明条数
-之和：一个 `set` 条目即使改了多个字段也只计 1。
+之和：一个 `set` 条目即使改了多个字段也只计 1，chain 内的 ref 数也不计入。
 
 ```text
-tree v1 format=delta id=O4 base=O3 scope=reported_visible_with_context changes=6
+tree v2 format=delta id=O4 base=O3 view=compact scope=reported_visible_with_context changes=6
+defaults {"checked":false}
 
-~ n7 label=["WLAN 已关闭"] actions=["tap"]
+~ n7 label=["WLAN 已关闭"] actions=["tap"] bounds=[40,300,240,380]
 ~ n8 checked=false
-+ n14 group [0,460,1080,580]
++ n14 group
   n15 text [48,490,700,550] "移动网络" tap
 - n16
 children n5 = [n6 n9 n14]
-= n12 group [0,1800,1080,2100]
+= n12 group
   n91 input [48,1850,1032,1990] "搜索设置" value="" hint="输入关键词" tap text
 end tree
 ```
 
 `~` 行只列实际变化的字段，字段值保留显式 `false`、`""`、`[]` 与 `null`；字段顺序为
 `label`、`actions`、`bounds`、`enabled`、`focused`、`selected`、`checked`、`value`、
-`hint`、`protected`、`axis`、`resource`。`SetNode` 没有 `role`，`~` 行也不输出 `role`。
+`hint`、`protected`、`axis`、`resource`。`bounds=hidden` 表示该几何按策略不交付，
+`bounds=null` 表示置为未知。`SetNode` 没有 `role`，`~` 行也不输出 `role`。
 `add` / `remove` 保持结果中的顺序；`set`、`children`、`replace` 按 ref 数值升序输出。
 同一个 `base` 下的新 delta 覆盖旧 delta，不叠加；块头 `base=` 是唯一锚点。
 
 **补看块。** 块头为
-`inspect v1 scope=<tree|subtree|query> observation=<O> revision=<n> captured_at=<RFC3339> tree_scope=<scope> [root=<ref>] [matches=<n> total=<n> truncated=<bool>] nodes=<n>`。
+`inspect v2 scope=<tree|subtree|query> observation=<O> revision=<n> captured_at=<RFC3339> tree_scope=<scope> view=detailed [root=<ref>] [matches=<n> total=<n> truncated=<bool>] nodes=<n> entries=<m>`，
+随后是同一行 `defaults {"checked":false}` 与空行。
 `tree` 输出整树，`subtree` 额外带 `root=`，`query` 按命中顺序输出
 `match i/N path=[…]` 与完整命中子树，命中之间以空行分隔。`matches` 是本次返回条数，
 `total` 是预算前命中数，`truncated=true` 表示引擎只返回了完整条目前缀。`nodes` 是正文
-节点行数之和；查询的嵌套命中按各自子树重复计数。`path` 是 root..parent 的 ref 序列，
-不含命中节点本身。
+逻辑节点数之和；查询的嵌套命中按各自子树重复计数。`path` 是 root..parent 的 ref 序列，
+不含命中节点本身。补看固定使用 detailed 视图：逐节点展开、不折 chain、不隐藏已知几何。
 
 **预算与完整性。** MCP 不设文本大小上限，不产生 `omitted`。可读块能无损表示时完整输出；
 非法 ref、缺少必要元数据、未知成员或其他不可表示情况以完整 `json v1` 兜底。树 ref 必须
-满足 `n` 加非零十进制数字。服务的观察树/inspect 全树上限为 128 KiB，subtree/query 为
+满足 `n` 加非零十进制数字。服务的观察树与 detailed 全树上限为 128 KiB，subtree/query 为
 32 KiB；引擎返回的 `truncated` 仍保留。块分别以 `end tree` / `end inspect` 结束。
 缺失 `end result` 或 `end diagnostic` 表示对应文本被宿主截断；应改用宿主支持的
 `structured`，或通过 `inspect` 的 node/query 收窄。`both` 同时发送两种完整编码，会增加

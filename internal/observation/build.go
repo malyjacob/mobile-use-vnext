@@ -60,12 +60,43 @@ func (b *Builder) Reset() {
 	b.nextRef = 1
 }
 
-// Build projects one capture to a complete public tree. It is pure with
-// respect to the previous snapshot: no published object is mutated.
+// Build projects one capture to a complete public tree and publishes it as the
+// new continuity state. It is pure with respect to the previous snapshot: no
+// published object is mutated.
 //
 // A capture without a usable root or with an empty display is rejected with
 // an error; nothing is published and the previous snapshot is left untouched.
 func (b *Builder) Build(cap *device.Capture) (*Snapshot, error) {
+	snapshot, commit, err := b.Candidate(cap)
+	if err != nil {
+		return nil, err
+	}
+	commit()
+	return snapshot, nil
+}
+
+// Candidate projects one capture without advancing continuity. The returned
+// commit function publishes exactly this candidate as the new continuity state
+// (previous snapshot and ref counter); a discarded candidate leaves the builder
+// exactly as it was, so a rejected acquisition can never shift the refs of a
+// later published tree.
+func (b *Builder) Candidate(cap *device.Capture) (*Snapshot, func(), error) {
+	prev, nextRef := b.prev, b.nextRef
+	snapshot, err := b.build(cap)
+	candidatePrev, candidateNextRef := b.prev, b.nextRef
+	b.prev, b.nextRef = prev, nextRef
+	if err != nil {
+		return nil, nil, err
+	}
+	commit := func() {
+		b.prev, b.nextRef = candidatePrev, candidateNextRef
+	}
+	return snapshot, commit, nil
+}
+
+// build is the projection itself. It advances the builder's continuity state;
+// only Build and the returned commit of Candidate may keep that state.
+func (b *Builder) build(cap *device.Capture) (*Snapshot, error) {
 	if cap == nil {
 		return nil, invalidTree("capture is missing")
 	}

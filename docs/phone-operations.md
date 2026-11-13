@@ -237,7 +237,7 @@ adb shell su -c 'tail -n 100 /data/data/com.mobileuse.vnext/files/diagnostics.lo
    $control = (Get-Content .state/deploy.json -Raw | ConvertFrom-Json).control_token
    Invoke-RestMethod http://127.0.0.1:18881/v1/control/stop -Method Post `
      -Headers @{ Authorization = "Bearer $control" } -ContentType 'application/json' `
-     -Body '{"contract_version":"10","app_instance_id":"<uuid>","stop_seq":1,"reason":"operator_stop"}'
+     -Body '{"contract_version":"11","app_instance_id":"<uuid>","stop_seq":1,"reason":"operator_stop"}'
    ```
 
    `accepted=true` 只表示停止边界已绑定；仍需用 App/`status.cleanup` 核验执行链、任务与

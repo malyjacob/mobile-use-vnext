@@ -246,7 +246,7 @@ type Observation struct {
 	Quality         *Quality
 	Screen          *Screen
 	Foreground      *Foreground
-	Tree            *TreeValue
+	Tree            *ReadTreeValue
 	Missing         []string
 	Image           *ImageMeta
 	Error           *Error

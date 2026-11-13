@@ -260,7 +260,7 @@ func TestCheckObservationQuality(t *testing.T) {
 func TestRequireQualityTextLines(t *testing.T) {
 	quality := &qualityView{State: "unknown", Samples: 0, StopReason: "not_sampled"}
 	projected := &callResult{texts: []string{
-		"result v1 is_error=false\n" +
+		"result v2 is_error=false\n" +
 			"observation.quality.state=unknown\n" +
 			"observation.quality.samples=0\n" +
 			"observation.quality.stop_reason=not_sampled\n" +
@@ -322,7 +322,7 @@ func TestCheckScrollEffect(t *testing.T) {
 // TestDecodeResultTextQualityAndEffect pins the generic oracle: effect and
 // observation quality are ordinary dotted paths, not a special block.
 func TestDecodeResultTextQualityAndEffect(t *testing.T) {
-	text := "result v1 is_error=false\n" +
+	text := "result v2 is_error=false\n" +
 		"operation_id=Pscroll000000000000000001\n" +
 		"outcome=executed\n" +
 		"effect.state=observed\n" +
@@ -369,7 +369,10 @@ func TestProjectQualityAndEffectChannels(t *testing.T) {
 		"quality": map[string]any{
 			"state": "stable", "samples": 2, "stop_reason": "stable",
 		},
-		"tree": map[string]any{"format": treeFull, "scope": "reported_visible_with_context"},
+		"tree": map[string]any{
+			"format": treeFull, "scope": "reported_visible_with_context",
+			"view": "compact", "defaults": map[string]any{"checked": false},
+		},
 	}
 	payload := map[string]any{
 		"operation_id": "Pscroll000000000000000001",
@@ -571,18 +574,18 @@ func TestDecodeResultTextRejectsIncompleteProjection(t *testing.T) {
 	}{
 		{
 			name:   "missing tail",
-			text:   "result v1 is_error=false\nstatus=not_seen\n",
+			text:   "result v2 is_error=false\nstatus=not_seen\n",
 			reason: "text_result_unterminated",
 		},
 		{
 			name: "omitted tree",
-			text: "result v1 is_error=false\nobservation.id=\"O1\"\n\n" +
-				"tree v1 omitted reason=ref_format\nend result\n",
+			text: "result v2 is_error=false\nobservation.id=\"O1\"\n\n" +
+				"tree v2 omitted reason=ref_format\nend result\n",
 			reason: "text_result_block_omitted",
 		},
 		{
 			name: "duplicate path",
-			text: "result v1 is_error=false\njson v1 path=\"/status\" value=\"a\"\n" +
+			text: "result v2 is_error=false\njson v1 path=\"/status\" value=\"a\"\n" +
 				"json v1 path=\"/status\" value=\"b\"\nend result\n",
 			reason: "text_result_path_duplicate",
 		},
@@ -598,7 +601,7 @@ func TestDecodeResultTextRejectsIncompleteProjection(t *testing.T) {
 }
 
 func TestDecodeResultTextJSONPointer(t *testing.T) {
-	text := "result v1 is_error=false\n" +
+	text := "result v2 is_error=false\n" +
 		"json v1 path=\"/future/a~1b~0c\" value={\"value\":1}\n" +
 		"end result\n"
 	decoded, failure := decodeResultText(text)

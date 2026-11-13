@@ -125,7 +125,7 @@ func TestQualitySingleFrameUnreadableIsUnknown(t *testing.T) {
 
 	public := h.publishQuality(t, work, session, "act")
 	requireQuality(t, public.Quality, protocol.QualityUnknown, 1, protocol.QualityStopUnreadable)
-	if !treeHasLabel(public.Tree.Full.Root, "A") {
+	if !readTreeHasLabel(public.Tree.Full.Root, "A") {
 		t.Fatalf("published frame is not the frame before the failed read")
 	}
 }
@@ -141,7 +141,7 @@ func TestQualityMaxSamplesIsUnstable(t *testing.T) {
 
 	public := h.publishQuality(t, work, session, "act")
 	requireQuality(t, public.Quality, protocol.QualityUnstable, 3, protocol.QualityStopMaxSamples)
-	if !treeHasLabel(public.Tree.Full.Root, "C") {
+	if !readTreeHasLabel(public.Tree.Full.Root, "C") {
 		t.Fatalf("published frame is not the newest sampled frame")
 	}
 }
@@ -173,7 +173,7 @@ func TestQualityEqualPairIsStable(t *testing.T) {
 
 	public := h.publishQuality(t, work, session, "act")
 	requireQuality(t, public.Quality, protocol.QualityStable, 3, protocol.QualityStopStable)
-	if !treeHasLabel(public.Tree.Full.Root, "B") {
+	if !readTreeHasLabel(public.Tree.Full.Root, "B") {
 		t.Fatalf("published frame is not the later frame of the equal pair")
 	}
 }
@@ -189,7 +189,7 @@ func TestQualityUnreadableAfterTwoFramesIsUnstable(t *testing.T) {
 
 	public := h.publishQuality(t, work, session, "act")
 	requireQuality(t, public.Quality, protocol.QualityUnstable, 2, protocol.QualityStopUnreadable)
-	if !treeHasLabel(public.Tree.Full.Root, "B") {
+	if !readTreeHasLabel(public.Tree.Full.Root, "B") {
 		t.Fatalf("published frame is not the last readable frame")
 	}
 }
@@ -401,7 +401,7 @@ func TestQualityStalePairCannotRescueStable(t *testing.T) {
 	}
 	requireQuality(t, qualityOf(policy, run), protocol.QualityUnstable, 3,
 		protocol.QualityStopBudget)
-	if !treeHasLabel(tree.full.Root, "B") {
+	if !treeHasLabel(tree.projection.Tree.Root, "B") {
 		t.Fatalf("published tree is not the differing refresh frame")
 	}
 }

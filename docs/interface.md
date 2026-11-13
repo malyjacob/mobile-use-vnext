@@ -15,7 +15,7 @@
 | 方法 | 所有业务端点只接受 `POST`；其他方法返回 `405`，错误码 `invalid_request` |
 | 认证 | `/api/*` 用 `agent_token`；`/v1/control/*` 用 `control_token`；`Authorization: Bearer <token>` |
 | 身份隔离 | agent token 不能访问 `/v1/control/*`，control token 不能访问 `/api/*`；错误为 `401 unauthorized` |
-| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 10`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
+| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 11`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
 | 预分配 P | `/api/*` 可带 `X-Mobile-Use-Operation: P…`；缺省由服务分配。`status` 不使用该头 |
 | 请求体 | 必须是一个 JSON 对象；大小上限：`start`/`status`/`end` 16 KiB，`observe` 32 KiB，`act` 64 KiB，`inspect`/`keepalive`/`diagnose`/`app` 8 KiB，`notify` 16 KiB，`shell` 32 KiB，`sync` 32 KiB，`stop` 8 KiB |
 | 响应 | `Content-Type: application/json; charset=utf-8`，`Cache-Control: no-store` |
@@ -73,7 +73,7 @@ app, shell, notification, diagnosis, cleanup, error, recovery
 ```
 
 - `code` 稳定，`message` 是受控中文短句，调用方只依赖 `code`；
-- `/api/*` 的 `details` 仅可能出现白名单事实：`limit`、`limit_ms`、`app_code`、`field`、
+- `/api/*` 的 `details` 仅可能出现白名单事实：`limit`、`budget`、`limit_ms`、`app_code`、`field`、
   `task_ids`、`allowed_kinds`、`allowed_scopes`、`blocking_operation_id`、`start_operation_id`；
   `mcp.*` 是 [MCP 适配器](mcp.md) 的保留命名空间，仅由该适配器向结果投影注入，服务端
   `/api/*` 永不产生这些键；
@@ -156,8 +156,9 @@ HTTP 状态映射（`protocol.Status`）：
     "quality":{"state":"stable","samples":2,"stop_reason":"stable"},
     "screen":{"width":1080,"height":2400,"rotation":0},
     "foreground":{"state":"present","package":"com.example.probe","task_id":12},
-    "tree":{"format":"full","scope":"reported_visible_with_context",
-      "root":{"ref":"n1","role":"root","bounds":[0,0,1080,2400]}}}
+    "tree":{"format":"full","scope":"reported_visible_with_context","view":"compact",
+      "defaults":{"checked":false},
+      "root":{"ref":"n1","role":"root","bounds":[0,0,1080,2400],"checked":null}}}
 }
 ```
 
@@ -278,7 +279,7 @@ HTTP 状态映射（`protocol.Status`）：
 输出由服务端基线状态决定：
 
 - `observe(O1)`：若 O1 是 `ready` 的 full 候选，先把它确认为基线，然后执行一次新采集。
-  新采集通常相对 O1 返回 delta；页面未变时是空差异（只有 `format` 与 `base`）。
+  新采集通常相对 O1 返回 delta；页面未变时是空差异（只有 `format`、`base`、`view` 与 `defaults`）。
 - `observe(P…)`：强制 full。P 必须属于本 Agent 且其原会话仍活动。
 - 引用已结束会话的 `O` → `409 session_ended`；O 不存在或不属于本 Agent →
   `409 observation_not_found`；P 已封闭 → `409 request_closed`；P 不存在 →
@@ -299,7 +300,7 @@ HTTP 状态映射（`protocol.Status`）：
  "quality":{"state":"unknown","samples":0,"stop_reason":"not_sampled"},
  "screen":{"width":1080,"height":2400,"rotation":0},
  "foreground":{"state":"unknown","reason":"display_section_missing"},
- "tree":{"format":"delta","base":"O1"}}}
+ "tree":{"format":"delta","base":"O1","view":"compact","defaults":{"checked":false}}}}
 ```
 
 `observe` 不做收敛采样，其观察的质量固定为 `unknown`/`0`/`not_sampled`；`act` 重验失败交付的
@@ -519,7 +520,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 
 | 字段 | 必填 | 类型 | 说明 |
 | --- | --- | --- | --- |
-| `contract_version` | 是 | 字符串 | 必须为 `"10"`，否则 `409 contract_mismatch` |
+| `contract_version` | 是 | 字符串 | 必须为 `"11"`，否则 `409 contract_mismatch` |
 | `app_instance_id` | 是 | UUID | App 进程实例；变化会撤销旧归属 |
 | `app_version` | 是 | 字符串 | 仅发行标识 |
 | `selected_mode` | 是 | `virtual`/`primary` | 用户选择 |
@@ -546,7 +547,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 
 ```json
 {
-  "contract_version": "10",
+  "contract_version": "11",
   "service_instance_id": "…",
   "control": {
     "revision": 42,
@@ -581,7 +582,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 ## 9. `POST /v1/control/stop`
 
 ```json
-{"contract_version":"10","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
+{"contract_version":"11","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
 ```
 
 - **不校验普通契约**：`contract_version` 字段存在但不参与准入，服务与 App 契约版本
@@ -591,7 +592,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 - 重复或过期 `seq` 不报错，只返回 `state=duplicate`。
 
 ```json
-{"contract_version":"10","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
+{"contract_version":"11","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
 ```
 
 `accepted` 恒为 `true`；`state` 为 `revoked`（绑定时撤销了活动会话）、`recorded`
@@ -604,7 +605,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 无认证，只表示进程可应答，不代表设备就绪或资源干净：
 
 ```json
-{"status":"ok","contract_version":"10","service_instance_id":"…","release_version":"…"}
+{"status":"ok","contract_version":"11","service_instance_id":"…","release_version":"…"}
 ```
 
 ## 11. 数据对象
@@ -629,8 +630,9 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
  "quality":{"state":"unstable","samples":5,"stop_reason":"max_samples"},
  "screen":{"width":1080,"height":2400,"rotation":0},
  "foreground":{"state":"present","package":"com.example","task_id":12},
- "tree":{"format":"full","scope":"reported_visible_with_context",
-   "root":{"ref":"n1","role":"root","bounds":[0,0,1080,2400]}}}
+ "tree":{"format":"full","scope":"reported_visible_with_context","view":"compact",
+   "defaults":{"checked":false},
+   "root":{"ref":"n1","role":"root","bounds":[0,0,1080,2400],"checked":null}}}
 ```
 
 Observation 的编码顺序固定为 `status`、`id`、`origin`、`revision`、`captured_at`、
@@ -681,46 +683,69 @@ Observation 的编码顺序固定为 `status`、`id`、`origin`、`revision`、`
 
 ### Node
 
+公共节点是交付表示，不是服务内部完整快照。每个逻辑节点保留原 `ref`、角色、内容、源能力与
+三态事实；只有已知几何可以按固定的匿名规则不交付，连续匿名单子链可以折成一条 `chain`
+定义。逻辑节点、父子关系与顺序不因交付表示改变。
+
 ```json
 {"ref":"n7","role":"button","bounds":[40,300,240,380],
  "label":["确定"],"actions":["tap"],"enabled":false}
+{"chain":["n2","n3"],"role":"view","children":[{"ref":"n4","role":"text","bounds":[0,0,1080,60]}]}
 ```
 
-字段全集：`ref`、`role`、`bounds`、`label`、`actions`、`enabled`、`focused`、`selected`、
-`checked`、`value`、`hint`、`protected`、`axis`、`resource`、`context`、`children`。
+普通节点的字段全集：`ref`、`role`、`bounds`、`label`、`actions`、`enabled`、`focused`、
+`selected`、`checked`、`value`、`hint`、`protected`、`axis`、`resource`、`context`、
+`children`。`chain` 定义以 `chain` 取代 `ref`，携带成员的共享字段与末成员的孩子。
 
 | 字段 | 编码规则 |
 | --- | --- |
-| `ref`/`role` | 总是出现；`role` 属于固定集合 `root`、`group`、`text`、`button`、`input`、`checkbox`、`radio`、`switch`、`toggle`、`scroll`、`image`、`view` |
-| `bounds` | 总是出现，`[left,top,right,bottom]` 或 `null`（未知/context 节点） |
+| `ref`/`chain` | 二选一。普通节点写自己的 `ref`；`chain` 是至少两个、按原顺序排列的连续 ref 数组，成员除 `ref`/`children` 外公共字段完全相同且几何都隐藏 |
+| `role` | 总是出现；属于固定集合 `root`、`group`、`text`、`button`、`input`、`checkbox`、`radio`、`switch`、`toggle`、`scroll`、`image`、`view` |
+| `bounds` | 三态：四整数数组表示已知矩形；`null` 表示源未提供可用几何；compact 视图里按策略隐藏的已知矩形直接省略该成员。detailed 视图不允许隐藏，`bounds` 总是出现 |
 | `label`/`actions`/`children` | 空时省略；`actions` 取 `tap`、`long_press`、`text`、`swipe` |
 | `enabled` | 默认 `true`；已知 `false` 时显式 `false`；未知时显式 `null` |
 | `focused`/`selected`/`protected` | 默认 `false`；已知 `true` 时显式 `true`；未知时显式 `null` |
-| `checked`/`value`/`hint`/`axis`/`resource` | 未知时省略；已知值显式给出（`false`/`""` 也保留） |
-| `context` | 仅在 `true` 时出现，表示非可见的必要祖先（`role=group`、`bounds=null`、无动作/标签） |
+| `checked` | 完整节点默认 `false`：已知 `false` 省略，已知 `true` 显式 `true`，未知显式 `null` |
+| `value`/`hint`/`axis`/`resource` | 未知时省略；已知值显式给出（`""` 也保留） |
+| `context` | 仅在 `true` 时出现，表示非可见的必要祖先（`role=group`、无动作/标签、几何未知） |
 
-合成根固定为 `role=root`、目标屏矩形、`enabled=true`、其余布尔已知 `false`；虚拟屏没有
-任何子节点时，合法的公开树就是“只有根、没有 `children`”。`actions` 是节点的源能力词表，
-不随受控滚动增加枚举；`scroll` 由 `act.operation.type=scroll` 与 `container` 表达，
-`actions=swipe` 不构成 raw `swipe` 授权。
+合成根固定为 `role=root`、目标屏矩形、`enabled=true`、其余布尔已知 `false`、`checked=null`；
+虚拟屏没有任何子节点时，合法的公开树就是“只有根、没有 `children`”。`actions` 是节点的源
+能力词表，不随受控滚动增加枚举；`scroll` 由 `act.operation.type=scroll` 与 `container`
+表达，`actions=swipe` 不构成 raw `swipe` 授权。
+
+匿名规则是固定的服务策略，不是请求字段：一个公开节点只有在角色为 `view`/`group`、无动作、
+无标签、无 `value`/`hint`/`resource`/`axis`、`enabled` 已知 `true` 且
+`focused`/`selected`/`protected`/`checked` 都已知 `false` 时，才允许隐藏它的已知几何或参与
+`chain` 折叠。内容、能力或特殊状态出现时，公共几何重新交付，即使内部矩形数值未变。
 
 ### Tree 与 Delta
 
 ```json
-{"format":"full","scope":"reported_visible_with_context","root":{…}}
-{"format":"delta","base":"O1","set":{"n7":{"label":["已发送"],"actions":[]}},
+{"format":"full","scope":"reported_visible_with_context","view":"compact",
+ "defaults":{"checked":false},"root":{…}}
+{"format":"delta","base":"O1","view":"compact","defaults":{"checked":false},
+ "set":{"n7":{"label":["已发送"],"actions":[]},"n8":{"bounds":"hidden"}},
  "add":[…],"remove":["n3"],"children":{"n1":["n2","n7"]},"replace":{"n4":{…}}}
 ```
 
 - `scope` 固定为 `reported_visible_with_context`：目标屏上报告可见的节点及其必要祖先，
   其他显示器的节点不发布；
-- delta 的五个块都可省略；空差异只含 `format` 与 `base`；
+- `view` 固定为 `compact`（观察）或 `detailed`（`inspect`）；`defaults` 固定声明
+  `{"checked":false}`，不能由调用方改写；
+- delta 的五个块都可省略；空差异只含 `format`、`base`、`view` 与 `defaults`；
 - `set` 的每个成员只携带发生变化的字段，但值必须是**完整新值**，显式保留
-  `false`/`0`/`""`/`[]`/`null`；省略表示“未修改”，`null` 表示“置为未知”；
+  `false`/`0`/`""`/`[]`/`null`；省略表示“未修改”，`null` 表示“置为未知”，
+  `bounds:"hidden"` 表示“该几何按策略不交付”；
 - `children` 给出父节点的完整子列表；`add` 的新子树必须被某条 `children` 挂接；
-  `remove` 删除基线中的整棵子树；
-- 角色变化、跨父移动、根替换等不可表达的变化不会出现在 delta 中，服务会改发 full。
-
+  `remove` 删除基线中的整棵子树；`add`/`replace` 的定义根保持普通 `ref` 锚点，只有其后代
+  可以折成 `chain`；
+- 角色变化、跨父移动、根替换等不可表达的变化不会出现在 delta 中，服务会改发 full；
+  仅 `chain` 分组变化不构成退回 full 的理由；
+- 公共 full 超过 128 KiB、单个内部快照超过 4 MiB，或该快照连同受保护历史仍超过 32 MiB 的
+  留存额度时，服务返回 `503 tree_too_large`，`details.budget` 分别取 `public_full`、
+  `internal_snapshot`、`retained_snapshots`，`details.limit` 为对应字节上限；错误不携带
+  树内容，也不先删除历史或回滚已接纳的 P/已认领的 O。
 ### Image
 
 ```json
@@ -776,15 +801,20 @@ Observation 的编码顺序固定为 `status`、`id`、`origin`、`revision`、`
 `node` 与 `query` 互斥。`inspect` 只读保留中的历史树，不采集、不续租、不确认基线、
 不认领 O，也不需要 O 仍可输入。
 
-- 整树补看受完整公开树上限（128 KiB）；`node` 子树受 32 KiB 上限；
-- `query` 的单个命中与返回命中总量都受 32 KiB 上限：任一命中超过 32 KiB 时整次查询以
-  `409 inspection_too_large` 失败（即使它不在返回前缀内）；总量预算只决定完整命中的
-  返回前缀，前缀不足全部命中时置 `truncated=true`；
+- 补看固定使用 `view=detailed`：逐节点展开、不折 `chain`、不隐藏已知几何；`tree` 作用域的
+  `view`/`defaults` 在嵌套完整树里声明，`subtree`/`query` 在 inspection 信封声明一次；
+- 整树补看按 detailed 公共编码计量，受 128 KiB 上限；`node` 子树的 `{view,defaults,root}`
+  内容对象与 `query` 的 `{view,defaults,matches,total,truncated}` 内容对象各受 32 KiB 上限；
+- `query` 的每个命中独立按 `total=<预算前命中数>`、`truncated=<是否多于一个>` 计量；任一命中
+  超过 32 KiB 时整次查询以 `409 inspection_too_large` 失败（即使它不在返回前缀内）；
+  总量预算只决定完整命中的返回前缀，共享的 `view`/`defaults` 只计一次，前缀不足全部命中时
+  置 `truncated=true`；
 - `query` 在 `label`/`value`/`hint`/`resource` 上做字面 Unicode 折叠子串匹配，按原树顺序
   返回完整命中子树和祖先 `ref` 路径；`total` 为预算前命中数，返回值只含完整命中子树；
 - 常见失败：`409 observation_not_found`（不存在或不属于本 Agent）、
   `409 content_unavailable`（树已被淘汰）、`409 node_not_found`、
   `409 inspection_too_large`（`details.limit` 为字节上限）。这些失败不携带 `recovery`。
+  compact 观察树能交付不保证 detailed 整树也能交付；超额时不静默改用 compact 返回。
 
 ### `POST /api/keepalive`
 

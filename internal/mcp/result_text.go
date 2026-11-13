@@ -152,7 +152,7 @@ func encodeResultText(raw []byte, isError bool) (string, error) {
 		return "", err
 	}
 	w := &resultTextWriter{}
-	w.line("result v1 is_error=" + strconv.FormatBool(isError))
+	w.line("result v2 is_error=" + strconv.FormatBool(isError))
 	for _, m := range members {
 		if err := w.member(m.name, "/"+pointerPart(m.name), m.value, nil); err != nil {
 			return "", err
@@ -234,7 +234,7 @@ func losslessTypedResult(raw []byte, target any) bool {
 func readableResultBlock(key string, raw []byte, parent []resultMember) (string, bool) {
 	switch key {
 	case "observation.tree":
-		var tree protocol.TreeValue
+		var tree protocol.ReadTreeValue
 		if !losslessTypedResult(raw, &tree) {
 			return "", false
 		}

@@ -44,6 +44,26 @@ func testFullTree() *Tree {
 	return &Tree{Format: "full", Scope: Scope, Root: testNode("n1", RoleRoot)}
 }
 
+// testReadNode builds the public read definition of one node with delivered
+// geometry and an explicit known-false checked fact.
+func testReadNode(ref string, role Role) *ReadNode {
+	enabled := true
+	checked := false
+	return &ReadNode{
+		Ref:     ref,
+		Role:    role,
+		Bounds:  KnownBounds(Bounds{Left: 10, Top: 20, Right: 110, Bottom: 220}),
+		Label:   []string{},
+		Actions: []Action{},
+		Enabled: &enabled,
+		Checked: &checked,
+	}
+}
+
+func testReadFullTree(view string) *ReadTree {
+	return &ReadTree{Format: "full", Scope: Scope, View: view, Root: testReadNode("n1", RoleRoot)}
+}
+
 func testObservation() *Observation {
 	taskID := 42
 	return &Observation{
@@ -60,7 +80,7 @@ func testObservation() *Observation {
 			TaskID:  &taskID,
 			HasTask: true,
 		},
-		Tree:    &TreeValue{Full: testFullTree()},
+		Tree:    &ReadTreeValue{Full: testReadFullTree(ViewCompact)},
 		Missing: []string{"image"},
 	}
 }
@@ -100,10 +120,11 @@ func TestDecodeObserveDeltaWithImage(t *testing.T) {
 			ActionableUntil: "2026-11-09T03:01:01Z",
 			Screen:          &Screen{Width: 1080, Height: 2400, Rotation: 0},
 			Foreground:      &Foreground{State: "present", HasTask: true},
-			Tree: &TreeValue{Delta: &Delta{
+			Tree: &ReadTreeValue{Delta: &ReadDelta{
 				Format: "delta",
 				Base:   "O1",
-				Set: map[string]SetNode{
+				View:   ViewCompact,
+				Set: map[string]ReadSetNode{
 					"n2": {Label: Field[[]string]{Set: true, Value: []string{"Done"}}},
 					"n3": {Checked: Field[*bool]{Set: true, Value: &yes}},
 				},
@@ -200,7 +221,7 @@ func TestDecodeInspectTree(t *testing.T) {
 		Revision:      3,
 		CapturedAt:    "2026-11-09T03:00:02Z",
 		Scope:         "tree",
-		Tree:          testFullTree(),
+		Tree:          testReadFullTree(ViewDetailed),
 	}}
 	roundTripDecode(t, original)
 }
@@ -212,7 +233,8 @@ func TestDecodeInspectSubtree(t *testing.T) {
 		Revision:      3,
 		CapturedAt:    "2026-11-09T03:00:02Z",
 		Scope:         "subtree",
-		Root:          testNode("n5", RoleGroup),
+		View:          ViewDetailed,
+		Root:          testReadNode("n5", RoleGroup),
 	}}
 	roundTripDecode(t, original)
 }
@@ -225,8 +247,9 @@ func TestDecodeInspectQueryMatches(t *testing.T) {
 		Revision:      3,
 		CapturedAt:    "2026-11-09T03:00:02Z",
 		Scope:         "query",
+		View:          ViewDetailed,
 		Matches: []InspectionMatch{{
-			Node: testNode("n6", RoleButton),
+			Node: testReadNode("n6", RoleButton),
 			Path: []string{"n1", "n5", "n6"},
 		}},
 		Total:     9,

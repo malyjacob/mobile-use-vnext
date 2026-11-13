@@ -307,9 +307,16 @@ const (
 		`"started_at":"2026-11-09T00:00:00Z","expires_at":"2026-11-09T00:02:00Z"}`
 	testScreenJSON     = `{"width":1080,"height":2400,"rotation":0}`
 	testForegroundJSON = `{"state":"present","package":"com.example.probe","task_id":12}`
-	testFullTreeJSON   = `{"format":"full","scope":"reported_visible_with_context",` +
+	// Observations always deliver the compact view; historical inspection
+	// material is always detailed, so the tree scope of an inspection response
+	// must carry the detailed view and defaults in its nested complete tree.
+	testFullTreeJSON = `{"format":"full","scope":"reported_visible_with_context",` +
+		`"view":"compact","defaults":{"checked":false},` +
 		`"root":{"ref":"n1","role":"root","bounds":[0,0,1080,2400]}}`
-	testDeltaTreeJSON = `{"format":"delta","base":"O1"}`
+	testDetailedTreeJSON = `{"format":"full","scope":"reported_visible_with_context",` +
+		`"view":"detailed","defaults":{"checked":false},` +
+		`"root":{"ref":"n1","role":"root","bounds":[0,0,1080,2400]}}`
+	testDeltaTreeJSON = `{"format":"delta","base":"O1","view":"compact","defaults":{"checked":false}}`
 )
 
 func TestToolCatalog(t *testing.T) {
@@ -593,7 +600,7 @@ func TestStrictAdmission(t *testing.T) {
 				t.Fatalf("%s: expected IsError", testCase.name)
 			}
 			text := testTextContent(t, result)
-			requireTestContains(t, text, "result v1 is_error=true\nerror.code=invalid_request")
+			requireTestContains(t, text, "result v2 is_error=true\nerror.code=invalid_request")
 			structured := testStructuredObject(t, result)
 			errorObject, ok := structured["error"].(map[string]any)
 			if !ok || errorObject["code"] != "invalid_request" {
@@ -616,7 +623,7 @@ func TestStrictAdmission(t *testing.T) {
 		if !result.IsError {
 			t.Fatal("trailing second value was accepted")
 		}
-		requireTestContains(t, testTextContent(t, result), "result v1 is_error=true\nerror.code=invalid_request")
+		requireTestContains(t, testTextContent(t, result), "result v2 is_error=true\nerror.code=invalid_request")
 		if fake.totalRequests() != 0 {
 			t.Fatal("client was called for a trailing value")
 		}
@@ -711,8 +718,8 @@ func TestStartProjectionWithFullTree(t *testing.T) {
 	requireTestContains(t, text, "observation.id=O1")
 	requireTestContains(t, text, "observation.screen="+testScreenJSON)
 	requireTestContains(t, text, "observation.foreground="+testForegroundJSON)
-	requireTestContains(t, text, "\n\ntree v1 format=full id=O1 scope=reported_visible_with_context nodes=1\n\n"+
-		"n1 root [0,0,1080,2400]\nend tree\n")
+	requireTestContains(t, text, "\n\ntree v2 format=full id=O1 scope=reported_visible_with_context view=compact nodes=1 entries=1\n"+
+		"defaults {\"checked\":false}\n\nn1 root [0,0,1080,2400]\nend tree\n")
 	structured := testStructuredJSON(t, result)
 	requireTestContains(t, structured, fmt.Sprintf(`"operation_id":%q`, operation))
 	requireTestContains(t, structured, `"format":"full"`)
@@ -746,7 +753,8 @@ func TestObservePartialWithImage(t *testing.T) {
 	requireTestContains(t, text, "operation_id="+operation)
 	requireTestContains(t, text, "observation.status=partial")
 	requireTestContains(t, text, "observation.missing=[\"tree\"]")
-	requireTestContains(t, text, "\n\ntree v1 format=delta id=O2 base=O1 scope=reported_visible_with_context changes=0\n\nend tree\n")
+	requireTestContains(t, text, "\n\ntree v2 format=delta id=O2 base=O1 view=compact scope=reported_visible_with_context changes=0\n"+
+		"defaults {\"checked\":false}\n\nend tree\n")
 	requireTestContains(t, text, "\"media_type\":\"image/png\"")
 	requireTestContains(t, text, "\"width\":2")
 	requireTestContains(t, text, "\"read_only\":true")

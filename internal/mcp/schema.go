@@ -17,14 +17,21 @@ type toolDefinition struct {
 // carry a tree block. It is shared verbatim so the catalog has one syntax
 // legend, not five drifting variants.
 const treeTextGuide = "可读正文在 key=value 阶段事实之后附带一个确定性树块：" +
-	"full 块以 `tree v1 format=full id=<O> scope=<scope> nodes=<n>` 开头，后接节点行；" +
-	"delta 块以 `tree v1 format=delta id=<O> base=<O2> scope=<scope> changes=<n>` 开头，" +
+	"块头后固定一行 `defaults {\"checked\":false}`，随后一个空行再写正文。" +
+	"full 块以 `tree v2 format=full id=<O> scope=<scope> view=<compact> nodes=<n> entries=<m>` 开头，后接节点行；" +
+	"delta 块以 `tree v2 format=delta id=<O> base=<O2> view=compact scope=<scope> changes=<n>` 开头，" +
 	"后接 `~`/`+`/`-`/`children`/`=` 变更行；两者均以 `end tree` 结尾。" +
 	"节点行为 `缩进 n<ref> <role> <bounds> \"label\"… value=\"…\" hint=\"…\" " +
-	"tap|long_press|text|swipe enabled=… focused=… checked=… axis=… resource=\"…\" context`，" +
-	"`n<ref>` 可直接用作 target.ref。delta 相对 base 累计，新 delta 覆盖旧 delta，不叠加。" +
-	"补看块以 `inspect v1 scope=<tree|subtree|query> observation=<O> revision=<n> … nodes=<n>` " +
-	"开头，tree/subtree 后接节点行，query 后接 `match i/N path=[…]` 与命中子树，并以 " +
+	"tap|long_press|text|swipe enabled=… focused=… checked=… axis=… resource=\"…\" context`；" +
+	"`n<ref>` 可直接用作 target.ref。" +
+	"匿名普通 view/group 的已知矩形在观察视图里省略该列，未知几何仍写 `-`；" +
+	"连续匿名单子节点写成 `chain [n2 n3] <role>`，其中每个 ref 仍是可寻址的逻辑节点。" +
+	"`checked` 默认 `false`（省略），只有 `checked=true` 与 `checked=null` 显式出现。" +
+	"`nodes` 为展开后逻辑节点数，`entries` 为普通节点或 chain 定义行数。" +
+	"delta 相对 base 累计，新 delta 覆盖旧 delta，不叠加；修改行的 `bounds=hidden` 表示按策略不交付该几何。" +
+	"补看块以 `inspect v2 scope=<tree|subtree|query> observation=<O> revision=<n> captured_at=<RFC3339> " +
+	"tree_scope=<scope> view=detailed [root=<ref>|matches=<n> total=<n> truncated=<bool>] nodes=<n> entries=<m>` " +
+	"开头，tree/subtree 后接完整详细节点行，query 后接 `match i/N path=[…]` 与命中子树，并以 " +
 	"`end inspect` 结尾。" +
 	"滚动用 `operation.type=scroll` + `operation.container` 表达；raw `swipe` 是原始手势，不承诺滚动语义。" +
 	"树块 `tap|long_press|text|swipe` 动作列（`Node.actions`）中的 `swipe` 只是节点的源能力，不是 raw swipe 授权。" +

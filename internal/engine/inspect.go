@@ -5,13 +5,9 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/malyjacob/mobile-use-vnext/internal/observation"
 	"github.com/malyjacob/mobile-use-vnext/internal/protocol"
 )
-
-// inspectionUnitBytes is the fixed local budget for one subtree or one query
-// hit. It is service policy, not a per-call option: too large a unit is a
-// controlled error instead of a silently cropped node.
-const inspectionUnitBytes = 32 * 1024
 
 // inspectionSource is the immutable reading material of one retained
 // observation. It is copied out under the state lock; the tree it points at is
@@ -33,13 +29,15 @@ type inspectMatch struct {
 // inspectMatchWire mirrors the public query hit shape so byte budgeting uses
 // exactly the canonical JSON produced later by InspectionView.
 type inspectMatchWire struct {
-	Node *protocol.Node `json:"node"`
-	Path []string       `json:"path"`
+	Node *protocol.ReadNode `json:"node"`
+	Path []string           `json:"path"`
 }
 
 // Inspect returns historical reading material for one retained observation. It
 // performs no device I/O, takes no work position, renews no lease, confirms no
-// baseline and allocates no observation or operation.
+// baseline and allocates no observation or operation. The historical view is
+// always detailed: every retained public field and every known rectangle is
+// expanded, no chain is folded and no geometry is hidden.
 func (e *Engine) Inspect(agent string, req *protocol.InspectRequest) (*protocol.Result, *protocol.APIError) {
 	if req == nil {
 		return nil, protocol.Invalid("inspect 请求缺失")
@@ -59,14 +57,15 @@ func (e *Engine) Inspect(agent string, req *protocol.InspectRequest) (*protocol.
 		Origin:        source.origin,
 		Revision:      source.revision,
 		CapturedAt:    formatTime(source.capturedAt),
+		View:          protocol.ViewDetailed,
 	}
 	switch {
 	case req.HasQuery:
-		if apiErr := inspectionQuery(view, source.root, req.Query); apiErr != nil {
+		if apiErr := e.inspectionQuery(view, source.root, req.Query); apiErr != nil {
 			return nil, apiErr
 		}
 	case req.HasNode:
-		if apiErr := inspectionSubtree(view, source.root, req.Node); apiErr != nil {
+		if apiErr := e.inspectionSubtree(view, source.root, req.Node); apiErr != nil {
 			return nil, apiErr
 		}
 	default:
@@ -96,9 +95,16 @@ func (e *Engine) inspectionSource(agent, observationID string) (*inspectionSourc
 	}, nil
 }
 
-// inspectionTree returns the complete public tree within the full-tree budget.
+// inspectionTree returns the complete detailed tree within the full-tree
+// budget. The budget is measured on the detailed public encoding, never on the
+// compact observation encoding.
 func (e *Engine) inspectionTree(view *protocol.InspectionView, root *protocol.Node) *protocol.APIError {
-	tree := &protocol.Tree{Format: "full", Scope: protocol.Scope, Root: root}
+	tree := observation.ProjectDetailedTree(&protocol.Tree{
+		Format: "full", Scope: protocol.Scope, Root: root,
+	})
+	if tree == nil || tree.Validate() != nil {
+		return protocol.Internal()
+	}
 	encoded, err := protocol.JSON(tree)
 	if err != nil {
 		return protocol.Internal()
@@ -111,65 +117,125 @@ func (e *Engine) inspectionTree(view *protocol.InspectionView, root *protocol.No
 	return nil
 }
 
-// inspectionSubtree returns one complete subtree rooted at an original public
-// ref. A missing ref is a controlled not-found error, never a partial node.
-func inspectionSubtree(view *protocol.InspectionView, root *protocol.Node, ref string) *protocol.APIError {
+// inspectionSubtree returns one complete detailed subtree rooted at an original
+// public ref. A missing ref is a controlled not-found error, never a partial
+// node.
+func (e *Engine) inspectionSubtree(view *protocol.InspectionView, root *protocol.Node, ref string) *protocol.APIError {
 	node := findPublicNode(root, ref)
 	if node == nil {
 		return protocol.NewError(409, protocol.CodeNodeNotFound, "原节点不在该观察中")
 	}
-	encoded, err := protocol.JSON(node)
+	detailed := observation.ProjectDetailedNode(node)
+	if detailed == nil {
+		return protocol.Internal()
+	}
+	// The unit budget covers the {view, defaults, root} content object exactly
+	// as the inspection envelope declares it once.
+	encoded, err := protocol.JSON(struct {
+		View     string             `json:"view"`
+		Defaults protocol.Defaults  `json:"defaults"`
+		Root     *protocol.ReadNode `json:"root"`
+	}{View: protocol.ViewDetailed, Root: detailed})
 	if err != nil {
 		return protocol.Internal()
 	}
-	if len(encoded) > inspectionUnitBytes {
-		return inspectionTooLarge(inspectionUnitBytes)
+	if len(encoded) > e.cfg.MaxInspectionUnitBytes {
+		return inspectionTooLarge(e.cfg.MaxInspectionUnitBytes)
 	}
 	view.Scope = "subtree"
-	view.Root = node
+	view.Root = detailed
 	return nil
 }
 
 // inspectionQuery matches the literal query over label/value/hint/resource and
-// returns complete matched subtrees in original tree order. Only a prefix of
-// complete units is returned when the budget forces truncation.
-func inspectionQuery(view *protocol.InspectionView, root *protocol.Node, query string) *protocol.APIError {
+// returns complete detailed matched subtrees in original tree order. Every hit
+// is checked on its own; one hit that cannot fit fails the whole query. Only a
+// complete prefix of the original order is returned when the shared budget
+// forces truncation.
+func (e *Engine) inspectionQuery(view *protocol.InspectionView, root *protocol.Node, query string) *protocol.APIError {
 	matches := collectInspectMatches(root, foldText(query))
-	sizes := make([]int, len(matches))
+	total := len(matches)
+	unit := e.cfg.MaxInspectionUnitBytes
+	if unit <= 0 {
+		return protocol.Internal()
+	}
+	hits := make([]inspectMatchWire, len(matches))
+	matchBytes := make([]int, len(matches))
 	for i, match := range matches {
-		encoded, err := protocol.JSON(inspectMatchWire{
-			Node: match.node,
-			Path: append([]string{}, match.path...),
-		})
+		node := observation.ProjectDetailedNode(match.node)
+		if node == nil {
+			return protocol.Internal()
+		}
+		hits[i] = inspectMatchWire{Node: node, Path: append([]string{}, match.path...)}
+		encoded, err := protocol.JSON(hits[i])
 		if err != nil {
 			return protocol.Internal()
 		}
-		if len(encoded) > inspectionUnitBytes {
-			return inspectionTooLarge(inspectionUnitBytes)
+		matchBytes[i] = len(encoded)
+	}
+	// The unit candidate of one hit uses total=N and truncated=(N>1); this is a
+	// budget probe, not the actual response prefix.
+	unitBase, err := queryEmptyBytes(total, total > 1)
+	if err != nil {
+		return protocol.Internal()
+	}
+	for _, size := range matchBytes {
+		if unitBase+size > unit {
+			return inspectionTooLarge(unit)
 		}
-		sizes[i] = len(encoded)
+	}
+	// The final object shares one header, so the prefix is selected with the
+	// exact incremental cost instead of re-encoding every growing prefix.
+	prefixBase, err := queryEmptyBytes(total, true)
+	if err != nil {
+		return protocol.Internal()
 	}
 	included, used := 0, 0
-	for i := range matches {
-		if used+sizes[i] > inspectionUnitBytes {
+	for i, size := range matchBytes {
+		added := size
+		if i > 0 {
+			added++ // element separator
+		}
+		if prefixBase+used+added > unit {
 			break
 		}
-		used += sizes[i]
+		used += added
 		included++
 	}
-	truncated := included < len(matches)
+	truncated := included < total
 	view.Scope = "query"
 	view.Matches = make([]protocol.InspectionMatch, 0, included)
 	for _, match := range matches[:included] {
 		view.Matches = append(view.Matches, protocol.InspectionMatch{
-			Node: match.node,
+			Node: observation.ProjectDetailedNode(match.node),
 			Path: append([]string{}, match.path...),
 		})
 	}
-	view.Total = len(matches)
+	view.Total = total
 	view.HasTotal = true
 	view.Truncated = &truncated
 	return nil
+}
+
+// queryEmptyBytes measures the shared content object header of a query response
+// with an empty match list. The number of digits of total and the length of the
+// truncated literal are part of the budget.
+func queryEmptyBytes(total int, truncated bool) (int, error) {
+	encoded, err := protocol.JSON(struct {
+		View      string             `json:"view"`
+		Defaults  protocol.Defaults  `json:"defaults"`
+		Matches   []inspectMatchWire `json:"matches"`
+		Total     int                `json:"total"`
+		Truncated bool               `json:"truncated"`
+	}{
+		View: protocol.ViewDetailed, Matches: []inspectMatchWire{}, Total: total, Truncated: truncated,
+	})
+	if err != nil {
+		return 0, err
+	}
+	// The two array brackets of the empty list are already counted; the first
+	// inserted element replaces nothing, so the base excludes them.
+	return len(encoded) - len("[]"), nil
 }
 
 // collectInspectMatches walks the tree in preorder, so matches keep original

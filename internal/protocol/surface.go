@@ -1052,24 +1052,31 @@ func (n *NotificationView) MarshalJSONTo(enc *jsontext.Encoder) error {
 }
 
 // InspectionView is the historical reading material returned by inspect. It
-// never grants input authority and never triggers a new capture.
+// never grants input authority and never triggers a new capture. Historical
+// inspection is always the detailed view: every retained field is expanded and
+// no geometry is hidden.
 type InspectionView struct {
 	ObservationID string
 	Origin        string
 	Revision      int
 	CapturedAt    string
 	Scope         string
-	Tree          *Tree
-	Root          *Node
-	Matches       []InspectionMatch
-	Total         int
-	HasTotal      bool
-	Truncated     *bool
+	// View and Defaults are declared once on the inspection envelope for the
+	// subtree and query scopes. The tree scope declares them in its nested
+	// complete tree instead, so the same metadata is never stated twice.
+	View      string
+	Defaults  Defaults
+	Tree      *ReadTree
+	Root      *ReadNode
+	Matches   []InspectionMatch
+	Total     int
+	HasTotal  bool
+	Truncated *bool
 }
 
 // InspectionMatch is one complete matched subtree and its ancestor ref path.
 type InspectionMatch struct {
-	Node *Node
+	Node *ReadNode
 	Path []string
 }
 
@@ -1113,6 +1120,20 @@ func (v *InspectionView) MarshalJSONTo(enc *jsontext.Encoder) error {
 	}
 	if err := writeString(enc, v.Scope); err != nil {
 		return err
+	}
+	if v.Scope != "tree" {
+		if err := writeName(enc, "view"); err != nil {
+			return err
+		}
+		if err := writeString(enc, v.View); err != nil {
+			return err
+		}
+		if err := writeName(enc, "defaults"); err != nil {
+			return err
+		}
+		if err := MarshalJSONTo(enc, v.Defaults); err != nil {
+			return err
+		}
 	}
 	switch v.Scope {
 	case "tree":

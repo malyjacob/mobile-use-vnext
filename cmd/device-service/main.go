@@ -181,6 +181,16 @@ func (p *observationProjector) Build(capture *device.Capture) (*engine.Projectio
 	return engineProjection(snapshot), nil
 }
 
+// Candidate projects one capture without publishing its ref continuity. The
+// engine commits the returned candidate at its single commit point.
+func (p *observationProjector) Candidate(capture *device.Capture) (*engine.Projection, func(), error) {
+	snapshot, commit, err := p.builder.Candidate(capture)
+	if err != nil {
+		return nil, nil, err
+	}
+	return engineProjection(snapshot), commit, nil
+}
+
 // Preview projects a settle sample without moving ref continuity.
 func (p *observationProjector) Preview(capture *device.Capture) (*engine.Projection, error) {
 	snapshot, err := p.builder.Preview(capture)
@@ -201,8 +211,8 @@ func (p *observationProjector) Reset() { p.builder.Reset() }
 // treeDiffer adapts the pure delta algorithm to the engine interface.
 type treeDiffer struct{}
 
-func (treeDiffer) Diff(baseID string, base, current *protocol.Tree) (*protocol.Delta, error) {
-	return observation.Diff(baseID, base, current)
+func (treeDiffer) Diff(baseID string, base, current *protocol.ReadTree) (*protocol.ReadDelta, error) {
+	return observation.ReadDiff(baseID, base, current)
 }
 
 // imageEncoder adapts the pure image post-processing package to the engine's
