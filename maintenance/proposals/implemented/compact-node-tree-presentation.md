@@ -1,12 +1,13 @@
 # 提案：统一压缩公共节点树并按交付表示计算预算
 
-状态：提案，未实现。
+状态：已实现（实现提交 `4fc86cf26c40be1df099a1ea259c99ca7a8d5abc`，2026-11-13）。
+实现与验证记录：[验证记录](../../verification/compact-node-tree-presentation.md)。
 基线提交：`25db973434de859a5992a6da4b9124e9870cfb14`（分支 `master`，2026-11-13）。
 适用范围：`start`、`observe`、`act`、`app` 变更分支的观察树；`inspect` 的全树、子树与查询；HTTP、Go 客户端及 MCP 的 `text` / `structured` / `both`；手机与 Windows 主机配套发布。
 影响范围：`internal/protocol`、`internal/observation`、`internal/engine`、`internal/client`、`internal/mcp` 及对应测试；`scripts/mcp-probe`；版本源与生成文件；相关正式文档及发布验证记录。
-契约（`/api/*` 字段与 `contract_version`）：改变公共树/补看响应的形状、默认值、几何省略与差分表示；请求字段不增加。建议发行号 `0.11.0`、共同契约号 `11`、Android versionCode `13`。
+契约（`/api/*` 字段与 `contract_version`）：改变公共树/补看响应的形状、默认值、几何省略与差分表示；请求字段不增加。发行号 `0.11.0`、共同契约号 `11`、Android versionCode `13`。
 
-本文引用的函数名、行号、常量与默认值均以该基线提交为准；实现落地前若代码已前进，须按当时的 `HEAD` 重新核对，重点为 [树构造](../../internal/observation/build.go)、[树差分](../../internal/observation/diff.go)、[采集与提交](../../internal/engine/capture.go)、[补看](../../internal/engine/inspect.go)、[公共节点编码](../../internal/protocol/node.go)、[MCP 树文本](../../internal/mcp/tree_text.go)、[版本源](../../release/versions.json)与[发布规范](../../docs/release.md)。
+本文引用的函数名、行号、常量与默认值均以该基线提交为准；实现落地前若代码已前进，须按当时的 `HEAD` 重新核对，重点为 [树构造](../../../internal/observation/build.go)、[树差分](../../../internal/observation/diff.go)、[采集与提交](../../../internal/engine/capture.go)、[补看](../../../internal/engine/inspect.go)、[公共节点编码](../../../internal/protocol/node.go)、[MCP 树文本](../../../internal/mcp/tree_text.go)、[版本源](../../../release/versions.json)与[发布规范](../../../docs/release.md)。
 
 ## 0. 摘要
 
@@ -32,24 +33,24 @@
 
 | 环节 | 基线证据 | 对设计的约束 |
 | --- | --- | --- |
-| 发布节点 | [build.go:214–221](../../internal/observation/build.go#L214-L221)、[264–270](../../internal/observation/build.go#L264-L270) | 属性存在或有保留子节点即可保留可见 view，不能凭角色判断它可删 |
-| checked 来源 | [build.go:362–379](../../internal/observation/build.go#L362-L379) | 普通角色也公开源提供的 checked，false 是事实 |
-| 完整 Node 编码 | [node.go:123–145](../../internal/protocol/node.go#L123-L145)、[290–297](../../internal/protocol/node.go#L290-L297) | 旧 checked 默认未知；新默认值须在共同 DTO 编解码中定义 |
-| delta presence | [node.go:558–600](../../internal/protocol/node.go#L558-L600) | set 省略为沿用基线，显式 false/null/空数组必须保留 |
-| 差分守恒 | [diff.go:20–53](../../internal/observation/diff.go#L20-L53)、[apply.go:102–176](../../internal/observation/apply.go#L102-L176) | 先还原逻辑节点再应用差分；replace 的键与定义根须一致 |
-| 原完整树门禁 | [capture.go:402–417](../../internal/engine/capture.go#L402-L417) | 需要在新公共 full 编码之后检查交付预算 |
-| full/delta 选择 | [capture.go:250–264](../../internal/engine/capture.go#L250-L264) | 同一基线、同一公共编码比较大小，70% 是严格小于 |
-| replace 成本 | [diff.go:344–396](../../internal/observation/diff.go#L344-L396) | 旧固定节点权重不能代表新 chain/defaults 的真实成本 |
-| 坐标与输入 | [point.go:54–80](../../internal/engine/point.go#L54-L80)、[act.go:246–275](../../internal/engine/act.go#L246-L275)、[394–425](../../internal/engine/act.go#L394-L425) | 最深节点命中及实时重验继续使用完整树；ref 不向祖先晋升 |
-| 滚动容器 | [scroll.go:163–168](../../internal/engine/scroll.go#L163-L168)、[246–283](../../internal/engine/scroll.go#L246-L283) | 不能合并真实滚动节点或借 chain 改变容器解析 |
-| 补看与预算 | [inspect.go:40–42](../../internal/engine/inspect.go#L40-L42)、[99–171](../../internal/engine/inspect.go#L99-L171)、[175–207](../../internal/engine/inspect.go#L175-L207) | 历史只读、不确认基线；查询路径含所有原 ref；任一大命中会令查询失败 |
-| 内部共享引用 | [engine.go:383–412](../../internal/engine/engine.go#L383-L412)、[capture.go:625–632](../../internal/engine/capture.go#L625-L632) | 不能原地修改共享树以生成 compact 或 detailed |
-| 构造器隐性持有 | [build.go:136–147](../../internal/observation/build.go#L136-L147) | Build 会推进 prev，预算拒绝/STOP 后必须释放候选并回滚连续性 |
-| 稳定性 | [settle.go:109–123](../../internal/engine/settle.go#L109-L123)、[297–307](../../internal/engine/settle.go#L297-L307)、[identity.go:8–33](../../internal/engine/identity.go#L8-L33) | 隐藏公共几何不能让完整运行事实的变化被判稳定 |
-| 两种编码等价 | [mcp.md:67–81](../../docs/mcp.md#L67-L81)、[result_text.go:216–253](../../internal/mcp/result_text.go#L216-L253) | text 必须可逆还原 structured 的同一 canonical Result；现有 JSON 保真检查不能替代新文本逆解析测试 |
-| MCP 渲染边界 | [tree_text.go:17–20](../../internal/mcp/tree_text.go#L17-L20)、[41–45](../../internal/mcp/tree_text.go#L41-L45) | 渲染无状态、不展开历史 delta、不另设文本截断门禁 |
-| 内部现有限制 | [hierarchy.go:13–18](../../internal/android/hierarchy.go#L13-L18)、[rpc.go:17–19](../../internal/android/rpc.go#L17-L19)、[engine.go:125–127](../../internal/engine/engine.go#L125-L127) | 解析深度 50、节点 20000、RPC 响应 64 MiB、保留观察数 32，与交付预算分别约束 |
-| 发布与版本 | [versions.json:2–5](../../release/versions.json#L2-L5)、[release.md:19–47](../../docs/release.md#L19-L47)、[128–160](../../docs/release.md#L128-L160) | 当前 0.10.0/10/12；共同契约升级要求 App/服务/客户端/MCP 配套 |
+| 发布节点 | [build.go:214–221](../../../internal/observation/build.go#L214-L221)、[264–270](../../../internal/observation/build.go#L264-L270) | 属性存在或有保留子节点即可保留可见 view，不能凭角色判断它可删 |
+| checked 来源 | [build.go:362–379](../../../internal/observation/build.go#L362-L379) | 普通角色也公开源提供的 checked，false 是事实 |
+| 完整 Node 编码 | [node.go:123–145](../../../internal/protocol/node.go#L123-L145)、[290–297](../../../internal/protocol/node.go#L290-L297) | 旧 checked 默认未知；新默认值须在共同 DTO 编解码中定义 |
+| delta presence | [node.go:558–600](../../../internal/protocol/node.go#L558-L600) | set 省略为沿用基线，显式 false/null/空数组必须保留 |
+| 差分守恒 | [diff.go:20–53](../../../internal/observation/diff.go#L20-L53)、[apply.go:102–176](../../../internal/observation/apply.go#L102-L176) | 先还原逻辑节点再应用差分；replace 的键与定义根须一致 |
+| 原完整树门禁 | [capture.go:402–417](../../../internal/engine/capture.go#L402-L417) | 需要在新公共 full 编码之后检查交付预算 |
+| full/delta 选择 | [capture.go:250–264](../../../internal/engine/capture.go#L250-L264) | 同一基线、同一公共编码比较大小，70% 是严格小于 |
+| replace 成本 | [diff.go:344–396](../../../internal/observation/diff.go#L344-L396) | 旧固定节点权重不能代表新 chain/defaults 的真实成本 |
+| 坐标与输入 | [point.go:54–80](../../../internal/engine/point.go#L54-L80)、[act.go:246–275](../../../internal/engine/act.go#L246-L275)、[394–425](../../../internal/engine/act.go#L394-L425) | 最深节点命中及实时重验继续使用完整树；ref 不向祖先晋升 |
+| 滚动容器 | [scroll.go:163–168](../../../internal/engine/scroll.go#L163-L168)、[246–283](../../../internal/engine/scroll.go#L246-L283) | 不能合并真实滚动节点或借 chain 改变容器解析 |
+| 补看与预算 | [inspect.go:40–42](../../../internal/engine/inspect.go#L40-L42)、[99–171](../../../internal/engine/inspect.go#L99-L171)、[175–207](../../../internal/engine/inspect.go#L175-L207) | 历史只读、不确认基线；查询路径含所有原 ref；任一大命中会令查询失败 |
+| 内部共享引用 | [engine.go:383–412](../../../internal/engine/engine.go#L383-L412)、[capture.go:625–632](../../../internal/engine/capture.go#L625-L632) | 不能原地修改共享树以生成 compact 或 detailed |
+| 构造器隐性持有 | [build.go:136–147](../../../internal/observation/build.go#L136-L147) | Build 会推进 prev，预算拒绝/STOP 后必须释放候选并回滚连续性 |
+| 稳定性 | [settle.go:109–123](../../../internal/engine/settle.go#L109-L123)、[297–307](../../../internal/engine/settle.go#L297-L307)、[identity.go:8–33](../../../internal/engine/identity.go#L8-L33) | 隐藏公共几何不能让完整运行事实的变化被判稳定 |
+| 两种编码等价 | [mcp.md:67–81](../../../docs/mcp.md#L67-L81)、[result_text.go:216–253](../../../internal/mcp/result_text.go#L216-L253) | text 必须可逆还原 structured 的同一 canonical Result；现有 JSON 保真检查不能替代新文本逆解析测试 |
+| MCP 渲染边界 | [tree_text.go:17–20](../../../internal/mcp/tree_text.go#L17-L20)、[41–45](../../../internal/mcp/tree_text.go#L41-L45) | 渲染无状态、不展开历史 delta、不另设文本截断门禁 |
+| 内部现有限制 | [hierarchy.go:13–18](../../../internal/android/hierarchy.go#L13-L18)、[rpc.go:17–19](../../../internal/android/rpc.go#L17-L19)、[engine.go:125–127](../../../internal/engine/engine.go#L125-L127) | 解析深度 50、节点 20000、RPC 响应 64 MiB、保留观察数 32，与交付预算分别约束 |
+| 发布与版本 | [versions.json:2–5](../../../release/versions.json#L2-L5)、[release.md:19–47](../../../docs/release.md#L19-L47)、[128–160](../../../docs/release.md#L128-L160) | 当前 0.10.0/10/12；共同契约升级要求 App/服务/客户端/MCP 配套 |
 
 ### 1.3 为什么直觉会出错
 
@@ -281,7 +282,7 @@ SnapshotCost 定义为固定内部计量对象 `{raw_capture,full_tree}` 的实�
 
 这是可重复的资源计费代理，不是 Go heap/RSS 的精确字节：映射索引、ref 列表、对象/分配器开销及进行中采集/输出暂存不与 JSON 等量。本提案不把 32 MiB 宣称为进程内存硬上限；结合现有深度/节点/RPC 与工作期限边界控制候选，并在系统级记录实际峰值。不能为通过代理预算删除运行证据。
 
-唯一快照集合覆盖所有引擎长期持有者：观察表、current、baseline、active/last/retired session 的连续性/Projector，以及历史 O 的 Projector；相同底层快照只计一次，独立复制或新增缓存必须计费。基线中 [退休会话](../../internal/engine/retirement.go#L105)及 [lastSession](../../internal/engine/cleanup.go#L442-L452)仍会持有 session，因此不能仅在 observations 删除后就扣除所有成本。
+唯一快照集合覆盖所有引擎长期持有者：观察表、current、baseline、active/last/retired session 的连续性/Projector，以及历史 O 的 Projector；相同底层快照只计一次，独立复制或新增缓存必须计费。基线中 [退休会话](../../../internal/engine/retirement.go#L105)及 [lastSession](../../../internal/engine/cleanup.go#L442-L452)仍会持有 session，因此不能仅在 observations 删除后就扣除所有成本。
 
 实现时分离历史材料和构造器生命周期：历史 O 只需完整快照及标量元数据，不应长期保存可变 Projector；输入预览/重验使用相应 work 持有的候选上下文。活动会话只保存已提交连续性，终态 session/lastSession/retired session 释放不再承担连续性的长期引用。不得对尚被旧 work 使用的 Builder 调用 Reset 或竞争改写；通过所有者句柄分离/断开引擎引用，让旧 work 保留其自己的在途对象。若仍有引擎长期 holder 无法释放，就继续纳入去重计费，不把它伪称已释放。在途局部对象与长期留存计费边界分别记录，不将逻辑交接完成伪称物理 goroutine 已退出。
 
@@ -310,18 +311,18 @@ settle 的完整 L1/L2/L3 摘要继续读取 T 与源身份链；不将 L2 改�
 
 | 文件/文件族 | 改动 |
 | --- | --- |
-| [node.go](../../internal/protocol/node.go)、拟新增 `internal/protocol/read_tree.go` | 保留完整运行模型；增加公共阅读 DTO、三态几何、chain 定义、新默认值与严格编解码 |
-| [surface.go](../../internal/protocol/surface.go)、[decode_response.go](../../internal/protocol/decode_response.go)、[responses.go](../../internal/protocol/responses.go) | Observation/Inspection 切换公共 DTO；inspection 元数据作用域与 detailed 编解码；请求形状保持 |
-| [build.go](../../internal/observation/build.go)、[match.go](../../internal/observation/match.go) | 候选式构造与连续性提交/丢弃；原匹配判据保持，避免失败候选长期持有 |
-| [diff.go](../../internal/observation/diff.go)、[apply.go](../../internal/observation/apply.go)、拟新增阅读投影/编码算法文件 | P、Expand、Pack、公共差分/守恒、真实编码成本；完整运行算法不共用有损 DTO |
-| [engine.go](../../internal/engine/engine.go)、[capture.go](../../internal/engine/capture.go)、[inspect.go](../../internal/engine/inspect.go)、[retirement.go](../../internal/engine/retirement.go)、[cleanup.go](../../internal/engine/cleanup.go) | 内外预算、候选提交、全部长期 holder 留存计账及构造器生命周期分离、compact/detailed 分流、同基线差分 |
-| [settle.go](../../internal/engine/settle.go)、[point.go](../../internal/engine/point.go)、[act.go](../../internal/engine/act.go)、[scroll.go](../../internal/engine/scroll.go) | 保持完整输入/稳定性证据，补充隔离与回归用例，避免误用公共隐藏几何 |
-| [客户端](../../internal/client/client.go)及协议测试 | 使用新公共树类型、默认值、chain 和几何状态；同 contract 配套，不自动旧格式降级 |
-| [result_text.go](../../internal/mcp/result_text.go)、[tree_text.go](../../internal/mcp/tree_text.go)、[result_value.go](../../internal/mcp/result_value.go) | result/tree/inspect v2；两模式同源、完整兜底、无状态渲染及文本逆解析测试 |
-| [schema.go](../../internal/mcp/schema.go)、[catalog.go](../../internal/mcp/catalog.go)及目录/等价测试 | 11 工具保持，更新共同语法图例、inspect 说明与目录指纹期望 |
-| [探针入口](../../scripts/mcp-probe/main.go)与 `scripts/mcp-probe` 解码/检查文件 | 支持新公共响应/文本，验证两种编码、链、差分与配套目录 |
-| [版本源](../../release/versions.json)、[生成脚本](../../scripts/generate-version.ps1)的四个输出目标 | 唯一来源前进 0.11.0/11/13，生成常量和 App 版本；不手改多处版本 |
-| [发布构建](../../scripts/build-release.ps1)、[主机构建](../../scripts/build-host-tools.ps1)、[清单核验](../../scripts/verify-manifest.ps1)、[部署](../../scripts/deploy.ps1) | 复用现有入口及清单；不为契约 11 另写硬编码版本，不新增配置迁移 |
+| [node.go](../../../internal/protocol/node.go)、拟新增 `internal/protocol/read_tree.go` | 保留完整运行模型；增加公共阅读 DTO、三态几何、chain 定义、新默认值与严格编解码 |
+| [surface.go](../../../internal/protocol/surface.go)、[decode_response.go](../../../internal/protocol/decode_response.go)、[responses.go](../../../internal/protocol/responses.go) | Observation/Inspection 切换公共 DTO；inspection 元数据作用域与 detailed 编解码；请求形状保持 |
+| [build.go](../../../internal/observation/build.go)、[match.go](../../../internal/observation/match.go) | 候选式构造与连续性提交/丢弃；原匹配判据保持，避免失败候选长期持有 |
+| [diff.go](../../../internal/observation/diff.go)、[apply.go](../../../internal/observation/apply.go)、拟新增阅读投影/编码算法文件 | P、Expand、Pack、公共差分/守恒、真实编码成本；完整运行算法不共用有损 DTO |
+| [engine.go](../../../internal/engine/engine.go)、[capture.go](../../../internal/engine/capture.go)、[inspect.go](../../../internal/engine/inspect.go)、[retirement.go](../../../internal/engine/retirement.go)、[cleanup.go](../../../internal/engine/cleanup.go) | 内外预算、候选提交、全部长期 holder 留存计账及构造器生命周期分离、compact/detailed 分流、同基线差分 |
+| [settle.go](../../../internal/engine/settle.go)、[point.go](../../../internal/engine/point.go)、[act.go](../../../internal/engine/act.go)、[scroll.go](../../../internal/engine/scroll.go) | 保持完整输入/稳定性证据，补充隔离与回归用例，避免误用公共隐藏几何 |
+| [客户端](../../../internal/client/client.go)及协议测试 | 使用新公共树类型、默认值、chain 和几何状态；同 contract 配套，不自动旧格式降级 |
+| [result_text.go](../../../internal/mcp/result_text.go)、[tree_text.go](../../../internal/mcp/tree_text.go)、[result_value.go](../../../internal/mcp/result_value.go) | result/tree/inspect v2；两模式同源、完整兜底、无状态渲染及文本逆解析测试 |
+| [schema.go](../../../internal/mcp/schema.go)、[catalog.go](../../../internal/mcp/catalog.go)及目录/等价测试 | 11 工具保持，更新共同语法图例、inspect 说明与目录指纹期望 |
+| [探针入口](../../../scripts/mcp-probe/main.go)与 `scripts/mcp-probe` 解码/检查文件 | 支持新公共响应/文本，验证两种编码、链、差分与配套目录 |
+| [版本源](../../../release/versions.json)、[生成脚本](../../../scripts/generate-version.ps1)的四个输出目标 | 唯一来源前进 0.11.0/11/13，生成常量和 App 版本；不手改多处版本 |
+| [发布构建](../../../scripts/build-release.ps1)、[主机构建](../../../scripts/build-host-tools.ps1)、[清单核验](../../../scripts/verify-manifest.ps1)、[部署](../../../scripts/deploy.ps1) | 复用现有入口及清单；不为契约 11 另写硬编码版本，不新增配置迁移 |
 
 ### 6.2 配置与取值
 
@@ -363,7 +364,7 @@ settle 的完整 L1/L2/L3 摘要继续读取 T 与源身份链；不将 L2 改�
 
 本次改变普通公共响应，必须前进共同 contract，不能仅改工具描述或文本版本而保持 contract 10。
 
-实现时同步 [接口契约](../../docs/interface.md)、[MCP](../../docs/mcp.md)、[架构](../../docs/architecture.md)、[客户端](../../docs/client.md)、[发布](../../docs/release.md)、[运行手册](../../docs/runbook.md)、[接入](../../docs/integration.md)、[手机操作](../../docs/phone-operations.md)，以及 [控制端协议](../../docs/control-protocol.md)中版本说明的真实受影响部分。正式文档只写落地行为，过程/测量/未执行项留在 maintenance；最终提交前完成独立只读 docs 审计并修正、复检。
+实现时同步 [接口契约](../../../docs/interface.md)、[MCP](../../../docs/mcp.md)、[架构](../../../docs/architecture.md)、[客户端](../../../docs/client.md)、[发布](../../../docs/release.md)、[运行手册](../../../docs/runbook.md)、[接入](../../../docs/integration.md)、[手机操作](../../../docs/phone-operations.md)，以及 [控制端协议](../../../docs/control-protocol.md)中版本说明的真实受影响部分。正式文档只写落地行为，过程/测量/未执行项留在 maintenance；最终提交前完成独立只读 docs 审计并修正、复检。
 
 兼容性：旧 contract 10 的普通 API/客户端/App sync 由既有精确版本检查拒绝；不协商降级、不重解释旧 Node。最小 STOP 的服务接纳继续不依赖普通 contract，但不承诺旧 App 能解析新版本确认。进程重启后旧观察不得被当作新实例的有效输入。
 
@@ -481,7 +482,7 @@ GOEXPERIMENT=jsonv2 GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build ./...
 
 stdio 路径由实际宿主重启连接以 spawn 新 exe；HTTP 路径停止精确旧进程，以原命令和原配置启动新 exe 后重连。主机和手机实际 MCP 宿主都重新发现目录；工具数仍 11，但 description/schema 及目录指纹必须与本组清单一致。仅磁盘替换、页面刷新、tools/list 数量或 list_changed 都不足以证明完成。
 
-主机验证使用 [主机清单核验入口](../../scripts/build-host-tools.ps1)和既有私有配置直接运行更新后的探针；探针的 transport/binary 选择与现有连接一致，使用重复 manifest 参数检查配套，例如：
+主机验证使用 [主机清单核验入口](../../../scripts/build-host-tools.ps1)和既有私有配置直接运行更新后的探针；探针的 transport/binary 选择与现有连接一致，使用重复 manifest 参数检查配套，例如：
 
 ```text
 build/mcp-probe.exe -config <既有私有配置路径> -binary <实际新适配器路径> -transport <既有路径对应模式> -result-mode text -manifest build/release/manifest.json -manifest build/host-tools-manifest.json
@@ -489,9 +490,9 @@ build/mcp-probe.exe -config <既有私有配置路径> -binary <实际新适配�
 
 随后对 structured/both 检查相同新契约。上述占位符不作为真实执行命令或验证结论。
 
-对已经运行的手机或主机 HTTP 入口，使用 `-transport http-remote`，探针不启动或停止适配器；使用与目标入口对应的既有合法 HTTP 配置。[http 模式会自行启动适配器，而 http-remote 连接既有入口](../../scripts/mcp-probe/main.go#L156-L198)。若真实有效部署通过命令行将 stdio 配置覆盖为 HTTP、现有探针拒绝该配置，则通过实际宿主连接完成检查；也可先补充探针不写配置的等价覆盖能力并验证，但不能为通过探针而重写私有配置。`http` 模式仅用于明确空闲端口上的临时产物验证，不代表已运行入口验收。stdio 探针验证新产物，实际宿主换载及目录刷新另行确认。
+对已经运行的手机或主机 HTTP 入口，使用 `-transport http-remote`，探针不启动或停止适配器；使用与目标入口对应的既有合法 HTTP 配置。[http 模式会自行启动适配器，而 http-remote 连接既有入口](../../../scripts/mcp-probe/main.go#L156-L198)。若真实有效部署通过命令行将 stdio 配置覆盖为 HTTP、现有探针拒绝该配置，则通过实际宿主连接完成检查；也可先补充探针不写配置的等价覆盖能力并验证，但不能为通过探针而重写私有配置。`http` 模式仅用于明确空闲端口上的临时产物验证，不代表已运行入口验收。stdio 探针验证新产物，实际宿主换载及目录刷新另行确认。
 
-不直接调用 [verify-m5 包装](../../scripts/verify-m5.ps1#L184-L204)：它即使 SkipBuild 也会重写私有配置，不符合只换二进制边界。当前 [verify-m6](../../scripts/verify-m6.ps1#L579-L594)硬编码上一契约 9，本提案不以整套该脚本为门禁，使用本次最小的 10→11 拒绝验证；如实施者选择复用，先修订相关断言/说明并验证，不借此扩大消息或重启演练范围。
+不直接调用 [verify-m5 包装](../../../scripts/verify-m5.ps1#L184-L204)：它即使 SkipBuild 也会重写私有配置，不符合只换二进制边界。当前 [verify-m6](../../../scripts/verify-m6.ps1#L579-L594)硬编码上一契约 9，本提案不以整套该脚本为门禁，使用本次最小的 10→11 拒绝验证；如实施者选择复用，先修订相关断言/说明并验证，不借此扩大消息或重启演练范围。
 
 发布完成分别报告：已安装版本、运行镜像哈希、App 配对/准入、旧 cleanup 保留事实、实际目录刷新、两端树闭环与未执行项。失败时停止升级并保持受控准入；回退只使用已核验整组配套产物，保留配置/账本，不混用新旧 contract。
 
@@ -541,17 +542,50 @@ build/mcp-probe.exe -config <既有私有配置路径> -binary <实际新适配�
 9. 在干净已提交源码身份构建并核验手机完整包与 Windows 工具，按 §8.2 执行受控双端部署、精确重启和实际目录/最小闭环验证。不得把构建、安装、目录刷新或业务闭环合并伪称一个成功。
 10. 写真实验证记录；实现提交落盘后按流程补 §11、移动到 implemented、重写相对链接并单独提交归档。归档记录与发布构建所用源码身份分别清楚标注。
 
-## 11. 实现结果（归档时补写）
+## 11. 实现结果
 
-当前状态为提案，未实现。本节不填未来提交 hash、落地清单或测试结果。
+实现提交：`4fc86cf26c40be1df099a1ea259c99ca7a8d5abc`（2026-11-13）。提案落盘提交
+`2781ffb`；基线提交 `25db973`。实际执行命令、用例与未执行项见
+[验证记录](../../verification/compact-node-tree-presentation.md)。
 
 ### 11.1 已落地
 
-归档时逐项填写提案条目、真实代码落点及实现提交。
+| 提案条目 | 代码落点 |
+| --- | --- |
+| §4.1 公共阅读 DTO、三态几何、默认值与严格编解码 | `internal/protocol/read_tree.go`：`ReadNode`、`ReadTree`、`ReadDelta`、`ReadSetNode`、`Defaults`、`ReadBounds`、`ReadTreeValue`、`Validate`；内部 `Node`/`Tree`/`Delta` 保持运行模型不变 |
+| §4.1 响应接线、inspection 元数据作用域 | `internal/protocol/surface.go` 的 `InspectionView`/`InspectionMatch`、`responses.go` 的 `Observation.Tree`、`decode_response.go` 的 tree/inspection 解码 |
+| §4.2/§4.3 匿名判据与几何三态 | `internal/observation/read.go` 的 `AnonymousPlain`、`projectReadNode`（compact/detailed） |
+| §4.4 chain 规则与可逆折链 | `internal/observation/read.go` 的 `PackTree`、`PackDelta`、`packSubtree`、`chainShorterThanOrdinary`、`UnpackTree`；定义根保持普通 `ref` |
+| §5.2 公共差分、Apply 守恒与字节成本 | `internal/observation/read_diff.go`：`ReadDiff`、`ReadApply`、`expandReadDelta`、`readCosts.regionSaving`；`cmd/device-service/main.go` 的 `treeDiffer` 改用 `ReadDiff` |
+| §5.1 候选式构造与连续性回滚 | `internal/observation/build.go` 的 `Builder.Candidate` + commit；`engine.Projector.Candidate`；`engine.projectCapture` 与 `publishTreeAttempt` 在唯一提交点调用 commit |
+| §5.3 公共预算与 70% 判据 | `internal/engine/capture.go` 的 `projectCapture`（compact 128 KiB）、`publishTreeAttempt`（`10×delta<7×full`）、`budgetError` |
+| §5.4 内部 4/32 MiB、留存 dry-run 与原子淘汰 | `internal/engine/capture.go` 的 `MaxSnapshotCostBytes`/`MaxRetainedSnapshotCostBytes`、`planRetentionLocked`；`observation.SnapshotCost` |
+| §4.6/§5.3 inspect 固定 detailed 与 128/32 KiB 内容对象 | `internal/engine/inspect.go` 的 `inspectionTree`、`inspectionSubtree`、`inspectionQuery`、`queryEmptyBytes` |
+| §5.4 历史持有者与投影器释放 | `internal/engine/engine.go` 移除 `observationState.Projector`；`retirement.go` 的 `retireLocked` 断开 `session.Projector`；`act.go`/`scroll.go` 改用 work/引擎投影器 |
+| §4.5 MCP 文本 v2 与两模式同源 | `internal/mcp/tree_text.go`（tree/inspect v2、defaults 行、chain、隐藏几何、`bounds=hidden`）、`result_text.go`（`result v2`）、`schema.go`（共享图例） |
+| §8.1 文本逆解析与守恒测试 | `internal/mcp/tree_text_test.go` 的 v2 解析器与 `TestTreeTextRoundTrip`；`result_manifest_test.go` 的公共成员清单 |
+| 探针配套 | `scripts/mcp-probe/result_text.go`（v2 oracle、defaults 行、view）、`result.go`（头部比较字段）、`checks.go`（v2 前缀） |
+| §6.2 版本与生成目标 | `release/versions.json`（0.11.0/11/13）与 `scripts/generate-version.ps1` 的 Go/Java/XML/Manifest 四个输出；`scripts/verify-m6.ps1` 的上一契约断言修订为 10 |
+| §6.5 正式文档 | `docs/interface.md`、`mcp.md`、`architecture.md`、`client.md`、`integration.md`、`release.md`、`runbook.md`、`control-protocol.md`、`phone-operations.md` |
+
+反向对照：去掉 `checked` 省略、关闭匿名几何隐藏、让候选立即提交、公共差分不比较几何状态
+时，对应测试分别失败；恢复后通过。详见验证记录 §4。
 
 ### 11.2 与提案不同或未执行
 
-归档时逐项填写结论与理由；触及判据、契约或时序的偏离先回到提案修订确认，不以归档补记代替。
+| 项 | 结论与理由 |
+| --- | --- |
+| 候选式构造的接口形状 | 采用 `Builder.Candidate(capture) (snapshot, commit, error)` 与 `Projector.Candidate`，由引擎在唯一提交点调用 `commit`。与 §5.1 的 clone+commit 等价，未另建预览对象 |
+| 留存计费边界 | 唯一快照成本按观察记录的 `Cost` 累计；`baseline` 只保存 compact 阅读表示。退休会话断开 `session.Projector` 引用，但不对仍被在途 work 持有的投影器调用 `Reset`，避免与预览竞争。在途局部对象不入长期计费，与 §5.4 的边界一致 |
+| 历史观察不再保存投影器 | `observationState.Projector` 字段被删除而不是保留为 nil；点命中证明使用引擎默认投影器，因为它只需投影的 `Source` 映射、不依赖 ref 连续性 |
+| 生产侧文本解析 | 未新增；文本逆解析只在测试与探针侧实现。产品代码只编码，未知成员继续走 `json v1` 兜底 |
+| 配置命名 | §6.2 表中的 `MaxObservationBytes` 未采用；实际为 `MaxFullTreeBytes`、`MaxInspectionUnitBytes`、`MaxSnapshotCostBytes`、`MaxRetainedSnapshotCostBytes` |
+| 整组发布构建、清单核验、主机工具构建 | **未执行**：主机 MCP 适配器正从 `build/device-mcp.exe` 运行，而构建输出路径就是该运行镜像；按 §8.2 必须先停止精确旧进程或改在干净发布工作区构建，本会话不重启用户宿主进程。没有由本次源码身份产生的清单，因此也没有 `verify-manifest.ps1` 可核验的对象 |
+| 手机整组部署与 §8.2 实机验收 | **未执行**：没有受控设备窗口，部署会更换用户手机版本。compact/detailed 真机、三模式、双端目录刷新、最小闭环均未取得证据 |
+| 真实 Capture 压缩比、token、耗时与进程峰值 | **未执行**：原始采集与树不入库，本次未连接设备；只用合成高冗余 fixture 证明 ≥25%，不外推真实比例 |
+| `verify-m6.ps1` 运行 | **未执行**：需要已部署手机。只修订了它的上一契约断言（9→10），修订后未运行 |
+| 契约 10 拒绝的实机闭环 | **未执行**：没有部署 0.11.0 与旧客户端联调窗口；该边界由既有精确版本检查实现 |
+
 
 ---
 

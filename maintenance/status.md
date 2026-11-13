@@ -1,6 +1,6 @@
 # 项目实施状态
 
-状态：2026-11-11。本页承载用户可见的阶段进度、已实现/已实测/未验证分层与未决项；
+状态：2026-11-13。本页承载用户可见的阶段进度、已实现/已实测/未验证分层与未决项；
 `docs/` 只保留正式架构、现行契约与运维说明。
 
 ## 1. 阶段
@@ -43,6 +43,7 @@
 | 工作期限与未决输入的会话级封锁（契约 7） | 已实现 | 已实测：`act` 后静默 60 秒会话仍 `active`；未确认回执不再阻止 `observe`；受管 `shell` 超预算返回后立即 `observe` 成功；服务进程重启（不重启手机）后 `can_start=true` 且旧会话记 `service_restarted`；账本为版本 4；stdio 与手机 HTTP `mcp-probe` 均 PASS。真实回执未知注入与 `termination=unknown` 实机样本未执行（[记录](verification/remove-work-ui-deadline-lockdown.md)） |
 | 显式重设会话租期并取消累计硬上限（契约 8） | 已实现 | 已实测：start 首观察后五分钟期限；120 分钟显式租约跨过 `started_at+1h`；普通 observe 不截短 30 分钟长租约；省略/1 分钟可缩短；同一 P 重放不再次计时；一分钟真实到期记 `lease_expired` 且 cleanup 完成；长租约下 STOP 立即 `revoked`。已发布 0.8.0 / versionCode 10，手机 HTTP 与主机 stdio `mcp-probe` PASS（[记录](verification/explicit-keepalive-duration.md)） |
 | 受控滚动、raw swipe duration 与观察质量/效果（契约 10） | 已实现 | 已部署 0.10.0/契约 10/versionCode 12；Settings 实机 5 次受控 scroll 全部 `executed`、0 次 `target_changed`，quality 均 stable；effect 得到 `not_observed`/`unknown`，尚未取得实机 `observed` 或跨应用样本（[记录](verification/semantic-scroll-observation-quality.md)） |
+| 公共树表示与交付预算（契约 11） | 已实现 | 未实测：公共阅读 DTO、三态几何、匿名隐藏、chain 折链、公共差分与 128/32 KiB、内部 4/32 MiB 预算、inspect detailed、MCP result/tree/inspect v2 已落盘并通过单测与 linux/arm64 构建；整组发布、手机部署与实机验收未执行（主机适配器占用构建输出镜像），原因与证据见[记录](verification/compact-node-tree-presentation.md) |
 
 ## 3. 未验证 / 未实现
 
@@ -68,6 +69,8 @@
 | 实等会话累计超过一小时 | 未执行：由受控时间单测证明硬上限已删除；实机 120 分钟显式租约返回的绝对期限已超过 `started_at+1h`（[记录](verification/explicit-keepalive-duration.md)） |
 | 实机 MCP 调用带 `duration_minutes` 的 keepalive | 未单独构造：MCP 转发由单测覆盖，实机 keepalive 语义由直接 HTTP 调用验证（[记录](verification/explicit-keepalive-duration.md)） |
 | 受控 scroll/raw duration/quality/effect 的实机与跨应用证据 | 部分执行：Settings 一个应用 5 次 scroll、1 次 raw swipe 已实测；`effect=observed` 实机样本、长文/B 站/WebView/嵌套容器/overlay/STOP 时序与阈值校准未执行（[记录](verification/semantic-scroll-observation-quality.md)） |
+| 契约 11 公共树表示的整组发布与实机验收 | 未执行：0.11.0 产物未构建（主机适配器正从构建输出路径运行），手机未部署；真机 compact/detailed、三结果模式、双端目录刷新与最小闭环均无证据（[记录](verification/compact-node-tree-presentation.md)） |
+| 真实 Capture 的新旧公共表示对比与运行成本 | 未执行：原始采集与树不入库，且本次未连接设备；合成高冗余 fixture 只证明 ≥25% 缩减，真实压缩比、token、耗时与进程峰值未测（[记录](verification/compact-node-tree-presentation.md)） |
 
 ## 4. 证据入口
 
@@ -83,6 +86,7 @@
 - [显式重设会话租期与取消累计硬上限实现、发布与实机验证](verification/explicit-keepalive-duration.md)
 - [ref 连续性与静态页 delta 修复验证](verification/ref-stability-public-identity.md)
 - [主屏多窗口层级修复与实机验证](verification/primary-display-multi-window.md)
+- [契约 11 公共树表示、交付预算与文本 v2 的实现与验证](verification/compact-node-tree-presentation.md)
 - [工程决策](decisions.md)
 - [工程流程](process.md)
 
@@ -97,3 +101,6 @@
   更早产物仍作为不匹配验证材料。
 - 契约 10 的实现、部署与实机补记已推送到 `origin`；issue #10 已回复并以 `COMPLETED`
   关闭，`#7` 未关闭、未重开（[记录](verification/semantic-scroll-observation-quality.md) §9）。
+- 契约 11（公共树表示与交付预算）已实现并提交，但当前部署仍是 `0.10.0`/契约 10；0.11.0
+  产物尚未构建（主机 MCP 适配器正从 `build/device-mcp.exe` 运行，构建输出即运行镜像），
+  手机与主机均未升级（[记录](verification/compact-node-tree-presentation.md)）。
