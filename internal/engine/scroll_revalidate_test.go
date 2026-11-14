@@ -128,56 +128,123 @@ func TestScrollContentMovesContainerStableExecuted(t *testing.T) {
 	}
 }
 
-// TestScrollInnerScopeAtActualTrajectoryRejected places an inner scroll scope
-// over the actual injected start (or end). The centre line cannot be proven to
-// stay in the selected container, so nothing is dispatched.
-func TestScrollInnerScopeAtActualTrajectoryRejected(t *testing.T) {
-	for name, inner := range map[string]device.Rect{
-		"start": {Left: 0, Top: 1800, Right: 1080, Bottom: 2400},
-		"end":   {Left: 0, Top: 800, Right: 1080, Bottom: 1200},
+// scrollPageWithInnerScope returns the ordinary page with one extra inner
+// scroll scope, so the observed and the fresh frame can disagree about the
+// provable center line.
+func scrollPageWithInnerScope(base []rawNodeSpec, rect device.Rect) []rawNodeSpec {
+	specs := append([]rawNodeSpec(nil), base...)
+	return append(specs, rawNodeSpec{Parent: 1, Bounds: rect,
+		Class: "androidx.recyclerview.widget.RecyclerView", Scrollable: true})
+}
+
+// TestScrollStaticAvoidsInnerScope is the static half of the split: a published
+// inner scroll scope is no longer a post-claim rejection, because the planner
+// removes it from the plan. The trajectory is shorter and stays outside it.
+func TestScrollStaticAvoidsInnerScope(t *testing.T) {
+	for name, tc := range map[string]struct {
+		inner device.Rect
+		want  swipeCall
+	}{
+		// [0,1800): extent 1800, margin 180, usable 1440, page 864.
+		"start": {inner: device.Rect{Left: 0, Top: 1800, Right: 1080, Bottom: 2400},
+			want: swipeCall{displayID: 12, x1: 540, y1: 1620, x2: 540, y2: 756, durationMS: 400}},
+		// [1200,2400): extent 1200, margin 120, usable 960, page 576.
+		"end": {inner: device.Rect{Left: 0, Top: 800, Right: 1080, Bottom: 1200},
+			want: swipeCall{displayID: 12, x1: 540, y1: 2280, x2: 540, y2: 1704, durationMS: 400}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newHarness(t)
-			specs := []rawNodeSpec{
-				{Parent: -1, Bounds: screenRect(), Class: "android.widget.FrameLayout"},
-				{Parent: 0, Bounds: screenRect(), Class: "android.widget.ScrollView", Scrollable: true},
-				{Parent: 1, Bounds: inner, Class: "androidx.recyclerview.widget.RecyclerView", Scrollable: true},
-				{Parent: 2, Bounds: device.Rect{Left: 0, Top: inner.Top + 100, Right: 1080, Bottom: inner.Top + 300},
-					Class: "android.widget.TextView", Text: "inner"},
-				{Parent: 1, Bounds: device.Rect{Left: 0, Top: 1100, Right: 1080, Bottom: 1300},
-					Class: "android.widget.TextView", Text: "outer-content"},
-			}
-			h.device.scriptCaptures(scrollPageStep(specs))
+			specs := scrollPageWithInnerScope(scrollPageSpecs(screenRect(), device.Rect{Top: 1000}),
+				tc.inner)
+			page := scrollPageStep(specs)
+			h.device.scriptCaptures(page)
 			start := h.startSession()
-			outer := findPublic(currentTree(t, h.engine).Root, func(node *protocol.Node) bool {
-				return node.Role == protocol.RoleScroll && node.Bounds != nil &&
-					node.Bounds.Top == 0 && node.Bounds.Bottom == 2400
-			})
-			if outer == nil {
-				t.Fatal("outer container missing")
-			}
-			h.device.scriptCaptures(scrollPageStep(specs))
+			outer := scrollContainerRef(t, h)
+			h.device.scriptCaptures(page, page)
 
 			result := h.actP(t, "", start.Observation.ID, protocol.Operation{
-				Type: "scroll", Container: &protocol.Target{UseRef: true, Ref: outer.Ref},
+				Type: "scroll", Container: &protocol.Target{UseRef: true, Ref: outer},
 				Direction: protocol.ScrollDirectionDown,
 			})
-			requireNotExecuted(t, result, protocol.CodeTargetChanged)
-			requireNoEffect(t, result)
-			if result.Observation == nil {
-				t.Fatal("inner-scope rejection did not deliver the fresh frame")
+			if result.Outcome != OutcomeExecuted {
+				t.Fatalf("outcome = %s error %+v", result.Outcome, result.Error)
 			}
-			if got := swipeCount(h); got != 0 {
-				t.Fatalf("swipes = %d, want none", got)
+			calls := swipeCalls(h)
+			if len(calls) != 1 || calls[0] != tc.want {
+				t.Fatalf("swipe = %+v, want %+v", calls, tc.want)
 			}
 		})
 	}
 }
 
-// TestScrollPointSelectorAlsoProvesActualTrajectory proves the actual-scope
-// check runs for point-selected containers too: the static point resolves to
-// one container, but the fixed centre line enters an inner scope.
-func TestScrollPointSelectorAlsoProvesActualTrajectory(t *testing.T) {
+// TestScrollDynamicSegmentConflictRejected is the required reverse control for
+// the whole-segment proof: a conflict that only appears in the fresh frame at
+// the start, the end or the middle of the original segment rejects the attempt
+// even though both endpoints on their own may still be provable.
+func TestScrollDynamicSegmentConflictRejected(t *testing.T) {
+	cases := map[string]device.Rect{
+		"start":  {Left: 0, Top: 1900, Right: 1080, Bottom: 2400},
+		"end":    {Left: 0, Top: 1000, Right: 1080, Bottom: 1100},
+		"middle": {Left: 0, Top: 1500, Right: 1080, Bottom: 1600},
+	}
+	for name, inner := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t)
+			observed := scrollPageStep(scrollPageSpecs(screenRect(), device.Rect{Top: 1000}))
+			h.device.scriptCaptures(observed)
+			start := h.startSession()
+			container := scrollContainerRef(t, h)
+			fresh := scrollPageWithInnerScope(scrollPageSpecs(screenRect(), device.Rect{Top: 1000}), inner)
+			h.device.scriptCaptures(scrollPageStep(fresh), scrollPageStep(fresh))
+
+			result := h.actP(t, "", start.Observation.ID, protocol.Operation{
+				Type: "scroll", Container: &protocol.Target{UseRef: true, Ref: container},
+				Direction: protocol.ScrollDirectionDown,
+			})
+			requireNotExecuted(t, result, protocol.CodeTargetChanged)
+			requireNoEffect(t, result)
+			if got := swipeCount(h); got != 0 {
+				t.Fatalf("swipes = %d, want none", got)
+			}
+			if result.Observation == nil {
+				t.Fatal("segment rejection did not deliver the fresh frame")
+			}
+		})
+	}
+}
+
+// TestScrollFreshChangeOutsideSegmentKeepsPlan proves the fresh proof never
+// re-plans: a change that only shortens the longest safe interval outside the
+// authorized segment changes nothing about the injected coordinates.
+func TestScrollFreshChangeOutsideSegmentKeepsPlan(t *testing.T) {
+	h := newHarness(t)
+	observed := scrollPageStep(scrollPageSpecs(screenRect(), device.Rect{Top: 1000}))
+	h.device.scriptCaptures(observed)
+	start := h.startSession()
+	container := scrollContainerRef(t, h)
+	fresh := scrollPageWithInnerScope(scrollPageSpecs(screenRect(), device.Rect{Top: 1000}),
+		device.Rect{Left: 0, Top: 0, Right: 1080, Bottom: 700})
+	h.device.scriptCaptures(scrollPageStep(fresh), scrollPageStep(fresh))
+
+	result := h.actP(t, "", start.Observation.ID, protocol.Operation{
+		Type: "scroll", Container: &protocol.Target{UseRef: true, Ref: container},
+		Direction: protocol.ScrollDirectionDown,
+	})
+	if result.Outcome != OutcomeExecuted {
+		t.Fatalf("outcome = %s error %+v", result.Outcome, result.Error)
+	}
+	// The observed plan stays [0,2400): 2160 -> 1008, never a re-planned 2080.
+	want := swipeCall{displayID: 12, x1: 540, y1: 2160, x2: 540, y2: 1008, durationMS: 400}
+	calls := swipeCalls(h)
+	if len(calls) != 1 || calls[0] != want {
+		t.Fatalf("swipe = %+v, want %+v", calls, want)
+	}
+}
+
+// TestScrollPointSelectorAvoidsInnerScope proves the point selector uses the same
+// static span: the resolved container is planned around the inner scope instead
+// of being rejected after the claim.
+func TestScrollPointSelectorAvoidsInnerScope(t *testing.T) {
 	h := newHarness(t)
 	specs := []rawNodeSpec{
 		{Parent: -1, Bounds: screenRect(), Class: "android.widget.FrameLayout"},
@@ -189,17 +256,57 @@ func TestScrollPointSelectorAlsoProvesActualTrajectory(t *testing.T) {
 		{Parent: 3, Bounds: device.Rect{Left: 0, Top: 1900, Right: 1080, Bottom: 2100},
 			Class: "android.widget.TextView", Text: "inner"},
 	}
-	h.device.scriptCaptures(scrollPageStep(specs))
+	page := scrollPageStep(specs)
+	h.device.scriptCaptures(page)
 	start := h.startSession()
-	h.device.scriptCaptures(scrollPageStep(specs))
+	h.device.scriptCaptures(page, page)
 
 	result := h.actP(t, "", start.Observation.ID, protocol.Operation{
 		Type: "scroll", Container: &protocol.Target{X: 540, Y: 1100},
 		Direction: protocol.ScrollDirectionDown,
 	})
-	requireNotExecuted(t, result, protocol.CodeTargetChanged)
-	if got := swipeCount(h); got != 0 {
-		t.Fatalf("swipes = %d, want none", got)
+	if result.Outcome != OutcomeExecuted {
+		t.Fatalf("outcome = %s error %+v", result.Outcome, result.Error)
+	}
+	// [0,1800): extent 1800, margin 180, usable 1440, page 864.
+	want := swipeCall{displayID: 12, x1: 540, y1: 1620, x2: 540, y2: 756, durationMS: 400}
+	calls := swipeCalls(h)
+	if len(calls) != 1 || calls[0] != want {
+		t.Fatalf("swipe = %+v, want %+v", calls, want)
+	}
+}
+
+// TestScrollPublishedOverlayScopeAvoided keeps the capability boundary honest: a
+// published overlay with its own scroll scope is now a planning input rather than
+// an after-the-fact rejection. The injected gesture stays clear of it.
+func TestScrollPublishedOverlayScopeAvoided(t *testing.T) {
+	h := newHarness(t)
+	specs := []rawNodeSpec{
+		{Parent: -1, Bounds: screenRect(), Class: "android.widget.FrameLayout"},
+		{Parent: 0, Bounds: screenRect(), Class: "android.widget.ScrollView", Scrollable: true},
+		{Parent: 1, Bounds: device.Rect{Left: 0, Top: 1000, Right: 1080, Bottom: 1200},
+			Class: "android.widget.TextView", Text: "alpha"},
+		// Root-level overlay scroll container drawn over the old start point.
+		{Parent: 0, Bounds: device.Rect{Left: 0, Top: 2100, Right: 1080, Bottom: 2400},
+			Class: "androidx.recyclerview.widget.RecyclerView", Scrollable: true},
+	}
+	h.device.scriptCaptures(scrollPageStep(specs))
+	start := h.startSession()
+	outer := scrollContainerRef(t, h)
+	h.device.scriptCaptures(scrollPageStep(specs), scrollPageStep(specs))
+
+	result := h.actP(t, "", start.Observation.ID, protocol.Operation{
+		Type: "scroll", Container: &protocol.Target{UseRef: true, Ref: outer},
+		Direction: protocol.ScrollDirectionDown,
+	})
+	if result.Outcome != OutcomeExecuted {
+		t.Fatalf("outcome = %s error %+v", result.Outcome, result.Error)
+	}
+	// [0,2100): extent 2100, margin 210, usable 1680, page 1008.
+	want := swipeCall{displayID: 12, x1: 540, y1: 1890, x2: 540, y2: 882, durationMS: 400}
+	calls := swipeCalls(h)
+	if len(calls) != 1 || calls[0] != want {
+		t.Fatalf("swipe = %+v, want %+v", calls, want)
 	}
 }
 
@@ -244,40 +351,6 @@ func TestScrollOuterScrollAncestorAllowed(t *testing.T) {
 	want := swipeCall{displayID: 12, x1: 540, y1: 1840, x2: 540, y2: 1072, durationMS: 400}
 	if calls[0] != want {
 		t.Fatalf("swipe = %+v, want %+v", calls[0], want)
-	}
-}
-
-// TestScrollPublishedOverlayScopeAtStartRejected is the capability boundary:
-// a published overlay with its own scroll scope over the actual start point
-// changes the scope set and is rejected.
-func TestScrollPublishedOverlayScopeAtStartRejected(t *testing.T) {
-	h := newHarness(t)
-	specs := []rawNodeSpec{
-		{Parent: -1, Bounds: screenRect(), Class: "android.widget.FrameLayout"},
-		{Parent: 0, Bounds: screenRect(), Class: "android.widget.ScrollView", Scrollable: true},
-		{Parent: 1, Bounds: device.Rect{Left: 0, Top: 1000, Right: 1080, Bottom: 1200},
-			Class: "android.widget.TextView", Text: "alpha"},
-		// Root-level overlay scroll container drawn over the start point.
-		{Parent: 0, Bounds: device.Rect{Left: 0, Top: 2100, Right: 1080, Bottom: 2400},
-			Class: "androidx.recyclerview.widget.RecyclerView", Scrollable: true},
-	}
-	h.device.scriptCaptures(scrollPageStep(specs))
-	start := h.startSession()
-	outer := findPublic(currentTree(t, h.engine).Root, func(node *protocol.Node) bool {
-		return node.Role == protocol.RoleScroll && node.Bounds != nil && node.Bounds.Top == 0
-	})
-	if outer == nil {
-		t.Fatal("outer container missing")
-	}
-	h.device.scriptCaptures(scrollPageStep(specs))
-
-	result := h.actP(t, "", start.Observation.ID, protocol.Operation{
-		Type: "scroll", Container: &protocol.Target{UseRef: true, Ref: outer.Ref},
-		Direction: protocol.ScrollDirectionDown,
-	})
-	requireNotExecuted(t, result, protocol.CodeTargetChanged)
-	if got := swipeCount(h); got != 0 {
-		t.Fatalf("swipes = %d, want none", got)
 	}
 }
 

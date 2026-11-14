@@ -157,17 +157,18 @@ engine 的状态锁只做有限内存检查与转换：锁内不等待 ADB、u2 
 ### 受控滚动与原始手势
 
 `act.operation.type=scroll` 是受控滚动尝试：调用方声明阅读方向与幅度，服务在几何合法且作用域
-可证明的容器内选择起止点。授权单位是观察到的滚动容器与实际注入的起终点作用域，不是起点
-叶节点：
+可证明的容器内选择起止点。授权单位是观察到的滚动容器与观察时授权的固定段，不是起点叶节点：
 
 - 容器在观察的公开树中解析：`ref` 必须直接是 `role=scroll`、`actions` 含 `swipe` 的节点，
   服务不做祖先晋升；坐标候选归约到最近的可滚动祖先，出现多个不同滚动作用域时要求调用方
   显式给 `container.ref`；
+- 静态规划固定容器正交中心坐标，用一次整树遍历把每个节点归约到最近的公开滚动作用域，把
+  不属于选定容器及其 `raw` 外层祖先的候选投影成轴上的阻塞区间，再从「裁剪矩形 ∩ 公开矩形」
+  的基础区间中扣除；最长可证区间决定 `page`/`half` 的留白与幅度，等长区间按手势起点侧取定；
 - 认领后只对容器做“完整内容身份 + 祖先链”唯一匹配，容器 bounds 变化按 `target_changed`
-  处理；
-- 从新鲜容器计算的实际起终点，其最内层可滚动作用域必须仍是该容器；外层包裹祖先允许，容器
-  内层后代或不可比作用域拒绝，实际终点必须仍在容器内；
-- 静态几何不可执行在认领前拒绝，新鲜几何不可执行走重验失败的交付路径。
+  处理；新鲜树用同一套区间归约证明**观察时授权的那一整段**仍可用，不重新选择区间、不重算
+  起止点，起点、终点或中段出现新作用域都拒绝；
+- 静态不可执行在认领前拒绝，新鲜不成立走重验失败的交付路径。
 
 raw `swipe` 仍是原始手势：起点 `from` 继续走完整内容身份、祖先链与同点解析证明，只增加有界
 `duration_ms`，不承诺滚动语义。`scroll` 不证明真实滚动方向、触摸消费者、业务安全或到达边界；
@@ -498,7 +499,7 @@ P 已无法定位时，`end(P)` 返回 `409 operation_unknown`、`phase=referenc
 | 层 | 字段 | 含义 |
 | --- | --- | --- |
 | 动作执行 | `outcome` | `executed` / `not_executed` / `uncertain`；只描述本次输入是否已派发并有完成证据 |
-| 滚动效果 | `effect.state` | `observed` / `not_observed` / `unknown`；只在 `scroll` 结果与仍保留该原操作的 P 视图中出现，只表示是否观察到容器内内容位移，不表示动作因果、方向、距离或到达边界 |
+| 滚动效果 | `effect.state` | `observed` / `not_observed` / `unknown`；只在 `scroll` 结果与仍保留该原操作的 P 视图中出现，只表示是否观察到容器内内容位移，不表示动作因果、方向、距离或到达边界。`observed` 要求屏幕位移与容器相对位移同时成立且同号对达到门限，`not_observed` 用完整匹配集与容器四边不变判据，二者都不证明原始内容静止 |
 | 观察 | `observation.status` | `complete` / `partial` / `failed`；后观察失败不改写已确认的 `executed` |
 | 条件等待 | `wait.trigger` / `wait.matched` / `wait.elapsed_ms` | 等待因哪个分支退出、最终发布帧上成立哪些单帧条件、整次调用耗时；不表示页面之后不再变化，也不替代 `observation.status` |
 | 观察质量 | `observation.quality` | `state` / `samples` / `stop_reason`；只表示树是否收敛、经过多少有效采样，不限制输入授权 |
@@ -517,7 +518,9 @@ P 已无法定位时，`end(P)` 返回 `409 operation_unknown`、`phase=referenc
 正文、命令、原始响应或异常文本。每个 UI 窗口关闭只记一条 `ui.window_closed`，
 `state=terminated|not_dispatched|unknown`；该事件不进入任何工具响应。受控滚动的规划、重验与
 效果事件只带 `operation_id`（必要时 `observation_id`）与受控枚举/布尔/计数，不记 ref、坐标、
-标签或树；观察质量事件只记可取得的 `operation_id`、`observation_id`、阶段与受控枚举/数值。
+标签或树；`scroll.revalidate` 的 `start_scope_proven`/`end_scope_proven` 只描述两端，
+整段证明由独立的 `proven` 布尔值表达；`scroll.effect` 的 `anchors`/`coverage` 仍按完整
+匹配集计数；观察质量事件只记可取得的 `operation_id`、`observation_id`、阶段与受控枚举/数值。
 新增键必须先进入 `internal/eventlog` 的单一白名单，否则事件被静默丢弃。
 
 ## 10. 消息投递与发布边界
@@ -533,7 +536,7 @@ P 已无法定位时，`end(P)` 返回 `409 operation_unknown`、`phase=referenc
 ### 发布
 
 `release/versions.json` 是发行号、共同契约号与 Android versionCode 的唯一来源；当前为
-`release_version=0.12.0`、`contract_version=12`、`android_version_code=14`，构建生成
+`release_version=0.13.0`、`contract_version=13`、`android_version_code=15`，构建生成
 Go/Java 常量。`scripts/build-release.ps1` 产出整组产物与 `build/release/manifest.json`
 （源码提交、Go 版本、MCP SDK/协议、各产物 SHA-256/大小、Android 包名/版本、工具目录指纹）。
 工具目录固定为 `scripts/toolcatalog` 投影的 12 个工具，指纹是该目录注册顺序、名称、描述与

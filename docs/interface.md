@@ -15,7 +15,7 @@
 | 方法 | 所有业务端点只接受 `POST`；其他方法返回 `405`，错误码 `invalid_request` |
 | 认证 | `/api/*` 用 `agent_token`；`/v1/control/*` 用 `control_token`；`Authorization: Bearer <token>` |
 | 身份隔离 | agent token 不能访问 `/v1/control/*`，control token 不能访问 `/api/*`；错误为 `401 unauthorized` |
-| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 12`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
+| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 13`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
 | 预分配 P | `/api/*` 可带 `X-Mobile-Use-Operation: P…`；缺省由服务分配。`status` 不使用该头 |
 | 请求体 | 必须是一个 JSON 对象；大小上限：`start`/`status`/`end`/`wait_for` 16 KiB，`observe` 32 KiB，`act` 64 KiB，`inspect`/`keepalive`/`diagnose`/`app` 8 KiB，`notify` 16 KiB，`shell` 32 KiB，`sync` 32 KiB，`stop` 8 KiB |
 | 响应 | `Content-Type: application/json; charset=utf-8`，`Cache-Control: no-store` |
@@ -393,9 +393,18 @@ HTTP 状态映射（`protocol.Status`）：
   `422 unsupported_node_action`。同一容器内的多个内容候选（例如同点同深度的 `view`/`text`）
   不是歧义。服务不自动选择“最大的滚动容器”，也不校验滚动轴。
 
-容器 bounds 必须非空、可裁剪且有正面积；服务用与认领后重验相同的固定几何判据计算起止点，
-静态阶段不可执行时在认领前返回 `422 unsupported_node_action`，不采集、不认领，O 保持
-`ready`。
+容器 bounds 必须非空、可裁剪且有正面积。服务固定容器的正交中心坐标，在一维作用域区间中选出
+最长的可证子区间，再把 `page`/`half` 的留白与 60%/30% 幅度作用在该子区间上；因此局部滚动
+作用域即使不覆盖原起终点，也会缩短或移动本次轨迹，幅度不承诺整屏距离。`up`/`left` 在等长
+区间中取坐标较小者，`down`/`right` 取较大者。静态阶段不可执行（没有任何可证区间，或该区间
+产生的行程小于 `48px`）时，在认领前返回 `422 unsupported_node_action`，不采集、不认领，
+O 保持 `ready`。
+
+可证区间这样得到：以容器 `raw` 矩形与显示屏的交集为裁剪矩形，与容器公开矩形相交后取其滚动轴
+区间作为基础区间；遍历整棵公开树，继承每个节点最近的公开滚动作用域（含自身），把不属于选定
+容器、也不属于其 `raw` 外层祖先的候选沿轴投影成阻塞区间并从基础区间中扣除。没有滚动祖先的
+候选不阻塞；最近作用域的来源缺失或越界时按阻塞处理，不回退到更外层。父矩形不跨越中心线时
+仍要检查其伸出的子节点。容器自身或其外层包裹祖先不阻塞。
 
 静态检查（不认领、不派发）：会话必须 `active`；O 必须为 `ready` 且未过期；ref 节点存在、
 非 root、非 context、有 bounds、`enabled` 不为已知 `false`，并具备对应动作能力；`text` 还要
@@ -403,8 +412,8 @@ HTTP 状态映射（`protocol.Status`）：
 内；`HOME`/`APP_SWITCH` 仅在主屏（`display.ID==0`）可用。坐标目标（`tap`/`long_press`/`text`
 的 `target`、`swipe` 的 `from`）还要在观察的公开树中解析到唯一节点：取包含该点、有 bounds、
 非 root、非 context 的最深节点；同级并列候选返回 `422 ambiguous_point`，不认领、不采集；
-解析不到节点时维持前台级检查。`scroll` 不在此列：它以 `container` 的解析结果与容器几何为
-静态授权，不要求起点叶节点可解析。
+解析不到节点时维持前台级检查。`scroll` 不在此列：它以 `container` 的解析结果与中心线可证
+区间为静态授权，不要求起点叶节点可解析。
 
 静态拒绝且 O 仍可用时（`node_not_found`、`node_disabled`、`unsupported_node_action`、
 `invalid_coordinates`、`ambiguous_point`、`unsupported_key` 等），什么都没派发、O 未被认领，
@@ -417,12 +426,15 @@ HTTP 状态映射（`protocol.Status`）：
 ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动作所需的输入（`text` 为焦点点击 +
 显示绑定写入，任何一步失败都不重放）。
 
-`scroll` 的认领后重验以观察到的容器为授权单位，不要求起点叶节点身份不变：新鲜树只对选定
-容器按“完整内容身份 + 祖先链”唯一匹配，容器 bounds 变化视为 `target_changed`；随后从新鲜
-容器用同一份几何判据计算实际注入的起点与终点，并在不推进 ref 连续号的新鲜公开树中证明两端
-的**最内层**可滚动作用域都是选定容器。外层包裹祖先允许；容器内层后代、不可比或其他滚动
-作用域拒绝；实际终点必须仍在容器内。ref 与坐标两种容器选择器都执行这一步。任一失败与其他
-重验失败一致：`target_changed` 并在已取得可用新帧时交付该帧；服务不搜索替代轨迹。
+`scroll` 的认领后重验以观察到的容器与观察时授权的固定轨迹为授权单位，不要求起点叶节点身份
+不变：新鲜树只对选定容器按“完整内容身份 + 祖先链”唯一匹配，容器 bounds 变化视为
+`target_changed`，公开容器还必须仍满足 `scroll` 容器条件。随后**不重新规划**：在不推进 ref
+连续号的新鲜公开树中，用与静态阶段同一套区间归约证明原起点、原终点及两者之间的**整段**
+仍落在同一个可证区间内；两端还必须在屏幕、裁剪矩形与公开容器中，且正交坐标等于选定的中心线。
+起点、终点或中段任一点出现新的冲突作用域即 `target_changed`；只在原段之外的变化，即便改变了
+最长区间，也不单独造成拒绝。ref 与坐标两种容器选择器都执行这一步；服务不搜索替代轨迹，也
+不因新鲜树重新选择起止点。任一失败与其他重验失败一致：`target_changed` 并在已取得可用新帧时
+交付该帧。
 `scroll` 只证明容器与真实注入轨迹，不证明真实滚动方向、触摸消费者或业务安全；raw `swipe`
 仍是原始手势，`from` 继续走完整内容身份、祖先链与同点解析证明，内容移动时仍可
 `target_changed`，不承诺滚动语义。
@@ -468,7 +480,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
   `executed`。
 - 坐标目标只证明一个点：`tap`/`long_press`/`text` 证明其 `target`，`swipe` 只证明起点
   `from`；终点是方向与幅度，不参与节点身份。观察时点解析不到节点时按前台级派发。`scroll`
-  不证明叶节点或单点：它证明选定容器与真实注入的起终点作用域，坐标只是容器选择器。
+  不证明叶节点或单点：它证明选定容器与观察时授权的那一段轨迹，坐标只是容器选择器。
 - 后观察失败时：HTTP 503，但 `outcome` 仍是 `executed`，`observation.status=failed`，
   `recovery` 为 `entry=observe`、`reference=P`、`input_state=retired`、
   `cause=post_observation_failed`；不能因后观察失败改判未执行。
@@ -480,10 +492,11 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
   `control_revoked`。
 
 `scroll` 不新增错误码：`container.ref` 指向不存在的节点沿用 `node_not_found`；ref 存在但不是
-可滚动容器、点选择器找不到容器或静态几何不可执行返回 `unsupported_node_action`；点选择器
-出现多个不同滚动作用域返回 `ambiguous_point`；容器或真实注入轨迹在新鲜树中不成立返回
-`target_changed`。`ambiguous_point` 对 raw `swipe` 的提示是可执行的：调整起点，或改用
-`scroll` 的 `container` 显式指定容器；错误码与判定不变，raw `swipe` 仍不接受 `ref`。
+可滚动容器、点选择器找不到容器、中心线上没有任何可证区间或该区间行程不足返回
+`unsupported_node_action`；点选择器出现多个不同滚动作用域返回 `ambiguous_point`；容器在新鲜树
+中不成立，或原授权段内新增冲突作用域返回 `target_changed`。`ambiguous_point` 对 raw `swipe`
+的提示是可执行的：调整起点，或改用 `scroll` 的 `container` 显式指定容器；错误码与判定不变，
+raw `swipe` 仍不接受 `ref`。
 
 ## 7. `POST /api/end`
 
@@ -524,7 +537,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 
 | 字段 | 必填 | 类型 | 说明 |
 | --- | --- | --- | --- |
-| `contract_version` | 是 | 字符串 | 必须为 `"12"`，否则 `409 contract_mismatch` |
+| `contract_version` | 是 | 字符串 | 必须为 `"13"`，否则 `409 contract_mismatch` |
 | `app_instance_id` | 是 | UUID | App 进程实例；变化会撤销旧归属 |
 | `app_version` | 是 | 字符串 | 仅发行标识 |
 | `selected_mode` | 是 | `virtual`/`primary` | 用户选择 |
@@ -551,7 +564,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 
 ```json
 {
-  "contract_version": "12",
+  "contract_version": "13",
   "service_instance_id": "…",
   "control": {
     "revision": 42,
@@ -587,7 +600,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 ## 9. `POST /v1/control/stop`
 
 ```json
-{"contract_version":"12","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
+{"contract_version":"13","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
 ```
 
 - **不校验普通契约**：`contract_version` 字段存在但不参与准入，服务与 App 契约版本
@@ -597,7 +610,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 - 重复或过期 `seq` 不报错，只返回 `state=duplicate`。
 
 ```json
-{"contract_version":"12","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
+{"contract_version":"13","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
 ```
 
 `accepted` 恒为 `true`；`state` 为 `revoked`（绑定时撤销了活动会话）、`recorded`
@@ -610,7 +623,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 无认证，只表示进程可应答，不代表设备就绪或资源干净：
 
 ```json
-{"status":"ok","contract_version":"12","service_instance_id":"…","release_version":"…"}
+{"status":"ok","contract_version":"13","service_instance_id":"…","release_version":"…"}
 ```
 
 ## 11. 数据对象
@@ -680,14 +693,33 @@ Observation 的编码顺序固定为 `status`、`id`、`origin`、`revision`、`
 
 | 值 | 含义 |
 | --- | --- |
-| `observed` | 后观察中至少两个匹配内容单元沿请求轴出现同号位移，且同号单元比例达到固定门限；不要求全覆盖。只表示观察到内容位移，不证明动作因果、方向、距离或滚动成功 |
-| `not_observed` | 只在观察质量为 `stable`、至少 2 个匹配内容单元、前后内容单元计数相同且 100% 唯一匹配、沿请求轴的中心位移与尺寸变化都不超过固定容差时成立；不证明到达边界或手势失败 |
-| `unknown` | 无后观察树、后观察失败或撤销、容器不唯一或发生变化、匹配不足、尺寸变化，或一致位移不足；不表示“未移动” |
+| `observed` | 后观察中至少两个内部匹配内容单元沿请求轴同时满足屏幕位移与容器相对位移且同号对一致，同号比例达到固定门限；不要求全覆盖、不要求观察质量 `stable`、不要求与请求方向同号。只表示观察到内容位移，不证明动作因果、方向、距离或滚动成功 |
+| `not_observed` | 只在观察质量为 `stable`、至少 2 个匹配内容单元、前后内容单元计数相同且 100% 唯一匹配、容器四边与沿请求轴的中心位移及尺寸变化都不超过固定容差时成立；不证明到达边界或手势失败 |
+| `unknown` | 无后观察树、后观察失败或撤销、容器不唯一或已失去滚动能力、正交边或容器身份变化、匹配不足、无法解释的尺寸变化，或一致位移不足；不表示“未移动” |
 
-固定判据由服务策略界定，不是请求字段：`observed` 需至少 2 个匹配内容单元沿请求轴的中心
-位移不小于 2px，且同号比例不低于 75%，不要求 100% 覆盖；`not_observed` 需至少 2 个匹配
-内容单元、前后内容单元 100% 唯一匹配、沿请求轴的中心位移不超过 1px、宽高变化不超过 1px。
-这些数值只界定状态含义，不承诺滚动距离、到达边界或业务成功。
+固定判据由服务策略界定，不是请求字段。派发前的 `pre` 必须是本次重验读到的帧，`post` 是后
+观察帧；请求轴由 `direction` 决定。
+
+- **容器守卫**：`pre`/`post` 必须唯一匹配同一容器内容键与祖先链，且两侧公开节点都仍是
+  `scroll` 容器；纵向时左右边、横向时上下边的变化都不超过 1px，且两侧矩形有正面积交集。
+  轴向两边允许变化，但只有四边都不变时才可能推出 `not_observed`。
+- **匹配集**：受控日志中的 `anchors` 与 `coverage` 始终按完整唯一匹配集计数，不进入结果；
+  匹配不足 2 个即 `unknown/insufficient_anchors`。
+- **尺寸与轴向贴边**：宽高差都不超过 1px 才算尺寸稳定。正交轴尺寸变化，或轴向尺寸变化且
+  前后都不贴该轴的视口边缘，直接 `unknown/size_changed`；轴向贴边且仅轴向尺寸变化者只从
+  正证据中排除，不判 `size_changed`。轴向贴边的匹配对即使尺寸恰好相等也不计入正证据，
+  裁剪端点被屏幕或容器改动过的单元同样排除。
+- **正证据**：对每个计入正证据的匹配对同时要求屏幕轴向位移与容器相对轴向位移都达到 2px，
+  按两者的符号组合计数；`len(eligible)>=2` 且最大同号对不少于 2 个、占比不低于 75% 时为
+  `observed`。只满足一个参照的单元不进任何对，但仍留在分母中。
+- **负证据**：未命中正证据后依次要求容器四边不变、全部匹配对尺寸稳定；再要求观察质量
+  `stable`、前后单元计数相同且 100% 唯一匹配、至少两个单元、**全部**匹配对的屏幕轴向中心
+  位移不超过 1px，才返回 `not_observed`。负证据使用完整匹配集与绝对中心，不会因为正证据
+  候选不足而提前退出。
+
+这些数值只界定状态含义，不承诺滚动距离、到达边界或业务成功。负证据只能证明这些可测矩形
+未见位移，不能证明原始内容静止：一个在视口内始终铺满容器的超界单元，可见矩形不变时即使
+真实内容移动也会得到 `not_observed`。
 
 ### Node
 

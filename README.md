@@ -7,14 +7,14 @@ HTTP 协议配对。
 
 - 模块：`github.com/malyjacob/mobile-use-vnext`
 - Go：1.27.1，启用 `GOEXPERIMENT=jsonv2`
-- 契约：`contract_version = "10"`，服务、HTTP 客户端、控制 App 精确相等才做普通工作
-- 发行：`0.10.0`；`release/versions.json` 是发行号、契约号与 Android versionCode（12）的唯一
+- 契约：`contract_version = "13"`，服务、HTTP 客户端、控制 App 精确相等才做普通工作
+- 发行：`0.13.0`；`release/versions.json` 是发行号、契约号与 Android versionCode（15）的唯一
   来源，构建生成 Go/Java 常量
 
 ## 能力边界
 
-- Agent 工具为 `POST /api/<tool>`，共 11 个：`start`/`status`/`observe`/`act`/`inspect`/
-  `keepalive`/`end`/`app`/`notify`/`shell`/`diagnose`；`app` 以一个工具承载
+- Agent 工具为 `POST /api/<tool>`，共 12 个：`start`/`status`/`observe`/`wait_for`/`act`/
+  `inspect`/`keepalive`/`end`/`app`/`notify`/`shell`/`diagnose`；`app` 以一个工具承载
   `find`/`list`/`open`/`claim`/`handoff`/`close`/`kill` 七个互斥 kind。逐项字段、错误码与
   空值规则见 [接口契约](docs/interface.md)。
 - `observe`/`act` 的 `image=true` 返回与本次树同次采集的一张 JPEG 图片；图片元数据在
@@ -41,7 +41,7 @@ internal/engine/        唯一业务入口：会话、O/P、工作位置、STOP�
 internal/android/       ADB、u2 RPC、制品管理与受管执行链
 internal/httpapi/       认证 HTTP 接入、/api/<tool>、控制端同步与最小 STOP
 internal/client/        强类型 HTTP 客户端（发送前 P、结构化结果、图片字节）
-internal/mcp/           11 工具注册/schema/结果投影、取消包装、HTTP 认证与 Origin
+internal/mcp/           12 工具注册/schema/结果投影、取消包装、HTTP 认证与 Origin
 internal/store/         私有恢复账本与 Agent 消息文件（原子文件、单写者）
 internal/eventlog/      有界事件/字段白名单日志
 android-control/        Java 控制 App 源码与构建入口（含 test-target 验证探针）
@@ -154,13 +154,14 @@ $env:GOEXPERIMENT = 'jsonv2'; go test ./...
 ## 接口
 
 Agent 工具（`POST /api/<tool>`，`Authorization: Bearer <agent_token>`，
-`X-Mobile-Use-Contract: 10`）：
+`X-Mobile-Use-Contract: 13`）：
 
 | 工具 | 说明 |
 | --- | --- |
 | `start` | 请求体必须为 `{}`；创建/绑定目标屏幕并发布首个 full 观察；初始化、激活与首观察成功发布使用五分钟租期 |
 | `status` | 无参数、`{"reference":"O…"}` 或 `{"reference":"P…"}`；只读查询 |
 | `observe` | `reference`（O/P）；按服务端基线返回 full 或 delta；`observe(P)` 与 `full=true` 强制 full；`image=true` 附加本次图片 |
+| `wait_for` | `reference` + `timeout`（必填 1～40，`stable=true` 时至少 2）+ 可选 `query`/`absent_query`/`stable`/`full`/`image`；在唯一工作位上等待后发布一个新 `O` |
 | `act` | `observation_id` + `operation`：`tap`、`long_press`、`swipe`（可选 `duration_ms`）、`scroll`（`container`/`direction`/`amount`）、`key`、`text`；`image=true` 为后观察附图 |
 | `inspect` | `observation_id` 可选 `node` 或 `query`；只读历史树 |
 | `keepalive` | `reference`（O/P）+ 可选 `duration_minutes`（1～120，默认 2）；从应用时重设当前活动会话租期，可延长或缩短；普通活动仅按两分钟取最大值 |

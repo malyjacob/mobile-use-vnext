@@ -1,6 +1,6 @@
 {
-  "release_version": "0.12.0",
-  "contract_version": 12,
-  "android_version_code": 14,
-  "source_commit": "a14962d5df8a52ff3fc06a1e5ba9adfddbbb5ecd"
+  "release_version": "0.13.0",
+  "contract_version": 13,
+  "android_version_code": 15,
+  "source_commit": "85621e71e17b51da3361f8a677be900a8a46de2e"
 }

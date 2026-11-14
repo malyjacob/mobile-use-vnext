@@ -133,11 +133,32 @@ func scrollProjection(t *testing.T, capture device.Capture) *Projection {
 }
 
 func effectPage(units []rawNodeSpec) []rawNodeSpec {
+	return effectPageRect(screenRect(), units)
+}
+
+// effectPageRect is the same page with an explicit container rectangle, so a
+// test can move or resize the viewport between the two frames.
+func effectPageRect(container device.Rect, units []rawNodeSpec) []rawNodeSpec {
 	specs := []rawNodeSpec{
 		{Parent: -1, Bounds: screenRect(), Class: "android.widget.FrameLayout"},
-		{Parent: 0, Bounds: screenRect(), Class: "android.widget.ScrollView", Scrollable: true},
+		{Parent: 0, Bounds: container, Class: "android.widget.ScrollView", Scrollable: true},
 	}
 	return append(specs, units...)
+}
+
+// horizontalEffectPage is the transposed fixture: the request axis is x.
+func horizontalEffectPage(container device.Rect, units []rawNodeSpec) []rawNodeSpec {
+	specs := []rawNodeSpec{
+		{Parent: -1, Bounds: screenRect(), Class: "android.widget.FrameLayout"},
+		{Parent: 0, Bounds: container, Class: "android.widget.HorizontalScrollView", Scrollable: true},
+	}
+	return append(specs, units...)
+}
+
+// hUnit is one horizontally laid out content unit.
+func hUnit(left, width int, text string) rawNodeSpec {
+	return rawNodeSpec{Parent: 1, Bounds: device.Rect{Left: left, Top: 100,
+		Right: left + width, Bottom: 300}, Class: "android.widget.TextView", Text: text}
 }
 
 func textUnit(top, height int, text string) rawNodeSpec {
@@ -154,13 +175,19 @@ func movedUnit(top, height int, text string, delta int) rawNodeSpec {
 
 func effectInputs(t *testing.T, preSpecs, postSpecs []rawNodeSpec) (*scrollFrame, *observationState) {
 	t.Helper()
+	return effectInputsDirection(t, preSpecs, postSpecs, protocol.ScrollDirectionDown)
+}
+
+func effectInputsDirection(t *testing.T, preSpecs, postSpecs []rawNodeSpec,
+	direction string) (*scrollFrame, *observationState) {
+	t.Helper()
 	display := device.Display{ID: 12, Width: 1080, Height: 2400, Density: 420}
 	preCapture := buildCapture(display, preSpecs)
 	postCapture := buildCapture(display, postSpecs)
 	pre := scrollProjection(t, preCapture)
 	post := scrollProjection(t, postCapture)
 	return &scrollFrame{
-			capture: pre.Capture, projection: pre, containerIndex: 1, direction: protocol.ScrollDirectionDown,
+			capture: pre.Capture, projection: pre, containerIndex: 1, direction: direction,
 		},
 		&observationState{Projection: post}
 }
@@ -174,7 +201,13 @@ func stableQuality() *protocol.Quality {
 func computeEffect(t *testing.T, pre *scrollFrame, post *observationState,
 	quality *protocol.Quality) scrollEffectResult {
 	t.Helper()
-	return computeScrollEffect(pre, post, quality, protocol.ScrollDirectionDown,
+	return computeEffectDirection(t, pre, post, quality, protocol.ScrollDirectionDown)
+}
+
+func computeEffectDirection(t *testing.T, pre *scrollFrame, post *observationState,
+	quality *protocol.Quality, direction string) scrollEffectResult {
+	t.Helper()
+	return computeScrollEffect(pre, post, quality, direction,
 		context.Background(), time.Now().Add(time.Second))
 }
 
@@ -440,4 +473,284 @@ func TestScrollEffectPostFailureAndBudget(t *testing.T) {
 	requireEffectResult(t, computeScrollEffect(pre, post, stableQuality(),
 		protocol.ScrollDirectionDown, context.Background(), time.Now().Add(-time.Millisecond)),
 		protocol.EffectUnknown, effectReasonCPUBudget)
+}
+
+// ---------------------------------------------------------------- viewport effect
+
+// TestScrollEffectAxisViewportShrinksWithInternalMovers is the capability the
+// proposal adds: a container that only shrinks along the request axis no longer
+// forces unknown. The internal units still move together, while the clipped edge
+// unit is excluded from positive evidence.
+func TestScrollEffectAxisViewportShrinksWithInternalMovers(t *testing.T) {
+	preUnits := []rawNodeSpec{
+		textUnit(300, 200, "alpha"), textUnit(800, 200, "bravo"), textUnit(2000, 400, "edge"),
+	}
+	postUnits := []rawNodeSpec{
+		textUnit(200, 200, "alpha"), textUnit(700, 200, "bravo"), textUnit(2000, 400, "edge"),
+	}
+	pre, post := effectInputs(t,
+		effectPageRect(device.Rect{Right: 1080, Bottom: 2400}, preUnits),
+		effectPageRect(device.Rect{Right: 1080, Bottom: 2100}, postUnits))
+	got := computeEffect(t, pre, post, stableQuality())
+	requireEffectResult(t, got, protocol.EffectObserved, "")
+	if got.Anchors != 3 {
+		t.Fatalf("anchors = %d, want the full matched set 3", got.Anchors)
+	}
+
+	// Reverse control: without the axis-edge exclusion the clipped edge unit is
+	// a size change and the whole inference collapses to unknown.
+	if scrollEligibleUnit(matchedScrollUnit{
+		pre:  scrollContentUnit{rect: device.Rect{Top: 2000, Bottom: 2400}, raw: device.Rect{Top: 2000, Bottom: 2400}},
+		post: scrollContentUnit{rect: device.Rect{Top: 2000, Bottom: 2100}, raw: device.Rect{Top: 2000, Bottom: 2400}},
+	}, device.Rect{Right: 1080, Bottom: 2400}, device.Rect{Right: 1080, Bottom: 2100}, true) {
+		t.Fatal("an axis-edge unit with a clipped axial size must not be eligible")
+	}
+}
+
+// TestScrollEffectHorizontalAxisViewportObserved is the transposed positive
+// case: only the right edge of a horizontal viewport shrinks and the two internal
+// units move together.
+func TestScrollEffectHorizontalAxisViewportObserved(t *testing.T) {
+	preUnits := []rawNodeSpec{hUnit(300, 200, "alpha"), hUnit(600, 200, "bravo")}
+	postUnits := []rawNodeSpec{hUnit(200, 200, "alpha"), hUnit(500, 200, "bravo")}
+	pre, post := effectInputsDirection(t,
+		horizontalEffectPage(device.Rect{Right: 1080, Bottom: 2400}, preUnits),
+		horizontalEffectPage(device.Rect{Right: 900, Bottom: 2400}, postUnits),
+		protocol.ScrollDirectionRight)
+	got := computeEffectDirection(t, pre, post, stableQuality(), protocol.ScrollDirectionRight)
+	requireEffectResult(t, got, protocol.EffectObserved, "")
+	if got.Axis != "x" {
+		t.Fatalf("axis = %q, want x", got.Axis)
+	}
+}
+
+// TestScrollEffectSingleInternalCandidateUnknown keeps the minimum: one internal
+// mover is not consensus, and a changed container cannot prove stillness.
+func TestScrollEffectSingleInternalCandidateUnknown(t *testing.T) {
+	preUnits := []rawNodeSpec{
+		textUnit(300, 200, "alpha"), textUnit(2000, 400, "edge"),
+	}
+	postUnits := []rawNodeSpec{
+		textUnit(200, 200, "alpha"), textUnit(2000, 400, "edge"),
+	}
+	pre, post := effectInputs(t,
+		effectPageRect(device.Rect{Right: 1080, Bottom: 2400}, preUnits),
+		effectPageRect(device.Rect{Right: 1080, Bottom: 2100}, postUnits))
+	got := computeEffect(t, pre, post, stableQuality())
+	if got.State != protocol.EffectUnknown {
+		t.Fatalf("effect = %+v, want unknown", got)
+	}
+}
+
+// TestScrollEffectContainerContentReferenceFrames pins the dual reference on the
+// three canonical arrangements of a viewport that grows upward.
+func TestScrollEffectContainerContentReferenceFrames(t *testing.T) {
+	moved := []rawNodeSpec{textUnit(500, 200, "alpha"), textUnit(900, 200, "bravo")}
+	t.Run("content_follows_container", func(t *testing.T) {
+		// Top 349->0 and content shifted by -349: absolute -349, relative 0.
+		post := []rawNodeSpec{movedUnit(500, 200, "alpha", -349), movedUnit(900, 200, "bravo", -349)}
+		pre, postObs := effectInputs(t,
+			effectPageRect(device.Rect{Top: 349, Right: 1080, Bottom: 2400}, moved),
+			effectPageRect(device.Rect{Right: 1080, Bottom: 2400}, post))
+		got := computeEffect(t, pre, postObs, stableQuality())
+		requireEffectResult(t, got, protocol.EffectUnknown, effectReasonContainer)
+	})
+	t.Run("content_follows_and_moves", func(t *testing.T) {
+		// The same shift plus a real relative -50: both references agree.
+		post := []rawNodeSpec{movedUnit(500, 200, "alpha", -399), movedUnit(900, 200, "bravo", -399)}
+		pre, postObs := effectInputs(t,
+			effectPageRect(device.Rect{Top: 349, Right: 1080, Bottom: 2400}, moved),
+			effectPageRect(device.Rect{Right: 1080, Bottom: 2400}, post))
+		got := computeEffect(t, pre, postObs, stableQuality())
+		requireEffectResult(t, got, protocol.EffectObserved, "")
+	})
+	t.Run("screen_static_relative_moved", func(t *testing.T) {
+		// Content keeps its screen position while the viewport grows: absolute 0,
+		// relative 349. A relative-only rule would report observed.
+		pre, postObs := effectInputs(t,
+			effectPageRect(device.Rect{Top: 349, Right: 1080, Bottom: 2400}, moved),
+			effectPageRect(device.Rect{Right: 1080, Bottom: 2400}, moved))
+		got := computeEffect(t, pre, postObs, stableQuality())
+		requireEffectResult(t, got, protocol.EffectUnknown, effectReasonContainer)
+	})
+	t.Run("horizontal_transpose", func(t *testing.T) {
+		units := []rawNodeSpec{hUnit(500, 200, "alpha"), hUnit(900, 200, "bravo")}
+		pre, postObs := effectInputsDirection(t,
+			horizontalEffectPage(device.Rect{Left: 349, Right: 1080, Bottom: 2400}, units),
+			horizontalEffectPage(device.Rect{Right: 1080, Bottom: 2400}, units),
+			protocol.ScrollDirectionRight)
+		got := computeEffectDirection(t, pre, postObs, stableQuality(), protocol.ScrollDirectionRight)
+		requireEffectResult(t, got, protocol.EffectUnknown, effectReasonContainer)
+		if got.Axis != "x" {
+			t.Fatalf("axis = %q, want x", got.Axis)
+		}
+	})
+	t.Run("pure_translation", func(t *testing.T) {
+		// Both axial edges move together with static internal content.
+		pre, postObs := effectInputs(t,
+			effectPageRect(device.Rect{Right: 1080, Bottom: 2400}, moved),
+			effectPageRect(device.Rect{Right: 1080, Top: 60, Bottom: 2400}, moved))
+		got := computeEffect(t, pre, postObs, stableQuality())
+		requireEffectResult(t, got, protocol.EffectUnknown, effectReasonContainer)
+	})
+	t.Run("bottom_extends_top_fixed", func(t *testing.T) {
+		pre, postObs := effectInputs(t,
+			effectPageRect(device.Rect{Right: 1080, Bottom: 2200}, moved),
+			effectPageRect(device.Rect{Right: 1080, Bottom: 2400}, moved))
+		got := computeEffect(t, pre, postObs, stableQuality())
+		requireEffectResult(t, got, protocol.EffectUnknown, effectReasonContainer)
+	})
+}
+
+// TestScrollEffectDualReferenceCancelAndBuckets covers the two conservative
+// consequences: screen motion that is cancelled by the container, and equal
+// relative motion split across absolute zero points.
+func TestScrollEffectDualReferenceCancelAndBuckets(t *testing.T) {
+	t.Run("absolute_cancelled", func(t *testing.T) {
+		// The container moves up by 100 while the content keeps its screen
+		// position: relative +100, absolute 0. Relative-only evidence would be a
+		// false positive.
+		units := []rawNodeSpec{textUnit(500, 200, "alpha"), textUnit(900, 200, "bravo")}
+		pre, postObs := effectInputs(t,
+			effectPageRect(device.Rect{Right: 1080, Top: 100, Bottom: 2400}, units),
+			effectPageRect(device.Rect{Right: 1080, Bottom: 2400}, units))
+		got := computeEffect(t, pre, postObs, stableQuality())
+		requireEffectResult(t, got, protocol.EffectUnknown, effectReasonContainer)
+	})
+	t.Run("four_bucket_split", func(t *testing.T) {
+		// Every unit moves down on screen, but two lose relative position and two
+		// gain it. Merging the buckets by absolute sign alone would reach 4/4.
+		preUnits := []rawNodeSpec{
+			textUnit(400, 200, "alpha"), textUnit(700, 200, "bravo"),
+			textUnit(1200, 200, "charlie"), textUnit(1500, 200, "delta"),
+		}
+		postUnits := []rawNodeSpec{
+			textUnit(500, 200, "alpha"), textUnit(800, 200, "bravo"),
+			textUnit(1600, 200, "charlie"), textUnit(1900, 200, "delta"),
+		}
+		pre, postObs := effectInputs(t,
+			effectPageRect(device.Rect{Right: 1080, Bottom: 2400}, preUnits),
+			effectPageRect(device.Rect{Right: 1080, Top: 300, Bottom: 2400}, postUnits))
+		got := computeEffect(t, pre, postObs, stableQuality())
+		if got.State != protocol.EffectUnknown {
+			t.Fatalf("effect = %+v, want unknown", got)
+		}
+	})
+}
+
+// TestScrollEffectInternalDeformationUnknown keeps the global size guard: a
+// deformation that is not on the axis edge cannot be filtered away by the
+// surviving movers.
+func TestScrollEffectInternalDeformationUnknown(t *testing.T) {
+	preUnits := []rawNodeSpec{
+		textUnit(400, 200, "alpha"), textUnit(700, 200, "bravo"), textUnit(1000, 200, "charlie"),
+	}
+	postUnits := []rawNodeSpec{
+		textUnit(300, 200, "alpha"), textUnit(600, 200, "bravo"), textUnit(900, 400, "charlie"),
+	}
+	pre, post := effectInputs(t, effectPage(preUnits), effectPage(postUnits))
+	got := computeEffect(t, pre, post, stableQuality())
+	requireEffectResult(t, got, protocol.EffectUnknown, effectReasonSize)
+}
+
+// TestScrollEffectPostContainerCapability covers the post container guards: a
+// container that loses its scroll capability or changes identity cannot be
+// crossed by content movement.
+func TestScrollEffectPostContainerCapability(t *testing.T) {
+	units := []rawNodeSpec{textUnit(400, 200, "alpha"), textUnit(700, 200, "bravo")}
+	movedUnits := []rawNodeSpec{movedUnit(400, 200, "alpha", -100), movedUnit(700, 200, "bravo", -100)}
+	t.Run("disabled", func(t *testing.T) {
+		post := effectPage(movedUnits)
+		post[1].Disabled = true
+		pre, postObs := effectInputs(t, effectPage(units), post)
+		got := computeEffect(t, pre, postObs, stableQuality())
+		requireEffectResult(t, got, protocol.EffectUnknown, effectReasonContainer)
+	})
+	t.Run("duplicate_content_key", func(t *testing.T) {
+		// A second published node with the same content key and ancestry makes the
+		// container match ambiguous, never a guess.
+		post := append(effectPage(movedUnits), rawNodeSpec{Parent: 0, Bounds: screenRect(),
+			Class: "android.widget.ScrollView", Scrollable: true})
+		pre, postObs := effectInputs(t, effectPage(units), post)
+		got := computeEffect(t, pre, postObs, stableQuality())
+		requireEffectResult(t, got, protocol.EffectUnknown, effectReasonContainer)
+	})
+	t.Run("orthogonal_edge_changed", func(t *testing.T) {
+		post := append([]rawNodeSpec(nil), effectPage(movedUnits)...)
+		post[1].Bounds = device.Rect{Left: 20, Right: 1060, Bottom: 2400}
+		pre, postObs := effectInputs(t, effectPage(units), post)
+		got := computeEffect(t, pre, postObs, stableQuality())
+		requireEffectResult(t, got, protocol.EffectUnknown, effectReasonContainer)
+	})
+}
+
+// TestScrollEffectEqualSizeClipDriftUnknown is the anti-drift control: two static
+// oversized units clipped by a translated equal-length viewport keep their
+// clipped size while the clipped centres move together. They must never become
+// positive evidence.
+func TestScrollEffectEqualSizeClipDriftUnknown(t *testing.T) {
+	units := []rawNodeSpec{
+		{Parent: 1, Bounds: device.Rect{Left: 0, Top: 0, Right: 1080, Bottom: 5000},
+			Class: "android.widget.TextView", Text: "alpha"},
+		{Parent: 1, Bounds: device.Rect{Left: 0, Top: -1000, Right: 1080, Bottom: 6000},
+			Class: "android.widget.TextView", Text: "bravo"},
+	}
+	preContainer := device.Rect{Right: 1080, Bottom: 800}
+	postContainer := device.Rect{Right: 1080, Top: 100, Bottom: 900}
+	pre, postObs := effectInputs(t, effectPageRect(preContainer, units), effectPageRect(postContainer, units))
+	got := computeEffect(t, pre, postObs, stableQuality())
+	requireEffectResult(t, got, protocol.EffectUnknown, effectReasonContainer)
+
+	// Reverse control: the axis-edge exclusion is what keeps these clipped
+	// windows out of the positive evidence, even at equal clipped size.
+	pair := matchedScrollUnit{
+		pre:  scrollContentUnit{rect: preContainer, raw: device.Rect{Right: 1080, Bottom: 5000}},
+		post: scrollContentUnit{rect: postContainer, raw: device.Rect{Right: 1080, Bottom: 5000}},
+	}
+	if scrollEligibleUnit(pair, preContainer, postContainer, true) {
+		t.Fatal("an axis-edge clipped unit must not be eligible")
+	}
+}
+
+// TestScrollEffectStillNotObserved covers the negative evidence that must not be
+// tightened: every matched unit is still, even when the eligible positive
+// candidates are not enough.
+func TestScrollEffectStillNotObserved(t *testing.T) {
+	t.Run("edge_only_units", func(t *testing.T) {
+		units := []rawNodeSpec{textUnit(0, 200, "alpha"), textUnit(2200, 200, "bravo")}
+		pre, post := effectInputs(t, effectPage(units), effectPage(units))
+		got := computeEffect(t, pre, post, stableQuality())
+		requireEffectResult(t, got, protocol.EffectNotObserved, "")
+		if got.Anchors != 2 {
+			t.Fatalf("anchors = %d, want 2", got.Anchors)
+		}
+	})
+	t.Run("clipped_oversized_units", func(t *testing.T) {
+		// Both units exceed the viewport in both frames; their visible rectangle
+		// never changes. This is the documented clipping blind spot and stays
+		// not_observed.
+		preUnits := []rawNodeSpec{
+			{Parent: 1, Bounds: device.Rect{Left: 0, Top: -100, Right: 1080, Bottom: 2500},
+				Class: "android.widget.TextView", Text: "alpha"},
+			{Parent: 1, Bounds: device.Rect{Left: 0, Top: -50, Right: 1080, Bottom: 2550},
+				Class: "android.widget.TextView", Text: "bravo"},
+		}
+		postUnits := []rawNodeSpec{
+			{Parent: 1, Bounds: device.Rect{Left: 0, Top: -50, Right: 1080, Bottom: 2550},
+				Class: "android.widget.TextView", Text: "alpha"},
+			{Parent: 1, Bounds: device.Rect{Left: 0, Top: 0, Right: 1080, Bottom: 2600},
+				Class: "android.widget.TextView", Text: "bravo"},
+		}
+		pre, post := effectInputs(t, effectPage(preUnits), effectPage(postUnits))
+		got := computeEffect(t, pre, post, stableQuality())
+		requireEffectResult(t, got, protocol.EffectNotObserved, "")
+	})
+	t.Run("not_observed_needs_stability", func(t *testing.T) {
+		units := []rawNodeSpec{textUnit(400, 200, "alpha"), textUnit(700, 200, "bravo")}
+		pre, post := effectInputs(t, effectPage(units), effectPage(units))
+		unstable := &protocol.Quality{State: protocol.QualityUnstable, Samples: 2,
+			StopReason: protocol.QualityStopMaxSamples}
+		got := computeEffect(t, pre, post, unstable)
+		requireEffectResult(t, got, protocol.EffectUnknown, effectReasonUnstable)
+	})
 }

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"sort"
 	"time"
 
 	"github.com/malyjacob/mobile-use-vnext/internal/device"
@@ -42,6 +43,283 @@ const (
 // scrollPoint is one logical display point of the fixed trajectory.
 type scrollPoint struct {
 	X, Y int
+}
+
+// scrollSpan is one half-open interval on the controlled-scroll axis. All
+// interval algebra in this file uses half-open boundaries.
+type scrollSpan struct {
+	start, end int
+}
+
+func (s scrollSpan) length() int { return s.end - s.start }
+
+// Nearest-scope sentinels of the shared traversal. A candidate whose nearest
+// scroll scope has no usable source is blocked rather than promoted outward.
+const (
+	scrollScopeNone     = -1
+	scrollScopeUnusable = -2
+)
+
+// scrollScopeSpace is the center-line scope reduction of one immutable public
+// tree. The static planner and the fresh revalidation both reduce exactly this
+// way; neither scans an ancestor chain per point.
+type scrollScopeSpace struct {
+	vertical bool
+	center   int
+	public   device.Rect // published rectangle of the selected container
+	base     scrollSpan  // axis interval of the raw clip intersected with public
+	spans    []scrollSpan
+}
+
+func rectFromBounds(bounds *protocol.Bounds) device.Rect {
+	return device.Rect{Left: bounds.Left, Top: bounds.Top,
+		Right: bounds.Right, Bottom: bounds.Bottom}
+}
+
+// orthogonalCenter is the fixed off-axis coordinate of the trajectory. Only this
+// coordinate is fixed by the service; the axis is planned from the safe spans.
+func orthogonalCenter(rect device.Rect, vertical bool) int {
+	if vertical {
+		return rect.Left + rect.Width()/2
+	}
+	return rect.Top + rect.Height()/2
+}
+
+func orthogonalContains(rect device.Rect, center int, vertical bool) bool {
+	if vertical {
+		return center >= rect.Left && center < rect.Right
+	}
+	return center >= rect.Top && center < rect.Bottom
+}
+
+func axisSpan(rect device.Rect, vertical bool) scrollSpan {
+	if vertical {
+		return scrollSpan{start: rect.Top, end: rect.Bottom}
+	}
+	return scrollSpan{start: rect.Left, end: rect.Right}
+}
+
+func axisCoordinate(point scrollPoint, vertical bool) int {
+	if vertical {
+		return point.Y
+	}
+	return point.X
+}
+
+func orthogonalCoordinate(point scrollPoint, vertical bool) int {
+	if vertical {
+		return point.X
+	}
+	return point.Y
+}
+
+// subtractScrollSpans removes the union of the blocking intervals from the base
+// interval. Empty, unordered, nested, duplicated and adjacent intervals are all
+// handled by clip-sort-merge; adjacent intervals merge, so a one-pixel conflict
+// never leaves a zero-width gap.
+func subtractScrollSpans(base scrollSpan, blocked []scrollSpan) []scrollSpan {
+	clipped := make([]scrollSpan, 0, len(blocked))
+	for _, span := range blocked {
+		start, end := span.start, span.end
+		if start < base.start {
+			start = base.start
+		}
+		if end > base.end {
+			end = base.end
+		}
+		if start >= end {
+			continue
+		}
+		clipped = append(clipped, scrollSpan{start: start, end: end})
+	}
+	sort.Slice(clipped, func(i, j int) bool {
+		if clipped[i].start != clipped[j].start {
+			return clipped[i].start < clipped[j].start
+		}
+		return clipped[i].end < clipped[j].end
+	})
+	var spans []scrollSpan
+	cursor := base.start
+	for _, span := range clipped {
+		if span.end <= cursor {
+			continue
+		}
+		if span.start > cursor {
+			spans = append(spans, scrollSpan{start: cursor, end: span.start})
+		}
+		cursor = span.end
+	}
+	if cursor < base.end {
+		spans = append(spans, scrollSpan{start: cursor, end: base.end})
+	}
+	return spans
+}
+
+// rawAncestorSet builds the raw ancestor set of the selected container once. A
+// malformed parent relation fails closed instead of walking without a bound.
+func rawAncestorSet(capture *device.Capture, want int) (map[int]bool, bool) {
+	if capture == nil || want < 0 || want >= len(capture.Nodes) {
+		return nil, false
+	}
+	ancestors := make(map[int]bool, len(capture.Nodes))
+	for parent := capture.Nodes[want].Parent; parent >= 0; {
+		if parent >= len(capture.Nodes) || ancestors[parent] {
+			return nil, false
+		}
+		ancestors[parent] = true
+		parent = capture.Nodes[parent].Parent
+	}
+	return ancestors, true
+}
+
+// scrollSafeSpans reduces the whole public tree to the provable intervals of the
+// selected container's center line. The traversal updates the nearest scroll
+// scope on every node before testing that node as a geometric candidate, so a
+// scroll ancestor that does not cross the center line still owns its
+// descendants. It never prunes a subtree by the parent rectangle.
+func scrollSafeSpans(projection *Projection, want int, clipped device.Rect,
+	direction string) (*scrollScopeSpace, bool) {
+	space := &scrollScopeSpace{}
+	switch direction {
+	case protocol.ScrollDirectionUp, protocol.ScrollDirectionDown:
+		space.vertical = true
+	case protocol.ScrollDirectionLeft, protocol.ScrollDirectionRight:
+	default:
+		return nil, false
+	}
+	if projection == nil || projection.Tree == nil || projection.Tree.Root == nil ||
+		projection.Capture == nil || want < 0 || want >= len(projection.Capture.Nodes) {
+		return nil, false
+	}
+	if clipped.Empty() {
+		return nil, false
+	}
+	public, ok := publicBoundsByRawIndex(projection, want)
+	if !ok {
+		return nil, false
+	}
+	space.public = rectFromBounds(public)
+	shared := clipped.Intersect(space.public)
+	if shared.Empty() {
+		return nil, false
+	}
+	space.center = orthogonalCenter(clipped, space.vertical)
+	if !orthogonalContains(shared, space.center, space.vertical) {
+		return nil, false
+	}
+	space.base = axisSpan(shared, space.vertical)
+	ancestors, ok := rawAncestorSet(projection.Capture, want)
+	if !ok {
+		return nil, false
+	}
+	var blocked []scrollSpan
+	var walk func(node *protocol.Node, depth, nearest int)
+	walk = func(node *protocol.Node, depth, nearest int) {
+		if node == nil {
+			return
+		}
+		scope := nearest
+		if isScrollContainer(node) {
+			if index, mapped := projection.Source[node.Ref]; mapped &&
+				index >= 0 && index < len(projection.Capture.Nodes) {
+				scope = index
+			} else {
+				scope = scrollScopeUnusable
+			}
+		}
+		if depth > 0 && !node.Context && node.Role != protocol.RoleRoot &&
+			node.Bounds != nil && node.Bounds.Width() > 0 && node.Bounds.Height() > 0 &&
+			orthogonalContains(rectFromBounds(node.Bounds), space.center, space.vertical) {
+			switch {
+			case scope == scrollScopeNone:
+				// No innermost scroll scope: it cannot contradict the selection.
+			case scope == scrollScopeUnusable:
+				blocked = append(blocked, axisSpan(rectFromBounds(node.Bounds), space.vertical))
+			case scope == want || ancestors[scope]:
+				// The selected container, or a raw ancestor that wraps it.
+			default:
+				blocked = append(blocked, axisSpan(rectFromBounds(node.Bounds), space.vertical))
+			}
+		}
+		for _, child := range node.Children {
+			walk(child, depth+1, scope)
+		}
+	}
+	walk(projection.Tree.Root, 0, scrollScopeNone)
+	space.spans = subtractScrollSpans(space.base, blocked)
+	return space, true
+}
+
+// longestSpan picks the longest provable interval. Equal lengths are ordered by
+// the start side of the gesture, so the choice is deterministic.
+func (space *scrollScopeSpace) longestSpan(direction string) (scrollSpan, bool) {
+	preferLater := direction == protocol.ScrollDirectionDown ||
+		direction == protocol.ScrollDirectionRight
+	best := scrollSpan{}
+	found := false
+	for _, span := range space.spans {
+		if !found {
+			best, found = span, true
+			continue
+		}
+		switch {
+		case span.length() > best.length():
+		case span.length() == best.length() && preferLater:
+		case span.length() == best.length() && !preferLater && span.start < best.start:
+		default:
+			continue
+		}
+		best = span
+	}
+	return best, found
+}
+
+// safeRect replaces only the axis bounds of the clipped rectangle, so the fixed
+// orthogonal edges of the container are preserved.
+func (space *scrollScopeSpace) safeRect(clipped device.Rect, span scrollSpan) device.Rect {
+	if space.vertical {
+		return device.Rect{Left: clipped.Left, Top: span.start, Right: clipped.Right, Bottom: span.end}
+	}
+	return device.Rect{Left: span.start, Top: clipped.Top, Right: span.end, Bottom: clipped.Bottom}
+}
+
+// provesPoint reports whether one point is inside the screen, the raw clipped
+// rectangle and the published container, sits exactly on the fixed center line
+// and falls inside a provable interval.
+func (space *scrollScopeSpace) provesPoint(point scrollPoint, clipped, screen device.Rect) bool {
+	if !insideScrollRect(point, clipped) || !insideScrollRect(point, space.public) ||
+		!insideScrollRect(point, screen) {
+		return false
+	}
+	if orthogonalCoordinate(point, space.vertical) != space.center {
+		return false
+	}
+	value := axisCoordinate(point, space.vertical)
+	for _, span := range space.spans {
+		if value >= span.start && value < span.end {
+			return true
+		}
+	}
+	return false
+}
+
+// provesSegment is the whole-segment proof: both endpoints must be provable and
+// the closed segment between them must fit inside one single provable interval.
+func (space *scrollScopeSpace) provesSegment(start, end scrollPoint, clipped, screen device.Rect) bool {
+	if !space.provesPoint(start, clipped, screen) || !space.provesPoint(end, clipped, screen) {
+		return false
+	}
+	low := axisCoordinate(start, space.vertical)
+	high := axisCoordinate(end, space.vertical)
+	if low > high {
+		low, high = high, low
+	}
+	for _, span := range space.spans {
+		if span.start <= low && high < span.end {
+			return true
+		}
+	}
+	return false
 }
 
 // scrollPlan is the static resolution of one controlled scroll attempt. It is
@@ -220,7 +498,7 @@ func resolveScrollPlan(obs *observationState, operation *protocol.Operation) (*s
 			return nil, apiErr
 		}
 		container = publicNodeByRawIndex(projection, index)
-		if container == nil {
+		if container == nil || !isScrollContainer(container) {
 			return nil, unsupportedScrollContainer("该坐标没有可用的滚动容器")
 		}
 	}
@@ -229,13 +507,25 @@ func resolveScrollPlan(obs *observationState, operation *protocol.Operation) (*s
 		return nil, unsupportedScrollContainer("滚动容器来源不可用")
 	}
 	raw := &projection.Capture.Nodes[index]
-	clipped := raw.Bounds.Intersect(projection.Capture.Display.Bounds())
+	screen := projection.Capture.Display.Bounds()
+	clipped := raw.Bounds.Intersect(screen)
 	if clipped.Empty() {
 		return nil, unsupportedScrollContainer("滚动容器没有可用几何")
 	}
-	start, end, ok := scrollGeometry(clipped, projection.Capture.Display.Bounds(), direction, amount)
+	// The static plan is the only authorization of one attempt: the longest
+	// provable interval on the fixed center line, then the fixed geometry on it.
+	// A partial conflict shortens or moves the gesture; it never re-aims it later.
+	space, ok := scrollSafeSpans(projection, index, clipped, direction)
 	if !ok {
-		return nil, unsupportedScrollContainer("滚动容器不支持该滚动方向")
+		return nil, unsupportedScrollContainer("滚动容器没有可用几何")
+	}
+	span, ok := space.longestSpan(direction)
+	if !ok {
+		return nil, unsupportedScrollTrajectory()
+	}
+	start, end, ok := scrollGeometry(space.safeRect(clipped, span), screen, direction, amount)
+	if !ok || !space.provesSegment(start, end, clipped, screen) {
+		return nil, unsupportedScrollTrajectory()
 	}
 	return &scrollPlan{
 		containerIndex: index, container: raw, selector: selector,
@@ -285,6 +575,15 @@ func scrollContainerAtPoint(projection *Projection, x, y int) (int, *protocol.AP
 
 func unsupportedScrollContainer(message string) *protocol.APIError {
 	return protocol.NewError(422, protocol.CodeNodeUnsupported, message)
+}
+
+// unsupportedScrollTrajectory is the static rejection of a container whose center
+// line has no provable trajectory for the requested amount. It deliberately does
+// not claim the container cannot scroll on the device: only the published tree is
+// proven.
+func unsupportedScrollTrajectory() *protocol.APIError {
+	return protocol.NewError(422, protocol.CodeNodeUnsupported,
+		"无法在该容器中心线上生成可证明的滚动轨迹")
 }
 
 // publicNodeByRawIndex maps one raw capture node back to its published node.
@@ -351,22 +650,18 @@ func (e *Engine) revalidateScrollTarget(work *workState, obs *observationState,
 	}
 	freshContainer, matched := matchFreshNode(&capture, obs.Projection.Capture, plan.container)
 	if !matched {
-		e.logScrollRevalidate(work.OperationID, false, false, false, qualityState)
+		e.logScrollRevalidate(work.OperationID, false, false, false, false, qualityState)
 		return &capture, nil, targetChangedScroll()
 	}
 	freshIndex := indexOf(&capture, freshContainer)
 	if freshIndex < 0 {
-		e.logScrollRevalidate(work.OperationID, false, false, false, qualityState)
+		e.logScrollRevalidate(work.OperationID, false, false, false, false, qualityState)
 		return &capture, nil, targetChangedScroll()
 	}
-	clipped := freshContainer.Bounds.Intersect(capture.Display.Bounds())
+	screen := capture.Display.Bounds()
+	clipped := freshContainer.Bounds.Intersect(screen)
 	if clipped.Empty() {
-		e.logScrollRevalidate(work.OperationID, true, false, false, qualityState)
-		return &capture, nil, targetChangedScroll()
-	}
-	start, end, ok := scrollGeometry(clipped, capture.Display.Bounds(), plan.direction, plan.amount)
-	if !ok {
-		e.logScrollRevalidate(work.OperationID, true, false, false, qualityState)
+		e.logScrollRevalidate(work.OperationID, true, false, false, false, qualityState)
 		return &capture, nil, targetChangedScroll()
 	}
 	projector := work.Projector
@@ -383,94 +678,35 @@ func (e *Engine) revalidateScrollTarget(work *workState, obs *observationState,
 		return &capture, nil, protocol.NewError(503, protocol.CodeHierarchyFailed, "公开树构造失败")
 	}
 	containerPublic := publicNodeByRawIndex(projection, freshIndex)
-	if containerPublic == nil || containerPublic.Bounds == nil {
-		e.logScrollRevalidate(work.OperationID, true, false, false, qualityState)
+	if containerPublic == nil || containerPublic.Bounds == nil || !isScrollContainer(containerPublic) {
+		e.logScrollRevalidate(work.OperationID, true, false, false, false, qualityState)
 		return &capture, nil, targetChangedScroll()
 	}
-	endInside := containerPublic.Bounds.Contains(end.X, end.Y)
-	startScope := scrollScopeMatches(projection, start.X, start.Y, freshIndex)
-	endScope := scrollScopeMatches(projection, end.X, end.Y, freshIndex)
-	proven := endInside && startScope && endScope
-	e.logScrollRevalidate(work.OperationID, true, startScope, endScope, qualityState)
+	// The fresh tree proves the exact segment the caller was authorized for. It
+	// never re-selects the longest interval or recomputes the endpoints: a change
+	// outside the authorized segment cannot move the gesture.
+	space, ok := scrollSafeSpans(projection, freshIndex, clipped, plan.direction)
+	if !ok {
+		e.logScrollRevalidate(work.OperationID, true, false, false, false, qualityState)
+		return &capture, nil, targetChangedScroll()
+	}
+	startProven := space.provesPoint(plan.start, clipped, screen)
+	endProven := space.provesPoint(plan.end, clipped, screen)
+	proven := space.provesSegment(plan.start, plan.end, clipped, screen)
+	e.logScrollRevalidate(work.OperationID, true, startProven, endProven, proven, qualityState)
 	if !proven {
 		return &capture, nil, targetChangedScroll()
 	}
 	return &capture, &scrollFrame{
 		capture: &capture, projection: projection, container: freshContainer,
 		containerIndex: freshIndex, direction: plan.direction, amount: plan.amount,
-		start: start, end: end,
+		start: plan.start, end: plan.end,
 	}, nil
 }
 
 func targetChangedScroll() *protocol.APIError {
 	return protocol.NewError(409, protocol.CodeTargetChanged,
 		"滚动容器或实际轨迹已变化，本次未派发")
-}
-
-// scrollScopeMatches requires every public candidate at the actual point to
-// resolve to the selected container or to an outer wrapping scroll ancestor of
-// it. The nearest scope of a descendant is the container itself, while an outer
-// wrapping ancestor is allowed because it does not change which innermost
-// scope owns the injected point. An inner descendant scope, an incomparable
-// scope, or a point with no scope at all is a rejection. A candidate without
-// any scroll ancestor cannot change the innermost scope and is ignored.
-func scrollScopeMatches(projection *Projection, x, y, want int) bool {
-	if projection == nil || projection.Tree == nil || projection.Tree.Root == nil {
-		return false
-	}
-	capture := projection.Capture
-	ancestors := map[int]bool{}
-	if capture != nil && want >= 0 && want < len(capture.Nodes) {
-		for parent := capture.Nodes[want].Parent; parent >= 0 && parent < len(capture.Nodes); {
-			if ancestors[parent] {
-				break
-			}
-			ancestors[parent] = true
-			parent = capture.Nodes[parent].Parent
-		}
-	}
-	found := false
-	ok := true
-	var walk func(node *protocol.Node, depth int, ancestorsPath []*protocol.Node)
-	walk = func(node *protocol.Node, depth int, ancestorsPath []*protocol.Node) {
-		if node == nil || !ok {
-			return
-		}
-		path := append(ancestorsPath, node)
-		if depth > 0 && !node.Context && node.Role != protocol.RoleRoot &&
-			node.Bounds != nil && node.Bounds.Contains(x, y) {
-			scope := -1
-			for i := len(path) - 1; i >= 0; i-- {
-				if !isScrollContainer(path[i]) {
-					continue
-				}
-				index, mapped := projection.Source[path[i].Ref]
-				if !mapped {
-					ok = false
-					return
-				}
-				scope = index
-				break
-			}
-			switch {
-			case scope < 0:
-				// No scroll ancestor: it does not own an innermost scroll
-				// scope, so it cannot contradict the selected container.
-			case scope == want:
-				found = true
-			case ancestors[scope]:
-				// Outer wrapping scroll ancestor: allowed.
-			default:
-				ok = false
-				return
-			}
-		}
-		for _, child := range node.Children {
-			walk(child, depth+1, path)
-		}
-	}
-	walk(projection.Tree.Root, 0, nil)
-	return ok && found
 }
 
 // dispatchScroll injects the fixed center-line trajectory. The physical
@@ -573,9 +809,13 @@ func matchScrollContainer(pre *scrollFrame, post *device.Capture) (int, bool) {
 
 // scrollContentUnit is one leaf content unit of the container subtree. Its
 // bounds are clipped to the container; only clipped size and center are used.
+// raw keeps the source rectangle before the screen and container clipping, so
+// the classification can prove that the axis endpoints did not move because of
+// a clipping window.
 type scrollContentUnit struct {
 	key  contentKey
 	rect device.Rect
+	raw  device.Rect
 }
 
 func (u scrollContentUnit) width() int  { return u.rect.Width() }
@@ -586,6 +826,15 @@ func (u scrollContentUnit) axisCenter(vertical bool) int {
 		return (u.rect.Top + u.rect.Bottom) / 2
 	}
 	return (u.rect.Left + u.rect.Right) / 2
+}
+
+// axisClipped reports whether the axis endpoints differ from the source
+// rectangle, that is whether a clipping window changed them.
+func (u scrollContentUnit) axisClipped(vertical bool) bool {
+	if vertical {
+		return u.rect.Top != u.raw.Top || u.rect.Bottom != u.raw.Bottom
+	}
+	return u.rect.Left != u.raw.Left || u.rect.Right != u.raw.Right
 }
 
 // scrollContentUnits collects the leaf content units of one published container
@@ -621,8 +870,13 @@ func scrollContentUnits(projection *Projection, containerIndex int) []scrollCont
 		if eligible && !childUnit {
 			if index, mapped := projection.Source[node.Ref]; mapped &&
 				index >= 0 && index < len(projection.Capture.Nodes) {
+				raw := &projection.Capture.Nodes[index]
+				source := raw.RawBounds
+				if source.Empty() {
+					source = raw.Bounds
+				}
 				units = append(units, scrollContentUnit{
-					key: contentKeyOf(&projection.Capture.Nodes[index]), rect: clip,
+					key: contentKeyOf(raw), rect: clip, raw: source,
 				})
 			}
 		}
@@ -705,6 +959,60 @@ func scrollAxis(direction string) string {
 	}
 }
 
+// touchScrollAxisEdge reports whether a unit sits on the low or high axial edge
+// of the viewport. Only the request axis is inspected: filling the orthogonal
+// axis is not an axial edge.
+func touchScrollAxisEdge(rect, viewport device.Rect, vertical bool) bool {
+	if vertical {
+		return rect.Top-viewport.Top <= effectMaxSizeDeltaPx ||
+			viewport.Bottom-rect.Bottom <= effectMaxSizeDeltaPx
+	}
+	return rect.Left-viewport.Left <= effectMaxSizeDeltaPx ||
+		viewport.Right-rect.Right <= effectMaxSizeDeltaPx
+}
+
+// orthogonalScrollEdgesStable is the container guard of the request axis: the
+// two off-axis edges must not move, while the axial edges may change.
+func orthogonalScrollEdgesStable(pre, post device.Rect, vertical bool) bool {
+	if vertical {
+		return absInt(pre.Left-post.Left) <= effectMaxSizeDeltaPx &&
+			absInt(pre.Right-post.Right) <= effectMaxSizeDeltaPx
+	}
+	return absInt(pre.Top-post.Top) <= effectMaxSizeDeltaPx &&
+		absInt(pre.Bottom-post.Bottom) <= effectMaxSizeDeltaPx
+}
+
+// rectsEqualWithin reports whether all four edges stay inside the tolerance.
+func rectsEqualWithin(a, b device.Rect, tolerance int) bool {
+	return absInt(a.Left-b.Left) <= tolerance && absInt(a.Top-b.Top) <= tolerance &&
+		absInt(a.Right-b.Right) <= tolerance && absInt(a.Bottom-b.Bottom) <= tolerance
+}
+
+// scrollEligibleUnit reports whether one matched pair may contribute positive
+// displacement evidence. A pair must be size stable, must not touch an axial
+// viewport edge in either frame, and must not have had its axis endpoints moved
+// by a clipping window. An equal-size clipped window can still drift with the
+// viewport, so equal size alone is not enough.
+func scrollEligibleUnit(pair matchedScrollUnit, preViewport, postViewport device.Rect,
+	vertical bool) bool {
+	if absInt(pair.post.width()-pair.pre.width()) > effectMaxSizeDeltaPx ||
+		absInt(pair.post.height()-pair.pre.height()) > effectMaxSizeDeltaPx {
+		return false
+	}
+	if touchScrollAxisEdge(pair.pre.rect, preViewport, vertical) ||
+		touchScrollAxisEdge(pair.post.rect, postViewport, vertical) {
+		return false
+	}
+	return !pair.pre.axisClipped(vertical) && !pair.post.axisClipped(vertical)
+}
+
+func scrollSign(value int) int {
+	if value < 0 {
+		return 0
+	}
+	return 1
+}
+
 // computeScrollEffect is the pure CPU effect inference. It reads only the two
 // captured frames, performs no device I/O and never rewrites the outcome.
 func computeScrollEffect(pre *scrollFrame, post *observationState,
@@ -738,12 +1046,27 @@ func computeScrollEffect(pre *scrollFrame, post *observationState,
 		result.Reason = effectReasonCPUBudget
 		return result
 	}
-	preBounds, preOK := publicBoundsByRawIndex(pre.projection, pre.containerIndex)
-	postBounds, postOK := publicBoundsByRawIndex(post.Projection, postIndex)
-	if !preOK || !postOK || boundsDiffer(preBounds, postBounds, effectMaxSizeDeltaPx) {
+	// The container guard allows the viewport to stretch along the request axis,
+	// because a collapsing or expanding bar is a legitimate accompaniment of the
+	// gesture. The off-axis edges and a positive overlap must still hold, and the
+	// public container must still be a scroll container on both sides.
+	preContainer := publicNodeByRawIndex(pre.projection, pre.containerIndex)
+	postContainer := publicNodeByRawIndex(post.Projection, postIndex)
+	if preContainer == nil || postContainer == nil ||
+		!isScrollContainer(preContainer) || !isScrollContainer(postContainer) ||
+		preContainer.Bounds == nil || postContainer.Bounds == nil {
 		result.Reason = effectReasonContainer
 		return result
 	}
+	vertical := scrollAxis(direction) == "y"
+	preRect := rectFromBounds(preContainer.Bounds)
+	postRect := rectFromBounds(postContainer.Bounds)
+	if !orthogonalScrollEdgesStable(preRect, postRect, vertical) ||
+		preRect.Intersect(postRect).Empty() {
+		result.Reason = effectReasonContainer
+		return result
+	}
+	containerUnchanged := rectsEqualWithin(preRect, postRect, effectMaxSizeDeltaPx)
 	preUnits := scrollContentUnits(pre.projection, pre.containerIndex)
 	if expired() {
 		result.Reason = effectReasonCPUBudget
@@ -756,6 +1079,8 @@ func computeScrollEffect(pre *scrollFrame, post *observationState,
 	}
 	units := max(len(preUnits), len(postUnits))
 	matched := matchScrollUnits(preUnits, postUnits)
+	// The published counters always describe the full matched set, never the
+	// filtered positive-evidence subset.
 	result.Anchors = len(matched)
 	if units > 0 {
 		result.Coverage = len(matched) * 100 / units
@@ -764,42 +1089,99 @@ func computeScrollEffect(pre *scrollFrame, post *observationState,
 		result.Reason = effectReasonInsufficient
 		return result
 	}
-	vertical := scrollAxis(direction) == "y"
+	allUnitsRigid := true
+	maxMoveAll := 0
+	eligible := make([]matchedScrollUnit, 0, len(matched))
 	for _, pair := range matched {
-		if absInt(pair.post.width()-pair.pre.width()) > effectMaxSizeDeltaPx ||
-			absInt(pair.post.height()-pair.pre.height()) > effectMaxSizeDeltaPx {
+		widthDelta := absInt(pair.post.width() - pair.pre.width())
+		heightDelta := absInt(pair.post.height() - pair.pre.height())
+		axisDelta, orthogonalDelta := widthDelta, heightDelta
+		if vertical {
+			axisDelta, orthogonalDelta = heightDelta, widthDelta
+		}
+		if widthDelta > effectMaxSizeDeltaPx || heightDelta > effectMaxSizeDeltaPx {
+			allUnitsRigid = false
+		}
+		// Only an axial size change that touches an axial viewport edge may be
+		// excluded: an equal-size clipped window can drift with the viewport, and
+		// an interior deformation cannot be explained by clipping at all.
+		if orthogonalDelta > effectMaxSizeDeltaPx ||
+			(axisDelta > effectMaxSizeDeltaPx &&
+				!touchScrollAxisEdge(pair.pre.rect, preRect, vertical) &&
+				!touchScrollAxisEdge(pair.post.rect, postRect, vertical)) {
 			result.Reason = effectReasonSize
 			return result
+		}
+		delta := pair.post.axisCenter(vertical) - pair.pre.axisCenter(vertical)
+		if absInt(delta) > maxMoveAll {
+			maxMoveAll = absInt(delta)
+		}
+		if scrollEligibleUnit(pair, preRect, postRect, vertical) {
+			eligible = append(eligible, pair)
 		}
 	}
 	if expired() {
 		result.Reason = effectReasonCPUBudget
 		return result
 	}
-	movedPositive, movedNegative, maxMove := 0, 0, 0
-	for _, pair := range matched {
-		delta := pair.post.axisCenter(vertical) - pair.pre.axisCenter(vertical)
-		if delta >= effectMinDisplacementPx {
-			movedPositive++
-		} else if delta <= -effectMinDisplacementPx {
-			movedNegative++
+	// Positive evidence needs both frames of reference: screen displacement alone
+	// would count content that merely follows the container, and container
+	// relative displacement alone would count a viewport that only changed size.
+	preOrigin, postOrigin := preRect.Top, postRect.Top
+	if !vertical {
+		preOrigin, postOrigin = preRect.Left, postRect.Left
+	}
+	var buckets [2][2]int
+	for _, pair := range eligible {
+		absolute := pair.post.axisCenter(vertical) - pair.pre.axisCenter(vertical)
+		relative := (pair.post.axisCenter(vertical) - postOrigin) -
+			(pair.pre.axisCenter(vertical) - preOrigin)
+		if absInt(absolute) < effectMinDisplacementPx || absInt(relative) < effectMinDisplacementPx {
+			continue
 		}
-		if absInt(delta) > maxMove {
-			maxMove = absInt(delta)
+		buckets[scrollSign(absolute)][scrollSign(relative)]++
+	}
+	if expired() {
+		result.Reason = effectReasonCPUBudget
+		return result
+	}
+	dominant := 0
+	for _, row := range buckets {
+		for _, count := range row {
+			if count > dominant {
+				dominant = count
+			}
 		}
 	}
-	dominant := movedPositive
-	if movedNegative > dominant {
-		dominant = movedNegative
-	}
-	if dominant >= effectMinAnchors && dominant*100 >= len(matched)*effectConsensusPercent {
+	if len(eligible) >= effectMinAnchors && dominant >= effectMinAnchors &&
+		dominant*100 >= len(eligible)*effectConsensusPercent {
+		if expired() {
+			result.Reason = effectReasonCPUBudget
+			return result
+		}
 		result.State = protocol.EffectObserved
 		result.Reason = ""
 		return result
 	}
+	// Negative evidence keeps the pre-proposal semantics: the four container
+	// edges and every matched unit must be stable, and it uses the full matched
+	// set with absolute centers. It cannot prove that raw content stood still
+	// when a clipping window hides it.
+	if !containerUnchanged {
+		result.Reason = effectReasonContainer
+		return result
+	}
+	if !allUnitsRigid {
+		result.Reason = effectReasonSize
+		return result
+	}
 	if quality != nil && quality.State == protocol.QualityStable &&
 		len(preUnits) == len(postUnits) && len(matched) == len(preUnits) &&
-		len(matched) >= effectMinAnchors && maxMove <= effectNoMoveTolerancePx {
+		len(matched) >= effectMinAnchors && maxMoveAll <= effectNoMoveTolerancePx {
+		if expired() {
+			result.Reason = effectReasonCPUBudget
+			return result
+		}
 		result.State = protocol.EffectNotObserved
 		result.Reason = ""
 		return result
@@ -809,18 +1191,12 @@ func computeScrollEffect(pre *scrollFrame, post *observationState,
 		result.Reason = effectReasonCoverage
 	case quality == nil || quality.State != protocol.QualityStable:
 		result.Reason = effectReasonUnstable
+	case len(eligible) < effectMinAnchors:
+		result.Reason = effectReasonInsufficient
 	default:
 		result.Reason = effectReasonMotion
 	}
 	return result
-}
-
-func boundsDiffer(a, b *protocol.Bounds, tolerance int) bool {
-	if a == nil || b == nil {
-		return true
-	}
-	return absInt(a.Left-b.Left) > tolerance || absInt(a.Top-b.Top) > tolerance ||
-		absInt(a.Right-b.Right) > tolerance || absInt(a.Bottom-b.Bottom) > tolerance
 }
 
 func absInt(value int) int {
@@ -868,13 +1244,17 @@ func (e *Engine) logScrollPlan(operationID string, plan *scrollPlan) {
 		eventlog.Str("end_edge", endEdge))
 }
 
+// logScrollRevalidate records the container proof, both endpoint scope proofs and
+// the whole-segment proof. The endpoint flags never stand for the segment: a
+// segment rejection can carry proven endpoints.
 func (e *Engine) logScrollRevalidate(operationID string, containerProven, startProven,
-	endProven bool, quality string) {
+	endProven, proven bool, quality string) {
 	e.log.Event(eventlog.Debug, "scroll.revalidate",
 		eventlog.Str("operation_id", operationID),
 		eventlog.Bool("container_proven", containerProven),
 		eventlog.Bool("start_scope_proven", startProven),
 		eventlog.Bool("end_scope_proven", endProven),
+		eventlog.Bool("proven", proven),
 		eventlog.Str("quality", quality))
 }
 
