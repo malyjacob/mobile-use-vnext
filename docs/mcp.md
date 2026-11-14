@@ -11,9 +11,12 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
   SDK 服务只发布 `2026-07-28`。收到旧版 `initialize` 时，SDK 按生命周期规范回答
   `2025-11-25` 并期望客户端断开；该回答不是本适配器的新协议协商结果，也不对应第二套工具、
   别名或旧协议回退。
-- 工具目录固定为 11 个，与 [接口契约](interface.md) 同名同义：`start`、`status`、`observe`、
-  `act`、`inspect`、`keepalive`、`end`、`app`、`notify`、`shell`、`diagnose`。
+- 工具目录固定为 12 个，与 [接口契约](interface.md) 同名同义：`start`、`status`、`observe`、
+  `wait_for`、`act`、`inspect`、`keepalive`、`end`、`app`、`notify`、`shell`、`diagnose`。
   不注册 `/health`、认证初始化、旧工具别名或旧协议回退。
+- 目录指纹是工具数、注册顺序、名称、描述与入参 schema 的 canonical SHA-256，当前为
+  `04177607f49d99c84aabd80632c37554989918e6f0454ed882a739d9fa72b1e9`；发布清单与探针按
+  它比对实际 `tools/list`，任一条描述或 schema 变化都会改变该值。
 - stdio 模式的 stdout 只承载 MCP 协议帧；日志与诊断一律写 stderr。
 - 私有配置把适配进程绑定到一个可信 Agent 的服务凭据；该凭据不是工具参数，不进入日志、
   错误、结果或 MCP 正文。
@@ -45,6 +48,16 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
 时长或改写成单调续租。工具描述与参数说明明确：每个新 P 覆盖原截止时间且可缩短，省略也
 重设为两分钟；普通活动只按两分钟取最大值，不继承本次时长；start 使用五分钟租期，会话没有
 累计时长硬上限。调用取消仍按第 6 节撤销授权，长租约不覆盖取消边界。
+
+`wait_for` 的 schema 以 `reference` 与 `timeout` 为必填，`query`、`absent_query`、`stable`、
+`full`、`image` 可选：`timeout` 是 1–40 的整数，`stable=true` 时至少 2；两个条件字符串各
+至多 256 个码点。工具描述向 Agent 声明三条使用契约：到时同样按成功返回并发布验证采集得到的
+那个观察，调用方须检查 `wait.trigger` 与 `wait.matched`，连续 3 帧稳定由
+`observation.quality.state=stable` 表达；`wait.elapsed_ms` 计自准入完成至终帧发布，因需补采
+或复用验证帧，实际耗时可超过 `timeout` 至多约 35 秒；两个条件只匹配当前公开可见树且
+`stable=true` 对整树计算摘要，页面有倒计时或实时进度变化时应保持 `stable=false`。参数在
+适配器侧按同一严格解码器接入，解码器可判定的非法组合在发出 HTTP 请求前被拒；两个条件折叠
+后相同由引擎准入在请求发出后拒绝，不接触设备。
 
 `app` 的根 schema 继续声明统一的 `properties`、`required=["kind"]` 与
 `additionalProperties=false`，再按 kind 列出互斥成员；服务端严格解码是权威，不依赖宿主
@@ -85,10 +98,17 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
 `result v2` 在 `phase` 之后投影 `effect.state`，在观察字段中投影
 `observation.quality.state`、`observation.quality.samples` 与
 `observation.quality.stop_reason`；`structured` 与 `both` 的 `structuredContent` 保留同一份
-对象，`text` 不发送结构化内容。适配器不重算或补投影这两个事实；`effect` 只由 `scroll` 的
+对象，`text` 不发送结构化内容。适配器不重算或补投影这些事实；`effect` 只由 `scroll` 的
 操作结果与保留的 P 视图携带，带树的观察都携带 `observation.quality`（未采样或重验交付为
 `unknown`/`0`/`not_sampled`），只有没有树的失败观察不携带它。两者的成员与取值见
 [接口契约](interface.md) §11。
+
+`wait_for` 的 `wait` 对象也按同一份 `Result` 投影：`result v2` 输出 `wait.trigger`（token）、
+`wait.matched`（紧凑 JSON 数组）与 `wait.elapsed_ms`（数字字面量），成员顺序固定为
+`trigger`、`matched`、`elapsed_ms`；`matched` 为空时服务端已省略该成员，适配器不补
+`null`、不补空数组。`structured` 与 `both` 的 `structuredContent` 保留同一份对象。验证采集
+失败的结果按第 3 节的诊断投影透传 `wait.trigger` 与 `wait.elapsed_ms`，不输出
+`wait.matched`。
 
 完整文本第一行为 `result v2 is_error=<true|false>`，最后为 `end result`。已知字段按
 `Result` 的公共顺序输出，字段行和块可以交错；例如 shell 块之后仍可有错误与恢复字段。
@@ -107,8 +127,10 @@ json v1 path="/observation/tree" value={"format":"full","scope":"","root":null}
 
 `structured` 的错误文本使用 `diagnostic v1 is_error=true` / `end diagnostic`，只包含
 操作号、操作状态、outcome、phase、目标引用、准入/消息状态、观察 status/id、会话、收尾、
-错误与恢复等存在的解释字段；它不代表完整 `A`。所有字段均从同一份 `A` 生成。`app` 只在
-diagnostic 中补充 `app.kind`，不展开 `items`、`tasks`、PID 或其他业务事实。
+条件等待的 `wait.trigger` 与 `wait.elapsed_ms`、错误与恢复等存在的解释字段；它不代表
+完整 `A`。所有字段均从同一份 `A` 生成。`app` 只在 diagnostic 中补充 `app.kind`，不展开
+`items`、`tasks`、PID 或其他业务事实；`wait.matched` 不进入 diagnostic：失败结果没有可判定
+那一帧的已发布观察。
 
 `app` 结果字段在完整文本中的分类固定如下；复合字段使用紧凑完整 JSON，保留嵌套成员、
 数组顺序、显式 `null` 与 `[]`：
@@ -144,6 +166,8 @@ diagnostic 中补充 `app.kind`，不展开 `items`、`tasks`、PID 或其他业
 | 主动作 `not_executed` / `uncertain` | `true` |
 | 纯 `observe` 有合法核心 O，仅缺图 | `false` |
 | 纯 `observe` 没有合法核心 O（含只有只读图） | `true` |
+| `wait_for` 发布出合法核心 O（含到期未命中） | `false`（按 `observe` 同口径） |
+| `wait_for` 没有发布新 O（含验证采集失败、只有只读图、准入或传输错误） | `true` |
 | `status` 正常给出 `request_closed` 或其他查询事实 | `false` |
 | `status`/`end` 返回 `operation_unknown` | `true`；`end` 可同时封闭该 P 的未来接纳 |
 | `diagnose` 证据不足或覆盖范围有限 | `false` |
@@ -165,7 +189,8 @@ diagnostic 中补充 `app.kind`，不展开 `items`、`tasks`、PID 或其他业
 
 在 `result v2` 文本里（`text`/`both` 模式），错误结果同样按成员投影：`act` 重验失败交付的
 新观察会带树块，`is_error=true` 与树块可以出现在同一个结果里。交付与否不改变 `is_error` 的
-判定：`act` 看 `outcome` 是否为 `executed`，其余工具按 `error` 与各自的查询事实。
+判定：`act` 看 `outcome` 是否为 `executed`，`observe` 与 `wait_for` 看是否发布出核心 O，
+其余工具按 `error` 与各自的查询事实。
 `structured` 模式的错误文本是 `diagnostic v1`，不含树块。
 
 **观察块。** 块头之后固定一行 `defaults {"checked":false}`，再一个空行、节点行，最后是终止行：
@@ -252,7 +277,7 @@ output "hello\n"
 end shell
 
 timeline v1 events=1
-event {"at":"2026-11-10T03:00:00Z","phase":"dispatch","code":"executed"}
+event {"at":"2026-11-10T03:00:00Z","phase":"session","code":"active"}
 end timeline
 ```
 
@@ -298,8 +323,8 @@ device-mcp -transport http -config <private-config>
 
 ## 6. 取消、P 与漏收边界
 
-有本次新 P 的工具调用（`start`、`observe`、`act`、`keepalive`、`end`、`app`、`notify`、`shell`）
-在取消时：
+有本次新 P 的工具调用（`start`、`observe`、`wait_for`、`act`、`keepalive`、`end`、`app`、
+`notify`、`shell`）在取消时：
 
 1. 停止等待本次调用结果；
 2. 对需要 `end` 的分支用独立的有界上下文调用 `end(P)`（上限 5 秒），不等待设备工作完成；
@@ -319,6 +344,9 @@ device-mcp -transport http -config <private-config>
 - 五个变更 kind（`open`/`claim`/`handoff`/`close`/`kill`）按通用步骤 2 发起有界 `end(P)`，
   保留真实的 end 文案、session/cleanup 与恢复入口；不能把查询的“未发起 end”文案复制给
   变更，也不能省略实际发起的 end。
+
+`wait_for` 不是只读工具：它按通用步骤 2 发起有界 `end(P)`，取消同时关闭等待上下文并释放
+普通工作位。取消保留取消前已取得的 `wait` 事实，也不声称新观察已发布。
 
 `status`、`inspect`、`diagnose` 只取消本次读取，不登记 P、不调用 `end`。调用参数中的
 `reference` 是原观察/操作定位，不是本次取消的 P；不得把它当成本次调用的操作编号。
@@ -356,4 +384,7 @@ device-mcp -transport http -config <private-config>
   `http.token` 与 `agent_token` 必须不同。
 - 未提供 `http.listen` 时不能以 `http` 传输启动；`allowed_origins` 只接受
   `scheme://host[:port]`。
+- 宿主侧工具超时必须覆盖一次调用的完整预算：验证采集整体受 35 秒固定预留截止约束，因此带图
+  与无图调用都按 `timeout <= host_timeout - 35s` 预留。宿主在到点时取消调用，适配器按第 6
+  节发起有界 `end(P)`，被取消的等待不保证产出新观察。
 - 构建与启动方式见 [运行手册](runbook.md) 的 MCP 章节。

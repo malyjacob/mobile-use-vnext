@@ -41,7 +41,7 @@ adb forward          主机 18881 → 服务；主机 18883 → 手机 MCP
    `adb forward`，也不需要 Agent token。
 
 只需要直连 HTTP 的 Agent 则使用 `http://127.0.0.1:18881/api/<tool>`、`agent_token` 与
-`X-Mobile-Use-Contract: 11`。
+`X-Mobile-Use-Contract: 12`。
 
 ## 1. 默认部署后的网络与进程
 
@@ -180,8 +180,8 @@ Header: Authorization: Bearer <mcp_token>
 
 1. 完全退出并重启 MCP 客户端/宿主进程；
 2. 执行 `server/discover` 与 `tools/list`；
-3. 应看到固定 11 个工具：`start`、`status`、`observe`、`act`、`inspect`、`keepalive`、
-   `end`、`app`、`notify`、`shell`、`diagnose`。
+3. 应看到固定 12 个工具：`start`、`status`、`observe`、`wait_for`、`act`、`inspect`、
+   `keepalive`、`end`、`app`、`notify`、`shell`、`diagnose`。
 
 MCP 的 `act` schema 含 `scroll` 分支（`container`/`direction`/`amount`）与 `swipe` 的可选
 `duration_ms`；观察质量与滚动效果的字段和投影见[接口契约](interface.md)与
@@ -270,7 +270,7 @@ HTTP 宿主在原有 `Authorization` 头之外按需添加：
 
 ```text
 Authorization: Bearer <agent_token>
-X-Mobile-Use-Contract: 11
+X-Mobile-Use-Contract: 12
 Content-Type: application/json; charset=utf-8
 ```
 
@@ -278,7 +278,7 @@ Content-Type: application/json; charset=utf-8
 $deploy = Get-Content .state/deploy.json -Raw | ConvertFrom-Json
 $headers = @{
     Authorization           = "Bearer $($deploy.agent_token)"
-    'X-Mobile-Use-Contract' = '11'
+    'X-Mobile-Use-Contract' = '12'
 }
 Invoke-RestMethod http://127.0.0.1:18881/api/status -Method Post `
   -Headers $headers -ContentType 'application/json' -Body '{}'
@@ -314,6 +314,43 @@ Invoke-RestMethod http://127.0.0.1:18881/api/status -Method Post `
 P 的两种用法：`observe({"reference":"P9"})` 的 `reference` 引用本 Agent 已有的 P9 原操作，
 不是本次 `observe` 的请求体 P；本次调用仍使用自己的新 P。`status(P9)` 只返回操作摘要，
 不重新采集，也不补回业务集合。
+
+### 5.2 `wait_for` 条件等待示例
+
+外层“先等几秒再 `observe`”的轮询把每一帧都变成新 O 与一次完整往返。已知界面会在数秒内就绪
+时，改用一次服务端条件等待：
+
+```json
+{"reference":"O1","absent_query":"加载中","timeout":15}
+{"reference":"O1","query":"完成","stable":true,"timeout":20}
+{"reference":"O1","timeout":5,"image":true}
+```
+
+```powershell
+$wait = Invoke-RestMethod http://127.0.0.1:18881/api/wait_for -Method Post `
+  -Headers $headers -ContentType 'application/json' `
+  -Body '{"reference":"O1","query":"完成","timeout":20}'
+$wait.wait.trigger      # query / absent_query / stable / timeout
+$wait.wait.matched      # ["query"]；没有可判定项时该成员缺失
+$wait.wait.elapsed_ms   # 自准入完成到终帧发布的耗时
+$newOid = $wait.observation.id
+```
+
+- `timeout` 必填、1–40 秒，`stable=true` 时至少 2。到时不是错误：只要验证采集成功，结果仍带
+  新观察与 `wait.trigger=timeout`，`wait.matched` 至少包含 `timeout`；终帧若同时命中
+  `query`/`absent_query`，对应项也按固定顺序列出，调用方按 `observation` 继续即可。
+- 条件或稳定判据满足后服务立即返回，不跑满 `timeout`；等待期不发布中间帧，只有最终验证采集
+  发布一个新 O。`query`/`absent_query` 只匹配当前公开可见树，视口外内容不参与。
+- `stable=true` 要求整树连续 3 帧一致（至少跨越 1.2 秒）；页面有倒计时或实时进度变化时保持
+  `stable=false`，否则会等到 `timeout` 到期。
+- 宿主侧工具超时必须覆盖验证采集：该阶段整体受 35 秒固定预留截止约束，带图与无图调用都按
+  `timeout <= host_timeout - 35s` 预留。宿主默认 60 秒时，`timeout` 取 25 秒以内；否则宿主
+  会取消本次调用。
+- 取消语义：STOP 与 `end` 会释放工作位并把 `409 control_revoked` 交付给调用方；MCP 取消与
+  客户端断连同样立即关闭等待并释放工作位，但由适配器（有界 `end(P)`，`call_cancelled`）或
+  传输层收尾。取消不证明设备侧已撤回，也不保证本次等待产出观察。
+- 等待期独占唯一普通工作位：同会话的 `observe`、`act`、`app`、`shell` 立即返回
+  `409 device_busy`。已知很慢的流程用一次较长 `timeout`，不要并发试探。
 
 ## 6. 路径 C：主机自建 MCP 适配器
 
@@ -389,7 +426,7 @@ $json = $config | ConvertTo-Json -Depth 5
 }
 ```
 
-宿主只引用二进制和配置路径，不把 token 写进宿主文件。重启宿主后应看到 11 个工具。
+宿主只引用二进制和配置路径，不把 token 写进宿主文件。重启宿主后应看到 12 个工具。
 只读文本的 stdio 宿主在 `args` 中追加 `"-result-mode", "text"`；结构化宿主可用
 `structured`；不写时默认 `both`。结果模式不是 JSON 配置成员，选择规则见第 4.5 节。
 
@@ -445,7 +482,7 @@ Header: Authorization: Bearer <mcp_token>
 两种选择：
 
 ```text
-直连 HTTP:  http://127.0.0.1:18880/api/<tool>   + agent_token + X-Mobile-Use-Contract: 11
+直连 HTTP:  http://127.0.0.1:18880/api/<tool>   + agent_token + X-Mobile-Use-Contract: 12
 MCP HTTP:   http://127.0.0.1:18882/mcp          + mcp_token
 ```
 
@@ -630,7 +667,7 @@ GET 判断工具是否可用。
 $deploy = Get-Content .state/deploy.json -Raw | ConvertFrom-Json
 $headers = @{
     Authorization           = "Bearer $($deploy.agent_token)"
-    'X-Mobile-Use-Contract' = '11'
+    'X-Mobile-Use-Contract' = '12'
 }
 $start = Invoke-RestMethod http://127.0.0.1:18881/api/start -Method Post `
   -Headers $headers -ContentType 'application/json' -Body '{}'

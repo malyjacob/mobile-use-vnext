@@ -227,7 +227,7 @@ func TestCheckObservationQuality(t *testing.T) {
 		},
 		{
 			name:        "invalid stop reason",
-			observation: `{"quality":{"state":"stable","samples":2,"stop_reason":"timeout"}}`,
+			observation: `{"quality":{"state":"stable","samples":2,"stop_reason":"settled"}}`,
 			reason:      "observation_quality_stop_reason_invalid",
 		},
 	}

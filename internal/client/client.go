@@ -224,6 +224,22 @@ func (c *Client) Act(ctx context.Context, request *protocol.ActRequest, opts ...
 	return c.post(ctx, "act", body, operation)
 }
 
+// WaitFor calls POST /api/wait_for.
+func (c *Client) WaitFor(ctx context.Context, request *protocol.WaitForRequest, opts ...CallOption) (*Response, error) {
+	operation, operationErr := c.newOperation(opts)
+	if operationErr != nil {
+		return nil, operationErr
+	}
+	if request == nil {
+		return nil, invalidRequest(operation, messageMissingRequest)
+	}
+	body, err := request.Encode()
+	if err != nil {
+		return nil, invalidRequest(operation, messageInvalidRequest)
+	}
+	return c.post(ctx, "wait_for", body, operation)
+}
+
 // End calls POST /api/end.
 func (c *Client) End(ctx context.Context, reference string, opts ...CallOption) (*Response, error) {
 	operation, operationErr := c.newOperation(opts)

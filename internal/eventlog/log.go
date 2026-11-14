@@ -92,6 +92,9 @@ var allowedKeys = map[string]struct{}{
 	// Tree encoding facts. The format is the closed enum full/delta, never tree
 	// content or a ref.
 	"format": {},
+	// Condition-wait facts. The trigger is a closed enum, never the query or
+	// absent_query text that produced it.
+	"trigger": {},
 }
 
 // Logger is a bounded, drop-counting event sink.

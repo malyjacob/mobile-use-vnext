@@ -15,9 +15,9 @@
 | 方法 | 所有业务端点只接受 `POST`；其他方法返回 `405`，错误码 `invalid_request` |
 | 认证 | `/api/*` 用 `agent_token`；`/v1/control/*` 用 `control_token`；`Authorization: Bearer <token>` |
 | 身份隔离 | agent token 不能访问 `/v1/control/*`，control token 不能访问 `/api/*`；错误为 `401 unauthorized` |
-| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 11`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
+| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 12`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
 | 预分配 P | `/api/*` 可带 `X-Mobile-Use-Operation: P…`；缺省由服务分配。`status` 不使用该头 |
-| 请求体 | 必须是一个 JSON 对象；大小上限：`start`/`status`/`end` 16 KiB，`observe` 32 KiB，`act` 64 KiB，`inspect`/`keepalive`/`diagnose`/`app` 8 KiB，`notify` 16 KiB，`shell` 32 KiB，`sync` 32 KiB，`stop` 8 KiB |
+| 请求体 | 必须是一个 JSON 对象；大小上限：`start`/`status`/`end`/`wait_for` 16 KiB，`observe` 32 KiB，`act` 64 KiB，`inspect`/`keepalive`/`diagnose`/`app` 8 KiB，`notify` 16 KiB，`shell` 32 KiB，`sync` 32 KiB，`stop` 8 KiB |
 | 响应 | `Content-Type: application/json; charset=utf-8`，`Cache-Control: no-store` |
 | 健康检查 | `GET /health` 无认证，见 §10 |
 
@@ -25,7 +25,8 @@
 
 - 未知成员、重复成员名、大小写变体、尾随第二个 JSON 值、类型混用 → `422 invalid_request`；
 - 必填字段必须实际出现；未声明 nullable 的字段出现显式 `null` → `422 invalid_request`
-  （`status` 的 `reference`、`observe` 的 `full`/`image`/`wait_ms`、`act` 的 `image`、
+  （`status` 的 `reference`、`observe` 的 `full`/`image`/`wait_ms`、`wait_for` 的
+  `query`/`absent_query`/`stable`/`full`/`image`、`act` 的 `image`、
   `text`/`key` 的值等）；
 - 请求体为空、只有空白或不是对象 → `422 invalid_request`；
 - 编号规则：`O…` 为观察，`P…` 为操作；引用长度 1–64，首字符必须是 `O` 或 `P`。
@@ -43,7 +44,8 @@
 `act` 的重验在派发前失败时另有一个交付观察点：重验已经读取的那一帧直接发布为新的 `ready`
 观察，随失败结果返回（见 §6）。该点不做收敛采样，也不重新采集，其质量固定为
 `unknown`/`0`/`not_sampled`。`observe` 由调用方决定节奏（`wait_ms` 与 `full`），不做收敛
-采样；`shell` 不发布观察，命令是否改变屏幕由下一次 `act` 的实时重验或一次 `observe` 回答。
+采样；`wait_for` 不在这几个采样点之列，它的观察质量来自自身的条件等待（见 §14）；
+`shell` 不发布观察，命令是否改变屏幕由下一次 `act` 的实时重验或一次 `observe` 回答。
 
 ## 2. 结果分层与错误
 
@@ -59,10 +61,11 @@
 operation_id, operation_state, outcome, phase, effect, target_reference, request_closed,
 blocking_operation_id, can_start, blocking_code, start_operation_id,
 observation_state, input_state, message_id, saved, session, observation, inspection,
-app, shell, notification, diagnosis, cleanup, error, recovery
+app, shell, wait, notification, diagnosis, cleanup, error, recovery
 ```
 
 事实互不替代：`outcome`（动作执行）、`effect`（本次受控滚动的位移观察）、
+`wait`（条件等待的退出分支、单帧匹配项与耗时）、
 `observation.status` 与 `observation.quality`（观察及其收敛质量）、`session.state`（会话）、
 `cleanup.*`（物理收尾）。`error` 只在失败时出现：
 
@@ -73,7 +76,8 @@ app, shell, notification, diagnosis, cleanup, error, recovery
 ```
 
 - `code` 稳定，`message` 是受控中文短句，调用方只依赖 `code`；
-- `/api/*` 的 `details` 仅可能出现白名单事实：`limit`、`budget`、`limit_ms`、`app_code`、`field`、
+- `/api/*` 的 `details` 仅可能出现白名单事实：`limit`、`budget`、`limit_ms`、`limit_s`、
+  `app_code`、`field`、
   `task_ids`、`allowed_kinds`、`allowed_scopes`、`blocking_operation_id`、`start_operation_id`；
   `mcp.*` 是 [MCP 适配器](mcp.md) 的保留命名空间，仅由该适配器向结果投影注入，服务端
   `/api/*` 永不产生这些键；
@@ -520,7 +524,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 
 | 字段 | 必填 | 类型 | 说明 |
 | --- | --- | --- | --- |
-| `contract_version` | 是 | 字符串 | 必须为 `"11"`，否则 `409 contract_mismatch` |
+| `contract_version` | 是 | 字符串 | 必须为 `"12"`，否则 `409 contract_mismatch` |
 | `app_instance_id` | 是 | UUID | App 进程实例；变化会撤销旧归属 |
 | `app_version` | 是 | 字符串 | 仅发行标识 |
 | `selected_mode` | 是 | `virtual`/`primary` | 用户选择 |
@@ -547,14 +551,14 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 
 ```json
 {
-  "contract_version": "11",
+  "contract_version": "12",
   "service_instance_id": "…",
   "control": {
     "revision": 42,
     "availability": {"state":"ready"},
     "session": {"origin":"P1","agent":"local-agent","mode":"virtual","state":"active",
       "started_at":"…","expires_at":"…"},
-    "work": {"operation_id":"P2","kind":"act","phase":"dispatch"},
+    "work": {"operation_id":"P2","kind":"act","phase":"act.capture"},
     "cleanup": null
   },
   "commands": [],
@@ -565,7 +569,8 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 
 - `availability.state`：`ready`/`recovering`/`blocked`；非 `ready` 时可带 `reason`；
 - `session`：`null` 或 `{origin, agent?, mode, state, started_at?, expires_at?, ended_at?, reason?}`；
-- `work`：`null` 或 `{operation_id, kind, phase}`；`kind` 为 `start`/`observe`/`act`/`app`/`shell`；
+- `work`：`null` 或 `{operation_id, kind, phase}`；`kind` 为
+  `start`/`observe`/`wait_for`/`act`/`app`/`shell`；
   `kind=app` 时另带可选 `app_kind`，取 `find`/`list`/`open`/`claim`/`handoff`/`close`/`kill`；
 - `cleanup`：`null` 或 `{state, execution?, tasks?, recents?, display?}`；只与同一
   `control.session` 同属一个原会话；
@@ -582,7 +587,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 ## 9. `POST /v1/control/stop`
 
 ```json
-{"contract_version":"11","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
+{"contract_version":"12","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
 ```
 
 - **不校验普通契约**：`contract_version` 字段存在但不参与准入，服务与 App 契约版本
@@ -592,7 +597,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 - 重复或过期 `seq` 不报错，只返回 `state=duplicate`。
 
 ```json
-{"contract_version":"11","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
+{"contract_version":"12","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
 ```
 
 `accepted` 恒为 `true`；`state` 为 `revoked`（绑定时撤销了活动会话）、`recorded`
@@ -605,7 +610,7 @@ ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动
 无认证，只表示进程可应答，不代表设备就绪或资源干净：
 
 ```json
-{"status":"ok","contract_version":"11","service_instance_id":"…","release_version":"…"}
+{"status":"ok","contract_version":"12","service_instance_id":"…","release_version":"…"}
 ```
 
 ## 11. 数据对象
@@ -643,18 +648,21 @@ Observation 的编码顺序固定为 `status`、`id`、`origin`、`revision`、`
 | --- | --- |
 | `state` | `stable`/`unstable`/`unknown` |
 | `samples` | 本次 settle 的有效可比较帧数，非负整数；未做收敛采样的观察为 `0` |
-| `stop_reason` | `stable`/`max_samples`/`budget`/`unreadable`/`not_sampled` |
+| `stop_reason` | `stable`/`max_samples`/`budget`/`unreadable`/`not_sampled`/`condition`/`timeout` |
 
 - `samples` 受固定采样策略与刷新次数约束：`observe` 与重验失败交付的观察为 `0`；
   `act` 无图最多 5 帧，`act(image=true)` 的图片绑定刷新可再加 1 帧（最多 6）；`start` 最多
-  4 帧；`app` 的五个变更 kind 后观察最多 5 帧。请求不能改变这些上限。
+  4 帧；`app` 的五个变更 kind 后观察最多 5 帧；`wait_for` 的有效帧来自等待采样与终帧，
+  见 §14。请求不能改变这些上限。
 - `unknown`：`samples<2`，或本次观察没有做收敛采样（`stop_reason=not_sampled`）。
 - `unstable`：`samples>=2`，且最终发布帧与紧邻前一帧的最新比较不一致。
 - `stable`：最终发布帧与紧邻前一帧形成相等对，样本数达到该阶段固定的最少样本门限，且
   `stop_reason=stable`；历史上有过相等对但最终帧不同不算 `stable`。
 - `stop_reason` 说明采样为何结束：`stable` 收敛停止、`max_samples` 达到帧数上限、`budget`
   达到总预算、`unreadable` 某次采样读取失败并提前结束（失败不增加 `samples`）、
-  `not_sampled` 未做收敛采样。
+  `not_sampled` 未做收敛采样、`condition` 条件等待在满足条件的帧上结束、`timeout` 条件
+  等待用尽自己的等待窗口。`condition` 与 `timeout` 只由 `wait_for` 产生，且与同一对象的
+  `state` 保持一致（见 §14）。
 - `quality` 是观察材料事实，不是输入授权：`unstable`/`unknown` 的 O 仍可发布、仍可被认领；
   它不改变 `status`、`actionable_until`、基线确认或 O 状态机。`complete+unstable` 与
   `partial+stable` 都是合法组合；没有树的失败观察不发布 `quality`，只保留错误与图片材料。
@@ -1035,6 +1043,7 @@ task；应用在本屏前台、前台未知、前台服务或播放状态未知�
 | 端点/能力 | 契约行为 |
 | --- | --- |
 | `start`、`status`、`observe`、`end` | 见 §3、§4、§5、§7 |
+| `wait_for` | 定义于 §14；条件等待与稳定门禁，发布一个新观察 |
 | `act`：`tap`、`long_press`、`swipe`、`scroll`、`key`、`text` | 定义于 §6；其他动作类型不被接受 |
 | `observe`/`act` 的 `image=true` | 见 §5 图片；图片是本次观察的附加材料，不是单独工具 |
 | 截图、图片块 | HTTP/SDK 用同一 `observation.image` 元数据与 `base64` 载体；MCP `ImageContent` 承载图片字节 |
@@ -1047,3 +1056,108 @@ task；应用在本屏前台、前台未知、前台服务或播放状态未知�
 未注册的 `/api/<tool>` 路径由 Go `ServeMux` 返回默认的纯文本 `404 page not found`，不是本页
 的 JSON 错误形状；客户端应先按工具目录判断能力。已定义端点中，`GET /health` 是唯一不需要
 认证的端点。
+
+## 14. `POST /api/wait_for`
+
+`wait_for` 在当前会话的普通工作流上等待一个字面条件或整树稳定，退出后在同一工作位内做一次
+验证采集并发布一个新观察。请求体上限 16 KiB：
+
+```json
+{"reference":"O1","query":"确定","timeout":15}
+{"reference":"O1","absent_query":"加载中","timeout":15}
+{"reference":"O1","stable":true,"timeout":5,"full":true,"image":true}
+```
+
+| 字段 | 必填 | 类型/范围 | 说明 |
+| --- | --- | --- | --- |
+| `reference` | 是 | `O…`/`P…`，≤64 | 原观察或原操作，解析口径与 §5 的 `observe` 相同；引用 `P` 时本次发布强制 full，与 `observe(P)` 一致 |
+| `timeout` | 是 | 整数 1–40（秒） | 本次等待窗口；`stable=true` 时至少 2 |
+| `query` | 否 | 字符串，≤256 个 Unicode 码点，不得为空或全空白 | 公开树中存在至少一个节点在 `label`/`value`/`hint`/`resource` 上包含该文本 |
+| `absent_query` | 否 | 同上 | 帧已具备最小可读证据，且整棵公开树没有任何节点命中该文本 |
+| `stable` | 否 | 布尔，默认 `false` | 要求整树连续 3 帧一致；有查询时是条件满足后的门禁，无查询时是独立触发分支 |
+| `full` | 否 | 布尔，默认 `false` | `true` 强制本次发布的观察为 full |
+| `image` | 否 | 布尔，默认 `false` | `true` 在同一次验证采集中附加一张图片；条件命中帧复用而不重采树 |
+
+接入拒绝项（一律 `422 invalid_request`，不接触设备）：未知成员、重复成员、大小写变体、
+尾随第二个 JSON 值、类型混用、显式 `null`；`reference` 或 `timeout` 缺失；`timeout` 不是
+1–40 的整数；`stable=true` 且 `timeout<2`；`query`/`absent_query` 超过 256 个码点或为空、
+全空白；两者同时出现且字面相同。折叠后相同的两个条件由引擎在准入时以同样的
+`422 invalid_request` 拒绝。引用不可解析、不属于本 Agent 或指向已结束会话时，按 §5 的同一
+错误族拒绝（`observation_not_found`、`operation_unknown`、`request_closed`、`session_ended`、
+`reference_has_no_session` 等）。
+
+### 条件与稳定判据
+
+- `query` 是字面 Unicode 大小写折叠子串匹配；`absent_query` 要求该帧先通过最小可读证据
+  门槛——除合成根外至少 1 个非 `context` 内容节点——且整棵树没有任何节点命中。
+- 检索范围严格等于服务公布的 `reported_visible_with_context` 公开树：视口外或被隐私策略
+  抑制的内容永不命中，“未命中”不等于业务界面没有变化。
+- `stable=true` 是 `S-B` 组合：无查询时它是独立触发分支（整树连续 3 帧摘要一致）；有查询
+  时它是门禁（条件与连续 3 帧一致同时成立）。判据是**连续相等帧数 == 3**，不是累计采样数；
+  采样最小间隔 600ms，因此 3 帧至少跨越 1.2s。
+- 退出分支固定为 `query`、`absent_query`、连续 3 帧稳定、`timeout` 到期、采样上限守卫
+  （80 个有效帧）。
+
+### 结果
+
+```json
+{"operation_id":"P8",
+ "observation":{"status":"complete","id":"O2","origin":"P1","revision":2,
+   "captured_at":"…","actionable_until":"…",
+   "quality":{"state":"stable","samples":3,"stop_reason":"stable"},
+   "screen":{"width":1080,"height":2400,"rotation":0},
+   "tree":{"format":"full","scope":"reported_visible_with_context","view":"compact",
+     "defaults":{"checked":false},
+     "root":{"ref":"n1","role":"root","bounds":[0,0,1080,2400],"checked":null}}},
+ "wait":{"trigger":"query","matched":["query"],"elapsed_ms":4210}}
+```
+
+`wait` 对象在 `Result` 中固定位于 `shell` 之后、`notification` 之前（见 §2），成员顺序为
+`trigger`、`matched`、`elapsed_ms`：
+
+| 成员 | 规则 |
+| --- | --- |
+| `trigger` | 在进入验证采集前冻结的退出分支，取值 `query`/`absent_query`/`stable`/`timeout`；命中时优先级为 `query > absent_query`，到时与采样上限守卫都记 `timeout` |
+| `matched` | 只在最终发布的那一帧上评估的单帧可判定项，固定顺序 `["query","absent_query","timeout"]`，`timeout` 仅在 `trigger=timeout` 时包含；空列表时整个成员省略，绝不写 `null`；`stable` 不进入该列表 |
+| `elapsed_ms` | 自准入完成到终帧发布的耗时（毫秒），含验证采集 |
+
+`observation.quality` 永远描述最终发布的那一帧：
+
+- 命中条件或稳态退出时复用候选帧、不重采树：连续 3 帧一致为 `state=stable`、
+  `stop_reason=stable`；否则 `samples>=2` 为 `unstable`、`<2` 为 `unknown`，两种情况的
+  `stop_reason` 都是 `condition`。
+- 到时或触达采样上限时重采终帧：等待期没有任何有效帧（纯等待或全部采集失败）为
+  `unknown`/`samples=0`/`not_sampled`；有有效历史帧时把终帧并入同一比较，连续 3 帧一致为
+  `stable`/`stable`，否则 `samples>=2` 为 `unstable`、`<2` 为 `unknown`，`stop_reason` 为
+  `timeout` 或 `max_samples`。
+- 复用候选帧且 `image=true` 时，截图与候选树的跨度超过固定图片预算则按 §5 的
+  `image_stale` 规则丢图：观察为 `partial`、`missing=["image"]`，树与 `wait` 不变。
+
+`stop_reason` 的完整枚举因此是 `stable`、`max_samples`、`budget`、`unreadable`、
+`not_sampled`、`condition`、`timeout`（见 §11）。
+
+### 准入、期限与撤销
+
+- 准入在单一状态锁内完成：解析引用、拦截已过期会话（`409 session_expired`，绝不复活）、
+  普通屏障与工作位、工作记录、基线确认与 `SessionTTL=120s` 单调续租。已过期会话不被本次
+  调用续租，也不被推进成 `control_revoked`。
+- 等待期独占唯一普通工作位，其他普通工具立即返回 `409 device_busy`，不建普通动作队列。
+- 与 `observe` 相同，服务在进入引擎前先为本次结果预留投递容量：无图 256 KiB、带图 1 MiB，
+  并占用一个投递槽（同时最多 2 个）；预留失败返回 `503 delivery_unavailable`，不接触设备。
+  一次长等待在整个调用期间持有该槽，直到响应写完。
+- 工作上下文继承调用方的 HTTP 请求上下文：STOP 与 `end` 立即释放工作位，等待返回
+  `409 control_revoked`，不发布迟到观察；MCP 取消与客户端断连同样立即关闭等待并释放工作位，
+  但调用方按适配器或传输层的取消结果收尾，不保证送达该 409。
+- 验证采集时目标显示不可用返回 `503 display_unavailable`；候选帧在提交门禁被拒绝时沿用
+  既有错误（`stale_screen`、`control_revoked`、`tree_too_large` 等），不发布新 O。
+- 验证采集失败时结果仍带 `wait` 的 `trigger` 与 `elapsed_ms`，省略 `matched`；观察形状为
+  `observation.status=failed`（`image=true` 且截图成功、核心树失败时为只读图的 `partial`，
+  两者都没有观察 id），失败原因在 `observation.error`，并随结果携带 `recovery`。这样的结果
+  在 HTTP 上是 `503`：顶层 `error` 只用于准入期与等待期的拒绝。
+- `wait_for` 不认领任何 `O`；发布新 `O` 时把上一个 `ready` `O` 置为 `retired`。
+- 时间预算：工作位期限为 `timeout + 40s`（41–80s）。验证采集整体受 35 秒的固定预留截止
+  约束：单步上限（显示探测 5s、截图 10s、截图目标复核 5s、层级读取下限 15s）恰好用满该
+  预留，任一步在剩余时间内没有完成，整次采集就按失败结果返回，因此最坏
+  `timeout + 35s = 75s` 严格小于 80s 的工作位期限，也严格小于 90s 的
+  `httpapi.WriteTimeout` 与 `client.defaultTimeout`。全局 `WriteTimeout`、客户端默认超时、
+  `SessionTTL` 与 `ObservationLifetime` 都不随本工具改变。

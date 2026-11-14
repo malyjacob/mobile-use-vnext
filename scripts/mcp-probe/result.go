@@ -31,6 +31,10 @@ const (
 	treeFull            = "full"
 	treeDelta           = "delta"
 	imageJPEG           = "image/jpeg"
+
+	qualityUnknown        = "unknown"
+	qualityStopNotSampled = "not_sampled"
+	waitTriggerTimeout    = "timeout"
 )
 
 // Frozen public enumerations of the act quality/effect projection. The probe
@@ -43,6 +47,7 @@ var (
 	qualityStopReasons = map[string]bool{
 		"stable": true, "max_samples": true, "budget": true,
 		"unreadable": true, "not_sampled": true,
+		"condition": true, "timeout": true,
 	}
 	effectStates = map[string]bool{
 		"observed": true, "not_observed": true, "unknown": true,
@@ -131,6 +136,15 @@ type effectView struct {
 	State string `json:"state"`
 }
 
+// waitView is the bounded condition-wait outcome. A frozen trigger and an
+// elapsed time are always carried; the matched list is omitted when empty and
+// is never null, so a decoded null is indistinguishable from an absent member.
+type waitView struct {
+	Trigger   string   `json:"trigger"`
+	Matched   []string `json:"matched"`
+	ElapsedMS int64    `json:"elapsed_ms"`
+}
+
 // observationView is the observation header; tree bodies are not interpreted.
 type observationView struct {
 	Status   string       `json:"status"`
@@ -170,6 +184,7 @@ type resultView struct {
 	Inspection       *inspectionView  `json:"inspection"`
 	App              *appView         `json:"app"`
 	Shell            *shellView       `json:"shell"`
+	Wait             *waitView        `json:"wait"`
 	Diagnosis        *diagnosisView   `json:"diagnosis"`
 	Cleanup          *cleanupView     `json:"cleanup"`
 	Error            *errorView       `json:"error"`

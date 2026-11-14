@@ -477,6 +477,28 @@ func (f *fakeAdapter) handle(ctx context.Context, name string, request *sdk.Call
 			"operation_id": f.nextID("P"),
 			"observation":  f.observation(o, reference, 2, true),
 		}), nil
+	case "wait_for":
+		reference, _ := arguments["reference"].(string)
+		if !validReference(reference, 'P') && !validReference(reference, 'O') {
+			return f.errorResult(map[string]any{
+				"error": map[string]any{"code": "invalid_request"},
+			}), nil
+		}
+		o := f.nextID("O")
+		observation := f.observation(o, reference, 2, false)
+		// A pure-sleep wait samples nothing, so its terminal frame is the
+		// explicit not_sampled fact rather than a converged pair.
+		observation["quality"] = map[string]any{
+			"state": qualityUnknown, "samples": 0, "stop_reason": qualityStopNotSampled,
+		}
+		return f.render(map[string]any{
+			"operation_id": f.nextID("P"),
+			"observation":  observation,
+			"wait": map[string]any{
+				"trigger": waitTriggerTimeout, "matched": []any{waitTriggerTimeout},
+				"elapsed_ms": 1000,
+			},
+		}, false, false), nil
 	case "act":
 		o := f.nextID("O")
 		payload := map[string]any{
@@ -1063,11 +1085,11 @@ func TestAdapterChecksAgainstFakeAdapter(t *testing.T) {
 				t.Fatalf("checks failed (exit %d):\n%s", code, output.String())
 			}
 			for _, want := range []string{
-				"PASS tools count=11",
-				"PASS catalog tools=11",
+				"PASS tools count=12",
+				"PASS catalog tools=12",
 				"PASS catalog_fingerprint",
 				"PASS act_scroll_schema",
-				"PASS schema objects=11",
+				"PASS schema objects=12",
 				"PASS result_error",
 				"PASS status can_start=true",
 				"PASS start",
@@ -1220,6 +1242,8 @@ func (f *fakeRecoveryService) serve(writer http.ResponseWriter, request *http.Re
 		f.writeStart(writer, operationID)
 	case "/api/observe":
 		f.writeObserve(writer, request, operationID, body)
+	case "/api/wait_for":
+		f.writeWait(writer, operationID, body)
 	case "/api/act":
 		f.writeAct(writer, operationID, body)
 	case "/api/inspect":
@@ -1325,6 +1349,38 @@ func (f *fakeRecoveryService) writeObserve(writer http.ResponseWriter, request *
 	f.operations[operationID] = operationFinished
 	f.outcomes[operationID] = outcomeExecuted
 	result := &protocol.Result{OperationID: operationID, Observation: observation}
+	f.mutex.Unlock()
+	f.writeResult(writer, result)
+}
+
+// writeWait answers one condition wait with the frozen timeout fact and the
+// terminal frame it published.
+func (f *fakeRecoveryService) writeWait(writer http.ResponseWriter, operationID string, body []byte) {
+	var waitBody struct {
+		Reference string `json:"reference"`
+		Timeout   int    `json:"timeout"`
+	}
+	_ = json.Unmarshal(body, &waitBody)
+	if waitBody.Timeout < 1 || waitBody.Timeout > 40 {
+		f.writeResult(writer, &protocol.Result{OperationID: operationID, Error: &protocol.Error{
+			Code: protocol.CodeInvalidRequest, Message: "timeout 超出允许范围",
+		}})
+		return
+	}
+	f.mutex.Lock()
+	f.revision++
+	observation := f.observationLocked(false, unsampledTestQuality())
+	f.operations[operationID] = operationFinished
+	f.outcomes[operationID] = outcomeExecuted
+	result := &protocol.Result{
+		OperationID: operationID,
+		Observation: observation,
+		Wait: &protocol.WaitResult{
+			Trigger:   protocol.WaitTriggerTimeout,
+			Matched:   []string{protocol.WaitTriggerTimeout},
+			ElapsedMS: 1000,
+		},
+	}
 	f.mutex.Unlock()
 	f.writeResult(writer, result)
 }
@@ -1724,7 +1780,7 @@ func TestProbeAgainstRealAdapter(t *testing.T) {
 				t.Fatalf("checks failed (exit %d):\n%s", code, output.String())
 			}
 			for _, want := range []string{
-				"PASS tools count=11",
+				"PASS tools count=12",
 				"PASS catalog",
 				"PASS catalog_fingerprint",
 				"PASS act_scroll_schema",

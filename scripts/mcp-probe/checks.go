@@ -36,7 +36,7 @@ const (
 // toolNames is the complete public MCP catalog, in registration order. apps and
 // open_app were merged into app; any of the old names existing is a failure.
 var toolNames = []string{
-	"start", "status", "observe", "act", "inspect", "keepalive",
+	"start", "status", "observe", "wait_for", "act", "inspect", "keepalive",
 	"end", "app", "notify", "shell", "diagnose",
 }
 
@@ -104,6 +104,13 @@ func (p *probe) runChecks(ctx context.Context) bool {
 		observedID, ok := p.observeCheck(ctx, start.ObservationID)
 		if !ok {
 			return false
+		}
+		waitedID, ok := p.waitForCheck(ctx, observedID)
+		if !ok {
+			return false
+		}
+		if waitedID != "" {
+			observedID = waitedID
 		}
 		if !p.contentProjectionCheck(ctx, start.OperationID, observedID) {
 			return false
@@ -703,6 +710,69 @@ func integerString(value *int) string {
 
 // inspectCheck reads the observed tree through inspect and asserts the
 // readable inspection block carries a header and a trailer.
+// waitForCheck runs the shortest legal condition wait in pure-sleep form. It
+// proves the tool is reachable, that a timeout is a success with a published
+// frame, and that the frozen trigger and the elapsed fact are both carried.
+func (p *probe) waitForCheck(ctx context.Context, reference string) (string, bool) {
+	projected, failure := p.call(ctx, "wait_for", map[string]any{
+		"reference": reference, "timeout": 1,
+	})
+	if failure != nil {
+		p.reporter.fail("wait_for", failure.reason, failure.fields...)
+		return "", false
+	}
+	view := projected.view
+	if projected.result.IsError {
+		p.reporter.fail("wait_for", "tool_is_error", field("code", codeOf(view)))
+		return "", false
+	}
+	if view.Wait == nil {
+		p.reporter.fail("wait_for", "wait_fact_missing")
+		return "", false
+	}
+	if view.Wait.Trigger != waitTriggerTimeout {
+		p.reporter.fail("wait_for", "trigger_unexpected", field("trigger", view.Wait.Trigger))
+		return "", false
+	}
+	if len(view.Wait.Matched) != 1 || view.Wait.Matched[0] != waitTriggerTimeout {
+		p.reporter.fail("wait_for", "matched_unexpected",
+			field("matched", strconv.Itoa(len(view.Wait.Matched))))
+		return "", false
+	}
+	if view.Wait.ElapsedMS < 1000 {
+		p.reporter.fail("wait_for", "elapsed_below_window",
+			field("ms", strconv.FormatInt(view.Wait.ElapsedMS, 10)))
+		return "", false
+	}
+	observation := view.Observation
+	if observation == nil || !validReference(observation.ID, 'O') {
+		p.reporter.fail("wait_for", "observation_missing")
+		return "", false
+	}
+	quality := observation.Quality
+	if quality == nil || quality.State != qualityUnknown ||
+		quality.Samples != 0 || quality.StopReason != qualityStopNotSampled {
+		p.reporter.fail("wait_for", "quality_unexpected",
+			field("state", qualityStateOf(quality)))
+		return "", false
+	}
+	p.reporter.pass("wait_for",
+		field("trigger", view.Wait.Trigger),
+		field("matched", strconv.Itoa(len(view.Wait.Matched))),
+		field("ms", strconv.FormatInt(view.Wait.ElapsedMS, 10)),
+		field("id", observation.ID), field("status", observation.Status),
+		field("quality", quality.State+"/"+quality.StopReason))
+	return observation.ID, true
+}
+
+// qualityStateOf keeps a nil quality distinguishable in a failure field.
+func qualityStateOf(quality *qualityView) string {
+	if quality == nil {
+		return "missing"
+	}
+	return quality.State
+}
+
 func (p *probe) inspectCheck(ctx context.Context, observationID string) bool {
 	projected, failure := p.call(ctx, "inspect", map[string]any{"observation_id": observationID})
 	if failure != nil {

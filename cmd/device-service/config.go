@@ -38,6 +38,11 @@ type Config struct {
 	ReleaseVersion string `json:"release_version"`
 }
 
+// maxADBTimeoutSeconds is the hard upper bound of the private per-command ADB
+// timeout. It is the budget invariant of every synchronous acquisition, not a
+// tuning knob: see the wait/tool budget chain in the interface documentation.
+const maxADBTimeoutSeconds = 15
+
 func loadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -70,6 +75,12 @@ func loadConfig(path string) (*Config, error) {
 	}
 	if cfg.ADB.TimeoutSeconds <= 0 {
 		cfg.ADB.TimeoutSeconds = 8
+	}
+	// The single hierarchy-dump ceiling is the floor of every acquisition. A
+	// larger per-command ADB timeout would silently raise that floor and push
+	// the worst-case synchronous tool result past the fixed 90s HTTP window.
+	if cfg.ADB.TimeoutSeconds > maxADBTimeoutSeconds {
+		return nil, fmt.Errorf("adb timeout_seconds must not exceed %d", maxADBTimeoutSeconds)
 	}
 	if cfg.Tokens.Agent == "" || cfg.Tokens.Control == "" {
 		return nil, errors.New("both agent and control tokens are required")

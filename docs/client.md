@@ -19,7 +19,7 @@ instance, err := c.Discover(ctx)
 `POST /api/status {}` 取得当前准入事实（`can_start`、`blocking_code`、本 Agent 的
 `session`、`start_operation_id` 与 `cleanup`）。它不生成 P、不续租、不创建会话。
 
-当前共同契约为 `"11"`。契约版本不等时返回 `contract_mismatch`；客户端不刷新版本、不重发
+当前共同契约为 `"12"`。契约版本不等时返回 `contract_mismatch`；客户端不刷新版本、不重发
 业务动作。端口可应答、`/health` 正常都不等于 `can_start=true`。
 
 ## 2. 操作编号 P
@@ -28,7 +28,7 @@ instance, err := c.Discover(ctx)
 
 | 工具 | P |
 | --- | --- |
-| `start`、`observe`、`act`、`keepalive`、`end`、`app`、`notify`、`shell` | 生成并放在 `X-Mobile-Use-Operation` |
+| `start`、`observe`、`wait_for`、`act`、`keepalive`、`end`、`app`、`notify`、`shell` | 生成并放在 `X-Mobile-Use-Operation` |
 | `status`、`inspect`、`diagnose` | 不生成、不发送该头 |
 
 - 默认 P 形状为 `P` + 24 位小写十六进制；调用方可用 `client.WithOperationID` 指定一个
@@ -58,8 +58,8 @@ type Response struct {
 ```
 
 `Result` 与服务 HTTP 结果同形：`outcome`、`phase`、`session`、`observation`、`inspection`、
-`app`、`shell`、`notification`、`diagnosis`、`cleanup`、`error`、`recovery` 等字段只在本次
-确有该事实时出现；`recovery` 缺失表示本次结果没有待恢复事实。客户端不改写主事实：
+`app`、`shell`、`wait`、`notification`、`diagnosis`、`cleanup`、`error`、`recovery` 等字段
+只在本次确有该事实时出现；`recovery` 缺失表示本次结果没有待恢复事实。客户端不改写主事实：
 `observation.status=failed` 的 503 仍是带 `Result` 的正常响应，不降成无归属异常。
 
 `effect` 与 `observation.quality` 也来自同一份 `Result`：客户端用 `internal/protocol` 的
@@ -79,6 +79,7 @@ type Response struct {
 | `Start` | 无 | 是 |
 | `Status` | `reference`（空串表示无引用） | 否 |
 | `Observe` | `*protocol.ObserveRequest` | 是 |
+| `WaitFor` | `*protocol.WaitForRequest` | 是 |
 | `Act` | `*protocol.ActRequest` | 是 |
 | `End` | `reference` | 是 |
 | `Inspect` | `*protocol.InspectRequest` | 否 |
@@ -92,6 +93,21 @@ type Response struct {
 请求体由 `internal/protocol` 的 `Encode` 生成，只包含该工具声明的成员；未知字段、类型
 混用与显式 `null` 不会被客户端补成默认值。客户端每条逻辑调用最多发出一次 HTTP 请求
 （`Discover` 固定两次只读请求），不排队、不重试、不跟随重定向。
+
+`Client.WaitFor(ctx, *protocol.WaitForRequest, ...Option)` 只发一次 `POST /api/wait_for`，
+不轮询、不重试。请求编码只写 `reference`、`timeout`、调用方给出的 `query`/`absent_query`
+与 `stable`/`full`/`image`：两个条件只在对应的 `Has` 标记为真时出现，省略不会被补成空串；
+三个布尔成员总是按值编码。编码前只拒绝空 `reference` 与 1–40 之外的 `timeout`；
+`stable=true` 时少于 2 秒、条件为空或全空白、超长以及两个条件字面相同等组合由服务端与
+MCP 适配器的严格解码拒绝；两个条件折叠后相同则是引擎准入判定的矛盾，请求已经发出但尚未
+接触设备。
+响应由 `internal/protocol` 的响应解码器直接读成 `Result`：`wait` 出现时 `trigger` 与
+`elapsed_ms` 必填；`matched` 可以整个缺失（表示最终发布帧上没有可判定的单帧条件），显式
+`null` 或空列表都不是合法编码，条目只接受 `query`/`absent_query`/`timeout`。未知
+`trigger` 枚举值、非法的 `matched` 形态或负 `elapsed_ms` 按 `invalid_response` 拒绝；
+响应对象对未知成员向前兼容，多出成员不构成拒绝理由。客户端不重算 `trigger`、不补
+`matched`，也不把 `stable` 写进该列表。一次等待的实际耗时可达 `timeout` 加 35 秒的验证
+采集预留，仍由 `defaultTimeout=90s` 覆盖；该全局默认值不因本方法改变。
 
 `Act` 仍接收 `*protocol.ActRequest`，编码器只写所选分支的成员：`scroll` 的
 `container`/`direction`/`amount` 与 `swipe` 的 `from`/`to`/`duration_ms` 互斥，缺成员、

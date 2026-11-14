@@ -48,6 +48,25 @@ func TestStrictAdmission(t *testing.T) {
 		{"act unknown op", `{"observation_id":"O1","operation":{"type":"hover"}}`, false},
 		{"act unknown member", `{"observation_id":"O1","operation":{"type":"tap","target":{"ref":"n1"},"duration":10}}`, false},
 		{"act image null", `{"observation_id":"O1","operation":{"type":"tap","target":{"ref":"n1"}},"image":null}`, false},
+		{"wait_for ok sleep", `{"reference":"O1","timeout":1}`, true},
+		{"wait_for ok conditions", `{"reference":"O1","query":"加载","absent_query":"错误","timeout":40,"stable":true,"full":true,"image":true}`, true},
+		{"wait_for missing timeout", `{"reference":"O1"}`, false},
+		{"wait_for null timeout", `{"reference":"O1","timeout":null}`, false},
+		{"wait_for timeout zero", `{"reference":"O1","timeout":0}`, false},
+		{"wait_for timeout over", `{"reference":"O1","timeout":41}`, false},
+		{"wait_for timeout float", `{"reference":"O1","timeout":1.5}`, false},
+		{"wait_for missing reference", `{"timeout":5}`, false},
+		{"wait_for null reference", `{"reference":null,"timeout":5}`, false},
+		{"wait_for stable short", `{"reference":"O1","timeout":1,"stable":true}`, false},
+		{"wait_for null query", `{"reference":"O1","timeout":5,"query":null}`, false},
+		{"wait_for blank query", `{"reference":"O1","timeout":5,"query":"   "}`, false},
+		{"wait_for blank absent", `{"reference":"O1","timeout":5,"absent_query":""}`, false},
+		{"wait_for same condition", `{"reference":"O1","timeout":5,"query":"加载","absent_query":"加载"}`, false},
+		{"wait_for null stable", `{"reference":"O1","timeout":5,"stable":null}`, false},
+		{"wait_for unknown member", `{"reference":"O1","timeout":5,"wait_ms":10}`, false},
+		{"wait_for duplicate member", `{"reference":"O1","timeout":5,"timeout":6}`, false},
+		{"wait_for case variant", `{"Reference":"O1","timeout":5}`, false},
+		{"wait_for trailing value", `{"reference":"O1","timeout":5} {}`, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -61,6 +80,8 @@ func TestStrictAdmission(t *testing.T) {
 				_, err = DecodeObserve([]byte(tc.body))
 			case strings.HasPrefix(tc.name, "end"):
 				_, err = DecodeEnd([]byte(tc.body))
+			case strings.HasPrefix(tc.name, "wait_for"):
+				_, err = DecodeWaitFor([]byte(tc.body))
 			default:
 				_, err = DecodeAct([]byte(tc.body))
 			}
@@ -354,7 +375,6 @@ func TestDecodeActBranchMutex(t *testing.T) {
 	}
 }
 
-
 func marshal(t *testing.T, v any) []byte {
 	t.Helper()
 	data, err := json.Marshal(v)
@@ -515,6 +535,62 @@ func TestObservationEncoding(t *testing.T) {
 }
 
 func intptr(v int) *int { return &v }
+
+// TestWaitForEncodeRoundTrip pins the canonical wire form of one condition wait:
+// an omitted condition is an absent member, a long Unicode timeout is rejected
+// past the documented bound, and the result fact keeps its member order and its
+// never-null matched list.
+func TestWaitForEncodeRoundTrip(t *testing.T) {
+	request := &WaitForRequest{
+		Reference: "O1", Query: "加载", HasQuery: true, Timeout: 15,
+	}
+	body, err := request.Encode()
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	want := `{"reference":"O1","query":"加载","timeout":15,"stable":false,"full":false,"image":false}`
+	if string(body) != want {
+		t.Fatalf("encode = %s, want %s", body, want)
+	}
+	decoded, apiErr := DecodeWaitFor(body)
+	if apiErr != nil {
+		t.Fatalf("decode: %v", apiErr)
+	}
+	if *decoded != *request {
+		t.Fatalf("round trip = %+v, want %+v", decoded, request)
+	}
+
+	long := strings.Repeat("测", MaxQueryRunes+1)
+	if _, apiErr := DecodeWaitFor([]byte(`{"reference":"O1","timeout":5,"query":"` + long + `"}`)); apiErr == nil {
+		t.Fatal("an over-long condition was admitted")
+	}
+
+	for _, raw := range []string{
+		`{"wait":{"trigger":"query","matched":["query","timeout"],"elapsed_ms":1200}}`,
+		`{"wait":{"trigger":"stable","elapsed_ms":0}}`,
+	} {
+		var result Result
+		if err := json.Unmarshal([]byte(raw), &result); err != nil {
+			t.Fatalf("decode %s: %v", raw, err)
+		}
+		if result.Wait == nil || result.Wait.Trigger == "" {
+			t.Fatalf("decoded wait is empty: %+v", result.Wait)
+		}
+	}
+	for _, raw := range []string{
+		`{"wait":{"trigger":"poll","elapsed_ms":1}}`,
+		`{"wait":{"trigger":"query","matched":null,"elapsed_ms":1}}`,
+		`{"wait":{"trigger":"query","matched":[],"elapsed_ms":1}}`,
+		`{"wait":{"trigger":"query","matched":["stable"],"elapsed_ms":1}}`,
+		`{"wait":{"trigger":"query","elapsed_ms":-1}}`,
+		`{"wait":{"trigger":"query"}}`,
+	} {
+		var result Result
+		if err := json.Unmarshal([]byte(raw), &result); err == nil {
+			t.Fatalf("admitted invalid wait result %s", raw)
+		}
+	}
+}
 
 func TestEmptyDeltaDecode(t *testing.T) {
 	var d Delta

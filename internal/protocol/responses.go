@@ -165,6 +165,12 @@ const (
 	QualityStopBudget     = "budget"
 	QualityStopUnreadable = "unreadable"
 	QualityStopNotSampled = "not_sampled"
+	// QualityStopCondition and QualityStopTimeout close the vocabulary for a
+	// condition wait: the published frame satisfied a literal condition, or the
+	// wait ran out of its own deadline. They are reasons of the same quality
+	// object and never contradict its state.
+	QualityStopCondition = "condition"
+	QualityStopTimeout   = "timeout"
 )
 
 // Quality is the settle quality of one published observation. All three members
@@ -199,6 +205,66 @@ func (q *Quality) MarshalJSONTo(enc *jsontext.Encoder) error {
 		return err
 	}
 	if err := writeString(enc, q.StopReason); err != nil {
+		return err
+	}
+	return enc.WriteToken(jsontext.EndObject)
+}
+
+// Wait trigger and matched values are a closed vocabulary. A trigger states
+// which wait branch stopped the waiting phase; a matched entry states which
+// single-frame condition actually holds on the published frame.
+const (
+	WaitTriggerQuery       = "query"
+	WaitTriggerAbsentQuery = "absent_query"
+	WaitTriggerStable      = "stable"
+	WaitTriggerTimeout     = "timeout"
+)
+
+// WaitResult is the bounded outcome fact of one condition wait. Trigger is
+// frozen before the verification acquisition; Matched lists only the
+// single-frame conditions that hold on the published frame and is omitted when
+// empty; ElapsedMS measures admission through publication.
+type WaitResult struct {
+	Trigger   string
+	Matched   []string
+	ElapsedMS int64
+}
+
+// MarshalJSONTo writes the wait object in its fixed member order. matched is
+// never null: it is either absent or a non-empty array.
+func (w *WaitResult) MarshalJSONTo(enc *jsontext.Encoder) error {
+	if w == nil {
+		return writeNull(enc)
+	}
+	if err := enc.WriteToken(jsontext.BeginObject); err != nil {
+		return err
+	}
+	if err := writeName(enc, "trigger"); err != nil {
+		return err
+	}
+	if err := writeString(enc, w.Trigger); err != nil {
+		return err
+	}
+	if len(w.Matched) > 0 {
+		if err := writeName(enc, "matched"); err != nil {
+			return err
+		}
+		if err := enc.WriteToken(jsontext.BeginArray); err != nil {
+			return err
+		}
+		for _, item := range w.Matched {
+			if err := writeString(enc, item); err != nil {
+				return err
+			}
+		}
+		if err := enc.WriteToken(jsontext.EndArray); err != nil {
+			return err
+		}
+	}
+	if err := writeName(enc, "elapsed_ms"); err != nil {
+		return err
+	}
+	if err := writeInt64(enc, w.ElapsedMS); err != nil {
 		return err
 	}
 	return enc.WriteToken(jsontext.EndObject)
@@ -588,15 +654,18 @@ func (r *Recovery) MarshalJSONTo(enc *jsontext.Encoder) error {
 
 // Result is the operation/tool report. Only fields known for this call appear.
 type Result struct {
-	OperationID         string
-	OperationState      string
-	Outcome             string
-	Phase               string
-	Effect              *Effect
-	Observation         *Observation
-	Inspection          *InspectionView
-	App                 *AppView
-	Shell               *ShellView
+	OperationID    string
+	OperationState string
+	Outcome        string
+	Phase          string
+	Effect         *Effect
+	Observation    *Observation
+	Inspection     *InspectionView
+	App            *AppView
+	Shell          *ShellView
+	// Wait is the bounded outcome fact of a condition wait. It is published for
+	// the tool that owns this kind only, between shell and notification.
+	Wait                *WaitResult
 	Notification        *NotificationView
 	Diagnosis           *DiagnosisView
 	Session             *Session
@@ -778,6 +847,14 @@ func (r *Result) MarshalJSONTo(enc *jsontext.Encoder) error {
 			return err
 		}
 		if err := MarshalJSONTo(enc, r.Shell); err != nil {
+			return err
+		}
+	}
+	if r.Wait != nil {
+		if err := writeName(enc, "wait"); err != nil {
+			return err
+		}
+		if err := MarshalJSONTo(enc, r.Wait); err != nil {
 			return err
 		}
 	}

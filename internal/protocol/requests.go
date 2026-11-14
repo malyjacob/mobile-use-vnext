@@ -4,6 +4,7 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -14,6 +15,16 @@ const (
 	MaxCommandRunes = 4096
 	MaxWaitMS       = 10000
 	MaxReferenceLen = 64
+
+	// Wait timeout bounds in seconds. The upper bound keeps one synchronous
+	// wait inside the fixed 90s HTTP ceiling once the bounded verification
+	// acquisition of phase C is added; the lower bound is the shortest useful
+	// wait and is raised to 2s when a three-frame stability gate is required.
+	MinWaitTimeoutSeconds = 1
+	MaxWaitTimeoutSeconds = 40
+	// MinStableWaitTimeoutSeconds is the shortest timeout that can contain the
+	// fixed three-frame stability gate.
+	MinStableWaitTimeoutSeconds = 2
 )
 
 // StartRequest is start(); the object must be empty.
@@ -31,6 +42,22 @@ type ObserveRequest struct {
 	Full      bool
 	Image     bool
 	WaitMS    int
+}
+
+// WaitForRequest is wait_for(reference, query, absent_query, timeout, stable,
+// full, image). query and absent_query are the optional literal conditions, and
+// the two Has flags record whether the caller supplied them at all so an
+// omitted condition is distinguishable from an empty one.
+type WaitForRequest struct {
+	Reference      string
+	Query          string
+	HasQuery       bool
+	AbsentQuery    string
+	HasAbsentQuery bool
+	Timeout        int
+	Stable         bool
+	Full           bool
+	Image          bool
 }
 
 // EndRequest is end(reference).
@@ -174,6 +201,95 @@ func DecodeObserve(body []byte) (*ObserveRequest, *APIError) {
 	}
 	return &ObserveRequest{Reference: wire.Reference, Full: wire.Full,
 		Image: wire.Image, WaitMS: wire.WaitMS}, nil
+}
+
+// DecodeWaitFor admits wait_for(reference, query, absent_query, timeout, stable,
+// full, image). timeout is the only required member besides reference; every
+// other condition is optional and an omitted condition is not the same as an
+// empty one.
+func DecodeWaitFor(body []byte) (*WaitForRequest, *APIError) {
+	var presence struct {
+		Reference   jsontext.Value `json:"reference"`
+		Query       jsontext.Value `json:"query"`
+		AbsentQuery jsontext.Value `json:"absent_query"`
+		Timeout     jsontext.Value `json:"timeout"`
+		Stable      jsontext.Value `json:"stable"`
+		Full        jsontext.Value `json:"full"`
+		Image       jsontext.Value `json:"image"`
+	}
+	var wire struct {
+		Reference   string `json:"reference"`
+		Query       string `json:"query"`
+		AbsentQuery string `json:"absent_query"`
+		Timeout     int    `json:"timeout"`
+		Stable      bool   `json:"stable"`
+		Full        bool   `json:"full"`
+		Image       bool   `json:"image"`
+	}
+	if err := decodeStrict(body, &presence, &wire); err != nil {
+		return nil, invalidDecode(err)
+	}
+	if len(presence.Reference) == 0 {
+		return nil, Invalid("wait_for 需要 reference 参数")
+	}
+	if string(presence.Reference) == "null" {
+		return nil, Invalid("reference 不接受 null")
+	}
+	if len(presence.Timeout) == 0 {
+		return nil, Invalid("wait_for 需要 timeout 参数")
+	}
+	if string(presence.Timeout) == "null" {
+		return nil, Invalid("timeout 不接受 null")
+	}
+	if err := checkNulls(map[string]jsontext.Value{
+		"query": presence.Query, "absent_query": presence.AbsentQuery,
+		"stable": presence.Stable, "full": presence.Full, "image": presence.Image,
+	}); err != nil {
+		return nil, err
+	}
+	if err := checkReference(wire.Reference); err != nil {
+		return nil, err
+	}
+	if wire.Timeout < MinWaitTimeoutSeconds || wire.Timeout > MaxWaitTimeoutSeconds {
+		return nil, Invalid("timeout 超出允许范围").WithDetail("limit_s", MaxWaitTimeoutSeconds)
+	}
+	req := &WaitForRequest{
+		Reference: wire.Reference, Timeout: wire.Timeout,
+		Stable: wire.Stable, Full: wire.Full, Image: wire.Image,
+	}
+	if len(presence.Query) > 0 {
+		if apiErr := checkWaitQuery("query", wire.Query); apiErr != nil {
+			return nil, apiErr
+		}
+		req.Query, req.HasQuery = wire.Query, true
+	}
+	if len(presence.AbsentQuery) > 0 {
+		if apiErr := checkWaitQuery("absent_query", wire.AbsentQuery); apiErr != nil {
+			return nil, apiErr
+		}
+		req.AbsentQuery, req.HasAbsentQuery = wire.AbsentQuery, true
+	}
+	if req.Stable && req.Timeout < MinStableWaitTimeoutSeconds {
+		return nil, Invalid("stable=true 时 timeout 不能小于 2 秒").
+			WithDetail("limit_s", MinStableWaitTimeoutSeconds)
+	}
+	if req.HasQuery && req.HasAbsentQuery && req.Query == req.AbsentQuery {
+		return nil, Invalid("query 与 absent_query 不能相同")
+	}
+	return req, nil
+}
+
+// checkWaitQuery admits one literal condition. It is deliberately stricter than
+// the read-only inspection query: an all-whitespace condition can never be a
+// meaningful wait and is rejected before any device work.
+func checkWaitQuery(name, value string) *APIError {
+	if utf8.RuneCountInString(value) > MaxQueryRunes {
+		return Invalid(name+" 超过长度上限").WithDetail("limit", MaxQueryRunes)
+	}
+	if strings.TrimSpace(value) == "" {
+		return Invalid(name + " 不能为空或全空白")
+	}
+	return nil
 }
 
 // DecodeEnd admits end(reference).

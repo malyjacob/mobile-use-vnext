@@ -85,6 +85,69 @@ func (r *ObserveRequest) Encode() ([]byte, error) {
 	})
 }
 
+// Encode writes the canonical wait_for(reference, query, absent_query, timeout,
+// stable, full, image) body. Omitted conditions are simply absent members.
+func (r *WaitForRequest) Encode() ([]byte, error) {
+	if r.Reference == "" {
+		return nil, errors.New("wait_for requires a reference")
+	}
+	if r.Timeout < MinWaitTimeoutSeconds || r.Timeout > MaxWaitTimeoutSeconds {
+		return nil, errors.New("wait_for timeout is out of range")
+	}
+	return encodeRequest(func(enc *jsontext.Encoder) error {
+		if err := enc.WriteToken(jsontext.BeginObject); err != nil {
+			return err
+		}
+		if err := writeName(enc, "reference"); err != nil {
+			return err
+		}
+		if err := writeString(enc, r.Reference); err != nil {
+			return err
+		}
+		if r.HasQuery {
+			if err := writeName(enc, "query"); err != nil {
+				return err
+			}
+			if err := writeString(enc, r.Query); err != nil {
+				return err
+			}
+		}
+		if r.HasAbsentQuery {
+			if err := writeName(enc, "absent_query"); err != nil {
+				return err
+			}
+			if err := writeString(enc, r.AbsentQuery); err != nil {
+				return err
+			}
+		}
+		if err := writeName(enc, "timeout"); err != nil {
+			return err
+		}
+		if err := writeInt(enc, r.Timeout); err != nil {
+			return err
+		}
+		if err := writeName(enc, "stable"); err != nil {
+			return err
+		}
+		if err := writeBool(enc, r.Stable); err != nil {
+			return err
+		}
+		if err := writeName(enc, "full"); err != nil {
+			return err
+		}
+		if err := writeBool(enc, r.Full); err != nil {
+			return err
+		}
+		if err := writeName(enc, "image"); err != nil {
+			return err
+		}
+		if err := writeBool(enc, r.Image); err != nil {
+			return err
+		}
+		return enc.WriteToken(jsontext.EndObject)
+	})
+}
+
 // Encode writes the canonical end(reference) body.
 func (r *EndRequest) Encode() ([]byte, error) {
 	if r.Reference == "" {

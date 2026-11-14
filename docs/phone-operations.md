@@ -114,6 +114,21 @@ curl.exe -s http://127.0.0.1:18881/health
 `18881` 供主机直连 HTTP；`18883` 供主机 MCP 客户端访问手机适配器。不要再把手机 `18882`
 转发到主机 `18882`，否则会与主机自建 MCP 适配器冲突。
 
+### 3.1 工具目录与联合版本校验
+
+手机侧 MCP 适配器与设备服务共用同一工具目录，固定为 12 个工具：`start`、`status`、
+`observe`、`wait_for`、`act`、`inspect`、`keepalive`、`end`、`app`、`notify`、`shell`、
+`diagnose`。适配器按同一份目录投影 `tools/list`，发布清单与探针按工具目录指纹核对，描述或
+schema 变化都会改变指纹。
+
+服务端、手机 MCP 适配器与控制 App 必须同为 `contract_version=12`，控制 App 还须与清单的
+versionName/versionCode 一致：
+
+- `/health` 的 `contract_version` 与 `release_version` 必须等于清单值；
+- 普通同步与 `/api/*` 的契约头不匹配返回 `409 contract_mismatch`，只有最小 STOP 仍可用；
+- 适配器与服务版本不一致时，工具调用会被服务按 `409 contract_mismatch` 拒绝；升级后必须
+  重启适配器进程，宿主要重新 `tools/list` 才能看到新目录。
+
 ## 4. 启动与恢复
 
 - 本仓库不安装开机自启。设备系统启动后按顺序确认：chroot 可进入、Android 侧 adb 服务可用、
@@ -207,7 +222,7 @@ curl.exe -s http://127.0.0.1:18881/health
 | `shell_pending` | 受管命令未结束或终止未确认 | 屏障最长到 `deadline_at + ShellConfirmTimeout + 3s`（默认约执行预算结束后 8 秒）；到界后以 `termination=unknown` 结案让位，不杀 runner、不删运行目录，且 `cleanup.execution` 保持未确认 |
 | `ledger_corrupt`/`ledger_unavailable` | 账本损坏或不可写 | 检查目录权限/磁盘；损坏账本需人工处置并重新部署，不能带病启动 |
 | `device_unavailable` | Android 侧 adb/u2 不可用 | 检查 `adb -s 127.0.0.1:5555 get-state`、u2 端口与固定制品哈希；重启服务触发 `EnsureU2` |
-| `display_probe_failed` | 当前显示探测失败 | 确认 SurfaceFlinger/`dumpsys display` 与 App 当前 `display`；不要手工关闭用户主屏 |
+| 采集返回 `display_unavailable` | 当前目标显示探测失败 | 确认 SurfaceFlinger/`dumpsys display` 与 App 当前 `display`；不要手工关闭用户主屏 |
 | 控制 App 崩溃或反复重启 | 权限、系统挂起或旧版本缺陷 | 更新到配套 App；`pm unsuspend`；查看 App 诊断日志的受控事件 |
 | 主机 `/health` 不通 | adb 转发失效或服务未启动 | 重建 `adb forward`；`service.sh status`；核对端口 |
 | 主机 `18883/mcp` 不通 | 手机适配器未运行、转发失效或端口冲突 | 看 `device-mcp.log` 与 `pgrep`；重建 `adb forward tcp:18883 tcp:18882` |
@@ -237,7 +252,7 @@ adb shell su -c 'tail -n 100 /data/data/com.mobileuse.vnext/files/diagnostics.lo
    $control = (Get-Content .state/deploy.json -Raw | ConvertFrom-Json).control_token
    Invoke-RestMethod http://127.0.0.1:18881/v1/control/stop -Method Post `
      -Headers @{ Authorization = "Bearer $control" } -ContentType 'application/json' `
-     -Body '{"contract_version":"11","app_instance_id":"<uuid>","stop_seq":1,"reason":"operator_stop"}'
+     -Body '{"contract_version":"12","app_instance_id":"<uuid>","stop_seq":1,"reason":"operator_stop"}'
    ```
 
    `accepted=true` 只表示停止边界已绑定；仍需用 App/`status.cleanup` 核验执行链、任务与

@@ -467,6 +467,25 @@ func (e *Engine) readCapture(ctx context.Context, work *workState, session *sess
 	if err != nil {
 		return device.Capture{}, protocol.NewError(503, protocol.CodeHierarchyFailed, "未能取得节点树")
 	}
+	return e.captureValidated(cap, session)
+}
+
+// readPollCapture reads one frame of the condition-wait poll loop. It is a
+// deliberate sibling of readCapture and applies exactly the same per-capture
+// validation through captureValidated; only the phase naming differs, because a
+// poll sample must not rebroadcast a new work phase on every frame.
+func (e *Engine) readPollCapture(ctx context.Context, session *sessionState) (device.Capture, *protocol.APIError) {
+	cap, err := e.dev.Capture(ctx, session.Display)
+	if err != nil {
+		return device.Capture{}, protocol.NewError(503, protocol.CodeHierarchyFailed, "未能取得节点树")
+	}
+	return e.captureValidated(cap, session)
+}
+
+// captureValidated is the single per-capture validation source of every
+// acquisition path: capture age, target display binding and the control-UI
+// exclusion. It never projects, publishes or waits.
+func (e *Engine) captureValidated(cap device.Capture, session *sessionState) (device.Capture, *protocol.APIError) {
 	now := time.Now()
 	if cap.CapturedAt.IsZero() {
 		cap.CapturedAt = now

@@ -240,11 +240,60 @@ func (q *Quality) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 	}
 	switch stopReason {
 	case QualityStopStable, QualityStopMaxSamples, QualityStopBudget,
-		QualityStopUnreadable, QualityStopNotSampled:
+		QualityStopUnreadable, QualityStopNotSampled,
+		QualityStopCondition, QualityStopTimeout:
 	default:
 		return fmt.Errorf("invalid quality.stop_reason")
 	}
 	*q = Quality{State: state, Samples: samples, StopReason: stopReason}
+	return nil
+}
+
+// UnmarshalJSONFrom decodes the bounded condition-wait outcome. trigger and
+// elapsed_ms are required and enum/number bound; matched is optional, but when
+// present it must be a non-empty array of closed-vocabulary entries, so an
+// explicit null or an empty list is rejected instead of being folded into
+// "no match".
+func (w *WaitResult) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	var wire struct {
+		Trigger   member[string]           `json:"trigger"`
+		Matched   nullableMember[[]string] `json:"matched"`
+		ElapsedMS member[int64]            `json:"elapsed_ms"`
+	}
+	if err := readObject(dec, "wait", &wire); err != nil {
+		return err
+	}
+	trigger, err := requireResponseMember(wire.Trigger, "wait.trigger")
+	if err != nil {
+		return err
+	}
+	switch trigger {
+	case WaitTriggerQuery, WaitTriggerAbsentQuery, WaitTriggerStable, WaitTriggerTimeout:
+	default:
+		return fmt.Errorf("invalid wait.trigger")
+	}
+	elapsed, err := requireResponseMember(wire.ElapsedMS, "wait.elapsed_ms")
+	if err != nil {
+		return err
+	}
+	if elapsed < 0 {
+		return fmt.Errorf("wait.elapsed_ms must not be negative")
+	}
+	var matched []string
+	if wire.Matched.Present {
+		if len(wire.Matched.Value) == 0 {
+			return fmt.Errorf("wait.matched must be a non-empty array when present")
+		}
+		matched = append(matched, wire.Matched.Value...)
+		for _, item := range matched {
+			switch item {
+			case WaitTriggerQuery, WaitTriggerAbsentQuery, WaitTriggerTimeout:
+			default:
+				return fmt.Errorf("invalid wait.matched entry")
+			}
+		}
+	}
+	*w = WaitResult{Trigger: trigger, Matched: matched, ElapsedMS: elapsed}
 	return nil
 }
 
@@ -404,6 +453,7 @@ func (r *Result) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 		Inspection          *InspectionView          `json:"inspection"`
 		App                 *AppView                 `json:"app"`
 		Shell               *ShellView               `json:"shell"`
+		Wait                *WaitResult              `json:"wait"`
 		Notification        *NotificationView        `json:"notification"`
 		Diagnosis           *DiagnosisView           `json:"diagnosis"`
 		Cleanup             *Cleanup                 `json:"cleanup"`
@@ -435,6 +485,7 @@ func (r *Result) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 		Inspection:          wire.Inspection,
 		App:                 wire.App,
 		Shell:               wire.Shell,
+		Wait:                wire.Wait,
 		Notification:        wire.Notification,
 		Diagnosis:           wire.Diagnosis,
 		Cleanup:             wire.Cleanup,

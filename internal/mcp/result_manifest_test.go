@@ -86,6 +86,7 @@ var rmfCompositeInventory = map[string]string{
 	"Error":           "Code Message Details",
 	"Quality":         "State Samples StopReason",
 	"Effect":          "State",
+	"WaitResult":      "Trigger Matched ElapsedMS",
 }
 
 func TestResultFieldManifest(t *testing.T) {
@@ -760,6 +761,11 @@ func rmfResultFixtures() []rmfFixture {
 			InputState:          "effective",
 			MessageID:           "M1",
 			Saved:               rmfPtr(false),
+			Wait: &protocol.WaitResult{
+				Trigger:   protocol.WaitTriggerQuery,
+				Matched:   []string{protocol.WaitTriggerQuery},
+				ElapsedMS: 1500,
+			},
 			Session: &protocol.Session{
 				Origin:    "P1",
 				State:     "active",

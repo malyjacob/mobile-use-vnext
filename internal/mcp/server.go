@@ -457,7 +457,7 @@ func (e *execution) isError(tool string) bool {
 	switch tool {
 	case "status", "diagnose":
 		return result == nil || result.Error != nil
-	case "observe":
+	case "observe", "wait_for":
 		return result == nil || result.Observation == nil || result.Observation.ID == ""
 	case "act":
 		return result == nil || result.Outcome != "executed"
@@ -562,6 +562,24 @@ func prepareCall(service *client.Client, definition toolDefinition, body []byte)
 				Full:      request.Full,
 				Image:     request.Image,
 				WaitMS:    request.WaitMS,
+			}, client.WithOperationID(operationID))
+		}
+	case "wait_for":
+		request, apiErr := protocol.DecodeWaitFor(body)
+		if apiErr != nil {
+			return nil, apiErr
+		}
+		call.run = func(ctx context.Context, operationID string) (*client.Response, error) {
+			return service.WaitFor(ctx, &protocol.WaitForRequest{
+				Reference:      request.Reference,
+				Query:          request.Query,
+				HasQuery:       request.HasQuery,
+				AbsentQuery:    request.AbsentQuery,
+				HasAbsentQuery: request.HasAbsentQuery,
+				Timeout:        request.Timeout,
+				Stable:         request.Stable,
+				Full:           request.Full,
+				Image:          request.Image,
 			}, client.WithOperationID(operationID))
 		}
 	case "act":

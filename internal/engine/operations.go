@@ -269,11 +269,100 @@ func (e *Engine) acquireWork(op *operationState, kind string) (*workState, *prot
 
 func (e *Engine) setWorkPhase(work *workState, phase string) {
 	e.mu.Lock()
-	if e.work == work {
+	if e.work == work && work.Phase != phase {
 		work.Phase = phase
 		e.broadcastAppLocked()
 	}
 	e.mu.Unlock()
+}
+
+// setOperationWait saves the bounded condition-wait outcome of one operation.
+// The write is conditional: a finished or frozen operation never accepts a
+// later value, so a late phase-C result can never rewrite a closed P.
+func (e *Engine) setOperationWait(op *operationState, wait *protocol.WaitResult) bool {
+	if op == nil || wait == nil {
+		return false
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if op.State != OperationRunning {
+		return false
+	}
+	saved := *wait
+	if len(wait.Matched) > 0 {
+		saved.Matched = append([]string(nil), wait.Matched...)
+	}
+	op.Wait = &saved
+	return true
+}
+
+// acquireWaitWork takes the single ordinary device work position for one
+// condition wait. Reference resolution, the expired-session refusal, the
+// ordinary barrier, the work conflict, the work record and the lease renewal
+// all happen in one bounded critical section, so a wait can never be admitted
+// into an already expired session and then killed halfway through its own
+// window. The work context inherits the caller's request context, so a client
+// disconnect or an MCP cancellation releases the position immediately. The
+// second result is the force-full decision of the resolved reference.
+func (e *Engine) acquireWaitWork(op *operationState, agent, reference string,
+	parent context.Context, timeout time.Duration) (*workState, bool, *protocol.APIError) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	now := time.Now()
+	e.detachRetiredLocked(now)
+	if e.shuttingDown {
+		return nil, false, protocol.NewError(503, protocol.CodeDeviceUnavailable, "服务正在退出")
+	}
+	target, resolveErr := e.resolveObserveTargetLocked(agent, reference)
+	if resolveErr != nil {
+		return nil, false, resolveErr
+	}
+	// A condition wait never revives a lease it found already expired. This is
+	// the explicit difference from observe, which lets the work authorization
+	// check report control_revoked instead.
+	if !sessionBeforeDeadline(target.session, now) {
+		return nil, false, protocol.NewError(409, protocol.CodeSessionExpired, "原会话已过期")
+	}
+	if barrier := e.ordinaryBarrierLocked(op, now); barrier != nil {
+		return nil, false, barrier
+	}
+	if e.work != nil {
+		var blocking string
+		if e.work.Agent == op.Agent {
+			blocking = e.work.OperationID
+		}
+		return nil, false, &protocol.APIError{
+			Code: protocol.CodeDeviceBusy, Message: "设备工作尚未完成",
+			HTTPStatus: 409, Outcome: OutcomeNotExecuted,
+			Details: map[string]any{"blocking_operation_id": blocking},
+		}
+	}
+	workTimeout := timeout + waitWorkReserve
+	if e.maintenanceCancel != nil {
+		e.maintenanceCancel()
+	}
+	ctx, cancel := context.WithTimeout(parent, workTimeout)
+	work := &workState{
+		OperationID: op.ID, Agent: op.Agent, Kind: WorkWaitFor, Phase: "admitted",
+		Start: now, Deadline: now.Add(workTimeout), Ctx: ctx, Cancel: cancel,
+		Projector: e.projector, SessionEpoch: target.session.Epoch,
+	}
+	if e.projectorFactory != nil && target.session.State != SessionEnded &&
+		target.session.Projector != nil {
+		work.Projector = target.session.Projector
+	}
+	e.work = work
+	// A successful wait(O) reads one still-usable full candidate, so it is the
+	// same reading acknowledgement observe performs after admission.
+	if target.obs != nil && target.obs == e.current &&
+		target.obs.Full && target.obs.Status == ObservationReady {
+		e.confirmBaselineLocked(target.obs)
+	}
+	e.extendSessionLocked(now, e.cfg.SessionTTL)
+	e.broadcastAppLocked()
+	// A P reference reads a new tree from scratch, so the target carries the
+	// same force-full decision observe already honours.
+	return work, target.forceFull, nil
 }
 
 func (e *Engine) releaseWork(work *workState) {

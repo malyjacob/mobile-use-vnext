@@ -37,6 +37,10 @@ var resultFields = func() map[string]resultFieldKind {
 	add("effect.", "state", fieldToken)
 	add("", "session cleanup error recovery observation app notification diagnosis", fieldObject)
 	add("", "inspection shell", fieldBlock)
+	add("", "wait", fieldObject)
+	add("wait.", "trigger", fieldToken)
+	add("wait.", "matched", fieldJSON)
+	add("wait.", "elapsed_ms", fieldLiteral)
 	add("session.", "origin state mode started_at expires_at ended_at reason", fieldToken)
 	add("session.", "agent", fieldString)
 	add("cleanup.", "state execution tasks recents display", fieldToken)
@@ -371,6 +375,19 @@ func encodeResultDiagnostic(raw []byte) (string, error) {
 			for _, v := range parts {
 				if v.name == "status" || v.name == "id" {
 					_ = w.member("observation."+v.name, "/observation/"+v.name, v.value, parts)
+				}
+			}
+		case "wait":
+			// A failed verification acquisition still knows which wait branch
+			// stopped waiting and how long it took; a match list would claim a
+			// frame that was never published, so it is never carried here.
+			parts, err := resultMembers(m.value)
+			if err != nil {
+				continue
+			}
+			for _, v := range parts {
+				if v.name == "trigger" || v.name == "elapsed_ms" {
+					_ = w.member("wait."+v.name, "/wait/"+v.name, v.value, parts)
 				}
 			}
 		default:

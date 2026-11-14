@@ -170,6 +170,13 @@ func resultModeFixtures() []resultModeFixture {
 	add("observe", "missing", `{"observation":{"status":"partial","id":"O1","missing":["image"],"image":{"error":{"code":"image_unavailable","message":"缺图"}}}}`)
 	add("observe", "read_only_image", `{"observation":{"status":"failed","image":{"read_only":true,"width":2,"height":3,"media_type":"image/jpeg","base64":"secret"}}}`)
 	add("observe", "empty", `{}`)
+	// Condition wait: a timed-out wait still publishes a frame and stays a
+	// success; a condition hit carries both the frozen trigger and the matched
+	// subset; a failed verification acquisition keeps the trigger and elapsed
+	// time but never a match list.
+	add("wait_for", "timeout", `{"operation_id":"P1","phase":"finished","observation":{"status":"complete","id":"O2","quality":{"state":"unknown","samples":0,"stop_reason":"not_sampled"}},"wait":{"trigger":"timeout","matched":["timeout"],"elapsed_ms":1200}}`)
+	add("wait_for", "condition_stable", `{"operation_id":"P1","phase":"finished","observation":{"status":"complete","id":"O3","quality":{"state":"stable","samples":3,"stop_reason":"stable"}},"wait":{"trigger":"query","elapsed_ms":2400}}`)
+	add("wait_for", "failed", `{"operation_id":"P1","phase":"failed","observation":{"status":"failed","missing":["tree"],"error":{"code":"hierarchy_unavailable","message":"读取失败"}},"wait":{"trigger":"absent_query","elapsed_ms":3000},"error":{"code":"hierarchy_unavailable","message":"读取失败"},"recovery":{"entry":"observe","reference":"P"}}`)
 	for _, outcome := range []string{"executed", "not_executed", "uncertain"} {
 		add("act", outcome, `{"operation_id":"P1","outcome":"`+outcome+`","error":{"code":"target_changed","message":"目标变化"},"recovery":{"entry":"observe","reference":"P"}}`)
 	}
@@ -340,10 +347,10 @@ func TestHTTPModesSelectProjectionPerCall(t *testing.T) {
 }
 
 func TestCatalogFingerprintBaseline(t *testing.T) {
-	// The catalog still has eleven tools. Contract 11 replaces the public
-	// reading representation and therefore the shared tree text legend;
+	// The catalog has twelve tools. Contract 12 adds the orthogonal condition
+	// wait and extends the shared quality vocabulary; the tree text legend,
 	// keepalive's optional duration schema and the result modes are unchanged.
-	const baseline = "fcf3ca140bdf5fc84b922f79af64480a488d8c5be6967b1a94b56094771f9d5d"
+	const baseline = "04177607f49d99c84aabd80632c37554989918e6f0454ed882a739d9fa72b1e9"
 	if got := CatalogFingerprint(); got != baseline {
 		t.Fatalf("catalog changed: %s", got)
 	}

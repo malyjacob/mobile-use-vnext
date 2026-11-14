@@ -80,6 +80,10 @@ func run() int {
 		fmt.Fprintf(os.Stderr, "device-service: settle policy rejected: %v\n", err)
 		return 2
 	}
+	if err := engineConfig.Wait.Validate(); err != nil {
+		fmt.Fprintf(os.Stderr, "device-service: wait policy rejected: %v\n", err)
+		return 2
+	}
 	eng := engine.New(engineConfig, logger,
 		deviceAdapter, ledger,
 		&observationProjector{builder: observation.NewBuilder()}, treeDiffer{},

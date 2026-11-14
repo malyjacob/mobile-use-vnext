@@ -18,7 +18,7 @@ cmd/device-service
 
 cmd/device-mcp
   ├─ 私有配置、stdio / Streamable HTTP 传输、认证与 Origin 门禁
-  ├─ internal/mcp        11 工具注册、schema、严格接入、结果与图片投影、取消包装
+  ├─ internal/mcp        12 工具注册、schema、严格接入、结果与图片投影、取消包装
   └─ internal/client     强类型 HTTP 客户端（发送前 P、结构化结果/错误、图片字节）
 ```
 
@@ -72,8 +72,9 @@ engine 的状态锁只做有限内存检查与转换：锁内不等待 ADB、u2 
   上报的显示描述、以及 `dumpsys`/SurfaceFlinger 的显示存在与 SFID 三者一致后才转 `active`。
 - `start` 初始化、激活与首个 full 观察成功发布使用 `StartSessionTTL=5min`：接纳时以
   `started_at + 5min` 初始化，后两个续期点取 `max(expires_at, now + 5min)`。其他普通工作只在
-  既有触发点（`act` 认领、成功发布新 O、`shell` 派发边界）按 `SessionTTL=120s` 取
-  `max(expires_at, now + 120s)`，不继承显式 `keepalive` 时长，也不截短更长的剩余租期。
+  既有触发点（`act` 认领、`wait_for` 准入、成功发布新 O、`shell` 派发边界）按
+  `SessionTTL=120s` 取 `max(expires_at, now + 120s)`，不继承显式 `keepalive` 时长，也不截短
+  更长的剩余租期。
   `status` 查询与其他只读调用不续租。
 - `keepalive` 是显式重设：engine 在同一状态锁内取应用时 `now`，校验原会话仍为当前 `active`
   且 `now < expires_at`，再覆盖为 `expires_at = now + duration_minutes`。时长是 1～120 的整数，
@@ -172,6 +173,35 @@ raw `swipe` 仍是原始手势：起点 `from` 继续走完整内容身份、祖
 `duration_ms`，不承诺滚动语义。`scroll` 不证明真实滚动方向、触摸消费者、业务安全或到达边界；
 设备事实仍只有 `Scrollable bool`，公开 `axis` 没有生产者。
 
+### 条件等待（wait_for）
+
+`wait_for` 是普通工作（`WorkWaitFor`）：先在唯一工作位上等待一个字面条件或整树稳定，再在同一
+工作位内做一次验证采集并发布一个新 `O`。
+
+- 准入在单一状态锁内完成：引用解析、已过期会话拦截（`409 session_expired`，绝不复活）、
+  普通屏障与工作位、工作记录、基线确认与 `SessionTTL=120s` 单调续租。已过期会话不被本次
+  调用续租，也不被推进成 `control_revoked`。
+- 等待期只采样、不发布：每帧读一次目标屏层级并用只读投影计算摘要，不发布、不推进 ref 连续号、
+  不确认基线。采样最小间隔 `MinDwell=600ms`；稳定判据是连续相等帧数达到 `StableFrames=3`，
+  不是累计采样数，因此 3 帧至少跨越 1.2s；`MaxSamples=80` 只计有效可读帧，
+  `ProbeOnFailStreak=3` 决定连续失败后何时重探目标显示，
+  `FrameTimeout=16s` 把单次慢读限成瞬态失败。这些值是服务策略，进程启动时校验，调用方不能设置。
+- 退出分支（`query`、`absent_query`、连续 3 帧稳定、`timeout` 到期、采样上限守卫）在进入
+  验证采集前冻结为 `wait.trigger`；命中优先级为 `query > absent_query`，到时与守卫都记
+  `timeout`。
+- 验证采集先 `ProbeDisplay`，需要图片时先读图；条件命中或稳态退出时复用候选帧、不重采树，
+  只有到时或守卫退出才重读终帧。提交仍走 `publishTreeAttempt` 的会话、工作权、显示代次与
+  采集龄门禁，撤销后不发布迟到候选。
+- `observation.quality` 永远描述最终发布的那一帧：复用候选帧时连稳 3 帧为
+  `stable`/`stable`，否则 `stop_reason=condition`（`samples>=2` 为 `unstable`，`<2` 为
+  `unknown`）；重读终帧时没有有效帧为 `unknown`/`0`/`not_sampled`，有历史帧则把终帧并入
+  同一比较：连稳 3 帧为 `stable`/`stable`，否则 `stop_reason` 为 `timeout` 或
+  `max_samples`。
+- `wait.matched` 只在最终发布帧上判定，只含 `query`、`absent_query`、`timeout`；`stable`
+  由 `observation.quality.state` 表达。空列表时整个成员省略。`wait.elapsed_ms` 计自准入
+  完成到终帧发布。
+- `wait_for` 不认领旧 `O`，只在新 `O` 发布时把上一个 `ready` `O` 置为 `retired`。
+
 ## 4. full/delta 与提交条件
 
 一次采集（`captureAndPublish`）的固定步骤：
@@ -208,6 +238,10 @@ raw `swipe` 仍是原始手势：起点 `from` 继续走完整内容身份、祖
 `projectCapture` 完成）：普通采集与 `act` 重验失败交付的帧共用同一提交门禁。交付路径在
 派发前失败时复用重验已经读取的那一帧，不重新采集、不做收敛采样、不确认基线，只把该帧投影、
 校验并提交为新的 ready O。
+
+`wait_for` 的验证采集直接进入同一 `publishTreeAttempt`，不经过本节的收敛采样：等待期的只读
+采样不发布、不推进基线，命中或稳态退出时复用候选帧，只有到时或采样守卫退出才读终帧；它的
+`observation.quality` 由等待比较得出（见 §3 条件等待）。
 
 公开 delta 相对已确认基线的同一 compact 阅读表示计算：先展开双方 chain，按原 ref 比较逻辑
 节点，再把 `add`/`replace` 定义折回 chain 并校验 `Apply` 守恒。70% 判据用有界整数关系
@@ -262,8 +296,8 @@ delta 的五类块：`set`（逐字段完整新值，显式保留 `false`/`0`/`"
 
 ## 5. 工作位置与并发
 
-- 设备同时只有一项当前普通工作（`start`/`observe`/`act`/`app`/`shell`）。冲突立即返回
-  `409 device_busy`，不建普通动作队列；同一 Agent 会得到 `blocking_operation_id`。
+- 设备同时只有一项当前普通工作（`start`/`observe`/`wait_for`/`act`/`app`/`shell`）。冲突立即
+  返回 `409 device_busy`，不建普通动作队列；同一 Agent 会得到 `blocking_operation_id`。
 - 会话撤权后，原 work、UI 与 shell 进入独立退休记录。旧逻辑交接从撤权起最多等待 5 秒；
   原调用提前取得终结证据时提前释放。到期仍无终结证据时，engine 冻结原操作结果、取消原上下文
   并脱离当前工作位置，最多以 `device_busy` 影响新工作到该边界。
@@ -284,8 +318,14 @@ delta 的五类块：`set`（逐字段完整新值，显式保留 `false`/`0`/`"
   派发未知时为 `uncertain`，已有确认 outcome 时保留；取消其上下文并令 `e.work=nil`。
   会话、所有观察与收尾链不因该工作期限改变。
 - 工作上下文按类型设上限：`start` = `StartTimeout + WorkTimeout`（40s）、`observe` =
-  `WorkTimeout + 15s`（35s）、`act` 与 `app` 的五个变更 kind 约 50s、`app` 的 `find`/`list`
-  查询 `WorkTimeout + 10s`（30s）、`shell` 约 65s；具体超时是服务策略，不是请求参数。
+  `WorkTimeout + 15s`（35s）、`wait_for` = `timeout + 40s`（41–80s）、`act` 与 `app` 的
+  五个变更 kind 约 50s、`app` 的 `find`/`list` 查询 `WorkTimeout + 10s`（30s）、`shell`
+  约 65s；具体超时是服务策略，不是请求参数。
+- `wait_for` 使用条件等待工作（`WorkWaitFor`），其上下文继承调用方请求 `ctx`：客户端断连、
+  MCP 取消、STOP 与 `end` 都立即关闭等待并释放工作位，不发布迟到观察；STOP 与 `end` 把
+  `409 control_revoked` 交付给调用方，MCP 取消与客户端断连由适配器或传输层收尾。同一次等待的
+  验证采集整体受 35 秒固定预留截止约束，与 `timeout + 40s` 的工作期限和固定的 90s 同步 HTTP
+  上限共同构成调用预算。
 - `app` 的 `find`/`list` 使用查询工作（`WorkAppQuery`），其上下文继承调用方 `ctx`，可被请求
   取消；取消后只关闭查询的发布资格与读取，`phase=query_cancelled`、无 outcome、无 error、
   无集合，普通工作位置最迟在 5 秒逻辑交接内释放。查询工作期限到期为 `phase=query_timeout`、
@@ -460,15 +500,18 @@ P 已无法定位时，`end(P)` 返回 `409 operation_unknown`、`phase=referenc
 | 动作执行 | `outcome` | `executed` / `not_executed` / `uncertain`；只描述本次输入是否已派发并有完成证据 |
 | 滚动效果 | `effect.state` | `observed` / `not_observed` / `unknown`；只在 `scroll` 结果与仍保留该原操作的 P 视图中出现，只表示是否观察到容器内内容位移，不表示动作因果、方向、距离或到达边界 |
 | 观察 | `observation.status` | `complete` / `partial` / `failed`；后观察失败不改写已确认的 `executed` |
+| 条件等待 | `wait.trigger` / `wait.matched` / `wait.elapsed_ms` | 等待因哪个分支退出、最终发布帧上成立哪些单帧条件、整次调用耗时；不表示页面之后不再变化，也不替代 `observation.status` |
 | 观察质量 | `observation.quality` | `state` / `samples` / `stop_reason`；只表示树是否收敛、经过多少有效采样，不限制输入授权 |
 | 图片 | `observation.image` | 本次附图的元数据或受控错误；图片失败不改写核心树与主动作 |
 | 会话 | `session.state` | `starting` / `active` / `ended` |
 | 物理收尾 | `cleanup.*` | 显示/任务/执行链是否确认释放 |
 
-`outcome`、`effect` 与 `observation.quality` 各自独立：`executed + effect=unknown` 是合法
-结果；`unstable`/`unknown` 的观察仍可发布、仍可被认领，是否执行由动作自己的判据决定；
-`effect` 与 `quality` 都不改写 `outcome`、`observation.status`、错误或恢复入口，也不改变 O
-的 `status`、`actionable_until` 与基线确认。
+`outcome`、`effect`、`wait` 与 `observation.quality` 各自独立：`executed + effect=unknown`
+是合法结果；`unstable`/`unknown` 的观察仍可发布、仍可被认领，是否执行由动作自己的判据决定；
+`effect`、`wait` 与 `quality` 都不改写 `outcome`、`observation.status`、错误或恢复入口，也
+不改变 O 的 `status`、`actionable_until` 与基线确认。`wait` 在 `Result` 中固定位于 `shell`
+之后、`notification` 之前；`status(P)` 与重复 `P` 的视图保留已保存的 `wait`，并按既有规则
+省略 `observation`。
 
 事件日志只记白名单键（ID、枚举、布尔、计数、时长），值经过单行截断；不记录树、差异、输入
 正文、命令、原始响应或异常文本。每个 UI 窗口关闭只记一条 `ui.window_closed`，
@@ -490,9 +533,12 @@ P 已无法定位时，`end(P)` 返回 `409 operation_unknown`、`phase=referenc
 ### 发布
 
 `release/versions.json` 是发行号、共同契约号与 Android versionCode 的唯一来源；当前为
-`release_version=0.11.0`、`contract_version=11`、`android_version_code=13`，构建生成
+`release_version=0.12.0`、`contract_version=12`、`android_version_code=14`，构建生成
 Go/Java 常量。`scripts/build-release.ps1` 产出整组产物与 `build/release/manifest.json`
 （源码提交、Go 版本、MCP SDK/协议、各产物 SHA-256/大小、Android 包名/版本、工具目录指纹）。
+工具目录固定为 `scripts/toolcatalog` 投影的 12 个工具，指纹是该目录注册顺序、名称、描述与
+入参 schema 的 canonical SHA-256；描述或 schema 变化都会改变指纹，因此清单必须在对应源码
+树上重建。
 清单必须来自干净的已提交工作树：`scripts/verify-manifest.ps1` 拒绝已有跟踪改动的工作树、
 `source_commit` 不是实际 `HEAD` 前缀、`source_dirty=true`、`complete=false`（部分构建）与
 缺失必需产物的清单，并重算产物哈希、Android 身份与工具目录指纹。

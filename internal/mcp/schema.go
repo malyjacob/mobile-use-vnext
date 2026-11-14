@@ -13,9 +13,9 @@ type toolDefinition struct {
 	readOnly    bool
 }
 
-// treeTextGuide is appended to the five tool descriptions whose results may
+// treeTextGuide is appended to the six tool descriptions whose results may
 // carry a tree block. It is shared verbatim so the catalog has one syntax
-// legend, not five drifting variants.
+// legend, not six drifting variants.
 const treeTextGuide = "可读正文在 key=value 阶段事实之后附带一个确定性树块：" +
 	"块头后固定一行 `defaults {\"checked\":false}`，随后一个空行再写正文。" +
 	"full 块以 `tree v2 format=full id=<O> scope=<scope> view=<compact> nodes=<n> entries=<m>` 开头，后接节点行；" +
@@ -116,6 +116,62 @@ var toolCatalog = []toolDefinition{
   "required": ["reference"],
   "additionalProperties": false,
   "description": "observe 需要 reference；full、image、wait_ms 均可选。"
+}`),
+	},
+	{
+		name: "wait_for",
+		description: "等待当前会话的界面条件并在条件满足或 timeout 到时后返回一个新观察。" +
+			"timeout 必填、1..40 秒（stable=true 时需 >= 2）：到时同样按成功返回（isError=false）并发布验证采集得到的那个观察；" +
+			"调用方须检查 wait.trigger 与 wait.matched，连续 3 帧稳定由 observation.quality.state=stable 表达。" +
+			"wait.elapsed_ms 计自准入完成至终帧发布，因需补采或复用验证帧，实际耗时可超过 timeout 至多约 35 秒。" +
+			"query 与 absent_query 只匹配当前公开可见树（不含视口外内容），且 stable=true 对整树计算摘要——" +
+			"页面若有倒计时或实时进度变化请保持 stable=false，否则会跑满 timeout。" +
+			treeTextGuide,
+		schema: json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "reference": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[OP]",
+      "description": "必填的 O 或 P 编号，必须指向本 Agent 仍活动的原会话。"
+    },
+    "query": {
+      "type": "string",
+      "maxLength": 256,
+      "description": "可选的字面条件：公开树中存在至少一个节点在 label/value/hint/resource 上包含该文本。"
+    },
+    "absent_query": {
+      "type": "string",
+      "maxLength": 256,
+      "description": "可选的字面条件：公开树中不存在任何节点在 label/value/hint/resource 上包含该文本。"
+    },
+    "timeout": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 40,
+      "description": "必填的等待上限秒数，1..40；stable=true 时至少 2。"
+    },
+    "stable": {
+      "type": "boolean",
+      "default": false,
+      "description": "true 时要求整树连续 3 帧一致；有查询时它是条件满足后的稳定门禁，无查询时它是独立触发分支。"
+    },
+    "full": {
+      "type": "boolean",
+      "default": false,
+      "description": "true 强制本次发布 full，忽略既有基线。"
+    },
+    "image": {
+      "type": "boolean",
+      "default": false,
+      "description": "true 时在同一验证采集中附加一个 ImageContent；条件命中帧会复用而不重采。"
+    }
+  },
+  "required": ["reference", "timeout"],
+  "additionalProperties": false,
+  "description": "wait_for 需要 reference 与 timeout；query、absent_query、stable、full、image 均可选。"
 }`),
 	},
 	{

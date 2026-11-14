@@ -49,6 +49,7 @@ const (
 	WorkAppQuery  = "app_query"
 	WorkAppAction = "app_action"
 	WorkShell     = "shell"
+	WorkWaitFor   = "wait_for"
 )
 
 // appTool is the single public tool name of every app lifecycle kind. The kind
@@ -83,16 +84,16 @@ type Config struct {
 	MaxInspectionUnitBytes       int
 	MaxSnapshotCostBytes         int
 	MaxRetainedSnapshotCostBytes int
-	MaxObservations              int // bounded retained observations
-	MaxOperations       int           // bounded P records
-	MaxAcceptanceAge    time.Duration // 5min P acceptance window
-	ControlPackage      string        // paired control App package
-	MaxAppsBytes        int           // 32 KiB apps result budget
-	AppListTTL          time.Duration // 60s trusted app-list cache
-	ShellTimeout        time.Duration // 30s managed shell execution budget
-	ShellConfirmTimeout time.Duration // 5s termination/confirmation budget
-	ShellStartTimeout   time.Duration // 3s managed start evidence budget
-	ShellOutputBytes    int           // 64 KiB retained output prefix
+	MaxObservations              int           // bounded retained observations
+	MaxOperations                int           // bounded P records
+	MaxAcceptanceAge             time.Duration // 5min P acceptance window
+	ControlPackage               string        // paired control App package
+	MaxAppsBytes                 int           // 32 KiB apps result budget
+	AppListTTL                   time.Duration // 60s trusted app-list cache
+	ShellTimeout                 time.Duration // 30s managed shell execution budget
+	ShellConfirmTimeout          time.Duration // 5s termination/confirmation budget
+	ShellStartTimeout            time.Duration // 3s managed start evidence budget
+	ShellOutputBytes             int           // 64 KiB retained output prefix
 
 	// App lifecycle policy. These are service budgets, never per-call options.
 	MaxCloseTasks     int           // 16 frozen close targets
@@ -112,46 +113,106 @@ type Config struct {
 	// is published; the per-phase values are service policy, never per-call
 	// options.
 	Settle SettlePolicies
+
+	// Wait policy. One condition wait samples the target display until a
+	// literal condition holds (optionally over a fixed number of consecutive
+	// equal frames) or its own deadline expires. Every value is service policy:
+	// no request field carries it.
+	Wait WaitPolicy
 }
+
+// WaitPolicy is the fixed sampling policy of the condition-wait tool. MinDwell
+// is the required distance between two sample starts, StableFrames is the
+// number of consecutive identical frames a stability gate needs, MaxSamples is
+// a defensive guard on valid readable frames only, ProbeOnFailStreak bounds how
+// many consecutive failed reads are tolerated before the target display is
+// re-probed, and FrameTimeout caps one single read so a slow dump stays a
+// transient failure instead of consuming the whole wait.
+type WaitPolicy struct {
+	MinDwell          time.Duration
+	StableFrames      int
+	MaxSamples        int
+	ProbeOnFailStreak int
+	FrameTimeout      time.Duration
+}
+
+// DefaultWaitPolicy returns the initial condition-wait values. They are sized
+// against the bounded 40s wait and the fixed 90s HTTP ceiling.
+func DefaultWaitPolicy() WaitPolicy {
+	return WaitPolicy{
+		MinDwell:          600 * time.Millisecond,
+		StableFrames:      3,
+		MaxSamples:        80,
+		ProbeOnFailStreak: 3,
+		FrameTimeout:      16 * time.Second,
+	}
+}
+
+// Validate rejects a wait policy that cannot behave as documented. It is checked
+// once when the process builds its configuration, never per call.
+func (p WaitPolicy) Validate() error {
+	if p.MinDwell < 0 {
+		return errors.New("wait.min_dwell must not be negative")
+	}
+	if p.StableFrames < 2 {
+		return errors.New("wait.stable_frames must be at least 2")
+	}
+	if p.MaxSamples < p.StableFrames {
+		return errors.New("wait.max_samples must be at least wait.stable_frames")
+	}
+	if p.ProbeOnFailStreak < 1 {
+		return errors.New("wait.probe_on_fail_streak must be at least 1")
+	}
+	if p.FrameTimeout <= 0 {
+		return errors.New("wait.frame_timeout must be positive")
+	}
+	return nil
+}
+
+// waitWorkTimeout is the work-position window of one condition wait: the
+// caller's own wait plus the fixed verification acquisition reserve. The result
+// stays strictly inside the 90s synchronous HTTP ceiling.
+const waitWorkReserve = 40 * time.Second
 
 // DefaultConfig returns the first-version policy values.
 func DefaultConfig(instanceID, agentName string) Config {
 	return Config{
-		ServiceInstanceID:   instanceID,
-		AgentName:           agentName,
-		StartSessionTTL:     5 * time.Minute,
-		SessionTTL:          120 * time.Second,
-		ObservationLifetime: 60 * time.Second,
-		StartTimeout:        20 * time.Second,
-		WorkTimeout:         20 * time.Second,
-		CaptureMaxAge:       15 * time.Second,
-		AppFreshness:        6 * time.Second,
-		CleanupTimeout:      12 * time.Second,
-		LedgerTimeout:       3 * time.Second,
-		MaxFullTreeBytes:    128 * 1024,
+		ServiceInstanceID:            instanceID,
+		AgentName:                    agentName,
+		StartSessionTTL:              5 * time.Minute,
+		SessionTTL:                   120 * time.Second,
+		ObservationLifetime:          60 * time.Second,
+		StartTimeout:                 20 * time.Second,
+		WorkTimeout:                  20 * time.Second,
+		CaptureMaxAge:                15 * time.Second,
+		AppFreshness:                 6 * time.Second,
+		CleanupTimeout:               12 * time.Second,
+		LedgerTimeout:                3 * time.Second,
+		MaxFullTreeBytes:             128 * 1024,
 		MaxInspectionUnitBytes:       32 * 1024,
 		MaxSnapshotCostBytes:         4 * 1024 * 1024,
 		MaxRetainedSnapshotCostBytes: 32 * 1024 * 1024,
-		MaxObservations:     32,
-		MaxOperations:       256,
-		MaxAcceptanceAge:    5 * time.Minute,
-		ControlPackage:      "com.mobileuse.vnext",
-		MaxAppsBytes:        32 * 1024,
-		AppListTTL:          60 * time.Second,
-		ShellTimeout:        30 * time.Second,
-		ShellConfirmTimeout: 5 * time.Second,
-		ShellStartTimeout:   3 * time.Second,
-		ShellOutputBytes:    65536,
-		MaxCloseTasks:       16,
-		MaxAppTransfers:     16,
-		MaxLedgerBytes:      65536,
-		MaxRetiredRecords:   8,
-		ForegroundRestore:   2 * time.Second,
-		ImageMaxLongSide:    1200,
-		ImageQuality:        80,
-		MaxImageBytes:       512 * 1024,
-		ImageMaxSpan:        3 * time.Second,
-		Settle:              DefaultSettlePolicies(),
+		MaxObservations:              32,
+		MaxOperations:                256,
+		MaxAcceptanceAge:             5 * time.Minute,
+		ControlPackage:               "com.mobileuse.vnext",
+		MaxAppsBytes:                 32 * 1024,
+		AppListTTL:                   60 * time.Second,
+		ShellTimeout:                 30 * time.Second,
+		ShellConfirmTimeout:          5 * time.Second,
+		ShellStartTimeout:            3 * time.Second,
+		ShellOutputBytes:             65536,
+		MaxCloseTasks:                16,
+		MaxAppTransfers:              16,
+		MaxLedgerBytes:               65536,
+		MaxRetiredRecords:            8,
+		ForegroundRestore:            2 * time.Second,
+		ImageMaxLongSide:             1200,
+		ImageQuality:                 80,
+		MaxImageBytes:                512 * 1024,
+		ImageMaxSpan:                 3 * time.Second,
+		Settle:                       DefaultSettlePolicies(),
+		Wait:                         DefaultWaitPolicy(),
 	}
 }
 
@@ -315,7 +376,7 @@ type Engine struct {
 	// shell is the current managed runner ownership. It keeps ordinary
 	// admission closed only until its bounded confirmation deadline.
 	shell        *shellState
-	shellProbing bool	// shellOrphan is the single slot holding a chain that was closed out as
+	shellProbing bool // shellOrphan is the single slot holding a chain that was closed out as
 	// unconfirmed. It no longer blocks admission; it keeps the identity so the
 	// closure chain may try one more exact termination and so no physical fact
 	// is reported as confirmed. A newer closed-out chain replaces it.
@@ -423,9 +484,9 @@ type observationState struct {
 	Projection        *Projection
 	// Compact is the published compact read tree of this observation and Cost
 	// is the internal accounting size of its snapshot. Both are immutable.
-	Compact *protocol.ReadTree
-	Cost    int
-	Status  string
+	Compact   *protocol.ReadTree
+	Cost      int
+	Status    string
 	ClaimedBy string
 	RetiredAt time.Time
 	Full      bool
@@ -443,12 +504,12 @@ type operationState struct {
 	// duplicate P or status(P) summary republishes.
 	AppKind       string
 	State         string
-	Phase           string
-	Outcome         string
-	Error           *protocol.Error
-	SessionOrigin   string
-	CreatedAt       time.Time
-	FinishedAt      time.Time
+	Phase         string
+	Outcome       string
+	Error         *protocol.Error
+	SessionOrigin string
+	CreatedAt     time.Time
+	FinishedAt    time.Time
 	// Reference is the kind of reference the request already used ("O"/"P").
 	// It is a planning fact only: it never grants authority.
 	Reference string
@@ -475,6 +536,10 @@ type operationState struct {
 	// Recovery is the projection returned with this operation, kept so a
 	// duplicate P or status(P) reports exactly the same next step.
 	Recovery *protocol.Recovery
+	// Wait is the bounded condition-wait outcome of this operation. It is
+	// written once, before the operation finishes, and a duplicate P or
+	// status(P) republishes it without an observation.
+	Wait *protocol.WaitResult
 }
 
 type workState struct {
@@ -1100,6 +1165,15 @@ func (e *Engine) operationViewLocked(op *operationState) *protocol.Result {
 	}
 	if op.Error != nil {
 		result.Error = op.Error
+	}
+	// The wait fact is one saved bounded outcome: a duplicate P or status(P)
+	// copies it and never recomputes a trigger, a match list or an elapsed time.
+	if op.Wait != nil {
+		wait := *op.Wait
+		if len(op.Wait.Matched) > 0 {
+			wait.Matched = append([]string(nil), op.Wait.Matched...)
+		}
+		result.Wait = &wait
 	}
 	// The effect is one saved bounded fact: a duplicate P or status(P) copies
 	// it and never recomputes or attaches an observation. A retained scroll

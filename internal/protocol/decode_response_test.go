@@ -729,7 +729,7 @@ func TestDecodeObservationQuality(t *testing.T) {
 		{"null samples", `{"status":"complete","quality":{"state":"unknown","samples":null,"stop_reason":"not_sampled"}}`},
 		{"null stop reason", `{"status":"complete","quality":{"state":"unknown","samples":0,"stop_reason":null}}`},
 		{"unknown state", `{"status":"complete","quality":{"state":"settled","samples":0,"stop_reason":"not_sampled"}}`},
-		{"unknown stop reason", `{"status":"complete","quality":{"state":"unknown","samples":0,"stop_reason":"timeout"}}`},
+		{"unknown stop reason", `{"status":"complete","quality":{"state":"unknown","samples":0,"stop_reason":"settled"}}`},
 		{"negative samples", `{"status":"complete","quality":{"state":"unknown","samples":-1,"stop_reason":"budget"}}`},
 		{"fractional samples", `{"status":"complete","quality":{"state":"unknown","samples":1.5,"stop_reason":"budget"}}`},
 		{"string samples", `{"status":"complete","quality":{"state":"unknown","samples":"1","stop_reason":"budget"}}`},

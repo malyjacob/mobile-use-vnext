@@ -96,6 +96,13 @@ func (e *Engine) Observe(ctx context.Context, agent, p string, req *protocol.Obs
 func (e *Engine) resolveObserveTarget(agent, reference string) (*observeTarget, *protocol.APIError) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	return e.resolveObserveTargetLocked(agent, reference)
+}
+
+// resolveObserveTargetLocked is the same resolution without taking the state
+// lock, so a single admission critical section can resolve a reference and take
+// the work position atomically. The caller holds e.mu.
+func (e *Engine) resolveObserveTargetLocked(agent, reference string) (*observeTarget, *protocol.APIError) {
 	session := e.session
 	kind, obs, p := e.findReferenceLocked(reference)
 	target := &observeTarget{session: session, obs: obs, p: p}

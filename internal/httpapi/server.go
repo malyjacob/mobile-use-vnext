@@ -54,6 +54,7 @@ func New(cfg Config, eng *engine.Engine, log *eventlog.Logger) *Server {
 	mux.HandleFunc("/api/start", s.agent(s.start))
 	mux.HandleFunc("/api/status", s.agent(s.status))
 	mux.HandleFunc("/api/observe", s.agent(s.observe))
+	mux.HandleFunc("/api/wait_for", s.agent(s.waitFor))
 	mux.HandleFunc("/api/act", s.agent(s.act))
 	mux.HandleFunc("/api/end", s.agent(s.end))
 	mux.HandleFunc("/api/inspect", s.agent(s.inspect))
@@ -231,6 +232,35 @@ func (s *Server) observe(w http.ResponseWriter, r *http.Request, p string) {
 		defer release()
 	}
 	result, apiErr := s.engine.Observe(r.Context(), s.cfg.AgentName, p, req)
+	s.finish(w, result, apiErr)
+}
+
+// waitFor admits the condition wait. The delivery budget is reserved before the
+// engine takes the single device work position, exactly like observe: a long
+// wait holds one slot for the whole call, and the slot is released after the
+// response is written.
+func (s *Server) waitFor(w http.ResponseWriter, r *http.Request, p string) {
+	body, ok := readBody(w, r, 16*1024)
+	if !ok {
+		return
+	}
+	req, apiErr := protocol.DecodeWaitFor(body)
+	if apiErr != nil {
+		writeAPIError(w, apiErr)
+		return
+	}
+	reserve := int64(deliveryReserveTree)
+	if req.Image {
+		reserve = deliveryReserveImage
+	}
+	release, ok := s.delivery.acquire(reserve)
+	if !ok {
+		writeAPIError(w, protocol.NewError(503, protocol.CodeDeliveryUnavailable,
+			"结果交付容量不足，请在当前结果交付后再试"))
+		return
+	}
+	defer release()
+	result, apiErr := s.engine.WaitFor(r.Context(), s.cfg.AgentName, p, req)
 	s.finish(w, result, apiErr)
 }
 

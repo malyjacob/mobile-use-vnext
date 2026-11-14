@@ -353,6 +353,9 @@ final class ControlState {
         if ("shell".equals(work.kind)) {
             return "正在执行命令";
         }
+        if ("wait_for".equals(work.kind)) {
+            return "正在等待界面";
+        }
         if ("app".equals(work.kind)) {
             return "app · " + appKindText(work.appKind);
         }
@@ -381,20 +384,76 @@ final class ControlState {
         return "未知".equals(label) ? "" : "（" + label + "）";
     }
 
-    /** 阶段只映射受控短码；未知阶段显示通用文案，不回显服务原文。 */
+    /**
+     * 阶段只映射受控短码；未知阶段显示通用文案，不回显服务原文。
+     *
+     * 服务端的普通工作相态带工具前缀（例如 wait_for.poll / wait_for.capture /
+     * wait_for.commit 与既有的 captureAndPublish 内部 .tree/.project/.image）。
+     * 前缀表把已知前缀收敛到同一组受控文案，未列出的前缀仍然回落“未知”。
+     */
     static String phaseLabel(String phase) {
         if (!hasText(phase)) {
             return "未知";
         }
-        switch (phase.trim()) {
+        String trimmed = phase.trim();
+        switch (trimmed) {
             case "admitted": return "已接纳";
             case "dispatch": return "已派发";
             case "capture": return "采集中";
             case "observe": return "后置观察";
+            case "read": return "读取中";
             case "running": return "运行中";
             case "finished": return "已结束";
-            default: return "未知";
+            default: return prefixedPhaseLabel(trimmed);
         }
+    }
+
+    /**
+     * 已知工作前缀到受控阶段文案的映射；后缀只收窄文案，不参与授权。
+     *
+     * 服务端的普通工作相态有两种形态：裸短码（`admitted`、`read`、`capture` 等）与
+     * `<tool>.<step>`（工具名或工具名加子步骤，例如 `act.settle.tree`、`app.open.capture`、
+     * `wait_for.poll`）。这里按最后一个点把相态拆成前缀与步骤，只对已知前缀给出文案，
+     * 未列出的前缀或步骤一律回落“未知”，不回显服务原文。
+     */
+    private static String prefixedPhaseLabel(String phase) {
+        int dot = phase.lastIndexOf('.');
+        if (dot <= 0 || dot == phase.length() - 1) {
+            return "未知";
+        }
+        String prefix = phase.substring(0, dot);
+        String step = phase.substring(dot + 1);
+        if (hasPhasePrefix(prefix, "wait_for")) {
+            switch (step) {
+                case "poll": return "等待条件";
+                case "capture":
+                case "tree":
+                case "image":
+                case "project": return "验证采集";
+                case "commit": return "提交观察";
+                default: return "未知";
+            }
+        }
+        if (hasPhasePrefix(prefix, "observe") || hasPhasePrefix(prefix, "act") ||
+                hasPhasePrefix(prefix, "start") || hasPhasePrefix(prefix, "open_app") ||
+                hasPhasePrefix(prefix, "app") || hasPhasePrefix(prefix, "shell")) {
+            switch (step) {
+                case "capture": return "采集中";
+                case "tree": return "读取节点树";
+                case "image": return "读取截图";
+                case "project": return "构造公开树";
+                case "commit": return "提交观察";
+                case "settle": return "等待稳定";
+                case "read": return "读取中";
+                default: return "未知";
+            }
+        }
+        return "未知";
+    }
+
+    /** 阶段前缀匹配工具名本身或其子步骤（`app` 也匹配 `app.open`）。 */
+    private static boolean hasPhasePrefix(String prefix, String tool) {
+        return prefix.equals(tool) || prefix.startsWith(tool + ".");
     }
 
     /** 只读展示：已结束会话的简短摘要，不参与主文案、授权或准入。 */

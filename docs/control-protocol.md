@@ -22,9 +22,9 @@
 
 ```json
 {
-  "contract_version": "11",
+  "contract_version": "12",
   "app_instance_id": "0b0b8c0e-...",
-  "app_version": "0.11.0",
+  "app_version": "0.12.0",
   "selected_mode": "virtual",
   "mode_generation": "8f0b2e2e-...",
   "mode_ready": true,
@@ -45,7 +45,7 @@
 
 | 字段 | 必填 | 含义 |
 | --- | --- | --- |
-| contract_version | 是 | 共同普通契约；必须等于 `"11"` |
+| contract_version | 是 | 共同普通契约；必须等于 `"12"` |
 | app_instance_id | 是 | 本次 App 进程实例，UUID；重建即变化 |
 | app_version | 是 | 仅发行标识，不参与能力协商 |
 | selected_mode | 是 | `virtual` 或 `primary`；App 重建默认 virtual |
@@ -70,14 +70,14 @@
 
 ```json
 {
-  "contract_version": "11",
+  "contract_version": "12",
   "service_instance_id": "d0e...",
   "control": {
     "revision": 42,
     "availability": {"state": "ready"},
     "session": {"origin":"P1","agent":"agent-short","mode":"virtual","state":"active",
       "started_at":"…","expires_at":"…"},
-    "work": {"operation_id":"P2","kind":"act","phase":"dispatch"},
+    "work": {"operation_id":"P2","kind":"act","phase":"act.capture"},
     "cleanup": null
   },
   "commands": [],
@@ -92,7 +92,7 @@
 - `availability.state` 为 `ready` / `recovering` / `blocked`，`reason` 为受控短码。
 - `session` 为 `null` 或 {origin, agent, mode, state, started_at, expires_at/ended_at, reason}。
 - `work` 为 `null` 或 {operation_id, kind, phase, app_kind?}，`kind` 为
-  `start`/`observe`/`act`/`app`/`shell`；`kind=app` 时 `app_kind` 为七种 kind 之一
+  `start`/`observe`/`wait_for`/`act`/`app`/`shell`；`kind=app` 时 `app_kind` 为七种 kind 之一
   （`find`/`list`/`open`/`claim`/`handoff`/`close`/`kill`）；不得携带节点、坐标、输入正文或命令。
 - `cleanup` 为 `null` 或 {state, execution, tasks, recents, display}；只表达最低摘要。
 - `commands` 只包含显示生命周期命令，每拍至多一条；每个命令 ID 只投递一次；原预算内的后续清理尝试使用新 ID。
@@ -141,13 +141,13 @@ App 必须拒绝无法解析、未知 kind、缺字段或 `contract_version` 不
 `POST /v1/control/stop`
 
 ```json
-{"contract_version":"11","app_instance_id":"...","stop_seq":7,"reason":"user_stop"}
+{"contract_version":"12","app_instance_id":"...","stop_seq":7,"reason":"user_stop"}
 ```
 
 响应（最小，不含普通服务状态、消息或设备命令）：
 
 ```json
-{"contract_version":"11","service_instance_id":"...","accepted":true,"stop_seq":7,"state":"revoked"}
+{"contract_version":"12","service_instance_id":"...","accepted":true,"stop_seq":7,"state":"revoked"}
 ```
 
 - App 先在本地提高停止代次、拒绝旧命令/回调恢复权限，再在独立线程发起本请求；不等待
@@ -182,11 +182,27 @@ App 只能从 `control` 与本机事实构造界面，不显示 Agent step，也
 | session.state=active，work.kind=app，app_kind=close | Agent · 正在关闭应用窗口 |
 | session.state=active，work.kind=app，app_kind=kill | Agent · 正在终止应用进程 |
 | session.state=active，work.kind=observe | Agent · 正在观察 |
+| session.state=active，work.kind=wait_for | Agent · 正在等待界面 |
 | session.state=active，work.kind=shell | Agent · 正在执行命令 |
 
 主文案按本地停止待同步、失鲜、当前可用性、当前会话/工作、待命的顺序决定；历史清理风险只进入详情。完整界面在短文案之外展开原
 会话、本机记录的最近一次已结束会话/设备工作、停止同步、模式选择、权限与清理五项；这些历史
 只用于说明，不改变授权、准入或主文案。
+
+`work.phase` 只映射受控短码，未知值显示“未知”且不回显服务原文。相态有两种形态：裸短码
+（`admitted`、`read`、`capture`、`observe`、`running`、`finished`）与 `<tool>.<step>`
+（例如 `act.settle.tree`、`app.open.capture`、`wait_for.poll`）。`wait_for` 的映射为：
+
+| `work.phase` | 显示文案 |
+| --- | --- |
+| `wait_for.poll` | 等待条件 |
+| `wait_for.capture`、`wait_for.tree`、`wait_for.image`、`wait_for.project` | 验证采集 |
+| `wait_for.commit` | 提交观察 |
+
+其余工具前缀（`start`、`observe`、`act`、`app`、`open_app`、`shell`，含 `app.open`
+这类工具加子步骤的前缀）按步骤短码映射：`capture` 采集中、`tree` 读取节点树、`image`
+读取截图、`project` 构造公开树、`commit` 提交观察、`settle` 等待稳定、`read` 读取中。
+未列出的前缀或步骤一律回落“未知”。阶段文案只用于说明当前步骤，不参与授权、准入或停止判定。
 
 ## 6. 失鲜与服务/App 重建
 

@@ -38,7 +38,7 @@ Android 侧，只与服务通信。Windows 主机只负责构建与下发，不�
 | 文件 | 位置 | 内容 |
 | --- | --- | --- |
 | `deploy.json` | 仓库 `.state/`（部署机） | agent/control/mcp 令牌、端口、chroot、版本 |
-| `config.json` | `.state/` 生成，推送到 `/opt/mobile-use-vnext/`（0600） | 监听地址、状态目录、ADB 串口、服务令牌、u2 路径 |
+| `config.json` | `.state/` 生成，推送到 `/opt/mobile-use-vnext/`（0600） | 监听地址、状态目录、ADB 串口、服务令牌、u2 路径；`adb.timeout_seconds` 必须 ≤15 |
 | `mcp-config.json`（手机） | `.state/phone-mcp-config.json` 生成并推送到 `/opt/mobile-use-vnext/`（0600） | 手机 MCP 适配器的 `base_url`、agent 令牌、监听与 MCP token |
 | `connection.json` | 推送到 `/data/data/com.mobileuse.vnext/files/`（0600，App UID 所有） | `base_url` + control 令牌 |
 | `messages.json`（服务） | chroot `/var/lib/mobile-use-vnext/`（0600） | 未确认的 Agent 消息；有界，正文不进入账本/日志 |
@@ -47,6 +47,11 @@ Android 侧，只与服务通信。Windows 主机只负责构建与下发，不�
 `.state/` 已在 `.gitignore` 中排除；不要复制到仓库、工单、聊天或日志。令牌泄漏时重新部署会
 复用旧令牌——需要轮换时删除对应私有文件后再部署。服务消息文件与 App 消息文件都只由各自
 进程写入；不要手工编辑，也不要用卸载/清库方式“修复”消息或配对。
+
+`config.json` 的 `adb.timeout_seconds` 是单次 ADB 命令的私有超时，默认 8 秒；层级读取的
+超时取它与 15 秒的较大者。服务启动时强制该值 ≤15 秒，因此每次采集的地板固定在 15 秒，
+同步工具结果不会越过固定的 90 秒 HTTP 上限。该上限对全部工具生效，不只针对某一个端点；
+手工把既有部署改成大于 15 会在升级后被配置校验拒绝，服务以退出码 `2` 退出且不接触设备。
 
 ## 3. 部署与升级
 
@@ -114,6 +119,10 @@ STOP 可用与 MCP 宿主已重新发现工具。手机适配器的安装/监听
 部署过程不触发手机重启。设备服务通过 `service.sh stop/start` 重启；APK 使用
 `adb install -r` 覆盖安装并保留 App 私有数据。
 
+共同契约是 `contract_version=12`：服务端、Go 客户端、控制 App 与手机/主机 MCP 适配器必须
+成套升级。旧版任一组件会因 `409 contract_mismatch` 被拒绝接入，只有最小 STOP 仍可用；升级
+后必须重启实际 MCP 宿主进程并重新 `tools/list`，让宿主看到 12 个工具。
+
 版本 1–4 账本由当前服务读取并保存为版本 5；旧 session 直接转入退休记录，待保存迁移快照后
 才允许有限补偿。升级继续使用同一次 `deploy.ps1 -SkipBuild`，覆盖安装保留 App 私有数据；
 legacy UI、旧 cleanup 或版本 3/4/5 中已发出预算且未完成的退休补偿不作为再次部署或新会话
@@ -167,7 +176,7 @@ adb -s 127.0.0.1:5555 forward tcp:18881 tcp:18880
 curl -s http://127.0.0.1:18881/health
 ```
 
-`/health` 无认证，返回 `status`、`contract_version`（当前 `"11"`）、`service_instance_id`、
+`/health` 无认证，返回 `status`、`contract_version`（当前 `"12"`）、`service_instance_id`、
 `release_version`。它只证明进程能应答，**不是** `can_start`。
 
 就绪以 `POST /api/status` 为准（令牌从 `.state/deploy.json` 读取，下面用占位符）：
@@ -175,13 +184,30 @@ curl -s http://127.0.0.1:18881/health
 ```bash
 curl -s -X POST http://127.0.0.1:18881/api/status \
   -H "Authorization: Bearer $AGENT_TOKEN" \
-  -H "X-Mobile-Use-Contract: 11" \
+  -H "X-Mobile-Use-Contract: 12" \
   -H "Content-Type: application/json" -d '{}'
 ```
 
 - `can_start=true` 才可 `start`；
 - `can_start=false` 时读 `blocking_code` 与 `cleanup`/`session`；
 - 端口已监听、`/health` 正常、进程存在都不能替代这个门禁。
+
+工具目录由探针的 `tools/list` 核对；工具端点可用一次最小条件等待验证（`reference` 用当前
+`ready` 的 O）：
+
+```bash
+curl -s -X POST http://127.0.0.1:18881/api/wait_for \
+  -H "Authorization: Bearer $AGENT_TOKEN" \
+  -H "X-Mobile-Use-Contract: 12" \
+  -H "Content-Type: application/json" -d '{"reference":"O1","timeout":1}'
+```
+
+纯等待 1 秒的成功响应带新观察与 `wait.trigger=timeout`、`wait.matched=["timeout"]`，
+`wait.elapsed_ms` 不小于 1000。验证采集失败时响应一律 HTTP `503`，结果形状是
+`observation.status=failed`（`image=true` 且截图成功、核心树失败时为只读图的 `partial`，没有
+观察 id），失败原因见 `observation.error.code`（`display_unavailable`、`hierarchy_unavailable`、
+`tree_too_large`、`stale_screen`、`control_revoked` 等）；顶层的 `409 control_revoked` 只来自
+等待期被 STOP 或 `end` 撤权，`409 session_expired` 只来自准入。
 
 手机 MCP 监听检查（主机经 `18883`）：
 
@@ -224,11 +250,14 @@ adb -s 127.0.0.1:5555 shell su -c 'tail -n 100 /data/data/com.mobileuse.vnext/fi
 | `can_start=false`、`blocking_code=device_busy`，且原会话刚结束 | 旧 work/UI/shell 正在最多 5 秒的逻辑交接 | 等待交接或查看原 `blocking_operation_id`；不杀设备进程、不删账本 |
 | `can_start=false`、`blocking_code=recovery_pending`/`control_sync_pending` | 当前服务仍在恢复入口或等待 App 当前同步 | 保持服务与 App 运行，修当前 ADB/App/模式/STOP 能力；旧 cleanup 未确认本身不是原因；不需要重启手机 |
 | `can_start=false`、`blocking_code=ledger_corrupt` / `ledger_unavailable` | 账本损坏或不可写 | 检查 `/var/lib/mobile-use-vnext` 权限与磁盘；损坏账本需要明确的人工处置（移走并重新部署），不能带病启动 |
-| `can_start=false`、`blocking_code=device_busy` | 已有普通工作（start/observe/act/app/shell）在进行 | 等该操作完成或用 `status` 查 `blocking_operation_id`；不建队列，不重试并发动作 |
+| `can_start=false`、`blocking_code=device_busy` | 已有普通工作（start/observe/wait_for/act/app/shell）在进行 | 等该操作完成或用 `status` 查 `blocking_operation_id`；不建队列，不重试并发动作 |
 | `can_start=false`、`blocking_code=device_locked` / `device_not_interactive` | 锁屏或熄屏 | 解锁并点亮屏幕；服务不绕过锁屏 |
 | `can_start=false`、`blocking_code=control_revoked` | 收到 STOP 后未完成一次新同步 | 等 App 下一拍同步（不再携带 `stop_pending`）后再 `start` |
 | `can_start=false`、`blocking_code=mode_not_selected`/`stop_unavailable` | App 模式/通知/停止通道不可用 | 在 App 选择虚拟屏或确认主屏共享；授予通知权限并确认通知频道可用 |
-| `409 contract_mismatch` | `X-Mobile-Use-Contract` 缺失/不是 `11`，或 App 契约版本不符；错误体带 `recovery`（`entry=update`、`reference=none`） | 服务与客户端必须同为 `contract_version=11`；升级整组产物，不要只升一侧 |
+| `409 contract_mismatch` | `X-Mobile-Use-Contract` 缺失/不是 `12`，或 App 契约版本不符；错误体带 `recovery`（`entry=update`、`reference=none`） | 服务与客户端必须同为 `contract_version=12`；升级整组产物，不要只升一侧 |
+| 服务启动即退出（退出码 `2`） | `config.json` 的 `adb.timeout_seconds` 大于 15，或其它配置项被拒 | 把该值改回 ≤15（默认 8）后重启；不要用放宽上限的方式绕过 |
+| `409 session_expired` | 引用指向的原会话租约已到期；条件等待在准入时不续租已过期的会话 | 重新 `start`，不要重试同一引用；等待期间需要更长租约时先显式 `keepalive` |
+| `409 control_revoked`（`wait_for`） | 等待中途 STOP 或 `end` 撤权；MCP 取消与客户端断连同样关闭等待并释放工作位，但由适配器（`call_cancelled`）或传输层收尾 | 用 `status(P)` 确认没有迟到观察；需要继续等待时用新 P 重试，不重放同一 P |
 | `401 unauthorized` | Bearer 令牌错误，或用了另一身份的令牌 | 从私有配置核对 agent/control 令牌；两者不能互换 |
 | 主机 `18883/mcp` 不通或 401 | 手机适配器未运行、转发失效、填错 token | 看 `device-mcp.log` 与 `pgrep`；重建 `adb forward tcp:18883 tcp:18882`；手机路径填 `.state/deploy.json` 的 `mcp_token` |
 | MCP 客户端 403 | `Origin` 未在 `allowed_origins` | 部署时用 `-McpAllowedOrigins` 精确放行并重启适配器；不要填 `*` |
@@ -380,12 +409,14 @@ go run ./scripts/mcp-probe -config .state/mcp-config.json -binary build/device-m
   `App`/`OpenApp` 覆盖 `app.list`（session/primary）、`app.open` 复用、受限 `claim`/`kill`
   拒绝、`app.close`、`end` 收尾与 STOP 场景。
 - `verify-m5.ps1` 通过 `build-host-tools.ps1`（`-SkipBuild` 时调用 `-VerifyOnly`）准备主机
-  `device-mcp.exe`/`mcp-probe.exe`，断言工具目录 count=11，并运行 stdio、主机 HTTP 与
+  `device-mcp.exe`/`mcp-probe.exe`，断言工具目录 count=12，并运行 stdio、主机 HTTP 与
   p-recovery 探针；宿主 token 仅在缺失时创建。`-VerifyOnly` 是完整发布门禁（干净已提交树、
   完整手机配套清单与 companion 比对），开发树或缺少配套手机清单时会失败。
-- `verify-m6.ps1` 核验发布清单、`/health`、安装后的 App versionName/versionCode 与工具目录
-  count=11；明确用上一发行契约版本验证同步与普通 API 都返回 `409 contract_mismatch`。
-  手机 MCP 只做 `server/discover`（并说明不做 `tools/list`、进程身份与生命周期验收）。
+- 探针的核心套件包含一次 `wait_for` 检查：以 `timeout=1` 的纯等待取得新观察，断言调用成功、
+  `wait.trigger=timeout`、`wait.matched=["timeout"]`、`wait.elapsed_ms>=1000`，且新观察的
+  `observation.quality` 为 `unknown`/`0`/`not_sampled`。
+- `verify-m6.ps1` 是破坏性整机演练脚本（force-stop/重启、notify 与 UI 全量回归、手机 MCP
+  `server/discover`），每次运行都会打断手机上的当前状态，不属于常规发布门禁。
 - `mcp-probe` 的 `-transport http-remote` 只连接已运行的手机适配器，不启动或停止远端进程；
   `-suite app-lifecycle` 只操作受控 test-target 包，要求原会话为 virtual，不自动切换显示模式。
 
@@ -433,7 +464,7 @@ adb -s 127.0.0.1:5555 shell su -c 'ls -l /data/data/com.mobileuse.vnext/files/me
    `unconfirmed` 并与原 session 同帧展示。默认虚拟屏，主屏共享需要用户重新确认。
 5. 若使用主机侧适配器，先辨认实际镜像路径与承载进程，结束旧活动调用并停止该精确进程，
    按 `build/host-tools-manifest.json` 替换 `build/device-mcp.exe` 与 `build/mcp-probe.exe`；
-   再重启实际 MCP 宿主进程/连接并重新发现 11 工具目录。只替换磁盘文件不算完成，也不宽泛
+   再重启实际 MCP 宿主进程/连接并重新发现 12 工具目录。只替换磁盘文件不算完成，也不宽泛
    终止所有同名进程。
 6. 运行相关最小闭环与回归；任何阶段失败都保持普通准入关闭并记录失败阶段。
 

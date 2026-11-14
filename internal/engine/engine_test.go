@@ -25,6 +25,7 @@ type fakeDevice struct {
 	density       int
 	displayExists bool
 	sfid          uint64
+	probeCalls    int
 	helperCalls   int
 	taps          [][2]int
 	keys          []string
@@ -112,10 +113,18 @@ func (f *fakeDevice) LogicalSize(context.Context) (int, int, int, error) {
 func (f *fakeDevice) ProbeDisplay(_ context.Context, id int) (device.DisplayState, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.probeCalls++
 	if id == 0 {
 		return device.DisplayState{Exists: true, SFID: 1}, nil
 	}
 	return device.DisplayState{Exists: f.displayExists, SFID: f.sfid}, nil
+}
+
+// probeCount returns the number of target-display probes.
+func (f *fakeDevice) probeCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.probeCalls
 }
 func (f *fakeDevice) CaptureImage(_ context.Context, sfid uint64) (device.ImageSource, error) {
 	f.mu.Lock()
