@@ -45,6 +45,7 @@
 | 显式重设会话租期并取消累计硬上限（契约 8） | 已实现 | 已实测：start 首观察后五分钟期限；120 分钟显式租约跨过 `started_at+1h`；普通 observe 不截短 30 分钟长租约；省略/1 分钟可缩短；同一 P 重放不再次计时；一分钟真实到期记 `lease_expired` 且 cleanup 完成；长租约下 STOP 立即 `revoked`。已发布 0.8.0 / versionCode 10，手机 HTTP 与主机 stdio `mcp-probe` PASS（[记录](verification/explicit-keepalive-duration.md)） |
 | 受控滚动、raw swipe duration 与观察质量/效果（契约 10） | 已实现 | 已部署 0.10.0/契约 10/versionCode 12；Settings 实机 5 次受控 scroll 全部 `executed`、0 次 `target_changed`，quality 均 stable；effect 得到 `not_observed`/`unknown`，尚未取得实机 `observed` 或跨应用样本（[记录](verification/semantic-scroll-observation-quality.md)） |
 | 公共树表示与交付预算（契约 11） | 已实现 | 已实测（部分）：0.11.0/契约 11/versionCode 13 整组构建、清单核验、手机覆盖安装与私有数据保留；实机契约 10 拒绝、最小 STOP 接纳、`start→full`、同基线空 delta、inspect 插入不改基线、query 与 end；stdio 与手机 HTTP 两个 MCP 入口的 both/text/structured 探针均 PASS。未执行：`verify-m6`（用户排除）、真实 Capture 压缩比/token/耗时/进程峰值（用户排除）、`act` 重验失败交付的实机样本（[记录](verification/compact-node-tree-presentation.md)） |
+| 受控滚动中心线安全区间、原段重验与联动视口效果（契约 13） | 已实现 | 已部署 0.13.0/契约 13/versionCode 15；契约边界实测（旧 12 与缺头均 `409 contract_mismatch`、最小 STOP 独立、`13` 受理）；Settings 7 次垂直 scroll 全部 `executed`、0 次 `target_changed`，取得 4 次实机 `observed`（`anchors=17`/`coverage=80`）与 6 次 `not_observed`；X 首页复现 `2242↔2400` 容器伸缩但受内容换血限制仍为 `unknown`；Zhihu/X 嵌套作用域取得真实 `422` 且零采集零派发。联动栏下的实机 `observed` 与合成覆盖层页未取得（[记录](verification/scroll-safe-trajectory-and-viewport-effect.md)） |
 
 ## 3. 未验证 / 未实现
 
@@ -72,6 +73,8 @@
 | 受控 scroll/raw duration/quality/effect 的实机与跨应用证据 | 部分执行：Settings 一个应用 5 次 scroll、1 次 raw swipe 已实测；`effect=observed` 实机样本、长文/B 站/WebView/嵌套容器/overlay/STOP 时序与阈值校准未执行（[记录](verification/semantic-scroll-observation-quality.md)） |
 | 契约 11 公共树表示的整组发布与实机验收 | 已执行（部分）：0.11.0 整组构建/清单/部署与两个 MCP 入口三模式探针、契约 10 拒绝、最小 STOP、full/delta/inspect 最小闭环均已实测；`verify-m6` 由用户排除，`act` 重验失败交付的实机样本未构造（[记录](verification/compact-node-tree-presentation.md)） |
 | 真实 Capture 的新旧公共表示对比与运行成本 | 未执行：用户明确排除；原始采集与树不入库，合成高冗余 fixture 只证明 ≥25% 缩减，真实压缩比、token、耗时与进程峰值未测（[记录](verification/compact-node-tree-presentation.md)） |
+| 联动栏容器伸缩下的实机 `observed` | 未取得：X 首页复现 `2242↔2400` 容器伸缩，但其虚拟化列表让匹配集为空（`insufficient_anchors`/`container_changed`）；Settings 有 `observed` 但没有容器伸缩（[记录](verification/scroll-safe-trajectory-and-viewport-effect.md) §6.4、§7） |
+| 带局部滚动覆盖的受控合成页实机样本 | 未执行：本轮按用户指定范围只部署整组产物与两个主机二进制，未安装验证探针 App；该场景由合成用例与 Zhihu/X 真实嵌套作用域覆盖（[记录](verification/scroll-safe-trajectory-and-viewport-effect.md) §7） |
 
 ## 4. 证据入口
 
@@ -94,14 +97,17 @@
 ## 5. 暂缓事项
 
 - 第 3 节的验证缺口暂不单独补测；待其后按真实使用路径补齐证据。
-- 当前部署为 `0.11.0`（`contract_version=11`、`android_version_code=13`），构建自
-  `3a4f579`、`source_dirty=false`，`can_start=true`；手机服务、控制 App 与手机 HTTP MCP
+- 当前部署为 `0.13.0`（`contract_version=13`、`android_version_code=15`），构建自
+  `badc856`、`source_dirty=false`，`can_start=true`；手机服务、控制 App 与手机 HTTP MCP
   适配器均与清单一致（逐项 SHA-256 校验），App 私有数据与账本 v5 保留，未重启手机、未卸载、
-  未清库。手机 HTTP MCP 与磁盘上的新主机适配器均通过 both/text/structured 探针
-  （[记录](verification/compact-node-tree-presentation.md)）。Windows DSH 连接器的 stdio
-  子进程仍执行旧镜像（契约 10），需该宿主自行重启后才能使用新契约；手机侧 `dsh-mcp-connector`
-  已自动重启并运行新二进制，另一个旧 stdio 宿主需其宿主自行恢复。
+  未清库。手机 HTTP MCP 适配器已随部署启动并通过 401 探测；主机侧
+  `build/device-mcp.exe` 与 `build/mcp-probe.exe` 已按主机清单重建并核验。仍持有旧二进制的
+  依赖方 Agent 宿主由用户自行重启，本轮不代为操作
+  （[记录](verification/scroll-safe-trajectory-and-viewport-effect.md)）。
 - 契约 10 的实现、部署与实机补记已推送到 `origin`；issue #10 已回复并以 `COMPLETED`
   关闭，`#7` 未关闭、未重开（[记录](verification/semantic-scroll-observation-quality.md) §9）。
 - 契约 11（公共树表示与交付预算）已实现、整组发布并部署到手机；`verify-m6` 由用户排除，
   真实 Capture 压缩比/token 与运行成本按用户要求未测（[记录](verification/compact-node-tree-presentation.md)）。
+- 契约 13（受控滚动安全区间与联动视口效果）已实现、整组发布并部署到手机；X 首页的
+  `2242↔2400` 容器伸缩已复现，但该应用仍缺正证据，联动栏下的实机 `observed` 尚未取得
+  （[记录](verification/scroll-safe-trajectory-and-viewport-effect.md) §7）。
