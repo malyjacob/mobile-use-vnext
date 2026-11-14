@@ -1,6 +1,6 @@
 # 项目实施状态
 
-状态：2026-11-14。本页承载用户可见的阶段进度、已实现/已实测/未验证分层与未决项；
+状态：2026-11-15。本页承载用户可见的阶段进度、已实现/已实测/未验证分层与未决项；
 `docs/` 只保留正式架构、现行契约与运维说明。
 
 ## 1. 阶段
@@ -46,6 +46,7 @@
 | 受控滚动、raw swipe duration 与观察质量/效果（契约 10） | 已实现 | 已部署 0.10.0/契约 10/versionCode 12；Settings 实机 5 次受控 scroll 全部 `executed`、0 次 `target_changed`，quality 均 stable；effect 得到 `not_observed`/`unknown`，尚未取得实机 `observed` 或跨应用样本（[记录](verification/semantic-scroll-observation-quality.md)） |
 | 公共树表示与交付预算（契约 11） | 已实现 | 已实测（部分）：0.11.0/契约 11/versionCode 13 整组构建、清单核验、手机覆盖安装与私有数据保留；实机契约 10 拒绝、最小 STOP 接纳、`start→full`、同基线空 delta、inspect 插入不改基线、query 与 end；stdio 与手机 HTTP 两个 MCP 入口的 both/text/structured 探针均 PASS。未执行：`verify-m6`（用户排除）、真实 Capture 压缩比/token/耗时/进程峰值（用户排除）、`act` 重验失败交付的实机样本（[记录](verification/compact-node-tree-presentation.md)） |
 | 受控滚动中心线安全区间、原段重验与联动视口效果（契约 13） | 已实现 | 已部署 0.13.0/契约 13/versionCode 15；契约边界实测（旧 12 与缺头均 `409 contract_mismatch`、最小 STOP 独立、`13` 受理）；Settings 7 次垂直 scroll 全部 `executed`、0 次 `target_changed`，取得 4 次实机 `observed`（`anchors=17`/`coverage=80`）与 6 次 `not_observed`；X 首页复现 `2242↔2400` 容器伸缩但受内容换血限制仍为 `unknown`；Zhihu/X 嵌套作用域取得真实 `422` 且零采集零派发。联动栏下的实机 `observed` 与合成覆盖层页未取得（[记录](verification/scroll-safe-trajectory-and-viewport-effect.md)） |
+| tap/long_press 子树安全落点与结构化引导（契约 14） | 已实现 / 已实测（有限） | 已部署 0.14.0/契约 14/versionCode 16；静态子树规划、固定点重验、R1 原子引导、`occluding_ref` 边界及嵌套详情所有权已实现并单测；实机临时复合卡片验证正文引导 `nearest_actionable_ref=n21`、`safe_point={540,331}`、`safe_carrier_ref=n22`，独立 O 上卡片 tap ×3 与 long_press 均与内按钮 0 次隔离；契约 13 拒绝/14 受理、恢复屏障与最小 STOP 通过。外部 MCP 宿主未操作，手机 stdio 旧进程需宿主重启；`occluding_ref` 专门页面与活动会话 STOP 未单独实机构造（[记录](verification/act-tap-safe-scope-and-guidance.md)） |
 
 ## 3. 未验证 / 未实现
 
@@ -61,7 +62,7 @@
 | 页面明显变化后的图片内容差异 | 未构造；实机为同屏静态帧 |
 | 倒序/迟到 `control_view.revision` 注入 | 实机未构造；App 只接受同实例更大的 revision，旧响应按代次丢弃（代码路径与单元测试覆盖，未单独实机注入） |
 | 长时间 recovering/blocked 窗口 | 已确认 SIGKILL/SIGTERM 后 `can_start=false` 且无旧会话恢复；恢复通常在 App 实例变化释放显示后约 1–2 秒完成，未构造分钟级阻塞 |
-| 外部 MCP 宿主缓存刷新 | 已验证：Codex 宿主实际重启后加载 `build/device-mcp.exe`，新进程路径与配置一致；12 工具 stdio 探针通过 |
+| 外部 MCP 宿主缓存刷新（历史版本） | 已验证：Codex 宿主实际重启后加载 `build/device-mcp.exe`，新进程路径与配置一致；12 工具 stdio 探针通过 |
 | 旧 App + 新服务下的旧 App 界面 | 旧版本在控制视图为空时自身 `NullPointerException`（`ControlState.cleanupRisk`），旧 App 服务仍可发送独立 STOP；新版本已修复该空指针 |
 | 通知频道关闭/权限撤销下的消息中心 | 代码路径检查；实机仅验证通知可用路径 |
 | 后观察收敛采样（`start`/`act`/`open_app`） | 已实现并由单元测试覆盖判据、预算、撤销与图片读序；实机 A/B 未执行：`target_changed` 率、按档 `samples`/`stable` 分布与 P50/P95 需真机采样后才能校准三档取值（[提案](proposals/implemented/act-post-observation-settle.md)、[记录](verification/act-post-observation-settle.md)） |
@@ -75,6 +76,7 @@
 | 真实 Capture 的新旧公共表示对比与运行成本 | 未执行：用户明确排除；原始采集与树不入库，合成高冗余 fixture 只证明 ≥25% 缩减，真实压缩比、token、耗时与进程峰值未测（[记录](verification/compact-node-tree-presentation.md)） |
 | 联动栏容器伸缩下的实机 `observed` | 未取得：X 首页复现 `2242↔2400` 容器伸缩，但其虚拟化列表让匹配集为空（`insufficient_anchors`/`container_changed`）；Settings 有 `observed` 但没有容器伸缩（[记录](verification/scroll-safe-trajectory-and-viewport-effect.md) §6.4、§7） |
 | 带局部滚动覆盖的受控合成页实机样本 | 未执行：本轮按用户指定范围只部署整组产物与两个主机二进制，未安装验证探针 App；该场景由合成用例与 Zhihu/X 真实嵌套作用域覆盖（[记录](verification/scroll-safe-trajectory-and-viewport-effect.md) §7） |
+| 0.14.0 外部 MCP 宿主重新发现工具 | 未执行：手机 HTTP 适配器已验证启动及哈希；手机 stdio 旧进程与外部依赖宿主仍需重启，本轮未操作宿主或 `tools/list`（[记录](verification/act-tap-safe-scope-and-guidance.md) §7、§11） |
 
 ## 4. 证据入口
 
@@ -91,19 +93,20 @@
 - [ref 连续性与静态页 delta 修复验证](verification/ref-stability-public-identity.md)
 - [主屏多窗口层级修复与实机验证](verification/primary-display-multi-window.md)
 - [契约 11 公共树表示、交付预算与文本 v2 的实现与验证](verification/compact-node-tree-presentation.md)
+- [tap/long_press 子树安全落点与结构化引导的实现与验证](verification/act-tap-safe-scope-and-guidance.md)
 - [工程决策](decisions.md)
 - [工程流程](process.md)
 
 ## 5. 暂缓事项
 
 - 第 3 节的验证缺口暂不单独补测；待其后按真实使用路径补齐证据。
-- 当前部署为 `0.13.0`（`contract_version=13`、`android_version_code=15`），构建自
-  `badc856`、`source_dirty=false`，`can_start=true`；手机服务、控制 App 与手机 HTTP MCP
-  适配器均与清单一致（逐项 SHA-256 校验），App 私有数据与账本 v5 保留，未重启手机、未卸载、
-  未清库。手机 HTTP MCP 适配器已随部署启动并通过 401 探测；主机侧
-  `build/device-mcp.exe` 与 `build/mcp-probe.exe` 已按主机清单重建并核验。仍持有旧二进制的
-  依赖方 Agent 宿主由用户自行重启，本轮不代为操作
-  （[记录](verification/scroll-safe-trajectory-and-viewport-effect.md)）。
+- 当前部署为 `0.14.0`（`contract_version=14`、`android_version_code=16`），构建自
+  `cc71c87`、`source_dirty=false`，`can_start=true`；手机服务、控制 App 与手机 HTTP MCP
+  适配器均已加载 0.14.0，适配器二进制 SHA-256 与发布清单一致。服务启动、App 配对、恢复屏障
+  与 STOP 可用性均 PASS；契约 13 请求被 `409 contract_mismatch` 拒绝，契约 14 与 control
+  sync 正常受理。手机 stdio 旧进程及仍持有旧二进制的依赖方 Agent 宿主需由宿主重启后重新发现
+  工具，本轮不代为操作、不宣称其已刷新
+  （[记录](verification/act-tap-safe-scope-and-guidance.md)）。
 - 契约 10 的实现、部署与实机补记已推送到 `origin`；issue #10 已回复并以 `COMPLETED`
   关闭，`#7` 未关闭、未重开（[记录](verification/semantic-scroll-observation-quality.md) §9）。
 - 契约 11（公共树表示与交付预算）已实现、整组发布并部署到手机；`verify-m6` 由用户排除，
@@ -111,6 +114,9 @@
 - 契约 13（受控滚动安全区间与联动视口效果）已实现、整组发布并部署到手机；X 首页的
   `2242↔2400` 容器伸缩已复现，但该应用仍缺正证据，联动栏下的实机 `observed` 尚未取得
   （[记录](verification/scroll-safe-trajectory-and-viewport-effect.md) §7）。
+- 契约 14（tap/long_press 子树安全落点与结构化引导）已实现、整组发布并部署到手机；临时
+  复合卡片取得静态拒绝、原子引导、固定点重验路径与业务后观察，`occluding_ref` 专门页面与
+  活动会话下最小 STOP 撤销未单独实机构造（[记录](verification/act-tap-safe-scope-and-guidance.md) §9、§11）。
 - 契约 13 的实现与归档提交已推送 `origin`（`master` 到 `6c52c8e`；归档提交信息里的「未推送」
   描述当时状态，已被本条取代）。issue #12 与 #13 各附一条实现与实机结果回复后以 `COMPLETED`
   关闭；#11、#14、#15 仍开放。

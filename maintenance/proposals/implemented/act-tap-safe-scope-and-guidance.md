@@ -1,13 +1,14 @@
 # 提案：act 点击与长按的子树安全落点规划及可操作祖先引导
 
-状态：提案，未实现。
+状态：已实现（实现提交 `cc71c876a231e0a2717e18f83f01c204fe96b735`，2026-11-15）。
 基线提交：`81bad647d40d2b9e13f25ff12dfb573f978e5061`（分支 `master`，`2026-11-15`）。
 适用范围：`act` 的 `tap` 与 `long_press` 分支中 `target.ref` 目标的静态落点规划、认领后实时重验、派发坐标选择，以及 `422 unsupported_node_action` 的 `error.details` 结构化引导；不改坐标目标、`text`、`swipe`、`scroll`、`key` 及公开树 `Node` 结构。
 影响范围：`internal/engine`（`act.go`、新增 `tap_scope.go` 及测试）、`internal/protocol`（错误详情所有权与解码测试）、`internal/client`/`internal/mcp`（端到端保真测试及 `schema.go`）、受影响的正式文档；实施发布时涉及 `release/versions.json`、版本生成物、手机整组发布产物与清单、Windows 主机 `device-mcp.exe`/`mcp-probe.exe` 构建清单及 `maintenance/verification/`。
 契约（`/api/*` 字段与 `contract_version`）：改变——公开树 `Node` 与请求顶层/分支 JSON 形状不变，但 `tap`/`long_press` 的 `target.ref` 默认落点策略、候选不可证明时的静态拒绝、认领后子树落点重验语义变化，且 `422 unsupported_node_action` 的 `error.details` 新增受控引导键，属于执行语义与契约面演进；`contract_version` 从 `13` 前进为 `14`（发行号 `0.14.0`、Android `versionCode=16`）。
+实现与验证记录：[act-tap-safe-scope-and-guidance.md](../../verification/act-tap-safe-scope-and-guidance.md)。
 
 本文引用的函数名、行号、常量与默认值均以该基线提交为准；实现落地前若代码已前进，
-须按当时的 `HEAD` 重新核对（重点：[act.go](../../internal/engine/act.go)、[point.go](../../internal/engine/point.go)、[scroll.go](../../internal/engine/scroll.go)、[schema.go](../../internal/mcp/schema.go)、[interface.md](../../docs/interface.md)、[architecture.md](../../docs/architecture.md)、[mcp.md](../../docs/mcp.md) 与 [versions.json](../../release/versions.json)）。
+须按当时的 `HEAD` 重新核对（重点：[act.go](../../../internal/engine/act.go)、[point.go](../../../internal/engine/point.go)、[scroll.go](../../../internal/engine/scroll.go)、[schema.go](../../../internal/mcp/schema.go)、[interface.md](../../../docs/interface.md)、[architecture.md](../../../docs/architecture.md)、[mcp.md](../../../docs/mcp.md) 与 [versions.json](../../../release/versions.json)）。
 
 ---
 
@@ -40,25 +41,25 @@
 
 #### 通路一：`target.ref` 的派发固定取 `raw.Bounds.Center()`，无子树竞争作用域检查
 
-1. [act.go:246–276](../../internal/engine/act.go#L246-L276) 的 `staticActContentCheck` 对 `target.UseRef` 只检查节点非 root、非 context、`Bounds != nil`、未禁用且 `hasAction(node, ActionTap/ActionLongPress)`，不检查 `raw.Bounds.Center()` 是否落在子树内其他具备交互能力的子控件上。
-2. [act.go:379–391](../../internal/engine/act.go#L379-L391) 的 `revalidateActTarget` 对 `target.UseRef` 只执行 `matchFreshNode(&capture, obs.Projection.Capture, raw)`（完整内容身份 + 祖先链匹配），不校验实际点击落点在新鲜公开树中的子树归属。
-3. [act.go:488–494](../../internal/engine/act.go#L488-L494) 的 `dispatchAct` 对 `target.UseRef` 固定执行 `x, y = raw.Bounds.Center()`，直接将外包框几何中心交给 `e.dev.Tap`/`LongPress`。
-4. 同类对照：[scroll.go:180–251](../../internal/engine/scroll.go#L180-L251)（`scrollSafeSpans`）、[静态规划](../../internal/engine/scroll.go#L518-L533) 与 [原轨迹重验](../../internal/engine/scroll.go#L667-L697) 已具备“扣除竞争作用域、静态规划、重验原计划”的机制；tap/long_press ref 尚无对应子树作用域证明。
-5. 边界核查：[act_point_test.go:404–422](../../internal/engine/act_point_test.go#L404-L422)（`TestActRefTargetStillUsesIdentityOnly`）保护子树外同级重叠不使 `ref` 自拒。本提案只避让目标子树内的竞争后代；不据此声称无障碍父子关系必然等于 Android 实际触摸路由。
-6. 参考已归档的 [scroll-safe-trajectory-and-viewport-effect.md §4、§7、§11](implemented/scroll-safe-trajectory-and-viewport-effect.md)：复用静态规划、固定计划重验、半开区间减法、source/祖先环保护和条件交付原则；不移植 scroll 的整树滚动作用域归约、方向平局规则或 `effect` 判据。当前代码以本提案基线为准，归档提案中的旧行号不作为当前代码位置。
+1. [act.go:246–276](../../../internal/engine/act.go#L246-L276) 的 `staticActContentCheck` 对 `target.UseRef` 只检查节点非 root、非 context、`Bounds != nil`、未禁用且 `hasAction(node, ActionTap/ActionLongPress)`，不检查 `raw.Bounds.Center()` 是否落在子树内其他具备交互能力的子控件上。
+2. [act.go:379–391](../../../internal/engine/act.go#L379-L391) 的 `revalidateActTarget` 对 `target.UseRef` 只执行 `matchFreshNode(&capture, obs.Projection.Capture, raw)`（完整内容身份 + 祖先链匹配），不校验实际点击落点在新鲜公开树中的子树归属。
+3. [act.go:488–494](../../../internal/engine/act.go#L488-L494) 的 `dispatchAct` 对 `target.UseRef` 固定执行 `x, y = raw.Bounds.Center()`，直接将外包框几何中心交给 `e.dev.Tap`/`LongPress`。
+4. 同类对照：[scroll.go:180–251](../../../internal/engine/scroll.go#L180-L251)（`scrollSafeSpans`）、[静态规划](../../../internal/engine/scroll.go#L518-L533) 与 [原轨迹重验](../../../internal/engine/scroll.go#L667-L697) 已具备“扣除竞争作用域、静态规划、重验原计划”的机制；tap/long_press ref 尚无对应子树作用域证明。
+5. 边界核查：[act_point_test.go:404–422](../../../internal/engine/act_point_test.go#L404-L422)（`TestActRefTargetStillUsesIdentityOnly`）保护子树外同级重叠不使 `ref` 自拒。本提案只避让目标子树内的竞争后代；不据此声称无障碍父子关系必然等于 Android 实际触摸路由。
+6. 参考已归档的 [scroll-safe-trajectory-and-viewport-effect.md §4、§7、§11](scroll-safe-trajectory-and-viewport-effect.md)：复用静态规划、固定计划重验、半开区间减法、source/祖先环保护和条件交付原则；不移植 scroll 的整树滚动作用域归约、方向平局规则或 `effect` 判据。当前代码以本提案基线为准，归档提案中的旧行号不作为当前代码位置。
 
 #### 通路二：`422 unsupported_node_action` 缺少可操作祖先与安全承载区线索
 
-1. [act.go:251–265](../../internal/engine/act.go#L251-L265) 在目标节点不支持 `tap`/`long_press` 或不能作为操作目标时，直接返回 `protocol.NewError(422, protocol.CodeNodeUnsupported, ...)`，未调用 `WithDetail` 附带任何结构化上下文。
-2. [decode_response.go:107–123](../../internal/protocol/decode_response.go#L107-L123) 以 `map[string]any` 解码 `details`；[result_text.go:50](../../internal/mcp/result_text.go#L50) 将其整体作为 JSON 文本输出，`encodeResultDiagnostic` 也复用该编码。外层信封可承载嵌套对象，但现有泛型门禁不等于新键已通过端到端验收。
-3. [errors.go:27–32](../../internal/protocol/errors.go#L27-L32) 的 `APIError.Public()` 共享 `Details`，而 [engine.go:1166–1168](../../internal/engine/engine.go#L1166-L1168) 的重复 P / `status(P)` 视图直接共享 `op.Error`；[result_value.go:30–36](../../internal/mcp/result_value.go#L30-L36) 的取消投影只复制外层 map。本提案须补新嵌套对象的所有权门禁，不能宣称基线已经深拷贝，见 §4.6。
-4. [delivery.go:76–82](../../internal/engine/delivery.go#L76-L82) 的交付白名单不含 `hierarchy_unavailable`；[act.go:720–725](../../internal/engine/act.go#L720-L725) 的 `lineageOf` 没有环保护。新 ref 路径须分别明确失败交付与匹配前的拓扑守卫。
+1. [act.go:251–265](../../../internal/engine/act.go#L251-L265) 在目标节点不支持 `tap`/`long_press` 或不能作为操作目标时，直接返回 `protocol.NewError(422, protocol.CodeNodeUnsupported, ...)`，未调用 `WithDetail` 附带任何结构化上下文。
+2. [decode_response.go:107–123](../../../internal/protocol/decode_response.go#L107-L123) 以 `map[string]any` 解码 `details`；[result_text.go:50](../../../internal/mcp/result_text.go#L50) 将其整体作为 JSON 文本输出，`encodeResultDiagnostic` 也复用该编码。外层信封可承载嵌套对象，但现有泛型门禁不等于新键已通过端到端验收。
+3. [errors.go:27–32](../../../internal/protocol/errors.go#L27-L32) 的 `APIError.Public()` 共享 `Details`，而 [engine.go:1166–1168](../../../internal/engine/engine.go#L1166-L1168) 的重复 P / `status(P)` 视图直接共享 `op.Error`；[result_value.go:30–36](../../../internal/mcp/result_value.go#L30-L36) 的取消投影只复制外层 map。本提案须补新嵌套对象的所有权门禁，不能宣称基线已经深拷贝，见 §4.6。
+4. [delivery.go:76–82](../../../internal/engine/delivery.go#L76-L82) 的交付白名单不含 `hierarchy_unavailable`；[act.go:720–725](../../../internal/engine/act.go#L720-L725) 的 `lineageOf` 没有环保护。新 ref 路径须分别明确失败交付与匹配前的拓扑守卫。
 
 ### 1.3 为什么直觉会出错
 
 - **“对不支持点击的叶节点 `n491` 直接静默晋升去点父容器 `n516`”**：违反已定的不静默晋升边界。若用户选择了容器内的装饰文本，静默晋升可能在调用方不知情下触发外层动作；若不解决容器中心遮挡，晋升后仍可能命中子图 `n523`。
 - **“只在 `422` 错误里返回 `nearest_actionable_ref: "n516"`，不改 `n516` 的落点逻辑”**：这会制造诱导误点的陷阱——调用方听从错误提示改传 `target={ref:"n516"}`，下一拍就会因为 `n516` 盲点几何中心 `(540, 708)` 而直接误开子图 `n523`。
-- **“对 `target.ref` 直接套用全局 `resolvePoint(Tree.Root, x, y)` 要求目标必须是全屏最深节点”**：这会把子树内的正常文本承载子节点（如按钮或卡片内的 `text`）也当成遮挡，还会破坏 [act_point_test.go:404–422](../../internal/engine/act_point_test.go#L404-L422) 中同级全屏层与按钮重叠时的 `ref` 语义。正确边界是**只把目标子树内部的竞争交互后代（及其子树）视为阻塞区，而把目标子树内部的非交互后代视为归属目标的冒泡承载区**。
+- **“对 `target.ref` 直接套用全局 `resolvePoint(Tree.Root, x, y)` 要求目标必须是全屏最深节点”**：这会把子树内的正常文本承载子节点（如按钮或卡片内的 `text`）也当成遮挡，还会破坏 [act_point_test.go:404–422](../../../internal/engine/act_point_test.go#L404-L422) 中同级全屏层与按钮重叠时的 `ref` 语义。正确边界是**只把目标子树内部的竞争交互后代（及其子树）视为阻塞区，而把目标子树内部的非交互后代视为归属目标的冒泡承载区**。
 - **“在公开树每个 `Node` 上新增 `nearest_tap_ref` 或 `center_occluded` 字段”**：会让整棵树（含紧凑视图 `view=compact`）的每个节点膨胀字节开销，侵占 128 KiB 公共预算。
 
 ## 2. 目标与非目标
@@ -75,7 +76,7 @@
 
 - 不对不支持动作的 `target.ref` 做静默祖先晋升派发（点 `n491` 仍明确返回 `422 unsupported_node_action`）。
 - 不改变坐标目标 `{x, y}`、`text`、`swipe`、`scroll`、`key` 的判据与行为。
-- 不解决跨同级（sibling）/跨窗口 z-order 遮挡或未发布透明拦截层（保留 [act_point_test.go:404–422](../../internal/engine/act_point_test.go#L404-L422) 的同级 `ref` 行为）。
+- 不解决跨同级（sibling）/跨窗口 z-order 遮挡或未发布透明拦截层（保留 [act_point_test.go:404–422](../../../internal/engine/act_point_test.go#L404-L422) 的同级 `ref` 行为）。
 - 不新增请求字段，不改变公开树 `Node`/`ReadNode`/`ReadDelta` 的字段定义。
 - 主机侧只更新构建 `build/device-mcp.exe` 与 `build/mcp-probe.exe` 及构建清单，不重启或修改依赖它的外部 Agent 宿主进程。
 
@@ -102,7 +103,7 @@
    - 校验不能依赖基线无环保护的 `lineageOf`，也不能先交给可能遍历坏图的 `Preview`。这是新 ref 路径的局部前置守卫，不扩大坐标、text、swipe、scroll 的判据；若需改共用匹配函数，另行核查调用方语义。
    - 静态目标 source 缺失/越界沿用 `409 node_not_found`；其它结构/映射损坏为 `503 hierarchy_unavailable`，本操作不认领、不采集。R1 仅因无法构造引导而遇到这些问题时，保留原 `422` 并省略引导。新鲜 raw/公开图拓扑损坏或不可投影为 `503 hierarchy_unavailable`；图结构有效但目标/承载的身份、source 映射或落点归属不可证为 `409 target_changed`，作用域内其它 source 不能证明时也拒绝该固定点。
 2. **已知交互节点 `isTouchInteractive(M)`**：非 root、非 context 且 actions 含 `tap`、`long_press`、`text` 任一种。判据对两种请求动作相同；不因 `enabled=false` 豁免竞争节点。仅有 `swipe` 不进入该集合。这是公开能力词表上的保守模型，不把 editable 启发式或动作位解释为真实事件分发证明。
-3. **未知边界 `M.Context`**：基线 [build.go:373–378](../../internal/observation/build.go#L373-L378) 清空 context 的动作与几何，且 [engine.Projection](../../internal/engine/engine.go#L276-L280) 没有 `ContextSource`。因此不能从 `actions=[]` 推出其非交互，也不能读取不存在的 `Source[M.Ref]`。本提案将 context 视为保守边界：不作承载候选，其所有具有正面积公开 bounds 的后代都阻塞；context 自身无可用矩形，不凭空扩大成整个 `C.Bounds`。R1 沿父链遇到 context 则停止引导。
+3. **未知边界 `M.Context`**：基线 [build.go:373–378](../../../internal/observation/build.go#L373-L378) 清空 context 的动作与几何，且 [engine.Projection](../../../internal/engine/engine.go#L276-L280) 没有 `ContextSource`。因此不能从 `actions=[]` 推出其非交互，也不能读取不存在的 `Source[M.Ref]`。本提案将 context 视为保守边界：不作承载候选，其所有具有正面积公开 bounds 的后代都阻塞；context 自身无可用矩形，不凭空扩大成整个 `C.Bounds`。R1 沿父链遇到 context 则停止引导。
 4. **基础几何**：目标 `C` 必须非 root、非 context、有正面积 bounds、未被明确禁用、含请求动作且 source 有效。令 `raw = &Capture.Nodes[Source[C.Ref]]`，`screen = Capture.Display.Bounds()`，`baseRect = raw.Bounds ∩ screen ∩ rectFromBounds(C.Bounds)`。显示尺寸必须正且与本 O 的屏幕一致；空交集不能取中心。使用 `Bounds`，不以 `RawBounds` 替代基线坐标。
 5. **`collectSubtreeTapScope(C)`**：从 `C.Children` 开始先序 DFS，继承 `inBlocked` 与最近边界 owner；`blockedHere = inBlocked || isTouchInteractive(M) || M.Context`。
    - `blockedHere` 为真时，记录所有非 context、有正面积 bounds 后代的矩形及其最近边界 owner；继续遍历子树。后代 bounds 可伸出其父 bounds，**不得因父矩形不命中或为空而剪枝**。不遍历 `C` 子树外同级节点作为 R3 阻塞者。
@@ -126,7 +127,7 @@
 `tapPlan` 仅为本次调用的不可变计划，保存点、strategy、目标 raw 来源、可选承载 raw/ref 与 CPU 计时；沿静态检查→重验→派发显式传递。不将它写入公共树、会话或恢复账本，不形成第二份执行权威。
 
 1. **`default_center`**：先测 `raw.Bounds.Center()`；仅当它在 `baseRect` 外时，改测非空 `baseRect` 中心。原中心位于基础矩形且通过完整谓词时保留基线坐标；若它在矩形内但被阻塞/歧义，则进入第二级。
-2. **`carrier_node`**：将先序 `carriers` 稳定拆为 2a 非匿名、2b 匿名，每轮内部保持先序。直接在 `*protocol.Node` 上定义 `anonymousPlainNode(M)`，等价于 [read.go:17–43](../../internal/observation/read.go#L17-L43)：
+2. **`carrier_node`**：将先序 `carriers` 稳定拆为 2a 非匿名、2b 匿名，每轮内部保持先序。直接在 `*protocol.Node` 上定义 `anonymousPlainNode(M)`，等价于 [read.go:17–43](../../../internal/observation/read.go#L17-L43)：
    ```text
    M != nil && !M.Context && M.Role in {view, group}
    && len(M.Label)==0 && len(M.Actions)==0
@@ -155,7 +156,7 @@
 4. 在 fresh 目标子树上重建同一作用域空间，只证明 **`(plan.x,plan.y)`** 满足 §4.2；不运行候选选择、不改变 strategy/坐标。不要求其它位置的最长区间或候选排名保持不变。节点失配、映射失配或点证明失败为 `409 target_changed`。
 5. 返回已读的 `&capture` 与受控错误给原 `Act` 路径。`409 target_changed` 可走既有 `deliverRejection`，但仅发布门禁成功才交付新 O；`503 hierarchy_unavailable` **不在交付白名单**，不交付 O，恢复为 `observe/P/retired`。不为本提案扩大白名单，也不额外重采。
 
-测试夹具应分别注入工作/会话 projector 与回退 projector；[act_point_test.go:240–254](../../internal/engine/act_point_test.go#L240-L254) 只替换 `e.projector` 的旧坐标用例仍保留原语义，不能照抄后误以为覆盖了 `work.Projector` 分支。
+测试夹具应分别注入工作/会话 projector 与回退 projector；[act_point_test.go:240–254](../../../internal/engine/act_point_test.go#L240-L254) 只替换 `e.projector` 的旧坐标用例仍保留原语义，不能照抄后误以为覆盖了 `work.Projector` 分支。
 
 ### 4.5 `422 unsupported_node_action` 的祖先与坐标引导（R1）
 
@@ -175,7 +176,7 @@ R1 坐标与下一次对 A 的 ref 调用可能选在不同位置，但两者在
 - 生成完成后不再原地修改任何 Details。实施时在 `APIError.Public()` 与 `operationViewLocked` 的错误投影边界建立独立所有权：至少对新增嵌套 map、外层 map 及已有受控数组做递归复制，避免首次结果、保留的 op.Error、重复 P 与 status(P) 共享可变对象。只复制受控 JSON 值，不以 JSON 往返复制改变既有 `[]int` 等内存类型；不把任意树或正文引入锁内。此复制不改变任何错误键或其它分支的业务判据。
 - `canonicalResult` 的取消处理只追加外层 `mcp.*`，当前浅复制在“不写嵌套对象”的前提下可保留；须用含 safe_point 的取消夹具证明不修改源 Result/保留操作。后续若改嵌套对象必须先复制，不得把顶层复制宣传为深拷贝。
 - 扩充协议解码、真实 HTTP 客户端、MCP result manifest/parity 夹具：同一嵌套结果经 HTTP → 客户端 → canonical JSON 后，both/text 的 `result v2` 可逆解析与 canonical JSON 等价；structured 的 StructuredContent 等价，且错误 `diagnostic v1` 的 `error.details` 完整包含新键。diagnostic 是白名单摘录，不要求整个 Result 能逆还原。
-- 复用 [result_text.go:225–228](../../internal/mcp/result_text.go#L225-L228) 的 canonical 比较口径（保留数值、不做有损浮点重写），覆盖键插入顺序、零坐标、可选键省略和取消扩展。补重复 P/status(P) 不重派发、提示不重算及修改某一返回视图的嵌套值不污染其它视图/历史记录的测试。通过这些门禁前不作“已保真”的验证结论。
+- 复用 [result_text.go:225–228](../../../internal/mcp/result_text.go#L225-L228) 的 canonical 比较口径（保留数值、不做有损浮点重写），覆盖键插入顺序、零坐标、可选键省略和取消扩展。补重复 P/status(P) 不重派发、提示不重算及修改某一返回视图的嵌套值不污染其它视图/历史记录的测试。通过这些门禁前不作“已保真”的验证结论。
 
 ## 5. 算法
 
@@ -287,12 +288,12 @@ t6 dispatch：注入 (plan.x, plan.y)
 
 ### 6.5 契约与文档影响
 
-1. **契约版本升级**：按 [docs/release.md §2](../../docs/release.md#L45-L47)，`tap`/`long_press` 的默认落点行为、静态拒绝条件、重验判据及 `422` 错误详情结构发生变化，`contract_version` 从 `13` 升级为 `14`，`release_version` 升为 `0.14.0`，`android_version_code` 升为 `16`。
+1. **契约版本升级**：按 [docs/release.md §2](../../../docs/release.md#L45-L47)，`tap`/`long_press` 的默认落点行为、静态拒绝条件、重验判据及 `422` 错误详情结构发生变化，`contract_version` 从 `13` 升级为 `14`，`release_version` 升为 `0.14.0`，`android_version_code` 升为 `16`。
 2. **正式文档同步范围**：
-   - [docs/interface.md](../../docs/interface.md) §1（`error.details` 白名单及键类型/省略规则）、§2（422 说明）、§6（静态规划、固定点重验、引导及历史提示有效性），避免只加分支说明却与总白名单冲突；
-   - [docs/architecture.md](../../docs/architecture.md) §3（补充 `tap`/`long_press` 的子树作用域与安全落点规划说明）；
-   - [docs/mcp.md](../../docs/mcp.md) §1/§2（更新工具目录指纹与 `act` 描述说明）；
-   - 同步 [docs/control-protocol.md](../../docs/control-protocol.md)、[docs/release.md](../../docs/release.md)、[docs/runbook.md](../../docs/runbook.md)、[docs/phone-operations.md](../../docs/phone-operations.md)、[docs/client.md](../../docs/client.md) 与 [README.md](../../README.md) 中的当前版本/示例；按真实工具目录重新生成 MCP 指纹，不手填推测值。实施前检索其余正式文档，仅修改实际受影响的描述。
+   - [docs/interface.md](../../../docs/interface.md) §1（`error.details` 白名单及键类型/省略规则）、§2（422 说明）、§6（静态规划、固定点重验、引导及历史提示有效性），避免只加分支说明却与总白名单冲突；
+   - [docs/architecture.md](../../../docs/architecture.md) §3（补充 `tap`/`long_press` 的子树作用域与安全落点规划说明）；
+   - [docs/mcp.md](../../../docs/mcp.md) §1/§2（更新工具目录指纹与 `act` 描述说明）；
+   - 同步 [docs/control-protocol.md](../../../docs/control-protocol.md)、[docs/release.md](../../../docs/release.md)、[docs/runbook.md](../../../docs/runbook.md)、[docs/phone-operations.md](../../../docs/phone-operations.md)、[docs/client.md](../../../docs/client.md) 与 [README.md](../../../README.md) 中的当前版本/示例；按真实工具目录重新生成 MCP 指纹，不手填推测值。实施前检索其余正式文档，仅修改实际受影响的描述。
 3. **文档审计门禁**：所有 `docs/` 修改在实现提交前交由独立只读文档审计 subagent 审核并取得 clean 结论。
 
 ## 7. 预期效果与能力边界
@@ -435,19 +436,38 @@ go test ./internal/mcp -run '^(TestAgentResultLosslessParity|TestResultFieldMani
 6. 先提交实现，再在同一干净源码提交上整组构建、核验手机和主机清单、部署手机并执行 §8.2 最小闭环；主机只构建/校验两 exe。失败修正后重新走受影响门禁，不绕过 source_dirty 或清单检查。
 7. 将本提案移入 `maintenance/proposals/implemented/`、补写 §11、重写相对链接，并编写 `maintenance/verification/act-tap-safe-scope-and-guidance.md` 单独提交归档。
 
-## 11. 实现结果（归档时补写）
+## 11. 实现结果
 
-实现提交：`<待实现提交后填写>`。实现与验证记录：`../../verification/act-tap-safe-scope-and-guidance.md`（归档移动到 implemented/ 后的相对路径，本次不预建验证结论）。
+实现提交：`cc71c876a231e0a2717e18f83f01c204fe96b735`（2026-11-15；发行 `0.14.0`、
+契约 `14`、Android `versionCode=16`）。实现与验证记录：
+[act-tap-safe-scope-and-guidance.md](../../verification/act-tap-safe-scope-and-guidance.md)。
 
 ### 11.1 已落地
 
 | 提案条目 | 落点 |
 | --- | --- |
+| 目标子树作用域、严格承载/阻塞边界的收集，以及 `default_center` → `carrier_node` → `center_span` 的确定性候选顺序 | [tap_scope.go](../../../internal/engine/tap_scope.go)（`collectTapScope`、`provesSubtreeTapPoint`、`enumerateTapCandidates`、`chooseTapPlan`、`planTapTarget`） |
+| 无候选时认领前 `422 unsupported_node_action`；仅在目标原中心有阻塞证据时按深度/先序选择 `occluding_ref`，不宣称全表面遮挡 | `tap_scope.go`（`occludingTapRef`、`staticTapRefCheck`）；[act.go](../../../internal/engine/act.go)（`staticActContentCheckWithTap`） |
+| 认领后只重验静态固定点：fresh 目标/承载唯一匹配、工作 projector 优先、`Preview` 失败 `503 hierarchy_unavailable`、不重选坐标 | `act.go`（`revalidateActTarget`、`revalidateTapTarget`）；`tap_scope.go`（`validateTapRawTopology`、`checkTapSourceMapping`） |
+| `422` 的 R1 引导：先证明最近可操作祖先 ref 可规划，再以子树谓词与整树唯一命中归属双重证明坐标；祖先、坐标与可选承载键原子出现，不静默晋升派发 | `tap_scope.go`（`tapGuidanceFor`、`tapGuidanceCandidates`、`provesGuidancePoint`、`tapUnsupportedWithGuidance`） |
+| `error.details` 的受控嵌套对象所有权：公开错误、保留的 `op.Error`、重复 P 与 `status(P)` 视图不共享可变详情 | [errors.go](../../../internal/protocol/errors.go)（`CloneErrorDetails`、`APIError.Public`）；[engine.go](../../../internal/engine/engine.go)（`operationViewLocked`） |
+| 白名单 `act.tap_plan` 诊断，仅记录操作 ID、动作、模式、证明布尔与耗时 | `act.go`（`logTapPlan`）；`internal/eventlog` 既有白名单键 |
+| `act` 的 MCP 描述同步说明子树安全落点、固定点重验与 `422` 引导字段；工具目录指纹由真实注册目录生成，为 `count=12`、`6ace74b8bdceb75dd43ffe270e3f33c7b3a6064aff3cc4734256e539460d136e` | [schema.go](../../../internal/mcp/schema.go) |
+| 唯一版本源推进并通过生成器同步 Go/Java/XML/Manifest；版本边界为 `0.14.0 / 14 / 16` | `release/versions.json`、`scripts/generate-version.ps1`、`internal/protocol/version_generated.go`、`android-control/.../GeneratedVersion.java`、`strings_version.xml`、`AndroidManifest.xml` |
+| 正式文档与 README 同步已落地行为：子树安全落点、固定点重验、R1 原子引导、`occluding_ref` 边界、树证明不保证 Android 消费或业务结果 | [interface.md](../../../docs/interface.md)、[architecture.md](../../../docs/architecture.md)、[mcp.md](../../../docs/mcp.md)、[integration.md](../../../docs/integration.md)、[control-protocol.md](../../../docs/control-protocol.md)、[release.md](../../../docs/release.md)、[runbook.md](../../../docs/runbook.md)、[phone-operations.md](../../../docs/phone-operations.md)、[client.md](../../../docs/client.md)、[README.md](../../../README.md) |
+| 新规划/重验/引导/所有权/三模式保真测试与回归 | [act_tap_scope_test.go](../../../internal/engine/act_tap_scope_test.go)、[errors_test.go](../../../internal/protocol/errors_test.go)、[decode_response_test.go](../../../internal/protocol/decode_response_test.go)、[app_test.go](../../../internal/httpapi/app_test.go)、[client_test.go](../../../internal/client/client_test.go)、[result_parity_test.go](../../../internal/mcp/result_parity_test.go)、[result_manifest_test.go](../../../internal/mcp/result_manifest_test.go) |
 
 ### 11.2 与提案不同或未执行
 
 | 项 | 结论与理由 |
 | --- | --- |
+| 外部 MCP 宿主重新发现 0.14.0 工具目录 | 未执行：本轮只启动并核验手机 HTTP MCP 适配器，未操作外部宿主或其 `tools/list`；手机 stdio 旧进程仍需宿主重启后加载新二进制。 |
+| `scripts/verify-m6.ps1` | 未执行：脚本已漂移，不作为本轮发布门禁；发布以 `scripts/build-release.ps1`、`scripts/verify-manifest.ps1`、实际版本边界检查和部署结果为准。 |
+| 活动会话下最小 STOP 撤销的独立实机样本 | 未执行：只取得先 `end` 且 cleanup pending 时 `/v1/control/stop` 的实机样本，不能把该样本写成活动会话撤销已验证。 |
+| 临时 test-target 覆盖安装后的第一次 `app.open` | 观察到 `504 app_launch_unconfirmed`，但观察完整且前台已为 probe；随后 full observe + open 恢复。该无关生命周期异常未修改，不纳入本提案行为结论。 |
+| 五包之外的全仓/设备矩阵 | 未扩大：按真实变化路径执行 `internal/engine`、`internal/protocol`、`internal/httpapi`、`internal/client`、`internal/mcp` 的测试与 vet；这不等于全仓或跨设备矩阵通过。 |
+| `occluding_ref` 的专门实机样本 | 未单独构造：由合成复合卡片/全遮挡用例覆盖键选择与省略边界；实机样本只验证了 `unsupported_node_action` 的祖先/坐标引导。 |
+| Android 消费者与业务结果 | 不保证：树模型证明只覆盖公开树的几何、作用域与固定点归属；同级/窗口 z 序、透明拦截层、自定义触摸代理和应用的最终业务结果仍属能力边界。 |
 
 ---
 
