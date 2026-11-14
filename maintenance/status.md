@@ -1,6 +1,6 @@
 # 项目实施状态
 
-状态：2026-11-13。本页承载用户可见的阶段进度、已实现/已实测/未验证分层与未决项；
+状态：2026-11-14。本页承载用户可见的阶段进度、已实现/已实测/未验证分层与未决项；
 `docs/` 只保留正式架构、现行契约与运维说明。
 
 ## 1. 阶段
@@ -24,6 +24,7 @@
 | `apps` | 已实现 | 已验证（Core 脚本） |
 | `open_app` | 已实现 | 已验证：创建/复用/未知包/end/STOP 清理 |
 | `inspect` | 已实现 | 已验证：整树/子树/查询 |
+| `wait_for` | 已实现（契约 12，第 12 个工具） | 已实测（virtual 模式）：`query`+`stable=true` 提前命中 1651ms（`stable/3/stable`）、`absent_query` 首帧命中 469ms、纯 sleep+image 4338ms（`unknown/0/not_sampled`，图片 540×1200 complete）、等待期 `end` 撤销后约 50ms 返回 `409 control_revoked` 且无迟到 `O`；主机与手机侧探针均 `PASS`。primary 模式表征与 App STOP 按钮未执行（[记录](verification/wait-for.md)） |
 | `keepalive` | 已实现 | 已验证：续租/结束会话拒绝 |
 | `notify` | 已实现 | 已验证：保存/重复/空正文；经控制同步进入 App 消息中心、系统通知与本地已读，确认后释放服务端队列 |
 | `diagnose` | 已实现 | 已验证：无参/指定 O |
