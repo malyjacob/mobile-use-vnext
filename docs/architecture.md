@@ -174,6 +174,28 @@ raw `swipe` 仍是原始手势：起点 `from` 继续走完整内容身份、祖
 `duration_ms`，不承诺滚动语义。`scroll` 不证明真实滚动方向、触摸消费者、业务安全或到达边界；
 设备事实仍只有 `Scrollable bool`，公开 `axis` 没有生产者。
 
+### tap/long_press 的子树安全落点
+
+`tap`/`long_press` 的 `ref` 目标在静态阶段规划一次固定落点：以目标 raw 矩形、逻辑屏与公开
+bounds 的非空交集为基础，只在目标子树内扣除已知交互节点及其后代和 context 边界，依次测试
+原中心或交集中心、承载节点中心、中心线最长可证区间中点。候选点必须同时避开阻塞区，并让
+目标子树内包含该点的最深非 root、非 context 节点唯一属于目标非阻塞作用域。没有可证候选时
+在认领前返回 `422 unsupported_node_action`；目标原中心有可定位阻塞 owner 时附
+`occluding_ref`，该键不证明整个表面不可点。
+
+认领后只对计划中的目标、可选承载节点和固定 `(x,y)` 做新鲜树重验：目标与承载必须按完整内容
+身份和祖先链唯一匹配，目标仍满足动作几何条件，承载仍在目标非阻塞作用域，固定点继续满足
+同一子树安全谓词。服务不重选候选；任一失配返回 `409 target_changed`，结构不可投影返回
+`503 hierarchy_unavailable`。`422` 的祖先引导只对自身不含 `tap`/`long_press`/`text` 动作的
+非 root、非 `context` 目标尝试；父链上的第一个交互节点是唯一候选，不满足动作、几何、source
+或双重可证点条件时整组省略。`nearest_actionable_ref` 与 `safe_point` 原子出现，
+`safe_carrier_ref` 仅在该点来自承载节点时附上；它们都只在同一观察内通过子树及整树归属证明
+时给出，绝不静默晋升或自动派发。
+
+该证明只覆盖公开树模型的目标子树，不覆盖子树外同级或跨窗口 z 序、未发布的透明触摸层、
+应用自定义事件拦截或私有业务回调。树证明与 `executed` 都不证明 Android 实际事件消费者或
+期望业务结果。
+
 ### 条件等待（wait_for）
 
 `wait_for` 是普通工作（`WorkWaitFor`）：先在唯一工作位上等待一个字面条件或整树稳定，再在同一
@@ -536,7 +558,7 @@ P 已无法定位时，`end(P)` 返回 `409 operation_unknown`、`phase=referenc
 ### 发布
 
 `release/versions.json` 是发行号、共同契约号与 Android versionCode 的唯一来源；当前为
-`release_version=0.13.0`、`contract_version=13`、`android_version_code=15`，构建生成
+`release_version=0.14.0`、`contract_version=14`、`android_version_code=16`，构建生成
 Go/Java 常量。`scripts/build-release.ps1` 产出整组产物与 `build/release/manifest.json`
 （源码提交、Go 版本、MCP SDK/协议、各产物 SHA-256/大小、Android 包名/版本、工具目录指纹）。
 工具目录固定为 `scripts/toolcatalog` 投影的 12 个工具，指纹是该目录注册顺序、名称、描述与

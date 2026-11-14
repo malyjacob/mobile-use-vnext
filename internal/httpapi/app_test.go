@@ -45,6 +45,46 @@ func decodeAppResult(t *testing.T, recorder *httptest.ResponseRecorder) *protoco
 	return &result
 }
 
+// TestAPIErrorNestedDetailsWire pins the server-side shape of the optional tap
+// guidance. safe_point remains an object with explicit zero coordinates, and
+// optional keys that were not proven are absent rather than null or empty.
+func TestAPIErrorNestedDetailsWire(t *testing.T) {
+	apiErr := protocol.NewErrorOutcome(http.StatusUnprocessableEntity,
+		protocol.CodeNodeUnsupported, "目标节点不支持点击", "not_executed")
+	apiErr.WithDetail("nearest_actionable_ref", "n516")
+	apiErr.WithDetail("safe_point", map[string]any{"x": 0, "y": 0})
+	apiErr.WithDetail("task_ids", []int{0, 42})
+
+	recorder := httptest.NewRecorder()
+	writeAPIError(recorder, apiErr)
+	if recorder.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422", recorder.Code)
+	}
+	result := decodeAppResult(t, recorder)
+	if result.Error == nil || result.Error.Code != protocol.CodeNodeUnsupported {
+		t.Fatalf("error = %+v, want unsupported_node_action", result.Error)
+	}
+	safePoint, ok := result.Error.Details["safe_point"].(map[string]any)
+	if !ok {
+		t.Fatalf("safe_point decoded as %T, want nested object", result.Error.Details["safe_point"])
+	}
+	if safePoint["x"] != float64(0) || safePoint["y"] != float64(0) {
+		t.Fatalf("zero safe_point coordinates changed: %#v", safePoint)
+	}
+	for _, optional := range []string{"safe_carrier_ref", "occluding_ref"} {
+		if _, present := result.Error.Details[optional]; present {
+			t.Fatalf("unproven optional key %q was emitted", optional)
+		}
+		if strings.Contains(recorder.Body.String(), optional) {
+			t.Fatalf("unproven optional key %q appears on the wire", optional)
+		}
+	}
+	if ids, ok := result.Error.Details["task_ids"].([]any); !ok || len(ids) != 2 ||
+		ids[0] != float64(0) || ids[1] != float64(42) {
+		t.Fatalf("task_ids = %#v, want [0,42]", result.Error.Details["task_ids"])
+	}
+}
+
 func TestAppRouteRejectsBodyOverLimit(t *testing.T) {
 	raw := `{"kind":"find"}`
 	body := raw + strings.Repeat(" ", 8*1024-len(raw)+1)

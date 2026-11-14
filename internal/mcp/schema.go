@@ -178,6 +178,11 @@ var toolCatalog = []toolDefinition{
 		name: "act",
 		description: "消费一个 ready 观察并派发 tap、long_press、text、swipe、scroll 或 key。" +
 			"operation 只接受对应分支的成员；image=true 在动作后的同一次采集中附加 ImageContent。" +
+			"tap/long_press 的 target.ref 在目标子树内按 default_center → carrier_node（先非匿名后匿名）→ center_span（先纵向后横向）规划安全落点，认领后只重验该固定点；" +
+			"无可证落点时返回 422 unsupported_node_action，若存在中心阻塞证据可带 error.details.occluding_ref。" +
+			"目标自身不支持请求动作时也返回 422，且不会静默改点父节点；同一观察能证明最近可操作祖先时，" +
+			"error.details 同时带 nearest_actionable_ref 与 safe_point（x/y 整数）；点来自承载子节点时才带 safe_carrier_ref，" +
+			"该 ref 只解释来源，可能没有请求动作，不能当作替代 target.ref。引导无法完整证明时整组省略，且仅对生成它的观察有效，不是后续准入证明。" +
 			"滚动用 operation.type=scroll + container 表达：direction 声明阅读方向，amount 选 page 或 half；" +
 			"swipe 是原始手势，只接受 from/to 与可选 duration_ms，不承诺滚动语义。" +
 			"坐标目标会在派发前按点解析节点并证明未变化，变化时返回 target_changed。" +

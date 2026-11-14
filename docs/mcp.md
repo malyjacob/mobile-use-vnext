@@ -15,7 +15,7 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
   `wait_for`、`act`、`inspect`、`keepalive`、`end`、`app`、`notify`、`shell`、`diagnose`。
   不注册 `/health`、认证初始化、旧工具别名或旧协议回退。
 - 目录指纹是工具数、注册顺序、名称、描述与入参 schema 的 canonical SHA-256，当前为
-  `04177607f49d99c84aabd80632c37554989918e6f0454ed882a739d9fa72b1e9`；发布清单与探针按
+  `6ace74b8bdceb75dd43ffe270e3f33c7b3a6064aff3cc4734256e539460d136e`；发布清单与探针按
   它比对实际 `tools/list`，任一条描述或 schema 变化都会改变该值。
 - stdio 模式的 stdout 只承载 MCP 协议帧；日志与诊断一律写 stderr。
 - 私有配置把适配进程绑定到一个可信 Agent 的服务凭据；该凭据不是工具参数，不进入日志、
@@ -33,6 +33,16 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
 300）。分支成员互斥：`scroll` 不接受 `target`/`from`/`to`/`key`/`text`/`duration_ms`，其他
 分支也不接受 `container`/`direction`/`amount`。`operation` schema 因此暴露 `scroll`、
 `container`、`direction`、`amount` 与 `duration_ms`；服务端严格解码仍是权威。
+
+`tap`/`long_press` 的 `ref` 目标在目标子树内按固定有限候选规划安全落点，静态无可证点时
+返回 `422 unsupported_node_action`。只有目标自身不含 `tap`、`long_press`、`text` 动作且
+不是 root/`context` 时，才尝试同一观察内的祖先引导；目标含其中任一动作时，即使不含请求
+动作也不跳过自身。父链上的第一个交互节点是唯一候选，须未明确禁用、动作/几何/source 可用
+并产生双重可证点，否则整组省略。可证时 `nearest_actionable_ref` 与 `safe_point` 原子出现，
+点来自承载节点时再附 `safe_carrier_ref`；该 ref 只解释坐标来源，不是可点击替代。认领后只
+重验静态固定点，不在新鲜树中重选坐标。静态规划无候选且目标原中心有阻塞证据时，`occluding_ref` 只
+指出该阻塞 owner，不表示整个目标表面不可点。子树规划不解决子树外同级或跨窗口 z 序、未发布
+透明层或实际事件消费者，输入执行也不证明应用业务结果。
 
 工具描述中的树引导与树块词表一致：树节点行的动作列仍只有 `tap`、`long_press`、`text`、
 `swipe`（`Node.actions` 不新增枚举）；`actions=swipe` 只是节点的源能力，不是 raw `swipe`

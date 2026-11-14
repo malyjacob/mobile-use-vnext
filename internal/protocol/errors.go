@@ -3,11 +3,16 @@ package protocol
 import (
 	"errors"
 	"net/http"
+	"reflect"
 )
 
 // APIError is the controlled error shape shared across HTTP and later MCP.
 // Code is stable; Message is a short controlled sentence. Details may only
-// carry whitelisted phase/check/limit facts, never user text or device output.
+// carry whitelisted controlled JSON facts: limit, budget, limit_ms, limit_s,
+// app_code, field, task_ids, allowed_kinds, allowed_scopes,
+// blocking_operation_id, start_operation_id, nearest_actionable_ref,
+// safe_carrier_ref, safe_point (x/y integers), and occluding_ref. They never
+// carry user text, device output, trees, commands or credentials.
 type APIError struct {
 	Code       string
 	Message    string
@@ -29,7 +34,7 @@ func (e *APIError) Public() *Error {
 	if e == nil {
 		return nil
 	}
-	return &Error{Code: e.Code, Message: e.Message, Details: e.Details}
+	return &Error{Code: e.Code, Message: e.Message, Details: CloneErrorDetails(e.Details)}
 }
 
 // Error is the public controlled error object.
@@ -37,6 +42,65 @@ type Error struct {
 	Code    string         `json:"code"`
 	Message string         `json:"message"`
 	Details map[string]any `json:"details,omitempty"`
+}
+
+// CloneErrorDetails returns an independent copy of one error's controlled JSON
+// details. It recursively copies string-keyed maps, slices and arrays while
+// preserving concrete element types such as []int and []string; scalars are
+// copied by value. It deliberately avoids a JSON round trip, which would
+// change every decoded number to float64. Non-JSON containers are outside the
+// Details whitelist and are returned as-is.
+func CloneErrorDetails(details map[string]any) map[string]any {
+	if details == nil {
+		return nil
+	}
+	return cloneErrorDetailValue(reflect.ValueOf(details)).Interface().(map[string]any)
+}
+
+// cloneErrorDetailValue copies only the container shapes that can occur in the
+// controlled JSON Details whitelist. It keeps named slice/array/map types and
+// their element types intact.
+func cloneErrorDetailValue(value reflect.Value) reflect.Value {
+	switch value.Kind() {
+	case reflect.Interface:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		cloned := cloneErrorDetailValue(value.Elem())
+		out := reflect.New(value.Type()).Elem()
+		out.Set(cloned)
+		return out
+	case reflect.Map:
+		if value.Type().Key().Kind() != reflect.String {
+			return value
+		}
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		out := reflect.MakeMapWithSize(value.Type(), value.Len())
+		iter := value.MapRange()
+		for iter.Next() {
+			out.SetMapIndex(iter.Key(), cloneErrorDetailValue(iter.Value()))
+		}
+		return out
+	case reflect.Slice:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		out := reflect.MakeSlice(value.Type(), value.Len(), value.Len())
+		for index := 0; index < value.Len(); index++ {
+			out.Index(index).Set(cloneErrorDetailValue(value.Index(index)))
+		}
+		return out
+	case reflect.Array:
+		out := reflect.New(value.Type()).Elem()
+		for index := 0; index < value.Len(); index++ {
+			out.Index(index).Set(cloneErrorDetailValue(value.Index(index)))
+		}
+		return out
+	default:
+		return value
+	}
 }
 
 // NewError builds an APIError with the given status and outcome. It never

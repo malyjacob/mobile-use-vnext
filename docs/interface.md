@@ -15,7 +15,7 @@
 | 方法 | 所有业务端点只接受 `POST`；其他方法返回 `405`，错误码 `invalid_request` |
 | 认证 | `/api/*` 用 `agent_token`；`/v1/control/*` 用 `control_token`；`Authorization: Bearer <token>` |
 | 身份隔离 | agent token 不能访问 `/v1/control/*`，control token 不能访问 `/api/*`；错误为 `401 unauthorized` |
-| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 13`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
+| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 14`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
 | 预分配 P | `/api/*` 可带 `X-Mobile-Use-Operation: P…`；缺省由服务分配。`status` 不使用该头 |
 | 请求体 | 必须是一个 JSON 对象；大小上限：`start`/`status`/`end`/`wait_for` 16 KiB，`observe` 32 KiB，`act` 64 KiB，`inspect`/`keepalive`/`diagnose`/`app` 8 KiB，`notify` 16 KiB，`shell` 32 KiB，`sync` 32 KiB，`stop` 8 KiB |
 | 响应 | `Content-Type: application/json; charset=utf-8`，`Cache-Control: no-store` |
@@ -78,7 +78,14 @@ app, shell, wait, notification, diagnosis, cleanup, error, recovery
 - `code` 稳定，`message` 是受控中文短句，调用方只依赖 `code`；
 - `/api/*` 的 `details` 仅可能出现白名单事实：`limit`、`budget`、`limit_ms`、`limit_s`、
   `app_code`、`field`、
-  `task_ids`、`allowed_kinds`、`allowed_scopes`、`blocking_operation_id`、`start_operation_id`；
+  `task_ids`、`allowed_kinds`、`allowed_scopes`、`blocking_operation_id`、`start_operation_id`、
+  `nearest_actionable_ref`、`safe_carrier_ref`、`safe_point`、`occluding_ref`；
+  `nearest_actionable_ref`、`safe_carrier_ref` 与 `occluding_ref` 是字符串，`safe_point` 是
+  只含非负整数 `x`、`y` 的 JSON 对象，不得字符串化。`tap`/`long_press` 的祖先引导按原子组
+  给出或整体省略：`nearest_actionable_ref` 与 `safe_point` 总是同时出现；仅当该点来自引导
+  候选的承载节点时再附 `safe_carrier_ref`。承载可以是原目标或候选祖先的非阻塞后代，其 ref
+  只解释坐标来源，不表示它具备请求动作。`occluding_ref` 仅在静态落点规划无候选且目标原中心
+  有中心阻塞证据时出现。没有可证事实时省略这些键，不以 `null` 或空字符串代替；
   `mcp.*` 是 [MCP 适配器](mcp.md) 的保留命名空间，仅由该适配器向结果投影注入，服务端
   `/api/*` 永不产生这些键；
 - `recovery` 是下一个请求的投影：本次结果没有待恢复事实时整个对象省略；出现时 `entry` 与
@@ -367,6 +374,32 @@ HTTP 状态映射（`protocol.Status`）：
 `amount`；`duration_ms` 只在 `swipe` 上出现。`duration_ms` 的显式 `null`、0、负数、非整数与
 越界一律拒绝。`swipe` 仍是原始手势，不承诺滚动语义；表达滚动意图用 `scroll`。
 
+`tap`/`long_press` 的 `ref` 目标使用子树安全落点规划。服务以目标 `raw` 矩形、逻辑屏与
+公开 `bounds` 的非空交集为基础，只把目标子树内 `actions` 含 `tap`、`long_press`、`text`
+任一种的节点（无论 `enabled` 值）及其后代、以及 `context` 边界视为阻塞；仅含 `swipe` 的
+节点不自动成为阻塞边界。候选顺序固定为：
+
+1. 原中心；仅当它在基础矩形外时改测基础矩形中心；
+2. 目标子树内的非阻塞承载节点中心，非匿名节点先于匿名节点，各自保持先序；中心越出基础
+   矩形时改测该承载与基础矩形的非空交集中心；
+3. 先固定基础矩形横向中心线，取纵向包含该线的阻塞区间扣除后的最长剩余区间中点；未通过时
+   再固定纵向中心线，对称求横向区间。等长区间取起点较小者。
+
+每个候选都必须避开阻塞区，并让目标子树内包含该点的最深非 root、非 `context` 节点唯一属于
+目标非阻塞作用域。服务选择第一个通过的候选；没有可证候选时在认领前返回
+`422 unsupported_node_action`，不采集、不派发，O 保持 `ready`。目标子树外同级节点不参与
+阻塞或候选排序。坐标目标、`text`、`swipe`、`scroll` 与 `key` 不使用这套规划。
+
+`target.ref` 在返回原 `422 unsupported_node_action` 的路径中，仅当目标不是 root/`context`
+且不含 `tap`、`long_press`、`text` 任一动作时尝试祖先引导；目标含任一此类动作、即使不含
+请求动作，也视为交互边界，不跳过自身。服务沿唯一父链向上，遇到 `context` 即停止，并把第一个
+含上述任一动作的节点作为唯一候选祖先。该祖先未明确禁用、bounds 与 source 有效、支持请求
+动作且按同一规划能产生可证点时，才尝试引导；任一条件不满足即整组省略，不继续越过它寻找
+更外层节点。`safe_point` 还必须通过整树单点解析并证明命中该祖先或其非阻塞承载作用域；
+无法完整证明时整组省略。`safe_carrier_ref` 可指原目标或该祖先的非阻塞后代承载节点候选，只解释坐标
+来源，不是可直接点击的替代 ref；服务绝不静默改派祖先。`occluding_ref` 只指出目标原中心的
+一个可定位阻塞 owner，不表示整个目标表面不可点。
+
 `scroll` 是受控滚动尝试：`container` 与 `direction` 必填，`amount` 省略为 `page`；
 `direction` 是调用方声明的阅读/视口方向，不是服务证明的设备滚动轴。映射固定为：
 
@@ -425,6 +458,19 @@ O 保持 `ready`。
 坐标目标解析到唯一节点时，该节点也必须按同一身份与祖先链唯一匹配，且同一坐标在不推进
 ref 连续号的新鲜公开树中仍解析到同一节点）→ 派发本次动作所需的输入（`text` 为焦点点击 +
 显示绑定写入，任何一步失败都不重放）。
+
+`tap`/`long_press` 的 `ref` 计划在认领后只重验静态选定的固定点及其可选承载节点，不重新
+运行候选选择：目标与承载必须按“完整内容身份 + 祖先链”唯一匹配，公开目标仍满足动作与
+几何条件，承载仍属于目标非阻塞作用域；在不推进 ref 连续号的新鲜公开树中，同一固定点还须
+满足原有的子树安全谓词。目标、承载或固定点任一失配均返回 `409 target_changed`，不派发
+输入；新鲜树结构不可投影为 `503 hierarchy_unavailable`。重验失败仍按本节的交付门禁处理，
+`hierarchy_unavailable` 不交付新 O。
+
+这组证明只覆盖公开树模型内的目标子树，不覆盖子树外同级或跨窗口 z 序、未发布的透明拦截层、
+应用自定义触摸代理或业务回调。子树外同级重叠不导致该 `ref` 规划自拒，也不在树模型中证明
+谁消费真实触摸；`executed` 只证明输入已派发，不证明 Android 实际事件消费者或应用业务结果。
+祖先与坐标引导只对生成它的 O 及同一观察有效；后续调用仍须新 P、正常准入与实时重验，O 过期、
+被消费、替换或撤权后不能继续使用。
 
 `scroll` 的认领后重验以观察到的容器与观察时授权的固定轨迹为授权单位，不要求起点叶节点身份
 不变：新鲜树只对选定容器按“完整内容身份 + 祖先链”唯一匹配，容器 bounds 变化视为
@@ -537,7 +583,7 @@ raw `swipe` 仍不接受 `ref`。
 
 | 字段 | 必填 | 类型 | 说明 |
 | --- | --- | --- | --- |
-| `contract_version` | 是 | 字符串 | 必须为 `"13"`，否则 `409 contract_mismatch` |
+| `contract_version` | 是 | 字符串 | 必须为 `"14"`，否则 `409 contract_mismatch` |
 | `app_instance_id` | 是 | UUID | App 进程实例；变化会撤销旧归属 |
 | `app_version` | 是 | 字符串 | 仅发行标识 |
 | `selected_mode` | 是 | `virtual`/`primary` | 用户选择 |
@@ -564,7 +610,7 @@ raw `swipe` 仍不接受 `ref`。
 
 ```json
 {
-  "contract_version": "13",
+  "contract_version": "14",
   "service_instance_id": "…",
   "control": {
     "revision": 42,
@@ -600,7 +646,7 @@ raw `swipe` 仍不接受 `ref`。
 ## 9. `POST /v1/control/stop`
 
 ```json
-{"contract_version":"13","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
+{"contract_version":"14","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
 ```
 
 - **不校验普通契约**：`contract_version` 字段存在但不参与准入，服务与 App 契约版本
@@ -610,7 +656,7 @@ raw `swipe` 仍不接受 `ref`。
 - 重复或过期 `seq` 不报错，只返回 `state=duplicate`。
 
 ```json
-{"contract_version":"13","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
+{"contract_version":"14","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
 ```
 
 `accepted` 恒为 `true`；`state` 为 `revoked`（绑定时撤销了活动会话）、`recorded`
@@ -623,7 +669,7 @@ raw `swipe` 仍不接受 `ref`。
 无认证，只表示进程可应答，不代表设备就绪或资源干净：
 
 ```json
-{"status":"ok","contract_version":"13","service_instance_id":"…","release_version":"…"}
+{"status":"ok","contract_version":"14","service_instance_id":"…","release_version":"…"}
 ```
 
 ## 11. 数据对象

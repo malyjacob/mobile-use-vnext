@@ -29,12 +29,24 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 	e.mu.Unlock()
 	var point *pointCheck
 	var scroll *scrollPlan
+	var tap *tapPlan
 	if staticErr == nil {
-		point, scroll, staticErr = staticActContentCheck(staticObs, &req.Operation)
+		point, scroll, tap, staticErr = staticActContentCheckWithTap(staticObs, &req.Operation)
 	}
 	if staticErr != nil {
 		e.logActPoint(op.ID, point, false)
+		if tap != nil {
+			e.logTapPlan(op.ID, tap.action, tap.strategy, false, tap.took)
+		}
 		return e.finishWithError(op, "admission", staticErr), nil
+	}
+	var tapTook time.Duration
+	tapProven := false
+	if tap != nil {
+		tapTook = tap.took
+		defer func() {
+			e.logTapPlan(op.ID, tap.action, tap.strategy, tapProven, tapTook)
+		}()
 	}
 	if scroll != nil {
 		e.logScrollPlan(op.ID, scroll)
@@ -69,7 +81,9 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 	if scroll != nil {
 		fresh, frame, revalidateErr = e.revalidateScrollTarget(work, obs, scroll)
 	} else {
-		fresh, raw, revalidateErr = e.revalidateActTarget(work, obs, &req.Operation, point)
+		var proofTook time.Duration
+		fresh, raw, proofTook, revalidateErr = e.revalidateActTarget(work, obs, &req.Operation, point, tap)
+		tapTook += proofTook
 	}
 	if revalidateErr != nil {
 		e.logActPoint(op.ID, point, false)
@@ -87,6 +101,7 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 		}
 		return result, nil
 	}
+	tapProven = true
 	e.logActPoint(op.ID, point, point != nil && point.state == pointUnique)
 
 	e.setOperationPhase(op, "dispatch")
@@ -95,7 +110,7 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 	if scroll != nil {
 		outcome, dispatchErr = e.dispatchScroll(work, frame)
 	} else {
-		outcome, dispatchErr = e.dispatchAct(work, obs, &req.Operation, fresh, raw)
+		outcome, dispatchErr = e.dispatchAct(work, obs, &req.Operation, fresh, raw, tap)
 	}
 	if outcome == OutcomeUncertain {
 		e.markDispatchUnknown(work)
@@ -309,6 +324,19 @@ func staticActContentCheck(obs *observationState, operation *protocol.Operation)
 	return nil, nil, nil
 }
 
+// staticActContentCheckWithTap keeps the existing coordinate, text, swipe,
+// scroll and key branches unchanged while giving tap/long_press ref targets
+// their own bounded subtree planner.
+func staticActContentCheckWithTap(obs *observationState, operation *protocol.Operation) (
+	*pointCheck, *scrollPlan, *tapPlan, *protocol.APIError) {
+	if operation != nil && (operation.Type == "tap" || operation.Type == "long_press") &&
+		operation.Target != nil && operation.Target.UseRef {
+		return staticTapRefCheck(obs, operation)
+	}
+	point, scroll, apiErr := staticActContentCheck(obs, operation)
+	return point, scroll, nil, apiErr
+}
+
 // claimObservationLocked performs the one-way ready->claimed transition and
 // processes the reading acknowledgement of a full candidate.
 func (e *Engine) claimObservationLocked(op *operationState, agent string, work *workState, obs *observationState,
@@ -349,46 +377,145 @@ func (e *Engine) claimObservationLocked(op *operationState, agent string, work *
 // returns the fresh capture it already read, so the caller path may publish it
 // as evidence instead of discarding it.
 func (e *Engine) revalidateActTarget(work *workState, obs *observationState,
-	operation *protocol.Operation, point *pointCheck) (*device.Capture, *device.RawNode, *protocol.APIError) {
+	operation *protocol.Operation, point *pointCheck, tap *tapPlan) (
+	*device.Capture, *device.RawNode, time.Duration, *protocol.APIError) {
 	ctx := work.Ctx
 	if e.workRevoked(work) {
-		return nil, nil, protocol.NewError(409, protocol.CodeStopped, "会话已撤销")
+		return nil, nil, 0, protocol.NewError(409, protocol.CodeStopped, "会话已撤销")
 	}
 	session := e.sessionForWork(work)
 	if session == nil {
-		return nil, nil, protocol.NewError(409, protocol.CodeSessionEnded, "原会话已结束")
+		return nil, nil, 0, protocol.NewError(409, protocol.CodeSessionEnded, "原会话已结束")
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	state, err := e.dev.ProbeDisplay(probeCtx, session.Display.ID)
 	cancel()
 	if err != nil || !state.Exists {
-		return nil, nil, protocol.NewError(503, protocol.CodeDisplayUnavailable, "目标屏幕不可用")
+		return nil, nil, 0, protocol.NewError(503, protocol.CodeDisplayUnavailable, "目标屏幕不可用")
 	}
 	capture, err := e.dev.Capture(ctx, session.Display)
 	if err != nil {
-		return nil, nil, protocol.NewError(503, protocol.CodeHierarchyFailed, "实时目标重验失败")
+		return nil, nil, 0, protocol.NewError(503, protocol.CodeHierarchyFailed, "实时目标重验失败")
 	}
 	if err := foregroundMatches(obs.Foreground, capture.Foreground); err != nil {
-		return &capture, nil, err
+		return &capture, nil, 0, err
 	}
 	if point != nil && point.state == pointUnique {
 		if apiErr := e.provePointTarget(&capture, obs, point); apiErr != nil {
-			return &capture, nil, apiErr
+			return &capture, nil, 0, apiErr
 		}
 	}
 	if operation.Target == nil || !operation.Target.UseRef {
-		return &capture, nil, nil
+		return &capture, nil, 0, nil
+	}
+	if tap != nil {
+		return e.revalidateTapTarget(work, obs, &capture, tap)
 	}
 	raw := sourceNode(obs, operation.Target.Ref)
 	if raw == nil {
-		return &capture, nil, protocol.NewError(409, protocol.CodeNodeNotFound, "目标节点来源不可用")
+		return &capture, nil, 0, protocol.NewError(409, protocol.CodeNodeNotFound, "目标节点来源不可用")
 	}
 	fresh, ok := matchFreshNode(&capture, obs.Projection.Capture, raw)
 	if !ok {
-		return &capture, nil, protocol.NewError(409, protocol.CodeTargetChanged,
+		return &capture, nil, 0, protocol.NewError(409, protocol.CodeTargetChanged,
 			"目标元素已变化，本次未派发")
 	}
-	return &capture, fresh, nil
+	return &capture, fresh, 0, nil
+}
+
+// revalidateTapTarget proves the same fixed point of the static plan against
+// one fresh capture. It never selects another candidate: target identity,
+// carrier identity and the exact static point must all remain provable.
+func (e *Engine) revalidateTapTarget(work *workState, obs *observationState,
+	fresh *device.Capture, plan *tapPlan) (
+	_ *device.Capture, _ *device.RawNode, took time.Duration, apiErr *protocol.APIError) {
+	started := time.Now()
+	defer func() { took = time.Since(started) }()
+	if fresh == nil || plan == nil || plan.targetRaw == nil || obs == nil ||
+		obs.Projection == nil || obs.Projection.Capture == nil {
+		return fresh, nil, 0, tapHierarchyError()
+	}
+	topology, apiErr := validateTapRawTopology(fresh)
+	if apiErr != nil {
+		return fresh, nil, 0, apiErr
+	}
+	targetRaw, ok := matchFreshNode(fresh, obs.Projection.Capture, plan.targetRaw)
+	if !ok {
+		return fresh, nil, 0, tapTargetChanged()
+	}
+	var carrierRaw *device.RawNode
+	if plan.carrierRaw != nil {
+		carrierRaw, ok = matchFreshNode(fresh, obs.Projection.Capture, plan.carrierRaw)
+		if !ok {
+			return fresh, nil, 0, tapTargetChanged()
+		}
+	}
+	projector := work.Projector
+	if projector == nil {
+		projector = e.projector
+	}
+	if projector == nil {
+		return fresh, nil, 0, tapHierarchyError()
+	}
+	projection, err := projector.Preview(fresh)
+	if err != nil || projection == nil || projection.Tree == nil ||
+		projection.Tree.Root == nil || projection.Source == nil ||
+		projection.Capture == nil {
+		return fresh, nil, 0, tapHierarchyError()
+	}
+	view, apiErr := buildTapPublicView(projection.Tree, fresh, projection.Source)
+	if apiErr != nil {
+		return fresh, nil, 0, apiErr
+	}
+	targetIndex := indexOf(fresh, targetRaw)
+	if targetIndex < 0 {
+		return fresh, nil, 0, tapTargetChanged()
+	}
+	carrierIndex := -1
+	if carrierRaw != nil {
+		carrierIndex = indexOf(fresh, carrierRaw)
+		if carrierIndex < 0 {
+			return fresh, nil, 0, tapTargetChanged()
+		}
+	}
+	switch checkTapSourceMapping(view, topology, targetIndex) {
+	case tapSourceTargetMissing:
+		return fresh, nil, 0, tapTargetChanged()
+	case tapSourceDamaged:
+		return fresh, nil, 0, tapHierarchyError()
+	}
+	targetPublic := view.byRaw[targetIndex]
+	if !validTapPublicTarget(targetPublic, protocol.Action(plan.action)) {
+		return fresh, nil, 0, tapTargetChanged()
+	}
+	input := &tapInput{
+		view: view, capture: fresh, topology: topology,
+		target: targetPublic, targetRaw: targetRaw, targetIndex: targetIndex,
+	}
+	scope, apiErr := collectTapScope(input)
+	if apiErr != nil {
+		if apiErr.Code == protocol.CodeHierarchyFailed {
+			return fresh, nil, 0, apiErr
+		}
+		return fresh, nil, 0, tapTargetChanged()
+	}
+	if !provesSubtreeTapPoint(scope, plan.x, plan.y) {
+		return fresh, nil, 0, tapTargetChanged()
+	}
+	if carrierRaw != nil {
+		carrierPublic := view.byRaw[carrierIndex]
+		if carrierPublic == nil || carrierPublic.Context ||
+			carrierPublic.Role == protocol.RoleRoot || carrierPublic.Bounds == nil {
+			return fresh, nil, 0, tapTargetChanged()
+		}
+		carrierRect := rectFromBounds(carrierPublic.Bounds)
+		if carrierRect.Width() <= 0 || carrierRect.Height() <= 0 ||
+			!carrierRect.Contains(plan.x, plan.y) ||
+			scope.carrierByRef[carrierPublic.Ref] == nil {
+			return fresh, nil, 0, tapTargetChanged()
+		}
+	}
+	return fresh, targetRaw, 0, nil
 }
 
 // provePointTarget requires the observed node to match exactly one fresh node
@@ -444,6 +571,20 @@ func (e *Engine) logActPoint(operationID string, point *pointCheck, proven bool)
 		eventlog.Duration("ms", point.took))
 }
 
+// logTapPlan records one subtree-plan decision. The coordinates, refs, labels
+// and tree content are deliberately absent.
+func (e *Engine) logTapPlan(operationID, action, mode string, proven bool, took time.Duration) {
+	if mode == "" {
+		return
+	}
+	e.log.Event(eventlog.Debug, "act.tap_plan",
+		eventlog.Str("operation_id", operationID),
+		eventlog.Str("action", action),
+		eventlog.Str("mode", mode),
+		eventlog.Bool("proven", proven),
+		eventlog.Duration("ms", took))
+}
+
 func foregroundMatches(observed, fresh device.Foreground) *protocol.APIError {
 	switch observed.State {
 	case device.ForegroundPresent:
@@ -472,7 +613,8 @@ func foregroundMatches(observed, fresh device.Foreground) *protocol.APIError {
 // accepted it. Anything after the first dispatched primitive that cannot be
 // confirmed is uncertain; nothing is replayed.
 func (e *Engine) dispatchAct(work *workState, obs *observationState,
-	operation *protocol.Operation, fresh *device.Capture, raw *device.RawNode) (string, *protocol.APIError) {
+	operation *protocol.Operation, fresh *device.Capture, raw *device.RawNode,
+	tap *tapPlan) (string, *protocol.APIError) {
 	session := e.sessionForWork(work)
 	if session == nil || e.workRevoked(work) {
 		return OutcomeNotExecuted, protocol.NewError(409, protocol.CodeStopped, "会话已撤销")
@@ -486,11 +628,15 @@ func (e *Engine) dispatchAct(work *workState, obs *observationState,
 		x, y = operation.Target.X, operation.Target.Y
 	}
 	if operation.Target != nil && operation.Target.UseRef {
-		if raw == nil || raw.Bounds.Empty() {
-			return OutcomeNotExecuted, protocol.NewError(409, protocol.CodeTargetChanged,
-				"目标元素没有可用几何")
+		if tap != nil && (operation.Type == "tap" || operation.Type == "long_press") {
+			x, y = tap.x, tap.y
+		} else {
+			if raw == nil || raw.Bounds.Empty() {
+				return OutcomeNotExecuted, protocol.NewError(409, protocol.CodeTargetChanged,
+					"目标元素没有可用几何")
+			}
+			x, y = raw.Bounds.Center()
 		}
-		x, y = raw.Bounds.Center()
 	}
 	if apiErr := e.beginUIDispatch(work, operation.Type); apiErr != nil {
 		return OutcomeNotExecuted, apiErr

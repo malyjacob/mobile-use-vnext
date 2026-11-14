@@ -415,6 +415,55 @@ func TestDecodeErrorResultWithDetails(t *testing.T) {
 	}
 }
 
+// TestDecodeErrorResultWithNestedDetails pins the strict response decoder's
+// generic details shape: safe_point stays an object, zero coordinates are not
+// dropped, arrays decode as generic JSON arrays, and unproven optional keys do
+// not appear. Re-encoding the decoded int-shaped source must preserve JSON
+// numeric equality even though generic any numbers are now float64.
+func TestDecodeErrorResultWithNestedDetails(t *testing.T) {
+	body := []byte(`{"operation_id":"P15","operation_state":"finished","outcome":"not_executed",` +
+		`"error":{"code":"unsupported_node_action","message":"目标节点不支持点击","details":` +
+		`{"nearest_actionable_ref":"n516","safe_point":{"x":0,"y":0},"task_ids":[0,42]}}}`)
+	var decoded Result
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatalf("decode nested details: %v", err)
+	}
+	if decoded.Error == nil {
+		t.Fatal("decoded error is nil")
+	}
+	safePoint, ok := decoded.Error.Details["safe_point"].(map[string]any)
+	if !ok {
+		t.Fatalf("safe_point = %T, want nested object", decoded.Error.Details["safe_point"])
+	}
+	if safePoint["x"] != float64(0) || safePoint["y"] != float64(0) {
+		t.Fatalf("zero coordinates changed: %#v", safePoint)
+	}
+	taskIDs, ok := decoded.Error.Details["task_ids"].([]any)
+	if !ok || len(taskIDs) != 2 || taskIDs[0] != float64(0) || taskIDs[1] != float64(42) {
+		t.Fatalf("task_ids = %#v, want generic [0,42]", decoded.Error.Details["task_ids"])
+	}
+	for _, absent := range []string{"safe_carrier_ref", "occluding_ref"} {
+		if _, ok := decoded.Error.Details[absent]; ok {
+			t.Fatalf("unproven optional key %q was manufactured", absent)
+		}
+	}
+
+	reencoded, err := JSON(&decoded)
+	if err != nil {
+		t.Fatalf("re-encode nested details: %v", err)
+	}
+	var want, got any
+	if err := json.Unmarshal(body, &want); err != nil {
+		t.Fatalf("decode source JSON: %v", err)
+	}
+	if err := json.Unmarshal(reencoded, &got); err != nil {
+		t.Fatalf("decode re-encoded JSON: %v", err)
+	}
+	if !reflect.DeepEqual(want, got) {
+		t.Fatalf("numeric JSON value changed\nwant %#v\n got %#v", want, got)
+	}
+}
+
 func TestDecodeEndWithCleanupError(t *testing.T) {
 	original := &Result{
 		OperationID:    "P8",

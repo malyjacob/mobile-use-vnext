@@ -34,21 +34,21 @@ type rmfFixture struct {
 }
 
 var rmfKnownExclusions = map[string]string{
-	"protocol.Result.IncludeSession":     "presence flag",
-	"protocol.Foreground.HasTask":        "presence flag",
-	"protocol.InspectionView.HasTotal":   "presence flag",
-	"protocol.AppView.HasTotal":          "presence flag",
-	"protocol.AppView.HasStatePreserved": "presence flag",
-	"protocol.AppView.HasItems": "presence flag",
+	"protocol.Result.IncludeSession":          "presence flag",
+	"protocol.Foreground.HasTask":             "presence flag",
+	"protocol.InspectionView.HasTotal":        "presence flag",
+	"protocol.AppView.HasTotal":               "presence flag",
+	"protocol.AppView.HasStatePreserved":      "presence flag",
+	"protocol.AppView.HasItems":               "presence flag",
 	"protocol.AppCloseTask.HasRecentsCleaned": "presence flag",
-	"protocol.AppView.HasTasks":          "presence flag",
-	"protocol.AppView.HasTargetPIDs":     "presence flag",
-	"protocol.AppView.HasKilledPIDs":     "presence flag",
-	"protocol.AppView.HasRemainingPIDs":  "presence flag",
-	"protocol.AppView.HasRestarted":      "presence flag",
-	"protocol.ImageMeta.Base64":          "transport-only",
-	"protocol.ReadTreeValue.Full":        "variant wrapper",
-	"protocol.ReadTreeValue.Delta":       "variant wrapper",
+	"protocol.AppView.HasTasks":               "presence flag",
+	"protocol.AppView.HasTargetPIDs":          "presence flag",
+	"protocol.AppView.HasKilledPIDs":          "presence flag",
+	"protocol.AppView.HasRemainingPIDs":       "presence flag",
+	"protocol.AppView.HasRestarted":           "presence flag",
+	"protocol.ImageMeta.Base64":               "transport-only",
+	"protocol.ReadTreeValue.Full":             "variant wrapper",
+	"protocol.ReadTreeValue.Delta":            "variant wrapper",
 	// A read node carries exactly one definition anchor: its own ref or the
 	// consecutive refs a chain folds. The chain form is never the root of a
 	// complete tree, an add or a replace, so it cannot appear on every scanned
@@ -56,9 +56,9 @@ var rmfKnownExclusions = map[string]string{
 	"protocol.ReadNode.Chain": "definition anchor variant",
 	// ReadBounds selects the wire geometry form (null, "hidden" or one
 	// rectangle). Only the rectangle is a tuple that needs per-member coverage.
-	"protocol.ReadBounds.Kind":  "public geometry variant",
-	"protocol.Field.Set":        "generic Field wrapper",
-	"protocol.Field.Value":      "generic Field wrapper",
+	"protocol.ReadBounds.Kind": "public geometry variant",
+	"protocol.Field.Set":       "generic Field wrapper",
+	"protocol.Field.Value":     "generic Field wrapper",
 }
 
 // Explicit inventories close the reflection loophole where a new field always
@@ -264,7 +264,12 @@ func TestCancellationDetailsParity(t *testing.T) {
 					Error: &protocol.Error{
 						Code:    protocol.CodeUnauthorized,
 						Message: "服务错误",
-						Details: map[string]any{"phase": "service_error"},
+						Details: map[string]any{
+							"phase":                  "service_error",
+							"nearest_actionable_ref": "n516",
+							"safe_point":             map[string]any{"x": 0, "y": 0},
+							"task_ids":               []int{0, 42},
+						},
 					},
 				}
 			},
@@ -298,6 +303,14 @@ func TestCancellationDetailsParity(t *testing.T) {
 					if details["phase"] != "service_error" {
 						t.Fatalf("canonical details lost existing detail: %#v", details)
 					}
+					safePoint, ok := details["safe_point"].(map[string]any)
+					if !ok || safePoint["x"] != float64(0) || safePoint["y"] != float64(0) {
+						t.Fatalf("canonical details lost nested safe_point: %#v", details)
+					}
+					taskIDs, ok := details["task_ids"].([]any)
+					if !ok || len(taskIDs) != 2 || taskIDs[0] != float64(0) || taskIDs[1] != float64(42) {
+						t.Fatalf("canonical details lost numeric array: %#v", details)
+					}
 				} else {
 					if code != "call_cancelled" || message != "测试取消" {
 						t.Fatalf("canonical error = %s/%q, want synthesized call_cancelled", code, message)
@@ -308,6 +321,17 @@ func TestCancellationDetailsParity(t *testing.T) {
 				}
 				if got, ok := details["mcp.cancellation"].(string); !ok || got != "测试取消" {
 					t.Fatalf("mcp.cancellation = %#v, want %q", details["mcp.cancellation"], "测试取消")
+				}
+				for key := range details {
+					if key == "mcp.cancelled" || key == "mcp.cancellation" {
+						continue
+					}
+					if source == nil || source.Error == nil {
+						t.Fatalf("canonical added non-MCP detail %q", key)
+					}
+					if _, ok := source.Error.Details[key]; !ok {
+						t.Fatalf("canonical added non-MCP detail %q", key)
+					}
 				}
 
 				wantText := assertResultTextParity(t, canonical, true)
@@ -874,7 +898,13 @@ func rmfResultFixtures() []rmfFixture {
 			Error: &protocol.Error{
 				Code:    protocol.CodeActionUnknown,
 				Message: "结果不确定",
-				Details: map[string]any{"phase": "request"},
+				Details: map[string]any{
+					"phase":                  "request",
+					"nearest_actionable_ref": "n516",
+					"safe_carrier_ref":       "n491",
+					"safe_point":             map[string]any{"x": 0, "y": 0},
+					"task_ids":               []int{0, 42},
+				},
 			},
 			Recovery: &protocol.Recovery{
 				Entry:      protocol.RecoveryEntryStatus,
@@ -1225,14 +1255,14 @@ func rmfSetNode() protocol.ReadSetNode {
 
 func rmfNode(ref string, role protocol.Role, withChildren bool) *protocol.ReadNode {
 	node := &protocol.ReadNode{
-		Ref:       ref,
-		Role:      role,
-		Bounds:    protocol.KnownBounds(protocol.Bounds{Left: 1, Top: 2, Right: 3, Bottom: 4}),
-		Label:     []string{"label"},
-		Actions:   []protocol.Action{protocol.ActionTap},
-		Enabled:   nil,
-		Focused:   nil,
-		Selected:  rmfPtr(true),
+		Ref:      ref,
+		Role:     role,
+		Bounds:   protocol.KnownBounds(protocol.Bounds{Left: 1, Top: 2, Right: 3, Bottom: 4}),
+		Label:    []string{"label"},
+		Actions:  []protocol.Action{protocol.ActionTap},
+		Enabled:  nil,
+		Focused:  nil,
+		Selected: rmfPtr(true),
 		// checked=false is the public default and is omitted; the fixture uses
 		// a known true so the member appears in the canonical document.
 		Checked:   rmfPtr(true),
@@ -1276,6 +1306,7 @@ func rmfDeterministicResult(iteration int) *protocol.Result {
 		children[key] = []string{"n1", "n2"}
 		replace[key] = rmfNode(key, protocol.RoleButton, false)
 	}
+	details["safe_point"] = map[string]any{"x": 0, "y": 0}
 	return &protocol.Result{
 		OperationID: "P1",
 		Error: &protocol.Error{

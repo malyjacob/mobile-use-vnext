@@ -1164,7 +1164,9 @@ func (e *Engine) operationViewLocked(op *operationState) *protocol.Result {
 		result.App = &protocol.AppView{Kind: op.AppKind}
 	}
 	if op.Error != nil {
-		result.Error = op.Error
+		cloned := *op.Error
+		cloned.Details = protocol.CloneErrorDetails(op.Error.Details)
+		result.Error = &cloned
 	}
 	// The wait fact is one saved bounded outcome: a duplicate P or status(P)
 	// copies it and never recomputes a trigger, a match list or an elapsed time.

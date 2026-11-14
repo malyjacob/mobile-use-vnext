@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -760,6 +762,101 @@ func TestAppDecodesClaimAmbiguity(t *testing.T) {
 	}
 }
 
+// TestActNestedErrorDetailsOverHTTP exercises the actual client transport and
+// strict response decoder. Nested JSON objects must stay objects, zero pixel
+// coordinates must survive, and the int values written by the service must be
+// numerically equal after decoding to float64 and re-encoding.
+func TestActNestedErrorDetailsOverHTTP(t *testing.T) {
+	cases := []struct {
+		name          string
+		withCarrier   bool
+		withOccluding bool
+	}{
+		{name: "all evidenced keys", withCarrier: true, withOccluding: true},
+		{name: "optional keys omitted"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			details := map[string]any{
+				"nearest_actionable_ref": "n516",
+				"safe_point":             map[string]any{"x": 0, "y": 0},
+				"task_ids":               []int{0, 42},
+			}
+			if tc.withCarrier {
+				details["safe_carrier_ref"] = "n491"
+			}
+			if tc.withOccluding {
+				details["occluding_ref"] = "n523"
+			}
+			source := &protocol.Result{
+				OperationID:    "Pactdetails",
+				OperationState: "finished",
+				Outcome:        "not_executed",
+				Error: &protocol.Error{
+					Code:    protocol.CodeNodeUnsupported,
+					Message: "目标节点不支持点击",
+					Details: details,
+				},
+			}
+			sourceJSON, err := protocol.JSON(source)
+			if err != nil {
+				t.Fatalf("encode service result: %v", err)
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				writeResponse(w, http.StatusUnprocessableEntity, string(sourceJSON))
+			}))
+			defer server.Close()
+
+			client := newTestClient(t, server.URL)
+			response, err := client.Act(context.Background(), &protocol.ActRequest{
+				ObservationID: "O1",
+				Operation: protocol.Operation{
+					Type:   "tap",
+					Target: &protocol.Target{UseRef: true, Ref: "n491"},
+				},
+			}, WithOperationID("Pactdetails"))
+			if response == nil {
+				t.Fatal("structured failure dropped the response")
+			}
+			clientErr := requireClientError(t, err)
+			if clientErr.Code != protocol.CodeNodeUnsupported ||
+				clientErr.HTTPStatus != http.StatusUnprocessableEntity ||
+				clientErr.Result == nil || clientErr.Result.Error == nil {
+				t.Fatalf("structured failure changed: %+v", clientErr)
+			}
+			gotDetails := clientErr.Result.Error.Details
+			safePoint, ok := gotDetails["safe_point"].(map[string]any)
+			if !ok {
+				t.Fatalf("safe_point decoded as %T, want nested object", gotDetails["safe_point"])
+			}
+			if safePoint["x"] != float64(0) || safePoint["y"] != float64(0) {
+				t.Fatalf("zero coordinates changed: %#v", safePoint)
+			}
+			if _, present := gotDetails["safe_carrier_ref"]; present != tc.withCarrier {
+				t.Fatalf("safe_carrier_ref presence = %t, want %t", present, tc.withCarrier)
+			}
+			if _, present := gotDetails["occluding_ref"]; present != tc.withOccluding {
+				t.Fatalf("occluding_ref presence = %t, want %t", present, tc.withOccluding)
+			}
+
+			roundTripped, err := protocol.JSON(clientErr.Result)
+			if err != nil {
+				t.Fatalf("re-encode decoded result: %v", err)
+			}
+			var want, got any
+			if err := jsonv2.Unmarshal(sourceJSON, &want); err != nil {
+				t.Fatalf("decode source JSON: %v", err)
+			}
+			if err := jsonv2.Unmarshal(roundTripped, &got); err != nil {
+				t.Fatalf("decode round-tripped JSON: %v", err)
+			}
+			if !reflect.DeepEqual(want, got) {
+				t.Fatalf("JSON values changed across HTTP:\nwant %#v\n got %#v", want, got)
+			}
+		})
+	}
+}
+
 func TestAppDecodesHandoffNullStatePreserved(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		writeResponse(w, http.StatusOK,
@@ -887,6 +984,7 @@ func TestAppDecodesKillPIDs(t *testing.T) {
 		t.Fatal("explicit restarted=null was not preserved")
 	}
 }
+
 // TestActDecodesEffectAndQuality pins the contract-10 response decoder behind
 // Client: effect.state and observation.quality.state/samples/stop_reason keep
 // the same values, including the valid explicit samples=0 fact. The client is

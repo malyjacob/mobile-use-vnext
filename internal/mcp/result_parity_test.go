@@ -32,6 +32,58 @@ func TestBothModeParity(t *testing.T) {
 	}
 }
 
+// TestHTTPNestedErrorDetailsAcrossModes runs one real client HTTP decode and
+// then the three MCP projections of that same execution. It guards the full
+// service-result → client → canonical JSON path for tap guidance.
+func TestHTTPNestedErrorDetailsAcrossModes(t *testing.T) {
+	fake := newTestDeviceService(t)
+	fake.setHandler("act", func(w http.ResponseWriter, r *http.Request, body string) {
+		writeTestJSON(w, http.StatusUnprocessableEntity,
+			`{"operation_id":"P15","operation_state":"finished","outcome":"not_executed",`+
+				`"error":{"code":"unsupported_node_action","message":"目标节点不支持点击","details":`+
+				`{"nearest_actionable_ref":"n516","safe_carrier_ref":"n491","safe_point":{"x":0,"y":0},"task_ids":[0,42]}},`+
+				`"recovery":{"entry":"retry","reference":"O","input_state":"effective"}}`)
+	})
+	a := &adapter{client: newTestDeviceClient(t, fake)}
+	execution := a.run(context.Background(), testDefinitionByName(t, "act"),
+		[]byte(`{"observation_id":"O1","operation":{"type":"tap","target":{"ref":"n491"}}}`))
+	if execution.result == nil || execution.result.Error == nil {
+		t.Fatalf("HTTP nested failure was not projected: %#v", execution)
+	}
+	safePoint, ok := execution.result.Error.Details["safe_point"].(map[string]any)
+	if !ok || safePoint["x"] != float64(0) || safePoint["y"] != float64(0) {
+		t.Fatalf("client lost nested safe_point: %#v", execution.result.Error.Details)
+	}
+
+	canonical, err := canonicalResult(execution)
+	if err != nil {
+		t.Fatalf("canonicalResult: %v", err)
+	}
+	want, err := decodeResultJSON(canonical)
+	if err != nil {
+		t.Fatalf("decode canonical: %v", err)
+	}
+	for _, mode := range []ResultMode{ResultModeBoth, ResultModeText, ResultModeStructured} {
+		out := projectExecution(execution, "act", mode)
+		if !out.IsError {
+			t.Fatalf("mode %v: nested failure was not an error", mode)
+		}
+		if mode == ResultModeStructured {
+			if got := rmfStructuredBytes(t, out.StructuredContent); !bytes.Equal(got, canonical) {
+				t.Fatalf("mode %v: structuredContent differs from canonical", mode)
+			}
+			diagnostic := testTextContent(t, out)
+			requireTestContains(t, diagnostic, `"safe_carrier_ref":"n491"`)
+			requireTestContains(t, diagnostic, `"safe_point":{"x":0,"y":0}`)
+			continue
+		}
+		decoded, flag, err := decodeResultText(t, testTextContent(t, out))
+		if err != nil || !flag || !reflect.DeepEqual(want, decoded) {
+			t.Fatalf("mode %v text parity error=%v flag=%t", mode, err, flag)
+		}
+	}
+}
+
 func TestAgentResultLosslessParity(t *testing.T) {
 	for _, fixture := range resultModeFixtures() {
 		t.Run(fixture.tool+"/"+fixture.name, func(t *testing.T) {
@@ -180,6 +232,10 @@ func resultModeFixtures() []resultModeFixture {
 	for _, outcome := range []string{"executed", "not_executed", "uncertain"} {
 		add("act", outcome, `{"operation_id":"P1","outcome":"`+outcome+`","error":{"code":"target_changed","message":"目标变化"},"recovery":{"entry":"observe","reference":"P"}}`)
 	}
+	add("act", "unsupported_nested_details", `{"operation_id":"P15","operation_state":"finished","outcome":"not_executed",`+
+		`"error":{"code":"unsupported_node_action","message":"目标节点不支持点击","details":`+
+		`{"nearest_actionable_ref":"n516","safe_point":{"x":0,"y":0},"task_ids":[0,42]}},`+
+		`"recovery":{"entry":"retry","reference":"O","input_state":"effective"}}`)
 	add("act", "scroll_effect_quality", `{"operation_id":"P1","outcome":"executed","phase":"completed","effect":{"state":"observed"},"target_reference":"O1","observation":{"status":"complete","id":"O2","origin":"P1","revision":2,"quality":{"state":"unstable","samples":5,"stop_reason":"max_samples"},"tree":`+testFullTreeJSON+`}}`)
 	add("act", "scroll_effect_unknown", `{"operation_id":"P1","outcome":"uncertain","effect":{"state":"unknown"},"observation":{"status":"complete","id":"O3","quality":{"state":"unknown","samples":0,"stop_reason":"not_sampled"}},"error":{"code":"action_unknown","message":"动作结果不确定"}}`)
 	fixtures = append(fixtures, resultModeFixture{tool: "act", name: "executed_cancelled", raw: `{"outcome":"executed"}`, cancelled: true})
@@ -229,6 +285,70 @@ func resultModeFixtures() []resultModeFixture {
 		add(tool.name, "admission", `{"error":{"code":"invalid_request","message":"参数错误"},"recovery":{"entry":"retry","reference":"none"}}`)
 	}
 	return fixtures
+}
+
+// TestNestedErrorDetailsModeParity pins the same nested guidance across all
+// three result modes. Text v2 must decode back to the canonical value,
+// structuredContent must be the canonical value, and the structured diagnostic
+// must retain the complete error.details object. The source Result is immutable.
+func TestNestedErrorDetailsModeParity(t *testing.T) {
+	source := &protocol.Result{
+		OperationID:    "P15",
+		OperationState: "finished",
+		Outcome:        "not_executed",
+		Error: &protocol.Error{
+			Code:    protocol.CodeNodeUnsupported,
+			Message: "目标节点不支持点击",
+			Details: map[string]any{
+				"nearest_actionable_ref": "n516",
+				"safe_point":             map[string]any{"x": 0, "y": 0},
+				"task_ids":               []int{0, 42},
+			},
+		},
+	}
+	before := rmfResultBytes(t, source)
+	e := &execution{result: source}
+	canonical, err := canonicalResult(e)
+	if err != nil {
+		t.Fatalf("canonicalResult: %v", err)
+	}
+	want, err := decodeResultJSON(canonical)
+	if err != nil {
+		t.Fatalf("decode canonical: %v", err)
+	}
+
+	for _, mode := range []ResultMode{ResultModeBoth, ResultModeText, ResultModeStructured} {
+		out := projectExecution(e, "act", mode)
+		if !out.IsError {
+			t.Fatalf("mode %v: nested error was not marked as an error", mode)
+		}
+		if mode == ResultModeText && out.StructuredContent != nil {
+			t.Fatalf("mode %v: text mode carried structured content", mode)
+		}
+		if mode != ResultModeText {
+			if got := rmfStructuredBytes(t, out.StructuredContent); !bytes.Equal(got, canonical) {
+				t.Fatalf("mode %v: structuredContent differs from canonical\nwant %s\n got %s", mode, canonical, got)
+			}
+		}
+		text := testTextContent(t, out)
+		if mode == ResultModeStructured {
+			requireTestContains(t, text, "diagnostic v1 is_error=true")
+			requireTestContains(t, text, `"safe_point":{"x":0,"y":0}`)
+			requireTestContains(t, text, `"task_ids":[0,42]`)
+			requireTestNotContains(t, text, "occluding_ref")
+			continue
+		}
+		decoded, flag, err := decodeResultText(t, text)
+		if err != nil || !flag || !reflect.DeepEqual(want, decoded) {
+			t.Fatalf("mode %v text parity error=%v flag=%t\nwant=%#v\ngot=%#v\n%s",
+				mode, err, flag, want, decoded, text)
+		}
+		requireTestContains(t, text, `"safe_point":{"x":0,"y":0}`)
+		requireTestNotContains(t, text, "occluding_ref")
+	}
+	if got := rmfResultBytes(t, source); !bytes.Equal(got, before) {
+		t.Fatalf("mode projection mutated the source result\nbefore: %s\n after: %s", before, got)
+	}
 }
 
 func TestStructuredMinimalErrorText(t *testing.T) {
@@ -347,10 +467,9 @@ func TestHTTPModesSelectProjectionPerCall(t *testing.T) {
 }
 
 func TestCatalogFingerprintBaseline(t *testing.T) {
-	// The catalog has twelve tools. Contract 12 adds the orthogonal condition
-	// wait and extends the shared quality vocabulary; the tree text legend,
-	// keepalive's optional duration schema and the result modes are unchanged.
-	const baseline = "04177607f49d99c84aabd80632c37554989918e6f0454ed882a739d9fa72b1e9"
+	// The catalog has twelve tools. Contract 14 updates only the act guidance
+	// for subtree-safe target.ref planning and structured 422 details.
+	const baseline = "6ace74b8bdceb75dd43ffe270e3f33c7b3a6064aff3cc4734256e539460d136e"
 	if got := CatalogFingerprint(); got != baseline {
 		t.Fatalf("catalog changed: %s", got)
 	}

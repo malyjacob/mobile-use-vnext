@@ -7,8 +7,8 @@ HTTP 协议配对。
 
 - 模块：`github.com/malyjacob/mobile-use-vnext`
 - Go：1.27.1，启用 `GOEXPERIMENT=jsonv2`
-- 契约：`contract_version = "13"`，服务、HTTP 客户端、控制 App 精确相等才做普通工作
-- 发行：`0.13.0`；`release/versions.json` 是发行号、契约号与 Android versionCode（15）的唯一
+- 契约：`contract_version = "14"`，服务、HTTP 客户端、控制 App 精确相等才做普通工作
+- 发行：`0.14.0`；`release/versions.json` 是发行号、契约号与 Android versionCode（16）的唯一
   来源，构建生成 Go/Java 常量
 
 ## 能力边界
@@ -154,7 +154,7 @@ $env:GOEXPERIMENT = 'jsonv2'; go test ./...
 ## 接口
 
 Agent 工具（`POST /api/<tool>`，`Authorization: Bearer <agent_token>`，
-`X-Mobile-Use-Contract: 13`）：
+`X-Mobile-Use-Contract: 14`）：
 
 | 工具 | 说明 |
 | --- | --- |
@@ -162,7 +162,7 @@ Agent 工具（`POST /api/<tool>`，`Authorization: Bearer <agent_token>`，
 | `status` | 无参数、`{"reference":"O…"}` 或 `{"reference":"P…"}`；只读查询 |
 | `observe` | `reference`（O/P）；按服务端基线返回 full 或 delta；`observe(P)` 与 `full=true` 强制 full；`image=true` 附加本次图片 |
 | `wait_for` | `reference` + `timeout`（必填 1～40，`stable=true` 时至少 2）+ 可选 `query`/`absent_query`/`stable`/`full`/`image`；在唯一工作位上等待后发布一个新 `O` |
-| `act` | `observation_id` + `operation`：`tap`、`long_press`、`swipe`（可选 `duration_ms`）、`scroll`（`container`/`direction`/`amount`）、`key`、`text`；`image=true` 为后观察附图 |
+| `act` | `observation_id` + `operation`：`tap`、`long_press`、`swipe`（可选 `duration_ms`）、`scroll`（`container`/`direction`/`amount`）、`key`、`text`；`tap`/`long_press` 的 `ref` 目标按子树安全落点规划并在认领后重验固定点，`422` 可带受控祖先引导；`image=true` 为后观察附图 |
 | `inspect` | `observation_id` 可选 `node` 或 `query`；只读历史树 |
 | `keepalive` | `reference`（O/P）+ 可选 `duration_minutes`（1～120，默认 2）；从应用时重设当前活动会话租期，可延长或缩短；普通活动仅按两分钟取最大值 |
 | `end` | `reference`（O/P）；撤权并启动独立收尾 |
