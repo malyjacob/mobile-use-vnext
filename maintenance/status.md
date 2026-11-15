@@ -1,6 +1,6 @@
 # 项目实施状态
 
-状态：2026-11-15。本页承载用户可见的阶段进度、已实现/已实测/未验证分层与未决项；
+状态：2026-11-16。本页承载用户可见的阶段进度、已实现/已实测/未验证分层与未决项；
 `docs/` 只保留正式架构、现行契约与运维说明。
 
 ## 1. 阶段
@@ -94,6 +94,7 @@
 - [主屏多窗口层级修复与实机验证](verification/primary-display-multi-window.md)
 - [契约 11 公共树表示、交付预算与文本 v2 的实现与验证](verification/compact-node-tree-presentation.md)
 - [tap/long_press 子树安全落点与结构化引导的实现与验证](verification/act-tap-safe-scope-and-guidance.md)
+- [观察连续性、结构差分与动作重验（S0–S5 中期进度与剩余 S6–S10）](verification/observation-continuity-and-revalidation.md)
 - [工程决策](decisions.md)
 - [工程流程](process.md)
 
@@ -120,3 +121,11 @@
 - 契约 13 的实现与归档提交已推送 `origin`（`master` 到 `6c52c8e`；归档提交信息里的「未推送」
   描述当时状态，已被本条取代）。issue #12 与 #13 各附一条实现与实机结果回复后以 `COMPLETED`
   关闭；#11、#14、#15 仍开放。
+- 提案 [观察连续性、结构差分与动作重验](proposals/observation-continuity-and-revalidation/README.md)
+  （`70f390e`，仍保持“提案，未实现”）已完成 **S0–S5**（阶段代码与测试提交 `900e640`）：
+  覆盖净化与三态无 Defaults 协议、五阶段连续性、B2 结构差分与双应用器、动作重验与 MCP/client/probe
+  消费者同步；全仓 `GOEXPERIMENT=jsonv2 go vet ./...`、`go test -count=1 ./...`（12 个测试包全绿，
+  `engine` `455.270s`）与 Windows/`linux/arm64` 构建均通过。当前版本源与已部署制品仍停留在 `0.14.0 /
+  contract 14 / versionCode 16`，剩余 **S6–S10**（跨包 `I01–I03` 与 `B01–B06` 成本对比、S7
+  版本递增/`docs/` 同步与只读文档审计/Android 构建、S8 最终实现提交、S9 清单与 `D01–D06` 实机、S10
+  归档）按用户要求延后至下次会话完成（[进度与记录](verification/observation-continuity-and-revalidation.md)）。
