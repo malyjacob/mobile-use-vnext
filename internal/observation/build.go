@@ -41,8 +41,11 @@ type unit struct {
 // A Builder must be driven by one goroutine at a time; it holds no locks of
 // its own and mutates nothing else.
 type Builder struct {
-	prev    *Snapshot
-	nextRef int
+	prev           *Snapshot
+	nextRef        int
+	hasBudgetLimit bool
+	budgetLimit    uint64
+	lastStats      matchStats
 }
 
 // NewBuilder returns a Builder with no continuity state.
@@ -58,6 +61,7 @@ func (b *Builder) Previous() *Snapshot { return b.prev }
 func (b *Builder) Reset() {
 	b.prev = nil
 	b.nextRef = 1
+	b.lastStats = matchStats{}
 }
 
 // Build projects one capture to a complete public tree and publishes it as the
@@ -116,33 +120,29 @@ func (b *Builder) build(cap *device.Capture) (*Snapshot, error) {
 	// published units get monotonic numbers in preorder.
 	refs := b.assignRefs(cap, units)
 
-	// Build bottom-up: a parent copies the public nodes of its published
-	// children in source order.
+	// Build in source preorder and attach every published unit to its nearest
+	// published ancestor so descendants across unpublished wrappers remain
+	// reachable in source reading order.
 	public := make([]*protocol.Node, len(cap.Nodes))
-	for _, i := range postOrder(cap) {
-		u := units[i]
-		if i == cap.Root || !u.published {
-			continue
-		}
-		node := newPublicNode(cap, i, u, refs[i])
-		for _, child := range cap.Nodes[i].Children {
-			if child < 0 || child >= len(cap.Nodes) {
-				continue
-			}
-			if !hasAncestorPath(cap, child, i) || public[child] == nil {
-				continue
-			}
-			node.Children = append(node.Children, public[child])
-		}
-		public[i] = node
-	}
-
 	root := newRootNode(cap.Display, refs[cap.Root])
-	for _, child := range cap.Nodes[cap.Root].Children {
-		if child < 0 || child >= len(cap.Nodes) || public[child] == nil {
+	public[cap.Root] = root
+
+	order := preorder(cap)
+	for _, i := range order {
+		if i == cap.Root || !units[i].published {
 			continue
 		}
-		root.Children = append(root.Children, public[child])
+		public[i] = newPublicNode(cap, i, units[i], refs[i])
+	}
+	for _, i := range order {
+		if i == cap.Root || !units[i].published {
+			continue
+		}
+		parent := nearestPublishedParent(cap, units, i)
+		if parent < 0 || parent >= len(public) || public[parent] == nil {
+			parent = cap.Root
+		}
+		public[parent].Children = append(public[parent].Children, public[i])
 	}
 
 	snap := &Snapshot{
@@ -151,8 +151,8 @@ func (b *Builder) build(cap *device.Capture) (*Snapshot, error) {
 		ContextSource: make(map[string]int),
 	}
 	snap.Source[root.Ref] = cap.Root
-	for i := range cap.Nodes {
-		if public[i] == nil {
+	for _, i := range order {
+		if i == cap.Root || public[i] == nil {
 			continue
 		}
 		if units[i].context {
@@ -237,10 +237,11 @@ func project(cap *device.Capture) []unit {
 		}
 		switch {
 		case !inScope[i]:
-			// A node of another display is a wrapper holding target-display
-			// content. It is part of no target-display scope, so it is never
-			// published; its kept descendants attach to the nearest published
-			// ancestor instead.
+			// A node of another display is never published itself, yet it still
+			// propagates whether any kept target-display descendant lives inside
+			// its subtree so target-display ancestors become context or visible
+			// containers.
+			inTree[i] = childInTree
 			continue
 		case raw.Visible && (hasSemantics(raw) || childInTree):
 			units[i] = unit{published: true, role: classifyRole(raw)}
@@ -292,13 +293,46 @@ func postOrder(cap *device.Capture) []int {
 	return order
 }
 
-// hasSemantics reports whether the raw node carries anything worth reading or
-// acting on. It is the "not semantically empty" test of design §3.2.
+// hasSemantics reports whether a visible leaf carries readable content,
+// interaction capability, non-default state, or an intrinsic leaf role.
 func hasSemantics(raw *device.RawNode) bool {
-	return raw.TextSet || raw.DescSet || raw.HasEnabled || raw.HasChecked ||
-		raw.HasSelected || raw.HasFocused || raw.HasClickable ||
-		raw.HasLongClick || raw.HasScrollable || raw.HasCheckable ||
-		raw.HasPassword || raw.Editable
+	if raw.TextSet && raw.Text != "" {
+		return true
+	}
+	if raw.DescSet && raw.Description != "" {
+		return true
+	}
+	if (raw.HasClickable && raw.Clickable) ||
+		(raw.HasLongClick && raw.LongClickable) ||
+		(raw.HasScrollable && raw.Scrollable) ||
+		raw.Editable ||
+		(raw.HasCheckable && raw.Checkable) {
+		return true
+	}
+	if (raw.HasEnabled && !raw.Enabled) ||
+		(raw.HasChecked && raw.Checked) ||
+		(raw.HasFocused && raw.Focused) ||
+		(raw.HasSelected && raw.Selected) ||
+		(raw.HasPassword && raw.Password) {
+		return true
+	}
+	return retainsIntrinsicLeafRole(classifyRole(raw))
+}
+
+func retainsIntrinsicLeafRole(role protocol.Role) bool {
+	switch role {
+	case protocol.RoleImage,
+		protocol.RoleInput,
+		protocol.RoleButton,
+		protocol.RoleCheckbox,
+		protocol.RoleRadio,
+		protocol.RoleSwitch,
+		protocol.RoleToggle,
+		protocol.RoleScroll,
+		protocol.RoleText:
+		return true
+	}
+	return false
 }
 
 // classifyRole maps source evidence to a public role (design §4.3). Only
@@ -455,8 +489,8 @@ func actionsOf(raw *device.RawNode) []protocol.Action {
 }
 
 // newRootNode builds the synthetic reading root for one display. The root is
-// a reading unit: known enabled=true, focused/selected/protected=false, no
-// actions and the display rectangle as bounds.
+// a reading unit: known enabled=true, focused/selected/protected/checked=false,
+// no actions and the display rectangle as bounds.
 func newRootNode(display device.Display, ref string) *protocol.Node {
 	yes, no := true, false
 	b := protocol.Bounds{Left: 0, Top: 0, Right: display.Width, Bottom: display.Height}
@@ -470,6 +504,7 @@ func newRootNode(display device.Display, ref string) *protocol.Node {
 		Focused:   &no,
 		Selected:  &no,
 		Protected: &no,
+		Checked:   &no,
 		Children:  []*protocol.Node{},
 	}
 }

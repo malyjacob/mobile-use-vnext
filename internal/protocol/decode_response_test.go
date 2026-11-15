@@ -26,8 +26,8 @@ func roundTripDecode[T any](t *testing.T, original *T) *T {
 	return &decoded
 }
 
-// testNode builds a canonical node whose omitted defaults match what the
-// existing Node decoder restores (label and actions as empty arrays).
+// testNode builds a canonical node whose omitted state defaults match what the
+// Node decoder restores (label and actions as empty arrays).
 func testNode(ref string, role Role) *Node {
 	enabled := true
 	return &Node{
@@ -257,6 +257,98 @@ func TestDecodeInspectQueryMatches(t *testing.T) {
 		Truncated: &yes,
 	}}
 	roundTripDecode(t, original)
+}
+
+func TestDecodeInspectionRejectsLegacyDeclaration(t *testing.T) {
+	const prefix = `{"observation_id":"O1","origin":"P1","revision":3,` +
+		`"captured_at":"2026-11-09T03:00:02Z",`
+	cases := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "query envelope",
+			body: prefix + `"scope":"query","view":"detailed","defaults":{"checked":false},` +
+				`"matches":[],"total":0}`,
+		},
+		{
+			name: "query envelope null",
+			body: prefix + `"scope":"query","view":"detailed","defaults":null,` +
+				`"matches":[],"total":0}`,
+		},
+		{
+			name: "subtree envelope",
+			body: prefix + `"scope":"subtree","view":"detailed","defaults":{"checked":false},` +
+				`"root":{"ref":"n5","role":"group","bounds":[0,0,1,1]}}`,
+		},
+		{
+			name: "tree envelope",
+			body: prefix + `"scope":"tree","defaults":{"checked":false},` +
+				`"tree":{"format":"full","scope":"reported_visible_with_context","view":"detailed",` +
+				`"root":{"ref":"n1","role":"root","bounds":[0,0,1,1]}}}`,
+		},
+		{
+			name: "nested tree",
+			body: prefix + `"scope":"tree",` +
+				`"tree":{"format":"full","scope":"reported_visible_with_context","view":"detailed",` +
+				`"defaults":{"checked":false},"root":{"ref":"n1","role":"root","bounds":[0,0,1,1]}}}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var view InspectionView
+			if err := json.Unmarshal([]byte(tc.body), &view); err == nil {
+				t.Fatalf("accepted removed defaults: %s", tc.body)
+			}
+		})
+	}
+}
+
+func TestDecodeInspectionShapeValidation(t *testing.T) {
+	const prefix = `{"observation_id":"O1","origin":"P1","revision":3,` +
+		`"captured_at":"2026-11-09T03:00:02Z",`
+	cases := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "tree outer view",
+			body: prefix + `"scope":"tree","view":"detailed",` +
+				`"tree":{"format":"full","scope":"reported_visible_with_context","view":"detailed",` +
+				`"root":{"ref":"n1","role":"root","bounds":[0,0,1,1]}}}`,
+		},
+		{
+			name: "tree compact nested view",
+			body: prefix + `"scope":"tree",` +
+				`"tree":{"format":"full","scope":"reported_visible_with_context","view":"compact",` +
+				`"root":{"ref":"n1","role":"root","bounds":[0,0,1,1]}}}`,
+		},
+		{
+			name: "subtree missing view",
+			body: prefix + `"scope":"subtree","root":{"ref":"n5","role":"group","bounds":[0,0,1,1]}}`,
+		},
+		{
+			name: "subtree compact view",
+			body: prefix + `"scope":"subtree","view":"compact",` +
+				`"root":{"ref":"n5","role":"group","bounds":[0,0,1,1]}}`,
+		},
+		{
+			name: "query missing view",
+			body: prefix + `"scope":"query","matches":[],"total":0}`,
+		},
+		{
+			name: "query compact view",
+			body: prefix + `"scope":"query","view":"compact","matches":[],"total":0}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var view InspectionView
+			if err := json.Unmarshal([]byte(tc.body), &view); err == nil {
+				t.Fatalf("accepted invalid inspection shape: %s", tc.body)
+			}
+		})
+	}
 }
 
 func TestDecodeAppFindView(t *testing.T) {

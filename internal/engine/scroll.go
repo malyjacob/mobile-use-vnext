@@ -40,7 +40,7 @@ const (
 	effectReasonCPUBudget    = "cpu_budget"
 )
 
-// scrollPoint is one logical display point of the fixed trajectory.
+// scrollPoint is one logical display point of a planned trajectory.
 type scrollPoint struct {
 	X, Y int
 }
@@ -447,8 +447,8 @@ func isScrollContainer(node *protocol.Node) bool {
 }
 
 // resolveScrollPlan validates the scroll branch against the observation the
-// caller read and computes the fixed trajectory. It performs no device I/O and
-// never claims; the returned plan is the only input of the fresh revalidation.
+// caller read and computes the initial trajectory. It performs no device I/O
+// and never claims; the returned plan is the only input of fresh revalidation.
 func resolveScrollPlan(obs *observationState, operation *protocol.Operation) (*scrollPlan, *protocol.APIError) {
 	if operation.Container == nil {
 		return nil, protocol.Invalid("scroll 缺少 container")
@@ -512,9 +512,9 @@ func resolveScrollPlan(obs *observationState, operation *protocol.Operation) (*s
 	if clipped.Empty() {
 		return nil, unsupportedScrollContainer("滚动容器没有可用几何")
 	}
-	// The static plan is the only authorization of one attempt: the longest
-	// provable interval on the fixed center line, then the fixed geometry on it.
-	// A partial conflict shortens or moves the gesture; it never re-aims it later.
+	// The static plan authorizes one attempt: the longest provable interval on
+	// the center line, then the geometry on it. Fresh revalidation preserves the
+	// segment while it remains proven and otherwise replans in the same scope.
 	space, ok := scrollSafeSpans(projection, index, clipped, direction)
 	if !ok {
 		return nil, unsupportedScrollContainer("滚动容器没有可用几何")
@@ -611,96 +611,171 @@ func publicBoundsByRawIndex(projection *Projection, index int) (*protocol.Bounds
 	return node.Bounds, true
 }
 
-// revalidateScrollTarget proves the container is still the same node in the
-// live frame, recomputes the trajectory with the same geometry function and
-// proves that the actual injected start and end still resolve to that one
-// container. A rejection returns the frame it already read so the caller path
-// can deliver it as fresh evidence.
+// intervalOverlapRatio is relative to the shorter interval, so an axial
+// stretch does not by itself make a scroll container look like a different
+// scope. Bounds are half-open.
+func intervalOverlapRatio(a, b scrollSpan) float64 {
+	if a.length() <= 0 || b.length() <= 0 {
+		return 0
+	}
+	overlap := min(a.end, b.end) - max(a.start, b.start)
+	if overlap <= 0 {
+		return 0
+	}
+	return float64(overlap) / float64(min(a.length(), b.length()))
+}
+
+// sameScrollScope separates container identity from trajectory planning. The
+// container may stretch or move along the requested axis, but a meaningful
+// axial overlap and stable cross-axis edges are both required.
+func sameScrollScope(oldRect, freshRect, oldScreen, freshScreen device.Rect,
+	direction string) bool {
+	if oldRect.Empty() || freshRect.Empty() {
+		return false
+	}
+	oldClipped := oldRect.Intersect(oldScreen)
+	freshClipped := freshRect.Intersect(freshScreen)
+	if oldClipped.Empty() || freshClipped.Empty() {
+		return false
+	}
+	switch direction {
+	case protocol.ScrollDirectionUp, protocol.ScrollDirectionDown:
+		oldAxis := scrollSpan{start: oldClipped.Top, end: oldClipped.Bottom}
+		freshAxis := scrollSpan{start: freshClipped.Top, end: freshClipped.Bottom}
+		if intervalOverlapRatio(oldAxis, freshAxis) < 0.5 {
+			return false
+		}
+		tolerance := max(8, min(oldClipped.Width(), freshClipped.Width())/50)
+		return absInt(oldClipped.Left-freshClipped.Left) <= tolerance &&
+			absInt(oldClipped.Right-freshClipped.Right) <= tolerance
+	case protocol.ScrollDirectionLeft, protocol.ScrollDirectionRight:
+		oldAxis := scrollSpan{start: oldClipped.Left, end: oldClipped.Right}
+		freshAxis := scrollSpan{start: freshClipped.Left, end: freshClipped.Right}
+		if intervalOverlapRatio(oldAxis, freshAxis) < 0.5 {
+			return false
+		}
+		tolerance := max(8, min(oldClipped.Height(), freshClipped.Height())/50)
+		return absInt(oldClipped.Top-freshClipped.Top) <= tolerance &&
+			absInt(oldClipped.Bottom-freshClipped.Bottom) <= tolerance
+	}
+	return false
+}
+
+// revalidateScrollTarget proves the container is still the same source node,
+// then proves or replans its trajectory from the fresh public tree. A rejection
+// returns the frame it already read so the caller path can deliver it as fresh
+// evidence.
 func (e *Engine) revalidateScrollTarget(work *workState, obs *observationState,
 	plan *scrollPlan) (*device.Capture, *scrollFrame, *protocol.APIError) {
 	if work == nil || plan == nil || plan.container == nil {
-		return nil, nil, targetChangedScroll()
+		return nil, nil, protocol.NewError(503, protocol.CodeHierarchyFailed,
+			"实时目标重验失败")
 	}
-	if e.workRevoked(work) {
-		return nil, nil, protocol.NewError(409, protocol.CodeStopped, "会话已撤销")
-	}
-	session := e.sessionForWork(work)
-	if session == nil {
-		return nil, nil, protocol.NewError(409, protocol.CodeSessionEnded, "原会话已结束")
-	}
-	if obs == nil || obs.Projection == nil || obs.Projection.Capture == nil {
+	if obs == nil || obs.Projection == nil || obs.Projection.Capture == nil ||
+		obs.Projection.Tree == nil {
 		return nil, nil, protocol.NewError(503, protocol.CodeHierarchyFailed, "实时目标重验失败")
 	}
-	probeCtx, cancel := context.WithTimeout(work.Ctx, 5*time.Second)
-	state, err := e.dev.ProbeDisplay(probeCtx, session.Display.ID)
-	cancel()
-	if err != nil || !state.Exists {
-		return nil, nil, protocol.NewError(503, protocol.CodeDisplayUnavailable, "目标屏幕不可用")
-	}
-	capture, err := e.dev.Capture(work.Ctx, session.Display)
-	if err != nil {
-		return nil, nil, protocol.NewError(503, protocol.CodeHierarchyFailed, "实时目标重验失败")
+	capture, _, apiErr := e.captureForActRevalidation(work)
+	if apiErr != nil {
+		return nil, nil, apiErr
 	}
 	if err := foregroundMatches(obs.Foreground, capture.Foreground); err != nil {
-		return &capture, nil, err
+		return capture, nil, err
 	}
 	qualityState := protocol.QualityUnknown
 	if obs.Quality != nil && obs.Quality.State != "" {
 		qualityState = obs.Quality.State
 	}
-	freshContainer, matched := matchFreshNode(&capture, obs.Projection.Capture, plan.container)
-	if !matched {
+	revoked := func() bool { return e.workRevoked(work) }
+	match, matchState := e.probeActNode(
+		work.Ctx, revoked, obs.Projection.Capture, capture, plan.container)
+	switch matchState {
+	case actProbeUnique:
+	case actProbeCancelled:
+		return capture, nil, stoppedActRevalidation()
+	case actProbeBudgetExhausted, actProbeMalformed:
+		return capture, nil, protocol.NewError(503, protocol.CodeHierarchyFailed,
+			"实时目标重验失败")
+	case actProbeNone, actProbeAmbiguous:
 		e.logScrollRevalidate(work.OperationID, false, false, false, false, qualityState)
-		return &capture, nil, targetChangedScroll()
+		return capture, nil, targetChangedScroll()
+	default:
+		return capture, nil, protocol.NewError(503, protocol.CodeHierarchyFailed,
+			"实时目标重验失败")
 	}
-	freshIndex := indexOf(&capture, freshContainer)
+	freshContainer := match.raw
+	freshIndex := indexOf(capture, freshContainer)
 	if freshIndex < 0 {
-		e.logScrollRevalidate(work.OperationID, false, false, false, false, qualityState)
-		return &capture, nil, targetChangedScroll()
+		return capture, nil, protocol.NewError(503, protocol.CodeHierarchyFailed,
+			"实时目标重验失败")
 	}
-	screen := capture.Display.Bounds()
-	clipped := freshContainer.Bounds.Intersect(screen)
-	if clipped.Empty() {
+	oldScreen := obs.Projection.Capture.Display.Bounds()
+	newScreen := capture.Display.Bounds()
+	freshClipped := freshContainer.Bounds.Intersect(newScreen)
+	if freshClipped.Empty() ||
+		!sameScrollScope(plan.container.Bounds, freshContainer.Bounds,
+			oldScreen, newScreen, plan.direction) {
 		e.logScrollRevalidate(work.OperationID, true, false, false, false, qualityState)
-		return &capture, nil, targetChangedScroll()
+		return capture, nil, targetChangedScroll()
 	}
 	projector := work.Projector
 	if projector == nil {
 		projector = e.projector
 	}
 	if projector == nil {
-		return &capture, nil, protocol.NewError(503, protocol.CodeHierarchyFailed, "公开树构造失败")
+		return capture, nil, protocol.NewError(503, protocol.CodeHierarchyFailed, "公开树构造失败")
 	}
 	// Preview never advances ref continuity: the container proof authorizes
 	// this attempt and must not shift the refs of already published trees.
-	projection, err := projector.Preview(&capture)
+	projection, err := projector.Preview(capture)
+	if e.workRevoked(work) || work.Ctx.Err() != nil {
+		return capture, nil, stoppedActRevalidation()
+	}
 	if err != nil || projection == nil || projection.Tree == nil {
-		return &capture, nil, protocol.NewError(503, protocol.CodeHierarchyFailed, "公开树构造失败")
+		return capture, nil, protocol.NewError(503, protocol.CodeHierarchyFailed, "公开树构造失败")
 	}
 	containerPublic := publicNodeByRawIndex(projection, freshIndex)
 	if containerPublic == nil || containerPublic.Bounds == nil || !isScrollContainer(containerPublic) {
 		e.logScrollRevalidate(work.OperationID, true, false, false, false, qualityState)
-		return &capture, nil, targetChangedScroll()
+		return capture, nil, targetChangedScroll()
 	}
-	// The fresh tree proves the exact segment the caller was authorized for. It
-	// never re-selects the longest interval or recomputes the endpoints: a change
-	// outside the authorized segment cannot move the gesture.
-	space, ok := scrollSafeSpans(projection, freshIndex, clipped, plan.direction)
+	space, ok := scrollSafeSpans(projection, freshIndex, freshClipped, plan.direction)
 	if !ok {
 		e.logScrollRevalidate(work.OperationID, true, false, false, false, qualityState)
-		return &capture, nil, targetChangedScroll()
+		return capture, nil, targetChangedScroll()
 	}
-	startProven := space.provesPoint(plan.start, clipped, screen)
-	endProven := space.provesPoint(plan.end, clipped, screen)
-	proven := space.provesSegment(plan.start, plan.end, clipped, screen)
-	e.logScrollRevalidate(work.OperationID, true, startProven, endProven, proven, qualityState)
+	start, end := plan.start, plan.end
+	startProven := space.provesPoint(start, freshClipped, newScreen)
+	endProven := space.provesPoint(end, freshClipped, newScreen)
+	proven := space.provesSegment(start, end, freshClipped, newScreen)
 	if !proven {
-		return &capture, nil, targetChangedScroll()
+		span, hasSpan := space.longestSpan(plan.direction)
+		if !hasSpan {
+			e.logScrollRevalidate(
+				work.OperationID, true, startProven, endProven, false, qualityState)
+			return capture, nil, targetChangedScroll()
+		}
+		safe := space.safeRect(freshClipped, span)
+		var geometryOK bool
+		start, end, geometryOK = scrollGeometry(
+			safe, newScreen, plan.direction, plan.amount)
+		if !geometryOK || !space.provesSegment(start, end, freshClipped, newScreen) {
+			e.logScrollRevalidate(
+				work.OperationID, true, startProven, endProven, false, qualityState)
+			return capture, nil, targetChangedScroll()
+		}
+		startProven = space.provesPoint(start, freshClipped, newScreen)
+		endProven = space.provesPoint(end, freshClipped, newScreen)
+		proven = true
 	}
-	return &capture, &scrollFrame{
-		capture: &capture, projection: projection, container: freshContainer,
+	e.logScrollRevalidate(work.OperationID, true, startProven, endProven, proven, qualityState)
+	if e.workRevoked(work) || work.Ctx.Err() != nil {
+		return capture, nil, stoppedActRevalidation()
+	}
+	return capture, &scrollFrame{
+		capture: capture, projection: projection, container: freshContainer,
 		containerIndex: freshIndex, direction: plan.direction, amount: plan.amount,
-		start: plan.start, end: plan.end,
+		start: start, end: end,
 	}, nil
 }
 
@@ -709,7 +784,7 @@ func targetChangedScroll() *protocol.APIError {
 		"滚动容器或实际轨迹已变化，本次未派发")
 }
 
-// dispatchScroll injects the fixed center-line trajectory. The physical
+// dispatchScroll injects the fresh center-line trajectory. The physical
 // primitive and the ledger kind stay "swipe"; the semantic action is carried by
 // the operation fact. The outcome mapping is exactly the swipe mapping: nothing
 // dispatched is not_executed, anything unconfirmed after dispatch is uncertain.

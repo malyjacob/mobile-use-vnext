@@ -107,7 +107,6 @@ func testFullTree() *protocol.ReadTree {
 }
 
 const testTreeTextFullGolden = `tree v2 format=full id=O3 scope=reported_visible_with_context view=compact nodes=9 entries=9
-defaults {"checked":false}
 
 n1 root [0,0,1080,2400]
   n2 group [0,0,1080,220]
@@ -153,7 +152,6 @@ func testDelta() *protocol.ReadDelta {
 }
 
 const testTreeTextDeltaGolden = `tree v2 format=delta id=O4 base=O3 view=compact scope=reported_visible_with_context changes=6
-defaults {"checked":false}
 
 ~ n7 label=["WLAN 已关闭"] actions=["tap"]
 ~ n8 checked=false
@@ -175,8 +173,8 @@ func testInspectionTreeView() *protocol.InspectionView {
 	confirm.Actions = []protocol.Action{protocol.ActionTap}
 	scroll.Children = []*protocol.ReadNode{confirm}
 	root.Children = []*protocol.ReadNode{scroll}
-	// The tree scope declares view and defaults inside the nested complete
-	// tree: historical inspection material is always detailed.
+	// The tree scope declares view inside the nested complete tree: historical
+	// inspection material is always detailed.
 	return &protocol.InspectionView{
 		ObservationID: "O2", Origin: "P1", Revision: 4,
 		CapturedAt: "2026-11-10T03:00:00Z", Scope: "tree",
@@ -225,7 +223,6 @@ func testInspectionQueryView() *protocol.InspectionView {
 }
 
 const testTreeTextInspectTreeGolden = `inspect v2 scope=tree observation=O2 revision=4 captured_at=2026-11-10T03:00:00Z tree_scope=reported_visible_with_context view=detailed nodes=3 entries=3
-defaults {"checked":false}
 
 n1 root [0,0,1080,2400]
   n5 scroll [0,220,1080,2400] axis=y
@@ -234,7 +231,6 @@ end inspect
 `
 
 const testTreeTextInspectSubtreeGolden = `inspect v2 scope=subtree observation=O2 revision=4 captured_at=2026-11-10T03:00:00Z tree_scope=reported_visible_with_context view=detailed root=n5 nodes=2 entries=2
-defaults {"checked":false}
 
 n5 scroll [0,220,1080,2400] axis=y
   n7 button [40,600,240,680] "确定" tap
@@ -242,7 +238,6 @@ end inspect
 `
 
 const testTreeTextInspectQueryGolden = `inspect v2 scope=query observation=O2 revision=4 captured_at=2026-11-10T03:00:00Z tree_scope=reported_visible_with_context view=detailed matches=2 total=3 truncated=true nodes=4 entries=4
-defaults {"checked":false}
 
 match 1/2 path=[n1 n5]
 n7 button [40,600,240,680] "确定" tap
@@ -356,8 +351,7 @@ func TestTreeTextChainDefinition(t *testing.T) {
 	block := mustRenderTreeText(t, &protocol.Result{Observation: &protocol.Observation{
 		ID: "O5", Tree: &protocol.ReadTreeValue{Full: tree},
 	}})
-	want := "tree v2 format=full id=O5 scope=reported_visible_with_context view=compact nodes=4 entries=3\n" +
-		"defaults {\"checked\":false}\n\n" +
+	want := "tree v2 format=full id=O5 scope=reported_visible_with_context view=compact nodes=4 entries=3\n\n" +
 		"n1 root [0,0,1080,2400]\n" +
 		"  chain [n2 n3] view [0,0,1080,120]\n" +
 		"    n4 text [0,0,1080,60] \"标题\"\nend tree\n"
@@ -958,12 +952,12 @@ func TestTreeTextTrailer(t *testing.T) {
 
 func TestTreeTextEmptyTree(t *testing.T) {
 	root := testNode("n1", protocol.RoleRoot, testBounds(0, 0, 1080, 2400))
-	const defaultsLine = "defaults {\"checked\":false}\n\n"
+	const blockSeparator = "\n"
 	block := mustRenderTreeText(t, &protocol.Result{Observation: &protocol.Observation{
 		ID: "O1", Tree: &protocol.ReadTreeValue{Full: &protocol.ReadTree{Format: "full", Scope: protocol.Scope, View: protocol.ViewCompact, Root: root}},
 	}})
 	want := "tree v2 format=full id=O1 scope=reported_visible_with_context view=compact nodes=1 entries=1\n" +
-		defaultsLine +
+		blockSeparator +
 		"n1 root [0,0,1080,2400]\nend tree\n"
 	if block != want {
 		t.Fatalf("empty tree block = %q, want %q", block, want)
@@ -974,7 +968,7 @@ func TestTreeTextEmptyTree(t *testing.T) {
 		ID: "O2", Tree: &protocol.ReadTreeValue{Delta: delta},
 	}})
 	want = "tree v2 format=delta id=O2 base=O1 view=compact scope=reported_visible_with_context changes=0\n" +
-		defaultsLine + "end tree\n"
+		blockSeparator + "end tree\n"
 	if block != want {
 		t.Fatalf("empty delta block = %q, want %q", block, want)
 	}
@@ -986,7 +980,7 @@ func TestTreeTextEmptyTree(t *testing.T) {
 	block = mustRenderTreeText(t, &protocol.Result{Inspection: empty})
 	want = "inspect v2 scope=tree observation=O2 revision=4 captured_at=2026-11-10T03:00:00Z " +
 		"tree_scope=reported_visible_with_context view=detailed nodes=1 entries=1\n" +
-		defaultsLine +
+		blockSeparator +
 		"n1 root [0,0,1080,2400]\nend inspect\n"
 	if block != want {
 		t.Fatalf("empty inspection block = %q, want %q", block, want)
@@ -1000,7 +994,7 @@ func TestTreeTextEmptyTree(t *testing.T) {
 	block = mustRenderTreeText(t, &protocol.Result{Inspection: query})
 	want = "inspect v2 scope=query observation=O2 revision=4 captured_at=2026-11-10T03:00:00Z " +
 		"tree_scope=reported_visible_with_context view=detailed matches=0 nodes=0 entries=0\n" +
-		defaultsLine + "end inspect\n"
+		blockSeparator + "end inspect\n"
 	if block != want {
 		t.Fatalf("empty query block = %q, want %q", block, want)
 	}
@@ -1121,34 +1115,29 @@ func TestTextCarriesTreeBlock(t *testing.T) {
 
 // ---------------------------------------------------------------- text parser
 
-const testDefaultsLine = `defaults {"checked":false}`
-
 type parsedTreeTextBlock struct {
 	header  string
 	body    []string
 	trailer string
 }
 
-// parseTreeTextBlock checks the v2 frame: header, the fixed defaults line, one
-// blank line, the body and the trailer.
+// parseTreeTextBlock checks the v2 frame: header, one blank line, the body and
+// the trailer.
 func parseTreeTextBlock(t *testing.T, block string) parsedTreeTextBlock {
 	t.Helper()
 	if !strings.HasSuffix(block, "\n") {
 		t.Fatalf("block does not end with a newline: %q", block)
 	}
 	lines := strings.Split(strings.TrimSuffix(block, "\n"), "\n")
-	if len(lines) < 4 {
+	if len(lines) < 3 {
 		t.Fatalf("block has %d lines", len(lines))
 	}
-	if lines[1] != testDefaultsLine {
-		t.Fatalf("block header is not followed by the fixed defaults line: %q", block)
-	}
-	if lines[2] != "" {
-		t.Fatalf("defaults line is not followed by a blank line: %q", block)
+	if lines[1] != "" {
+		t.Fatalf("block header is not followed by a blank line: %q", block)
 	}
 	return parsedTreeTextBlock{
 		header:  lines[0],
-		body:    lines[3 : len(lines)-1],
+		body:    lines[2 : len(lines)-1],
 		trailer: lines[len(lines)-1],
 	}
 }

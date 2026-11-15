@@ -169,17 +169,15 @@ func decodeTreeBlock(lines []string, start int, object map[string]any,
 	if fields["view"] != "compact" {
 		return 0, failf("text_tree_view_invalid")
 	}
-	defaults, failure := decodeDefaultsLine(lines, start, "text_tree_defaults_invalid")
-	if failure != nil {
+	if failure := requireBlockSeparator(lines, start, "text_tree_separator_invalid"); failure != nil {
 		return 0, failure
 	}
 	if failure := setDecodedPath(object, seen, []string{"observation", "tree", "format"}, format); failure != nil {
 		return 0, failure
 	}
-	for key, value := range map[string]any{"view": fields["view"], "defaults": defaults} {
-		if failure := setDecodedPath(object, seen, []string{"observation", "tree", key}, value); failure != nil {
-			return 0, failure
-		}
+	if failure := setDecodedPath(object, seen,
+		[]string{"observation", "tree", "view"}, fields["view"]); failure != nil {
+		return 0, failure
 	}
 	if format == treeDelta {
 		if failure := setDecodedPath(object, seen, []string{"observation", "tree", "base"}, fields["base"]); failure != nil {
@@ -190,26 +188,23 @@ func decodeTreeBlock(lines []string, start int, object map[string]any,
 			return 0, failure
 		}
 	}
-	return findBlockEnd(lines, start+2, "end tree", "text_tree_unterminated")
+	end, failure := findBlockEnd(lines, start+2, "end tree", "text_tree_unterminated")
+	if failure != nil {
+		return 0, failure
+	}
+	if failure := validateTreeBody(lines[start+2:end-1], format, "text_tree"); failure != nil {
+		return 0, failure
+	}
+	return end, nil
 }
 
-// decodeDefaultsLine verifies the fixed defaults declaration that follows every
-// tree and inspection block header, its blank separator, and returns the decoded
-// object. Neither an omission nor an extended default policy is representable.
-func decodeDefaultsLine(lines []string, start int, reason string) (map[string]any, *checkError) {
-	if start+2 >= len(lines) || lines[start+1] != `defaults {"checked":false}` ||
-		lines[start+2] != "" {
-		return nil, failf(reason)
+// requireBlockSeparator verifies the single blank line between a readable block
+// header and its body. A legacy defaults line is not consumed.
+func requireBlockSeparator(lines []string, start int, reason string) *checkError {
+	if start+1 >= len(lines) || lines[start+1] != "" {
+		return failf(reason)
 	}
-	body, failure := decodeJSONValue(strings.TrimPrefix(lines[start+1], "defaults "))
-	if failure != nil {
-		return nil, failure
-	}
-	object, ok := body.(map[string]any)
-	if !ok {
-		return nil, failf(reason)
-	}
-	return object, nil
+	return nil
 }
 
 func decodeInspectionBlock(lines []string, start int, object map[string]any,
@@ -248,25 +243,204 @@ func decodeInspectionBlock(lines []string, start int, object map[string]any,
 			return 0, failure
 		}
 	}
-	defaults, failure := decodeDefaultsLine(lines, start, "text_inspect_defaults_invalid")
-	if failure != nil {
+	if failure := requireBlockSeparator(lines, start, "text_inspect_separator_invalid"); failure != nil {
 		return 0, failure
 	}
-	// The tree scope declares view and defaults in the nested complete tree; the
-	// subtree and query scopes declare them once on the inspection envelope.
+	// The tree scope declares view in the nested complete tree; the subtree and
+	// query scopes declare it once on the inspection envelope.
 	viewPath := []string{"inspection", "view"}
-	defaultsPath := []string{"inspection", "defaults"}
 	if scope == "tree" {
 		viewPath = []string{"inspection", "tree", "view"}
-		defaultsPath = []string{"inspection", "tree", "defaults"}
 	}
 	if failure := setDecodedPath(object, seen, viewPath, fields["view"]); failure != nil {
 		return 0, failure
 	}
-	if failure := setDecodedPath(object, seen, defaultsPath, defaults); failure != nil {
+	end, failure := findBlockEnd(lines, start+2, "end inspect", "text_inspect_unterminated")
+	if failure != nil {
 		return 0, failure
 	}
-	return findBlockEnd(lines, start+2, "end inspect", "text_inspect_unterminated")
+	bodyMode := scope
+	if bodyMode == "tree" || bodyMode == "subtree" {
+		// Both inspection scopes render complete detailed node definitions.
+		bodyMode = "full"
+	}
+	if failure := validateTreeBody(lines[start+2:end-1], bodyMode, "text_inspect"); failure != nil {
+		return 0, failure
+	}
+	return end, nil
+}
+
+// validateTreeBody keeps the probe from accepting a readable block whose body
+// contradicts the complete-node state contract. Full definitions may omit only
+// the known defaults; a delta set line may explicitly carry any tri-state value.
+func validateTreeBody(body []string, mode, prefix string) *checkError {
+	for _, rawLine := range body {
+		line := strings.TrimSpace(rawLine)
+		if line == "" {
+			continue
+		}
+		tokens, ok := treeLineTokens(line)
+		if !ok || len(tokens) == 0 {
+			return failf(prefix + "_body_invalid")
+		}
+		if tokens[0] == "defaults" {
+			return failf(prefix + "_body_invalid")
+		}
+		switch mode {
+		case "full":
+			if failure := validateFullNodeFlags(tokens, prefix); failure != nil {
+				return failure
+			}
+		case "delta":
+			switch tokens[0] {
+			case "~":
+				if failure := validateSetNodeFlags(tokens[1:], prefix); failure != nil {
+					return failure
+				}
+			case "+", "=":
+				if len(tokens) < 2 {
+					return failf(prefix + "_body_invalid")
+				}
+				if failure := validateFullNodeFlags(tokens[1:], prefix); failure != nil {
+					return failure
+				}
+			case "-", "children":
+			default:
+				return failf(prefix + "_body_invalid")
+			}
+		case "query":
+			if strings.HasPrefix(tokens[0], "match") {
+				continue
+			}
+			if failure := validateFullNodeFlags(tokens, prefix); failure != nil {
+				return failure
+			}
+		default:
+			return failf(prefix + "_body_invalid")
+		}
+	}
+	return nil
+}
+
+// validateFullNodeFlags rejects state members whose value is the complete-node
+// default. Unknown is null and therefore explicit; the non-default known value
+// is explicit. This is the contract that allows the removed defaults line to be
+// omitted without letting an old producer silently keep writing it per node.
+func validateFullNodeFlags(tokens []string, prefix string) *checkError {
+	for _, token := range tokens {
+		name, value, found := strings.Cut(token, "=")
+		if !found {
+			continue
+		}
+		switch name {
+		case "enabled":
+			if value == "true" {
+				return failf(prefix+"_flag_default", field("flag", name))
+			}
+			if value != "false" && value != "null" {
+				return failf(prefix+"_flag_invalid", field("flag", name))
+			}
+		case "focused", "selected", "protected", "checked":
+			if value == "false" {
+				return failf(prefix+"_flag_default", field("flag", name))
+			}
+			if value != "true" && value != "null" {
+				return failf(prefix+"_flag_invalid", field("flag", name))
+			}
+		}
+	}
+	return nil
+}
+
+// validateSetNodeFlags accepts every explicit tri-state value. An absent member
+// alone means "not modified".
+func validateSetNodeFlags(tokens []string, prefix string) *checkError {
+	for _, token := range tokens {
+		name, value, found := strings.Cut(token, "=")
+		if !found {
+			continue
+		}
+		switch name {
+		case "enabled", "focused", "selected", "protected", "checked":
+			if value != "true" && value != "false" && value != "null" {
+				return failf(prefix+"_flag_invalid", field("flag", name))
+			}
+		}
+	}
+	return nil
+}
+
+// treeLineTokens splits one node line while keeping quoted JSON strings and
+// bracketed arrays as single tokens. A ref must write none of them, so this
+// small scanner is sufficient to find state members without being confused by a
+// label such as "checked=false".
+func treeLineTokens(line string) ([]string, bool) {
+	var tokens []string
+	for index := 0; index < len(line); {
+		switch line[index] {
+		case ' ', '\t':
+			index++
+			continue
+		case '"':
+			end, ok := treeJSONStringEnd(line, index)
+			if !ok {
+				return nil, false
+			}
+			tokens = append(tokens, line[index:end])
+			index = end
+		case '[':
+			end, ok := treeBracketEnd(line, index)
+			if !ok {
+				return nil, false
+			}
+			tokens = append(tokens, line[index:end])
+			index = end
+		default:
+			start := index
+			for index < len(line) && line[index] != ' ' && line[index] != '\t' {
+				index++
+			}
+			tokens = append(tokens, line[start:index])
+		}
+	}
+	return tokens, true
+}
+
+func treeJSONStringEnd(value string, start int) (int, bool) {
+	escaped := false
+	for index := start + 1; index < len(value); index++ {
+		switch {
+		case escaped:
+			escaped = false
+		case value[index] == '\\':
+			escaped = true
+		case value[index] == '"':
+			return index + 1, true
+		}
+	}
+	return 0, false
+}
+
+func treeBracketEnd(value string, start int) (int, bool) {
+	depth := 0
+	for index := start; index < len(value); index++ {
+		switch value[index] {
+		case '"':
+			end, ok := treeJSONStringEnd(value, index)
+			if !ok {
+				return 0, false
+			}
+			index = end - 1
+		case '[':
+			depth++
+		case ']':
+			depth--
+			if depth == 0 {
+				return index + 1, true
+			}
+		}
+	}
+	return 0, false
 }
 
 func decodeShellBlock(lines []string, start int, object map[string]any,

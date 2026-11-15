@@ -328,8 +328,8 @@ func comparableResultObject(object map[string]any) map[string]any {
 			observationClone[key] = value
 		}
 		if tree, ok := observation["tree"].(map[string]any); ok {
-			treeHeader := make(map[string]any, 5)
-			for _, key := range []string{"format", "base", "scope", "view", "defaults"} {
+			treeHeader := make(map[string]any, 4)
+			for _, key := range []string{"format", "base", "scope", "view"} {
 				if value, exists := tree[key]; exists {
 					treeHeader[key] = value
 				}
@@ -339,18 +339,18 @@ func comparableResultObject(object map[string]any) map[string]any {
 		clone["observation"] = observationClone
 	}
 	if inspection, ok := object["inspection"].(map[string]any); ok {
-		header := make(map[string]any, 8)
+		header := make(map[string]any, 7)
 		for _, key := range []string{
 			"observation_id", "origin", "revision", "captured_at", "scope",
-			"view", "defaults",
+			"view",
 		} {
 			if value, exists := inspection[key]; exists {
 				header[key] = value
 			}
 		}
 		if tree, ok := inspection["tree"].(map[string]any); ok {
-			treeHeader := make(map[string]any, 2)
-			for _, key := range []string{"view", "defaults"} {
+			treeHeader := make(map[string]any, 1)
+			for _, key := range []string{"view"} {
 				if value, exists := tree[key]; exists {
 					treeHeader[key] = value
 				}

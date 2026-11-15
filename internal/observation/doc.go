@@ -11,14 +11,14 @@
 //
 // One capture produces one complete public tree with a synthetic root (role
 // root, bounds = target display rectangle, known enabled=true and
-// focused/selected/protected=false). The public scope is
+// focused/selected/protected/checked=false). The public scope is
 // protocol.Scope (reported_visible_with_context): nodes reported visible in the
 // target display, plus their necessary ancestors. An ancestor that is not
 // visible but has a visible or already-kept descendant is published as a
 // context node (role group, context=true, bounds=nil, no actions, no label).
 // Nodes of other displays are never published, and neither are semantically
-// empty leaves (no label, description, value, known state, action capability
-// or capability flag).
+// empty leaves (no readable content, non-default state, interaction
+// capability or intrinsic leaf role).
 //
 // This first implementation does not fold or collapse containers: every node
 // that has kept children or semantic evidence is published, so the public tree

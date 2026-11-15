@@ -371,7 +371,7 @@ func TestProjectQualityAndEffectChannels(t *testing.T) {
 		},
 		"tree": map[string]any{
 			"format": treeFull, "scope": "reported_visible_with_context",
-			"view": "compact", "defaults": map[string]any{"checked": false},
+			"view": "compact",
 		},
 	}
 	payload := map[string]any{
@@ -589,6 +589,57 @@ func TestDecodeResultTextRejectsIncompleteProjection(t *testing.T) {
 				"json v1 path=\"/status\" value=\"b\"\nend result\n",
 			reason: "text_result_path_duplicate",
 		},
+		{
+			name: "legacy tree defaults line",
+			text: "result v2 is_error=false\nobservation.id=\"O1\"\n\n" +
+				"tree v2 format=full id=O1 scope=reported_visible_with_context view=compact nodes=1 entries=1\n" +
+				"defaults {\"checked\":false}\n\nn1 root [0,0,1080,2400]\nend tree\nend result\n",
+			reason: "text_tree_separator_invalid",
+		},
+		{
+			name: "legacy inspection defaults line",
+			text: "result v2 is_error=false\n\n" +
+				"inspect v2 scope=tree observation=O1 revision=1 captured_at=now " +
+				"tree_scope=reported_visible_with_context view=detailed nodes=1 entries=1\n" +
+				"defaults {\"checked\":false}\n\nn1 root [0,0,1080,2400]\nend inspect\nend result\n",
+			reason: "text_inspect_separator_invalid",
+		},
+		{
+			name: "defaults line inside tree body",
+			text: "result v2 is_error=false\nobservation.id=\"O1\"\n\n" +
+				"tree v2 format=full id=O1 scope=reported_visible_with_context view=compact nodes=1 entries=1\n\n" +
+				"defaults {\"checked\":false}\nn1 root [0,0,1080,2400]\nend tree\nend result\n",
+			reason: "text_tree_body_invalid",
+		},
+		{
+			name: "full node writes checked default",
+			text: "result v2 is_error=false\nobservation.id=\"O1\"\n\n" +
+				"tree v2 format=full id=O1 scope=reported_visible_with_context view=compact nodes=1 entries=1\n\n" +
+				"n1 root [0,0,1080,2400] checked=false\nend tree\nend result\n",
+			reason: "text_tree_flag_default",
+		},
+		{
+			name: "full node writes enabled default",
+			text: "result v2 is_error=false\nobservation.id=\"O1\"\n\n" +
+				"tree v2 format=full id=O1 scope=reported_visible_with_context view=compact nodes=1 entries=1\n\n" +
+				"n1 root [0,0,1080,2400] enabled=true\nend tree\nend result\n",
+			reason: "text_tree_flag_default",
+		},
+		{
+			name: "full node writes focused default",
+			text: "result v2 is_error=false\nobservation.id=\"O1\"\n\n" +
+				"tree v2 format=full id=O1 scope=reported_visible_with_context view=compact nodes=1 entries=1\n\n" +
+				"n1 root [0,0,1080,2400] focused=false\nend tree\nend result\n",
+			reason: "text_tree_flag_default",
+		},
+		{
+			name: "inspection node writes checked default",
+			text: "result v2 is_error=false\n\n" +
+				"inspect v2 scope=tree observation=O1 revision=1 captured_at=now " +
+				"tree_scope=reported_visible_with_context view=detailed nodes=1 entries=1\n\n" +
+				"n1 root [0,0,1080,2400] checked=false\nend inspect\nend result\n",
+			reason: "text_inspect_flag_default",
+		},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -612,5 +663,37 @@ func TestDecodeResultTextJSONPointer(t *testing.T) {
 	number, integer := valueInteger(value)
 	if !ok || !integer || number != 1 {
 		t.Fatalf("decoded pointer value = %#v, %v", value, ok)
+	}
+}
+
+// TestDecodeResultTextAcceptsTriStateContract proves the body validator does
+// not reject explicit unknown values, explicit non-default known values, delta
+// set false, or a quoted label that merely looks like a state member.
+func TestDecodeResultTextAcceptsTriStateContract(t *testing.T) {
+	text := "result v2 is_error=false\nobservation.id=\"O1\"\n\n" +
+		"tree v2 format=full id=O1 scope=reported_visible_with_context view=compact nodes=3 entries=3\n\n" +
+		"n1 root [0,0,1080,2400]\n" +
+		"  n2 text \"checked=false is a label\" value=\"x\" enabled=false focused=true selected=null protected=null checked=null\n" +
+		"  n3 button enabled=null checked=true\n" +
+		"end tree\nend result\n"
+	if _, failure := decodeResultText(text); failure != nil {
+		t.Fatalf("valid tri-state full tree rejected: %s %v", failure.reason, failure.fields)
+	}
+
+	delta := "result v2 is_error=false\nobservation.id=\"O2\"\n\n" +
+		"tree v2 format=delta id=O2 base=O1 view=compact scope=reported_visible_with_context changes=2\n\n" +
+		"~ n2 checked=false focused=null\n" +
+		"+ n4 text [0,0,10,10] checked=true\n" +
+		"end tree\nend result\n"
+	if _, failure := decodeResultText(delta); failure != nil {
+		t.Fatalf("valid delta set rejected: %s %v", failure.reason, failure.fields)
+	}
+
+	inspection := "result v2 is_error=false\n\n" +
+		"inspect v2 scope=query observation=O1 revision=1 captured_at=now " +
+		"tree_scope=reported_visible_with_context view=detailed matches=1 total=1 truncated=false nodes=1 entries=1\n\n" +
+		"match 1/1 path=[n1 n2]\nn3 text [0,0,10,10] checked=null\nend inspect\nend result\n"
+	if _, failure := decodeResultText(inspection); failure != nil {
+		t.Fatalf("valid query inspection rejected: %s %v", failure.reason, failure.fields)
 	}
 }

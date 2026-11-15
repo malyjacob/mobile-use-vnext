@@ -280,7 +280,7 @@ func assertResultTextParity(t *testing.T, raw []byte, isError bool) string {
 func TestTextCodecDeliveredObservationOnError(t *testing.T) {
 	raw := []byte(`{"operation_id":"P7","operation_state":"finished","outcome":"not_executed","phase":"revalidate",` +
 		`"observation":{"status":"complete","id":"O2","origin":"P1","revision":2,"tree":{"format":"full",` +
-		`"scope":"reported_visible_with_context","view":"compact","defaults":{"checked":false},` +
+		`"scope":"reported_visible_with_context","view":"compact",` +
 		`"root":{"ref":"n1","role":"root","bounds":[0,0,1080,2400]}}},` +
 		`"error":{"code":"target_changed","message":"目标元素已变化，本次未派发"},` +
 		`"recovery":{"entry":"retry","reference":"O","input_state":"effective"}}`)
@@ -325,7 +325,7 @@ func TestTextCodecPresenceAndEscaping(t *testing.T) {
 
 func TestFutureFieldFallback(t *testing.T) {
 	for _, raw := range []string{
-		`{"observation":{"status":"complete","id":"O1","tree":{"format":"full","scope":"reported_visible_with_context","view":"compact","defaults":{"checked":false},"root":{"ref":"n1","role":"root","bounds":null,"future":true}}}}`,
+		`{"observation":{"status":"complete","id":"O1","tree":{"format":"full","scope":"reported_visible_with_context","view":"compact","root":{"ref":"n1","role":"root","bounds":null,"future":true}}}}`,
 		`{"inspection":{"observation_id":"O1","origin":"P1","revision":1,"captured_at":"now","scope":"tree","future":0}}`,
 		`{"app":{"kind":"find","items":[{"name":"N","package":"P","future":false}],"total":1,"truncated":false,"captured_at":"now","future":[]},"diagnosis":{"timeline":[{"at":"now","phase":"p","future":null}],"future/x":{}}}`,
 	} {
@@ -335,8 +335,8 @@ func TestFutureFieldFallback(t *testing.T) {
 
 func TestTextCodecUnrepresentableTreeMetadata(t *testing.T) {
 	for _, raw := range []string{
-		`{"observation":{"status":"complete","id":"中文","tree":{"format":"full","scope":"reported_visible_with_context","view":"compact","defaults":{"checked":false},"root":{"ref":"n1","role":"root","bounds":null}}}}`,
-		`{"observation":{"status":"complete","id":"O1","tree":{"format":"delta","base":"O0","view":"compact","defaults":{"checked":false},"replace":{"n1":{"ref":"n2","role":"text","bounds":null}}}}}`,
+		`{"observation":{"status":"complete","id":"中文","tree":{"format":"full","scope":"reported_visible_with_context","view":"compact","root":{"ref":"n1","role":"root","bounds":null}}}}`,
+		`{"observation":{"status":"complete","id":"O1","tree":{"format":"delta","base":"O0","view":"compact","replace":{"n1":{"ref":"n2","role":"text","bounds":null}}}}}`,
 	} {
 		t.Run(raw, func(t *testing.T) {
 			text, err := encodeResultText([]byte(raw), false)
@@ -372,7 +372,7 @@ func TestTextCodecEffectAndQuality(t *testing.T) {
 		`"quality":{"state":"unknown","samples":0,"stop_reason":"not_sampled"},` +
 		`"screen":{"width":1080,"height":2400,"rotation":0},` +
 		`"tree":{"format":"full","scope":"reported_visible_with_context",` +
-		`"view":"compact","defaults":{"checked":false},` +
+		`"view":"compact",` +
 		`"root":{"ref":"n1","role":"root","bounds":[0,0,1080,2400]}}}}`)
 	text := assertResultTextParity(t, raw, false)
 	for _, line := range []string{

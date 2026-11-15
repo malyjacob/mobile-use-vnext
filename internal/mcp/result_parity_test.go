@@ -240,9 +240,8 @@ func resultModeFixtures() []resultModeFixture {
 	add("act", "scroll_effect_unknown", `{"operation_id":"P1","outcome":"uncertain","effect":{"state":"unknown"},"observation":{"status":"complete","id":"O3","quality":{"state":"unknown","samples":0,"stop_reason":"not_sampled"}},"error":{"code":"action_unknown","message":"动作结果不确定"}}`)
 	fixtures = append(fixtures, resultModeFixture{tool: "act", name: "executed_cancelled", raw: `{"outcome":"executed"}`, cancelled: true})
 	// The inspection tree scope carries the detailed view inside the nested
-	// complete tree; subtree and query declare it on the envelope together with
-	// the fixed defaults declaration.
-	inspectionEnvelope := `"view":"detailed","defaults":{"checked":false},`
+	// complete tree; subtree and query declare it on the envelope.
+	inspectionEnvelope := `"view":"detailed",`
 	for _, scope := range []struct{ name, fields string }{
 		{"tree", `"tree":` + testDetailedTreeJSON},
 		{"subtree", inspectionEnvelope + `"root":{"ref":"n1","role":"root","bounds":null}`},
@@ -467,9 +466,9 @@ func TestHTTPModesSelectProjectionPerCall(t *testing.T) {
 }
 
 func TestCatalogFingerprintBaseline(t *testing.T) {
-	// The catalog has twelve tools. Contract 14 updates only the act guidance
-	// for subtree-safe target.ref planning and structured 422 details.
-	const baseline = "6ace74b8bdceb75dd43ffe270e3f33c7b3a6064aff3cc4734256e539460d136e"
+	// The catalog has twelve tools. This baseline covers the tree guide without
+	// a fixed defaults declaration and the remaining current guidance.
+	const baseline = "1a319cb307821d51bccfa1ed3df307c363b758973174623ee935c45bac2ffc55"
 	if got := CatalogFingerprint(); got != baseline {
 		t.Fatalf("catalog changed: %s", got)
 	}

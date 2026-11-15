@@ -55,10 +55,11 @@ func waitAct(t *testing.T, done <-chan struct {
 	return nil
 }
 
-// TestScrollContainerMovedRejected keeps the container content but changes its
-// rectangle: the complete container identity no longer matches, so the attempt
-// is rejected and the fresh frame is delivered instead of dispatched.
-func TestScrollContainerMovedRejected(t *testing.T) {
+// TestScrollContainerAxialGeometryAllowed keeps the container content and
+// changes its rectangle within the same scroll scope. The container may stretch
+// or move on the requested axis; the original segment remains the plan while it
+// is still proven in the fresh frame.
+func TestScrollContainerAxialGeometryAllowed(t *testing.T) {
 	for name, rect := range map[string]device.Rect{
 		"moved":   {Left: 0, Top: 10, Right: 1080, Bottom: 2400},
 		"resized": {Left: 0, Top: 0, Right: 1080, Bottom: 2390},
@@ -68,23 +69,19 @@ func TestScrollContainerMovedRejected(t *testing.T) {
 			h.device.scriptCaptures(scrollPageStep(scrollSpecWithContainerBounds(screenRect())))
 			start := h.startSession()
 			container := scrollContainerRef(t, h)
-			captures := h.device.captureCount()
 			h.device.scriptCaptures(scrollPageStep(scrollSpecWithContainerBounds(rect)))
 
 			result := h.actP(t, "", start.Observation.ID, protocol.Operation{
 				Type: "scroll", Container: &protocol.Target{UseRef: true, Ref: container},
 				Direction: protocol.ScrollDirectionDown,
 			})
-			requireNotExecuted(t, result, protocol.CodeTargetChanged)
-			requireNoEffect(t, result)
-			if result.Observation == nil {
-				t.Fatal("rejected scroll did not deliver the fresh evidence frame")
+			if result.Outcome != OutcomeExecuted {
+				t.Fatalf("same-scope axial geometry outcome = %s error %+v", result.Outcome, result.Error)
 			}
-			if got := swipeCount(h); got != 0 {
-				t.Fatalf("swipes = %d, want none", got)
-			}
-			if got := h.device.captureCount(); got != captures+1 {
-				t.Fatalf("captures = %d, want the single revalidation frame", got-captures)
+			want := swipeCall{displayID: 12, x1: 540, y1: 2160, x2: 540, y2: 1008, durationMS: 400}
+			calls := swipeCalls(h)
+			if len(calls) != 1 || calls[0] != want {
+				t.Fatalf("swipe = %+v, want the proven original segment %+v", calls, want)
 			}
 		})
 	}
@@ -177,45 +174,52 @@ func TestScrollStaticAvoidsInnerScope(t *testing.T) {
 	}
 }
 
-// TestScrollDynamicSegmentConflictRejected is the required reverse control for
-// the whole-segment proof: a conflict that only appears in the fresh frame at
-// the start, the end or the middle of the original segment rejects the attempt
-// even though both endpoints on their own may still be provable.
-func TestScrollDynamicSegmentConflictRejected(t *testing.T) {
-	cases := map[string]device.Rect{
-		"start":  {Left: 0, Top: 1900, Right: 1080, Bottom: 2400},
-		"end":    {Left: 0, Top: 1000, Right: 1080, Bottom: 1100},
-		"middle": {Left: 0, Top: 1500, Right: 1080, Bottom: 1600},
+// TestScrollDynamicSegmentConflictReplans proves a conflict at the start, end,
+// or middle of the original segment invalidates that segment, after which the
+// fresh longest safe span is planned as one whole segment.
+func TestScrollDynamicSegmentConflictReplans(t *testing.T) {
+	cases := map[string]struct {
+		inner device.Rect
+		want  swipeCall
+	}{
+		"start": {inner: device.Rect{Left: 0, Top: 1900, Right: 1080, Bottom: 2400},
+			want: swipeCall{displayID: 12, x1: 540, y1: 1710, x2: 540, y2: 798, durationMS: 400}},
+		"end": {inner: device.Rect{Left: 0, Top: 1000, Right: 1080, Bottom: 1100},
+			want: swipeCall{displayID: 12, x1: 540, y1: 2270, x2: 540, y2: 1646, durationMS: 400}},
+		"middle": {inner: device.Rect{Left: 0, Top: 1500, Right: 1080, Bottom: 1600},
+			want: swipeCall{displayID: 12, x1: 540, y1: 1350, x2: 540, y2: 630, durationMS: 400}},
 	}
-	for name, inner := range cases {
+	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			h := newHarness(t)
 			observed := scrollPageStep(scrollPageSpecs(screenRect(), device.Rect{Top: 1000}))
 			h.device.scriptCaptures(observed)
 			start := h.startSession()
 			container := scrollContainerRef(t, h)
-			fresh := scrollPageWithInnerScope(scrollPageSpecs(screenRect(), device.Rect{Top: 1000}), inner)
+			fresh := scrollPageWithInnerScope(
+				scrollPageSpecs(screenRect(), device.Rect{Top: 1000}), tc.inner)
 			h.device.scriptCaptures(scrollPageStep(fresh), scrollPageStep(fresh))
 
 			result := h.actP(t, "", start.Observation.ID, protocol.Operation{
 				Type: "scroll", Container: &protocol.Target{UseRef: true, Ref: container},
 				Direction: protocol.ScrollDirectionDown,
 			})
-			requireNotExecuted(t, result, protocol.CodeTargetChanged)
-			requireNoEffect(t, result)
-			if got := swipeCount(h); got != 0 {
-				t.Fatalf("swipes = %d, want none", got)
+			if result.Outcome != OutcomeExecuted {
+				t.Fatalf("blocked segment with a safe alternative outcome = %s error %+v",
+					result.Outcome, result.Error)
 			}
-			if result.Observation == nil {
-				t.Fatal("segment rejection did not deliver the fresh frame")
+			calls := swipeCalls(h)
+			if len(calls) != 1 || calls[0] != tc.want {
+				t.Fatalf("swipe = %+v, want fresh whole-segment plan %+v", calls, tc.want)
 			}
 		})
 	}
 }
 
-// TestScrollFreshChangeOutsideSegmentKeepsPlan proves the fresh proof never
-// re-plans: a change that only shortens the longest safe interval outside the
-// authorized segment changes nothing about the injected coordinates.
+// TestScrollFreshChangeOutsideSegmentKeepsPlan proves a still-proven segment is
+// preserved when a change only shortens another safe interval outside it. This
+// is not a general no-replan rule: a failed segment is replanned in the same
+// container.
 func TestScrollFreshChangeOutsideSegmentKeepsPlan(t *testing.T) {
 	h := newHarness(t)
 	observed := scrollPageStep(scrollPageSpecs(screenRect(), device.Rect{Top: 1000}))
@@ -233,7 +237,8 @@ func TestScrollFreshChangeOutsideSegmentKeepsPlan(t *testing.T) {
 	if result.Outcome != OutcomeExecuted {
 		t.Fatalf("outcome = %s error %+v", result.Outcome, result.Error)
 	}
-	// The observed plan stays [0,2400): 2160 -> 1008, never a re-planned 2080.
+	// The still-proven observed segment stays 2160 -> 1008 instead of being
+	// replaced by a longer alternative outside the authorized segment.
 	want := swipeCall{displayID: 12, x1: 540, y1: 2160, x2: 540, y2: 1008, durationMS: 400}
 	calls := swipeCalls(h)
 	if len(calls) != 1 || calls[0] != want {

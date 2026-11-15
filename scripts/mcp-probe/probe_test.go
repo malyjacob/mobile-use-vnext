@@ -365,7 +365,7 @@ func (f *fakeAdapter) observation(id, origin string, revision int, withImage boo
 		},
 		"tree": map[string]any{
 			"format": treeFull, "scope": "reported_visible_with_context",
-			"view": protocol.ViewCompact, "defaults": map[string]any{"checked": false},
+			"view": protocol.ViewCompact,
 		},
 	}
 	if withImage {
@@ -523,7 +523,7 @@ func (f *fakeAdapter) handle(ctx context.Context, name string, request *sdk.Call
 			"\n\ninspect v2 scope=tree observation=" + observationID +
 			" revision=2 captured_at=2026-01-01T00:00:00Z" +
 			" tree_scope=reported_visible_with_context view=detailed nodes=1 entries=1\n" +
-			"defaults {\"checked\":false}\n\n" +
+			"\n" +
 			"n1 root [0,0,1080,2400]\nend inspect\n"
 		return f.result(map[string]any{
 			"inspection": map[string]any{
@@ -533,10 +533,9 @@ func (f *fakeAdapter) handle(ctx context.Context, name string, request *sdk.Call
 				"captured_at":    "2026-01-01T00:00:00Z",
 				"scope":          "tree",
 				"tree": map[string]any{
-					"format":   treeFull,
-					"scope":    "reported_visible_with_context",
-					"view":     protocol.ViewDetailed,
-					"defaults": map[string]any{"checked": false},
+					"format": treeFull,
+					"scope":  "reported_visible_with_context",
+					"view":   protocol.ViewDetailed,
 					"root": map[string]any{
 						"ref": "n1", "role": "root", "bounds": []int{0, 0, 1080, 2400},
 					},
@@ -813,7 +812,7 @@ func writeFakeObservation(builder *strings.Builder, value any) {
 		block += " base=" + base
 	}
 	block += " view=compact nodes=1 entries=1 changes=0\n"
-	block += "defaults {\"checked\":false}\n\n"
+	block += "\n"
 	block += "n1 root [0,0,1080,2400]\nend tree\n"
 	writeFakeBlock(builder, block)
 }
@@ -837,7 +836,7 @@ func writeFakeInspection(builder *strings.Builder, value any) {
 		" captured_at=" + capturedAt +
 		" tree_scope=reported_visible_with_context view=detailed" +
 		" nodes=1 entries=1\n" +
-		"defaults {\"checked\":false}\n\nn1 root [0,0,1080,2400]\nend inspect\n"
+		"\nn1 root [0,0,1080,2400]\nend inspect\n"
 	writeFakeBlock(builder, block)
 }
 

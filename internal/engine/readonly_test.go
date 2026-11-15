@@ -89,6 +89,63 @@ func parseDiagnosisTime(t *testing.T, value string) time.Time {
 	return parsed
 }
 
+func detailedTreeBytes(t *testing.T, root *protocol.Node) int {
+	t.Helper()
+	tree := observation.ProjectDetailedTree(readonlyTree(root))
+	if tree == nil || tree.Validate() != nil {
+		t.Fatalf("invalid detailed tree fixture")
+	}
+	encoded, err := protocol.JSON(tree)
+	if err != nil {
+		t.Fatalf("encode detailed tree: %v", err)
+	}
+	return len(encoded)
+}
+
+func detailedTreeWithSize(t *testing.T, size int) *protocol.Node {
+	t.Helper()
+	root := readonlyNode("n1", protocol.RoleRoot)
+	child := readonlyNode("n2", protocol.RoleText, "x")
+	root.Children = []*protocol.Node{child}
+	oneByteLabel := detailedTreeBytes(t, root)
+	if size <= oneByteLabel {
+		t.Fatalf("detailed tree base is %d bytes, cannot reach %d", oneByteLabel, size)
+	}
+	child.Label[0] = strings.Repeat("x", 1+size-oneByteLabel)
+	if got := detailedTreeBytes(t, root); got != size {
+		t.Fatalf("detailed tree size = %d, want %d", got, size)
+	}
+	return root
+}
+
+func detailedSubtreeContentBytes(t *testing.T, node *protocol.Node) int {
+	t.Helper()
+	detailed := observation.ProjectDetailedNode(node)
+	encoded, err := protocol.JSON(inspectionSubtreeContent{
+		View: protocol.ViewDetailed, Root: detailed,
+	})
+	if err != nil {
+		t.Fatalf("encode detailed subtree content: %v", err)
+	}
+	return len(encoded)
+}
+
+func detailedSubtreeWithSize(t *testing.T, size int) (*protocol.Node, string) {
+	t.Helper()
+	root := readonlyNode("n1", protocol.RoleRoot)
+	child := readonlyNode("n2", protocol.RoleText, "x")
+	root.Children = []*protocol.Node{child}
+	oneByteLabel := detailedSubtreeContentBytes(t, child)
+	if size <= oneByteLabel {
+		t.Fatalf("detailed subtree base is %d bytes, cannot reach %d", oneByteLabel, size)
+	}
+	child.Label[0] = strings.Repeat("x", 1+size-oneByteLabel)
+	if got := detailedSubtreeContentBytes(t, child); got != size {
+		t.Fatalf("detailed subtree size = %d, want %d", got, size)
+	}
+	return root, child.Ref
+}
+
 // ------------------------------------------------------------- inspect
 
 func TestInspectReturnsTreeAndSubtree(t *testing.T) {
@@ -286,6 +343,169 @@ func TestInspectBudgetsRejectOversizedUnits(t *testing.T) {
 	}
 }
 
+func TestInspectDetailedTreeBudgetBoundary(t *testing.T) {
+	const limit = 128 * 1024
+	h := newHarness(t)
+	root := detailedTreeWithSize(t, limit)
+	attachObservation(t, h.engine, "O905", "agent", ObservationRetired, readonlyTree(root))
+
+	result, apiErr := h.engine.Inspect("agent", &protocol.InspectRequest{
+		ObservationID: "O905",
+	})
+	if apiErr != nil {
+		t.Fatalf("inspect tree at its exact budget: %v", apiErr)
+	}
+	encoded, err := protocol.JSON(result.Inspection.Tree)
+	if err != nil {
+		t.Fatalf("encode accepted detailed tree: %v", err)
+	}
+	if len(encoded) != limit {
+		t.Fatalf("accepted detailed tree = %d bytes, want %d", len(encoded), limit)
+	}
+
+	h.engine.cfg.MaxFullTreeBytes = limit - 1
+	if _, apiErr := h.engine.Inspect("agent", &protocol.InspectRequest{
+		ObservationID: "O905",
+	}); apiErr == nil || apiErr.Code != protocol.CodeInspectionTooLarge ||
+		apiErr.Details["limit"] != limit-1 {
+		t.Fatalf("detailed tree at N-1: %+v", apiErr)
+	}
+}
+
+func TestInspectSubtreeBudgetBoundary(t *testing.T) {
+	const limit = 32 * 1024
+	h := newHarness(t)
+	root, ref := detailedSubtreeWithSize(t, limit)
+	attachObservation(t, h.engine, "O906", "agent", ObservationRetired, readonlyTree(root))
+
+	result, apiErr := h.engine.Inspect("agent", &protocol.InspectRequest{
+		ObservationID: "O906", Node: ref, HasNode: true,
+	})
+	if apiErr != nil {
+		t.Fatalf("inspect subtree at its exact budget: %v", apiErr)
+	}
+	encoded, err := protocol.JSON(inspectionSubtreeContent{
+		View: protocol.ViewDetailed, Root: result.Inspection.Root,
+	})
+	if err != nil {
+		t.Fatalf("encode accepted detailed subtree: %v", err)
+	}
+	if len(encoded) != limit {
+		t.Fatalf("accepted detailed subtree = %d bytes, want %d", len(encoded), limit)
+	}
+
+	h.engine.cfg.MaxInspectionUnitBytes = limit - 1
+	if _, apiErr := h.engine.Inspect("agent", &protocol.InspectRequest{
+		ObservationID: "O906", Node: ref, HasNode: true,
+	}); apiErr == nil || apiErr.Code != protocol.CodeInspectionTooLarge ||
+		apiErr.Details["limit"] != limit-1 {
+		t.Fatalf("detailed subtree at N-1: %+v", apiErr)
+	}
+}
+
+func TestInspectQueryUnitBudgetBoundary(t *testing.T) {
+	h := newHarness(t)
+	root := readonlyNode("n1", protocol.RoleRoot)
+	hit := readonlyNode("n2", protocol.RoleText, "needle")
+	root.Children = []*protocol.Node{hit}
+	attachObservation(t, h.engine, "O907", "agent", ObservationRetired, readonlyTree(root))
+
+	encodedHit, err := protocol.JSON(inspectMatchWire{
+		Node: observation.ProjectDetailedNode(hit),
+		Path: []string{"n1"},
+	})
+	if err != nil {
+		t.Fatalf("encode query hit: %v", err)
+	}
+	base, err := queryEmptyBytes(1, false)
+	if err != nil {
+		t.Fatalf("measure query content header: %v", err)
+	}
+	limit := base + len(encodedHit)
+	h.engine.cfg.MaxInspectionUnitBytes = limit
+	result, apiErr := h.engine.Inspect("agent", &protocol.InspectRequest{
+		ObservationID: "O907", Query: "needle", HasQuery: true,
+	})
+	if apiErr != nil {
+		t.Fatalf("query hit at its exact budget: %v", apiErr)
+	}
+	if len(result.Inspection.Matches) != 1 || result.Inspection.Truncated == nil ||
+		*result.Inspection.Truncated {
+		t.Fatalf("single-hit query at N: %+v", result.Inspection)
+	}
+
+	h.engine.cfg.MaxInspectionUnitBytes = limit - 1
+	if _, apiErr := h.engine.Inspect("agent", &protocol.InspectRequest{
+		ObservationID: "O907", Query: "needle", HasQuery: true,
+	}); apiErr == nil || apiErr.Code != protocol.CodeInspectionTooLarge ||
+		apiErr.Details["limit"] != limit-1 {
+		t.Fatalf("query hit at N-1: %+v", apiErr)
+	}
+}
+
+func TestInspectQueryPrefixBudgetBoundary(t *testing.T) {
+	const total = 4
+	h := newHarness(t)
+	root := readonlyNode("n1", protocol.RoleRoot)
+	for index := 0; index < total; index++ {
+		label := "prefix" + strings.Repeat("x", 90+index)
+		root.Children = append(root.Children, readonlyNode(
+			"n"+string(rune('2'+index)), protocol.RoleText, label,
+		))
+	}
+	attachObservation(t, h.engine, "O908", "agent", ObservationRetired, readonlyTree(root))
+
+	base, err := queryEmptyBytes(total, true)
+	if err != nil {
+		t.Fatalf("measure query content header: %v", err)
+	}
+	unitBytes := func(index int) int {
+		encoded, err := protocol.JSON(inspectMatchWire{
+			Node: observation.ProjectDetailedNode(root.Children[index]),
+			Path: []string{root.Ref},
+		})
+		if err != nil {
+			t.Fatalf("encode query hit %d: %v", index, err)
+		}
+		return len(encoded)
+	}
+	first, second := unitBytes(0), unitBytes(1)
+	limit := base + first + 1 + second
+	h.engine.cfg.MaxInspectionUnitBytes = limit
+	result, apiErr := h.engine.Inspect("agent", &protocol.InspectRequest{
+		ObservationID: "O908", Query: "prefix", HasQuery: true,
+	})
+	if apiErr != nil {
+		t.Fatalf("query prefix at its exact budget: %v", apiErr)
+	}
+	view := result.Inspection
+	if view.Total != total || len(view.Matches) != 2 || view.Truncated == nil ||
+		!*view.Truncated {
+		t.Fatalf("query prefix at N: total=%d matches=%d truncated=%v",
+			view.Total, len(view.Matches), view.Truncated)
+	}
+	if refs := inspectionMatchRefs(view); !equalStrings(refs, []string{"n2", "n3"}) {
+		t.Fatalf("query prefix refs = %v, want [n2 n3]", refs)
+	}
+
+	h.engine.cfg.MaxInspectionUnitBytes = limit - 1
+	result, apiErr = h.engine.Inspect("agent", &protocol.InspectRequest{
+		ObservationID: "O908", Query: "prefix", HasQuery: true,
+	})
+	if apiErr != nil {
+		t.Fatalf("query prefix at N-1: %v", apiErr)
+	}
+	view = result.Inspection
+	if view.Total != total || len(view.Matches) != 1 || view.Truncated == nil ||
+		!*view.Truncated {
+		t.Fatalf("query prefix at N-1: total=%d matches=%d truncated=%v",
+			view.Total, len(view.Matches), view.Truncated)
+	}
+	if refs := inspectionMatchRefs(view); !equalStrings(refs, []string{"n2"}) {
+		t.Fatalf("query prefix refs at N-1 = %v, want [n2]", refs)
+	}
+}
+
 func TestInspectQueryTruncatesOnlyCompleteUnits(t *testing.T) {
 	h := newHarness(t)
 	root := readonlyNode("n1", protocol.RoleRoot)
@@ -313,8 +533,13 @@ func TestInspectQueryTruncatesOnlyCompleteUnits(t *testing.T) {
 	if len(view.Matches) == 0 || len(view.Matches) >= view.Total {
 		t.Fatalf("expected a non-empty prefix, got %d of %d", len(view.Matches), view.Total)
 	}
+	base, err := queryEmptyBytes(view.Total, *view.Truncated)
+	if err != nil {
+		t.Fatalf("measure query response header: %v", err)
+	}
+	fullResponseBytes := base
 	used := 0
-	for _, match := range view.Matches {
+	for index, match := range view.Matches {
 		if match.Node == nil || len(match.Node.Label) != 1 ||
 			!strings.HasPrefix(match.Node.Label[0], "命中") {
 			t.Fatalf("truncation returned an incomplete unit")
@@ -326,9 +551,17 @@ func TestInspectQueryTruncatesOnlyCompleteUnits(t *testing.T) {
 			t.Fatalf("encode unit: %v", err)
 		}
 		used += len(encoded)
+		if index > 0 {
+			fullResponseBytes++
+		}
+		fullResponseBytes += len(encoded)
 	}
 	if used > h.engine.cfg.MaxInspectionUnitBytes {
 		t.Fatalf("returned units use %d bytes, budget %d", used, h.engine.cfg.MaxInspectionUnitBytes)
+	}
+	if fullResponseBytes > h.engine.cfg.MaxInspectionUnitBytes {
+		t.Fatalf("complete query response uses %d bytes, budget %d",
+			fullResponseBytes, h.engine.cfg.MaxInspectionUnitBytes)
 	}
 }
 

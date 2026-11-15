@@ -120,11 +120,11 @@ func (b *Bounds) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 	return nil
 }
 
-// Node is the complete public tree node. Its encoding applies the protocol
-// defaults: enabled=true, focused/selected/protected=false, label/actions/
-// children=[], checked/value/hint/axis/resource=null, context=false. A field
-// equal to its default is omitted; an unknown state uses an explicit null for
-// fields whose semantic default is a known value.
+// Node is the complete public tree node. Its encoding omits known defaults:
+// enabled=true, focused/selected/protected/checked=false, empty collections,
+// and absent value/hint/axis/resource/context. Unknown tri-state values are
+// explicit null. On decode, an absent tri-state member restores its known
+// default (enabled=true, the others false); explicit null remains unknown.
 type Node struct {
 	Ref       string
 	Role      Role
@@ -287,12 +287,16 @@ func (n *Node) MarshalJSONTo(enc *jsontext.Encoder) error {
 			return err
 		}
 	}
-	// checked: default null; known values are explicit.
-	if n.Checked != nil {
+	// checked: default false; true and unknown are explicit.
+	if n.Checked == nil || *n.Checked {
 		if err := writeName(enc, "checked"); err != nil {
 			return err
 		}
-		if err := writeBool(enc, *n.Checked); err != nil {
+		if n.Checked == nil {
+			if err := writeNull(enc); err != nil {
+				return err
+			}
+		} else if err := writeBool(enc, true); err != nil {
 			return err
 		}
 	}
@@ -422,7 +426,7 @@ func (n *Node) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 		}
 		*field.dst = value
 	}
-	checked, err := decodeOptionalBool(wire.Checked)
+	checked, err := decodeTriBool(wire.Checked, false)
 	if err != nil {
 		return fmt.Errorf("checked: %w", err)
 	}
@@ -461,17 +465,6 @@ func decodeTriBool(raw jsontext.Value, defaultValue bool) (*bool, error) {
 		return &value, nil
 	}
 	if string(raw) == "null" {
-		return nil, nil
-	}
-	var value bool
-	if err := json.Unmarshal(raw, &value); err != nil {
-		return nil, err
-	}
-	return &value, nil
-}
-
-func decodeOptionalBool(raw jsontext.Value) (*bool, error) {
-	if len(raw) == 0 || string(raw) == "null" {
 		return nil, nil
 	}
 	var value bool

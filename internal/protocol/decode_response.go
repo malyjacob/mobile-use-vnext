@@ -84,13 +84,38 @@ func requireResponseMember[T any](m member[T], name string) (T, error) {
 // top-level null for a struct destination, but every public response object
 // is an object, so null must stay an error here.
 func readObject(dec *jsontext.Decoder, what string, dst any) error {
-	raw, err := dec.ReadValue()
+	raw, err := readObjectValue(dec, what)
 	if err != nil {
 		return err
 	}
+	return json.Unmarshal(raw, dst)
+}
+
+func readObjectValue(dec *jsontext.Decoder, what string) (jsontext.Value, error) {
+	raw, err := dec.ReadValue()
+	if err != nil {
+		return nil, err
+	}
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || trimmed[0] != '{' {
-		return fmt.Errorf("%s must be a JSON object", what)
+		return nil, fmt.Errorf("%s must be a JSON object", what)
+	}
+	return raw, nil
+}
+
+// readObjectWithoutMember rejects one removed top-level member while preserving
+// the forward-compatibility rule for every other unknown member.
+func readObjectWithoutMember(dec *jsontext.Decoder, what, member string, dst any) error {
+	raw, err := readObjectValue(dec, what)
+	if err != nil {
+		return err
+	}
+	var members map[string]jsontext.Value
+	if err := json.Unmarshal(raw, &members); err != nil {
+		return err
+	}
+	if _, present := members[member]; present {
+		return fmt.Errorf("%s must not declare %q", what, member)
 	}
 	return json.Unmarshal(raw, dst)
 }
@@ -519,8 +544,8 @@ func (r *Recovery) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 }
 
 // UnmarshalJSONFrom decodes the historical inspection material. The tree scope
-// declares its view and defaults in the nested complete tree; the subtree and
-// query scopes declare them once on this envelope.
+// declares its view in the nested complete tree; the subtree and query scopes
+// declare it once on this envelope.
 func (v *InspectionView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 	var wire struct {
 		ObservationID member[string]            `json:"observation_id"`
@@ -529,14 +554,13 @@ func (v *InspectionView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 		CapturedAt    member[string]            `json:"captured_at"`
 		Scope         member[string]            `json:"scope"`
 		View          member[string]            `json:"view"`
-		Defaults      *Defaults                 `json:"defaults"`
 		Tree          *ReadTree                 `json:"tree"`
 		Root          *ReadNode                 `json:"root"`
 		Matches       member[[]InspectionMatch] `json:"matches"`
 		Total         member[int]               `json:"total"`
 		Truncated     *bool                     `json:"truncated"`
 	}
-	if err := readObject(dec, "inspection", &wire); err != nil {
+	if err := readObjectWithoutMember(dec, "inspection", "defaults", &wire); err != nil {
 		return err
 	}
 	observationID, err := requireResponseMember(wire.ObservationID, "inspection.observation_id")
@@ -572,20 +596,17 @@ func (v *InspectionView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 		HasTotal:      wire.Total.Present,
 		Truncated:     wire.Truncated,
 	}
-	if wire.Defaults != nil {
-		v.Defaults = *wire.Defaults
-	}
 	switch scope {
 	case "tree":
-		if wire.View.Present || wire.Defaults != nil {
-			return fmt.Errorf("inspection tree scope declares view and defaults in the nested tree")
+		if wire.View.Present {
+			return fmt.Errorf("inspection tree scope declares view in the nested tree")
 		}
 		if wire.Tree == nil || wire.Tree.View != ViewDetailed {
 			return fmt.Errorf("inspection tree scope requires a detailed complete tree")
 		}
 	case "subtree", "query":
-		if !wire.View.Present || wire.Defaults == nil {
-			return fmt.Errorf("inspection %s scope requires view and defaults", scope)
+		if !wire.View.Present {
+			return fmt.Errorf("inspection %s scope requires view", scope)
 		}
 		if v.View != ViewDetailed {
 			return fmt.Errorf("inspection view must be detailed")

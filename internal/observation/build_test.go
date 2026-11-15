@@ -54,7 +54,7 @@ func TestBuildSyntheticRoot(t *testing.T) {
 	if root.Enabled == nil || !*root.Enabled {
 		t.Fatalf("root enabled must be known true")
 	}
-	for name, v := range map[string]*bool{"focused": root.Focused, "selected": root.Selected, "protected": root.Protected} {
+	for name, v := range map[string]*bool{"focused": root.Focused, "selected": root.Selected, "protected": root.Protected, "checked": root.Checked} {
 		if v == nil || *v {
 			t.Fatalf("root %s must be known false", name)
 		}
@@ -110,6 +110,10 @@ func TestBuildVisibleFilteringAndContextAncestor(t *testing.T) {
 	}
 	if len(ctx.Actions) != 0 || len(ctx.Label) != 0 {
 		t.Fatalf("context node must have no actions or label: %+v", ctx)
+	}
+	if ctx.Enabled != nil || ctx.Focused != nil || ctx.Selected != nil ||
+		ctx.Protected != nil || ctx.Checked != nil {
+		t.Fatalf("context node must keep all five tri-state flags nil: %+v", ctx)
 	}
 	if _, ok := snap.Source[ctx.Ref]; ok {
 		t.Fatalf("context node must not expose a source index")

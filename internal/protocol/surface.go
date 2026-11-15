@@ -218,7 +218,7 @@ func DecodeApp(body []byte) (*AppRequest, *APIError) {
 			continue
 		}
 		if !allowed[member.name] {
-			return nil, Invalid(kind + " 不接受该成员").WithDetail("field", member.name)
+			return nil, Invalid(kind+" 不接受该成员").WithDetail("field", member.name)
 		}
 		if string(member.raw) == "null" {
 			return nil, Invalid("参数不接受显式 null；省略该字段使用默认值").
@@ -1061,11 +1061,10 @@ type InspectionView struct {
 	Revision      int
 	CapturedAt    string
 	Scope         string
-	// View and Defaults are declared once on the inspection envelope for the
-	// subtree and query scopes. The tree scope declares them in its nested
-	// complete tree instead, so the same metadata is never stated twice.
+	// View is declared once on the inspection envelope for the subtree and query
+	// scopes. The tree scope declares it in its nested complete tree instead, so
+	// the same metadata is never stated twice.
 	View      string
-	Defaults  Defaults
 	Tree      *ReadTree
 	Root      *ReadNode
 	Matches   []InspectionMatch
@@ -1126,12 +1125,6 @@ func (v *InspectionView) MarshalJSONTo(enc *jsontext.Encoder) error {
 			return err
 		}
 		if err := writeString(enc, v.View); err != nil {
-			return err
-		}
-		if err := writeName(enc, "defaults"); err != nil {
-			return err
-		}
-		if err := MarshalJSONTo(enc, v.Defaults); err != nil {
 			return err
 		}
 	}

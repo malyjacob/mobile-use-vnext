@@ -17,7 +17,7 @@ type toolDefinition struct {
 // carry a tree block. It is shared verbatim so the catalog has one syntax
 // legend, not six drifting variants.
 const treeTextGuide = "可读正文在 key=value 阶段事实之后附带一个确定性树块：" +
-	"块头后固定一行 `defaults {\"checked\":false}`，随后一个空行再写正文。" +
+	"块头后空一行进入正文。" +
 	"full 块以 `tree v2 format=full id=<O> scope=<scope> view=<compact> nodes=<n> entries=<m>` 开头，后接节点行；" +
 	"delta 块以 `tree v2 format=delta id=<O> base=<O2> view=compact scope=<scope> changes=<n>` 开头，" +
 	"后接 `~`/`+`/`-`/`children`/`=` 变更行；两者均以 `end tree` 结尾。" +
@@ -26,7 +26,9 @@ const treeTextGuide = "可读正文在 key=value 阶段事实之后附带一个�
 	"`n<ref>` 可直接用作 target.ref。" +
 	"匿名普通 view/group 的已知矩形在观察视图里省略该列，未知几何仍写 `-`；" +
 	"连续匿名单子节点写成 `chain [n2 n3] <role>`，其中每个 ref 仍是可寻址的逻辑节点。" +
-	"`checked` 默认 `false`（省略），只有 `checked=true` 与 `checked=null` 显式出现。" +
+	"完整节点的状态位按已知默认省略：`enabled=true` 省略，`enabled=false`/`enabled=null` 显式；" +
+	"`focused`/`selected`/`protected`/`checked` 的已知 `false` 省略，`true` 与 `null` 显式。" +
+	"`set` 行不同：出现的状态字段一律保留显式 `false`/`true`/`null`，未出现才表示不修改。" +
 	"`nodes` 为展开后逻辑节点数，`entries` 为普通节点或 chain 定义行数。" +
 	"delta 相对 base 累计，新 delta 覆盖旧 delta，不叠加；修改行的 `bounds=hidden` 表示按策略不交付该几何。" +
 	"补看块以 `inspect v2 scope=<tree|subtree|query> observation=<O> revision=<n> captured_at=<RFC3339> " +
@@ -178,15 +180,27 @@ var toolCatalog = []toolDefinition{
 		name: "act",
 		description: "消费一个 ready 观察并派发 tap、long_press、text、swipe、scroll 或 key。" +
 			"operation 只接受对应分支的成员；image=true 在动作后的同一次采集中附加 ImageContent。" +
-			"tap/long_press 的 target.ref 在目标子树内按 default_center → carrier_node（先非匿名后匿名）→ center_span（先纵向后横向）规划安全落点，认领后只重验该固定点；" +
+			"tap/long_press 的 target.ref 先在目标子树内按 default_center → carrier_node（先非匿名后匿名）→ center_span（先纵向后横向）规划安全落点；" +
+			"认领后在当前树上重新确认目标与安全落点：原静态点仍可证明时保留，原 carrier 仍匹配且安全时沿用并在其内重算；" +
+			"原 carrier 失效时，只有目标双向唯一且有独立强内容身份，才可在同一 target scope 内安全解绑并重选 carrier/点；" +
+			"否则拒绝，不向上寻找可点击祖先，也不穿过 blocker；派发使用重算后的点。" +
 			"无可证落点时返回 422 unsupported_node_action，若存在中心阻塞证据可带 error.details.occluding_ref。" +
 			"目标自身不支持请求动作时也返回 422，且不会静默改点父节点；同一观察能证明最近可操作祖先时，" +
 			"error.details 同时带 nearest_actionable_ref 与 safe_point（x/y 整数）；点来自承载子节点时才带 safe_carrier_ref，" +
 			"该 ref 只解释来源，可能没有请求动作，不能当作替代 target.ref。引导无法完整证明时整组省略，且仅对生成它的观察有效，不是后续准入证明。" +
-			"滚动用 operation.type=scroll + container 表达：direction 声明阅读方向，amount 选 page 或 half；" +
+			"滚动用 operation.type=scroll + container 表达：direction 声明阅读方向，amount 选 page 或 half。" +
+			"认领后先唯一确认同一滚动容器（当前容器相交、轴向连续且离轴边缘稳定），再证明原轨迹；" +
+			"原轨迹不安全时在同一容器内按当前安全区间与中心带重新规划整条可证轨迹，只把新起点/终点派发给设备；" +
+			"容器不唯一、无法证明同一容器或没有可证轨迹时返回 target_changed。" +
 			"swipe 是原始手势，只接受 from/to 与可选 duration_ms，不承诺滚动语义。" +
+			"text 的 ref 目标与 tap 一样先在当前树确认目标并重算焦点 tap 点；焦点 tap 后在 tap 后和每次 readback 前按 exact → near → shifted 动态绑定当前获焦输入框，且要求同 Display、同前台 task 上下文：" +
+			"exact 要求完整来源字段与 presence、稳定 anchor 相同且 Bounds 完全相等；" +
+			"near 要求完整来源字段与 presence；有稳定 anchor 时 anchor 须相同，并覆盖旧点击点且与旧矩形足够交叠；无 anchor 时只按双向唯一的旧点击点/矩形交叠绑定；" +
+			"shifted 只放宽纵向位置，仍要求完整来源字段与 presence、稳定 anchor、稳定尺寸与水平带；" +
+			"不采用“全屏唯一同类型获焦”回退，写入与读回使用绑定后的 fresh bounds；坐标 text 只保留原点弱绑定，不启用 shifted。" +
 			"坐标目标会在派发前按点解析节点并证明未变化，变化时返回 target_changed。" +
 			"重验失败且已取得新帧时，结果另带一个新观察与 retry 入口：用该 O 加新 P 重试，不必再 observe。" +
+			"焦点 tap 已派发后绑定或读回失败记为 uncertain，不重开已结束的 tap。" +
 			"派发回执不可用时结果记为 uncertain，本次调用即关闭该窗口，不阻塞后续 observe 或其他普通调用，应以一次新 observe 收窄不确定性。" +
 			"观察的 `unstable`/`unknown` 质量（observation.quality）不阻止输入。" +
 			treeTextGuide,
@@ -209,7 +223,7 @@ var toolCatalog = []toolDefinition{
           "description": "动作类型；scroll 用 container/direction/amount，swipe 用 from/to/duration_ms。"
         },
         "target": {
-          "description": "tap/long_press/text 的目标：ref 或 x/y 坐标，二选一。",
+          "description": "tap/long_press/text 的目标：ref 或 x/y 坐标，二选一。ref 目标在认领后按当前树重验或重算；坐标目标只保留原点授权。",
           "oneOf": [
             {
               "type": "object",
@@ -231,7 +245,7 @@ var toolCatalog = []toolDefinition{
           ]
         },
         "container": {
-          "description": "scroll 的滚动容器选择器：ref 或 x/y 坐标，二选一。ref 必须直接指向 role=scroll 节点（不做祖先晋升）；x/y 取该点所在的滚动容器。",
+          "description": "scroll 的滚动容器选择器：ref 或 x/y 坐标，二选一。ref 必须直接指向 role=scroll 节点（不做祖先晋升）；x/y 取该点所在的滚动容器。认领后需唯一确认同一容器，轨迹按当前安全区间重验或重算。",
           "oneOf": [
             {
               "type": "object",

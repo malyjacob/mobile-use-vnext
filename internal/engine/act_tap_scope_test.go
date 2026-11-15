@@ -1083,6 +1083,9 @@ func TestActTapCarrierNodePrefersNamedBeforeAnonymous(t *testing.T) {
 	anonymous.HasSelected, anonymous.Selected = true, false
 	anonymous.HasPassword, anonymous.Password = true, false
 	anonymous.HasChecked, anonymous.Checked = true, false
+	anonymous.Children = []int{5}
+	retainedChild := tapRawNode(5, 2, 3, 0, device.Rect{},
+		"android.widget.TextView", "anonymous child", false, false)
 	named := tapRawNode(0, 0, 0, 0,
 		device.Rect{Left: 350, Top: 340, Right: 600, Bottom: 440},
 		"android.widget.TextView", "named", false, false)
@@ -1090,13 +1093,22 @@ func TestActTapCarrierNodePrefersNamedBeforeAnonymous(t *testing.T) {
 		"android.widget.ImageButton", "cover", true, true)
 
 	h := newTapScopeHarness(t)
-	h.device.scriptCaptures(tapCardWithChildrenStep(tapCardBounds, anonymous, named, cover))
+	h.device.scriptCaptures(func(_ *fakeDevice, display device.Display) (device.Capture, error) {
+		capture := tapPageWithChildren(display, tapCardBounds, anonymous, named, cover)
+		retainedChild.DisplayID = display.ID
+		capture.Nodes = append(capture.Nodes, retainedChild)
+		return capture, nil
+	})
 	start := h.startSession()
 	card := tapCardNode(t, h)
 	anonymousPublic := tapPublicBoundsNode(currentTree(t, h.engine).Root,
 		device.Rect{Left: 50, Top: 340, Right: 300, Bottom: 440})
 	if anonymousPublic == nil || !anonymousPlainNode(anonymousPublic) {
 		t.Fatalf("anonymous carrier fixture did not satisfy the read predicate: %+v", anonymousPublic)
+	}
+	if len(anonymousPublic.Children) != 1 {
+		t.Fatalf("anonymous carrier fixture has %d children, want one retained child",
+			len(anonymousPublic.Children))
 	}
 
 	result := h.actWith(t, "Pcarrierorder", tapRefRequest(start.Observation.ID, card.Ref))
@@ -1428,13 +1440,15 @@ func TestActTapFreshProofFallsBackToEngineProjector(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fresh capture: %v", err)
 	}
-	if _, _, _, apiErr = h.engine.revalidateTapTarget(&workState{}, obs, &fresh, plan); apiErr != nil {
+	if _, apiErr = h.engine.revalidateTapTargetFrame(
+		context.Background(), nil, nil, obs, &fresh, plan); apiErr != nil {
 		t.Fatalf("engine projector fallback rejected the proof: %+v", apiErr)
 	}
 
 	engineProjector := h.engine.projector
 	h.engine.projector = nil
-	_, _, _, apiErr = h.engine.revalidateTapTarget(&workState{}, obs, &fresh, plan)
+	_, apiErr = h.engine.revalidateTapTargetFrame(
+		context.Background(), nil, nil, obs, &fresh, plan)
 	h.engine.projector = engineProjector
 	if apiErr == nil || apiErr.Code != protocol.CodeHierarchyFailed {
 		t.Fatalf("missing projectors should be a hierarchy failure, got %+v", apiErr)

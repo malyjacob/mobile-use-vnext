@@ -1,6 +1,8 @@
 package observation
 
 import (
+	"sort"
+
 	"github.com/malyjacob/mobile-use-vnext/internal/device"
 	"github.com/malyjacob/mobile-use-vnext/internal/protocol"
 )
@@ -20,16 +22,17 @@ import (
 // A ref is continued only with that unique candidate. Every ambiguous outcome
 // allocates a new ref: never a nearest coordinate, never traversal order alone.
 //
-// Passes run parent-first so a matched parent is a usable anchor:
-//  1. label-free containers under a matched parent (non-actionable wrappers
-//     may ignore unpublished class/package; actionable containers require it);
-//  2. same matched parent, identical raw identity evidence;
-//  3. unique global raw identity match;
-//  4. same matched parent, input anchor (survives value edits);
-//  5. same matched parent, identical public identity (class/package changed);
-//  6. unique global public identity match.
+// Passes run as a deterministic five-stage pipeline:
+//  1. unique anonymous structure top-down from synthetic root;
+//  2. six content/identity passes (local exact, local resource-only, global
+//     exact, local input anchor, local public, global public);
+//  3. strict descendant-set container voting alternating with
+//  4. dirty-queue local recovery under newly anchored parents;
+//  5. single-pass zero-shift ordinal container recovery with an independent
+//     fixed point, followed by local-only recovery and monotonic ref allocation.
 //
-// The container pass is retried after a parent is matched by an identity rule.
+// All passes work against snapshots and charge a deterministic work budget;
+// exhaustion aborts the incomplete batch without partial application.
 
 // Action bits used by shape matching. An actionable anonymous container is a
 // potential act target, so it needs the stricter raw class/package agreement;
@@ -43,14 +46,16 @@ const (
 
 // matchKey is the identity evidence of one public unit. It deliberately
 // excludes input value, checked/focused/selected and bounds, so typing,
-// ticking and scrolling never break identity by themselves.
+// ticking and scrolling never break identity by themselves. Non-input units
+// keep label alongside resource id so same-resource different-label siblings
+// remain distinct unless the local resource-only fallback runs.
 type matchKey struct {
 	role      protocol.Role
 	class     string
 	pkg       string
 	resource  string
 	hasRes    bool
-	label     string // label signature; unused when the unit has a resource id
+	label     string // label signature; populated for non-input units even with a resource id
 	anchor    string // input description, used to survive value edits
 	actions   uint8  // tap/long_press/text/swipe bits
 	editable  bool
@@ -67,6 +72,7 @@ type publicKey struct {
 	resource  string
 	hasRes    bool
 	anchor    string
+	actions   uint8
 	editable  bool
 	protected bool
 }
@@ -88,12 +94,10 @@ func signature(raw *device.RawNode, role protocol.Role) matchKey {
 	}
 	if raw.HasPassword && raw.Password {
 		key.protected = true
-	} else if role != protocol.RoleInput && !key.hasRes {
-		// An input's own text is its value, never its identity label. A unit
-		// with a source resource id is identified by that id: its readable
-		// text may legitimately change (a counter, a changing caption) while
-		// the unit stays the same. Without a resource id the label is the only
-		// identity evidence there is.
+	} else if role != protocol.RoleInput {
+		// An input's own text is its value, never its identity label. Other
+		// units preserve label alongside any resource id so distinct rows using
+		// a template resource id keep independent identities.
 		key.label = labelSignature(labelParts(raw))
 	}
 	if role == protocol.RoleInput && raw.DescSet && !(raw.HasPassword && raw.Password) {
@@ -140,6 +144,7 @@ func labelSignature(parts []string) string {
 func publicSignature(raw *device.RawNode, role protocol.Role) publicKey {
 	key := publicKey{
 		role:      role,
+		actions:   actionsMask(raw),
 		editable:  role == protocol.RoleInput,
 		protected: raw.HasPassword && raw.Password,
 	}
@@ -169,422 +174,1508 @@ func contextSignature(raw *device.RawNode) matchKey {
 	}
 }
 
-// prevUnit is one unit of the previous tree with its preorder position.
-type prevUnit struct {
-	ref       string
-	position  int
-	parentPos int // -1 for the previous root
-	key       matchKey
-	pub       publicKey
+type matchSource uint8
+
+const (
+	sourceNone matchSource = iota
+	sourceRoot
+	sourceStage1Shape
+	sourceExact
+	sourceResource
+	sourceGlobalExact
+	sourceInput
+	sourceLocalPublic
+	sourceGlobalPublic
+	sourceDescendantVote
+	sourceLocalStructure
+	sourceLocalExact
+	sourceLocalResource
+	sourceLocalInput
+	sourceLocalPublicPost
+	sourceOrdinal
+	sourcePostOrdinalLocal
+)
+
+type matchStats struct {
+	workLimit        uint64
+	workUsed         uint64
+	budgetHit        bool
+	stoppedStage     string
+	rootMatched      bool
+	totalMatched     int
+	stage1Matched    int
+	stage2Matched    int
+	stage3Matched    int
+	stage4Matched    int
+	stage5Matched    int
+	postLocalMatched int
+}
+
+type workBudget struct {
+	limit     uint64
+	remaining uint64
+	used      uint64
+	hit       bool
+}
+
+func newWorkBudget(limit uint64) *workBudget {
+	return &workBudget{
+		limit:     limit,
+		remaining: limit,
+	}
+}
+
+func (w *workBudget) exhausted() bool {
+	return w.hit
+}
+
+// charge consumes deterministic work units, returning false when insufficient
+// remaining budget exists so the caller discards the pending unapplied batch.
+func (w *workBudget) charge(work uint64) bool {
+	if w.hit {
+		return false
+	}
+	if work > w.remaining {
+		w.used += w.remaining
+		w.remaining = 0
+		w.hit = true
+		return false
+	}
+	w.remaining -= work
+	w.used += work
+	return true
+}
+
+// publicMatchIndex captures both the previous published snapshot and the current
+// capture's published hierarchy with public-preorder Euler intervals.
+type publicMatchIndex struct {
+	prevRoot     int
+	prevCount    int
+	prevOrder    []int
+	prevRef      []string
+	prevParent   []int
+	prevChildren [][]int
+	prevTin      []int
+	prevTout     []int
+	prevKey      []matchKey
+	prevPub      []publicKey
+
+	root        int
+	curCount    int
+	order       []int // current published raw indices in public DFS preorder
+	curPos      []int // raw node index -> 0..curCount-1 (-1 if unpublished)
+	curParent   []int // indexed by curPos -> raw parent index (-1 for root)
+	curChildren [][]int
+	tin         []int // indexed by raw node index
+	tout        []int // indexed by raw node index
+	curKey      []matchKey
+	curPub      []publicKey
+}
+
+func buildPublicMatchIndex(prevSnap *Snapshot, cap *device.Capture, units []unit) *publicMatchIndex {
+	idx := &publicMatchIndex{
+		prevRoot: -1,
+		root:     cap.Root,
+	}
+
+	if prevSnap != nil && prevSnap.Tree != nil && prevSnap.Tree.Root != nil {
+		var walkCount func(node *protocol.Node) int
+		walkCount = func(node *protocol.Node) int {
+			count := 1
+			for _, ch := range node.Children {
+				count += walkCount(ch)
+			}
+			return count
+		}
+		prevCount := walkCount(prevSnap.Tree.Root)
+		idx.prevRoot = 0
+		idx.prevCount = prevCount
+		idx.prevOrder = make([]int, 0, prevCount)
+		idx.prevRef = make([]string, prevCount)
+		idx.prevParent = make([]int, prevCount)
+		idx.prevChildren = make([][]int, prevCount)
+		idx.prevTin = make([]int, prevCount)
+		idx.prevTout = make([]int, prevCount)
+		idx.prevKey = make([]matchKey, prevCount)
+		idx.prevPub = make([]publicKey, prevCount)
+
+		cursor := 0
+		var walkPrev func(node *protocol.Node, parentPos int)
+		walkPrev = func(node *protocol.Node, parentPos int) {
+			pos := cursor
+			cursor++
+			idx.prevOrder = append(idx.prevOrder, pos)
+			idx.prevRef[pos] = node.Ref
+			idx.prevParent[pos] = parentPos
+			idx.prevTin[pos] = pos
+			if parentPos >= 0 {
+				idx.prevChildren[parentPos] = append(idx.prevChildren[parentPos], pos)
+			}
+			if rawIdx, ok := prevSnap.Source[node.Ref]; ok {
+				raw := &prevSnap.Capture.Nodes[rawIdx]
+				idx.prevKey[pos] = signature(raw, node.Role)
+				idx.prevPub[pos] = publicSignature(raw, node.Role)
+			} else if rawIdx, ok := prevSnap.ContextSource[node.Ref]; ok {
+				idx.prevKey[pos] = contextSignature(&prevSnap.Capture.Nodes[rawIdx])
+			}
+			for _, child := range node.Children {
+				walkPrev(child, pos)
+			}
+			idx.prevTout[pos] = cursor - 1
+		}
+		walkPrev(prevSnap.Tree.Root, -1)
+	}
+
+	rawOrder := preorder(cap)
+	curPos := make([]int, len(cap.Nodes))
+	for i := range curPos {
+		curPos[i] = -1
+	}
+	tempChildren := make(map[int][]int)
+	curParentByRaw := make(map[int]int)
+	for _, rawIdx := range rawOrder {
+		if rawIdx != cap.Root && !units[rawIdx].published {
+			continue
+		}
+		if rawIdx == cap.Root {
+			curParentByRaw[rawIdx] = -1
+			continue
+		}
+		parent := nearestPublishedParent(cap, units, rawIdx)
+		if parent < 0 || parent >= len(units) || (parent != cap.Root && !units[parent].published) {
+			parent = cap.Root
+		}
+		curParentByRaw[rawIdx] = parent
+		tempChildren[parent] = append(tempChildren[parent], rawIdx)
+	}
+
+	// Traverse published children from cap.Root so public order and Euler intervals
+	// strictly reflect the published tree hierarchy regardless of raw slice order.
+	order := make([]int, 0, len(curParentByRaw))
+	tin := make([]int, len(cap.Nodes))
+	tout := make([]int, len(cap.Nodes))
+	curTimer := 0
+	var walkCur func(cur int)
+	walkCur = func(cur int) {
+		rank := curTimer
+		curTimer++
+		curPos[cur] = rank
+		order = append(order, cur)
+		tin[cur] = rank
+		for _, child := range tempChildren[cur] {
+			walkCur(child)
+		}
+		tout[cur] = curTimer - 1
+	}
+	walkCur(cap.Root)
+
+	curCount := len(order)
+	idx.curCount = curCount
+	idx.order = order
+	idx.curPos = curPos
+	idx.tin = tin
+	idx.tout = tout
+	idx.curParent = make([]int, curCount)
+	idx.curChildren = make([][]int, curCount)
+	idx.curKey = make([]matchKey, curCount)
+	idx.curPub = make([]publicKey, curCount)
+
+	for rank, cur := range order {
+		idx.curParent[rank] = curParentByRaw[cur]
+		idx.curChildren[rank] = tempChildren[cur]
+		if cur == cap.Root {
+			continue
+		}
+		raw := &cap.Nodes[cur]
+		if units[cur].context {
+			idx.curKey[rank] = contextSignature(raw)
+			continue
+		}
+		idx.curKey[rank] = signature(raw, units[cur].role)
+		idx.curPub[rank] = publicSignature(raw, units[cur].role)
+	}
+
+	return idx
+}
+
+func (idx *publicMatchIndex) hasPublicChildren(cur int) bool {
+	pos := idx.curPos[cur]
+	return pos >= 0 && len(idx.curChildren[pos]) > 0
+}
+
+func (idx *publicMatchIndex) parentOf(cur int) int {
+	return idx.curParent[idx.curPos[cur]]
+}
+
+func (idx *publicMatchIndex) childrenOf(cur int) []int {
+	return idx.curChildren[idx.curPos[cur]]
+}
+
+func (idx *publicMatchIndex) curMatchKey(cur int) matchKey {
+	return idx.curKey[idx.curPos[cur]]
+}
+
+func (idx *publicMatchIndex) curPubKey(cur int) publicKey {
+	return idx.curPub[idx.curPos[cur]]
+}
+
+func (idx *publicMatchIndex) curAnonymousContainer(cur int) bool {
+	if cur == idx.root {
+		return false
+	}
+	pos := idx.curPos[cur]
+	if pos < 0 || len(idx.curChildren[pos]) == 0 {
+		return false
+	}
+	return isStructurallyMatchable(idx.curKey[pos], idx.curPub[pos])
+}
+
+func (idx *publicMatchIndex) prevAnonymousContainer(prevPos int) bool {
+	if prevPos == idx.prevRoot || prevPos < 0 || prevPos >= idx.prevCount {
+		return false
+	}
+	if len(idx.prevChildren[prevPos]) == 0 {
+		return false
+	}
+	return isStructurallyMatchable(idx.prevKey[prevPos], idx.prevPub[prevPos])
+}
+
+// directChildUnder maps oldPos to the direct published child of anchor whose
+// subtree contains oldPos, returning false for anchor itself or non-descendants.
+func (idx *publicMatchIndex) directChildUnder(oldPos, anchor int, budget *workBudget) (int, bool) {
+	if oldPos <= idx.prevTin[anchor] || idx.prevTout[oldPos] > idx.prevTout[anchor] {
+		return 0, false
+	}
+	children := idx.prevChildren[anchor]
+	if len(children) == 0 {
+		return 0, false
+	}
+	targetTin := idx.prevTin[oldPos]
+	lo, hi := 0, len(children)-1
+	for lo <= hi {
+		if !budget.charge(1) {
+			return 0, false
+		}
+		mid := lo + (hi-lo)/2
+		cand := children[mid]
+		if targetTin < idx.prevTin[cand] {
+			hi = mid - 1
+		} else if targetTin > idx.prevTout[cand] {
+			lo = mid + 1
+		} else {
+			return cand, true
+		}
+	}
+	return 0, false
+}
+
+func isStructurallyMatchable(k matchKey, pk publicKey) bool {
+	return !k.editable && !hasPublicIdentity(pk) && k.label == ""
+}
+
+type pairProposal struct {
+	prevPos int
+	cur     int
+	source  matchSource
+}
+
+type pairEntry struct {
+	prevPos int
+	cur     int
+	curTin  int
+}
+
+type pairSnapshot struct {
+	idx       *publicMatchIndex
+	prevToCur []int
+	curToOld  []int
+	prevSrc   []matchSource
+}
+
+func (s pairSnapshot) oldUsed(oldPos int) bool {
+	return oldPos < 0 || oldPos >= len(s.prevToCur) || s.prevToCur[oldPos] >= 0
+}
+
+func (s pairSnapshot) curUsed(cur int) bool {
+	pos := s.idx.curPos[cur]
+	return pos < 0 || s.curToOld[pos] >= 0
+}
+
+func (s pairSnapshot) pairOfOld(oldPos int) (int, bool) {
+	if oldPos < 0 || oldPos >= len(s.prevToCur) {
+		return 0, false
+	}
+	cur := s.prevToCur[oldPos]
+	return cur, cur >= 0
+}
+
+func (s pairSnapshot) pairOfCur(cur int) (int, bool) {
+	pos := s.idx.curPos[cur]
+	if pos < 0 {
+		return 0, false
+	}
+	oldPos := s.curToOld[pos]
+	return oldPos, oldPos >= 0
+}
+
+func (s pairSnapshot) sourceOfOld(oldPos int) matchSource {
+	if oldPos < 0 || oldPos >= len(s.prevSrc) {
+		return sourceNone
+	}
+	return s.prevSrc[oldPos]
+}
+
+type matchState struct {
+	idx       *publicMatchIndex
+	refs      []string
+	usedRef   map[string]bool
+	prevToCur []int
+	curToOld  []int
+	prevSrc   []matchSource
+	stats     matchStats
+}
+
+func newMatchState(idx *publicMatchIndex, refs []string) *matchState {
+	prevToCur := make([]int, idx.prevCount)
+	for i := range prevToCur {
+		prevToCur[i] = -1
+	}
+	curToOld := make([]int, idx.curCount)
+	for i := range curToOld {
+		curToOld[i] = -1
+	}
+	return &matchState{
+		idx:       idx,
+		refs:      refs,
+		usedRef:   make(map[string]bool, idx.curCount),
+		prevToCur: prevToCur,
+		curToOld:  curToOld,
+		prevSrc:   make([]matchSource, idx.prevCount),
+	}
+}
+
+func (st *matchState) prevUsed(oldPos int) bool {
+	return oldPos < 0 || oldPos >= len(st.prevToCur) || st.prevToCur[oldPos] >= 0
+}
+
+func (st *matchState) curUsed(cur int) bool {
+	pos := st.idx.curPos[cur]
+	return pos < 0 || st.curToOld[pos] >= 0
+}
+
+func (st *matchState) matchedOld(cur int) (int, bool) {
+	pos := st.idx.curPos[cur]
+	if pos < 0 {
+		return 0, false
+	}
+	oldPos := st.curToOld[pos]
+	return oldPos, oldPos >= 0
+}
+
+func (st *matchState) matchCount() int {
+	return st.stats.totalMatched
+}
+
+func (st *matchState) assign(cur, prevPos int, source matchSource) {
+	curPos := st.idx.curPos[cur]
+	ref := st.idx.prevRef[prevPos]
+	st.refs[cur] = ref
+	st.usedRef[ref] = true
+	st.prevToCur[prevPos] = cur
+	st.curToOld[curPos] = prevPos
+	st.prevSrc[prevPos] = source
+
+	switch source {
+	case sourceRoot:
+		st.stats.rootMatched = true
+	case sourceStage1Shape:
+		st.stats.stage1Matched++
+		st.stats.totalMatched++
+	case sourceExact, sourceResource, sourceGlobalExact, sourceInput, sourceLocalPublic, sourceGlobalPublic:
+		st.stats.stage2Matched++
+		st.stats.totalMatched++
+	case sourceDescendantVote:
+		st.stats.stage3Matched++
+		st.stats.totalMatched++
+	case sourceLocalStructure, sourceLocalExact, sourceLocalResource, sourceLocalInput, sourceLocalPublicPost:
+		st.stats.stage4Matched++
+		st.stats.totalMatched++
+	case sourceOrdinal:
+		st.stats.stage5Matched++
+		st.stats.totalMatched++
+	case sourcePostOrdinalLocal:
+		st.stats.postLocalMatched++
+		st.stats.totalMatched++
+	}
+}
+
+func (st *matchState) snapshotPairs() pairSnapshot {
+	prevCopy := make([]int, len(st.prevToCur))
+	copy(prevCopy, st.prevToCur)
+	curCopy := make([]int, len(st.curToOld))
+	copy(curCopy, st.curToOld)
+	srcCopy := make([]matchSource, len(st.prevSrc))
+	copy(srcCopy, st.prevSrc)
+	return pairSnapshot{
+		idx:       st.idx,
+		prevToCur: prevCopy,
+		curToOld:  curCopy,
+		prevSrc:   srcCopy,
+	}
+}
+
+// chooseBatchIfBidirectionallyUnique validates every proposal endpoint against
+// baseR and current assignments. Any duplicate prevPos/cur or already-used
+// endpoint rejects the entire batch so partial conflicts never leak through.
+func (st *matchState) chooseBatchIfBidirectionallyUnique(
+	proposals []pairProposal,
+	baseR pairSnapshot,
+	budget *workBudget,
+) ([]pairProposal, bool) {
+	if len(proposals) == 0 {
+		return nil, true
+	}
+	oldCounts := make(map[int]int, len(proposals))
+	curCounts := make(map[int]int, len(proposals))
+	for _, pr := range proposals {
+		if !budget.charge(1) {
+			return nil, false
+		}
+		if pr.prevPos < 0 || pr.prevPos >= st.idx.prevCount {
+			return nil, true
+		}
+		if pr.cur < 0 || pr.cur >= len(st.idx.curPos) || st.idx.curPos[pr.cur] < 0 {
+			return nil, true
+		}
+		if baseR.oldUsed(pr.prevPos) || baseR.curUsed(pr.cur) || st.prevUsed(pr.prevPos) || st.curUsed(pr.cur) {
+			return nil, true
+		}
+		oldCounts[pr.prevPos]++
+		curCounts[pr.cur]++
+		if oldCounts[pr.prevPos] > 1 || curCounts[pr.cur] > 1 {
+			return nil, true
+		}
+	}
+	return proposals, true
+}
+
+func (st *matchState) applyBatch(accepted []pairProposal) {
+	for _, pr := range accepted {
+		st.assign(pr.cur, pr.prevPos, pr.source)
+	}
+}
+
+type parentQueue struct {
+	idx     *publicMatchIndex
+	inQueue []bool
+	items   []int
+}
+
+func newParentQueue(idx *publicMatchIndex) *parentQueue {
+	return &parentQueue{
+		idx:     idx,
+		inQueue: make([]bool, idx.curCount),
+	}
+}
+
+func (q *parentQueue) push(cur int) {
+	pos := q.idx.curPos[cur]
+	if pos < 0 || q.inQueue[pos] {
+		return
+	}
+	q.inQueue[pos] = true
+	q.items = append(q.items, cur)
+}
+
+func (q *parentQueue) drainInPublicOrder() []int {
+	if len(q.items) == 0 {
+		return nil
+	}
+	sort.Slice(q.items, func(i, j int) bool {
+		return q.idx.tin[q.items[i]] < q.idx.tin[q.items[j]]
+	})
+	out := q.items
+	q.items = nil
+	for _, cur := range out {
+		q.inQueue[q.idx.curPos[cur]] = false
+	}
+	return out
+}
+
+type bucketKind uint8
+
+const (
+	bucketUnit bucketKind = iota + 1
+	bucketResourceOnly
+	bucketInputAnchor
+	bucketPublic
+	bucketShape
+)
+
+type bucketKey struct {
+	kind      bucketKind
+	role      protocol.Role
+	class     string
+	pkg       string
+	hasRes    bool
+	resource  string
+	label     string
+	anchor    string
+	actions   uint8
+	editable  bool
+	protected bool
+}
+
+func unitBucket(k matchKey, _ publicKey) bucketKey {
+	return bucketKey{
+		kind:      bucketUnit,
+		role:      k.role,
+		class:     k.class,
+		pkg:       k.pkg,
+		hasRes:    k.hasRes,
+		resource:  k.resource,
+		label:     k.label,
+		anchor:    k.anchor,
+		actions:   k.actions,
+		editable:  k.editable,
+		protected: k.protected,
+	}
+}
+
+func resourceOnlyBucket(k matchKey, _ publicKey) bucketKey {
+	return bucketKey{
+		kind:      bucketResourceOnly,
+		role:      k.role,
+		class:     k.class,
+		pkg:       k.pkg,
+		hasRes:    k.hasRes,
+		resource:  k.resource,
+		actions:   k.actions,
+		protected: k.protected,
+	}
+}
+
+func inputAnchorBucket(k matchKey, _ publicKey) bucketKey {
+	bk := bucketKey{
+		kind:      bucketInputAnchor,
+		role:      k.role,
+		class:     k.class,
+		pkg:       k.pkg,
+		hasRes:    k.hasRes,
+		actions:   k.actions,
+		protected: k.protected,
+	}
+	if k.hasRes {
+		bk.resource = k.resource
+	} else {
+		bk.anchor = k.anchor
+	}
+	return bk
+}
+
+func publicBucket(_ matchKey, pk publicKey) bucketKey {
+	return bucketKey{
+		kind:      bucketPublic,
+		role:      pk.role,
+		label:     pk.label,
+		hasRes:    pk.hasRes,
+		resource:  pk.resource,
+		anchor:    pk.anchor,
+		actions:   pk.actions,
+		editable:  pk.editable,
+		protected: pk.protected,
+	}
+}
+
+func shapeBucket(k matchKey) bucketKey {
+	bk := bucketKey{
+		kind:      bucketShape,
+		role:      k.role,
+		actions:   k.actions,
+		protected: k.protected,
+	}
+	if k.actions != 0 {
+		bk.class = k.class
+		bk.pkg = k.pkg
+	}
+	return bk
+}
+
+func hasIdentityMatch(k matchKey, _ publicKey) bool {
+	return hasIdentity(k)
+}
+
+func eligibleForGlobalExactMatch(k matchKey, _ publicKey) bool {
+	return eligibleForGlobalExact(k)
+}
+
+func isResourceOnlyEligible(k matchKey, _ publicKey) bool {
+	return !k.editable && k.hasRes
+}
+
+func isInputAnchorEligible(k matchKey, _ publicKey) bool {
+	return k.role == protocol.RoleInput && (k.hasRes || k.anchor != "")
+}
+
+func hasPublicNonInputIdentity(_ matchKey, pk publicKey) bool {
+	return !pk.editable && hasPublicIdentity(pk)
+}
+
+type bucketUniverse uint8
+
+const (
+	localUnmatchedUniverse bucketUniverse = iota
+	globalFullUniverse
+)
+
+type contentPass struct {
+	universe bucketUniverse
+	source   matchSource
+	key      func(matchKey, publicKey) bucketKey
+	eligible func(matchKey, publicKey) bool
 }
 
 // matchRefs assigns refs to the published units of cap, continuing the
-// builder's previous snapshot where unambiguous and allocating new refs from
-// the monotonic counter otherwise.
+// builder's previous snapshot through the five-stage continuity pipeline and
+// allocating new refs strictly monotonically from b.nextRef.
 func (b *Builder) matchRefs(cap *device.Capture, units []unit, refs []string) {
-	var prev []prevUnit
-	prevPosition := map[string]int{}
-	if b.prev != nil {
-		cursor := 0
-		var walk func(n *protocol.Node, parentPos int)
-		walk = func(n *protocol.Node, parentPos int) {
-			unit := prevUnit{ref: n.Ref, position: cursor, parentPos: parentPos}
-			if i, ok := b.prev.Source[n.Ref]; ok {
-				raw := &b.prev.Capture.Nodes[i]
-				unit.key = signature(raw, n.Role)
-				unit.pub = publicSignature(raw, n.Role)
-			} else if i, ok := b.prev.ContextSource[n.Ref]; ok {
-				unit.key = contextSignature(&b.prev.Capture.Nodes[i])
-			}
-			prevPosition[n.Ref] = cursor
-			prev = append(prev, unit)
-			cursor++
-			for _, child := range n.Children {
-				walk(child, unit.position)
-			}
-		}
-		walk(b.prev.Tree.Root, -1)
-	}
+	b.lastStats = matchStats{}
+	idx := buildPublicMatchIndex(b.prev, cap, units)
+	st := newMatchState(idx, refs)
 
-	// Only published units take part in matching. An unpublished raw node has
-	// no public role and must not consume a ref, a previous position, or a
-	// global-uniqueness slot.
-	curOrder := make([]int, 0, len(cap.Nodes))
-	parentOf := make(map[int]int, len(cap.Nodes))
-	childrenOf := make(map[int][]int, len(cap.Nodes))
-	for _, i := range preorder(cap) {
-		if i != cap.Root && !units[i].published {
-			continue
-		}
-		curOrder = append(curOrder, i)
-		if i == cap.Root {
-			continue
-		}
-		p := nearestPublishedParent(cap, units, i)
-		parentOf[i] = p
-		childrenOf[p] = append(childrenOf[p], i)
+	limit := uint64(128*(idx.prevCount+idx.curCount+1) + 65_536)
+	if b.hasBudgetLimit {
+		limit = b.budgetLimit
 	}
+	budget := newWorkBudget(limit)
 
-	curSig := make(map[int]matchKey, len(curOrder))
-	curPub := make(map[int]publicKey, len(curOrder))
-	for _, i := range curOrder {
-		if i == cap.Root {
-			continue
-		}
-		raw := &cap.Nodes[i]
-		if units[i].context {
-			curSig[i] = contextSignature(raw)
-			continue
-		}
-		curSig[i] = signature(raw, units[i].role)
-		curPub[i] = publicSignature(raw, units[i].role)
-	}
-
-	usedRef := map[string]bool{}
-	usedPos := map[int]bool{}
-	// prevParent maps a current raw index to the previous position of the
-	// parent it was matched under, so children have a stable anchor.
-	prevParent := map[int]int{}
 	allocate := func() string {
 		for {
 			ref := formatRef(b.nextRef)
 			b.nextRef++
-			if !usedRef[ref] {
-				usedRef[ref] = true
+			if !st.usedRef[ref] {
+				st.usedRef[ref] = true
 				return ref
 			}
 		}
 	}
-	// match records one accepted correspondence.
-	match := func(raw int, ref string, pos int) {
-		refs[raw] = ref
-		usedRef[ref] = true
-		usedPos[pos] = true
-		prevParent[raw] = pos
-	}
 
-	// The synthetic root continues the previous synthetic root: it is the
-	// reading unit of this display, not an application node. Top-level current
-	// nodes anchor on it, so the previous root's own preorder position is the
-	// anchor value.
-	if b.prev != nil && b.prev.Tree != nil && b.prev.Tree.Root != nil {
-		refs[cap.Root] = b.prev.Tree.Root.Ref
-		usedRef[refs[cap.Root]] = true
-		if pos, ok := prevPosition[refs[cap.Root]]; ok {
-			usedPos[pos] = true
-			prevParent[cap.Root] = pos
-		}
+	if idx.prevRoot >= 0 {
+		// Continue the synthetic root. Current root is cap.Root, never raw index 0.
+		st.assign(idx.root, idx.prevRoot, sourceRoot)
 	} else {
-		refs[cap.Root] = allocate()
+		refs[idx.root] = allocate()
+		for _, cur := range idx.order {
+			if refs[cur] == "" {
+				refs[cur] = allocate()
+			}
+		}
+		st.stats.workLimit = budget.limit
+		st.stats.workUsed = budget.used
+		b.lastStats = st.stats
+		return
 	}
 
-	// Pass 1: label-free containers (scroll areas, layout rows, context
-	// ancestry) under a matched parent. A container carries no published
-	// identity of its own, so the parent anchor and sibling structure decide.
-	// A non-actionable wrapper may ignore unpublished class/package; an
-	// actionable anonymous container is a possible act target and still
-	// requires class/package agreement in sameShape.
-	//
-	// The pass is callable more than once: a parent that is matched by an
-	// identity rule becomes an anchor only after that rule ran, so its
-	// anonymous children need another container pass.
-	matchContainers := func() int {
-		matchedNow := 0
-		for _, i := range curOrder {
-			if i == cap.Root || refs[i] != "" || curSig[i].editable || hasPublicIdentity(curPub[i]) {
-				continue
-			}
-			anchor, ok := prevParent[parentOf[i]]
-			if !ok {
-				continue
-			}
-			var candidates []prevUnit
-			for _, unit := range prev {
-				if usedPos[unit.position] || unit.parentPos != anchor || !sameShape(unit.key, curSig[i]) {
-					continue
-				}
-				candidates = append(candidates, unit)
-			}
-			if len(candidates) == 0 {
-				continue
-			}
-			if countCurrentSiblings(childrenOf, curSig, parentOf[i], curSig[i]) == 1 {
-				if len(candidates) == 1 {
-					match(i, candidates[0].ref, candidates[0].position)
-					matchedNow++
-					continue
-				}
-				// The public shape is unique on the current side but several
-				// previous containers share it. Class/package may still single
-				// one out; otherwise the pair is ambiguous and gets a new ref.
-				if ref, pos, ok := classCandidate(candidates, curSig[i]); ok {
-					match(i, ref, pos)
-					matchedNow++
-				}
-				continue
-			}
-			// Several identical containers under this parent (list rows). Pair by
-			// ordinal only when the parent keeps exactly the same number of public
-			// shapes: then nothing moved and the ordinal is the remaining evidence.
-			if ref, pos, ok := ordinalSibling(prev, usedPos, childrenOf[parentOf[i]], curSig, anchor, i, sameShape); ok {
-				match(i, ref, pos)
-				matchedNow++
-			}
-		}
-		return matchedNow
-	}
-	matchContainers()
-
-	// Pass 2: same matched parent, identical raw identity evidence.
-	for _, i := range curOrder {
-		if i == cap.Root || refs[i] != "" {
-			continue
-		}
-		anchor, ok := prevParent[parentOf[i]]
-		if !ok || !hasIdentity(curSig[i]) {
-			continue
-		}
-		candidate := ""
-		count := 0
-		for _, unit := range prev {
-			if usedPos[unit.position] || unit.parentPos != anchor ||
-				!hasIdentity(unit.key) || !sameUnit(unit.key, curSig[i]) {
-				continue
-			}
-			candidate = unit.ref
-			count++
-		}
-		if count == 1 && countCurrentIdentitySiblings(childrenOf, curSig, parentOf[i], curSig[i]) == 1 {
-			match(i, candidate, prevPosition[candidate])
-		}
-		// count == 0: new or reappeared -> fresh ref below.
-		// count > 1: several previous units carry identical evidence under this
-		// parent. There is no way to tell which one this is, so it gets a new
-		// ref. Later passes may still recover it if the public evidence is
-		// unique.
+	dirty := newParentQueue(idx)
+	if idx.hasPublicChildren(idx.root) {
+		dirty.push(idx.root)
 	}
 
-	// Pass 3: exactly one previous unit and exactly one current unit carry the
-	// same raw identity evidence anywhere in the trees.
-	for _, i := range curOrder {
-		if i == cap.Root || refs[i] != "" || !hasIdentity(curSig[i]) {
-			continue
-		}
-		candidate := -1
-		count := 0
-		for _, unit := range prev {
-			if usedPos[unit.position] || !hasIdentity(unit.key) || !sameUnit(unit.key, curSig[i]) {
-				continue
-			}
-			candidate = unit.position
-			count++
-		}
-		if count == 1 && countCurrentIdentities(cap, curOrder, curSig, curSig[i]) == 1 {
-			match(i, prev[candidate].ref, candidate)
+	if !budget.charge(uint64(idx.prevCount + idx.curCount)) {
+		st.stats.stoppedStage = "index"
+	}
+
+	// Stage 1: unique anonymous structure top-down from root.
+	if !budget.exhausted() {
+		matchUniqueContainers(st, budget, dirty)
+		if budget.exhausted() {
+			st.stats.stoppedStage = "unique_containers"
 		}
 	}
 
-	// Pass 4: inputs keep identity through value edits when package, class and
-	// the resource/description anchor agree under the same matched parent.
-	for _, i := range curOrder {
-		if i == cap.Root || refs[i] != "" || !curSig[i].editable {
-			continue
-		}
-		anchor, ok := prevParent[parentOf[i]]
-		if !ok {
-			continue
-		}
-		candidate := ""
-		count := 0
-		for _, unit := range prev {
-			if usedPos[unit.position] || unit.parentPos != anchor || !sameInputAnchor(unit.key, curSig[i]) {
-				continue
-			}
-			candidate = unit.ref
-			count++
-		}
-		if count == 1 && countCurrentInputSiblings(childrenOf, curSig, parentOf[i], curSig[i]) == 1 {
-			match(i, candidate, prevPosition[candidate])
+	// Stage 2: six content/identity passes separated by local vs global universe.
+	if !budget.exhausted() {
+		matchContentPasses(st, budget, dirty)
+		if budget.exhausted() && st.stats.stoppedStage == "" {
+			st.stats.stoppedStage = "content_passes"
 		}
 	}
 
-	// Pass 4b: retry containers now that identity/input parents have anchors.
-	// A scroll area or row container may itself carry a resource id and be
-	// matched by an identity rule; its anonymous children could not match
-	// before that correspondence existed.
-	for attempt := 0; attempt < 2; attempt++ {
-		if matchContainers() == 0 {
+	// Stage 3 finds container anchors via strict descendant vote;
+	// Stage 4 recovers direct children only below anchored parents.
+	for !budget.exhausted() {
+		before := st.matchCount()
+		matchContainersByDescendants(st, budget, dirty)
+		if budget.exhausted() {
+			if st.stats.stoppedStage == "" {
+				st.stats.stoppedStage = "descendant_vote"
+			}
+			break
+		}
+		matchLocalUnderAnchoredParents(st, budget, dirty, false)
+		if budget.exhausted() {
+			if st.stats.stoppedStage == "" {
+				st.stats.stoppedStage = "local_recovery"
+			}
+			break
+		}
+		if st.matchCount() == before {
 			break
 		}
 	}
 
-	// Pass 5: public identity under the same matched parent. This recovers a
-	// unit whose raw class/package or unpublished resource id changed while
-	// every published field stayed the same. Both sides must be unique.
-	for _, i := range curOrder {
-		if i == cap.Root || refs[i] != "" || curPub[i].editable || !hasPublicIdentity(curPub[i]) {
-			continue
+	// Stage 5 runs once; ordinal results cannot seed further ordinal buckets.
+	if !budget.exhausted() {
+		matchOrdinalContainersZeroShift(st, budget, dirty)
+		if budget.exhausted() && st.stats.stoppedStage == "" {
+			st.stats.stoppedStage = "ordinal"
 		}
-		anchor, ok := prevParent[parentOf[i]]
+	}
+
+	// After ordinal, only local child recovery is permitted (no Stage 3/5 rerun).
+	if !budget.exhausted() {
+		matchLocalUnderAnchoredParents(st, budget, dirty, true)
+		if budget.exhausted() && st.stats.stoppedStage == "" {
+			st.stats.stoppedStage = "post_ordinal_local"
+		}
+	}
+
+	// Safe degradation assigns sequential fresh refs in public preorder.
+	for _, cur := range idx.order {
+		if refs[cur] == "" {
+			refs[cur] = allocate()
+		}
+	}
+
+	st.stats.workLimit = budget.limit
+	st.stats.workUsed = budget.used
+	st.stats.budgetHit = budget.exhausted()
+	b.lastStats = st.stats
+}
+
+func matchUniqueContainers(st *matchState, budget *workBudget, dirty *parentQueue) {
+	if !st.idx.hasPublicChildren(st.idx.root) {
+		return
+	}
+	frontier := []int{st.idx.root}
+	for len(frontier) > 0 && !budget.exhausted() {
+		baseR := st.snapshotPairs()
+		offers, complete := matchParentScopedStructurallyUniqueContainers(st, frontier, sourceStage1Shape, budget)
+		if !complete {
+			return
+		}
+		accepted, ok := st.chooseBatchIfBidirectionallyUnique(offers, baseR, budget)
+		if !ok || len(accepted) == 0 {
+			return
+		}
+		st.applyBatch(accepted)
+		var next []int
+		for _, pr := range accepted {
+			if st.idx.hasPublicChildren(pr.cur) {
+				dirty.push(pr.cur)
+				next = append(next, pr.cur)
+			}
+		}
+		sort.Slice(next, func(i, j int) bool {
+			return st.idx.tin[next[i]] < st.idx.tin[next[j]]
+		})
+		frontier = next
+	}
+}
+
+func matchContentPasses(st *matchState, budget *workBudget, dirty *parentQueue) {
+	passes := []contentPass{
+		{localUnmatchedUniverse, sourceExact, unitBucket, hasIdentityMatch},
+		{localUnmatchedUniverse, sourceResource, resourceOnlyBucket, isResourceOnlyEligible},
+		{globalFullUniverse, sourceGlobalExact, unitBucket, eligibleForGlobalExactMatch},
+		{localUnmatchedUniverse, sourceInput, inputAnchorBucket, isInputAnchorEligible},
+		{localUnmatchedUniverse, sourceLocalPublic, publicBucket, hasPublicNonInputIdentity},
+		{globalFullUniverse, sourceGlobalPublic, publicBucket, hasPublicNonInputIdentity},
+	}
+	for _, pass := range passes {
+		if budget.exhausted() {
+			return
+		}
+		baseR := st.snapshotPairs()
+		offers, complete := uniqueBidirectionalBuckets(st, pass, baseR, budget)
+		if !complete {
+			return
+		}
+		accepted, ok := st.chooseBatchIfBidirectionallyUnique(offers, baseR, budget)
 		if !ok {
+			return
+		}
+		if len(accepted) == 0 {
 			continue
 		}
-		candidate := ""
-		count := 0
-		for _, unit := range prev {
-			if usedPos[unit.position] || unit.parentPos != anchor ||
-				unit.pub.editable || !hasPublicIdentity(unit.pub) || !samePublicUnit(unit.pub, curPub[i]) {
-				continue
+		st.applyBatch(accepted)
+		for _, pr := range accepted {
+			if st.idx.hasPublicChildren(pr.cur) {
+				dirty.push(pr.cur)
 			}
-			candidate = unit.ref
-			count++
-		}
-		if count == 1 && countCurrentPublic(childrenOf[parentOf[i]], curPub, curPub[i]) == 1 {
-			match(i, candidate, prevPosition[candidate])
-		}
-	}
-
-	// Pass 6: exactly one previous and one current unit carry the same public
-	// identity anywhere in the trees (a class change that also moved parent).
-	for _, i := range curOrder {
-		if i == cap.Root || refs[i] != "" || curPub[i].editable || !hasPublicIdentity(curPub[i]) {
-			continue
-		}
-		candidate := -1
-		count := 0
-		for _, unit := range prev {
-			if usedPos[unit.position] || unit.pub.editable ||
-				!hasPublicIdentity(unit.pub) || !samePublicUnit(unit.pub, curPub[i]) {
-				continue
-			}
-			candidate = unit.position
-			count++
-		}
-		if count == 1 && countCurrentPublicAll(curOrder, curPub, curPub[i], cap.Root) == 1 {
-			match(i, prev[candidate].ref, candidate)
-		}
-	}
-
-	// Pass 6b: the public fallback can also turn a parent into an anchor.
-	for attempt := 0; attempt < 2; attempt++ {
-		if matchContainers() == 0 {
-			break
-		}
-	}
-
-	// Everything left is new (freshly appeared, reappeared, or ambiguous) and
-	// gets a fresh ref in preorder. A ref that left the previous tree is never
-	// resurrected: the counter only moves forward.
-	for _, i := range curOrder {
-		if refs[i] == "" {
-			refs[i] = allocate()
 		}
 	}
 }
 
+func uniqueBidirectionalBuckets(
+	st *matchState,
+	pass contentPass,
+	baseR pairSnapshot,
+	budget *workBudget,
+) ([]pairProposal, bool) {
+	var offers []pairProposal
+	if pass.universe == localUnmatchedUniverse {
+		for _, curParent := range st.idx.order {
+			anchor, anchored := st.matchedOld(curParent)
+			if !anchored {
+				continue
+			}
+			oldBuckets := make(map[bucketKey][]int)
+			curBuckets := make(map[bucketKey][]int)
+			var keyOrder []bucketKey
+			seen := make(map[bucketKey]bool)
+
+			for _, oldPos := range st.idx.prevChildren[anchor] {
+				if !budget.charge(1) {
+					return nil, false
+				}
+				k, pk := st.idx.prevKey[oldPos], st.idx.prevPub[oldPos]
+				if baseR.oldUsed(oldPos) || !pass.eligible(k, pk) {
+					continue
+				}
+				key := pass.key(k, pk)
+				oldBuckets[key] = append(oldBuckets[key], oldPos)
+				if !seen[key] {
+					seen[key] = true
+					keyOrder = append(keyOrder, key)
+				}
+			}
+			for _, cur := range st.idx.childrenOf(curParent) {
+				if !budget.charge(1) {
+					return nil, false
+				}
+				k, pk := st.idx.curMatchKey(cur), st.idx.curPubKey(cur)
+				if baseR.curUsed(cur) || !pass.eligible(k, pk) {
+					continue
+				}
+				key := pass.key(k, pk)
+				curBuckets[key] = append(curBuckets[key], cur)
+				if !seen[key] {
+					seen[key] = true
+					keyOrder = append(keyOrder, key)
+				}
+			}
+			if !appendSingletonOffers(&offers, keyOrder, oldBuckets, curBuckets, baseR, pass.source, budget) {
+				return nil, false
+			}
+		}
+		return offers, true
+	}
+
+	// Global cardinality includes every eligible node in the complete trees
+	// before consulting baseR, preventing local consumption from synthesizing a
+	// unique global fallback for remaining duplicates.
+	oldBuckets := make(map[bucketKey][]int)
+	curBuckets := make(map[bucketKey][]int)
+	var keyOrder []bucketKey
+	seen := make(map[bucketKey]bool)
+
+	for _, oldPos := range st.idx.prevOrder {
+		if !budget.charge(1) {
+			return nil, false
+		}
+		if oldPos == st.idx.prevRoot {
+			continue
+		}
+		k, pk := st.idx.prevKey[oldPos], st.idx.prevPub[oldPos]
+		if !pass.eligible(k, pk) {
+			continue
+		}
+		key := pass.key(k, pk)
+		oldBuckets[key] = append(oldBuckets[key], oldPos)
+		if !seen[key] {
+			seen[key] = true
+			keyOrder = append(keyOrder, key)
+		}
+	}
+	for _, cur := range st.idx.order {
+		if !budget.charge(1) {
+			return nil, false
+		}
+		if cur == st.idx.root {
+			continue
+		}
+		k, pk := st.idx.curMatchKey(cur), st.idx.curPubKey(cur)
+		if !pass.eligible(k, pk) {
+			continue
+		}
+		key := pass.key(k, pk)
+		curBuckets[key] = append(curBuckets[key], cur)
+		if !seen[key] {
+			seen[key] = true
+			keyOrder = append(keyOrder, key)
+		}
+	}
+	if !appendSingletonOffers(&offers, keyOrder, oldBuckets, curBuckets, baseR, pass.source, budget) {
+		return nil, false
+	}
+	return offers, true
+}
+
+func appendSingletonOffers(
+	offers *[]pairProposal,
+	keyOrder []bucketKey,
+	oldBuckets map[bucketKey][]int,
+	curBuckets map[bucketKey][]int,
+	baseR pairSnapshot,
+	source matchSource,
+	budget *workBudget,
+) bool {
+	for _, key := range keyOrder {
+		if !budget.charge(1) {
+			return false
+		}
+		oldList, curList := oldBuckets[key], curBuckets[key]
+		if len(oldList) != 1 || len(curList) != 1 {
+			continue
+		}
+		oldPos, cur := oldList[0], curList[0]
+		if baseR.oldUsed(oldPos) || baseR.curUsed(cur) {
+			continue
+		}
+		*offers = append(*offers, pairProposal{
+			prevPos: oldPos,
+			cur:     cur,
+			source:  source,
+		})
+	}
+	return true
+}
+
+func matchParentScopedStructurallyUniqueContainers(
+	st *matchState,
+	scope []int,
+	source matchSource,
+	budget *workBudget,
+) ([]pairProposal, bool) {
+	baseR := st.snapshotPairs()
+	var offers []pairProposal
+	for _, curParent := range scope {
+		anchor, anchored := st.matchedOld(curParent)
+		if !anchored {
+			continue
+		}
+		oldBuckets := make(map[bucketKey][]int)
+		curBuckets := make(map[bucketKey][]int)
+		var keyOrder []bucketKey
+		seen := make(map[bucketKey]bool)
+
+		for _, oldPos := range st.idx.prevChildren[anchor] {
+			if !budget.charge(1) {
+				return nil, false
+			}
+			if !isStructurallyMatchable(st.idx.prevKey[oldPos], st.idx.prevPub[oldPos]) {
+				continue
+			}
+			key := shapeBucket(st.idx.prevKey[oldPos])
+			oldBuckets[key] = append(oldBuckets[key], oldPos)
+			if !seen[key] {
+				seen[key] = true
+				keyOrder = append(keyOrder, key)
+			}
+		}
+		for _, cur := range st.idx.childrenOf(curParent) {
+			if !budget.charge(1) {
+				return nil, false
+			}
+			k := st.idx.curMatchKey(cur)
+			if !isStructurallyMatchable(k, st.idx.curPubKey(cur)) {
+				continue
+			}
+			key := shapeBucket(k)
+			curBuckets[key] = append(curBuckets[key], cur)
+			if !seen[key] {
+				seen[key] = true
+				keyOrder = append(keyOrder, key)
+			}
+		}
+		if !appendSingletonOffers(&offers, keyOrder, oldBuckets, curBuckets, baseR, source, budget) {
+			return nil, false
+		}
+	}
+	return offers, true
+}
+
+func matchParentScopedUniqueBuckets(
+	st *matchState,
+	scope []int,
+	pass contentPass,
+	baseR pairSnapshot,
+	budget *workBudget,
+) ([]pairProposal, bool) {
+	var offers []pairProposal
+	for _, curParent := range scope {
+		anchor, anchored := st.matchedOld(curParent)
+		if !anchored {
+			continue
+		}
+		oldBuckets := make(map[bucketKey][]int)
+		curBuckets := make(map[bucketKey][]int)
+		var keyOrder []bucketKey
+		seen := make(map[bucketKey]bool)
+
+		for _, oldPos := range st.idx.prevChildren[anchor] {
+			if !budget.charge(1) {
+				return nil, false
+			}
+			k, pk := st.idx.prevKey[oldPos], st.idx.prevPub[oldPos]
+			if baseR.oldUsed(oldPos) || !pass.eligible(k, pk) {
+				continue
+			}
+			key := pass.key(k, pk)
+			oldBuckets[key] = append(oldBuckets[key], oldPos)
+			if !seen[key] {
+				seen[key] = true
+				keyOrder = append(keyOrder, key)
+			}
+		}
+		for _, cur := range st.idx.childrenOf(curParent) {
+			if !budget.charge(1) {
+				return nil, false
+			}
+			k, pk := st.idx.curMatchKey(cur), st.idx.curPubKey(cur)
+			if baseR.curUsed(cur) || !pass.eligible(k, pk) {
+				continue
+			}
+			key := pass.key(k, pk)
+			curBuckets[key] = append(curBuckets[key], cur)
+			if !seen[key] {
+				seen[key] = true
+				keyOrder = append(keyOrder, key)
+			}
+		}
+		if !appendSingletonOffers(&offers, keyOrder, oldBuckets, curBuckets, baseR, pass.source, budget) {
+			return nil, false
+		}
+	}
+	return offers, true
+}
+
+type snapshotIntervals struct {
+	byCurTin  []pairEntry
+	byPrevPos []pairEntry
+}
+
+func buildSnapshotIntervals(idx *publicMatchIndex, baseR pairSnapshot) snapshotIntervals {
+	var byCur, byPrev []pairEntry
+	for _, cur := range idx.order {
+		if cur == idx.root {
+			continue
+		}
+		oldPos, matched := baseR.pairOfCur(cur)
+		if !matched || oldPos == idx.prevRoot {
+			continue
+		}
+		byCur = append(byCur, pairEntry{
+			prevPos: oldPos,
+			cur:     cur,
+			curTin:  idx.tin[cur],
+		})
+	}
+	byPrev = make([]pairEntry, 0, len(byCur))
+	for _, oldPos := range idx.prevOrder {
+		if oldPos == idx.prevRoot {
+			continue
+		}
+		cur, matched := baseR.pairOfOld(oldPos)
+		if !matched {
+			continue
+		}
+		byPrev = append(byPrev, pairEntry{
+			prevPos: oldPos,
+			cur:     cur,
+			curTin:  idx.tin[cur],
+		})
+	}
+	return snapshotIntervals{byCurTin: byCur, byPrevPos: byPrev}
+}
+
+func (iv snapshotIntervals) collectByCurInterval(tinLo, tinHi int, budget *workBudget) ([]pairEntry, bool) {
+	start := sort.Search(len(iv.byCurTin), func(i int) bool {
+		return iv.byCurTin[i].curTin >= tinLo
+	})
+	end := sort.Search(len(iv.byCurTin), func(i int) bool {
+		return iv.byCurTin[i].curTin > tinHi
+	})
+	count := end - start
+	if count <= 0 {
+		if !budget.charge(1) {
+			return nil, false
+		}
+		return nil, true
+	}
+	if !budget.charge(uint64(count)) {
+		return nil, false
+	}
+	out := make([]pairEntry, count)
+	copy(out, iv.byCurTin[start:end])
+	return out, true
+}
+
+func (iv snapshotIntervals) collectByPrevInterval(prevLo, prevHi int, budget *workBudget) ([]pairEntry, bool) {
+	start := sort.Search(len(iv.byPrevPos), func(i int) bool {
+		return iv.byPrevPos[i].prevPos >= prevLo
+	})
+	end := sort.Search(len(iv.byPrevPos), func(i int) bool {
+		return iv.byPrevPos[i].prevPos > prevHi
+	})
+	count := end - start
+	if count <= 0 {
+		if !budget.charge(1) {
+			return nil, false
+		}
+		return nil, true
+	}
+	if !budget.charge(uint64(count)) {
+		return nil, false
+	}
+	return iv.byPrevPos[start:end], true
+}
+
+func samePairSet(rc, rp []pairEntry, budget *workBudget) (bool, bool) {
+	if len(rc) == 0 || len(rc) != len(rp) {
+		return false, true
+	}
+	if len(rc) == 1 {
+		if !budget.charge(1) {
+			return false, false
+		}
+		return rc[0].prevPos == rp[0].prevPos && rc[0].curTin == rp[0].curTin, true
+	}
+	sort.Slice(rc, func(i, j int) bool {
+		if rc[i].prevPos != rc[j].prevPos {
+			return rc[i].prevPos < rc[j].prevPos
+		}
+		return rc[i].curTin < rc[j].curTin
+	})
+	for i := range rc {
+		if !budget.charge(1) {
+			return false, false
+		}
+		if rc[i].prevPos != rp[i].prevPos || rc[i].curTin != rp[i].curTin {
+			return false, true
+		}
+	}
+	return true, true
+}
+
+func matchContainersByDescendants(st *matchState, budget *workBudget, dirty *parentQueue) bool {
+	baseR := st.snapshotPairs()
+	intervals := buildSnapshotIntervals(st.idx, baseR)
+	var proposals []pairProposal
+
+	for _, cur := range st.idx.order {
+		if !budget.charge(1) {
+			return false
+		}
+		if cur == st.idx.root || st.curUsed(cur) || !st.idx.curAnonymousContainer(cur) {
+			continue
+		}
+		anchor, anchored := st.matchedOld(st.idx.parentOf(cur))
+		if !anchored {
+			continue
+		}
+		rc, ok := intervals.collectByCurInterval(st.idx.tin[cur], st.idx.tout[cur], budget)
+		if !ok {
+			return false
+		}
+		if len(rc) == 0 {
+			continue
+		}
+
+		expectedPrev := -1
+		conflict := false
+		for _, pr := range rc {
+			if !budget.charge(1) {
+				return false
+			}
+			child, ok := st.idx.directChildUnder(pr.prevPos, anchor, budget)
+			if budget.exhausted() {
+				return false
+			}
+			if !ok {
+				conflict = true
+				break
+			}
+			if expectedPrev == -1 {
+				expectedPrev = child
+			} else if child != expectedPrev {
+				conflict = true
+				break
+			}
+		}
+		if conflict || expectedPrev < 0 || baseR.oldUsed(expectedPrev) ||
+			!st.idx.prevAnonymousContainer(expectedPrev) ||
+			!sameShape(st.idx.prevKey[expectedPrev], st.idx.curMatchKey(cur)) {
+			continue
+		}
+
+		rp, ok := intervals.collectByPrevInterval(st.idx.prevTin[expectedPrev], st.idx.prevTout[expectedPrev], budget)
+		if !ok {
+			return false
+		}
+		equal, ok := samePairSet(rc, rp, budget)
+		if !ok {
+			return false
+		}
+		if !equal {
+			continue
+		}
+		proposals = append(proposals, pairProposal{
+			cur:     cur,
+			prevPos: expectedPrev,
+			source:  sourceDescendantVote,
+		})
+	}
+
+	accepted, ok := st.chooseBatchIfBidirectionallyUnique(proposals, baseR, budget)
+	if !ok || len(accepted) == 0 {
+		return false
+	}
+	st.applyBatch(accepted)
+	for _, pr := range accepted {
+		if st.idx.hasPublicChildren(pr.cur) {
+			dirty.push(pr.cur)
+		}
+	}
+	return true
+}
+
+func matchLocalUnderAnchoredParents(
+	st *matchState,
+	budget *workBudget,
+	dirty *parentQueue,
+	postOrdinal bool,
+) bool {
+	changed := false
+	resolveSource := func(src matchSource) matchSource {
+		if postOrdinal {
+			return sourcePostOrdinalLocal
+		}
+		return src
+	}
+	for {
+		scope := dirty.drainInPublicOrder()
+		if len(scope) == 0 || budget.exhausted() {
+			return changed
+		}
+
+		baseR := st.snapshotPairs()
+		shapeOffers, complete := matchParentScopedStructurallyUniqueContainers(
+			st, scope, resolveSource(sourceLocalStructure), budget,
+		)
+		if !complete {
+			return changed
+		}
+		shapeAccepted, ok := st.chooseBatchIfBidirectionallyUnique(shapeOffers, baseR, budget)
+		if !ok {
+			return changed
+		}
+		if len(shapeAccepted) > 0 {
+			st.applyBatch(shapeAccepted)
+			changed = true
+			for _, pr := range shapeAccepted {
+				if st.idx.hasPublicChildren(pr.cur) {
+					dirty.push(pr.cur)
+				}
+			}
+		}
+
+		passes := []contentPass{
+			{localUnmatchedUniverse, resolveSource(sourceLocalExact), unitBucket, hasIdentityMatch},
+			{localUnmatchedUniverse, resolveSource(sourceLocalResource), resourceOnlyBucket, isResourceOnlyEligible},
+			{localUnmatchedUniverse, resolveSource(sourceLocalInput), inputAnchorBucket, isInputAnchorEligible},
+			{localUnmatchedUniverse, resolveSource(sourceLocalPublicPost), publicBucket, hasPublicNonInputIdentity},
+		}
+		for _, pass := range passes {
+			if budget.exhausted() {
+				return changed
+			}
+			passBase := st.snapshotPairs()
+			offers, complete := matchParentScopedUniqueBuckets(st, scope, pass, passBase, budget)
+			if !complete {
+				return changed
+			}
+			accepted, ok := st.chooseBatchIfBidirectionallyUnique(offers, passBase, budget)
+			if !ok {
+				return changed
+			}
+			if len(accepted) == 0 {
+				continue
+			}
+			st.applyBatch(accepted)
+			changed = true
+			for _, pr := range accepted {
+				if st.idx.hasPublicChildren(pr.cur) {
+					dirty.push(pr.cur)
+				}
+			}
+		}
+	}
+}
+
+func matchOrdinalContainersZeroShift(st *matchState, budget *workBudget, dirty *parentQueue) bool {
+	baseR := st.snapshotPairs()
+	var proposals []pairProposal
+
+	for _, parentCur := range st.idx.order {
+		anchor, anchored := st.matchedOld(parentCur)
+		if !anchored {
+			continue
+		}
+
+		pgroups := make(map[bucketKey][]int)
+		cgroups := make(map[bucketKey][]int)
+		var keyOrder []bucketKey
+		seen := make(map[bucketKey]bool)
+
+		for _, oldPos := range st.idx.prevChildren[anchor] {
+			if !budget.charge(1) {
+				return false
+			}
+			if !st.idx.prevAnonymousContainer(oldPos) {
+				continue
+			}
+			shape := shapeBucket(st.idx.prevKey[oldPos])
+			pgroups[shape] = append(pgroups[shape], oldPos)
+			if !seen[shape] {
+				seen[shape] = true
+				keyOrder = append(keyOrder, shape)
+			}
+		}
+		for _, cur := range st.idx.childrenOf(parentCur) {
+			if !budget.charge(1) {
+				return false
+			}
+			if !st.idx.curAnonymousContainer(cur) {
+				continue
+			}
+			shape := shapeBucket(st.idx.curMatchKey(cur))
+			cgroups[shape] = append(cgroups[shape], cur)
+			if !seen[shape] {
+				seen[shape] = true
+				keyOrder = append(keyOrder, shape)
+			}
+		}
+
+		for _, shape := range keyOrder {
+			prevSibs := pgroups[shape]
+			curSibs := cgroups[shape]
+			k := len(prevSibs)
+			if k <= 1 || k != len(curSibs) {
+				continue
+			}
+			prevRank := make(map[int]int, k)
+			curRank := make(map[int]int, k)
+			for r, p := range prevSibs {
+				prevRank[p] = r
+			}
+			for r, c := range curSibs {
+				curRank[c] = r
+			}
+
+			fixed := false
+			reject := false
+			for r, p := range prevSibs {
+				if !budget.charge(1) {
+					return false
+				}
+				cur, matched := baseR.pairOfOld(p)
+				if !matched {
+					continue
+				}
+				cr, inGroup := curRank[cur]
+				if !inGroup || cr != r {
+					reject = true
+					break
+				}
+				if baseR.sourceOfOld(p) != sourceOrdinal {
+					fixed = true
+				}
+			}
+			if !reject {
+				for r, c := range curSibs {
+					if !budget.charge(1) {
+						return false
+					}
+					p, matched := baseR.pairOfCur(c)
+					if !matched {
+						continue
+					}
+					pr, inGroup := prevRank[p]
+					if !inGroup || pr != r {
+						reject = true
+						break
+					}
+					if baseR.sourceOfOld(p) != sourceOrdinal {
+						fixed = true
+					}
+				}
+			}
+			if reject || !fixed {
+				continue
+			}
+
+			for r := 0; r < k; r++ {
+				p, c := prevSibs[r], curSibs[r]
+				if !baseR.oldUsed(p) && !baseR.curUsed(c) {
+					proposals = append(proposals, pairProposal{
+						cur:     c,
+						prevPos: p,
+						source:  sourceOrdinal,
+					})
+				}
+			}
+		}
+	}
+
+	accepted, ok := st.chooseBatchIfBidirectionallyUnique(proposals, baseR, budget)
+	if !ok || len(accepted) == 0 {
+		return false
+	}
+	st.applyBatch(accepted)
+	for _, pr := range accepted {
+		if st.idx.hasPublicChildren(pr.cur) {
+			dirty.push(pr.cur)
+		}
+	}
+	return true
+}
+
 // hasIdentity reports whether a raw key carries evidence strong enough for
-// rules 2 and 3. A bare role and class with no label and no resource is a
-// generic container that many units share; it is never paired on that alone.
+// exact identity matching. A bare role and class with no label and no resource
+// is a generic container that many units share; it is never paired on that alone.
 func hasIdentity(key matchKey) bool {
 	if key.protected {
 		return true
 	}
 	if key.editable {
-		// An input is identified by class (and resource id or description).
-		// Its text is a value, so it never contributes to identity; the input
-		// rule in pass 4 still requires package+class plus an anchor.
 		return key.class != "" || key.hasRes || key.anchor != ""
 	}
 	return key.hasRes || key.label != ""
 }
 
-// countCurrentIdentities counts current units whose identity evidence equals
-// sig, including self, so a global match is accepted only when the current
-// side is unambiguous too.
-func countCurrentIdentities(cap *device.Capture, order []int, sigs map[int]matchKey, sig matchKey) int {
-	count := 0
-	for _, j := range order {
-		if j != cap.Root && hasIdentity(sigs[j]) && sameUnit(sigs[j], sig) {
-			count++
-		}
+// eligibleForGlobalExact reports whether an identity key is permitted to match
+// globally across different parents. Anchorless editable inputs are restricted
+// to local same-parent matching only.
+func eligibleForGlobalExact(key matchKey) bool {
+	if !hasIdentity(key) {
+		return false
 	}
-	return count
-}
-
-// countCurrentIdentitySiblings counts current published direct children of
-// parent whose raw identity equals sig, including self. A local exact match is
-// accepted only when the current side is unambiguous too.
-func countCurrentIdentitySiblings(childrenOf map[int][]int, sigs map[int]matchKey, parent int, sig matchKey) int {
-	count := 0
-	for _, child := range childrenOf[parent] {
-		if hasIdentity(sigs[child]) && sameUnit(sigs[child], sig) {
-			count++
-		}
+	if key.editable {
+		return key.hasRes || key.anchor != ""
 	}
-	return count
-}
-
-// countCurrentInputSiblings counts current published direct children of parent
-// whose input anchor equals sig, including self.
-func countCurrentInputSiblings(childrenOf map[int][]int, sigs map[int]matchKey, parent int, sig matchKey) int {
-	count := 0
-	for _, child := range childrenOf[parent] {
-		if sigs[child].editable && sameInputAnchor(sigs[child], sig) {
-			count++
-		}
-	}
-	return count
-}
-
-// ordinalSibling pairs i with the previous sibling of the same shape at the
-// same ordinal under the same matched parent, but only when both published
-// sibling lists have exactly the same size and shapes; otherwise it reports
-// false.
-func ordinalSibling(prev []prevUnit, usedPos map[int]bool, siblings []int, sigs map[int]matchKey, anchor, i int, same func(a, b matchKey) bool) (string, int, bool) {
-	// Rank of i among current published shape-siblings under its parent.
-	rank := 0
-	sameShapeCount := 0
-	for _, child := range siblings {
-		if !same(sigs[child], sigs[i]) {
-			continue
-		}
-		if child == i {
-			rank = sameShapeCount
-		}
-		sameShapeCount++
-	}
-	// Previous shape-siblings under the anchor.
-	var candidates []prevUnit
-	for _, unit := range prev {
-		if unit.parentPos == anchor && same(unit.key, sigs[i]) {
-			candidates = append(candidates, unit)
-		}
-	}
-	if len(candidates) != sameShapeCount || len(candidates) == 0 || rank >= len(candidates) {
-		return "", 0, false
-	}
-	unit := candidates[rank]
-	if usedPos[unit.position] {
-		return "", 0, false
-	}
-	return unit.ref, unit.position, true
-}
-
-// classCandidate picks the only previous container whose raw class/package
-// agree when the public shape alone matched several candidates.
-func classCandidate(candidates []prevUnit, sig matchKey) (string, int, bool) {
-	var found prevUnit
-	count := 0
-	for _, unit := range candidates {
-		if unit.key.class == sig.class && unit.key.pkg == sig.pkg {
-			found = unit
-			count++
-		}
-	}
-	if count == 1 {
-		return found.ref, found.position, true
-	}
-	return "", 0, false
+	return true
 }
 
 // nearestPublishedParent walks the raw parent chain to the first published
@@ -609,45 +1700,6 @@ func nearestPublishedParent(cap *device.Capture, units []unit, i int) int {
 	return cap.Root
 }
 
-// countCurrentSiblings counts current published direct children of parent
-// whose public shape equals sig, including self.
-func countCurrentSiblings(childrenOf map[int][]int, sigs map[int]matchKey, parent int, sig matchKey) int {
-	count := 0
-	for _, child := range childrenOf[parent] {
-		if sameShape(sigs[child], sig) {
-			count++
-		}
-	}
-	return count
-}
-
-// countCurrentPublic counts current published direct children of parent whose
-// public identity equals sig, including self.
-func countCurrentPublic(siblings []int, sigs map[int]publicKey, sig publicKey) int {
-	count := 0
-	for _, child := range siblings {
-		if hasPublicIdentity(sigs[child]) && samePublicUnit(sigs[child], sig) {
-			count++
-		}
-	}
-	return count
-}
-
-// countCurrentPublicAll counts public identities anywhere in the published
-// current tree.
-func countCurrentPublicAll(order []int, sigs map[int]publicKey, sig publicKey, root int) int {
-	count := 0
-	for _, j := range order {
-		if j == root || sigs[j].editable {
-			continue
-		}
-		if hasPublicIdentity(sigs[j]) && samePublicUnit(sigs[j], sig) {
-			count++
-		}
-	}
-	return count
-}
-
 // hasPublicIdentity reports whether published fields carry identity evidence.
 func hasPublicIdentity(key publicKey) bool {
 	return key.protected || key.hasRes || key.label != ""
@@ -658,24 +1710,26 @@ func hasPublicIdentity(key publicKey) bool {
 func samePublicUnit(a, b publicKey) bool {
 	return a.role == b.role && a.label == b.label &&
 		a.hasRes == b.hasRes && a.resource == b.resource &&
-		a.anchor == b.anchor && a.editable == b.editable &&
+		a.anchor == b.anchor && a.actions == b.actions && a.editable == b.editable &&
 		a.protected == b.protected
 }
 
-// sameUnit is rules 2 and 3: identical role, class, package, resource presence,
-// label signature and protection.
+// sameUnit compares every identity evidence field of two published units.
 func sameUnit(a, b matchKey) bool {
 	return a.role == b.role && a.class == b.class && a.pkg == b.pkg &&
 		a.hasRes == b.hasRes && a.resource == b.resource &&
-		a.label == b.label && a.protected == b.protected
+		a.label == b.label && a.anchor == b.anchor &&
+		a.actions == b.actions && a.editable == b.editable &&
+		a.protected == b.protected
 }
 
-// sameInputAnchor is rule 4.
+// sameInputAnchor compares non-value identity fields of two editable inputs.
 func sameInputAnchor(a, b matchKey) bool {
 	if a.role != protocol.RoleInput || b.role != protocol.RoleInput {
 		return false
 	}
-	if a.class != b.class || a.pkg != b.pkg || a.protected != b.protected {
+	if a.class != b.class || a.pkg != b.pkg ||
+		a.actions != b.actions || a.protected != b.protected {
 		return false
 	}
 	if a.hasRes && b.hasRes {
@@ -685,6 +1739,16 @@ func sameInputAnchor(a, b matchKey) bool {
 		return false
 	}
 	return a.anchor != "" && a.anchor == b.anchor
+}
+
+// sameResourceOnly matches non-input units across label changes within an
+// anchored parent when every non-label identity attribute agrees.
+func sameResourceOnly(a, b matchKey) bool {
+	if a.editable || b.editable || !a.hasRes || !b.hasRes {
+		return false
+	}
+	return a.role == b.role && a.class == b.class && a.pkg == b.pkg &&
+		a.resource == b.resource && a.actions == b.actions && a.protected == b.protected
 }
 
 // sameShape matches label-free containers: no label on either side, the same

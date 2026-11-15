@@ -385,7 +385,6 @@ func marshal(t *testing.T, v any) []byte {
 }
 
 func TestNodeDefaultEncoding(t *testing.T) {
-	tr := func(v bool) *bool { return &v }
 	yes := true
 	node := &Node{
 		Ref: "n1", Role: RoleButton, Bounds: &Bounds{Left: 1, Top: 2, Right: 3, Bottom: 4},
@@ -399,13 +398,13 @@ func TestNodeDefaultEncoding(t *testing.T) {
 		t.Fatalf("bounds missing: %s", got)
 	}
 
-	unknown := &Node{Ref: "n2", Role: RoleText, Bounds: nil, Enabled: nil, Checked: tr(false), Value: strptr("")}
+	unknown := &Node{Ref: "n2", Role: RoleText, Bounds: nil, Enabled: nil, Checked: nil, Value: strptr("")}
 	got = string(marshal(t, unknown))
 	if !strings.Contains(got, `"enabled":null`) {
 		t.Fatalf("unknown enabled must be explicit null: %s", got)
 	}
-	if !strings.Contains(got, `"checked":false`) {
-		t.Fatalf("checked=false must be explicit: %s", got)
+	if !strings.Contains(got, `"checked":null`) {
+		t.Fatalf("unknown checked must be explicit null: %s", got)
 	}
 	if !strings.Contains(got, `"value":""`) {
 		t.Fatalf("empty known value must be explicit: %s", got)
@@ -417,7 +416,26 @@ func TestNodeDefaultEncoding(t *testing.T) {
 
 func strptr(s string) *string { return &s }
 
-func TestNodeRoundTripDefaults(t *testing.T) {
+func optionalBoolPtr(v bool) *bool { return &v }
+
+func sameOptionalBool(a, b *bool) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
+func optionalBoolString(value *bool) string {
+	if value == nil {
+		return "null"
+	}
+	if *value {
+		return "true"
+	}
+	return "false"
+}
+
+func TestNodeRoundTripStates(t *testing.T) {
 	f := false
 	empty := ""
 	original := &Node{
@@ -439,6 +457,9 @@ func TestNodeRoundTripDefaults(t *testing.T) {
 	if decoded.Protected != nil {
 		t.Fatal("protected null should decode as unknown")
 	}
+	if decoded.Checked != nil {
+		t.Fatal("checked null should decode as unknown")
+	}
 	if decoded.Value == nil || *decoded.Value != "" {
 		t.Fatal("empty value lost")
 	}
@@ -451,12 +472,289 @@ func TestNodeRoundTripDefaults(t *testing.T) {
 	}
 }
 
+func TestNodeTriStateWireMatrix(t *testing.T) {
+	fields := []struct {
+		name         string
+		defaultValue bool
+		set          func(*Node, *bool)
+		get          func(*Node) *bool
+	}{
+		{"enabled", true, func(n *Node, value *bool) { n.Enabled = value }, func(n *Node) *bool { return n.Enabled }},
+		{"focused", false, func(n *Node, value *bool) { n.Focused = value }, func(n *Node) *bool { return n.Focused }},
+		{"selected", false, func(n *Node, value *bool) { n.Selected = value }, func(n *Node) *bool { return n.Selected }},
+		{"protected", false, func(n *Node, value *bool) { n.Protected = value }, func(n *Node) *bool { return n.Protected }},
+		{"checked", false, func(n *Node, value *bool) { n.Checked = value }, func(n *Node) *bool { return n.Checked }},
+	}
+	for _, field := range fields {
+		for _, state := range []string{"known default", "non-default known", "unknown"} {
+			t.Run(field.name+"/"+state, func(t *testing.T) {
+				var value *bool
+				switch state {
+				case "known default":
+					value = optionalBoolPtr(field.defaultValue)
+				case "non-default known":
+					value = optionalBoolPtr(!field.defaultValue)
+				}
+				node := &Node{Ref: "n1", Role: RoleButton}
+				field.set(node, value)
+				wire := string(marshal(t, node))
+				member := `"` + field.name + `":`
+
+				switch state {
+				case "known default":
+					if strings.Contains(wire, member) {
+						t.Fatalf("known default must be omitted: %s", wire)
+					}
+				case "non-default known":
+					want := "true"
+					if field.defaultValue {
+						want = "false"
+					}
+					if !strings.Contains(wire, member+want) {
+						t.Fatalf("non-default value missing: %s", wire)
+					}
+				case "unknown":
+					if !strings.Contains(wire, member+"null") {
+						t.Fatalf("unknown value must be explicit null: %s", wire)
+					}
+				}
+
+				var decoded Node
+				if err := json.Unmarshal([]byte(wire), &decoded); err != nil {
+					t.Fatalf("decode: %v", err)
+				}
+				if got := field.get(&decoded); !sameOptionalBool(got, value) {
+					t.Fatalf("decoded %s = %v, want %v", field.name, optionalBoolString(got), optionalBoolString(value))
+				}
+			})
+		}
+	}
+}
+
+func TestReadNodeTriStateWireMatrix(t *testing.T) {
+	fields := []struct {
+		name         string
+		defaultValue bool
+		set          func(*ReadNode, *bool)
+		get          func(*ReadNode) *bool
+	}{
+		{"enabled", true, func(n *ReadNode, value *bool) { n.Enabled = value }, func(n *ReadNode) *bool { return n.Enabled }},
+		{"focused", false, func(n *ReadNode, value *bool) { n.Focused = value }, func(n *ReadNode) *bool { return n.Focused }},
+		{"selected", false, func(n *ReadNode, value *bool) { n.Selected = value }, func(n *ReadNode) *bool { return n.Selected }},
+		{"protected", false, func(n *ReadNode, value *bool) { n.Protected = value }, func(n *ReadNode) *bool { return n.Protected }},
+		{"checked", false, func(n *ReadNode, value *bool) { n.Checked = value }, func(n *ReadNode) *bool { return n.Checked }},
+	}
+	for _, field := range fields {
+		for _, state := range []string{"known default", "non-default known", "unknown"} {
+			t.Run(field.name+"/"+state, func(t *testing.T) {
+				var value *bool
+				switch state {
+				case "known default":
+					value = optionalBoolPtr(field.defaultValue)
+				case "non-default known":
+					value = optionalBoolPtr(!field.defaultValue)
+				}
+				node := &ReadNode{Ref: "n1", Role: RoleButton, Bounds: HiddenBounds()}
+				field.set(node, value)
+				wire := string(marshal(t, node))
+				member := `"` + field.name + `":`
+
+				switch state {
+				case "known default":
+					if strings.Contains(wire, member) {
+						t.Fatalf("known default must be omitted: %s", wire)
+					}
+				case "non-default known":
+					want := "true"
+					if field.defaultValue {
+						want = "false"
+					}
+					if !strings.Contains(wire, member+want) {
+						t.Fatalf("non-default value missing: %s", wire)
+					}
+				case "unknown":
+					if !strings.Contains(wire, member+"null") {
+						t.Fatalf("unknown value must be explicit null: %s", wire)
+					}
+				}
+
+				var decoded ReadNode
+				if err := json.Unmarshal([]byte(wire), &decoded); err != nil {
+					t.Fatalf("decode: %v", err)
+				}
+				if got := field.get(&decoded); !sameOptionalBool(got, value) {
+					t.Fatalf("decoded %s = %v, want %v", field.name, optionalBoolString(got), optionalBoolString(value))
+				}
+			})
+		}
+	}
+}
+
+func TestSetNodeExplicitStateValues(t *testing.T) {
+	zeroBounds := Bounds{}
+	emptyValue := ""
+	set := SetNode{
+		Bounds:  Field[*Bounds]{Set: true, Value: &zeroBounds},
+		Label:   Field[[]string]{Set: true, Value: []string{}},
+		Actions: Field[[]Action]{Set: true, Value: []Action{}},
+		Enabled: Field[*bool]{Set: true, Value: optionalBoolPtr(false)},
+		Focused: Field[*bool]{Set: true, Value: optionalBoolPtr(true)},
+		Checked: Field[*bool]{Set: true, Value: nil},
+		Value:   Field[*string]{Set: true, Value: &emptyValue},
+	}
+	wire := string(marshal(t, &Delta{Format: "delta", Base: "O1", Set: map[string]SetNode{"n2": set}}))
+	for _, want := range []string{
+		`"bounds":[0,0,0,0]`, `"label":[]`, `"actions":[]`,
+		`"enabled":false`, `"focused":true`, `"checked":null`, `"value":""`,
+	} {
+		if !strings.Contains(wire, want) {
+			t.Fatalf("set wire missing %s: %s", want, wire)
+		}
+	}
+
+	var decoded Delta
+	if err := json.Unmarshal([]byte(wire), &decoded); err != nil {
+		t.Fatalf("decode set: %v", err)
+	}
+	got := decoded.Set["n2"]
+	if !got.Bounds.Set || got.Bounds.Value == nil || *got.Bounds.Value != zeroBounds {
+		t.Fatalf("zero bounds lost: %#v", got.Bounds)
+	}
+	if !got.Label.Set || got.Label.Value == nil || len(got.Label.Value) != 0 {
+		t.Fatalf("empty label lost: %#v", got.Label)
+	}
+	if !got.Actions.Set || got.Actions.Value == nil || len(got.Actions.Value) != 0 {
+		t.Fatalf("empty actions lost: %#v", got.Actions)
+	}
+	if !got.Enabled.Set || got.Enabled.Value == nil || *got.Enabled.Value {
+		t.Fatalf("enabled=false lost: %#v", got.Enabled)
+	}
+	if !got.Focused.Set || got.Focused.Value == nil || !*got.Focused.Value {
+		t.Fatalf("focused=true lost: %#v", got.Focused)
+	}
+	if !got.Checked.Set || got.Checked.Value != nil {
+		t.Fatalf("checked=null lost: %#v", got.Checked)
+	}
+	if !got.Value.Set || got.Value.Value == nil || *got.Value.Value != "" {
+		t.Fatalf("empty value lost: %#v", got.Value)
+	}
+}
+
+func TestReadSetNodeExplicitStateValues(t *testing.T) {
+	zeroBounds := KnownBounds(Bounds{})
+	emptyValue := ""
+	set := ReadSetNode{
+		Bounds:  Field[ReadBounds]{Set: true, Value: zeroBounds},
+		Label:   Field[[]string]{Set: true, Value: []string{}},
+		Actions: Field[[]Action]{Set: true, Value: []Action{}},
+		Enabled: Field[*bool]{Set: true, Value: optionalBoolPtr(false)},
+		Focused: Field[*bool]{Set: true, Value: optionalBoolPtr(true)},
+		Checked: Field[*bool]{Set: true, Value: nil},
+		Value:   Field[*string]{Set: true, Value: &emptyValue},
+	}
+	wire := string(marshal(t, &ReadDelta{
+		Format: "delta", Base: "O1", View: ViewCompact,
+		Set: map[string]ReadSetNode{"n2": set},
+	}))
+	for _, want := range []string{
+		`"bounds":[0,0,0,0]`, `"label":[]`, `"actions":[]`,
+		`"enabled":false`, `"focused":true`, `"checked":null`, `"value":""`,
+	} {
+		if !strings.Contains(wire, want) {
+			t.Fatalf("read set wire missing %s: %s", want, wire)
+		}
+	}
+	if strings.Contains(wire, `"defaults"`) {
+		t.Fatalf("read delta carried defaults: %s", wire)
+	}
+
+	var decoded ReadDelta
+	if err := json.Unmarshal([]byte(wire), &decoded); err != nil {
+		t.Fatalf("decode read set: %v", err)
+	}
+	got := decoded.Set["n2"]
+	if !got.Bounds.Set || !got.Bounds.Value.Equal(zeroBounds) {
+		t.Fatalf("zero bounds lost: %#v", got.Bounds)
+	}
+	if !got.Label.Set || got.Label.Value == nil || len(got.Label.Value) != 0 {
+		t.Fatalf("empty label lost: %#v", got.Label)
+	}
+	if !got.Actions.Set || got.Actions.Value == nil || len(got.Actions.Value) != 0 {
+		t.Fatalf("empty actions lost: %#v", got.Actions)
+	}
+	if !got.Enabled.Set || got.Enabled.Value == nil || *got.Enabled.Value {
+		t.Fatalf("enabled=false lost: %#v", got.Enabled)
+	}
+	if !got.Focused.Set || got.Focused.Value == nil || !*got.Focused.Value {
+		t.Fatalf("focused=true lost: %#v", got.Focused)
+	}
+	if !got.Checked.Set || got.Checked.Value != nil {
+		t.Fatalf("checked=null lost: %#v", got.Checked)
+	}
+	if !got.Value.Set || got.Value.Value == nil || *got.Value.Value != "" {
+		t.Fatalf("empty value lost: %#v", got.Value)
+	}
+}
+
+func TestReadTreeAndDeltaWireWithoutLegacyDeclaration(t *testing.T) {
+	tree := &ReadTree{
+		Format: "full", Scope: Scope, View: ViewCompact,
+		Root: &ReadNode{
+			Ref: "n1", Role: RoleRoot, Bounds: KnownBounds(Bounds{0, 0, 1, 1}),
+			Checked: optionalBoolPtr(false),
+		},
+	}
+	wire := string(marshal(t, tree))
+	if strings.Contains(wire, `"defaults"`) {
+		t.Fatalf("read tree carried defaults: %s", wire)
+	}
+	if strings.Contains(wire, `"checked"`) {
+		t.Fatalf("known-default checked was not omitted: %s", wire)
+	}
+	var decodedTree ReadTree
+	if err := json.Unmarshal([]byte(wire), &decodedTree); err != nil {
+		t.Fatalf("decode read tree: %v", err)
+	}
+	if decodedTree.Root == nil || decodedTree.Root.Checked == nil || *decodedTree.Root.Checked {
+		t.Fatalf("absent checked did not restore known false: %#v", decodedTree.Root)
+	}
+
+	delta := &ReadDelta{Format: "delta", Base: "O1", View: ViewCompact}
+	if got := string(marshal(t, delta)); got != `{"format":"delta","base":"O1","view":"compact"}` {
+		t.Fatalf("empty delta wire: %s", got)
+	}
+
+	for _, tc := range []struct {
+		name string
+		body string
+		dst  any
+	}{
+		{
+			name: "read tree",
+			body: `{"format":"full","scope":"reported_visible_with_context","view":"compact",` +
+				`"defaults":{"checked":false},"root":{"ref":"n1","role":"root","bounds":[0,0,1,1]}}`,
+			dst: &ReadTree{},
+		},
+		{
+			name: "read delta",
+			body: `{"format":"delta","base":"O1","view":"compact","defaults":{"checked":false}}`,
+			dst:  &ReadDelta{},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := json.Unmarshal([]byte(tc.body), tc.dst); err == nil {
+				t.Fatalf("accepted removed defaults: %s", tc.body)
+			}
+		})
+	}
+}
+
 func TestTreeAndDeltaEncoding(t *testing.T) {
 	yes, no := true, false
 	full := &Tree{Root: &Node{Ref: "n1", Role: RoleRoot, Bounds: &Bounds{0, 0, 1080, 2400},
 		Enabled: &yes, Focused: &no, Selected: &no, Protected: &no}}
 	got := string(marshal(t, full))
-	want := `{"format":"full","scope":"reported_visible_with_context","root":{"ref":"n1","role":"root","bounds":[0,0,1080,2400]}}`
+	want := `{"format":"full","scope":"reported_visible_with_context","root":{"ref":"n1","role":"root","bounds":[0,0,1080,2400],"checked":null}}`
 	if got != want {
 		t.Fatalf("full encoding:\n got %s\nwant %s", got, want)
 	}

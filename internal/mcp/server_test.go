@@ -309,14 +309,14 @@ const (
 	testForegroundJSON = `{"state":"present","package":"com.example.probe","task_id":12}`
 	// Observations always deliver the compact view; historical inspection
 	// material is always detailed, so the tree scope of an inspection response
-	// must carry the detailed view and defaults in its nested complete tree.
+	// must carry the detailed view in its nested complete tree.
 	testFullTreeJSON = `{"format":"full","scope":"reported_visible_with_context",` +
-		`"view":"compact","defaults":{"checked":false},` +
+		`"view":"compact",` +
 		`"root":{"ref":"n1","role":"root","bounds":[0,0,1080,2400]}}`
 	testDetailedTreeJSON = `{"format":"full","scope":"reported_visible_with_context",` +
-		`"view":"detailed","defaults":{"checked":false},` +
+		`"view":"detailed",` +
 		`"root":{"ref":"n1","role":"root","bounds":[0,0,1080,2400]}}`
-	testDeltaTreeJSON = `{"format":"delta","base":"O1","view":"compact","defaults":{"checked":false}}`
+	testDeltaTreeJSON = `{"format":"delta","base":"O1","view":"compact"}`
 )
 
 func TestToolCatalog(t *testing.T) {
@@ -720,7 +720,7 @@ func TestStartProjectionWithFullTree(t *testing.T) {
 	requireTestContains(t, text, "observation.screen="+testScreenJSON)
 	requireTestContains(t, text, "observation.foreground="+testForegroundJSON)
 	requireTestContains(t, text, "\n\ntree v2 format=full id=O1 scope=reported_visible_with_context view=compact nodes=1 entries=1\n"+
-		"defaults {\"checked\":false}\n\nn1 root [0,0,1080,2400]\nend tree\n")
+		"\nn1 root [0,0,1080,2400]\nend tree\n")
 	structured := testStructuredJSON(t, result)
 	requireTestContains(t, structured, fmt.Sprintf(`"operation_id":%q`, operation))
 	requireTestContains(t, structured, `"format":"full"`)
@@ -755,7 +755,7 @@ func TestObservePartialWithImage(t *testing.T) {
 	requireTestContains(t, text, "observation.status=partial")
 	requireTestContains(t, text, "observation.missing=[\"tree\"]")
 	requireTestContains(t, text, "\n\ntree v2 format=delta id=O2 base=O1 view=compact scope=reported_visible_with_context changes=0\n"+
-		"defaults {\"checked\":false}\n\nend tree\n")
+		"\nend tree\n")
 	requireTestContains(t, text, "\"media_type\":\"image/png\"")
 	requireTestContains(t, text, "\"width\":2")
 	requireTestContains(t, text, "\"read_only\":true")

@@ -1056,9 +1056,10 @@ func TestScrollSafeSpanRejectsUnusableScopeSource(t *testing.T) {
 	}
 }
 
-// TestScrollRevalidateLogSeparatesSegment covers the log boundary: a middle
-// conflict can leave both endpoint flags true while the whole segment is not
-// proven, and the published counters still describe the full matched set.
+// TestScrollRevalidateLogSeparatesSegment covers the log boundary: every safe
+// span can be too short to replan while both endpoints of the original segment
+// remain individually provable. The endpoint flags stay separate from the
+// whole-segment proof.
 func TestScrollRevalidateLogSeparatesSegment(t *testing.T) {
 	var buffer strings.Builder
 	logger := eventlog.New(&buffer, "instance-test")
@@ -1067,8 +1068,17 @@ func TestScrollRevalidateLogSeparatesSegment(t *testing.T) {
 	h.device.scriptCaptures(observed)
 	start := h.startSession()
 	container := scrollContainerRef(t, h)
-	fresh := scrollPageWithInnerScope(scrollPageSpecs(screenRect(), device.Rect{Top: 1000}),
-		device.Rect{Right: 1080, Top: 1500, Bottom: 1600})
+	fresh := scrollPageSpecs(screenRect(), device.Rect{Top: 1000})
+	for _, blocked := range []device.Rect{
+		{Right: 1080, Top: 0, Bottom: 1000},
+		{Right: 1080, Top: 1100, Bottom: 2100},
+		{Right: 1080, Top: 2200, Bottom: 2400},
+	} {
+		fresh = append(fresh, rawNodeSpec{
+			Parent: 1, Bounds: blocked,
+			Class: "androidx.recyclerview.widget.RecyclerView", Scrollable: true,
+		})
+	}
 	h.device.scriptCaptures(scrollPageStep(fresh), scrollPageStep(fresh))
 
 	result := h.actP(t, "Psegment", start.Observation.ID, protocol.Operation{

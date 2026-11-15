@@ -309,21 +309,12 @@ func equalReadNode(a, b *protocol.ReadNode) bool {
 	if !equalStrings(a.Label, b.Label) || !equalActions(a.Actions, b.Actions) {
 		return false
 	}
-	if !equalTriBool(a.Enabled, b.Enabled, true) {
+	if !equalOptionalBool(a.Enabled, b.Enabled) ||
+		!equalOptionalBool(a.Focused, b.Focused) ||
+		!equalOptionalBool(a.Selected, b.Selected) ||
+		!equalOptionalBool(a.Protected, b.Protected) ||
+		!equalOptionalBool(a.Checked, b.Checked) {
 		return false
-	}
-	for _, pair := range []struct {
-		left, right *bool
-		def         bool
-	}{
-		{a.Focused, b.Focused, false},
-		{a.Selected, b.Selected, false},
-		{a.Protected, b.Protected, false},
-		{a.Checked, b.Checked, false},
-	} {
-		if !equalTriBool(pair.left, pair.right, pair.def) {
-			return false
-		}
 	}
 	if !equalOptionalString(a.Value, b.Value) || !equalOptionalString(a.Hint, b.Hint) ||
 		!equalOptionalString(a.Resource, b.Resource) {

@@ -230,12 +230,15 @@ func TestInspectionEncoding(t *testing.T) {
 	}
 	got := string(marshal(t, view))
 	for _, want := range []string{
-		`"scope":"query"`, `"view":"detailed"`, `"defaults":{"checked":false}`,
-		`"matches":[`, `"node":{`, `"path":["n1"]`, `"total":1`,
+		`"scope":"query"`, `"view":"detailed"`, `"matches":[`, `"node":{`,
+		`"path":["n1"]`, `"total":1`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("missing %s in %s", want, got)
 		}
+	}
+	if strings.Contains(got, `"defaults"`) {
+		t.Fatalf("query inspection carried defaults: %s", got)
 	}
 	if strings.Contains(got, `"tree"`) || strings.Contains(got, `"root"`) {
 		t.Fatalf("query inspection must not carry tree/root: %s", got)

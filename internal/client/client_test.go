@@ -1292,6 +1292,156 @@ func TestObservationImageWithoutCarrierIsAbsent(t *testing.T) {
 	}
 }
 
+// TestObservationTreeTriStateDecode pins the client as a transparent wire
+// consumer: a missing complete-node state member restores the contract default,
+// explicit null stays unknown, and explicit non-default values stay false/true.
+// Re-encoding must omit only the known defaults and retain every null.
+func TestObservationTreeTriStateDecode(t *testing.T) {
+	const responseBody = `{"observation":{"status":"complete","id":"O1","tree":{` +
+		`"format":"full","scope":"reported_visible_with_context","view":"compact",` +
+		`"root":{"ref":"n1","role":"root","bounds":[0,0,1080,2400],"children":[` +
+		`{"ref":"n2","role":"text","bounds":[0,0,100,100]},` +
+		`{"ref":"n3","role":"text","bounds":[0,0,100,100],` +
+		`"enabled":null,"focused":null,"selected":null,"checked":null,"protected":null},` +
+		`{"ref":"n4","role":"button","bounds":[0,0,100,100],` +
+		`"enabled":false,"focused":true,"selected":true,"checked":true,"protected":true}` +
+		`]}}}}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		writeResponse(w, http.StatusOK, responseBody)
+	}))
+	defer server.Close()
+
+	response, err := newTestClient(t, server.URL).Status(context.Background(), "O1")
+	if err != nil {
+		t.Fatalf("Status() error: %v", err)
+	}
+	if response == nil || response.Result == nil || response.Result.Observation == nil ||
+		response.Result.Observation.Tree == nil || response.Result.Observation.Tree.Full == nil ||
+		response.Result.Observation.Tree.Full.Root == nil {
+		t.Fatal("full observation tree was not decoded")
+	}
+	children := response.Result.Observation.Tree.Full.Root.Children
+	if len(children) != 3 {
+		t.Fatalf("child count = %d, want 3", len(children))
+	}
+	byRef := make(map[string]*protocol.ReadNode, len(children))
+	for _, child := range children {
+		byRef[child.Ref] = child
+	}
+
+	defaults := byRef["n2"]
+	if defaults == nil || defaults.Enabled == nil || !*defaults.Enabled {
+		t.Fatal("missing enabled did not restore known true")
+	}
+	for name, value := range map[string]*bool{
+		"focused": defaults.Focused, "selected": defaults.Selected,
+		"checked": defaults.Checked, "protected": defaults.Protected,
+	} {
+		if value == nil || *value {
+			t.Fatalf("missing %s did not restore known false", name)
+		}
+	}
+
+	unknown := byRef["n3"]
+	if unknown == nil || unknown.Enabled != nil || unknown.Focused != nil ||
+		unknown.Selected != nil || unknown.Checked != nil || unknown.Protected != nil {
+		t.Fatal("explicit null was not preserved as unknown")
+	}
+
+	explicit := byRef["n4"]
+	if explicit == nil || explicit.Enabled == nil || *explicit.Enabled {
+		t.Fatal("explicit enabled=false was not preserved")
+	}
+	for name, value := range map[string]*bool{
+		"focused": explicit.Focused, "selected": explicit.Selected,
+		"checked": explicit.Checked, "protected": explicit.Protected,
+	} {
+		if value == nil || !*value {
+			t.Fatalf("explicit %s=true was not preserved", name)
+		}
+	}
+
+	encoded, err := protocol.JSON(response.Result)
+	if err != nil {
+		t.Fatalf("protocol.JSON: %v", err)
+	}
+	text := string(encoded)
+	if strings.Contains(text, "defaults") {
+		t.Fatal("client re-encode emitted a defaults declaration")
+	}
+	for _, member := range []string{"enabled", "focused", "selected", "checked", "protected"} {
+		if !strings.Contains(text, `"`+member+`":null`) {
+			t.Fatalf("explicit null %s was not retained: %s", member, text)
+		}
+	}
+	defaultNode, err := protocol.JSON(defaults)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, member := range []string{"enabled", "focused", "selected", "checked", "protected"} {
+		if strings.Contains(string(defaultNode), `"`+member+`"`) {
+			t.Fatalf("known default %s was not omitted: %s", member, defaultNode)
+		}
+	}
+	if !strings.Contains(text, `"enabled":false`) {
+		t.Fatalf("explicit enabled=false was not retained: %s", text)
+	}
+}
+
+// TestTargetChangedKeepsDeliveredObservationAndRetry pins the client's error
+// branch: a structured rejection may carry the new observation and the retry
+// entry. The client performs exactly one request and never retries by itself.
+func TestTargetChangedKeepsDeliveredObservationAndRetry(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
+		if request.URL.Path != "/api/act" {
+			t.Errorf("path = %s, want /api/act", request.URL.Path)
+		}
+		if got := request.Header.Get(operationHeader); !strings.HasPrefix(got, "P") {
+			t.Errorf("operation header = %q", got)
+		}
+		writeResponse(w, http.StatusConflict,
+			`{"operation_id":"P7","operation_state":"finished","outcome":"not_executed","phase":"revalidate",`+
+				`"observation":{"status":"complete","id":"O2","origin":"P1","revision":2,"tree":{`+
+				`"format":"full","scope":"reported_visible_with_context","view":"compact",`+
+				`"root":{"ref":"n1","role":"root","bounds":[0,0,1080,2400]}}},`+
+				`"error":{"code":"target_changed","message":"目标元素已变化，本次未派发"},`+
+				`"recovery":{"entry":"retry","reference":"O","input_state":"effective"}}`)
+	}))
+	defer server.Close()
+
+	response, err := newTestClient(t, server.URL).Act(context.Background(), &protocol.ActRequest{
+		ObservationID: "O1",
+		Operation: protocol.Operation{
+			Type: string(protocol.ActionTap),
+			Target: &protocol.Target{
+				Ref: "n1", UseRef: true,
+			},
+		},
+	}, WithOperationID("Pclient"))
+	clientErr := requireClientError(t, err)
+	if response == nil || response.Result == nil {
+		t.Fatal("service rejection did not retain a response result")
+	}
+	if clientErr.Code != protocol.CodeTargetChanged || clientErr.HTTPStatus != http.StatusConflict {
+		t.Fatalf("client error = %+v, want target_changed/409", clientErr)
+	}
+	if clientErr.Result != response.Result {
+		t.Fatal("typed error and response do not share the decoded result")
+	}
+	if response.Result.Observation == nil || response.Result.Observation.ID != "O2" {
+		t.Fatalf("delivered observation = %+v, want O2", response.Result.Observation)
+	}
+	if response.Result.Recovery == nil || response.Result.Recovery.Entry != protocol.RecoveryEntryRetry ||
+		response.Result.Recovery.Reference != protocol.RecoveryReferenceO {
+		t.Fatalf("recovery = %+v, want retry/O", response.Result.Recovery)
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("requests = %d, want exactly one (no automatic retry)", got)
+	}
+}
+
 func TestOversizedResponseIsRejected(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

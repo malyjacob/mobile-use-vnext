@@ -62,9 +62,9 @@ func (b *treeTextBuffer) writeBool(value bool) {
 	b.write("false")
 }
 
-// treeTextBlock is one header, the fixed defaults declaration, a blank line, the
-// body and a trailer. The trailer line ends with a newline; a missing trailer in
-// host output means host truncation.
+// treeTextBlock is one header, a blank line, the body and a trailer. The trailer
+// line ends with a newline; a missing trailer in host output means host
+// truncation.
 type treeTextBlock struct {
 	header  string
 	body    treeTextBuffer
@@ -72,7 +72,7 @@ type treeTextBlock struct {
 }
 
 func (b *treeTextBlock) finish() (string, bool) {
-	header := b.header + "\ndefaults {\"checked\":false}\n\n"
+	header := b.header + "\n\n"
 	total := len(header) + b.body.total + len(b.trailer) + 1
 	var builder strings.Builder
 	builder.Grow(total)

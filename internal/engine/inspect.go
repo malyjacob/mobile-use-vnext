@@ -33,6 +33,13 @@ type inspectMatchWire struct {
 	Path []string           `json:"path"`
 }
 
+// inspectionSubtreeContent is the unit-budgeted content object of a subtree
+// inspection. The inspection envelope carries the shared metadata once.
+type inspectionSubtreeContent struct {
+	View string             `json:"view"`
+	Root *protocol.ReadNode `json:"root"`
+}
+
 // Inspect returns historical reading material for one retained observation. It
 // performs no device I/O, takes no work position, renews no lease, confirms no
 // baseline and allocates no observation or operation. The historical view is
@@ -129,13 +136,11 @@ func (e *Engine) inspectionSubtree(view *protocol.InspectionView, root *protocol
 	if detailed == nil {
 		return protocol.Internal()
 	}
-	// The unit budget covers the {view, defaults, root} content object exactly
-	// as the inspection envelope declares it once.
-	encoded, err := protocol.JSON(struct {
-		View     string             `json:"view"`
-		Defaults protocol.Defaults  `json:"defaults"`
-		Root     *protocol.ReadNode `json:"root"`
-	}{View: protocol.ViewDetailed, Root: detailed})
+	// The unit budget covers the {view, root} content object exactly as the
+	// inspection envelope declares it once.
+	encoded, err := protocol.JSON(inspectionSubtreeContent{
+		View: protocol.ViewDetailed, Root: detailed,
+	})
 	if err != nil {
 		return protocol.Internal()
 	}
@@ -223,7 +228,6 @@ func (e *Engine) inspectionQuery(view *protocol.InspectionView, root *protocol.N
 func queryEmptyBytes(total int, truncated bool) (int, error) {
 	encoded, err := protocol.JSON(struct {
 		View      string             `json:"view"`
-		Defaults  protocol.Defaults  `json:"defaults"`
 		Matches   []inspectMatchWire `json:"matches"`
 		Total     int                `json:"total"`
 		Truncated bool               `json:"truncated"`

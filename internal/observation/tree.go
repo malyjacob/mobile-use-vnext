@@ -7,21 +7,14 @@ import (
 	"github.com/malyjacob/mobile-use-vnext/internal/protocol"
 )
 
-// Equal compares two trees after canonical default normalization.
+// Equal compares two trees using strict tri-state equality.
 //
-// Two nodes are equal when every logical field is equal. The encoding default
-// is treated as the value it promises:
-//   - a missing (zero value) enabled means known true, so nil Enabled equals
-//     a pointer to true;
-//   - focused/selected/protected nil equals false;
+// Two nodes are equal when every logical field is equal:
+//   - enabled, focused, selected, protected, and checked compare strictly as
+//     three states (nil unknown, false, true); nil never equals a known bool;
 //   - an empty label/actions slice equals nil;
 //   - context false equals the zero value;
-//   - role, bounds, value, hint (tri-state strings), checked and axis are
-//     compared exactly, because their zero value means "not known" and is not
-//     interchangeable with a known value.
-//
-// Two trees whose encodings differ still compare equal when they encode the
-// same logical content.
+//   - role, bounds, value, hint, resource, and axis are compared exactly.
 func Equal(a, b *protocol.Tree) bool {
 	if a == nil || b == nil {
 		return a == b
@@ -61,19 +54,11 @@ func equalNode(a, b *protocol.Node) bool {
 			return false
 		}
 	}
-	if !equalTriBool(a.Enabled, b.Enabled, true) {
-		return false
-	}
-	if !equalTriBool(a.Focused, b.Focused, false) {
-		return false
-	}
-	if !equalTriBool(a.Selected, b.Selected, false) {
-		return false
-	}
-	if !equalTriBool(a.Protected, b.Protected, false) {
-		return false
-	}
-	if !equalOptionalBool(a.Checked, b.Checked) {
+	if !equalOptionalBool(a.Enabled, b.Enabled) ||
+		!equalOptionalBool(a.Focused, b.Focused) ||
+		!equalOptionalBool(a.Selected, b.Selected) ||
+		!equalOptionalBool(a.Protected, b.Protected) ||
+		!equalOptionalBool(a.Checked, b.Checked) {
 		return false
 	}
 	if !equalOptionalString(a.Value, b.Value) || !equalOptionalString(a.Hint, b.Hint) ||
@@ -92,17 +77,6 @@ func equalNode(a, b *protocol.Node) bool {
 		}
 	}
 	return true
-}
-
-// equalTriBool compares a field whose absent encoding promises def.
-func equalTriBool(a, b *bool, def bool) bool {
-	if a == nil {
-		a = &def
-	}
-	if b == nil {
-		b = &def
-	}
-	return *a == *b
 }
 
 func equalOptionalBool(a, b *bool) bool {
@@ -174,10 +148,10 @@ func appendCanonical(buf []byte, n *protocol.Node) []byte {
 		buf = append(buf, 'A')
 		buf = append(buf, strconv.Quote(string(action))...)
 	}
-	buf = appendTriBool(buf, 'E', n.Enabled, true)
-	buf = appendTriBool(buf, 'F', n.Focused, false)
-	buf = appendTriBool(buf, 'S', n.Selected, false)
-	buf = appendTriBool(buf, 'P', n.Protected, false)
+	buf = appendOptBool(buf, 'E', n.Enabled)
+	buf = appendOptBool(buf, 'F', n.Focused)
+	buf = appendOptBool(buf, 'S', n.Selected)
+	buf = appendOptBool(buf, 'P', n.Protected)
 	buf = appendOptBool(buf, 'C', n.Checked)
 	buf = appendOptString(buf, 'V', n.Value)
 	buf = appendOptString(buf, 'H', n.Hint)
@@ -196,17 +170,6 @@ func appendCanonical(buf []byte, n *protocol.Node) []byte {
 		buf = append(buf, ',')
 	}
 	return append(buf, ']')
-}
-
-func appendTriBool(buf []byte, tag byte, v *bool, def bool) []byte {
-	buf = append(buf, tag)
-	if v == nil {
-		v = &def
-	}
-	if *v {
-		return append(buf, '1')
-	}
-	return append(buf, '0')
 }
 
 func appendOptBool(buf []byte, tag byte, v *bool) []byte {

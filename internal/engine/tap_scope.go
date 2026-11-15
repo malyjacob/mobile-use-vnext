@@ -953,3 +953,22 @@ func staticTapRefCheck(obs *observationState, operation *protocol.Operation) (
 	plan, apiErr := chooseTapPlan(scope, input, target, action, started)
 	return nil, nil, plan, apiErr
 }
+
+// staticTextRefCheck keeps the text capability checks in the shared static
+// content pass and plans the focus tap with the same target-subtree planner as
+// tap. The returned plan carries the focus action; the text target itself is
+// rechecked by the dispatch binder after the tap.
+func staticTextRefCheck(obs *observationState, operation *protocol.Operation) (
+	*pointCheck, *scrollPlan, *tapPlan, *protocol.APIError) {
+	if operation == nil || operation.Type != "text" ||
+		operation.Target == nil || !operation.Target.UseRef {
+		return nil, nil, nil, protocol.Invalid("文字操作缺少 ref target")
+	}
+	point, scroll, apiErr := staticActContentCheck(obs, operation)
+	if apiErr != nil {
+		return point, scroll, nil, apiErr
+	}
+	focus := *operation
+	focus.Type = "tap"
+	return staticTapRefCheck(obs, &focus)
+}

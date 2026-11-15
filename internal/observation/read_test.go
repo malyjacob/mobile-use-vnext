@@ -1,6 +1,8 @@
 package observation
 
 import (
+	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -68,8 +70,8 @@ func TestProjectCompactCheckedDefault(t *testing.T) {
 		t.Fatalf("encode compact tree: %v", err)
 	}
 	text := string(encoded)
-	if !strings.Contains(text, `"defaults":{"checked":false}`) {
-		t.Fatalf("compact tree must declare the checked default: %s", text)
+	if strings.Contains(text, `"defaults"`) {
+		t.Fatalf("compact tree must not carry defaults: %s", text)
 	}
 	if strings.Contains(text, `"ref":"n4","role":"group","checked"`) ||
 		strings.Contains(text, `"ref":"n4","role":"group","bounds"`) {
@@ -142,6 +144,107 @@ func TestReadSetPreservesExplicitValues(t *testing.T) {
 	}
 }
 
+func TestReadDeltaCombinedSetAndEmptyOmitDefaults(t *testing.T) {
+	baseLeaf := plainT("n2", protocol.RoleInput)
+	baseLeaf.Value = readString("hello")
+	baseLeaf.Label = []string{"标签"}
+	baseLeaf.Checked = nil
+	base := ProjectCompactTree(rootT(baseLeaf))
+
+	emptyDelta, err := ReadDiff("O1", base, base)
+	if err != nil {
+		t.Fatalf("empty ReadDiff: %v", err)
+	}
+	emptyJSON, err := protocol.JSON(emptyDelta)
+	if err != nil {
+		t.Fatalf("protocol.JSON(emptyDelta): %v", err)
+	}
+	if string(emptyJSON) != `{"format":"delta","base":"O1","view":"compact"}` {
+		t.Fatalf("empty delta JSON = %s", emptyJSON)
+	}
+
+	curLeaf := plainT("n2", protocol.RoleInput)
+	emptyStr := ""
+	curLeaf.Value = &emptyStr
+	curLeaf.Label = []string{}
+	curLeaf.Checked = readBool(false)
+	curLeaf.Focused = readBool(true)
+	curLeaf.Enabled = nil
+	current := ProjectCompactTree(rootT(curLeaf))
+
+	delta, err := ReadDiff("O1", base, current)
+	if err != nil {
+		t.Fatalf("ReadDiff: %v", err)
+	}
+	deltaJSON, err := protocol.JSON(delta)
+	if err != nil {
+		t.Fatalf("protocol.JSON(delta): %v", err)
+	}
+	for _, want := range []string{`"checked":false`, `"focused":true`, `"enabled":null`, `"value":""`, `"label":[]`} {
+		if !strings.Contains(string(deltaJSON), want) {
+			t.Fatalf("delta JSON lost %s: %s", want, deltaJSON)
+		}
+	}
+	if strings.Contains(string(deltaJSON), `"defaults"`) {
+		t.Fatalf("delta JSON must not include defaults: %s", deltaJSON)
+	}
+	applied, err := ReadApply(base, delta)
+	if err != nil {
+		t.Fatalf("ReadApply: %v", err)
+	}
+	if !ReadEqual(applied, current) {
+		t.Fatalf("ReadApply mismatch")
+	}
+	gotBytes, err := protocol.JSON(applied)
+	if err != nil {
+		t.Fatalf("protocol.JSON(applied): %v", err)
+	}
+	wantBytes, err := protocol.JSON(current)
+	if err != nil {
+		t.Fatalf("protocol.JSON(current): %v", err)
+	}
+	if string(gotBytes) != string(wantBytes) {
+		t.Fatalf("canonical JSON mismatch:\ngot:  %s\nwant: %s", gotBytes, wantBytes)
+	}
+}
+
+func TestUnknownStateNodesKeepBoundsAndStayOutOfChains(t *testing.T) {
+	unknownChild := plainT("n3", protocol.RoleView)
+	unknownChild.Selected = nil
+	unknownParent := plainT("n2", protocol.RoleView)
+	unknownParent.Protected = nil
+	unknownParent.Children = []*protocol.Node{unknownChild}
+	leaf := plainT("n4", protocol.RoleText)
+	leaf.Label = []string{"保留"}
+	unknownChild.Children = []*protocol.Node{leaf}
+
+	compact := ProjectCompactTree(rootT(unknownParent))
+	if hasChain(compact.Root, []string{"n2", "n3"}) {
+		t.Fatalf("unknown-state nodes must not join a chain: %+v", compact.Root)
+	}
+	for _, ref := range []string{"n2", "n3"} {
+		node := childOf(t, compact.Root, ref)
+		if node == nil || node.Bounds.Kind != protocol.GeometryKnown {
+			t.Fatalf("unknown-state node %s must keep known geometry: %+v", ref, node)
+		}
+	}
+
+	// Same packing guard applies to add/replace delta definitions.
+	delta := PackDelta(&protocol.ReadDelta{
+		Format: "delta", Base: "O1", View: protocol.ViewCompact,
+		Add: []*protocol.ReadNode{projectRead(unknownParent)},
+		Replace: map[string]*protocol.ReadNode{
+			"n2": projectRead(unknownParent),
+		},
+	})
+	if hasChain(delta.Add[0], []string{"n2", "n3"}) {
+		t.Fatalf("PackDelta must not chain unknown-state add nodes: %+v", delta.Add[0])
+	}
+	if hasChain(delta.Replace["n2"], []string{"n2", "n3"}) {
+		t.Fatalf("PackDelta must not chain unknown-state replace nodes: %+v", delta.Replace["n2"])
+	}
+}
+
 func TestGeometryStatesAreDistinct(t *testing.T) {
 	unknown := plainT("n2", protocol.RoleView)
 	unknown.Bounds = nil
@@ -177,25 +280,27 @@ func TestAnonymousPlainPredicate(t *testing.T) {
 		t.Fatal("a known-default view must be anonymous plain")
 	}
 	cases := map[string]func(n *protocol.Node){
-		"root role":       func(n *protocol.Node) { n.Role = protocol.RoleRoot },
-		"context":         func(n *protocol.Node) { n.Context = true },
-		"action":          func(n *protocol.Node) { n.Actions = []protocol.Action{protocol.ActionTap} },
-		"label":           func(n *protocol.Node) { n.Label = []string{"x"} },
-		"empty value":     func(n *protocol.Node) { n.Value = readString("") },
-		"empty hint":      func(n *protocol.Node) { n.Hint = readString("") },
-		"empty resource":  func(n *protocol.Node) { n.Resource = readString("") },
-		"axis":            func(n *protocol.Node) { n.Axis = protocol.AxisY },
-		"unknown enabled": func(n *protocol.Node) { n.Enabled = nil },
-		"disabled":        func(n *protocol.Node) { n.Enabled = readBool(false) },
-		"unknown focused": func(n *protocol.Node) { n.Focused = nil },
-		"unknown checked": func(n *protocol.Node) { n.Checked = nil },
-		"selected":        func(n *protocol.Node) { n.Selected = readBool(true) },
-		"protected":       func(n *protocol.Node) { n.Protected = readBool(true) },
-		"input role":      func(n *protocol.Node) { n.Role = protocol.RoleInput },
-		"scroll role":     func(n *protocol.Node) { n.Role = protocol.RoleScroll },
-		"image role":      func(n *protocol.Node) { n.Role = protocol.RoleImage },
-		"text role":       func(n *protocol.Node) { n.Role = protocol.RoleText },
-		"checkable role":  func(n *protocol.Node) { n.Role = protocol.RoleCheckbox },
+		"root role":         func(n *protocol.Node) { n.Role = protocol.RoleRoot },
+		"context":           func(n *protocol.Node) { n.Context = true },
+		"action":            func(n *protocol.Node) { n.Actions = []protocol.Action{protocol.ActionTap} },
+		"label":             func(n *protocol.Node) { n.Label = []string{"x"} },
+		"empty value":       func(n *protocol.Node) { n.Value = readString("") },
+		"empty hint":        func(n *protocol.Node) { n.Hint = readString("") },
+		"empty resource":    func(n *protocol.Node) { n.Resource = readString("") },
+		"axis":              func(n *protocol.Node) { n.Axis = protocol.AxisY },
+		"unknown enabled":   func(n *protocol.Node) { n.Enabled = nil },
+		"disabled":          func(n *protocol.Node) { n.Enabled = readBool(false) },
+		"unknown focused":   func(n *protocol.Node) { n.Focused = nil },
+		"unknown checked":   func(n *protocol.Node) { n.Checked = nil },
+		"unknown selected":  func(n *protocol.Node) { n.Selected = nil },
+		"unknown protected": func(n *protocol.Node) { n.Protected = nil },
+		"selected":          func(n *protocol.Node) { n.Selected = readBool(true) },
+		"protected":         func(n *protocol.Node) { n.Protected = readBool(true) },
+		"input role":        func(n *protocol.Node) { n.Role = protocol.RoleInput },
+		"scroll role":       func(n *protocol.Node) { n.Role = protocol.RoleScroll },
+		"image role":        func(n *protocol.Node) { n.Role = protocol.RoleImage },
+		"text role":         func(n *protocol.Node) { n.Role = protocol.RoleText },
+		"checkable role":    func(n *protocol.Node) { n.Role = protocol.RoleCheckbox },
 	}
 	for name, mutate := range cases {
 		node := plainT("n2", protocol.RoleView)
@@ -499,4 +604,590 @@ func itoa(value int) string {
 // decoder the HTTP client uses.
 func protocolDecode(data []byte, value any) error {
 	return protocol.Decode(data, value)
+}
+
+func readR(ref string, role protocol.Role, label string, children ...*protocol.ReadNode) *protocol.ReadNode {
+	return &protocol.ReadNode{
+		Ref: ref, Role: role,
+		Bounds:    readRect(0, 0, 100, 100),
+		Label:     []string{label},
+		Actions:   []protocol.Action{},
+		Enabled:   readBool(true),
+		Focused:   readBool(false),
+		Selected:  readBool(false),
+		Checked:   readBool(false),
+		Protected: readBool(false),
+		Children:  children,
+	}
+}
+
+func readRootR(children ...*protocol.ReadNode) *protocol.ReadTree {
+	return PackTree(&protocol.ReadTree{
+		Format: "full", Scope: protocol.Scope, View: protocol.ViewCompact,
+		Root: readR("n1", protocol.RoleRoot, "root", children...),
+	})
+}
+
+func mustReadDelta(t *testing.T, baseID string, base, current *protocol.ReadTree) *protocol.ReadDelta {
+	t.Helper()
+	delta, err := ReadDiff(baseID, base, current)
+	if err != nil {
+		t.Fatalf("ReadDiff: %v", err)
+	}
+	return delta
+}
+
+func mustReadApplyEqual(t *testing.T, base *protocol.ReadTree, delta *protocol.ReadDelta, current *protocol.ReadTree) {
+	t.Helper()
+	got, err := ReadApply(base, delta)
+	if err != nil {
+		t.Fatalf("ReadApply: %v", err)
+	}
+	if !ReadEqual(got, current) {
+		t.Fatalf("ReadApply result differs from current")
+	}
+	gotJSON, err := protocol.JSON(got)
+	if err != nil {
+		t.Fatalf("encode applied tree: %v", err)
+	}
+	wantJSON, err := protocol.JSON(current)
+	if err != nil {
+		t.Fatalf("encode current tree: %v", err)
+	}
+	if string(gotJSON) != string(wantJSON) {
+		t.Fatalf("canonical bytes differ:\ngot:  %s\nwant: %s", gotJSON, wantJSON)
+	}
+}
+
+func requireReadChildBlock(t *testing.T, delta *protocol.ReadDelta, parent string, want ...string) {
+	t.Helper()
+	got, ok := delta.Children[parent]
+	if !ok {
+		t.Fatalf("missing children[%s]: %+v", parent, delta.Children)
+	}
+	if got == nil {
+		t.Fatalf("children[%s] must be an explicit list, not nil", parent)
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("children[%s] = %v, want %v", parent, got, want)
+	}
+}
+
+func readDefinitionRefs(defs []*protocol.ReadNode) []string {
+	out := make([]string, 0, len(defs))
+	for _, def := range defs {
+		if def != nil {
+			out = append(out, def.Ref)
+		}
+	}
+	return out
+}
+
+func readWireText(t *testing.T, value any) string {
+	t.Helper()
+	encoded, err := protocol.JSON(value)
+	if err != nil {
+		t.Fatalf("protocol.JSON: %v", err)
+	}
+	return string(encoded)
+}
+
+func requireReadRejectedAtomically(t *testing.T, base *protocol.ReadTree, delta *protocol.ReadDelta) {
+	t.Helper()
+	var baseBefore protocol.ReadTree
+	if err := protocol.Decode([]byte(readWireText(t, base)), &baseBefore); err != nil {
+		t.Fatalf("clone baseline: %v", err)
+	}
+	var deltaBefore protocol.ReadDelta
+	if err := protocol.Decode([]byte(readWireText(t, delta)), &deltaBefore); err != nil {
+		t.Fatalf("clone delta: %v", err)
+	}
+	got, err := ReadApply(base, delta)
+	if err == nil {
+		t.Fatalf("ReadApply accepted an illegal delta: %+v", got)
+	}
+	if got != nil {
+		t.Fatalf("ReadApply returned a partial tree on rejection")
+	}
+	var baseAfter protocol.ReadTree
+	if err := protocol.Decode([]byte(readWireText(t, base)), &baseAfter); err != nil {
+		t.Fatalf("read baseline after rejection: %v", err)
+	}
+	if !reflect.DeepEqual(baseAfter, baseBefore) {
+		t.Fatalf("ReadApply mutated the baseline")
+	}
+	var deltaAfter protocol.ReadDelta
+	if err := protocol.Decode([]byte(readWireText(t, delta)), &deltaAfter); err != nil {
+		t.Fatalf("read delta after rejection: %v", err)
+	}
+	if !reflect.DeepEqual(deltaAfter, deltaBefore) {
+		t.Fatalf("ReadApply mutated the delta")
+	}
+}
+
+func mustReadRoundTrip(t *testing.T, delta *protocol.ReadDelta) *protocol.ReadDelta {
+	t.Helper()
+	encoded := readWireText(t, delta)
+	var decoded protocol.ReadDelta
+	if err := protocol.Decode([]byte(encoded), &decoded); err != nil {
+		t.Fatalf("decode read delta: %v", err)
+	}
+	if err := decoded.Validate(); err != nil {
+		t.Fatalf("decoded read delta validation: %v", err)
+	}
+	return &decoded
+}
+
+func TestReadDeltaWrapperAddAndUnwrap(t *testing.T) {
+	base := readRootR(readR("n15", protocol.RoleText, "survivor"))
+	current := readRootR(readR("n90", protocol.RoleGroup, "wrapper",
+		readR("n15", protocol.RoleText, "survivor"),
+		readR("n91", protocol.RoleButton, "new"),
+	))
+
+	delta := mustReadDelta(t, "O1", base, current)
+	if got := fmt.Sprint(readDefinitionRefs(delta.Add)); got != "[n90 n91]" {
+		t.Fatalf("add roots = %s, want [n90 n91]", got)
+	}
+	for _, def := range delta.Add {
+		if len(def.Children) != 0 {
+			t.Fatalf("assembly definition %s must not inline children: %+v", def.Ref, def)
+		}
+	}
+	requireReadChildBlock(t, delta, "n1", "n90")
+	requireReadChildBlock(t, delta, "n90", "n15", "n91")
+	mustReadApplyEqual(t, base, delta, current)
+}
+
+func TestReadDeltaChainBoundaryWithAssemblyRoot(t *testing.T) {
+	leafNode := plainT("n4", protocol.RoleText)
+	leafNode.Label = []string{"kept"}
+	mid := plainT("n3", protocol.RoleView)
+	mid.Children = []*protocol.Node{leafNode}
+	head := plainT("n2", protocol.RoleView)
+	head.Children = []*protocol.Node{mid}
+	base := ProjectCompactTree(rootT(head))
+	if !hasChain(base.Root, []string{"n2", "n3"}) {
+		t.Fatalf("fixture did not produce a baseline chain: %+v", base.Root)
+	}
+
+	wrapper := &protocol.Node{
+		Ref: "n90", Role: protocol.RoleGroup,
+		Bounds:  &protocol.Bounds{Left: 0, Top: 0, Right: 200, Bottom: 200},
+		Label:   []string{"wrapper"},
+		Actions: []protocol.Action{},
+		Enabled: readBool(true), Focused: readBool(false), Selected: readBool(false),
+		Protected: readBool(false), Checked: readBool(false),
+		Children: []*protocol.Node{head.Clone()},
+	}
+	current := ProjectCompactTree(rootT(wrapper))
+
+	delta := mustReadDelta(t, "O1", base, current)
+	if got := fmt.Sprint(readDefinitionRefs(delta.Add)); got != "[n90]" {
+		t.Fatalf("chain boundary add roots = %s, want [n90]", got)
+	}
+	requireReadChildBlock(t, delta, "n1", "n90")
+	requireReadChildBlock(t, delta, "n90", "n2")
+	mustReadApplyEqual(t, base, delta, current)
+}
+
+func TestReadDeltaWireRoundTripAssembly(t *testing.T) {
+	base := readRootR(readR("n15", protocol.RoleText, "survivor"))
+	current := readRootR(readR("n90", protocol.RoleGroup, "wrapper",
+		readR("n15", protocol.RoleText, "survivor"),
+		readR("n91", protocol.RoleButton, "new"),
+	))
+	delta := mustReadDelta(t, "O1", base, current)
+	decoded := mustReadRoundTrip(t, delta)
+	if got := fmt.Sprint(readDefinitionRefs(decoded.Add)); got != "[n90 n91]" {
+		t.Fatalf("decoded add roots = %s, want [n90 n91]", got)
+	}
+	requireReadChildBlock(t, decoded, "n90", "n15", "n91")
+	mustReadApplyEqual(t, base, decoded, current)
+}
+
+func TestReadDeltaStandaloneAddRootChildrenOverride(t *testing.T) {
+	base := readRootR(readR("n3", protocol.RoleText, "survivor"))
+	current := readRootR(readR("n2", protocol.RoleGroup, "wrapper",
+		readR("n3", protocol.RoleText, "survivor"),
+		readR("n4", protocol.RoleButton, "new"),
+	))
+	delta := mustReadDelta(t, "O1", base, current)
+	var standalone *protocol.ReadNode
+	for _, def := range delta.Add {
+		if def.Ref == "n2" {
+			standalone = def
+			break
+		}
+	}
+	if standalone == nil {
+		t.Fatalf("missing standalone assembly root n2: %+v", delta.Add)
+	}
+	if len(standalone.Children) != 0 {
+		t.Fatalf("standalone assembly root must start with no inline children: %+v", standalone)
+	}
+	decoded := mustReadRoundTrip(t, delta)
+	var decodedRoot *protocol.ReadNode
+	for _, def := range decoded.Add {
+		if def.Ref == "n2" {
+			decodedRoot = def
+			break
+		}
+	}
+	if decodedRoot == nil || len(decodedRoot.Children) != 0 {
+		t.Fatalf("strict wire round trip changed the assembly-root shape: %+v", decodedRoot)
+	}
+	requireReadChildBlock(t, decoded, "n2", "n3", "n4")
+	mustReadApplyEqual(t, base, decoded, current)
+}
+
+func TestReadDeltaNestedClosedDefinitionRejectsChildren(t *testing.T) {
+	base := readRootR()
+	cases := []struct {
+		name  string
+		delta *protocol.ReadDelta
+	}{
+		{"nested_closed_node", &protocol.ReadDelta{
+			Format: "delta", Base: "O1", View: protocol.ViewCompact,
+			Add: []*protocol.ReadNode{
+				readR("n2", protocol.RoleGroup, "add",
+					readR("n3", protocol.RoleGroup, "closed")),
+			},
+			Children: map[string][]string{
+				"n1": {"n2"},
+				"n3": {},
+			},
+		}},
+		{"top_level_add_with_inline_children", &protocol.ReadDelta{
+			Format: "delta", Base: "O1", View: protocol.ViewCompact,
+			Add: []*protocol.ReadNode{
+				readR("n2", protocol.RoleGroup, "add",
+					readR("n3", protocol.RoleText, "inline")),
+			},
+			Children: map[string][]string{
+				"n1": {"n2"},
+				"n2": {"n3"},
+			},
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.delta.Validate(); err != nil {
+				t.Fatalf("fixture validation: %v", err)
+			}
+			requireReadRejectedAtomically(t, base, tc.delta)
+		})
+	}
+}
+
+func movedReadReplaceTrees() (*protocol.ReadTree, *protocol.ReadTree) {
+	var oldRows, newRows []*protocol.ReadNode
+	for i := 10; i <= 17; i++ {
+		oldRows = append(oldRows, readR(fmt.Sprintf("n%d", i), protocol.RoleText, fmt.Sprintf("old-%d", i)))
+		newRows = append(newRows, readR(fmt.Sprintf("n%d", i), protocol.RoleText, fmt.Sprintf("new-%d", i)))
+	}
+	base := readRootR(
+		readR("n2", protocol.RoleGroup, "a",
+			readR("n4", protocol.RoleGroup, "r", oldRows...)),
+		readR("n3", protocol.RoleGroup, "b"),
+	)
+	current := readRootR(
+		readR("n2", protocol.RoleGroup, "a"),
+		readR("n3", protocol.RoleGroup, "b",
+			readR("n4", protocol.RoleGroup, "r", newRows...)),
+	)
+	return base, current
+}
+
+func TestReadDeltaHeaderAndStrictWireRoundTrip(t *testing.T) {
+	base, current := movedReadReplaceTrees()
+	delta := mustReadDelta(t, "O1", base, current)
+	if _, ok := delta.Replace["n4"]; !ok {
+		t.Fatalf("expected a moved replace region: %+v", delta.Replace)
+	}
+	requireReadChildBlock(t, delta, "n2")
+	requireReadChildBlock(t, delta, "n3", "n4")
+	encoded := readWireText(t, delta)
+	if strings.Contains(encoded, `"defaults"`) || strings.Contains(encoded, `"position"`) {
+		t.Fatalf("read delta carries a forbidden envelope: %s", encoded)
+	}
+	var wire map[string]any
+	if err := protocol.Decode([]byte(encoded), &wire); err != nil {
+		t.Fatalf("decode delta object: %v", err)
+	}
+	allowed := map[string]bool{
+		"format": true, "base": true, "view": true,
+		"set": true, "add": true, "remove": true, "children": true, "replace": true,
+	}
+	for key := range wire {
+		if !allowed[key] {
+			t.Fatalf("unexpected read delta member %q in %s", key, encoded)
+		}
+	}
+	for _, key := range []string{"format", "base", "view"} {
+		if _, ok := wire[key]; !ok {
+			t.Fatalf("missing read delta header member %q", key)
+		}
+	}
+	decoded := mustReadRoundTrip(t, delta)
+	requireReadChildBlock(t, decoded, "n2")
+	mustReadApplyEqual(t, base, decoded, current)
+}
+
+func TestReadDeltaFiveBoolStatesSurviveWire(t *testing.T) {
+	baseNode := readR("n2", protocol.RoleText, "state")
+	baseNode.Enabled = readBool(true)
+	baseNode.Focused = readBool(false)
+	baseNode.Selected = readBool(true)
+	baseNode.Checked = readBool(false)
+	baseNode.Protected = readBool(true)
+	base := readRootR(baseNode)
+
+	currentNode := readR("n2", protocol.RoleText, "state")
+	currentNode.Enabled = nil
+	currentNode.Focused = readBool(true)
+	currentNode.Selected = nil
+	currentNode.Checked = readBool(true)
+	currentNode.Protected = readBool(false)
+	current := readRootR(currentNode)
+
+	delta := mustReadDelta(t, "O1", base, current)
+	change, ok := delta.Set["n2"]
+	if !ok {
+		t.Fatalf("missing five-state set: %+v", delta)
+	}
+	for name, field := range map[string]protocol.Field[*bool]{
+		"enabled": change.Enabled, "focused": change.Focused, "selected": change.Selected,
+		"checked": change.Checked, "protected": change.Protected,
+	} {
+		if !field.Set {
+			t.Fatalf("%s must be explicitly set", name)
+		}
+	}
+	if change.Enabled.Value != nil || change.Focused.Value == nil || !*change.Focused.Value ||
+		change.Selected.Value != nil || change.Checked.Value == nil || !*change.Checked.Value ||
+		change.Protected.Value == nil || *change.Protected.Value {
+		t.Fatalf("ReadDiff merged a five-state transition: %+v", change)
+	}
+
+	decoded := mustReadRoundTrip(t, delta)
+	decodedChange := decoded.Set["n2"]
+	if decodedChange.Enabled.Value != nil ||
+		decodedChange.Focused.Value == nil || !*decodedChange.Focused.Value ||
+		decodedChange.Selected.Value != nil ||
+		decodedChange.Checked.Value == nil || !*decodedChange.Checked.Value ||
+		decodedChange.Protected.Value == nil || *decodedChange.Protected.Value {
+		t.Fatalf("wire round trip merged null, false and true: %+v", decodedChange)
+	}
+	applied, err := ReadApply(base, decoded)
+	if err != nil {
+		t.Fatalf("ReadApply: %v", err)
+	}
+	appliedNode := childOf(t, applied.Root, "n2")
+	if appliedNode == nil ||
+		appliedNode.Enabled != nil ||
+		appliedNode.Focused == nil || !*appliedNode.Focused ||
+		appliedNode.Selected != nil ||
+		appliedNode.Checked == nil || !*appliedNode.Checked ||
+		appliedNode.Protected == nil || *appliedNode.Protected {
+		t.Fatalf("ReadApply lost a five-state value: %+v", appliedNode)
+	}
+	mustReadApplyEqual(t, base, decoded, current)
+}
+
+func TestMalformedReadDeltaRejectsClosedOverrideAndOrphan(t *testing.T) {
+	base := readRootR(
+		readR("n2", protocol.RoleGroup, "a",
+			readR("n4", protocol.RoleGroup, "region"),
+		),
+		readR("n3", protocol.RoleGroup, "b"),
+	)
+	cases := []struct {
+		name  string
+		delta *protocol.ReadDelta
+	}{
+		{"closed_definition_override", &protocol.ReadDelta{
+			Format: "delta", Base: "O1", View: protocol.ViewCompact,
+			Add: []*protocol.ReadNode{
+				readR("n20", protocol.RoleGroup, "new",
+					readR("n21", protocol.RoleGroup, "closed")),
+			},
+			Children: map[string][]string{
+				"n1":  {"n2", "n3", "n20"},
+				"n21": {},
+			},
+		}},
+		{"orphan_add", &protocol.ReadDelta{
+			Format: "delta", Base: "O1", View: protocol.ViewCompact,
+			Add: []*protocol.ReadNode{readR("n20", protocol.RoleText, "orphan")},
+		}},
+		{"replace_move_keeps_old_parent", &protocol.ReadDelta{
+			Format: "delta", Base: "O1", View: protocol.ViewCompact,
+			Replace: map[string]*protocol.ReadNode{
+				"n4": readR("n4", protocol.RoleGroup, "region"),
+			},
+			Children: map[string][]string{"n3": {"n4"}},
+		}},
+		{"remove_root_revival", &protocol.ReadDelta{
+			Format: "delta", Base: "O1", View: protocol.ViewCompact,
+			Remove:   []string{"n2"},
+			Children: map[string][]string{"n1": {"n2"}},
+		}},
+		{"dead_parent_children", &protocol.ReadDelta{
+			Format: "delta", Base: "O1", View: protocol.ViewCompact,
+			Remove:   []string{"n2"},
+			Children: map[string][]string{"n2": {}},
+		}},
+		{"self_cycle", &protocol.ReadDelta{
+			Format: "delta", Base: "O1", View: protocol.ViewCompact,
+			Children: map[string][]string{"n2": {"n2"}},
+		}},
+		{"multiple_live_parents", &protocol.ReadDelta{
+			Format: "delta", Base: "O1", View: protocol.ViewCompact,
+			Children: map[string][]string{
+				"n1": {"n2", "n3"},
+				"n2": {"n3"},
+			},
+		}},
+		{"unreachable_survivor", &protocol.ReadDelta{
+			Format: "delta", Base: "O1", View: protocol.ViewCompact,
+			Children: map[string][]string{"n1": {"n2"}},
+		}},
+		{"isolated_replace", &protocol.ReadDelta{
+			Format: "delta", Base: "O1", View: protocol.ViewCompact,
+			Replace: map[string]*protocol.ReadNode{
+				"n4": readR("n4", protocol.RoleGroup, "region"),
+			},
+			Children: map[string][]string{
+				"n1": {"n2"},
+				"n2": {},
+			},
+		}},
+		{"unreachable_explicit_cycle", &protocol.ReadDelta{
+			Format: "delta", Base: "O1", View: protocol.ViewCompact,
+			Add: []*protocol.ReadNode{readR("n20", protocol.RoleGroup, "cycle")},
+			Children: map[string][]string{
+				"n1":  {"n2"},
+				"n3":  {"n20"},
+				"n20": {"n3"},
+			},
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.delta.Validate(); err != nil {
+				t.Fatalf("fixture validation: %v", err)
+			}
+			requireReadRejectedAtomically(t, base, tc.delta)
+		})
+	}
+}
+
+func TestReadDeltaRemoveResidueUsesFinalReachability(t *testing.T) {
+	base := readRootR(readR("n2", protocol.RoleGroup, "container",
+		readR("n3", protocol.RoleText, "a"),
+		readR("n4", protocol.RoleText, "b"),
+	))
+
+	pureRemove := &protocol.ReadDelta{
+		Format: "delta", Base: "O1", View: protocol.ViewCompact,
+		Remove: []string{"n2"},
+	}
+	got, err := ReadApply(base, pureRemove)
+	if err != nil {
+		t.Fatalf("pure remove: %v", err)
+	}
+	if len(got.Root.Children) != 0 {
+		t.Fatalf("pure remove did not delete the residue")
+	}
+
+	current := readRootR(readR("n3", protocol.RoleText, "a",
+		readR("n4", protocol.RoleText, "b"),
+	))
+	delta := mustReadDelta(t, "O1", base, current)
+	if fmt.Sprint(delta.Remove) != "[n2]" {
+		t.Fatalf("remove = %v, want [n2]", delta.Remove)
+	}
+	requireReadChildBlock(t, delta, "n1", "n3")
+	requireReadChildBlock(t, delta, "n3", "n4")
+	mustReadApplyEqual(t, base, delta, current)
+
+	declared := &protocol.ReadDelta{
+		Format: "delta", Base: "O1", View: protocol.ViewCompact,
+		Remove: []string{"n2"},
+		Set: map[string]protocol.ReadSetNode{
+			"n3": {Label: protocol.Field[[]string]{Set: true, Value: []string{"declared"}}},
+		},
+	}
+	requireReadRejectedAtomically(t, base, declared)
+}
+
+func TestReadDeltaHighestRemovedAncestorAcrossSurvivingMiddle(t *testing.T) {
+	base := readRootR(readR("n2", protocol.RoleGroup, "outer",
+		readR("n3", protocol.RoleGroup, "middle",
+			readR("n4", protocol.RoleText, "gone")),
+	))
+	current := readRootR(readR("n3", protocol.RoleGroup, "middle"))
+	delta := mustReadDelta(t, "O1", base, current)
+	if fmt.Sprint(delta.Remove) != "[n2]" {
+		t.Fatalf("remove = %v, want only n2", delta.Remove)
+	}
+	requireReadChildBlock(t, delta, "n1", "n3")
+	requireReadChildBlock(t, delta, "n3")
+	mustReadApplyEqual(t, base, delta, current)
+}
+
+func TestReadDeltaReplaceClosurePropagatesDeepParentChange(t *testing.T) {
+	var bRows, cRows []*protocol.ReadNode
+	for i := 10; i <= 15; i++ {
+		bRows = append(bRows, readR(fmt.Sprintf("n%d", i), protocol.RoleText, fmt.Sprintf("b-%d", i)))
+		cRows = append(cRows, readR(fmt.Sprintf("n%d", i+10), protocol.RoleText, fmt.Sprintf("c-%d", i)))
+	}
+	base := readRootR(readR("n2", protocol.RoleGroup, "a",
+		readR("n3", protocol.RoleGroup, "b", bRows...),
+		readR("n4", protocol.RoleGroup, "c", cRows...),
+	))
+	current := readRootR(readR("n2", protocol.RoleGroup, "a",
+		readR("n3", protocol.RoleGroup, "b",
+			append(append([]*protocol.ReadNode{}, bRows...),
+				readR("n4", protocol.RoleGroup, "c", cRows...))...),
+	))
+	delta := mustReadDelta(t, "O1", base, current)
+	if len(delta.Replace) != 0 {
+		t.Fatalf("deep parent change must not select a closed replace region: %+v", delta.Replace)
+	}
+	requireReadChildBlock(t, delta, "n2", "n3")
+	requireReadChildBlock(t, delta, "n3", "n10", "n11", "n12", "n13", "n14", "n15", "n4")
+	mustReadApplyEqual(t, base, delta, current)
+}
+
+func escapingReadReplaceTrees() (*protocol.ReadTree, *protocol.ReadTree) {
+	var oldRows, newRows []*protocol.ReadNode
+	for i := 10; i <= 17; i++ {
+		oldRows = append(oldRows, readR(fmt.Sprintf("n%d", i), protocol.RoleText, fmt.Sprintf("old-%d", i)))
+		newRows = append(newRows, readR(fmt.Sprintf("n%d", i), protocol.RoleText, fmt.Sprintf("new-%d", i)))
+	}
+	base := readRootR(readR("n2", protocol.RoleGroup, "outer",
+		readR("n3", protocol.RoleGroup, "escape",
+			readR("n4", protocol.RoleGroup, "region", oldRows...)),
+	))
+	current := readRootR(readR("n3", protocol.RoleGroup, "escape",
+		readR("n4", protocol.RoleGroup, "region", newRows...),
+	))
+	return base, current
+}
+
+func TestReadDeltaReplaceSurvivesThroughEscapingAncestor(t *testing.T) {
+	base, current := escapingReadReplaceTrees()
+	delta := mustReadDelta(t, "O1", base, current)
+	if fmt.Sprint(delta.Remove) != "[n2]" {
+		t.Fatalf("remove = %v, want [n2]", delta.Remove)
+	}
+	if _, ok := delta.Replace["n4"]; !ok {
+		if _, enclosing := delta.Replace["n3"]; !enclosing {
+			t.Fatalf("replace inside the old removed closure is not represented: %+v", delta.Replace)
+		}
+	}
+	requireReadChildBlock(t, delta, "n1", "n3")
+	mustReadApplyEqual(t, base, delta, current)
 }

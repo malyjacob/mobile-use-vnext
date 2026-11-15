@@ -98,43 +98,6 @@ func (b *ReadBounds) decodeValue(raw jsontext.Value) error {
 	return nil
 }
 
-// Defaults is the fixed full-node default declaration of one read object. It
-// always declares checked=false and no other member.
-type Defaults struct{}
-
-// MarshalJSONTo writes the fixed defaults object.
-func (Defaults) MarshalJSONTo(enc *jsontext.Encoder) error {
-	if err := enc.WriteToken(jsontext.BeginObject); err != nil {
-		return err
-	}
-	if err := writeName(enc, "checked"); err != nil {
-		return err
-	}
-	if err := writeBool(enc, false); err != nil {
-		return err
-	}
-	return enc.WriteToken(jsontext.EndObject)
-}
-
-// UnmarshalJSONFrom accepts exactly the fixed defaults declaration. A remote
-// party cannot extend it into another default policy.
-func (*Defaults) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
-	var wire struct {
-		Checked jsontext.Value `json:"checked"`
-	}
-	if err := json.UnmarshalDecode(dec, &wire, json.RejectUnknownMembers(true)); err != nil {
-		return err
-	}
-	if len(wire.Checked) == 0 {
-		return fmt.Errorf("defaults must declare checked")
-	}
-	var checked bool
-	if err := json.Unmarshal(wire.Checked, &checked); err != nil || checked {
-		return fmt.Errorf("defaults checked must be false")
-	}
-	return nil
-}
-
 // ReadNode is one public node definition. Exactly one of Ref and Chain is
 // present: an ordinary node carries its own ref, a chain definition carries
 // the consecutive original refs it folds. A chain definition carries the shared
@@ -487,14 +450,9 @@ func (n *ReadNode) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 		}
 		*field.dst = value
 	}
-	checked, err := decodeOptionalBool(wire.Checked)
+	checked, err := decodeTriBool(wire.Checked, false)
 	if err != nil {
 		return fmt.Errorf("checked: %w", err)
-	}
-	// The full-node default is checked=false: absence means known false.
-	if len(wire.Checked) == 0 {
-		value := false
-		checked = &value
 	}
 	n.Checked = checked
 	for _, field := range []struct {
@@ -541,11 +499,10 @@ func ValidPublicRef(ref string) bool {
 
 // ReadTree is a complete public tree in one view.
 type ReadTree struct {
-	Format   string
-	Scope    string
-	View     string
-	Defaults Defaults
-	Root     *ReadNode
+	Format string
+	Scope  string
+	View   string
+	Root   *ReadNode
 }
 
 // MarshalJSONTo encodes a complete read tree.
@@ -574,12 +531,6 @@ func (t *ReadTree) MarshalJSONTo(enc *jsontext.Encoder) error {
 	if err := writeString(enc, t.View); err != nil {
 		return err
 	}
-	if err := writeName(enc, "defaults"); err != nil {
-		return err
-	}
-	if err := MarshalJSONTo(enc, t.Defaults); err != nil {
-		return err
-	}
 	if err := writeName(enc, "root"); err != nil {
 		return err
 	}
@@ -593,11 +544,10 @@ func (t *ReadTree) MarshalJSONTo(enc *jsontext.Encoder) error {
 // view.
 func (t *ReadTree) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 	var wire struct {
-		Format   string    `json:"format"`
-		Scope    string    `json:"scope"`
-		View     string    `json:"view"`
-		Defaults *Defaults `json:"defaults"`
-		Root     *ReadNode `json:"root"`
+		Format string    `json:"format"`
+		Scope  string    `json:"scope"`
+		View   string    `json:"view"`
+		Root   *ReadNode `json:"root"`
 	}
 	if err := json.UnmarshalDecode(dec, &wire, json.RejectUnknownMembers(true)); err != nil {
 		return err
@@ -610,9 +560,6 @@ func (t *ReadTree) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 	}
 	if wire.View != ViewCompact && wire.View != ViewDetailed {
 		return fmt.Errorf("unsupported tree view %q", wire.View)
-	}
-	if wire.Defaults == nil {
-		return fmt.Errorf("full tree requires defaults")
 	}
 	if wire.Root == nil || wire.Root.IsChain() || wire.Root.Role != RoleRoot {
 		return fmt.Errorf("full tree requires a root node")
@@ -684,7 +631,6 @@ type ReadDelta struct {
 	Format   string                 `json:"format"`
 	Base     string                 `json:"base"`
 	View     string                 `json:"view"`
-	Defaults Defaults               `json:"defaults"`
 	Set      map[string]ReadSetNode `json:"set,omitzero"`
 	Add      []*ReadNode            `json:"add,omitzero"`
 	Remove   []string               `json:"remove,omitzero"`
@@ -757,7 +703,6 @@ func (d *ReadDelta) MarshalJSONTo(enc *jsontext.Encoder) error {
 		Format   string                 `json:"format"`
 		Base     string                 `json:"base"`
 		View     string                 `json:"view"`
-		Defaults Defaults               `json:"defaults"`
 		Set      map[string]ReadSetNode `json:"set,omitzero"`
 		Add      []*ReadNode            `json:"add,omitzero"`
 		Remove   []string               `json:"remove,omitzero"`
@@ -765,7 +710,7 @@ func (d *ReadDelta) MarshalJSONTo(enc *jsontext.Encoder) error {
 		Replace  map[string]*ReadNode   `json:"replace,omitzero"`
 	}
 	return MarshalJSONTo(enc, wire{
-		Format: d.Format, Base: d.Base, View: d.View, Defaults: d.Defaults,
+		Format: d.Format, Base: d.Base, View: d.View,
 		Set: d.Set, Add: d.Add, Remove: d.Remove, Children: d.Children, Replace: d.Replace,
 	})
 }
@@ -776,7 +721,6 @@ func (d *ReadDelta) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 		Format   string                 `json:"format"`
 		Base     string                 `json:"base"`
 		View     string                 `json:"view"`
-		Defaults *Defaults              `json:"defaults"`
 		Set      map[string]ReadSetNode `json:"set"`
 		Add      []*ReadNode            `json:"add"`
 		Remove   []string               `json:"remove"`
@@ -786,9 +730,6 @@ func (d *ReadDelta) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 	var w wire
 	if err := json.UnmarshalDecode(dec, &w, json.RejectUnknownMembers(true)); err != nil {
 		return err
-	}
-	if w.Defaults == nil {
-		return fmt.Errorf("delta requires defaults")
 	}
 	*d = ReadDelta{Format: w.Format, Base: w.Base, View: w.View, Set: w.Set,
 		Add: w.Add, Remove: w.Remove, Children: w.Children, Replace: w.Replace}
