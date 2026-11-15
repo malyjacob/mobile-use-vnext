@@ -570,7 +570,7 @@ func decodeTimelineBlock(lines []string, start int, object map[string]any,
 }
 
 func findBlockEnd(lines []string, start int, marker, reason string) (int, *checkError) {
-	for index := start + 1; index < len(lines); index++ {
+	for index := start; index < len(lines); index++ {
 		if strings.Contains(lines[index], " omitted ") {
 			return 0, failf("text_result_block_omitted")
 		}

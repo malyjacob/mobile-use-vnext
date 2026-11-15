@@ -366,3 +366,82 @@ Tier 4 按已确认默认排除，没有增加动态文案转换。新增内部�
 本次完整实现提交涵盖 S6 补充、受控测试 APK fixture、版本源与生成物、九份 CLEAN 正式文档
 及 S6/S7 验证留痕；不提前修改六份提案的“提案，未实现”头部、不归档、不推送。
 S9 的正式 manifest 必须来自该提交的干净 HEAD，不能把提交前候选 APK 或旧版本清单充作发布证据。
+
+### 7.1 S9 探针修复：空 delta 读取与失败会话收尾
+
+已有 S8 实现提交为 `bb43c1943d66e3ea5fe5fd938f9a5b68c82dfdeb`。本次是两个缺陷的
+实现修复，不改变产品契约、版本源或正式文档，修复只涉及
+`scripts/mcp-probe/checks.go`、`probe_test.go`、`result_modes_test.go` 与
+`result_text.go`。新实现提交由协调者随后生成并登记；本节不预填提交 hash。
+
+真实失败与先红证据：
+
+1. S9 smoke 在 `wait_for` 返回 `FAIL wait_for reason=text_tree_unterminated`。
+   `.state/s9-smoke-origin-aligned.log:15` 已记录本次 start 创建的
+   `P=Pa32ce5fc66f004a16e03b71d`，同一白名单日志 `:22` 记录上述失败；此前 auth、catalog、
+   schema、status、start、observe（含图）均为 PASS。纯合成先红用例为
+   `scripts/mcp-probe/result_modes_test.go:569` 的
+   `TestDecodeResultTextEmptyDeltaWithWait`；修复前实际退出 1，失败落点为
+   `result_modes_test.go:590`，原因同为 `text_tree_unterminated`。
+2. 探针因上述检查失败退出后，协调者核对实际 `/api/status` 仍为
+   `session_exists/active`，origin 恰为上述探针新建的 P；随后由协调者用原 P 受控 `end`
+   关闭。纯合成先红用例为 `scripts/mcp-probe/probe_test.go:1822` 的
+   `TestRunChecksEndsOwnSessionAfterLateFailure`；修复前实际退出 1，失败落点为
+   `probe_test.go:1848`，记录 `end dispatched 0 times after failure, want 1`。
+
+等待失败归因：
+
+- 生产引擎在 `internal/engine/capture.go:258` 选择 delta，`:268` 保留满足 70% 关系的
+  增量，并由 `:705` 发布 delta；画面未变化时，零 changes 的空 delta 是现行契约允许的
+  正常结果。
+- 生产文本渲染器在 `internal/mcp/tree_text.go:74` 固定写为 header、空行、body、trailer；
+  delta 渲染入口为 `:99`，`:182` 的空变更集合不写 body。因此空 delta 的合法布局是
+  `tree v2 ... changes=0`、空行、紧随的 `end tree`，产品输出没有截断。
+- 探针在 `scripts/mcp-probe/result_text.go:191` 把正文起点传给 `findBlockEnd`，但修复前
+  helper 又跳过该起点，从下一行开始扫描，因而遗漏空 body 的第一行 `end tree`。根因在
+  外部探针解析边界，不在生产 MCP 文本格式。
+
+同类核查：
+
+- `decodeInspectionBlock` 在 `scripts/mcp-probe/result_text.go:258` 使用同一 helper；空的
+  query inspection 同样可以合法输出零 matches、零 body 和紧随的 `end inspect`。新增
+  `scripts/mcp-probe/result_modes_test.go:600` 的 `TestDecodeResultTextEmptyInspection`
+  覆盖该路径。
+- 独立 `resultBlockText` 从 header 后一行扫描，shell/timeline 解码器各自从正文首行扫描，
+  均不存在本次偏移。
+- 修复只把 helper 的首个扫描位置改为调用方给出的正文起点，没有放宽完整性：新增反向对照
+  `result_modes_test.go:632` 的 `empty delta missing tree tail`，确认缺少 `end tree` 时仍
+  返回 `text_tree_unterminated`，不会吞掉截断树。
+
+失败会话收尾归因与修复：
+
+- 原 `runChecks` 在 start 成功后存在多条提前失败返回，只在所有 smoke 动作成功后才调用
+  `endCheck`；外层 transport close 不结束 remote 服务会话，因此本次 parser 误报暴露出
+  既存的失败路径收尾缺口。
+- `scripts/mcp-probe/checks.go:96` 在 `startCheck` 返回有效 P 后安装清理 defer；
+  `:942` 的 `cleanupOwnedSession` 只接受该已确认的 start P，以脱离原取消信号的 5 秒期限
+  做一次有界 `end`，不猜测或清理未知会话。
+- 正常路径在 `checks.go:133` 关闭 defer 后再执行唯一一次 `endCheck`；正常 end 即使响应
+  校验失败也不重放同一 P。修复后的合成测试要求 start 一次、失败后 end 恰好一次，并确认
+  该会话进入 `ended`。
+
+修复与相关测试实际命令及结果：
+
+```powershell
+$env:GOEXPERIMENT='jsonv2'
+$env:CGO_ENABLED='0'
+
+go test ./scripts/mcp-probe -count=1
+go test ./internal/mcp -count=1
+go test ./internal/engine -run 'TestWaitForPureSleepPublishesTimeoutFrame|TestWaitForPReferenceForcesFullTree' -count=1
+```
+
+- `./scripts/mcp-probe`：退出 0，`ok`（`7.970s`）；包含两个先红用例、空 query 同类用例、
+  截断树反向控制和完整 probe 包回归。
+- `./internal/mcp`：退出 0，`ok`（`0.427s`）；核对现行文本投影实现。
+- `./internal/engine`：退出 0，`ok`（`4.141s`）；两个指定 fake-device wait 用例通过。
+
+本次没有产品契约变化、源码 `docs/` 变更或版本变更。S7 的九份 `docs/*.md` 独立只读审计
+结论继续沿用为全部 CLEAN；本次未触发新的文档审计，也未以本实现记录自审代替独立审计。
+本节不登记后续 manifest、部署或 smoke 的通过结论，不把上述相关包测试表述为 S9 系统/实机
+PASS。

@@ -93,6 +93,12 @@ func (p *probe) runChecks(ctx context.Context) bool {
 	if !ok {
 		return false
 	}
+	cleanupNeeded := true
+	defer func() {
+		if cleanupNeeded {
+			p.cleanupOwnedSession(ctx, start.OperationID)
+		}
+	}()
 	if !p.appQueryChecks(ctx, start.OperationID) {
 		return false
 	}
@@ -122,6 +128,9 @@ func (p *probe) runChecks(ctx context.Context) bool {
 			return false
 		}
 	}
+	// endCheck makes the single end attempt for the normal path. If it fails,
+	// the known P may already have been accepted, so the defer must not replay it.
+	cleanupNeeded = false
 	if !p.endCheck(ctx, start.OperationID) {
 		return false
 	}
@@ -925,6 +934,32 @@ func (p *probe) endCheck(ctx context.Context, startID string) bool {
 		"outcome=executed", "session=ended",
 		field("cleanup.state", cleanupStateOf(last, view)))
 	return true
+}
+
+// cleanupOwnedSession is used only after startCheck returned the exact P this
+// probe created. It preserves cleanup when the check context was cancelled and
+// performs at most this one fallback end.
+func (p *probe) cleanupOwnedSession(parent context.Context, startID string) {
+	if p.session == nil || !validReference(startID, 'P') {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), 5*time.Second)
+	defer cancel()
+	projected, failure := p.call(ctx, "end", map[string]any{"reference": startID})
+	if failure != nil {
+		p.reporter.fail("cleanup_owned_session", failure.reason, failure.fields...)
+		return
+	}
+	if projected.result.IsError || projected.view.Outcome != outcomeExecuted ||
+		projected.view.Session == nil || projected.view.Session.State != sessionEnded {
+		p.reporter.fail("cleanup_owned_session", "not_confirmed",
+			field("code", codeOf(projected.view)),
+			field("outcome", projected.view.Outcome),
+			field("session", sessionStateOf(projected.view.Session)))
+		return
+	}
+	p.reporter.pass("cleanup_owned_session",
+		field("P", startID), "outcome=executed", "session=ended")
 }
 
 // waitCleanupSettled bounds the display-teardown race between the previous end

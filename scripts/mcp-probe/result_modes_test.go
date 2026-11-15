@@ -566,6 +566,57 @@ func TestDecodeResultTextContentBlocks(t *testing.T) {
 	}
 }
 
+func TestDecodeResultTextEmptyDeltaWithWait(t *testing.T) {
+	text := "result v2 is_error=false\n" +
+		"operation_id=Pwait000000000000000001\n" +
+		"phase=finished\n" +
+		"observation.status=complete\n" +
+		"observation.id=Owait00000000000000001\n" +
+		"observation.quality.state=unknown\n" +
+		"observation.quality.samples=0\n" +
+		"observation.quality.stop_reason=not_sampled\n" +
+		"\n" +
+		"tree v2 format=delta id=Owait00000000000000001 " +
+		"base=Owait00000000000000000 view=compact " +
+		"scope=reported_visible_with_context changes=0\n" +
+		"\n" +
+		"end tree\n" +
+		"wait.trigger=timeout\n" +
+		"wait.matched=[\"timeout\"]\n" +
+		"wait.elapsed_ms=1000\n" +
+		"end result\n"
+	decoded, failure := decodeResultText(text)
+	if failure != nil {
+		t.Fatalf("empty delta with wait rejected: %s %v", failure.reason, failure.fields)
+	}
+	if decoded.view.Wait == nil || decoded.view.Wait.Trigger != waitTriggerTimeout ||
+		len(decoded.view.Wait.Matched) != 1 ||
+		decoded.view.Wait.Matched[0] != waitTriggerTimeout ||
+		decoded.view.Wait.ElapsedMS != 1000 {
+		t.Fatalf("wait projection = %+v", decoded.view.Wait)
+	}
+}
+
+func TestDecodeResultTextEmptyInspection(t *testing.T) {
+	text := "result v2 is_error=false\n" +
+		"\n" +
+		"inspect v2 scope=query observation=O1 revision=1 captured_at=now " +
+		"tree_scope=reported_visible_with_context view=detailed " +
+		"matches=0 nodes=0 entries=0\n" +
+		"\n" +
+		"end inspect\n" +
+		"end result\n"
+	decoded, failure := decodeResultText(text)
+	if failure != nil {
+		t.Fatalf("empty inspection rejected: %s %v", failure.reason, failure.fields)
+	}
+	if decoded.view.Inspection == nil || decoded.view.Inspection.Scope != "query" ||
+		decoded.view.Inspection.ObservationID != "O1" ||
+		decoded.view.Inspection.Revision != 1 {
+		t.Fatalf("inspection projection = %+v", decoded.view.Inspection)
+	}
+}
+
 func TestDecodeResultTextRejectsIncompleteProjection(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -576,6 +627,14 @@ func TestDecodeResultTextRejectsIncompleteProjection(t *testing.T) {
 			name:   "missing tail",
 			text:   "result v2 is_error=false\nstatus=not_seen\n",
 			reason: "text_result_unterminated",
+		},
+		{
+			name: "empty delta missing tree tail",
+			text: "result v2 is_error=false\nobservation.id=O2\n\n" +
+				"tree v2 format=delta id=O2 base=O1 view=compact " +
+				"scope=reported_visible_with_context changes=0\n\n" +
+				"end result\n",
+			reason: "text_tree_unterminated",
 		},
 		{
 			name: "omitted tree",

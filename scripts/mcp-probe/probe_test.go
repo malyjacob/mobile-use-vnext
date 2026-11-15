@@ -1819,6 +1819,39 @@ func TestProbeAgainstRealAdapter(t *testing.T) {
 	}
 }
 
+func TestRunChecksEndsOwnSessionAfterLateFailure(t *testing.T) {
+	fake := startFakeRecoveryService(t)
+	fake.omitActQuality = true
+	session, service := newRealAdapterSession(t, fake, resultModeBoth)
+
+	var output bytes.Buffer
+	reporter := newReporter(&output)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	probe := &probe{
+		reporter: reporter, session: session, service: service,
+		resultMode: resultModeBoth,
+	}
+	if code := reporter.finish(probe.runChecks(ctx)); code != 1 {
+		t.Fatalf("late failure exit = %d, want 1:\n%s", code, output.String())
+	}
+	if !strings.Contains(output.String(), "FAIL act reason=observation_quality_missing") {
+		t.Fatalf("late failure was not attributed:\n%s", output.String())
+	}
+
+	fake.mutex.Lock()
+	defer fake.mutex.Unlock()
+	if fake.startCount != 1 {
+		t.Fatalf("start dispatched %d times, want 1", fake.startCount)
+	}
+	if fake.endCount != 1 {
+		t.Fatalf("end dispatched %d times after failure, want 1", fake.endCount)
+	}
+	if fake.session == nil || fake.session.State != sessionEnded {
+		t.Fatalf("own session after failure = %+v, want ended", fake.session)
+	}
+}
+
 func TestProbeAgainstRealHTTPAdapter(t *testing.T) {
 	for _, mode := range []string{resultModeBoth, resultModeText, resultModeStructured} {
 		t.Run(mode, func(t *testing.T) {
