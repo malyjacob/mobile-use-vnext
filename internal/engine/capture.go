@@ -282,8 +282,13 @@ func (e *Engine) publishTreeAttempt(work *workState, session *sessionState, phas
 		!e.workAuthorizedLocked(work, time.Now()) {
 		return nil, nil, stopped
 	}
+	// Bind publication to the captured material as well as the caller's session
+	// snapshot. Some callers hold the live session pointer, which a display
+	// report can update while projection is outside the lock.
 	if e.session.Display.Generation != session.Display.Generation ||
-		e.session.Display.ID != session.Display.ID {
+		e.session.Display.ID != session.Display.ID ||
+		e.session.Display.Generation != tree.capture.Display.Generation ||
+		e.session.Display.ID != tree.capture.Display.ID {
 		return nil, nil, protocol.NewError(409, protocol.CodeStaleScreen, "目标屏幕代次已变化")
 	}
 	if time.Since(tree.capture.CapturedAt) > e.cfg.CaptureMaxAge {

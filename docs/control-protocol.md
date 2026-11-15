@@ -22,9 +22,9 @@
 
 ```json
 {
-  "contract_version": "14",
+  "contract_version": "15",
   "app_instance_id": "0b0b8c0e-...",
-  "app_version": "0.14.0",
+  "app_version": "0.15.0",
   "selected_mode": "virtual",
   "mode_generation": "8f0b2e2e-...",
   "mode_ready": true,
@@ -45,7 +45,7 @@
 
 | 字段 | 必填 | 含义 |
 | --- | --- | --- |
-| contract_version | 是 | 共同普通契约；必须等于 `"14"` |
+| contract_version | 是 | 共同普通契约；必须等于 `"15"` |
 | app_instance_id | 是 | 本次 App 进程实例，UUID；重建即变化 |
 | app_version | 是 | 仅发行标识，不参与能力协商 |
 | selected_mode | 是 | `virtual` 或 `primary`；App 重建默认 virtual |
@@ -70,7 +70,7 @@
 
 ```json
 {
-  "contract_version": "14",
+  "contract_version": "15",
   "service_instance_id": "d0e...",
   "control": {
     "revision": 42,
@@ -141,13 +141,13 @@ App 必须拒绝无法解析、未知 kind、缺字段或 `contract_version` 不
 `POST /v1/control/stop`
 
 ```json
-{"contract_version":"14","app_instance_id":"...","stop_seq":7,"reason":"user_stop"}
+{"contract_version":"15","app_instance_id":"...","stop_seq":7,"reason":"user_stop"}
 ```
 
 响应（最小，不含普通服务状态、消息或设备命令）：
 
 ```json
-{"contract_version":"14","service_instance_id":"...","accepted":true,"stop_seq":7,"state":"revoked"}
+{"contract_version":"15","service_instance_id":"...","accepted":true,"stop_seq":7,"state":"revoked"}
 ```
 
 - App 先在本地提高停止代次、拒绝旧命令/回调恢复权限，再在独立线程发起本请求；不等待
@@ -169,18 +169,18 @@ App 只能从 `control` 与本机事实构造界面，不显示 Agent step，也
 | 连接失鲜 | 连接中断 · 服务状态未知 |
 | availability=recovering | 正在核验当前控制能力 |
 | availability=blocked | 控制不可用 · 查看原因 |
-| availability=ready，session=null | 虚拟屏 · 待命 |
+| availability=ready，session=null | 虚拟屏 · 待命 / 主屏共享 · 待命（按选定模式） |
 | session.state=ended | 上次会话已结束（附受控原因） |
 | session.state=starting | Agent · 正在准备 |
-| session.state=active，work=null | Agent · 会话有效，无设备操作 |
+| session.state=active，work=null | Agent · 会话有效，当前无设备操作 |
 | session.state=active，work.kind=act | Agent · 正在操作 |
-| session.state=active，work.kind=app，app_kind=find | Agent · 正在查找应用 |
-| session.state=active，work.kind=app，app_kind=list | Agent · 正在读取应用清单 |
-| session.state=active，work.kind=app，app_kind=open | Agent · 正在打开应用 |
-| session.state=active，work.kind=app，app_kind=claim | Agent · 正在认领应用任务 |
-| session.state=active，work.kind=app，app_kind=handoff | Agent · 正在交还应用任务 |
-| session.state=active，work.kind=app，app_kind=close | Agent · 正在关闭应用窗口 |
-| session.state=active，work.kind=app，app_kind=kill | Agent · 正在终止应用进程 |
+| session.state=active，work.kind=app，app_kind=find | Agent · app · 查找应用 |
+| session.state=active，work.kind=app，app_kind=list | Agent · app · 列出任务 |
+| session.state=active，work.kind=app，app_kind=open | Agent · app · 打开应用 |
+| session.state=active，work.kind=app，app_kind=claim | Agent · app · 认领任务 |
+| session.state=active，work.kind=app，app_kind=handoff | Agent · app · 交还任务 |
+| session.state=active，work.kind=app，app_kind=close | Agent · app · 关闭窗口 |
+| session.state=active，work.kind=app，app_kind=kill | Agent · app · 终止进程 |
 | session.state=active，work.kind=observe | Agent · 正在观察 |
 | session.state=active，work.kind=wait_for | Agent · 正在等待界面 |
 | session.state=active，work.kind=shell | Agent · 正在执行命令 |
@@ -190,7 +190,7 @@ App 只能从 `control` 与本机事实构造界面，不显示 Agent step，也
 只用于说明，不改变授权、准入或主文案。
 
 `work.phase` 只映射受控短码，未知值显示“未知”且不回显服务原文。相态有两种形态：裸短码
-（`admitted`、`read`、`capture`、`observe`、`running`、`finished`）与 `<tool>.<step>`
+（`admitted`、`read`、`dispatch`、`capture`、`observe`、`running`、`finished`）与 `<tool>.<step>`
 （例如 `act.settle.tree`、`app.open.capture`、`wait_for.poll`）。`wait_for` 的映射为：
 
 | `work.phase` | 显示文案 |

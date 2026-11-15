@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <item type="id" name="observation_d01_root" />
+    <item type="id" name="observation_d01_heading" />
+    <item type="id" name="observation_d01_state" />
+    <item type="id" name="observation_d01_empty_region" />
+    <item type="id" name="observation_d01_empty_leaf" />
+    <item type="id" name="observation_d01_semantic_text" />
+    <item type="id" name="observation_d01_semantic_action" />
+
+    <item type="id" name="observation_d02_root" />
+    <item type="id" name="observation_d02_heading" />
+    <item type="id" name="observation_d02_state" />
+    <item type="id" name="observation_d02_scroll" />
+    <item type="id" name="observation_d02_list" />
+    <item type="id" name="observation_d02_card_a" />
+    <item type="id" name="observation_d02_card_b" />
+    <item type="id" name="observation_d02_card_c" />
+    <item type="id" name="observation_d02_card_d" />
+    <item type="id" name="observation_d02_card_e" />
+    <item type="id" name="observation_d02_card_f" />
+    <item type="id" name="observation_d02_title" />
+    <item type="id" name="observation_d02_body_a" />
+    <item type="id" name="observation_d02_body_b" />
+    <item type="id" name="observation_d02_body_c" />
+    <item type="id" name="observation_d02_body_d" />
+    <item type="id" name="observation_d02_body_e" />
+    <item type="id" name="observation_d02_body_f" />
+    <item type="id" name="observation_d02_meta" />
+    <item type="id" name="observation_d02_footer" />
+
+    <item type="id" name="observation_d03_root" />
+    <item type="id" name="observation_d03_heading" />
+    <item type="id" name="observation_d03_state" />
+    <item type="id" name="observation_d03_hint" />
+    <item type="id" name="observation_d03_item" />
+    <item type="id" name="observation_d03_item_label" />
+    <item type="id" name="observation_d03_carrier_a" />
+    <item type="id" name="observation_d03_carrier_b" />
+    <item type="id" name="observation_d03_child_blocker" />
+    <item type="id" name="observation_d03_overlay" />
+    <item type="id" name="observation_d03_scroll_stack" />
+    <item type="id" name="observation_d03_scroll_frame" />
+    <item type="id" name="observation_d03_scroll" />
+    <item type="id" name="observation_d03_scroll_content" />
+    <item type="id" name="observation_d03_scroll_row" />
+    <item type="id" name="observation_d03_scroll_blocker" />
+
+    <item type="id" name="observation_d04_root" />
+    <item type="id" name="observation_d04_heading" />
+    <item type="id" name="observation_d04_state" />
+    <item type="id" name="observation_d04_stable_row" />
+    <item type="id" name="observation_d04_label_a" />
+    <item type="id" name="observation_d04_label_b" />
+    <item type="id" name="observation_d04_input_a" />
+    <item type="id" name="observation_d04_input_b" />
+    <item type="id" name="observation_d04_footer" />
+</resources>

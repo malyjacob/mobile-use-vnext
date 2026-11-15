@@ -119,7 +119,7 @@ STOP 可用与 MCP 宿主已重新发现工具。手机适配器的安装/监听
 部署过程不触发手机重启。设备服务通过 `service.sh stop/start` 重启；APK 使用
 `adb install -r` 覆盖安装并保留 App 私有数据。
 
-共同契约是 `contract_version=14`：服务端、Go 客户端、控制 App 与手机/主机 MCP 适配器必须
+共同契约是 `contract_version=15`：服务端、Go 客户端、控制 App 与手机/主机 MCP 适配器必须
 成套升级。旧版任一组件会因 `409 contract_mismatch` 被拒绝接入，只有最小 STOP 仍可用；升级
 后必须重启实际 MCP 宿主进程并重新 `tools/list`，让宿主看到 12 个工具。
 
@@ -176,7 +176,7 @@ adb -s 127.0.0.1:5555 forward tcp:18881 tcp:18880
 curl -s http://127.0.0.1:18881/health
 ```
 
-`/health` 无认证，返回 `status`、`contract_version`（当前 `"14"`）、`service_instance_id`、
+`/health` 无认证，返回 `status`、`contract_version`（当前 `"15"`）、`service_instance_id`、
 `release_version`。它只证明进程能应答，**不是** `can_start`。
 
 就绪以 `POST /api/status` 为准（令牌从 `.state/deploy.json` 读取，下面用占位符）：
@@ -184,7 +184,7 @@ curl -s http://127.0.0.1:18881/health
 ```bash
 curl -s -X POST http://127.0.0.1:18881/api/status \
   -H "Authorization: Bearer $AGENT_TOKEN" \
-  -H "X-Mobile-Use-Contract: 14" \
+  -H "X-Mobile-Use-Contract: 15" \
   -H "Content-Type: application/json" -d '{}'
 ```
 
@@ -198,7 +198,7 @@ curl -s -X POST http://127.0.0.1:18881/api/status \
 ```bash
 curl -s -X POST http://127.0.0.1:18881/api/wait_for \
   -H "Authorization: Bearer $AGENT_TOKEN" \
-  -H "X-Mobile-Use-Contract: 14" \
+  -H "X-Mobile-Use-Contract: 15" \
   -H "Content-Type: application/json" -d '{"reference":"O1","timeout":1}'
 ```
 
@@ -254,7 +254,7 @@ adb -s 127.0.0.1:5555 shell su -c 'tail -n 100 /data/data/com.mobileuse.vnext/fi
 | `can_start=false`、`blocking_code=device_locked` / `device_not_interactive` | 锁屏或熄屏 | 解锁并点亮屏幕；服务不绕过锁屏 |
 | `can_start=false`、`blocking_code=control_revoked` | 收到 STOP 后未完成一次新同步 | 等 App 下一拍同步（不再携带 `stop_pending`）后再 `start` |
 | `can_start=false`、`blocking_code=mode_not_selected`/`stop_unavailable` | App 模式/通知/停止通道不可用 | 在 App 选择虚拟屏或确认主屏共享；授予通知权限并确认通知频道可用 |
-| `409 contract_mismatch` | `X-Mobile-Use-Contract` 缺失/不是 `14`，或 App 契约版本不符；错误体带 `recovery`（`entry=update`、`reference=none`） | 服务与客户端必须同为 `contract_version=14`；升级整组产物，不要只升一侧 |
+| `409 contract_mismatch` | `X-Mobile-Use-Contract` 缺失/不是 `15`，或 App 契约版本不符；错误体带 `recovery`（`entry=update`、`reference=none`） | 服务与客户端必须同为 `contract_version=15`；升级整组产物，不要只升一侧 |
 | 服务启动即退出（退出码 `2`） | `config.json` 的 `adb.timeout_seconds` 大于 15，或其它配置项被拒 | 把该值改回 ≤15（默认 8）后重启；不要用放宽上限的方式绕过 |
 | `409 session_expired` | 引用指向的原会话租约已到期；条件等待在准入时不续租已过期的会话 | 重新 `start`，不要重试同一引用；等待期间需要更长租约时先显式 `keepalive` |
 | `409 control_revoked`（`wait_for`） | 等待中途 STOP 或 `end` 撤权；MCP 取消与客户端断连同样关闭等待并释放工作位，但由适配器（`call_cancelled`）或传输层收尾 | 用 `status(P)` 确认没有迟到观察；需要继续等待时用新 P 重试，不重放同一 P |

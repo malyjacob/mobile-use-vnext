@@ -33,6 +33,11 @@
             android:exported="true"
             android:process=":remote"
             android:taskAffinity="com.mobileuse.probe.remote" />
+        <activity
+            android:name=".ObservationFixtureActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:windowSoftInputMode="adjustResize" />
         <service
             android:name=".ProbePlaybackService"
             android:exported="false"

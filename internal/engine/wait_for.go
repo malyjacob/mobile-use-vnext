@@ -108,8 +108,10 @@ func (e *Engine) WaitFor(ctx context.Context, agent, p string,
 
 	e.setOperationPhase(op, "capture")
 	e.setWorkPhase(work, "wait_for.capture")
-	session = e.sessionForWork(work)
-	if session == nil {
+	// Keep the display identity under which the waiting candidate was read.
+	// A fresh session snapshot cannot reauthorize an old Preview after a
+	// display-generation change; publication rechecks this original identity.
+	if e.workRevoked(work) {
 		return e.finishObserveError(op, "capture", stoppedWaitError()), nil
 	}
 	captureCtx, captureCancel := context.WithTimeout(work.Ctx, waitCaptureReserve)

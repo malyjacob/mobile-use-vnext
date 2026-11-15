@@ -16,11 +16,10 @@ type rawIdentity struct {
 	HasFocused, Focused                           bool
 }
 
-// identityOf is the single identity function of this service. Live
-// revalidation compares it to decide target_changed, and the settle criterion
-// digests exactly the same value: a frame pair that differs nowhere in this
-// identity cannot fail revalidation for content reasons. Keeping one function
-// is what makes that guarantee hold as the fields evolve.
+// identityOf is the strict source identity used by settle sampling and the
+// coordinate-target path. Ref action revalidation uses structureKey and its
+// bounded Tier 1-3 matcher instead; relaxed ref geometry and transparent
+// wrappers do not relax settle equality or coordinate authorization.
 func identityOf(node *device.RawNode) rawIdentity {
 	return rawIdentity{
 		Package: node.Package, Class: node.ClassName, ResourceID: node.ResourceID,

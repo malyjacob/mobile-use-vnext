@@ -15,7 +15,7 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
   `wait_for`、`act`、`inspect`、`keepalive`、`end`、`app`、`notify`、`shell`、`diagnose`。
   不注册 `/health`、认证初始化、旧工具别名或旧协议回退。
 - 目录指纹是工具数、注册顺序、名称、描述与入参 schema 的 canonical SHA-256，当前为
-  `6ace74b8bdceb75dd43ffe270e3f33c7b3a6064aff3cc4734256e539460d136e`；发布清单与探针按
+  `1a319cb307821d51bccfa1ed3df307c363b758973174623ee935c45bac2ffc55`；发布清单与探针按
   它比对实际 `tools/list`，任一条描述或 schema 变化都会改变该值。
 - stdio 模式的 stdout 只承载 MCP 协议帧；日志与诊断一律写 stderr。
 - 私有配置把适配进程绑定到一个可信 Agent 的服务凭据；该凭据不是工具参数，不进入日志、
@@ -39,15 +39,15 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
 不是 root/`context` 时，才尝试同一观察内的祖先引导；目标含其中任一动作时，即使不含请求
 动作也不跳过自身。父链上的第一个交互节点是唯一候选，须未明确禁用、动作/几何/source 可用
 并产生双重可证点，否则整组省略。可证时 `nearest_actionable_ref` 与 `safe_point` 原子出现，
-点来自承载节点时再附 `safe_carrier_ref`；该 ref 只解释坐标来源，不是可点击替代。认领后只
-重验静态固定点，不在新鲜树中重选坐标。静态规划无候选且目标原中心有阻塞证据时，`occluding_ref` 只
+点来自承载节点时再附 `safe_carrier_ref`；该 ref 只解释坐标来源，不是可点击替代。认领后按分层身份与子树安全规则优先保留原点，
+必要时在同一目标内重算安全坐标；载体替换还需目标独立身份。静态规划无候选且目标原中心有阻塞证据时，`occluding_ref` 只
 指出该阻塞 owner，不表示整个目标表面不可点。子树规划不解决子树外同级或跨窗口 z 序、未发布
 透明层或实际事件消费者，输入执行也不证明应用业务结果。
 
 工具描述中的树引导与树块词表一致：树节点行的动作列仍只有 `tap`、`long_press`、`text`、
 `swipe`（`Node.actions` 不新增枚举）；`actions=swipe` 只是节点的源能力，不是 raw `swipe`
 授权，滚动用 `operation.type=scroll` 与 `container` 表达。引导同时声明块头 `view=`、
-固定 `defaults` 行、`entries` 计数与 `chain` 行，避免同一语法出现两份漂移表述。
+块头后的空行、`entries` 计数与 `chain` 行，避免同一语法出现两份漂移表述。
 
 调用参数在进入客户端前由 `internal/protocol` 的严格解码器接入：未知成员、重复键、大小写
 变体、尾随第二个 JSON 值、类型混用与未声明 `null` 都被拒绝，且不产生设备调用。参数错误
@@ -203,13 +203,12 @@ json v1 path="/observation/tree" value={"format":"full","scope":"","root":null}
 其余工具按 `error` 与各自的查询事实。
 `structured` 模式的错误文本是 `diagnostic v1`，不含树块。
 
-**观察块。** 块头之后固定一行 `defaults {"checked":false}`，再一个空行、节点行，最后是终止行：
+**观察块。** 块头之后是一个空行、节点行，最后是终止行：
 
 ```text
 tree v2 format=full id=O3 scope=reported_visible_with_context view=compact nodes=9 entries=9
-defaults {"checked":false}
 
-n1 root [0,0,1080,2400] checked=null
+n1 root [0,0,1080,2400]
   n2 group
     n3 button [24,60,144,180] "返回" tap
     n4 text [300,80,780,160] "设置"
@@ -233,7 +232,8 @@ end tree
 规则隐藏的已知矩形直接没有该列，`-` 不表示隐藏。连续匿名单子节点折成一条
 `chain [n2 n3]`，成员共享其余列，孩子属于末成员。`nodes` 是展开后的逻辑节点数，
 `entries` 是普通节点或 `chain` 定义行数；详细补看视图里两者相同。`checked` 默认
-`false`（省略），只有 `true` 与 `null` 显式出现。
+`false`（省略），只有 `true` 与 `null` 显式出现。完整节点的缺席布尔恢复为已知默认，
+显式 null 保持未知；set 的缺席只表示未修改。树与补看块均不输出 defaults 行。
 
 delta 块头为
 `tree v2 format=delta id=<O> base=<O2> view=compact scope=<scope> changes=<n>`，正文按
@@ -242,7 +242,6 @@ delta 块头为
 
 ```text
 tree v2 format=delta id=O4 base=O3 view=compact scope=reported_visible_with_context changes=6
-defaults {"checked":false}
 
 ~ n7 label=["WLAN 已关闭"] actions=["tap"] bounds=[40,300,240,380]
 ~ n8 checked=false
@@ -264,7 +263,7 @@ end tree
 
 **补看块。** 块头为
 `inspect v2 scope=<tree|subtree|query> observation=<O> revision=<n> captured_at=<RFC3339> tree_scope=<scope> view=detailed [root=<ref>] [matches=<n> total=<n> truncated=<bool>] nodes=<n> entries=<m>`，
-随后是同一行 `defaults {"checked":false}` 与空行。
+随后是一个空行与正文。
 `tree` 输出整树，`subtree` 额外带 `root=`，`query` 按命中顺序输出
 `match i/N path=[…]` 与完整命中子树，命中之间以空行分隔。`matches` 是本次返回条数，
 `total` 是预算前命中数，`truncated=true` 表示引擎只返回了完整条目前缀。`nodes` 是正文

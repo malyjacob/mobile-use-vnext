@@ -157,7 +157,7 @@ engine 的状态锁只做有限内存检查与转换：锁内不等待 ADB、u2 
 ### 受控滚动与原始手势
 
 `act.operation.type=scroll` 是受控滚动尝试：调用方声明阅读方向与幅度，服务在几何合法且作用域
-可证明的容器内选择起止点。授权单位是观察到的滚动容器与观察时授权的固定段，不是起点叶节点：
+可证明的容器内选择起止点。授权单位是同一可证明的滚动容器与新鲜轨迹，不是起点叶节点：
 
 - 容器在观察的公开树中解析：`ref` 必须直接是 `role=scroll`、`actions` 含 `swipe` 的节点，
   服务不做祖先晋升；坐标候选归约到最近的可滚动祖先，出现多个不同滚动作用域时要求调用方
@@ -165,9 +165,9 @@ engine 的状态锁只做有限内存检查与转换：锁内不等待 ADB、u2 
 - 静态规划固定容器正交中心坐标，用一次整树遍历把每个节点归约到最近的公开滚动作用域，把
   不属于选定容器及其 `raw` 外层祖先的候选投影成轴上的阻塞区间，再从「裁剪矩形 ∩ 公开矩形」
   的基础区间中扣除；最长可证区间决定 `page`/`half` 的留白与幅度，等长区间按手势起点侧取定；
-- 认领后只对容器做“完整内容身份 + 祖先链”唯一匹配，容器 bounds 变化按 `target_changed`
-  处理；新鲜树用同一套区间归约证明**观察时授权的那一整段**仍可用，不重新选择区间、不重算
-  起止点，起点、终点或中段出现新作用域都拒绝；
+- 认领后容器走 Tier 1–3 双向唯一匹配；轴向伸缩仍需足够重叠，离轴两边受固定容差限制。
+  新鲜树先证明原段；若失效，只在同一容器中重新归约安全区间并规划/证明整段。实际
+  `scrollFrame` 的起终点与受控时长进入设备 Swipe；没有安全段则 `target_changed`；
 - 静态不可执行在认领前拒绝，新鲜不成立走重验失败的交付路径。
 
 raw `swipe` 仍是原始手势：起点 `from` 继续走完整内容身份、祖先链与同点解析证明，只增加有界
@@ -183,10 +183,15 @@ bounds 的非空交集为基础，只在目标子树内扣除已知交互节点�
 在认领前返回 `422 unsupported_node_action`；目标原中心有可定位阻塞 owner 时附
 `occluding_ref`，该键不证明整个表面不可点。
 
-认领后只对计划中的目标、可选承载节点和固定 `(x,y)` 做新鲜树重验：目标与承载必须按完整内容
-身份和祖先链唯一匹配，目标仍满足动作几何条件，承载仍在目标非阻塞作用域，固定点继续满足
-同一子树安全谓词。服务不重选候选；任一失配返回 `409 target_changed`，结构不可投影返回
-`503 hierarchy_unavailable`。`422` 的祖先引导只对自身不含 `tap`/`long_press`/`text` 动作的
+认领后 ref 目标使用有界 Tier 1–3 双向唯一匹配：L1 不比较祖先 bounds、Focused/Selected，
+Tier 1 保持目标 bounds，Tier 2 允许受限微移；Tier 3 只移除三项内容均已知空且状态/能力已知
+安全的透明层，并要求非根强锚点。先证明原点；失败后可在原安全载体内重算。载体失效时必须
+有目标自身独立的稳定内容或双端唯一 resource，才可在同一目标子树安全重选；不向祖先扩权。
+实际 `tapFrame` 冻结新鲜坐标/载体供派发使用，坐标输入仍保持原点证明。无候选/歧义返回
+`409 target_changed`；预算耗尽、畸形树或投影损坏返回 `503 hierarchy_unavailable`；
+撤权优先返回 `control_revoked`，不交付新 O。判据细节见[接口契约](interface.md)。
+
+`422` 的祖先引导只对自身不含 `tap`/`long_press`/`text` 动作的
 非 root、非 `context` 目标尝试；父链上的第一个交互节点是唯一候选，不满足动作、几何、source
 或双重可证点条件时整组省略。`nearest_actionable_ref` 与 `safe_point` 原子出现，
 `safe_carrier_ref` 仅在该点来自承载节点时附上；它们都只在同一观察内通过子树及整树归属证明
@@ -232,8 +237,8 @@ bounds 的非空交集为基础，只在目标子树内扣除已知交互节点�
 1. 复核工作未撤销、会话仍属于该工作；
 2. `ProbeDisplay` 确认目标逻辑屏存在；
 3. `start` 的首个观察、`act` 的后观察与 `app` 五个变更 kind 的后观察先做收敛采样：逐帧
-   `Capture`，只有当连续两帧的三层摘要全部相同才停止——节点内容身份链（与实时重验同一个
-   `identityOf`）、公开树的规范编码、前台状态/包/任务与显示几何。采样间隔取上一帧的实测
+   `Capture`，只有当连续两帧的三层摘要全部相同才停止——节点内容身份链（严格的
+   `identityOf`，与 ref 动作的分层匹配分开）、公开树的规范编码、前台状态/包/任务与显示几何。采样间隔取上一帧的实测
    耗时，相邻两帧的采集起点间隔不小于该阶段的静默窗口，帧数与总墙钟分别有上限；预算耗尽
    照常发布最后一帧，不判采集失败。当前取值（静默窗口/总预算）：`act` 400ms/2s、
    `start` 300ms/1.5s、`app.open` 600ms/3s（其余 app 变更沿用 `act` 档）；它们是服务端固定
@@ -251,7 +256,7 @@ bounds 的非空交集为基础，只在目标子树内扣除已知交互节点�
    （`raw_capture` + 完整内部树）超过 `MaxSnapshotCostBytes=4 MiB`
    → `tree_too_large`（`details.budget=internal_snapshot`）；
 9. 在锁内重验：会话仍 `active`、`epoch` 不变、工作未被撤销、仍持有工作位置、显示 ID 与
-   `generation` 未变、采集未过期；
+   `generation` 未变、候选 capture 自身的显示 ID/代次与当前显示一致、采集未过期；
 10. 对唯一留存快照做有限 dry-run；连同受保护集合仍超过
     `MaxRetainedSnapshotCostBytes=32 MiB` → `tree_too_large`
     （`details.budget=retained_snapshots`），且不先删除历史；可容纳时一次应用淘汰、扣费、
@@ -271,11 +276,20 @@ bounds 的非空交集为基础，只在目标子树内扣除已知交互节点�
 `10×deltaBytes < 7×fullBytes`；等值退 full。构造器在投影阶段只产生候选，提交门禁通过后
 才推进 `prev` 与 ref 计数器；被拒绝的候选不改变下一次发布树的 ref。
 
-保号依据公开事实与已匹配的公开父锚点：role、label、公开时出现的 resource、actions、
-protected 与结构位置。未发布的 raw class/package/visible 不构成公开身份；context 节点保留
-自己的来源索引；未发布节点不参与匹配、不消耗 ref。无标签且不可动作的容器可按公开形状、父
-锚点与同形兄弟序号保号；匿名但可动作的容器，以及 input 的锚点匹配，仍要求 class/package
-一致；公开身份回退在上一帧与当前侧均唯一时才保号，无法唯一确定的对应一律新号。
+净化仅改变公开投影：默认空叶不发布，原始事实仍供动作重验使用；非目标 display 包装层不发布，
+目标后代按最近公开祖先挂接并保持 raw 先序。Source 与 ContextSource 互斥且完整覆盖公开 ref，
+context 只承载阅读祖先关系、不提供动作能力。五个状态保留来源三态，合成根使用已知默认。
+
+连续性在公开父索引上按五阶段运行：唯一匿名结构；六个局部/全局内容与身份 pass；基于完整、
+无冲突后代配对集合的父容器投票；新锚点下局部恢复（与投票交替）；最后一次零位移 ordinal
+恢复及局部收尾。ordinal 需要进入该阶段前已有的同 rank 独立强固定点，不能相互造证据。
+resource 与非输入 label 同时参与内容身份；局部 resource-only 回退只在同一锚定父下双向唯一时
+退让文案。全局唯一性始终按完整两侧树统计，不能因先匹配/消耗重复项制造唯一。无锚点输入仅
+允许同父双向唯一匹配。未知/歧义/预算截断降低保号率并分配新号，不猜测目标。
+
+匹配工作预算为 `Wmax=128×(Np+Nc+1)+65_536`，其中 Np/Nc 为两帧公开节点数；未完成批次整体
+丢弃。新号按公开先序从会话高水位单调分配；Candidate/Preview 丢弃不推进 prev 或高水位，
+最终提交门禁通过后才更新连续性，旧快照保持不变。
 
 ### 图片附加材料
 
@@ -305,7 +319,7 @@ full/delta 的选择（`useDelta`）：
 - 否则仅在“已有确认基线、基线属于同一会话、`revision - baseline.revision < 12`、
   基线采集龄 `< 180s`”时尝试 delta；
 - 差分必须可编码，且编码长度 `< full 长度 × 70%`；否则退回 full。
-- delta 无法表达（角色变化、跨父移动、根变化等）时 `Diff` 返回错误，采集改用 full。
+- delta 无法表达（同 ref 角色变化、根变化或非法最终图）时 `Diff` 返回错误，采集改用 full。
 - `act` 重验失败交付的观察按 `forceFull = !obs.Full` 决定，`obs` 为本次失败请求引用的观察：
   引用 full O 时它在认领时已被确认为基线，满足上述条件时交付若为 delta，其 `base` 就是调用方
   刚刚使用的那棵树；引用 delta O 时基线更早，改发 full，避免要求调用方把补丁应用到更早的树。
@@ -315,7 +329,14 @@ full/delta 的选择（`useDelta`）：
 并把空差异 delta 返回给调用方。客户端必须保留基线树，按 `delta.base` 应用到本地副本。
 
 delta 的五类块：`set`（逐字段完整新值，显式保留 `false`/`0`/`""`/`[]`/`null`）、`add`、
-`remove`、`children`（完整子列表）、`replace`（整段替换）。空差异只含 `format`、`base`、`view` 与 `defaults`。
+`remove`、`children`（完整子列表）、`replace`（整段替换）。空差异只含 `format`、`base`、`view`。
+
+五块是原子最终图声明。新增父收养存续节点时拆为顶层空 Add 组装根，并用 children 给出完整
+最终子列表；存续节点跨父迁移必须消除旧父 claim。remove 根必须消失，其基线后代可经最终
+可达边存活；不可达残余只允许来自删除/替换旧区域。Replace 根可迁移，其内部存续后代保持
+基线父关系。双父、循环、孤儿及不可达显式声明整体拒绝。Node/Read 共用规划与应用器，Read
+额外展开/打包 chain 并校验规范编码。五个布尔严格比较 unknown/false/true，完整节点省略
+已知默认，set 保留显式 null/false；阅读树、inspect 与文本块不携带 defaults 声明。
 
 ## 5. 工作位置与并发
 
@@ -558,7 +579,7 @@ P 已无法定位时，`end(P)` 返回 `409 operation_unknown`、`phase=referenc
 ### 发布
 
 `release/versions.json` 是发行号、共同契约号与 Android versionCode 的唯一来源；当前为
-`release_version=0.14.0`、`contract_version=14`、`android_version_code=16`，构建生成
+`release_version=0.15.0`、`contract_version=15`、`android_version_code=17`，构建生成
 Go/Java 常量。`scripts/build-release.ps1` 产出整组产物与 `build/release/manifest.json`
 （源码提交、Go 版本、MCP SDK/协议、各产物 SHA-256/大小、Android 包名/版本、工具目录指纹）。
 工具目录固定为 `scripts/toolcatalog` 投影的 12 个工具，指纹是该目录注册顺序、名称、描述与

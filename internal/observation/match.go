@@ -199,6 +199,8 @@ const (
 type matchStats struct {
 	workLimit        uint64
 	workUsed         uint64
+	candidateVisits  uint64
+	voteComparisons  uint64
 	budgetHit        bool
 	stoppedStage     string
 	rootMatched      bool
@@ -212,10 +214,12 @@ type matchStats struct {
 }
 
 type workBudget struct {
-	limit     uint64
-	remaining uint64
-	used      uint64
-	hit       bool
+	limit           uint64
+	remaining       uint64
+	used            uint64
+	candidateVisits uint64
+	voteComparisons uint64
+	hit             bool
 }
 
 func newWorkBudget(limit uint64) *workBudget {
@@ -227,6 +231,18 @@ func newWorkBudget(limit uint64) *workBudget {
 
 func (w *workBudget) exhausted() bool {
 	return w.hit
+}
+
+// visitCandidate counts one old or current public node actually examined as a
+// matching candidate. It is diagnostic only and never participates in charge.
+func (w *workBudget) visitCandidate() {
+	w.candidateVisits++
+}
+
+// compareVoteMember counts one actual member comparison between descendant
+// vote sets. It is diagnostic only and never participates in charge.
+func (w *workBudget) compareVoteMember() {
+	w.voteComparisons++
 }
 
 // charge consumes deterministic work units, returning false when insufficient
@@ -872,6 +888,8 @@ func (b *Builder) matchRefs(cap *device.Capture, units []unit, refs []string) {
 		}
 		st.stats.workLimit = budget.limit
 		st.stats.workUsed = budget.used
+		st.stats.candidateVisits = budget.candidateVisits
+		st.stats.voteComparisons = budget.voteComparisons
 		b.lastStats = st.stats
 		return
 	}
@@ -949,6 +967,8 @@ func (b *Builder) matchRefs(cap *device.Capture, units []unit, refs []string) {
 
 	st.stats.workLimit = budget.limit
 	st.stats.workUsed = budget.used
+	st.stats.candidateVisits = budget.candidateVisits
+	st.stats.voteComparisons = budget.voteComparisons
 	st.stats.budgetHit = budget.exhausted()
 	b.lastStats = st.stats
 }
@@ -1039,6 +1059,7 @@ func uniqueBidirectionalBuckets(
 				if !budget.charge(1) {
 					return nil, false
 				}
+				budget.visitCandidate()
 				k, pk := st.idx.prevKey[oldPos], st.idx.prevPub[oldPos]
 				if baseR.oldUsed(oldPos) || !pass.eligible(k, pk) {
 					continue
@@ -1054,6 +1075,7 @@ func uniqueBidirectionalBuckets(
 				if !budget.charge(1) {
 					return nil, false
 				}
+				budget.visitCandidate()
 				k, pk := st.idx.curMatchKey(cur), st.idx.curPubKey(cur)
 				if baseR.curUsed(cur) || !pass.eligible(k, pk) {
 					continue
@@ -1084,6 +1106,7 @@ func uniqueBidirectionalBuckets(
 		if !budget.charge(1) {
 			return nil, false
 		}
+		budget.visitCandidate()
 		if oldPos == st.idx.prevRoot {
 			continue
 		}
@@ -1102,6 +1125,7 @@ func uniqueBidirectionalBuckets(
 		if !budget.charge(1) {
 			return nil, false
 		}
+		budget.visitCandidate()
 		if cur == st.idx.root {
 			continue
 		}
@@ -1174,6 +1198,7 @@ func matchParentScopedStructurallyUniqueContainers(
 			if !budget.charge(1) {
 				return nil, false
 			}
+			budget.visitCandidate()
 			if !isStructurallyMatchable(st.idx.prevKey[oldPos], st.idx.prevPub[oldPos]) {
 				continue
 			}
@@ -1188,6 +1213,7 @@ func matchParentScopedStructurallyUniqueContainers(
 			if !budget.charge(1) {
 				return nil, false
 			}
+			budget.visitCandidate()
 			k := st.idx.curMatchKey(cur)
 			if !isStructurallyMatchable(k, st.idx.curPubKey(cur)) {
 				continue
@@ -1228,6 +1254,7 @@ func matchParentScopedUniqueBuckets(
 			if !budget.charge(1) {
 				return nil, false
 			}
+			budget.visitCandidate()
 			k, pk := st.idx.prevKey[oldPos], st.idx.prevPub[oldPos]
 			if baseR.oldUsed(oldPos) || !pass.eligible(k, pk) {
 				continue
@@ -1243,6 +1270,7 @@ func matchParentScopedUniqueBuckets(
 			if !budget.charge(1) {
 				return nil, false
 			}
+			budget.visitCandidate()
 			k, pk := st.idx.curMatchKey(cur), st.idx.curPubKey(cur)
 			if baseR.curUsed(cur) || !pass.eligible(k, pk) {
 				continue
@@ -1350,6 +1378,7 @@ func samePairSet(rc, rp []pairEntry, budget *workBudget) (bool, bool) {
 		if !budget.charge(1) {
 			return false, false
 		}
+		budget.compareVoteMember()
 		return rc[0].prevPos == rp[0].prevPos && rc[0].curTin == rp[0].curTin, true
 	}
 	sort.Slice(rc, func(i, j int) bool {
@@ -1362,6 +1391,7 @@ func samePairSet(rc, rp []pairEntry, budget *workBudget) (bool, bool) {
 		if !budget.charge(1) {
 			return false, false
 		}
+		budget.compareVoteMember()
 		if rc[i].prevPos != rp[i].prevPos || rc[i].curTin != rp[i].curTin {
 			return false, true
 		}
@@ -1378,6 +1408,7 @@ func matchContainersByDescendants(st *matchState, budget *workBudget, dirty *par
 		if !budget.charge(1) {
 			return false
 		}
+		budget.visitCandidate()
 		if cur == st.idx.root || st.curUsed(cur) || !st.idx.curAnonymousContainer(cur) {
 			continue
 		}
@@ -1399,6 +1430,7 @@ func matchContainersByDescendants(st *matchState, budget *workBudget, dirty *par
 			if !budget.charge(1) {
 				return false
 			}
+			budget.compareVoteMember()
 			child, ok := st.idx.directChildUnder(pr.prevPos, anchor, budget)
 			if budget.exhausted() {
 				return false
@@ -1543,6 +1575,7 @@ func matchOrdinalContainersZeroShift(st *matchState, budget *workBudget, dirty *
 			if !budget.charge(1) {
 				return false
 			}
+			budget.visitCandidate()
 			if !st.idx.prevAnonymousContainer(oldPos) {
 				continue
 			}
@@ -1557,6 +1590,7 @@ func matchOrdinalContainersZeroShift(st *matchState, budget *workBudget, dirty *
 			if !budget.charge(1) {
 				return false
 			}
+			budget.visitCandidate()
 			if !st.idx.curAnonymousContainer(cur) {
 				continue
 			}
@@ -1590,6 +1624,7 @@ func matchOrdinalContainersZeroShift(st *matchState, budget *workBudget, dirty *
 				if !budget.charge(1) {
 					return false
 				}
+				budget.visitCandidate()
 				cur, matched := baseR.pairOfOld(p)
 				if !matched {
 					continue
@@ -1608,6 +1643,7 @@ func matchOrdinalContainersZeroShift(st *matchState, budget *workBudget, dirty *
 					if !budget.charge(1) {
 						return false
 					}
+					budget.visitCandidate()
 					p, matched := baseR.pairOfCur(c)
 					if !matched {
 						continue

@@ -19,8 +19,13 @@ instance, err := c.Discover(ctx)
 `POST /api/status {}` 取得当前准入事实（`can_start`、`blocking_code`、本 Agent 的
 `session`、`start_operation_id` 与 `cleanup`）。它不生成 P、不续租、不创建会话。
 
-当前共同契约为 `"14"`。契约版本不等时返回 `contract_mismatch`；客户端不刷新版本、不重发
+当前共同契约为 `"15"`。契约版本不等时返回 `contract_mismatch`；客户端不刷新版本、不重发
 业务动作。端口可应答、`/health` 正常都不等于 `can_start=true`。
+
+公开树与 detailed inspection 使用相同的完整节点布尔默认/unknown 规则，不携带 defaults。
+delta 的 set 保留显式 false/空值/null；应用器将五块作为固定基线的原子最终图声明，支持
+存续节点迁移与新增组装父。调用方始终按 `delta.base` 应用到该 full 基线副本，不能叠加在上一份
+delta 结果上；阅读 ref 连续性不代替服务端输入授权。格式见[接口契约](interface.md)。
 
 ## 2. 操作编号 P
 
