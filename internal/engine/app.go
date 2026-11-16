@@ -19,6 +19,20 @@ func (e *Engine) App(ctx context.Context, agent, p string, req *protocol.AppRequ
 	if req == nil {
 		return nil, protocol.Invalid("app 请求缺失")
 	}
+	switch req.Kind {
+	case protocol.AppKindOpen:
+		if req.Reference == "" || req.Target == nil || req.Target.UseTask || req.Target.App == "" {
+			return nil, protocol.Invalid("open 需要 reference 与 target.app")
+		}
+	case protocol.AppKindClaim, protocol.AppKindHandoff, protocol.AppKindClose:
+		if req.Reference == "" || req.Target == nil {
+			return nil, protocol.Invalid(req.Kind + " 需要 reference 与 target")
+		}
+	case protocol.AppKindKill:
+		if req.Reference == "" || req.Target == nil || !req.Target.UseTask {
+			return nil, protocol.Invalid("kill 需要 reference 与 target.task_id")
+		}
+	}
 	var (
 		op        *operationState
 		duplicate *protocol.Result
@@ -569,8 +583,8 @@ func (e *Engine) sessionTaskLocked(session *sessionState, taskID int) *taskEntry
 
 // appTargetView is the already-proven part of one claim/handoff/close target.
 type appTargetView struct {
-	task     device.Task
-	entry    *taskEntry
+	task      device.Task
+	entry     *taskEntry
 	ownership string
-	origin   *int
+	origin    *int
 }

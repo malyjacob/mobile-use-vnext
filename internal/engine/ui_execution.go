@@ -84,8 +84,16 @@ func (e *Engine) noteShellTerminalLocked(run *shellState) {
 // beginUIDispatch saves a may-dispatch record before competing with STOP at
 // the final in-memory boundary. No disk or device wait holds the state lock.
 func (e *Engine) beginUIDispatch(work *workState, kind string) *protocol.APIError {
+	return e.beginUIDispatchStage(work, kind, "")
+}
+
+// beginUIDispatchStage is the text-aware form. When primitive is not empty,
+// the corresponding text stage advances to uncertain in the same short lock
+// that grants the final dispatch authorization, so status/freeze can never see
+// not_executed while the device command is already runnable.
+func (e *Engine) beginUIDispatchStage(work *workState, kind, primitive string) *protocol.APIError {
 	e.mu.Lock()
-	if !e.workAuthorizedLocked(work, time.Now()) {
+	if !e.workAuthorizedLocked(work, time.Now()) || !e.textStageAuthorizedLocked(work) {
 		e.mu.Unlock()
 		return protocol.NewError(409, protocol.CodeStopped, "输入未派发：原工作已撤销")
 	}
@@ -100,7 +108,8 @@ func (e *Engine) beginUIDispatch(work *workState, kind string) *protocol.APIErro
 		}
 	}
 	e.mu.Lock()
-	if !e.workAuthorizedLocked(work, time.Now()) || e.deviceIdentityRevision != identityRevision {
+	if !e.workAuthorizedLocked(work, time.Now()) || e.deviceIdentityRevision != identityRevision ||
+		!e.textStageAuthorizedLocked(work) {
 		e.mu.Unlock()
 		return protocol.NewError(409, protocol.CodeStopped, "输入未派发：原会话已撤销")
 	}
@@ -115,25 +124,73 @@ func (e *Engine) beginUIDispatch(work *workState, kind string) *protocol.APIErro
 	e.ui, work.UI = token, token
 	e.session.ExecutionUnknown = true
 	e.executionEvidenceRevision++
+	// The primitive becomes uncertain in the same lock that creates the
+	// may-dispatch token. A freeze that wins here cannot project not_executed
+	// for a command that may already be runnable.
+	e.markTextPrimitiveLocked(work, primitive, protocol.TextInputUncertain)
 	e.mu.Unlock()
 	if err := e.persistSync(work.Ctx); err != nil {
 		e.recordUIReceipt(work, device.DispatchNotDispatched)
+		e.clearTextPrimitive(work, primitive)
 		return protocol.NewError(503, protocol.CodeDeviceUnavailable, "输入未派发：恢复账本不可用")
 	}
 	e.mu.Lock()
 	if e.ui == token {
 		token.durable = true
 	}
-	authorized := e.workAuthorizedLocked(work, time.Now()) && e.ui == token && e.deviceIdentityRevision == identityRevision
+	authorized := e.workAuthorizedLocked(work, time.Now()) && e.ui == token &&
+		e.deviceIdentityRevision == identityRevision && e.textStageAuthorizedLocked(work)
 	if authorized {
 		work.DispatchUnknown = true
 	}
 	e.mu.Unlock()
 	if !authorized {
 		e.recordUIReceipt(work, device.DispatchNotDispatched)
+		e.clearTextPrimitive(work, primitive)
 		return protocol.NewError(409, protocol.CodeStopped, "输入未派发：原会话已撤销")
 	}
 	return nil
+}
+
+// clearTextPrimitive returns a primitive to not_executed after a definite
+// pre-dispatch failure. If STOP already froze the operation, the frozen
+// conservative snapshot is left untouched.
+func (e *Engine) clearTextPrimitive(work *workState, primitive string) {
+	if work == nil || primitive == "" {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	op := e.operations[work.OperationID]
+	if op == nil || op.State != OperationRunning || op.TextStage == nil {
+		return
+	}
+	switch primitive {
+	case "focus":
+		op.TextStage.focus = textFocusNotExecuted
+	case "write":
+		op.TextStage.write = protocol.TextInputNotExecuted
+	case "enter":
+		op.TextStage.enter = protocol.TextInputNotExecuted
+	default:
+		return
+	}
+	e.publishTextInputLocked(op)
+}
+
+// textStageAuthorizedLocked requires the display identity fixed at text
+// admission to be unchanged. A session display switch invalidates any pending
+// text primitive rather than binding it to a different screen.
+func (e *Engine) textStageAuthorizedLocked(work *workState) bool {
+	if work == nil {
+		return false
+	}
+	op := e.operations[work.OperationID]
+	if op == nil || op.TextStage == nil {
+		return true
+	}
+	return e.session != nil && e.session.Display.ID == op.TextStage.displayID &&
+		e.session.Display.Generation == op.TextStage.displayGeneration
 }
 
 // recordUIReceipt closes the dispatch window of the original token even after

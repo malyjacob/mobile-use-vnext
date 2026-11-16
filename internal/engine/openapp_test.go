@@ -10,7 +10,8 @@ import (
 
 // appOpenRequest builds one open request against a current ready observation.
 func appOpenRequest(o *protocol.Observation, app string) *protocol.AppRequest {
-	return &protocol.AppRequest{Kind: protocol.AppKindOpen, ObservationID: o.ID, App: app}
+	return &protocol.AppRequest{Kind: protocol.AppKindOpen, Reference: o.ID,
+		Target: &protocol.AppTarget{App: app}}
 }
 
 // intValue dereferences one already-proven identity for assertions.

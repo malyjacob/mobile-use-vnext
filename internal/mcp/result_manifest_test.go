@@ -85,6 +85,7 @@ var rmfCompositeInventory = map[string]string{
 	"Error":           "Code Message Details",
 	"Quality":         "State Samples StopReason",
 	"Effect":          "State",
+	"TextInputView":   "Write Enter",
 	"WaitResult":      "Trigger Matched ElapsedMS",
 }
 
@@ -774,6 +775,7 @@ func rmfResultFixtures() []rmfFixture {
 			Outcome:             "executed",
 			Phase:               "completed",
 			Effect:              &protocol.Effect{State: protocol.EffectObserved},
+			TextInput:           &protocol.TextInputView{Write: protocol.TextInputExecuted, Enter: protocol.TextInputExecuted},
 			TargetReference:     "O1",
 			RequestClosed:       rmfPtr(false),
 			BlockingOperationID: "P2",

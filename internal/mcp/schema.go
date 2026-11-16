@@ -49,16 +49,24 @@ const callerGuidance = "会话与推进：首次可直接 start({})；已有 act
 	"只有没有可用 O、需要查看外部变化，或 recovery.entry=observe 时才 observe。\n\n" +
 	"O 与 P：O 是一次观察，act 会消费 ready O，并以 observation.actionable_until 判断期限。" +
 	"P 是调用的幂等/查询编号，每次新工作调用另有新 P；app 的 find 和 notify 的 P 可能没有会话。" +
-	"带 reference 参数的工具用它指向已有 O/P；act、inspect、app 的目标输入仍用各自 schema 的 observation_id。" +
+	"请求引用统一用 reference：act 和 app 的变更 kind 必须是当前 ready O，inspect 必须是保留中的历史 O；" +
+	"observe、wait_for、keepalive、end、shell、status 保持各自已有的 O/P 范围。" +
 	"start 使用五分钟租期；普通活动在续期点只增不减，至少续至两分钟后；" +
 	"status、inspect、app 查询不续租。keepalive 可重设并可缩短租期，但不延长 O。\n\n" +
 	"选择工具：status 查状态；observe 新采集；wait_for 等条件；act 消费 O；inspect 查历史详细树；" +
 	"app 管应用生命周期；shell 执行命令且可能改屏；diagnose 查健康。" +
 	"wait_for 到时是正常返回，检查 wait.trigger、wait.matched 后用返回的 O 继续；" +
 	"observation.quality=unstable/unknown 本身不阻止输入，不要仅为追求 stable 重复 observe。\n\n" +
-	"text 会把目标框全文设为 text，不追加旧内容；普通输入无需先 tap。" +
-	"该调用会聚焦、写入并精确读回，但不发送 ENTER。需要提交时，用 text 返回的新 O 另行调用 act，" +
-	"并设 operation.type=key、operation.key=ENTER；结果 uncertain 时不要盲重发。\n\n" +
+	"act 的 ref 点按/长按默认 bubble=true：原目标完全没有 tap、long_press、text 任一动作时，可交给最近的交互祖先做一次目标提升；" +
+	"该祖先不支持本动作或不能生成唯一安全落点时就按恢复指引调整调用，不继续向更远祖先查找。" +
+	"坐标目标不传 bubble；需要只点原目标时显式 operation.bubble=false。" +
+	"一次调用只派发一个动作，不沿祖先逐层点击。\n\n" +
+	"text 默认 press_enter=true，一次调用完成自动聚焦、把目标框全文设为 text、精确读回，并在读回成功后至多发送一次 ENTER；" +
+	"普通输入无需先 tap，也无需另发 ENTER。返回的 text_input 分别报告 write 与 enter 阶段。" +
+	"仅填字、草稿、多行编辑、逐字段填写或清空但不提交时显式 operation.press_enter=false，只写入不发送 ENTER，也不返回 text_input。" +
+	"ENTER 只证明按键原语，不证明搜索、提交或导航成功；业务结果由后观察中的页面事实确认。" +
+	"text_input.enter=uncertain 时先观察当前页面，不要原样重发 ENTER；write=executed,enter=not_executed 且原会话仍活动时，" +
+	"可取新 O 后按需单独发送 key=ENTER，不必重新填字。\n\n" +
 	"恢复：retry/O 表示尚未派发，改正参数后用同一工具重试；结果带新 observation.id 就用它，否则用原 O。" +
 	"observe/P 的 body reference 用已有 O/P 所指活动会话的 P（常见为 session.origin，也可用所属 operation_id）；" +
 	"本次新调用另生新 P。status/P 按目标取 ID：当前动作用 operation_id，busy 用 blocking_operation_id，" +
@@ -219,13 +227,15 @@ var toolCatalog = []toolDefinition{
 	{
 		name: "act",
 		description: "消费一个 ready 观察并派发 tap、long_press、text、swipe、scroll 或 key，成功后返回动作后的观察。" +
-			"observation_id 必填且必须是 ready O，调用后该 O 被消费、不再可用。" +
+			"reference 必填且必须是当前 ready O，调用后该 O 被消费、不再可用。" +
 			"operation 只接受对应分支成员：tap/long_press 用 target；text 用 target 与 text；" +
 			"scroll 用 container、direction 与可选 amount（默认 page）；swipe 用 from/to 与可选 duration_ms；key 用 key 白名单。" +
+			"tap/long_press 的 ref 目标默认 bubble=true：原目标完全没有 tap、long_press、text 任一动作时只向最近交互祖先提升一次；" +
+			"该祖先不支持本动作时不再向更远祖先查找。坐标目标不带 bubble，显式 false 只点原目标。" +
+			"text 默认 press_enter=true，已包含自动聚焦、全文写入、精确读回和至多一次 ENTER；普通输入无需先 tap 或另发 ENTER。" +
+			"仅写入、草稿、多行或逐字段填写时显式 press_enter=false。" +
+			"省略/true 的 text 结果固定带 text_input:{write,enter}；显式 false 不返回该对象。" +
 			"image=true 在动作后的同一采集中附加 ImageContent。" +
-			"text 把目标框全文设为 text，不追加旧内容；普通输入无需先 tap；" +
-			"该调用会聚焦、写入并精确读回，但不发送 ENTER。需要提交时，用 text 返回的新 O 另行调用 act，" +
-			"并设 operation.type=key、operation.key=ENTER；结果 uncertain 时不要盲重发。" +
 			"滚动用 operation.type=scroll + container 表达，swipe 是原始手势，只承诺手势而不承诺滚动语义。" +
 			"树块动作列里的 `swipe` 只是节点的源能力，不是 raw swipe 授权；" +
 			"`scroll` 不承诺真实方向、触摸消费者或业务安全。" +
@@ -233,16 +243,16 @@ var toolCatalog = []toolDefinition{
 			"坐标目标或树变化返回 target_changed。" +
 			"重验失败且结果带新 observation.id 时，用该 O 加新 P 重试，不必再 observe。" +
 			"`unstable`/`unknown` 质量（observation.quality）不阻止输入。" +
-			"outcome=uncertain 时先 status 跟踪，不原样重发；其余 outcome 按结果带的 recovery 与 Instructions 的规则继续。",
+			"outcome=uncertain 时先 status 跟踪，不原样重发；executed 只证明派发，不证明业务成功；其余 outcome 按结果带的 recovery 与 Instructions 的规则继续。",
 		schema: json.RawMessage(`{
   "type": "object",
   "properties": {
-    "observation_id": {
+    "reference": {
       "type": "string",
       "minLength": 1,
       "maxLength": 64,
       "pattern": "^[OP]",
-      "description": "必填的 ready O 编号。"
+      "description": "必填的当前 ready O 编号；调用后该 O 被消费。"
     },
     "operation": {
       "type": "object",
@@ -273,6 +283,14 @@ var toolCatalog = []toolDefinition{
               "additionalProperties": false
             }
           ]
+        },
+        "bubble": {
+          "type": "boolean",
+          "description": "仅 tap/long_press 且 target 为 ref 时适用；省略按 true 处理。true 允许在原目标完全没有 tap、long_press、text 任一动作时只向最近交互祖先提升一次，false 只点原目标。坐标目标必须省略，其他动作携带即被拒绝。"
+        },
+        "press_enter": {
+          "type": "boolean",
+          "description": "仅 text 适用；省略按 true 处理。true 在精确读回后至多发送一次 ENTER 并返回 text_input；false 只自动聚焦、写入并读回，不发送 ENTER，也不返回 text_input。其他动作携带即被拒绝。"
         },
         "container": {
           "description": "scroll 的滚动容器选择器：ref 或 x/y 坐标，二选一。ref 必须直接指向 role=scroll 节点（不做祖先晋升）；x/y 取该点所在的滚动容器。认领后需唯一确认同一容器，轨迹按当前安全区间重验或重算。",
@@ -341,12 +359,12 @@ var toolCatalog = []toolDefinition{
         "text": {
           "type": "string",
           "maxLength": 4096,
-          "description": "text 分支要写入的字符串，可为空，最多 4096 个 Unicode 码点。"
+          "description": "text 分支要写入的字符串，可为空，最多 4096 个 Unicode 码点；目标框接收全文而不是追加。"
         }
       },
       "required": ["type"],
       "additionalProperties": false,
-      "description": "tap/long_press 接受 target；text 接受 target 与 text；scroll 接受 container、direction 与可选 amount；swipe 接受 from、to 与可选 duration_ms；key 接受 key。"
+      "description": "tap/long_press 接受 target 与按分支解释的 bubble；text 接受 target、text 与按分支解释的 press_enter；scroll 接受 container、direction 与可选 amount；swipe 接受 from、to 与可选 duration_ms；key 接受 key。"
     },
     "image": {
       "type": "boolean",
@@ -354,21 +372,21 @@ var toolCatalog = []toolDefinition{
       "description": "true 时在动作后的同一次采集中附加一个 ImageContent。"
     }
   },
-  "required": ["observation_id", "operation"],
+  "required": ["reference", "operation"],
   "additionalProperties": false,
-  "description": "act 需要 observation_id 与 operation；image 可选。"
+  "description": "act 需要 reference 与 operation；image 可选。"
 }`),
 	},
 	{
 		name: "inspect",
 		description: "只读查看保留中的历史观察树，不采集、不续租、不确认基线、不认领 O。" +
-			"observation_id 必填；node 与 query 互斥，query 按字面 Unicode 折叠子串匹配。" +
+			"reference 必填且必须指向保留中的历史 O；node 与 query 互斥，query 按字面 Unicode 折叠子串匹配。" +
 			"返回 inspect v2 块：tree 为完整详细树，subtree 为指定 root 的子树，query 为命中节点的路径与子树。" +
 			"历史树被淘汰（content_unavailable）时用 observe 取新观察；结果过大（inspection_too_large）时改用更窄的 node 或 query。",
 		schema: json.RawMessage(`{
   "type": "object",
   "properties": {
-    "observation_id": {
+    "reference": {
       "type": "string",
       "minLength": 1,
       "maxLength": 64,
@@ -386,10 +404,10 @@ var toolCatalog = []toolDefinition{
       "description": "可选字面查询；与 node 互斥。"
     }
   },
-  "required": ["observation_id"],
+  "required": ["reference"],
   "additionalProperties": false,
   "not": {"required": ["node", "query"]},
-  "description": "inspect 需要 observation_id；node 与 query 至多出现一个。"
+  "description": "inspect 需要 reference；node 与 query 至多出现一个。"
 }`),
 		readOnly: true,
 	},
@@ -448,12 +466,14 @@ var toolCatalog = []toolDefinition{
 		name: "app",
 		description: "统一应用生命周期入口，按 kind 选择互斥分支。" +
 			"find：无会话应用发现，query 按本地化名称或包名做字面折叠子串过滤；" +
-			"list：查询本 Agent 原会话的 live 任务（reference 必填），scope=session（默认）列会话虚屏任务，" +
-			"scope=primary 列主屏候选，app 可作包名过滤；find/list 都没有 outcome。" +
-			"open：消费当前 ready O，在会话屏复用同包窗口或新建；claim：把主屏精确 live 任务移入本会话虚屏并登记 borrowed；" +
+			"list：查询本 Agent 原会话的 live 任务（reference 必填，可为 ready O 或能解析到活动原会话的 P），" +
+			"scope=session（默认）列会话虚屏任务，scope=primary 列主屏候选，app 可作包名过滤；find/list 都没有 outcome。" +
+			"open：消费当前 ready O，用 target={app:包名} 在会话屏复用同包窗口或新建；" +
+			"claim：把主屏精确 live 任务移入本会话虚屏并登记 borrowed；" +
 			"handoff：把本会话虚屏的单个任务移回主屏 0，restore_foreground 默认 false；" +
 			"close：关闭本会话虚屏目标窗口，allow_borrowed 默认 false；" +
 			"kill：终止本会话 live owned 且同屏唯一可归因应用，target 只接受 task_id，allow_stop_playback 默认 false。" +
+			"open/claim/handoff/close/kill 的 reference 必须是当前 ready O。" +
 			"claim/handoff/close 的 target 为 task_id 或包名二选一；target 只是选择器，不单独授予权限。" +
 			"模式来自原会话：主屏会话只允许 find/list/open，其余变更 kind 在消费 O 前拒绝。" +
 			"五个变更 kind 的 outcome 为 executed/not_executed/uncertain，成功后返回原会话屏 full 无图观察；" +
@@ -476,7 +496,7 @@ var toolCatalog = []toolDefinition{
       "minLength": 1,
       "maxLength": 64,
       "pattern": "^[OP]",
-      "description": "list 必填：本 Agent 活动原会话的 O 或 P。"
+      "description": "list 可为 ready O 或能解析到本 Agent 活动原会话的 P；open/claim/handoff/close/kill 必须是当前 ready O。"
     },
     "scope": {
       "type": "string",
@@ -489,41 +509,26 @@ var toolCatalog = []toolDefinition{
       "minLength": 1,
       "maxLength": 255,
       "pattern": "^[A-Za-z0-9_]+(\\.[A-Za-z0-9_]+)*$",
-      "description": "明确 Android 包名：open 必填；list 可作过滤。"
-    },
-    "observation_id": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 64,
-      "pattern": "^[OP]",
-      "description": "open/claim/handoff/close/kill 必填的当前 ready O 编号。"
+      "description": "仅 list 接受：明确的包名过滤。open 的包名放在 target.app，其他 kind 不接受顶层 app。"
     },
     "target": {
-      "description": "claim/handoff/close：task_id 与 app 恰好一种；kill 只接受 task_id。",
-      "oneOf": [
-        {
-          "type": "object",
-          "properties": {
-            "task_id": {"type": "integer", "minimum": 1, "description": "精确 leaf task ID。"}
-          },
-          "required": ["task_id"],
-          "additionalProperties": false
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "精确 leaf task ID。"
         },
-        {
-          "type": "object",
-          "properties": {
-            "app": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 255,
-              "pattern": "^[A-Za-z0-9_]+(\\.[A-Za-z0-9_]+)*$",
-              "description": "按包名精确匹配；零个或多个候选时拒绝。"
-            }
-          },
-          "required": ["app"],
-          "additionalProperties": false
+        "app": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[A-Za-z0-9_]+(\\.[A-Za-z0-9_]+)*$",
+          "description": "明确的应用包名；按包名精确匹配，零个或多个候选时拒绝。"
         }
-      ]
+      },
+      "additionalProperties": false,
+      "description": "open 只接受 {app}；claim/handoff/close 接受 {task_id} 或 {app} 恰好一种；kill 只接受 {task_id}。"
     },
     "restore_foreground": {
       "type": "boolean",
@@ -543,65 +548,7 @@ var toolCatalog = []toolDefinition{
   },
   "required": ["kind"],
   "additionalProperties": false,
-  "allOf": [
-    {
-      "if": {"properties": {"kind": {"const": "find"}}, "required": ["kind"]},
-      "then": {"not": {"anyOf": [
-        {"required": ["reference"]}, {"required": ["observation_id"]}, {"required": ["target"]},
-        {"required": ["app"]}, {"required": ["scope"]}, {"required": ["restore_foreground"]},
-        {"required": ["allow_borrowed"]}, {"required": ["allow_stop_playback"]}
-      ]}}
-    },
-    {
-      "if": {"properties": {"kind": {"const": "list"}}, "required": ["kind"]},
-      "then": {"required": ["reference"], "not": {"anyOf": [
-        {"required": ["observation_id"]}, {"required": ["target"]}, {"required": ["query"]},
-        {"required": ["restore_foreground"]}, {"required": ["allow_borrowed"]},
-        {"required": ["allow_stop_playback"]}
-      ]}}
-    },
-    {
-      "if": {"properties": {"kind": {"const": "open"}}, "required": ["kind"]},
-      "then": {"required": ["observation_id", "app"], "not": {"anyOf": [
-        {"required": ["reference"]}, {"required": ["scope"]}, {"required": ["target"]},
-        {"required": ["query"]}, {"required": ["restore_foreground"]},
-        {"required": ["allow_borrowed"]}, {"required": ["allow_stop_playback"]}
-      ]}}
-    },
-    {
-      "if": {"properties": {"kind": {"const": "claim"}}, "required": ["kind"]},
-      "then": {"required": ["observation_id", "target"], "not": {"anyOf": [
-        {"required": ["reference"]}, {"required": ["scope"]}, {"required": ["app"]},
-        {"required": ["query"]}, {"required": ["restore_foreground"]},
-        {"required": ["allow_borrowed"]}, {"required": ["allow_stop_playback"]}
-      ]}}
-    },
-    {
-      "if": {"properties": {"kind": {"const": "handoff"}}, "required": ["kind"]},
-      "then": {"required": ["observation_id", "target"], "not": {"anyOf": [
-        {"required": ["reference"]}, {"required": ["scope"]}, {"required": ["app"]},
-        {"required": ["query"]}, {"required": ["allow_borrowed"]},
-        {"required": ["allow_stop_playback"]}
-      ]}}
-    },
-    {
-      "if": {"properties": {"kind": {"const": "close"}}, "required": ["kind"]},
-      "then": {"required": ["observation_id", "target"], "not": {"anyOf": [
-        {"required": ["reference"]}, {"required": ["scope"]}, {"required": ["app"]},
-        {"required": ["query"]}, {"required": ["restore_foreground"]},
-        {"required": ["allow_stop_playback"]}
-      ]}}
-    },
-    {
-      "if": {"properties": {"kind": {"const": "kill"}}, "required": ["kind"]},
-      "then": {"required": ["observation_id", "target"], "not": {"anyOf": [
-        {"required": ["reference"]}, {"required": ["scope"]}, {"required": ["app"]},
-        {"required": ["query"]}, {"required": ["restore_foreground"]},
-        {"required": ["allow_borrowed"]}
-      ]}}
-    }
-  ],
-  "description": "app 需要 kind；各分支只接受自己的成员，服务严格解码为权威。"
+  "description": "app 的扁平根只声明成员集合；每个 kind 的必填与禁止成员由服务端严格解码矩阵执行，跨 kind 成员返回 invalid_request。"
 }`),
 	},
 	{

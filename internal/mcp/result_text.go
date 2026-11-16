@@ -35,6 +35,8 @@ var resultFields = func() map[string]resultFieldKind {
 	add("", "operation_id operation_state outcome phase target_reference request_closed blocking_operation_id can_start blocking_code start_operation_id observation_state input_state message_id saved", fieldToken)
 	add("", "effect", fieldObject)
 	add("effect.", "state", fieldToken)
+	add("", "text_input", fieldObject)
+	add("text_input.", "write enter", fieldToken)
 	add("", "session cleanup error recovery observation app notification diagnosis", fieldObject)
 	add("", "inspection shell", fieldBlock)
 	add("", "wait", fieldObject)

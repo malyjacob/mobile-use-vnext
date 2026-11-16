@@ -302,7 +302,7 @@ func TestTextFocusReadFailureDoesNotReopenEndedTap(t *testing.T) {
 		return h.device.Capture(ctx, display)
 	}}
 	result, apiErr := h.engine.Act(context.Background(), "agent", "Pfocusread",
-		&protocol.ActRequest{ObservationID: first.Observation.ID, Operation: protocol.Operation{
+		&protocol.ActRequest{Reference: first.Observation.ID, Operation: protocol.Operation{
 			Type: "text", Target: &protocol.Target{X: 500, Y: 350}, Text: "synthetic",
 		}})
 	if apiErr != nil || result.Outcome != OutcomeUncertain {

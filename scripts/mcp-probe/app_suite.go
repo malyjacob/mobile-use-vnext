@@ -26,7 +26,7 @@ func (p *probe) appLifecycleChecks(ctx context.Context, start startSummary) bool
 	readyO := start.ObservationID
 
 	open, failure := p.call(ctx, "app", map[string]any{
-		"kind": "open", "observation_id": readyO, "app": target,
+		"kind": "open", "reference": readyO, "target": map[string]any{"app": target},
 	})
 	if failure != nil {
 		p.reporter.fail("app_open", failure.reason, failure.fields...)
@@ -85,7 +85,7 @@ func (p *probe) appLifecycleChecks(ctx context.Context, start startSummary) bool
 	// closed loop simply loses that task and close is skipped.
 	killed := false
 	kill, failure := p.call(ctx, "app", map[string]any{
-		"kind": "kill", "observation_id": nextO, "target": map[string]any{"task_id": taskID},
+		"kind": "kill", "reference": nextO, "target": map[string]any{"task_id": taskID},
 	})
 	if failure != nil {
 		p.reporter.fail("app_kill", failure.reason, failure.fields...)
@@ -144,7 +144,7 @@ func (p *probe) appLifecycleChecks(ctx context.Context, start startSummary) bool
 		p.reporter.skip("app_close", "controlled_task_killed")
 	} else {
 		closed, failure := p.call(ctx, "app", map[string]any{
-			"kind": "close", "observation_id": nextO, "target": map[string]any{"task_id": taskID},
+			"kind": "close", "reference": nextO, "target": map[string]any{"task_id": taskID},
 		})
 		if failure != nil {
 			p.reporter.fail("app_close", failure.reason, failure.fields...)
@@ -192,7 +192,7 @@ func (p *probe) appLifecycleChecks(ctx context.Context, start startSummary) bool
 	}
 	claimTask := candidates[0].TaskID
 	claim, failure := p.call(ctx, "app", map[string]any{
-		"kind": "claim", "observation_id": claimO,
+		"kind": "claim", "reference": claimO,
 		"target": map[string]any{"task_id": claimTask},
 	})
 	if failure != nil {

@@ -453,6 +453,37 @@ func (c *Cleanup) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 	return nil
 }
 
+// UnmarshalJSONFrom decodes the fixed text_input object. Both keys must be
+// present, unknown members are rejected and the five ordered primitive states
+// are the only accepted combinations.
+func (v *TextInputView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	raw, err := readObjectValue(dec, "text_input")
+	if err != nil {
+		return err
+	}
+	var wire struct {
+		Write member[string] `json:"write"`
+		Enter member[string] `json:"enter"`
+	}
+	if err := json.Unmarshal(raw, &wire, json.RejectUnknownMembers(true)); err != nil {
+		return err
+	}
+	write, err := requireResponseMember(wire.Write, "text_input.write")
+	if err != nil {
+		return err
+	}
+	enter, err := requireResponseMember(wire.Enter, "text_input.enter")
+	if err != nil {
+		return err
+	}
+	view := &TextInputView{Write: write, Enter: enter}
+	if !ValidTextInput(view) {
+		return fmt.Errorf("text_input carries an invalid primitive combination")
+	}
+	*v = *view
+	return nil
+}
+
 // UnmarshalJSONFrom decodes the operation/tool report. Session presence is
 // the wire evidence for IncludeSession, because the boolean has no member of
 // its own; an explicit null session is therefore a present, nil session.
@@ -463,6 +494,7 @@ func (r *Result) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 		Outcome             member[string]           `json:"outcome"`
 		Phase               member[string]           `json:"phase"`
 		Effect              member[*Effect]          `json:"effect"`
+		TextInput           member[*TextInputView]   `json:"text_input"`
 		TargetReference     member[string]           `json:"target_reference"`
 		RequestClosed       *bool                    `json:"request_closed"`
 		BlockingOperationID member[string]           `json:"blocking_operation_id"`
@@ -494,6 +526,7 @@ func (r *Result) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 		Outcome:             wire.Outcome.Value,
 		Phase:               wire.Phase.Value,
 		Effect:              wire.Effect.Value,
+		TextInput:           wire.TextInput.Value,
 		TargetReference:     wire.TargetReference.Value,
 		RequestClosed:       wire.RequestClosed,
 		BlockingOperationID: wire.BlockingOperationID.Value,

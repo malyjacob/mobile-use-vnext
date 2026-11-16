@@ -596,8 +596,8 @@ func TestStartObserveActTextEnd(t *testing.T) {
 		t.Fatalf("button not found in tree")
 	}
 	tapResult, apiErr := h.engine.Act(context.Background(), "agent", "", &protocol.ActRequest{
-		ObservationID: secondID,
-		Operation:     protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: button.Ref}},
+		Reference: secondID,
+		Operation: protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: button.Ref}},
 	})
 	if apiErr != nil {
 		t.Fatalf("act rejected: %v", apiErr)
@@ -619,7 +619,7 @@ func TestStartObserveActTextEnd(t *testing.T) {
 		t.Fatalf("input not found in tree")
 	}
 	textResult, apiErr := h.engine.Act(context.Background(), "agent", "", &protocol.ActRequest{
-		ObservationID: thirdID,
+		Reference: thirdID,
 		Operation: protocol.Operation{Type: "text",
 			Target: &protocol.Target{UseRef: true, Ref: input.Ref}, Text: "你好世界"},
 	})
@@ -763,8 +763,8 @@ func TestBusyRejectsSecondActionWithoutConsumingObservation(t *testing.T) {
 	h.engine.mu.Unlock()
 	button := findRole(currentTree(t, h.engine).Root, protocol.RoleButton)
 	result, apiErr := h.engine.Act(context.Background(), "agent", "", &protocol.ActRequest{
-		ObservationID: first.ID,
-		Operation:     protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: button.Ref}},
+		Reference: first.ID,
+		Operation: protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: button.Ref}},
 	})
 	if apiErr != nil {
 		t.Fatalf("busy act transport error: %v", apiErr)

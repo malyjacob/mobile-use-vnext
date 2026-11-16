@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"encoding/json/jsontext"
+	"errors"
 	"fmt"
 )
 
@@ -652,6 +653,71 @@ func (r *Recovery) MarshalJSONTo(enc *jsontext.Encoder) error {
 	return enc.WriteToken(jsontext.EndObject)
 }
 
+// Text-input primitive states. The wire enum is closed; "unknown" is the
+// explicit uncertain value, never an omitted member.
+const (
+	TextInputNotExecuted = "not_executed"
+	TextInputUncertain   = "uncertain"
+	TextInputExecuted    = "executed"
+)
+
+// TextInputView is the fixed write/enter snapshot of an accepted text action
+// whose effective press_enter value is true. Both keys are always present.
+type TextInputView struct {
+	Write string
+	Enter string
+}
+
+// ValidTextInput reports whether the pair is one of the five ordered states.
+// ENTER can never be non-not_executed before write is executed.
+func ValidTextInput(v *TextInputView) bool {
+	if v == nil {
+		return false
+	}
+	switch v.Write {
+	case TextInputNotExecuted, TextInputUncertain, TextInputExecuted:
+	default:
+		return false
+	}
+	switch v.Enter {
+	case TextInputNotExecuted, TextInputUncertain, TextInputExecuted:
+	default:
+		return false
+	}
+	switch {
+	case v.Write == TextInputNotExecuted:
+		return v.Enter == TextInputNotExecuted
+	case v.Write == TextInputUncertain:
+		return v.Enter == TextInputNotExecuted
+	default:
+		return true
+	}
+}
+
+// MarshalJSONTo writes the fixed write/enter object.
+func (v *TextInputView) MarshalJSONTo(enc *jsontext.Encoder) error {
+	if v == nil {
+		return writeNull(enc)
+	}
+	if !ValidTextInput(v) {
+		return errors.New("invalid text_input state")
+	}
+	if err := enc.WriteToken(jsontext.BeginObject); err != nil {
+		return err
+	}
+	for _, field := range []struct{ name, value string }{
+		{"write", v.Write}, {"enter", v.Enter},
+	} {
+		if err := writeName(enc, field.name); err != nil {
+			return err
+		}
+		if err := writeString(enc, field.value); err != nil {
+			return err
+		}
+	}
+	return enc.WriteToken(jsontext.EndObject)
+}
+
 // Result is the operation/tool report. Only fields known for this call appear.
 type Result struct {
 	OperationID    string
@@ -659,10 +725,13 @@ type Result struct {
 	Outcome        string
 	Phase          string
 	Effect         *Effect
-	Observation    *Observation
-	Inspection     *InspectionView
-	App            *AppView
-	Shell          *ShellView
+	// TextInput is the fixed primitive snapshot of a default/true text action.
+	// It is nil for every other action and for explicit press_enter=false.
+	TextInput   *TextInputView
+	Observation *Observation
+	Inspection  *InspectionView
+	App         *AppView
+	Shell       *ShellView
 	// Wait is the bounded outcome fact of a condition wait. It is published for
 	// the tool that owns this kind only, between shell and notification.
 	Wait                *WaitResult
@@ -727,6 +796,14 @@ func (r *Result) MarshalJSONTo(enc *jsontext.Encoder) error {
 			return err
 		}
 		if err := MarshalJSONTo(enc, r.Effect); err != nil {
+			return err
+		}
+	}
+	if r.TextInput != nil {
+		if err := writeName(enc, "text_input"); err != nil {
+			return err
+		}
+		if err := r.TextInput.MarshalJSONTo(enc); err != nil {
 			return err
 		}
 	}

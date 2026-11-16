@@ -137,7 +137,8 @@ engine 的状态锁只做有限内存检查与转换：锁内不等待 ADB、u2 
 
 - `find`/`list` 是查询：不消费 O、不续租、无 outcome；`find` 使用 detached P，`list` 绑定
   `reference` 解析到的原会话。`open`/`claim`/`handoff`/`close`/`kill` 消费当前 ready O；
-  静态拒绝不消费，认领后不归还。主屏会话只允许 `find`/`list`/`open`。
+  静态拒绝不消费，认领后不归还。主屏会话只允许 `find`/`list`/`open`。请求引用统一为
+  `reference`；`open` 的操作目标固定为 `target.app`，`list` 的顶层 `app` 只是查询过滤。
 - task 归属分三类：`owned` 是会话虚屏中可确认的自有任务（虚拟屏 open 新建或复用的窗口）；
   `borrowed` 是显式从主屏 `0` claim 进本会话虚屏的任务；`shared` 是主屏 open/list 或已
   handoff 交给主屏的任务。`shared` 不进入会话删除名单；主屏 open 不登记用户任务。
@@ -180,6 +181,19 @@ raw `swipe` 仍是原始手势：起点 `from` 继续走完整内容身份、祖
 
 ### tap/long_press 的子树安全落点
 
+`tap`/`long_press` 的 `ref` 目标在有效 `bubble=true`（省略或显式 true）时，先判断原目标自身
+是否有请求动作：有动作时仍走直接目标规划；完全没有 `tap`/`long_press`/`text` 动作时，沿公开
+父链找到第一个 touch-interactive 祖先 A，只把本次动作规划给 A 一次。A 必须支持请求动作、
+未明确禁用、bounds 有效，并在 A 作用域内产生唯一可证安全点；否则静态返回
+`422 unsupported_node_action`，不继续寻找更远祖先。source 映射缺失或层级损坏仍按各自的
+`409 node_not_found`/`503 hierarchy_unavailable` 拒绝，不降级为可执行提升。静态 plan 同时
+绑定原 child C 与 A；认领后
+分别 Tier 1–3 匹配两者，并要求 A 仍是 fresh C 的祖先和最近交互祖先、C 的公开 Role 与完整
+Label 未变、C 未新增 touch-interactive 能力、A 仍支持动作，随后在 A 作用域内重算安全点。
+C 或 A 丢失/歧义、C 内容被替换、出现更近交互祖先或点落到另一独立交互目标时返回
+`target_changed`，零派发；C 丢失时不能只凭 A 唯一而解绑授权。`bubble=false` 保持直接目标
+算法与错误；坐标目标不进入该分支。
+
 `tap`/`long_press` 的 `ref` 目标在静态阶段规划一次固定落点：以目标 raw 矩形、逻辑屏与公开
 bounds 的非空交集为基础，只在目标子树内扣除已知交互节点及其后代和 context 边界，依次测试
 原中心或交集中心、承载节点中心、中心线最长可证区间中点。候选点必须同时避开阻塞区，并让
@@ -199,11 +213,26 @@ Tier 1 保持目标 bounds，Tier 2 允许受限微移；Tier 3 只移除三项�
 非 root、非 `context` 目标尝试；父链上的第一个交互节点是唯一候选，不满足动作、几何、source
 或双重可证点条件时整组省略。`nearest_actionable_ref` 与 `safe_point` 原子出现，
 `safe_carrier_ref` 仅在该点来自承载节点时附上；它们都只在同一观察内通过子树及整树归属证明
-时给出，绝不静默晋升或自动派发。
+时给出，只解释可选坐标，不自动派发。默认 `bubble=true` 的一次 C→A 目标提升是独立契约；
+该引导不把授权静默解绑为祖先。
 
 该证明只覆盖公开树模型的目标子树，不覆盖子树外同级或跨窗口 z 序、未发布的透明触摸层、
 应用自定义事件拦截或私有业务回调。树证明与 `executed` 都不证明 Android 实际事件消费者或
 期望业务结果。
+
+### text 的复合输入阶段
+
+`text` 的 `press_enter` 省略或有效为 true 时，engine 在成功认领 O 的同一状态锁内初始化私有
+`textStage` 与公开不可变 `text_input:{write,enter}` 快照；显式 false 分支不初始化该对象，
+继续既有输入链路。焦点 tap、SetText 与 ENTER 各自在创建 `may_dispatch` 令牌的同一短锁内
+推进为 `uncertain`；持久化与最终授权在锁外/后续锁完成，失败回退为确定未派发，回执返回后
+再按终止/确定未派发/不可用分别推进。SetText 只有终止回执、唯一目标、Issued/Accepted、独立精确
+readback 与提交门禁全部成立后才为 `write=executed`；ENTER 只在 write 已确认、同一 work/P、
+同一 display generation 和最终归属门禁通过后发送一次。两键均确认时在同一临界区写入
+`enter=executed` 与 `KnownOutcome=executed`。冻结从累计 focus/write/enter 事实推导整体
+outcome：全部原语未获派发许可才是 `not_executed`，两键 executed 才是 `executed`，其余
+（包括焦点 tap 已派发但两键未派发）均为 `uncertain`。status(P)、重复 P 与冻结结果只复制
+最后一次已提交快照，迟到回执不能回补，也不持久化为普通动作历史。
 
 ### 条件等待（wait_for）
 

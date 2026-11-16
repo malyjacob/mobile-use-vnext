@@ -22,12 +22,12 @@ var routeAdmissionBase = []struct {
 	{"status", "reference", map[string]any{"reference": "O1"}},
 	{"observe", "reference", map[string]any{"reference": "O1"}},
 	{"wait_for", "reference", map[string]any{"reference": "O1", "timeout": 1}},
-	{"act", "observation_id", map[string]any{
-		"observation_id": "O1",
-		"operation":      map[string]any{"type": "key", "key": "BACK"},
+	{"act", "reference", map[string]any{
+		"reference": "O1",
+		"operation": map[string]any{"type": "key", "key": "BACK"},
 	}},
 	{"end", "reference", map[string]any{"reference": "O1"}},
-	{"inspect", "observation_id", map[string]any{"observation_id": "O1"}},
+	{"inspect", "reference", map[string]any{"reference": "O1"}},
 	{"keepalive", "reference", map[string]any{"reference": "O1"}},
 	{"diagnose", "", map[string]any{}},
 	{"notify", "text", map[string]any{"text": "message"}},

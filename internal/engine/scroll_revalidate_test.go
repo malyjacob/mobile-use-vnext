@@ -27,8 +27,8 @@ func (h *harness) actAsync(p, observationID string, operation protocol.Operation
 	}, 1)
 	go func() {
 		result, apiErr := h.engine.Act(context.Background(), "agent", p, &protocol.ActRequest{
-			ObservationID: observationID,
-			Operation:     operation,
+			Reference: observationID,
+			Operation: operation,
 		})
 		done <- struct {
 			result *protocol.Result

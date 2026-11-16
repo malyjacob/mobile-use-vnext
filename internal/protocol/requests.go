@@ -115,16 +115,69 @@ type Operation struct {
 	// DurationMS is the swipe-only gesture duration. An omitted wire duration
 	// decodes to DefaultSwipeDurationMS; the encoder omits it when zero.
 	DurationMS int
+	// Bubble is the presence-aware tap/long_press member. It only applies to a
+	// ref target: omitted means effective true, explicit false disables the one
+	// nearest-interactive-ancestor lift, and an explicit member on a coordinate
+	// target or any other operation type is rejected.
+	Bubble    bool
+	HasBubble bool
+	// PressEnter is the presence-aware text member. Omitted means effective
+	// true (one bounded ENTER after an exact readback); explicit false stops
+	// after the input path. Other operation types cannot carry it.
+	PressEnter    bool
+	HasPressEnter bool
+}
+
+// EffectiveBubble returns the branch-qualified value. It is meaningful only
+// for a ref tap/long_press; callers use ValidateEffectiveDefaults first.
+func (o *Operation) EffectiveBubble() bool {
+	return o == nil || !o.HasBubble || o.Bubble
+}
+
+// EffectivePressEnter returns the branch-qualified value. It is meaningful only
+// for text; callers use ValidateEffectiveDefaults first.
+func (o *Operation) EffectivePressEnter() bool {
+	return o == nil || !o.HasPressEnter || o.PressEnter
+}
+
+// ValidateEffectiveDefaults checks the closed membership rules shared by HTTP
+// decode, the canonical encoder, MCP argument conversion and direct engine
+// calls. It never computes a default for a branch where the member is invalid.
+func (o *Operation) ValidateEffectiveDefaults() *APIError {
+	if o == nil {
+		return Invalid("operation 必须是对象")
+	}
+	switch o.Type {
+	case "tap", "long_press":
+		if o.HasPressEnter {
+			return Invalid("press_enter 只适用于 text")
+		}
+		if o.HasBubble && (o.Target == nil || !o.Target.UseRef) {
+			return Invalid("bubble 只适用于 ref 目标；坐标目标不接受 bubble")
+		}
+	case "text":
+		if o.HasBubble {
+			return Invalid("bubble 只适用于 tap 或 long_press 的 ref 目标")
+		}
+	default:
+		if o.HasBubble {
+			return Invalid("bubble 只适用于 tap 或 long_press 的 ref 目标")
+		}
+		if o.HasPressEnter {
+			return Invalid("press_enter 只适用于 text")
+		}
+	}
+	return nil
 }
 
 // Point is one absolute screen coordinate.
 type Point struct{ X, Y int }
 
-// ActRequest is act(observation_id, operation, image=false).
+// ActRequest is act(reference, operation, image=false).
 type ActRequest struct {
-	ObservationID string
-	Operation     Operation
-	Image         bool
+	Reference string
+	Operation Operation
+	Image     bool
 }
 
 // Keys is the fixed first-version key whitelist.
@@ -315,23 +368,24 @@ func DecodeEnd(body []byte) (*EndRequest, *APIError) {
 	return &EndRequest{Reference: wire.Reference}, nil
 }
 
-// DecodeAct admits act(observation_id, operation, image).
+// DecodeAct admits act(reference, operation, image). The retired
+// observation_id member is not an alias: it is an unknown field.
 func DecodeAct(body []byte) (*ActRequest, *APIError) {
 	var presence struct {
-		ObservationID jsontext.Value `json:"observation_id"`
-		Operation     jsontext.Value `json:"operation"`
-		Image         jsontext.Value `json:"image"`
+		Reference jsontext.Value `json:"reference"`
+		Operation jsontext.Value `json:"operation"`
+		Image     jsontext.Value `json:"image"`
 	}
 	var wire struct {
-		ObservationID string        `json:"observation_id"`
-		Operation     *rawOperation `json:"operation"`
-		Image         bool          `json:"image"`
+		Reference string        `json:"reference"`
+		Operation *rawOperation `json:"operation"`
+		Image     bool          `json:"image"`
 	}
 	if err := decodeStrict(body, &presence, &wire); err != nil {
 		return nil, invalidDecode(err)
 	}
-	if len(presence.ObservationID) == 0 || string(presence.ObservationID) == "null" {
-		return nil, Invalid("act 需要 observation_id")
+	if len(presence.Reference) == 0 || string(presence.Reference) == "null" {
+		return nil, Invalid("act 需要 reference")
 	}
 	if len(presence.Operation) == 0 || string(presence.Operation) == "null" {
 		return nil, Invalid("act 需要 operation 对象")
@@ -339,14 +393,14 @@ func DecodeAct(body []byte) (*ActRequest, *APIError) {
 	if err := checkNulls(map[string]jsontext.Value{"image": presence.Image}); err != nil {
 		return nil, err
 	}
-	if err := checkReference(wire.ObservationID); err != nil {
+	if err := checkReference(wire.Reference); err != nil {
 		return nil, err
 	}
 	op, apiErr := parseOperation(wire.Operation)
 	if apiErr != nil {
 		return nil, apiErr
 	}
-	return &ActRequest{ObservationID: wire.ObservationID, Operation: *op, Image: wire.Image}, nil
+	return &ActRequest{Reference: wire.Reference, Operation: *op, Image: wire.Image}, nil
 }
 
 type rawOperation struct {
@@ -360,6 +414,8 @@ type rawOperation struct {
 	Direction  jsontext.Value `json:"direction"`
 	Amount     jsontext.Value `json:"amount"`
 	DurationMS jsontext.Value `json:"duration_ms"`
+	Bubble     jsontext.Value `json:"bubble"`
+	PressEnter jsontext.Value `json:"press_enter"`
 }
 
 type rawTarget struct {
@@ -404,18 +460,33 @@ func parseOperation(raw *rawOperation) (*Operation, *APIError) {
 	hasDirection := len(raw.Direction) > 0
 	hasAmount := len(raw.Amount) > 0
 	hasDuration := len(raw.DurationMS) > 0
+	hasBubble := len(raw.Bubble) > 0
+	hasPressEnter := len(raw.PressEnter) > 0
+	bubble, bubblePresent, bubbleErr := parseOptionalBool("bubble", raw.Bubble)
+	if bubbleErr != nil {
+		return nil, bubbleErr
+	}
+	pressEnter, pressEnterPresent, pressEnterErr := parseOptionalBool("press_enter", raw.PressEnter)
+	if pressEnterErr != nil {
+		return nil, pressEnterErr
+	}
+	op.Bubble, op.HasBubble = bubble, bubblePresent
+	op.PressEnter, op.HasPressEnter = pressEnter, pressEnterPresent
 	switch raw.Type {
 	case "tap", "long_press":
 		if raw.Target.Value == nil {
 			return nil, Invalid("该操作需要 target")
 		}
 		if raw.From.Present || raw.To.Present || hasKey || hasText ||
-			raw.Container.Present || hasDirection || hasAmount || hasDuration {
-			return nil, Invalid("该操作只接受 target")
+			raw.Container.Present || hasDirection || hasAmount || hasDuration || hasPressEnter {
+			return nil, Invalid("该操作只接受 target 与按分支解释的 bubble")
 		}
 		target, err := parseTarget(raw.Target.Value)
 		if err != nil {
 			return nil, err
+		}
+		if hasBubble && !target.UseRef {
+			return nil, Invalid("bubble 只适用于 ref 目标；坐标目标不接受 bubble")
 		}
 		op.Target = target
 	case "text":
@@ -423,8 +494,8 @@ func parseOperation(raw *rawOperation) (*Operation, *APIError) {
 			return nil, Invalid("text 操作需要 target")
 		}
 		if raw.From.Present || raw.To.Present || hasKey ||
-			raw.Container.Present || hasDirection || hasAmount || hasDuration {
-			return nil, Invalid("text 操作只接受 target 与 text")
+			raw.Container.Present || hasDirection || hasAmount || hasDuration || hasBubble {
+			return nil, Invalid("text 操作只接受 target、text 与可选的 press_enter")
 		}
 		if !hasText || string(raw.Text) == "null" {
 			return nil, Invalid("text 操作需要非 null 的 text")
@@ -444,7 +515,7 @@ func parseOperation(raw *rawOperation) (*Operation, *APIError) {
 		op.Text = text
 	case "swipe":
 		if raw.Target.Present || raw.Container.Present || hasKey || hasText ||
-			hasDirection || hasAmount {
+			hasDirection || hasAmount || hasBubble || hasPressEnter {
 			return nil, Invalid("swipe 只接受 from、to 与 duration_ms")
 		}
 		if raw.From.Value == nil || raw.To.Value == nil {
@@ -474,7 +545,7 @@ func parseOperation(raw *rawOperation) (*Operation, *APIError) {
 		op.From, op.To, op.DurationMS = from, to, duration
 	case "scroll":
 		if raw.Target.Present || raw.From.Present || raw.To.Present ||
-			hasKey || hasText || hasDuration {
+			hasKey || hasText || hasDuration || hasBubble || hasPressEnter {
 			return nil, Invalid("scroll 只接受 container、direction 与 amount")
 		}
 		if !raw.Container.Present {
@@ -504,7 +575,8 @@ func parseOperation(raw *rawOperation) (*Operation, *APIError) {
 		op.Container, op.Direction, op.Amount = container, direction, amount
 	case "key":
 		if raw.Target.Present || raw.From.Present || raw.To.Present || hasText ||
-			raw.Container.Present || hasDirection || hasAmount || hasDuration {
+			raw.Container.Present || hasDirection || hasAmount || hasDuration ||
+			hasBubble || hasPressEnter {
 			return nil, Invalid("key 操作只接受 key")
 		}
 		if !hasKey || string(raw.Key) == "null" {
@@ -521,7 +593,27 @@ func parseOperation(raw *rawOperation) (*Operation, *APIError) {
 	default:
 		return nil, Invalid("不支持的 operation.type")
 	}
+	if apiErr := op.ValidateEffectiveDefaults(); apiErr != nil {
+		return nil, apiErr
+	}
 	return op, nil
+}
+
+// parseOptionalBool records both the decoded value and whether the member was
+// present, so an omitted member can never be confused with an explicit false.
+// Explicit null and non-boolean values are rejected before any branch logic.
+func parseOptionalBool(name string, raw jsontext.Value) (bool, bool, *APIError) {
+	if len(raw) == 0 {
+		return false, false, nil
+	}
+	if isJSONNull(raw) {
+		return false, false, Invalid(name + " 不接受 null")
+	}
+	var value bool
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return false, false, Invalid(name + " 必须是布尔值")
+	}
+	return value, true, nil
 }
 
 // parseScrollDirection admits exactly the four declared lowercase directions.

@@ -13,6 +13,12 @@ import (
 // Static rejection happens before claiming; after claiming the old observation
 // is never returned to ready, even when no input was dispatched.
 func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequest) (finalResult *protocol.Result, finalErr *protocol.APIError) {
+	if req == nil {
+		return nil, protocol.Invalid("act 请求缺失")
+	}
+	if apiErr := req.Operation.ValidateEffectiveDefaults(); apiErr != nil {
+		return nil, apiErr
+	}
 	op, duplicate, apiErr := e.registerOperation(p, agent, "act")
 	if apiErr != nil {
 		return nil, apiErr
@@ -24,8 +30,8 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 	e.setOperationReference(op, protocol.RecoveryReferenceO)
 
 	e.mu.Lock()
-	staticErr := e.staticActCheckLocked(agent, req.ObservationID, &req.Operation, time.Now())
-	staticObs := e.observations[req.ObservationID]
+	staticErr := e.staticActCheckLocked(agent, req.Reference, &req.Operation, time.Now())
+	staticObs := e.observations[req.Reference]
 	e.mu.Unlock()
 	var point *pointCheck
 	var scroll *scrollPlan
@@ -64,11 +70,14 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 
 	e.mu.Lock()
 	session := e.session
-	obs := e.observations[req.ObservationID]
+	obs := e.observations[req.Reference]
 	claimErr := e.claimObservationLocked(op, agent, work, obs, session, time.Now())
 	if claimErr != nil {
 		e.mu.Unlock()
 		return e.finishWithError(op, "claim", claimErr), nil
+	}
+	if req.Operation.Type == "text" && req.Operation.EffectivePressEnter() {
+		e.initTextStageLocked(op, session)
 	}
 	e.touchSessionLocked(time.Now())
 	e.mu.Unlock()
@@ -118,11 +127,11 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 	if scroll != nil {
 		outcome, dispatchErr = e.dispatchScroll(work, frame)
 	} else {
-		outcome, dispatchErr = e.dispatchAct(work, obs, &req.Operation, fresh, tapFrame)
+		outcome, dispatchErr = e.dispatchAct(work, op, obs, &req.Operation, fresh, tapFrame)
 	}
 	if outcome == OutcomeUncertain {
 		e.markDispatchUnknown(work)
-		result := newResult(op)
+		result := e.newResult(op)
 		result.Outcome = OutcomeUncertain
 		result.Error = dispatchErr.Public()
 		if scroll != nil {
@@ -143,7 +152,7 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 	e.noteKnownOutcome(op, OutcomeExecuted)
 	e.setOperationPhase(op, "post_observation")
 	if e.workRevoked(work) {
-		result := newResult(op)
+		result := e.newResult(op)
 		result.Outcome = OutcomeExecuted
 		addScrollUnknownEffect(result, scroll)
 		result.Recovery = e.finishOperation(op, OutcomeExecuted, "executed_revoked", nil)
@@ -152,7 +161,7 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 	}
 	session = e.sessionForWork(work)
 	if session == nil {
-		result := newResult(op)
+		result := e.newResult(op)
 		result.Outcome = OutcomeExecuted
 		addScrollUnknownEffect(result, scroll)
 		result.Recovery = e.finishOperation(op, OutcomeExecuted, "executed_revoked", nil)
@@ -164,14 +173,14 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 		// A revoked session has no post observation to publish; the action
 		// itself stays executed. This is the same fact as the pre-capture
 		// revocation check above, only observed one step later.
-		result := newResult(op)
+		result := e.newResult(op)
 		result.Outcome = OutcomeExecuted
 		addScrollUnknownEffect(result, scroll)
 		result.Recovery = e.finishOperation(op, OutcomeExecuted, "executed_revoked", nil)
 		e.addSessionIfEnded(result)
 		return result, nil
 	}
-	result := newResult(op)
+	result := e.newResult(op)
 	result.Outcome = OutcomeExecuted
 	if postErr != nil {
 		// The action outcome stays executed; the post observation only reports
@@ -489,6 +498,140 @@ func freshTextTargetSafe(raw *device.RawNode) bool {
 		raw.HasPassword && !raw.Password
 }
 
+// revalidateBubbleTapFrame re-proves both identities of a C->A target lift on
+// the fresh frame. The child stays the authorization selector: if it is lost,
+// even a uniquely matched ancestor cannot silently inherit the action.
+func (e *Engine) revalidateBubbleTapFrame(ctx context.Context,
+	revoked func() bool, workProjector Projector, obs *observationState,
+	fresh *device.Capture, plan *tapPlan) (*tapFrame, *protocol.APIError) {
+	stop := func() bool {
+		return ctx == nil || ctx.Err() != nil || (revoked != nil && revoked())
+	}
+	if stop() {
+		return nil, stoppedActRevalidation()
+	}
+	topology, apiErr := validateTapRawTopology(fresh)
+	if apiErr != nil {
+		return nil, apiErr
+	}
+	matchChild, childState := e.probeActNode(
+		ctx, revoked, obs.Projection.Capture, fresh, plan.targetRaw)
+	switch childState {
+	case actProbeUnique:
+	case actProbeCancelled:
+		return nil, stoppedActRevalidation()
+	case actProbeBudgetExhausted, actProbeMalformed:
+		return nil, tapHierarchyError()
+	case actProbeNone, actProbeAmbiguous:
+		return nil, tapTargetChanged()
+	default:
+		return nil, tapHierarchyError()
+	}
+	matchAncestor, ancestorState := e.probeActNode(
+		ctx, revoked, obs.Projection.Capture, fresh, plan.bubbleAncestorRaw)
+	switch ancestorState {
+	case actProbeUnique:
+	case actProbeCancelled:
+		return nil, stoppedActRevalidation()
+	case actProbeBudgetExhausted, actProbeMalformed:
+		return nil, tapHierarchyError()
+	case actProbeNone, actProbeAmbiguous:
+		return nil, tapTargetChanged()
+	default:
+		return nil, tapHierarchyError()
+	}
+	if stop() {
+		return nil, stoppedActRevalidation()
+	}
+	projector := workProjector
+	if projector == nil {
+		projector = e.projector
+	}
+	if projector == nil {
+		return nil, tapHierarchyError()
+	}
+	projection, err := projector.Preview(fresh)
+	if stop() {
+		return nil, stoppedActRevalidation()
+	}
+	if err != nil || projection == nil || projection.Tree == nil ||
+		projection.Tree.Root == nil || projection.Source == nil ||
+		projection.Capture == nil {
+		return nil, tapHierarchyError()
+	}
+	view, apiErr := buildTapPublicView(projection.Tree, fresh, projection.Source)
+	if apiErr != nil {
+		return nil, apiErr
+	}
+	childIndex := indexOf(fresh, matchChild.raw)
+	ancestorIndex := indexOf(fresh, matchAncestor.raw)
+	if childIndex < 0 || ancestorIndex < 0 {
+		return nil, tapHierarchyError()
+	}
+	switch checkTapSourceMapping(view, topology, childIndex) {
+	case tapSourceTargetMissing:
+		return nil, tapTargetChanged()
+	case tapSourceDamaged:
+		return nil, tapHierarchyError()
+	}
+	if stop() {
+		return nil, stoppedActRevalidation()
+	}
+	childPublic := view.byRaw[childIndex]
+	ancestorPublic := view.byRaw[ancestorIndex]
+	if childPublic == nil || ancestorPublic == nil || view.byRaw[ancestorIndex] != ancestorPublic {
+		return nil, tapTargetChanged()
+	}
+	originalPublic := findPublicNode(obs.Projection.Tree.Root, plan.targetRef)
+	if originalPublic == nil {
+		return nil, tapTargetChanged()
+	}
+	if childPublic.Role != originalPublic.Role ||
+		!samePublicLabel(childPublic.Label, originalPublic.Label) {
+		return nil, tapTargetChanged()
+	}
+	// The child must still be non-interactive. Any new tap/long_press/text
+	// capability, including the requested one, invalidates the lift plan.
+	if isTouchInteractive(childPublic) {
+		return nil, tapTargetChanged()
+	}
+	if !validTapPublicTarget(ancestorPublic, protocol.Action(plan.action)) {
+		return nil, tapTargetChanged()
+	}
+	if !topology.isAncestor(ancestorIndex, childIndex) {
+		return nil, tapTargetChanged()
+	}
+	if nearestInteractiveAncestor(view, childPublic) != ancestorPublic {
+		return nil, tapTargetChanged()
+	}
+	ancestorInput := &tapInput{
+		view: view, capture: fresh, topology: topology,
+		target: ancestorPublic, targetRaw: matchAncestor.raw, targetIndex: ancestorIndex,
+	}
+	scope, apiErr := collectTapScope(ancestorInput)
+	if stop() {
+		return nil, stoppedActRevalidation()
+	}
+	if apiErr != nil {
+		return nil, tapTargetChanged()
+	}
+	x, y, strategy, carrier, ok := chooseBubbleTapPoint(scope, view, ancestorPublic, childPublic)
+	if !ok {
+		return nil, tapTargetChanged()
+	}
+	frame := &tapFrame{
+		capture: fresh, raw: matchAncestor.raw, x: x, y: y,
+		tier: matchAncestor.tier, strategy: strategy,
+	}
+	if carrier != nil {
+		frame.carrier = carrier.raw
+	}
+	if stop() {
+		return nil, stoppedActRevalidation()
+	}
+	return frame, nil
+}
+
 // revalidateTapTargetFrame proves one fresh ref target and computes the exact
 // point dispatch is allowed to use. The returned frame is immutable: target,
 // carrier, coordinates, Tier and strategy are fixed before the first primitive.
@@ -504,6 +647,9 @@ func (e *Engine) revalidateTapTargetFrame(ctx context.Context,
 	if ctx == nil || fresh == nil || plan == nil || plan.targetRaw == nil ||
 		obs == nil || obs.Projection == nil || obs.Projection.Capture == nil {
 		return nil, tapHierarchyError()
+	}
+	if plan.bubbleAncestorRaw != nil {
+		return e.revalidateBubbleTapFrame(ctx, revoked, workProjector, obs, fresh, plan)
 	}
 	topology, apiErr := validateTapRawTopology(fresh)
 	if apiErr != nil {
@@ -758,7 +904,7 @@ func foregroundMatches(observed, fresh device.Foreground) *protocol.APIError {
 // dispatchAct executes exactly one input branch and reports whether the device
 // accepted it. Anything after the first dispatched primitive that cannot be
 // confirmed is uncertain; nothing is replayed.
-func (e *Engine) dispatchAct(work *workState, obs *observationState,
+func (e *Engine) dispatchAct(work *workState, op *operationState, obs *observationState,
 	operation *protocol.Operation, fresh *device.Capture,
 	frame *tapFrame) (string, *protocol.APIError) {
 	session := e.sessionForWork(work)
@@ -767,7 +913,7 @@ func (e *Engine) dispatchAct(work *workState, obs *observationState,
 	}
 	displayID := session.Display.ID
 	if operation.Type == "text" {
-		return e.dispatchText(work, session, obs, operation, fresh, frame)
+		return e.dispatchText(work, op, session, obs, operation, fresh, frame)
 	}
 	x, y := 0, 0
 	if operation.Target != nil {
@@ -818,12 +964,21 @@ func (e *Engine) dispatchAct(work *workState, obs *observationState,
 }
 
 // dispatchText performs the focus tap, display-bound set and independent live
-// readback. The set is never replayed and text is never rolled back.
-func (e *Engine) dispatchText(work *workState, session *sessionState, obs *observationState,
-	operation *protocol.Operation, fresh *device.Capture,
-	frame *tapFrame) (string, *protocol.APIError) {
+// readback. The set is never replayed and text is never rolled back. When the
+// effective press_enter value is true, the same call may dispatch one ENTER
+// after the exact readback and exposes the fixed text_input snapshot.
+func (e *Engine) dispatchText(work *workState, op *operationState, session *sessionState,
+	obs *observationState, operation *protocol.Operation,
+	fresh *device.Capture, frame *tapFrame) (string, *protocol.APIError) {
 	if operation == nil || operation.Target == nil || fresh == nil {
 		return OutcomeNotExecuted, tapTargetChanged()
+	}
+	composite := operation.EffectivePressEnter()
+	primitive := func(name string) string {
+		if composite {
+			return name
+		}
+		return ""
 	}
 	displayID := session.Display.ID
 	tapX, tapY := operation.Target.X, operation.Target.Y
@@ -835,11 +990,21 @@ func (e *Engine) dispatchText(work *workState, session *sessionState, obs *obser
 		tapX, tapY = frame.x, frame.y
 		want = frame.raw
 	}
-	if apiErr := e.beginUIDispatch(work, "tap"); apiErr != nil {
+	if apiErr := e.beginUIDispatchStage(work, "tap", primitive("focus")); apiErr != nil {
 		return OutcomeNotExecuted, apiErr
 	}
 	receipt, tapErr := e.dev.Tap(work.Ctx, displayID, tapX, tapY)
 	e.recordUIReceipt(work, receipt)
+	if composite {
+		switch receipt {
+		case device.DispatchTerminated:
+			e.setTextPrimitive(work, op, "focus", textFocusExecuted)
+		case device.DispatchNotDispatched:
+			e.setTextPrimitive(work, op, "focus", textFocusNotExecuted)
+		default:
+			e.setTextPrimitive(work, op, "focus", textFocusUncertain)
+		}
+	}
 	if receipt == device.DispatchNotDispatched {
 		return OutcomeNotExecuted, protocol.NewError(503, protocol.CodeDeviceUnavailable, "输入未派发")
 	}
@@ -879,11 +1044,21 @@ func (e *Engine) dispatchText(work *workState, session *sessionState, obs *obser
 	if e.workRevoked(work) || work.Ctx.Err() != nil {
 		return OutcomeUncertain, actionUncertain()
 	}
-	if apiErr := e.beginUIDispatch(work, "text"); apiErr != nil {
+	if apiErr := e.beginUIDispatchStage(work, "text", primitive("write")); apiErr != nil {
 		return OutcomeUncertain, apiErr
 	}
 	result, err := e.dev.SetTextOnDisplay(work.Ctx, target, operation.Text)
 	e.recordUIReceipt(work, result.Receipt)
+	if composite {
+		switch result.Receipt {
+		case device.DispatchNotDispatched:
+			e.setTextPrimitive(work, op, "write", protocol.TextInputNotExecuted)
+		case device.DispatchTerminated:
+			// The write stays uncertain until the exact readback commits.
+		default:
+			e.setTextPrimitive(work, op, "write", protocol.TextInputUncertain)
+		}
+	}
 	if err != nil || result.Receipt != device.DispatchTerminated {
 		return OutcomeUncertain, textResultUncertain()
 	}
@@ -938,10 +1113,44 @@ func (e *Engine) dispatchText(work *workState, session *sessionState, obs *obser
 			if !e.confirmDispatch(work) {
 				return OutcomeUncertain, actionUncertain()
 			}
-			return OutcomeExecuted, nil
+			if !composite {
+				return OutcomeExecuted, nil
+			}
+			if !e.writeTextExecuted(work, op) {
+				return OutcomeUncertain, actionUncertain()
+			}
+			return e.dispatchTextEnter(work, op, displayID)
 		}
 	}
 	return OutcomeUncertain, textResultUncertain()
+}
+
+// dispatchTextEnter sends at most one ENTER after the write was committed. A
+// definite not-dispatched receipt leaves write=executed, enter=not_executed;
+// an unusable receipt leaves enter=uncertain. Neither case is replayed.
+func (e *Engine) dispatchTextEnter(work *workState, op *operationState,
+	displayID int) (string, *protocol.APIError) {
+	if !e.beginTextEnter(work, op) {
+		return OutcomeUncertain, actionUncertain()
+	}
+	if apiErr := e.beginUIDispatchStage(work, "key", "enter"); apiErr != nil {
+		return OutcomeUncertain, apiErr
+	}
+	receipt, err := e.dev.Key(work.Ctx, displayID, "ENTER")
+	e.recordUIReceipt(work, receipt)
+	switch receipt {
+	case device.DispatchNotDispatched:
+		e.setTextPrimitive(work, op, "enter", protocol.TextInputNotExecuted)
+		return OutcomeUncertain, actionUncertain()
+	case device.DispatchTerminated:
+		if err == nil && e.confirmTextEnter(work, op) {
+			return OutcomeExecuted, nil
+		}
+		return OutcomeUncertain, actionUncertain()
+	default:
+		e.setTextPrimitive(work, op, "enter", protocol.TextInputUncertain)
+		return OutcomeUncertain, actionUncertain()
+	}
 }
 
 func actionUncertain() *protocol.APIError {

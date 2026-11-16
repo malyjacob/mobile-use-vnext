@@ -14,7 +14,7 @@ import (
 func (e *Engine) appClose(ctx context.Context, op *operationState, req *protocol.AppRequest) (*protocol.Result, *protocol.APIError) {
 	now := time.Now()
 	e.mu.Lock()
-	_, session, staticErr := e.appStaticCheckLocked(op.Agent, req.ObservationID, now)
+	_, session, staticErr := e.appStaticCheckLocked(op.Agent, req.Reference, now)
 	if staticErr == nil {
 		staticErr = e.appModeGuardLocked(session, req.Kind)
 	}
@@ -53,7 +53,7 @@ func (e *Engine) appClose(ctx context.Context, op *operationState, req *protocol
 	}
 
 	e.mu.Lock()
-	claimErr := e.claimObservationLocked(op, op.Agent, work, e.observations[req.ObservationID],
+	claimErr := e.claimObservationLocked(op, op.Agent, work, e.observations[req.Reference],
 		e.session, time.Now())
 	e.mu.Unlock()
 	if claimErr != nil {

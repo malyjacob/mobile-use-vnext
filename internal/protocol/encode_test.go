@@ -61,7 +61,7 @@ func TestRequestEncodersRoundTrip(t *testing.T) {
 			{Type: "key", Key: "BACK"},
 		}
 		for _, operation := range branches {
-			body, err := (&ActRequest{ObservationID: "O1", Operation: *operation, Image: true}).Encode()
+			body, err := (&ActRequest{Reference: "O1", Operation: *operation, Image: true}).Encode()
 			if err != nil {
 				t.Fatalf("%s: %v", operation.Type, err)
 			}
@@ -78,7 +78,7 @@ func TestRequestEncodersRoundTrip(t *testing.T) {
 		}
 	})
 	t.Run("inspect", func(t *testing.T) {
-		body, err := (&InspectRequest{ObservationID: "O2", Query: "确定", HasQuery: true}).Encode()
+		body, err := (&InspectRequest{Reference: "O2", Query: "确定", HasQuery: true}).Encode()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -86,7 +86,7 @@ func TestRequestEncodersRoundTrip(t *testing.T) {
 		if apiErr != nil || req.Query != "确定" || !req.HasQuery || req.HasNode {
 			t.Fatalf("DecodeInspect: %v %+v", apiErr, req)
 		}
-		if _, err := (&InspectRequest{ObservationID: "O2", Node: "n1", HasNode: true, Query: "x", HasQuery: true}).Encode(); err == nil {
+		if _, err := (&InspectRequest{Reference: "O2", Node: "n1", HasNode: true, Query: "x", HasQuery: true}).Encode(); err == nil {
 			t.Fatal("mutually exclusive inspect members were encoded")
 		}
 	})
@@ -116,16 +116,17 @@ func TestRequestEncodersRoundTrip(t *testing.T) {
 			!req.HasQuery || req.Kind != AppKindFind {
 			t.Fatalf("DecodeApp find: %v %+v", apiErr, req)
 		}
-		openApp := &AppRequest{Kind: AppKindOpen, ObservationID: "O4", App: "com.android.settings"}
+		openApp := &AppRequest{Kind: AppKindOpen, Reference: "O4",
+			Target: &AppTarget{App: "com.android.settings"}}
 		body, err = openApp.Encode()
 		if err != nil {
 			t.Fatal(err)
 		}
-		if req, apiErr := DecodeApp(body); apiErr != nil ||
-			req.App != "com.android.settings" || req.Kind != AppKindOpen {
+		if req, apiErr := DecodeApp(body); apiErr != nil || req.Target == nil ||
+			req.Target.App != "com.android.settings" || req.Kind != AppKindOpen {
 			t.Fatalf("DecodeApp open: %v %+v", apiErr, req)
 		}
-		kill := &AppRequest{Kind: AppKindKill, ObservationID: "O4",
+		kill := &AppRequest{Kind: AppKindKill, Reference: "O4",
 			Target: &AppTarget{TaskID: 42, UseTask: true}, AllowStopPlayback: true}
 		body, err = kill.Encode()
 		if err != nil {
@@ -200,7 +201,7 @@ func TestKeepaliveDurationEncoding(t *testing.T) {
 // Encoded members stay within the documented public vocabulary: no Go field
 // names, no aliases and no explicit nulls.
 func TestEncodedMembersArePublic(t *testing.T) {
-	body, err := (&ActRequest{ObservationID: "O1", Operation: Operation{Type: "swipe", From: &Point{}, To: &Point{X: 1, Y: 2}}}).Encode()
+	body, err := (&ActRequest{Reference: "O1", Operation: Operation{Type: "swipe", From: &Point{}, To: &Point{X: 1, Y: 2}}}).Encode()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +211,7 @@ func TestEncodedMembersArePublic(t *testing.T) {
 	}
 	for name := range raw {
 		switch name {
-		case "observation_id", "operation", "image":
+		case "reference", "operation", "image":
 		default:
 			t.Fatalf("unexpected member %q", name)
 		}
@@ -252,7 +253,7 @@ func TestActScrollEncodeRoundTrip(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			body, err := (&ActRequest{ObservationID: "O1", Operation: tc.operation}).Encode()
+			body, err := (&ActRequest{Reference: "O1", Operation: tc.operation}).Encode()
 			if err != nil {
 				t.Fatalf("Encode: %v", err)
 			}
@@ -297,7 +298,7 @@ func TestSwipeDurationEncode(t *testing.T) {
 			To: &Point{X: 500, Y: 600}, DurationMS: duration}
 	}
 	for _, duration := range []int{MinSwipeDurationMS, DefaultSwipeDurationMS, MaxSwipeDurationMS} {
-		body, err := (&ActRequest{ObservationID: "O1", Operation: base(duration)}).Encode()
+		body, err := (&ActRequest{Reference: "O1", Operation: base(duration)}).Encode()
 		if err != nil {
 			t.Fatalf("duration %d: %v", duration, err)
 		}
@@ -314,7 +315,7 @@ func TestSwipeDurationEncode(t *testing.T) {
 		}
 	}
 
-	body, err := (&ActRequest{ObservationID: "O1", Operation: base(0)}).Encode()
+	body, err := (&ActRequest{Reference: "O1", Operation: base(0)}).Encode()
 	if err != nil {
 		t.Fatalf("omitted duration: %v", err)
 	}
@@ -362,7 +363,7 @@ func TestActEncoderRejectsInvalidShapes(t *testing.T) {
 		{Type: "key", Key: "BACK", Amount: ScrollAmountHalf},
 	}
 	for _, operation := range operations {
-		if body, err := (&ActRequest{ObservationID: "O1", Operation: operation}).Encode(); err == nil {
+		if body, err := (&ActRequest{Reference: "O1", Operation: operation}).Encode(); err == nil {
 			t.Fatalf("encoder admitted invalid shape %#v: %s", operation, body)
 		} else if body != nil {
 			t.Fatalf("encoder returned a body on error: %s", body)

@@ -17,34 +17,26 @@ import (
 
 // ---------------------------------------------------------------- schema
 
-// testAppSchemaShape pins the published app schema to the strict decoder: one
-// root object, exactly the ten catalogued members, kind required, and one
-// if/then branch per kind that rejects the members of every other branch.
+// testAppSchemaShape pins the published app schema to the flat contract: one
+// root object, exactly the nine catalogued members, kind required, and no
+// conditional applicators at any depth. Branch admission is the strict
+// server-side DecodeApp matrix, not a duplicated JSON-Schema matrix.
 func testAppSchemaShape(t *testing.T, raw json.RawMessage) {
 	t.Helper()
 	var schema struct {
-		Properties map[string]json.RawMessage `json:"properties"`
-		AllOf      []struct {
-			If struct {
-				Properties map[string]struct {
-					Const string `json:"const"`
-				} `json:"properties"`
-			} `json:"if"`
-			Then struct {
-				Required []string `json:"required"`
-				Not      struct {
-					AnyOf []struct {
-						Required []string `json:"required"`
-					} `json:"anyOf"`
-				} `json:"not"`
-			} `json:"then"`
-		} `json:"allOf"`
+		Type                 string                     `json:"type"`
+		Properties           map[string]json.RawMessage `json:"properties"`
+		Required             []string                   `json:"required"`
+		AdditionalProperties *bool                      `json:"additionalProperties"`
 	}
 	if err := json.Unmarshal(raw, &schema); err != nil {
 		t.Fatalf("decode app schema: %v", err)
 	}
+	if schema.Type != "object" {
+		t.Fatalf("app schema type = %q, want object", schema.Type)
+	}
 	wantProperties := []string{
-		"kind", "query", "reference", "scope", "app", "observation_id",
+		"kind", "query", "reference", "scope", "app",
 		"target", "restore_foreground", "allow_borrowed", "allow_stop_playback",
 	}
 	if len(schema.Properties) != len(wantProperties) {
@@ -55,6 +47,16 @@ func testAppSchemaShape(t *testing.T, raw json.RawMessage) {
 			t.Fatalf("app schema lacks property %q", name)
 		}
 	}
+	if _, ok := schema.Properties["observation_id"]; ok {
+		t.Fatal("app schema still publishes the retired observation_id member")
+	}
+	if !reflect.DeepEqual(schema.Required, []string{"kind"}) {
+		t.Fatalf("app required = %v, want [kind]", schema.Required)
+	}
+	if schema.AdditionalProperties == nil || *schema.AdditionalProperties {
+		t.Fatalf("app additionalProperties = %v, want false", schema.AdditionalProperties)
+	}
+	requireNoConditionalApplicators(t, raw)
 	var kind struct {
 		Enum []string `json:"enum"`
 	}
@@ -65,30 +67,34 @@ func testAppSchemaShape(t *testing.T, raw json.RawMessage) {
 		t.Fatalf("kind enum = %v, want %v", kind.Enum, protocol.AppKinds)
 	}
 	var target struct {
-		OneOf []struct {
-			Properties map[string]json.RawMessage `json:"properties"`
-			Required   []string                   `json:"required"`
-		} `json:"oneOf"`
+		Type                 string                     `json:"type"`
+		Properties           map[string]json.RawMessage `json:"properties"`
+		AdditionalProperties *bool                      `json:"additionalProperties"`
 	}
 	if err := json.Unmarshal(schema.Properties["target"], &target); err != nil {
 		t.Fatalf("target schema: %v", err)
 	}
-	if len(target.OneOf) != 2 {
-		t.Fatalf("target oneOf = %d, want 2", len(target.OneOf))
+	if target.Type != "object" || len(target.Properties) != 2 {
+		t.Fatalf("target schema = %+v, want a flat two-member object", target)
 	}
-	if len(target.OneOf[0].Required) != 1 || target.OneOf[0].Required[0] != "task_id" {
-		t.Fatalf("target task_id branch = %+v", target.OneOf[0])
+	if target.AdditionalProperties == nil || *target.AdditionalProperties {
+		t.Fatalf("target additionalProperties = %v, want false", target.AdditionalProperties)
 	}
 	var taskID struct {
 		Type    string `json:"type"`
 		Minimum int    `json:"minimum"`
 	}
-	if err := json.Unmarshal(target.OneOf[0].Properties["task_id"], &taskID); err != nil ||
+	if err := json.Unmarshal(target.Properties["task_id"], &taskID); err != nil ||
 		taskID.Type != "integer" || taskID.Minimum != 1 {
 		t.Fatalf("target.task_id schema = %+v %v", taskID, err)
 	}
-	if len(target.OneOf[1].Required) != 1 || target.OneOf[1].Required[0] != "app" {
-		t.Fatalf("target app branch = %+v", target.OneOf[1])
+	var app struct {
+		Type    string `json:"type"`
+		Pattern string `json:"pattern"`
+	}
+	if err := json.Unmarshal(target.Properties["app"], &app); err != nil ||
+		app.Type != "string" || app.Pattern == "" {
+		t.Fatalf("target.app schema = %+v %v", app, err)
 	}
 	for _, property := range []string{"restore_foreground", "allow_borrowed", "allow_stop_playback"} {
 		var option struct {
@@ -110,70 +116,35 @@ func testAppSchemaShape(t *testing.T, raw json.RawMessage) {
 		scope.Default != protocol.AppScopeSession || !reflect.DeepEqual(scope.Enum, []string{protocol.AppScopeSession, protocol.AppScopePrimary}) {
 		t.Fatalf("scope schema = %+v %v", scope, err)
 	}
-	if len(schema.AllOf) != len(protocol.AppKinds) {
-		t.Fatalf("app allOf branches = %d, want %d", len(schema.AllOf), len(protocol.AppKinds))
+}
+
+// requireNoConditionalApplicators walks the whole schema and rejects every
+// applicator that would encode branch admission as JSON Schema. The server-side
+// strict decoder stays the only kind-matrix authority.
+func requireNoConditionalApplicators(t *testing.T, raw json.RawMessage) {
+	t.Helper()
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		t.Fatalf("decode app schema tree: %v", err)
 	}
-	requiredByKind := map[string][]string{
-		protocol.AppKindFind:    nil,
-		protocol.AppKindList:    {"reference"},
-		protocol.AppKindOpen:    {"observation_id", "app"},
-		protocol.AppKindClaim:   {"observation_id", "target"},
-		protocol.AppKindHandoff: {"observation_id", "target"},
-		protocol.AppKindClose:   {"observation_id", "target"},
-		protocol.AppKindKill:    {"observation_id", "target"},
-	}
-	rejectedByKind := map[string]map[string]bool{
-		protocol.AppKindFind: {
-			"reference": true, "observation_id": true, "target": true,
-			"app": true, "scope": true, "restore_foreground": true,
-			"allow_borrowed": true, "allow_stop_playback": true,
-		},
-		protocol.AppKindList: {
-			"observation_id": true, "target": true, "query": true,
-			"restore_foreground": true, "allow_borrowed": true, "allow_stop_playback": true,
-		},
-		protocol.AppKindOpen: {
-			"reference": true, "scope": true, "target": true, "query": true,
-			"restore_foreground": true, "allow_borrowed": true, "allow_stop_playback": true,
-		},
-		protocol.AppKindClaim: {
-			"reference": true, "scope": true, "app": true, "query": true,
-			"restore_foreground": true, "allow_borrowed": true, "allow_stop_playback": true,
-		},
-		protocol.AppKindHandoff: {
-			"reference": true, "scope": true, "app": true, "query": true,
-			"allow_borrowed": true, "allow_stop_playback": true,
-		},
-		protocol.AppKindClose: {
-			"reference": true, "scope": true, "app": true, "query": true,
-			"restore_foreground": true, "allow_stop_playback": true,
-		},
-		protocol.AppKindKill: {
-			"reference": true, "scope": true, "app": true, "query": true,
-			"restore_foreground": true, "allow_borrowed": true,
-		},
-	}
-	seen := map[string]bool{}
-	for _, branch := range schema.AllOf {
-		kind := branch.If.Properties["kind"].Const
-		seen[kind] = true
-		if !reflect.DeepEqual(branch.Then.Required, requiredByKind[kind]) {
-			t.Fatalf("%s required = %v, want %v", kind, branch.Then.Required, requiredByKind[kind])
-		}
-		rejected := map[string]bool{}
-		for _, clause := range branch.Then.Not.AnyOf {
-			if len(clause.Required) != 1 {
-				t.Fatalf("%s rejection clause = %v", kind, clause.Required)
+	var walk func(node any, path string)
+	walk = func(node any, path string) {
+		switch typed := node.(type) {
+		case map[string]any:
+			for key, child := range typed {
+				switch key {
+				case "allOf", "if", "then", "else", "not", "oneOf":
+					t.Fatalf("app schema publishes %q at %s", key, path)
+				}
+				walk(child, path+"."+key)
 			}
-			rejected[clause.Required[0]] = true
-		}
-		if !reflect.DeepEqual(rejected, rejectedByKind[kind]) {
-			t.Fatalf("%s rejected members = %v, want %v", kind, rejected, rejectedByKind[kind])
+		case []any:
+			for _, child := range typed {
+				walk(child, path+"[]")
+			}
 		}
 	}
-	if len(seen) != len(protocol.AppKinds) {
-		t.Fatalf("app schema branches = %v", seen)
-	}
+	walk(value, "$")
 }
 
 // ---------------------------------------------------------------- admission
@@ -195,23 +166,25 @@ func TestAppStrictAdmission(t *testing.T) {
 		{"list cross-branch query", `{"kind":"list","reference":"O1","query":"x"}`},
 		{"list bad scope", `{"kind":"list","reference":"O1","scope":"virtual"}`},
 		{"list null scope", `{"kind":"list","reference":"O1","scope":null}`},
-		{"open missing app", `{"kind":"open","observation_id":"O1"}`},
-		{"open cross-branch query", `{"kind":"open","observation_id":"O1","app":"com.example","query":"x"}`},
-		{"open bad package", `{"kind":"open","observation_id":"O1","app":"not a package"}`},
-		{"claim missing target", `{"kind":"claim","observation_id":"O1"}`},
-		{"claim null target", `{"kind":"claim","observation_id":"O1","target":null}`},
-		{"claim empty target", `{"kind":"claim","observation_id":"O1","target":{}}`},
-		{"claim target both", `{"kind":"claim","observation_id":"O1","target":{"task_id":1,"app":"com.example"}}`},
-		{"claim target zero", `{"kind":"claim","observation_id":"O1","target":{"task_id":0}}`},
-		{"claim target negative", `{"kind":"claim","observation_id":"O1","target":{"task_id":-1}}`},
-		{"claim target string", `{"kind":"claim","observation_id":"O1","target":{"task_id":"1"}}`},
-		{"claim target unknown member", `{"kind":"claim","observation_id":"O1","target":{"task_id":1,"pid":7}}`},
-		{"claim cross-branch app", `{"kind":"claim","observation_id":"O1","target":{"task_id":1},"app":"com.example"}`},
-		{"claim cross-branch restore", `{"kind":"claim","observation_id":"O1","target":{"task_id":1},"restore_foreground":true}`},
-		{"handoff cross-branch allow", `{"kind":"handoff","observation_id":"O1","target":{"task_id":1},"allow_borrowed":true}`},
-		{"close cross-branch restore", `{"kind":"close","observation_id":"O1","target":{"task_id":1},"restore_foreground":true}`},
-		{"kill package target", `{"kind":"kill","observation_id":"O1","target":{"app":"com.example"}}`},
-		{"kill cross-branch allow_borrowed", `{"kind":"kill","observation_id":"O1","target":{"task_id":1},"allow_borrowed":true}`},
+		{"retired observation_id", `{"kind":"open","observation_id":"O1","target":{"app":"com.example"}}`},
+		{"open missing target", `{"kind":"open","reference":"O1"}`},
+		{"open top-level app", `{"kind":"open","reference":"O1","app":"com.example"}`},
+		{"open cross-branch query", `{"kind":"open","reference":"O1","target":{"app":"com.example"},"query":"x"}`},
+		{"open bad package", `{"kind":"open","reference":"O1","target":{"app":"not a package"}}`},
+		{"claim missing target", `{"kind":"claim","reference":"O1"}`},
+		{"claim null target", `{"kind":"claim","reference":"O1","target":null}`},
+		{"claim empty target", `{"kind":"claim","reference":"O1","target":{}}`},
+		{"claim target both", `{"kind":"claim","reference":"O1","target":{"task_id":1,"app":"com.example"}}`},
+		{"claim target zero", `{"kind":"claim","reference":"O1","target":{"task_id":0}}`},
+		{"claim target negative", `{"kind":"claim","reference":"O1","target":{"task_id":-1}}`},
+		{"claim target string", `{"kind":"claim","reference":"O1","target":{"task_id":"1"}}`},
+		{"claim target unknown member", `{"kind":"claim","reference":"O1","target":{"task_id":1,"pid":7}}`},
+		{"claim cross-branch app", `{"kind":"claim","reference":"O1","target":{"task_id":1},"app":"com.example"}`},
+		{"claim cross-branch restore", `{"kind":"claim","reference":"O1","target":{"task_id":1},"restore_foreground":true}`},
+		{"handoff cross-branch allow", `{"kind":"handoff","reference":"O1","target":{"task_id":1},"allow_borrowed":true}`},
+		{"close cross-branch restore", `{"kind":"close","reference":"O1","target":{"task_id":1},"restore_foreground":true}`},
+		{"kill package target", `{"kind":"kill","reference":"O1","target":{"app":"com.example"}}`},
+		{"kill cross-branch allow_borrowed", `{"kind":"kill","reference":"O1","target":{"task_id":1},"allow_borrowed":true}`},
 	}
 	for _, testCase := range cases {
 		testCase := testCase
@@ -249,12 +222,12 @@ func TestAppEveryKindIsAdmitted(t *testing.T) {
 		{"find query", `{"kind":"find","query":"设置"}`, protocol.AppKindFind},
 		{"list", `{"kind":"list","reference":"O1"}`, protocol.AppKindList},
 		{"list primary filter", `{"kind":"list","reference":"O1","scope":"primary","app":"com.example"}`, protocol.AppKindList},
-		{"open", `{"kind":"open","observation_id":"O1","app":"com.example"}`, protocol.AppKindOpen},
-		{"claim task", `{"kind":"claim","observation_id":"O1","target":{"task_id":43}}`, protocol.AppKindClaim},
-		{"claim app", `{"kind":"claim","observation_id":"O1","target":{"app":"com.example"}}`, protocol.AppKindClaim},
-		{"handoff", `{"kind":"handoff","observation_id":"O1","target":{"task_id":43},"restore_foreground":true}`, protocol.AppKindHandoff},
-		{"close", `{"kind":"close","observation_id":"O1","target":{"task_id":43},"allow_borrowed":true}`, protocol.AppKindClose},
-		{"kill", `{"kind":"kill","observation_id":"O1","target":{"task_id":43},"allow_stop_playback":true}`, protocol.AppKindKill},
+		{"open", `{"kind":"open","reference":"O1","target":{"app":"com.example"}}`, protocol.AppKindOpen},
+		{"claim task", `{"kind":"claim","reference":"O1","target":{"task_id":43}}`, protocol.AppKindClaim},
+		{"claim app", `{"kind":"claim","reference":"O1","target":{"app":"com.example"}}`, protocol.AppKindClaim},
+		{"handoff", `{"kind":"handoff","reference":"O1","target":{"task_id":43},"restore_foreground":true}`, protocol.AppKindHandoff},
+		{"close", `{"kind":"close","reference":"O1","target":{"task_id":43},"allow_borrowed":true}`, protocol.AppKindClose},
+		{"kill", `{"kind":"kill","reference":"O1","target":{"task_id":43},"allow_stop_playback":true}`, protocol.AppKindKill},
 	}
 	for _, testCase := range cases {
 		testCase := testCase
@@ -328,7 +301,7 @@ func appModeFixtures() []appModeFixture {
 		},
 		{
 			name:      "open",
-			arguments: `{"kind":"open","observation_id":"O1","app":"com.example"}`,
+			arguments: `{"kind":"open","reference":"O1","target":{"app":"com.example"}}`,
 			service: `{"operation_id":%q,"outcome":"executed","app":{"kind":"open",` +
 				`"package":"com.example","task_id":42,"display_id":12,"ownership":"owned",` +
 				`"reused":false,"state_preserved":false}}`,
@@ -340,7 +313,7 @@ func appModeFixtures() []appModeFixture {
 		},
 		{
 			name:      "claim",
-			arguments: `{"kind":"claim","observation_id":"O1","target":{"task_id":43}}`,
+			arguments: `{"kind":"claim","reference":"O1","target":{"task_id":43}}`,
 			service: `{"operation_id":%q,"outcome":"executed","app":{"kind":"claim",` +
 				`"package":"com.example","task_id":43,"source_display_id":0,"display_id":12,` +
 				`"ownership":"borrowed","state_preserved":true}}`,
@@ -351,7 +324,7 @@ func appModeFixtures() []appModeFixture {
 		},
 		{
 			name:      "handoff",
-			arguments: `{"kind":"handoff","observation_id":"O1","target":{"task_id":43}}`,
+			arguments: `{"kind":"handoff","reference":"O1","target":{"task_id":43}}`,
 			service: `{"operation_id":%q,"outcome":"executed","app":{"kind":"handoff",` +
 				`"package":"com.example","task_id":43,"source_display_id":12,"display_id":0,` +
 				`"ownership":"shared","state_preserved":null,"foreground_restore":"not_requested"}}`,
@@ -363,7 +336,7 @@ func appModeFixtures() []appModeFixture {
 		},
 		{
 			name:      "close",
-			arguments: `{"kind":"close","observation_id":"O1","target":{"app":"com.example"}}`,
+			arguments: `{"kind":"close","reference":"O1","target":{"app":"com.example"}}`,
 			service: `{"operation_id":%q,"outcome":"executed","app":{"kind":"close","display_id":12,` +
 				`"tasks":[{"task_id":42,"outcome":"executed","recents_cleaned":true},` +
 				`{"task_id":43,"outcome":"executed","recents_cleaned":false}],"complete":false}}`,
@@ -375,7 +348,7 @@ func appModeFixtures() []appModeFixture {
 		},
 		{
 			name:      "kill",
-			arguments: `{"kind":"kill","observation_id":"O1","target":{"task_id":42}}`,
+			arguments: `{"kind":"kill","reference":"O1","target":{"task_id":42}}`,
 			service: `{"operation_id":%q,"outcome":"executed","app":{"kind":"kill",` +
 				`"package":"com.example","source_task_id":42,"display_id":12,` +
 				`"target_pids":[1234,1235],"killed_pids":[1234,1235],` +
@@ -388,7 +361,7 @@ func appModeFixtures() []appModeFixture {
 		},
 		{
 			name:      "kill uncertain",
-			arguments: `{"kind":"kill","observation_id":"O1","target":{"task_id":42}}`,
+			arguments: `{"kind":"kill","reference":"O1","target":{"task_id":42}}`,
 			service: `{"operation_id":%q,"outcome":"uncertain","app":{"kind":"kill",` +
 				`"package":"com.example","source_task_id":42,"display_id":12,` +
 				`"target_pids":[1234],"killed_pids":[1234],"restarted":null},` +
@@ -398,7 +371,7 @@ func appModeFixtures() []appModeFixture {
 		},
 		{
 			name:      "claim not executed",
-			arguments: `{"kind":"claim","observation_id":"O1","target":{"task_id":43}}`,
+			arguments: `{"kind":"claim","reference":"O1","target":{"task_id":43}}`,
 			service: `{"operation_id":%q,"outcome":"not_executed","app":{"kind":"claim",` +
 				`"package":"com.example","task_id":43,"source_display_id":0},` +
 				`"error":{"code":"window_action_not_supported_on_primary_display","message":"主屏不支持该操作"}}`,
@@ -416,7 +389,7 @@ func appModeFixtures() []appModeFixture {
 		},
 		{
 			name:      "close partial",
-			arguments: `{"kind":"close","observation_id":"O1","target":{"app":"com.example"}}`,
+			arguments: `{"kind":"close","reference":"O1","target":{"app":"com.example"}}`,
 			service: `{"operation_id":%q,"outcome":"uncertain","app":{"kind":"close","display_id":12,` +
 				`"tasks":[{"task_id":42,"outcome":"executed","recents_cleaned":true},` +
 				`{"task_id":43,"outcome":"uncertain","recents_cleaned":false,` +
@@ -746,7 +719,7 @@ func TestCancellationAppMutationKeepsBoundedEnd(t *testing.T) {
 	resultChannel := make(chan *execution, 1)
 	go func() {
 		resultChannel <- adapter.run(ctx, testDefinitionByName(t, "app"),
-			[]byte(`{"kind":"close","observation_id":"O1","target":{"task_id":42}}`))
+			[]byte(`{"kind":"close","reference":"O1","target":{"task_id":42}}`))
 	}()
 	appRequests := fake.waitFor(t, "app", 1, mcpTestTimeout)
 	operation := appRequests[0].OperationID
@@ -793,7 +766,7 @@ func TestAppTransportFailureKeepsKindOnly(t *testing.T) {
 		body string
 		kind string
 	}{
-		{"close", `{"kind":"close","observation_id":"O1","target":{"task_id":42}}`, protocol.AppKindClose},
+		{"close", `{"kind":"close","reference":"O1","target":{"task_id":42}}`, protocol.AppKindClose},
 		{"find", `{"kind":"find"}`, protocol.AppKindFind},
 		{"list", `{"kind":"list","reference":"O1"}`, protocol.AppKindList},
 	}

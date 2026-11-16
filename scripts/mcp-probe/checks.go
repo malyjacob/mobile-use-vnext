@@ -177,7 +177,7 @@ func (p *probe) call(ctx context.Context, name string, arguments any) (*callResu
 // device action.
 func (p *probe) errorProjectionCheck(ctx context.Context) bool {
 	projected, failure := p.call(ctx, "inspect", map[string]any{
-		"observation_id": probeUnknownObservation,
+		"reference": probeUnknownObservation,
 	})
 	if failure != nil {
 		p.reporter.fail("result_error", failure.reason, failure.fields...)
@@ -335,27 +335,118 @@ func checkSchemas(tools []*sdk.Tool) *checkError {
 				return failf("required_mismatch", field("tool", "observe"))
 			}
 		case "act":
-			if !sameStringSet(schema.Required, []string{"observation_id", "operation"}) {
+			if !sameStringSet(schema.Required, []string{"reference", "operation"}) {
 				return failf("required_mismatch", field("tool", "act"))
 			}
-		case "app":
-			if !sameStringSet(schema.Required, []string{"kind"}) {
-				return failf("required_mismatch", field("tool", "app"))
+			if _, retired := schema.Properties["observation_id"]; retired {
+				return failf("act_retired_observation_id", field("tool", "act"))
 			}
-			kind, declared := schema.Properties["kind"]
-			if !declared {
-				return failf("app_schema_kind_missing", field("tool", "app"))
-			}
-			kindObject, ok := kind.(map[string]any)
+			operation, ok := schema.Properties["operation"].(map[string]any)
 			if !ok {
-				return failf("app_schema_kind_invalid", field("tool", "app"))
+				return failf("act_operation_schema_invalid", field("tool", "act"))
 			}
-			if values, ok := kindObject["enum"].([]any); !ok || len(values) != 7 {
-				return failf("app_schema_kind_enum", field("tool", "app"))
+			properties, ok := operation["properties"].(map[string]any)
+			if !ok {
+				return failf("act_operation_schema_invalid", field("tool", "act"))
+			}
+			for _, member := range []string{"bubble", "press_enter"} {
+				option, declared := properties[member].(map[string]any)
+				if !declared || option["type"] != "boolean" {
+					return failf("act_branch_member_missing", field("member", member))
+				}
+				// A branch-qualified default must not be published as if it
+				// applied to coordinates or another action.
+				if _, published := option["default"]; published {
+					return failf("act_branch_member_default", field("member", member))
+				}
+			}
+		case "app":
+			var tree any
+			if err := json.Unmarshal(encoded, &tree); err != nil {
+				return failf("input_schema_invalid", field("tool", tool.Name))
+			}
+			if failure := checkAppSchema(schema, tree); failure != nil {
+				return failure
 			}
 		}
 	}
 	return nil
+}
+
+// checkAppSchema pins the flat app surface: the fixed root member set, kind
+// required, a flat target object, and no conditional JSON-Schema applicators
+// anywhere. Branch admission remains the server-side strict decoder.
+func checkAppSchema(schema schemaView, tree any) *checkError {
+	wantMembers := []string{
+		"kind", "query", "reference", "scope", "app",
+		"target", "restore_foreground", "allow_borrowed", "allow_stop_playback",
+	}
+	if len(schema.Properties) != len(wantMembers) {
+		return failf("app_schema_members", field("count", strconv.Itoa(len(schema.Properties))))
+	}
+	for _, member := range wantMembers {
+		if _, declared := schema.Properties[member]; !declared {
+			return failf("app_schema_member_missing", field("member", member))
+		}
+	}
+	if _, retired := schema.Properties["observation_id"]; retired {
+		return failf("app_retired_observation_id")
+	}
+	if !sameStringSet(schema.Required, []string{"kind"}) {
+		return failf("required_mismatch", field("tool", "app"))
+	}
+	kind, declared := schema.Properties["kind"].(map[string]any)
+	if !declared {
+		return failf("app_schema_kind_missing", field("tool", "app"))
+	}
+	if values, ok := kind["enum"].([]any); !ok || len(values) != 7 {
+		return failf("app_schema_kind_enum", field("tool", "app"))
+	}
+	if keyword, found := conditionalApplicator(tree); found {
+		return failf("app_schema_conditional", field("keyword", keyword))
+	}
+	target, declared := schema.Properties["target"].(map[string]any)
+	if !declared || target["type"] != "object" {
+		return failf("app_target_not_object")
+	}
+	properties, ok := target["properties"].(map[string]any)
+	if !ok || len(properties) != 2 {
+		return failf("app_target_members")
+	}
+	for _, member := range []string{"task_id", "app"} {
+		if _, declared := properties[member]; !declared {
+			return failf("app_target_member_missing", field("member", member))
+		}
+	}
+	if additional, ok := target["additionalProperties"].(bool); !ok || additional {
+		return failf("app_target_additional_properties")
+	}
+	return nil
+}
+
+// conditionalApplicator walks a decoded schema and returns the first
+// branch-describing keyword. It is called with the complete root value so a
+// root-level allOf/if/then/else/not/oneOf cannot escape inspection.
+func conditionalApplicator(value any) (string, bool) {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			switch key {
+			case "allOf", "if", "then", "else", "not", "oneOf":
+				return key, true
+			}
+			if keyword, found := conditionalApplicator(child); found {
+				return keyword, found
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			if keyword, found := conditionalApplicator(child); found {
+				return keyword, found
+			}
+		}
+	}
+	return "", false
 }
 
 // statusCheck calls status with an empty object.
@@ -862,7 +953,7 @@ func qualityStateOf(quality *qualityView) string {
 }
 
 func (p *probe) inspectCheck(ctx context.Context, observationID string) bool {
-	projected, failure := p.call(ctx, "inspect", map[string]any{"observation_id": observationID})
+	projected, failure := p.call(ctx, "inspect", map[string]any{"reference": observationID})
 	if failure != nil {
 		p.reporter.fail("inspect", failure.reason, failure.fields...)
 		return false
@@ -907,9 +998,9 @@ func (p *probe) inspectCheck(ctx context.Context, observationID string) bool {
 // retry.
 func (p *probe) actCheck(ctx context.Context, observationID string) bool {
 	projected, failure := p.call(ctx, "act", map[string]any{
-		"observation_id": observationID,
-		"operation":      map[string]any{"type": "key", "key": "BACK"},
-		"image":          true,
+		"reference": observationID,
+		"operation": map[string]any{"type": "key", "key": "BACK"},
+		"image":     true,
 	})
 	if failure != nil {
 		p.reporter.fail("act", failure.reason, failure.fields...)

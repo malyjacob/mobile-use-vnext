@@ -141,7 +141,7 @@ func TestAppClaimMovesPrimaryTaskAsBorrowed(t *testing.T) {
 	h.device.mu.Unlock()
 
 	result, apiErr := h.engine.App(context.Background(), "agent", "Pclaim",
-		&protocol.AppRequest{Kind: protocol.AppKindClaim, ObservationID: first.Observation.ID,
+		&protocol.AppRequest{Kind: protocol.AppKindClaim, Reference: first.Observation.ID,
 			Target: &protocol.AppTarget{TaskID: 41, UseTask: true}})
 	if apiErr != nil {
 		t.Fatalf("app claim: %v", apiErr)
@@ -180,7 +180,7 @@ func TestAppClaimAmbiguousPackageKeepsObservation(t *testing.T) {
 	h.addTask(device.Task{TaskID: 41, RootID: 41, DisplayID: 0, Package: "com.example"})
 	h.addTask(device.Task{TaskID: 42, RootID: 42, DisplayID: 0, Package: "com.example"})
 	result, _ := h.engine.App(context.Background(), "agent", "Pclaim",
-		&protocol.AppRequest{Kind: protocol.AppKindClaim, ObservationID: first.Observation.ID,
+		&protocol.AppRequest{Kind: protocol.AppKindClaim, Reference: first.Observation.ID,
 			Target: &protocol.AppTarget{App: "com.example"}})
 	if result.Error == nil || result.Error.Code != protocol.CodeTaskAmbiguous ||
 		result.Outcome != OutcomeNotExecuted {
@@ -205,7 +205,7 @@ func TestAppClaimSharedRootIsRefused(t *testing.T) {
 	h.addTask(device.Task{TaskID: 41, RootID: 100, DisplayID: 0, Package: "com.example"})
 	h.addTask(device.Task{TaskID: 42, RootID: 100, DisplayID: 0, Package: "com.other"})
 	result, _ := h.engine.App(context.Background(), "agent", "Pclaim",
-		&protocol.AppRequest{Kind: protocol.AppKindClaim, ObservationID: first.Observation.ID,
+		&protocol.AppRequest{Kind: protocol.AppKindClaim, Reference: first.Observation.ID,
 			Target: &protocol.AppTarget{TaskID: 41, UseTask: true}})
 	if result.Error == nil || result.Error.Code != protocol.CodeTaskRootShared ||
 		result.Outcome != OutcomeNotExecuted {
@@ -222,7 +222,7 @@ func TestAppClaimUnknownReceiptStaysUncertainAndProtected(t *testing.T) {
 	h.device.moveReceipt = &unknown
 	h.device.mu.Unlock()
 	result, _ := h.engine.App(context.Background(), "agent", "Pclaim",
-		&protocol.AppRequest{Kind: protocol.AppKindClaim, ObservationID: first.Observation.ID,
+		&protocol.AppRequest{Kind: protocol.AppKindClaim, Reference: first.Observation.ID,
 			Target: &protocol.AppTarget{TaskID: 41, UseTask: true}})
 	if result.Outcome != OutcomeUncertain || result.Error == nil ||
 		result.Error.Code != protocol.CodeTaskMoveUnconfirmed {
@@ -258,7 +258,7 @@ func TestAppHandoffMovesTaskBackAndDropsOwnership(t *testing.T) {
 		Component: "com.example.app/.Main"})
 	h.ownTask(device.Task{TaskID: 77, RootID: 77, DisplayID: 12, Package: "com.example.app"}, TaskOwned, nil)
 	result, apiErr := h.engine.App(context.Background(), "agent", "Phandoff",
-		&protocol.AppRequest{Kind: protocol.AppKindHandoff, ObservationID: first.Observation.ID,
+		&protocol.AppRequest{Kind: protocol.AppKindHandoff, Reference: first.Observation.ID,
 			Target: &protocol.AppTarget{TaskID: 77, UseTask: true}})
 	if apiErr != nil {
 		t.Fatalf("app handoff: %v", apiErr)
@@ -293,7 +293,7 @@ func TestAppCloseRemovesExactOwnedTask(t *testing.T) {
 	h.device.recentKnown = true
 	h.device.mu.Unlock()
 	result, apiErr := h.engine.App(context.Background(), "agent", "Pclose",
-		&protocol.AppRequest{Kind: protocol.AppKindClose, ObservationID: first.Observation.ID,
+		&protocol.AppRequest{Kind: protocol.AppKindClose, Reference: first.Observation.ID,
 			Target: &protocol.AppTarget{TaskID: 77, UseTask: true}})
 	if apiErr != nil {
 		t.Fatalf("app close: %v", apiErr)
@@ -314,7 +314,7 @@ func TestAppCloseBorrowedRefusedBeforeClaim(t *testing.T) {
 	h.addTask(device.Task{TaskID: 77, RootID: 77, DisplayID: 12, Package: "com.example.app"})
 	h.ownTask(device.Task{TaskID: 77, RootID: 77, DisplayID: 12, Package: "com.example.app"}, TaskBorrowed, intPtr(0))
 	result, _ := h.engine.App(context.Background(), "agent", "Pclose",
-		&protocol.AppRequest{Kind: protocol.AppKindClose, ObservationID: first.Observation.ID,
+		&protocol.AppRequest{Kind: protocol.AppKindClose, Reference: first.Observation.ID,
 			Target: &protocol.AppTarget{TaskID: 77, UseTask: true}})
 	if result.Error == nil || result.Error.Code != protocol.CodeCloseBorrowed ||
 		result.App.HasTasks {
@@ -342,7 +342,7 @@ func TestAppCloseAboveCapacityRefusedBeforeClaim(t *testing.T) {
 		h.ownTask(task, TaskOwned, nil)
 	}
 	result, _ := h.engine.App(context.Background(), "agent", "Pclose",
-		&protocol.AppRequest{Kind: protocol.AppKindClose, ObservationID: first.Observation.ID,
+		&protocol.AppRequest{Kind: protocol.AppKindClose, Reference: first.Observation.ID,
 			Target: &protocol.AppTarget{App: "com.example"}})
 	if result.Error == nil || result.Error.Code != protocol.CodeAppCapacity ||
 		result.App.HasTasks || result.App.Complete != nil {
@@ -371,7 +371,7 @@ func TestAppClosePartialReportsPerItemFacts(t *testing.T) {
 	h.device.recentKnown = true
 	h.device.mu.Unlock()
 	result, _ := h.engine.App(context.Background(), "agent", "Pclose",
-		&protocol.AppRequest{Kind: protocol.AppKindClose, ObservationID: first.Observation.ID,
+		&protocol.AppRequest{Kind: protocol.AppKindClose, Reference: first.Observation.ID,
 			Target: &protocol.AppTarget{App: "com.example"}})
 	if result.Outcome != OutcomeUncertain || result.Error == nil ||
 		result.Error.Code != protocol.CodeAppTaskUnconfirmed {
@@ -396,7 +396,7 @@ func TestAppKillRefusesUnownedForegroundAndGuards(t *testing.T) {
 		first := h.startSession()
 		h.addTask(device.Task{TaskID: 77, RootID: 77, DisplayID: 12, Package: "com.example.app"})
 		result, _ := h.engine.App(context.Background(), "agent", "Pkill",
-			&protocol.AppRequest{Kind: protocol.AppKindKill, ObservationID: first.Observation.ID,
+			&protocol.AppRequest{Kind: protocol.AppKindKill, Reference: first.Observation.ID,
 				Target: &protocol.AppTarget{TaskID: 77, UseTask: true}})
 		if result.Error == nil || result.Error.Code != protocol.CodeKillNotOwned {
 			t.Fatalf("unowned kill result=%+v", result)
@@ -413,7 +413,7 @@ func TestAppKillRefusesUnownedForegroundAndGuards(t *testing.T) {
 			Package: "com.example.app", TaskID: intPtr(77)}
 		h.device.mu.Unlock()
 		result, _ := h.engine.App(context.Background(), "agent", "Pkill",
-			&protocol.AppRequest{Kind: protocol.AppKindKill, ObservationID: first.Observation.ID,
+			&protocol.AppRequest{Kind: protocol.AppKindKill, Reference: first.Observation.ID,
 				Target: &protocol.AppTarget{TaskID: 77, UseTask: true}})
 		if result.Error == nil || result.Error.Code != protocol.CodeKillForeground {
 			t.Fatalf("foreground kill result=%+v", result)
@@ -442,7 +442,7 @@ func TestAppKillTerminatesExactInstances(t *testing.T) {
 	}}
 	h.device.mu.Unlock()
 	result, apiErr := h.engine.App(context.Background(), "agent", "Pkill",
-		&protocol.AppRequest{Kind: protocol.AppKindKill, ObservationID: first.Observation.ID,
+		&protocol.AppRequest{Kind: protocol.AppKindKill, Reference: first.Observation.ID,
 			Target: &protocol.AppTarget{TaskID: 77, UseTask: true}})
 	if apiErr != nil {
 		t.Fatalf("app kill: %v", apiErr)
@@ -471,7 +471,7 @@ func TestAppKillConfirmedEmptyProcessSetIsExecutedWithoutSignal(t *testing.T) {
 	h.device.processes = device.PackageProcesses{UserID: 10123, Instances: []device.ProcessInstance{}}
 	h.device.mu.Unlock()
 	result, _ := h.engine.App(context.Background(), "agent", "Pkill",
-		&protocol.AppRequest{Kind: protocol.AppKindKill, ObservationID: first.Observation.ID,
+		&protocol.AppRequest{Kind: protocol.AppKindKill, Reference: first.Observation.ID,
 			Target: &protocol.AppTarget{TaskID: 77, UseTask: true}})
 	if result.Outcome != OutcomeExecuted || !result.App.HasTargetPIDs ||
 		result.App.TargetPIDs == nil || len(result.App.TargetPIDs) != 0 ||
@@ -500,7 +500,7 @@ func TestAppKillUnconfirmedKeepsKnownPIDs(t *testing.T) {
 	h.device.killReceipt = &unknown
 	h.device.mu.Unlock()
 	result, _ := h.engine.App(context.Background(), "agent", "Pkill",
-		&protocol.AppRequest{Kind: protocol.AppKindKill, ObservationID: first.Observation.ID,
+		&protocol.AppRequest{Kind: protocol.AppKindKill, Reference: first.Observation.ID,
 			Target: &protocol.AppTarget{TaskID: 77, UseTask: true}})
 	if result.Outcome != OutcomeUncertain || result.Error == nil ||
 		result.Error.Code != protocol.CodeKillUnconfirmed {
@@ -549,7 +549,7 @@ func TestAppDuplicatePRepublishesOnlyKind(t *testing.T) {
 	h := newHarness(t)
 	first := h.startSession()
 	h.addTask(device.Task{TaskID: 41, RootID: 41, DisplayID: 0, Package: "com.example.app"})
-	request := &protocol.AppRequest{Kind: protocol.AppKindClaim, ObservationID: first.Observation.ID,
+	request := &protocol.AppRequest{Kind: protocol.AppKindClaim, Reference: first.Observation.ID,
 		Target: &protocol.AppTarget{TaskID: 41, UseTask: true}}
 	result, _ := h.engine.App(context.Background(), "agent", "Pdupclaim", request)
 	if result.Outcome != OutcomeExecuted {
@@ -638,7 +638,7 @@ func TestAppClaimRefusedForRegisteredTask(t *testing.T) {
 	h.addTask(task)
 	h.ownTask(device.Task{TaskID: 41, RootID: 41, DisplayID: 12, Package: "com.example.app"}, TaskOwned, nil)
 	result, _ := h.engine.App(context.Background(), "agent", "Pclaimbusy",
-		&protocol.AppRequest{Kind: protocol.AppKindClaim, ObservationID: first.Observation.ID,
+		&protocol.AppRequest{Kind: protocol.AppKindClaim, Reference: first.Observation.ID,
 			Target: &protocol.AppTarget{TaskID: 41, UseTask: true}})
 	if result.Error == nil || result.Error.Code != protocol.CodeTaskLifecycleBusy ||
 		result.Outcome != OutcomeNotExecuted {

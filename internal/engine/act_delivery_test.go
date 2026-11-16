@@ -25,7 +25,7 @@ func unknownForegroundCaptureStep() captureStep {
 func (h *harness) tapRefRequest(t *testing.T, observationID, ref string) *protocol.ActRequest {
 	t.Helper()
 	return &protocol.ActRequest{
-		ObservationID: observationID,
+		Reference: observationID,
 		Operation: protocol.Operation{
 			Type:   "tap",
 			Target: &protocol.Target{UseRef: true, Ref: ref},
@@ -305,8 +305,8 @@ func TestActDuplicateKeepsStaticRetry(t *testing.T) {
 	h.device.scriptCaptures(overlayCaptureStep())
 	start := h.startSession()
 	request := &protocol.ActRequest{
-		ObservationID: start.Observation.ID,
-		Operation:     protocol.Operation{Type: "tap", Target: &protocol.Target{X: 500, Y: 150}},
+		Reference: start.Observation.ID,
+		Operation: protocol.Operation{Type: "tap", Target: &protocol.Target{X: 500, Y: 150}},
 	}
 	first, apiErr := h.engine.Act(context.Background(), "agent", "Pstatic", request)
 	if apiErr != nil {

@@ -472,12 +472,26 @@ func (e *Engine) busyError(op *operationState) *protocol.APIError {
 	return apiErr
 }
 
-// newResult builds a result owned by one operation.
+// newResult builds a result owned by one operation. The immutable text_input
+// snapshot, when present, is copied into every first result of that operation.
 func newResult(op *operationState) *protocol.Result {
 	if op == nil {
 		return &protocol.Result{}
 	}
-	return &protocol.Result{OperationID: op.ID}
+	result := &protocol.Result{OperationID: op.ID}
+	if op.TextInput != nil {
+		snapshot := *op.TextInput
+		result.TextInput = &snapshot
+	}
+	return result
+}
+
+// newResult takes the same snapshot under the state lock so a concurrent
+// stage advance cannot race the pointer/string copy.
+func (e *Engine) newResult(op *operationState) *protocol.Result {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return newResult(op)
 }
 
 // finishWithError marks the operation and returns the public error result. It
@@ -487,7 +501,7 @@ func (e *Engine) finishWithError(op *operationState, phase string, apiErr *proto
 	if apiErr.Outcome == "" {
 		apiErr.Outcome = OutcomeNotExecuted
 	}
-	result := newResult(op)
+	result := e.newResult(op)
 	result.Outcome = apiErr.Outcome
 	result.Error = apiErr.Public()
 	result.Recovery = e.finishOperation(op, apiErr.Outcome, phase, apiErr)

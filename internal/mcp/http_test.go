@@ -343,8 +343,8 @@ func TestHTTPSSECancellationEndsOperation(t *testing.T) {
 		_, err := session.CallTool(ctx, &sdk.CallToolParams{
 			Name: "act",
 			Arguments: map[string]any{
-				"observation_id": "O1",
-				"operation":      map[string]any{"type": "key", "key": "BACK"},
+				"reference": "O1",
+				"operation": map[string]any{"type": "key", "key": "BACK"},
 			},
 		})
 		callDone <- err

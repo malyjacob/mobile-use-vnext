@@ -332,7 +332,7 @@ func assertInspectionMatchesObservation(t *testing.T, e *Engine, id string) {
 		t.Fatalf("retained compact tree %q differs from its internal projection", id)
 	}
 
-	result, apiErr := e.Inspect("agent", &protocol.InspectRequest{ObservationID: id})
+	result, apiErr := e.Inspect("agent", &protocol.InspectRequest{Reference: id})
 	if apiErr != nil {
 		t.Fatalf("inspect %q: %v", id, apiErr)
 	}
@@ -652,9 +652,9 @@ func TestI01EntryPathObservationContinuityAndInspect(t *testing.T) {
 	}
 	appResult, apiErr := h.engine.App(context.Background(), "agent", "Pi01app",
 		&protocol.AppRequest{
-			Kind:          protocol.AppKindOpen,
-			ObservationID: waitObservation.ID,
-			App:           "com.example.app",
+			Kind:      protocol.AppKindOpen,
+			Reference: waitObservation.ID,
+			Target:    &protocol.AppTarget{App: "com.example.app"},
 		})
 	if apiErr != nil {
 		t.Fatalf("app entry: %v", apiErr)
@@ -686,7 +686,7 @@ func TestI01EntryPathObservationContinuityAndInspect(t *testing.T) {
 	// anything.
 	beforeInspect := captureInspectReadOnlyGuard(t, h)
 	inspection, apiErr := h.engine.Inspect("agent",
-		&protocol.InspectRequest{ObservationID: startObservation.ID})
+		&protocol.InspectRequest{Reference: startObservation.ID})
 	if apiErr != nil {
 		t.Fatalf("inspect original O: %v", apiErr)
 	}

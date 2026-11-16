@@ -46,7 +46,7 @@ func TestHTTPNestedErrorDetailsAcrossModes(t *testing.T) {
 	})
 	a := &adapter{client: newTestDeviceClient(t, fake)}
 	execution := a.run(context.Background(), testDefinitionByName(t, "act"),
-		[]byte(`{"observation_id":"O1","operation":{"type":"tap","target":{"ref":"n491"}}}`))
+		[]byte(`{"reference":"O1","operation":{"type":"tap","target":{"ref":"n491"}}}`))
 	if execution.result == nil || execution.result.Error == nil {
 		t.Fatalf("HTTP nested failure was not projected: %#v", execution)
 	}
@@ -238,6 +238,8 @@ func resultModeFixtures() []resultModeFixture {
 		`"recovery":{"entry":"retry","reference":"O","input_state":"effective"}}`)
 	add("act", "scroll_effect_quality", `{"operation_id":"P1","outcome":"executed","phase":"completed","effect":{"state":"observed"},"target_reference":"O1","observation":{"status":"complete","id":"O2","origin":"P1","revision":2,"quality":{"state":"unstable","samples":5,"stop_reason":"max_samples"},"tree":`+testFullTreeJSON+`}}`)
 	add("act", "scroll_effect_unknown", `{"operation_id":"P1","outcome":"uncertain","effect":{"state":"unknown"},"observation":{"status":"complete","id":"O3","quality":{"state":"unknown","samples":0,"stop_reason":"not_sampled"}},"error":{"code":"action_unknown","message":"动作结果不确定"}}`)
+	add("act", "text_input_enter_deferred", `{"operation_id":"P1","outcome":"executed","text_input":{"write":"executed","enter":"not_executed"}}`)
+	add("act", "text_input_write_uncertain", `{"operation_id":"P1","outcome":"uncertain","text_input":{"write":"uncertain","enter":"not_executed"}}`)
 	fixtures = append(fixtures, resultModeFixture{tool: "act", name: "executed_cancelled", raw: `{"outcome":"executed"}`, cancelled: true})
 	// The inspection tree scope carries the detailed view inside the nested
 	// complete tree; subtree and query declare it on the envelope.
@@ -468,7 +470,7 @@ func TestHTTPModesSelectProjectionPerCall(t *testing.T) {
 func TestCatalogFingerprintBaseline(t *testing.T) {
 	// The catalog has twelve tools. This baseline covers the caller-oriented
 	// descriptions after the tree guide moved to the server instructions.
-	const baseline = "312b6975e7a4706241c5a17c0cfcb0336330799e29286f98a4619a9f219c40fd"
+	const baseline = "c5fdc545cc77882a4662b6a4524517475065cfc3248ec42223ae4c1189529928"
 	if got := CatalogFingerprint(); got != baseline {
 		t.Fatalf("catalog changed: %s", got)
 	}

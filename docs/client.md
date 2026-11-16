@@ -117,16 +117,24 @@ MCP 适配器的严格解码拒绝；两个条件折叠后相同则是引擎准�
 `Act` 仍接收 `*protocol.ActRequest`，编码器只写所选分支的成员：`scroll` 的
 `container`/`direction`/`amount` 与 `swipe` 的 `from`/`to`/`duration_ms` 互斥，缺成员、
 混用或 `duration_ms` 为负数、1–49/2001 以上都会在发送前被拒绝；`duration_ms=0` 表示省略并
-使用服务端默认 300，不表示一个显式的零时长。客户端不新增滚动、质量或效果参数，也不在本地
-选择容器或起止点；`status(P)` 与重复 P 视图中的 `effect` 只按服务返回值读取，不重算。
+使用服务端默认 300，不表示一个显式的零时长。请求引用字段是 `reference`；`operation.bubble`
+与 `operation.press_enter` 使用 presence-aware 结构，省略时不写成员，显式 `false` 必须写成
+`false`，不能按 Go bool 零值省略。编码器与 HTTP 解码共用同一分支校验：坐标目标或其他动作
+携带 `bubble`、非 text 携带 `press_enter` 都在发送前拒绝。客户端不新增滚动、质量或效果参数，
+也不在本地选择容器或起止点；`status(P)` 与重复 P 视图中的 `effect` 只按服务返回值读取，不重算。
+`Result.text_input` 出现时 `write` 与 `enter` 都必须存在且属于固定枚举，合法组合受响应
+解码器约束；客户端不补 `not_executed`、不根据 `phase` 推导阶段，也不在本地改写快照。
 
-`Client.App(ctx, *protocol.AppRequest, ...Option)` 按 `Kind` 编码七个互斥分支：分支不完整、
-包含其他 kind 的成员或 `target` 不是恰好一个选择器时，`Encode` 在发送前拒绝。`App` 的每次
-新调用都生成自己的 P（或用 `WithOperationID` 预分配）；`find` 是 detached P，不绑定调用时
-恰有的全局活动会话；`list` 的 P 绑定 `reference` 解析到的原会话。`find`/`list` 成功与失败
-都没有 `outcome`；响应丢失时用 `Status(ctx, p)` 只能读取摘要，集合需要以新 P 重新查询。
-重复 P 只返回原操作视图，不再次读取或派发。`app` 的五个变更 kind 在响应中带 `outcome` 与
-后观察，消费失败或重试规则与其他工作工具一致。
+`Client.App(ctx, *protocol.AppRequest, ...Option)` 按 `Kind` 编码七个互斥分支：编码器只写所选
+分支的成员；分支不完整、缺少选择器，或 `open`/`kill` 使用不允许的选择器时，`Encode` 在发送
+前拒绝。`list` 的 `reference` 可为 ready O 或活动原会话 P；`open`/`claim`/`handoff`/`close`/
+`kill` 的 `reference` 必须是当前 ready O。`open` 只编码 `target.app`，不接受顶层 `app`；
+`list` 的顶层 `app` 只是过滤。`App` 的每次新调用都生成自己的 P（或用 `WithOperationID`
+预分配）；`find` 是 detached P，不绑定调用时恰有的全局活动会话；`list` 的 P 绑定
+`reference` 解析到的原会话。`find`/`list` 成功与失败都没有 `outcome`；响应丢失时用
+`Status(ctx, p)` 只能读取摘要，集合需要以新 P 重新查询。重复 P 只返回原操作视图，不再次
+读取或派发。`app` 的五个变更 kind 在响应中带 `outcome` 与后观察，消费失败或重试规则与其他
+工作工具一致。
 
 `Keepalive(ctx, reference)` 表示显式重设为两分钟；`KeepaliveWithDuration` 发送显式
 `duration_minutes`。两者共用同一发送路径与 P 校验；直接传入 0、负数、超过 120 或把时长

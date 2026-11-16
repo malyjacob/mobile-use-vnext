@@ -472,20 +472,26 @@ func tapCoverNode(t *testing.T, h *harness) *protocol.Node {
 	return cover
 }
 
+// tapRefRequest pins the explicit bubble=false branch so the tap scope and
+// guidance behavior is exercised without the default one-ancestor lift.
 func tapRefRequest(observationID, ref string) *protocol.ActRequest {
 	return &protocol.ActRequest{
-		ObservationID: observationID,
+		Reference: observationID,
 		Operation: protocol.Operation{
 			Type: "tap", Target: &protocol.Target{UseRef: true, Ref: ref},
+			Bubble: false, HasBubble: true,
 		},
 	}
 }
 
+// longPressRefRequest pins the explicit bubble=false branch for the same
+// reason as tapRefRequest.
 func longPressRefRequest(observationID, ref string) *protocol.ActRequest {
 	return &protocol.ActRequest{
-		ObservationID: observationID,
+		Reference: observationID,
 		Operation: protocol.Operation{
 			Type: "long_press", Target: &protocol.Target{UseRef: true, Ref: ref},
+			Bubble: false, HasBubble: true,
 		},
 	}
 }
@@ -836,7 +842,7 @@ func TestActTapContentGuidanceCoordinateNextTurn(t *testing.T) {
 	actTapContentGuidance(t, h, "Pguidecoord")
 	result, apiErr := h.engine.Act(context.Background(), "agent", "Pguidecoordnext",
 		&protocol.ActRequest{
-			ObservationID: h.currentObservationID(),
+			Reference: h.currentObservationID(),
 			Operation: protocol.Operation{
 				Type: "tap", Target: &protocol.Target{X: tapSafePoint[0], Y: tapSafePoint[1]},
 			},
@@ -1589,14 +1595,14 @@ func TestActTapGuidanceRetiredObservationReplayIsHistorical(t *testing.T) {
 	first, _, _, request := actTapContentGuidance(t, h, "Pretiredguidance")
 
 	observed, apiErr := h.engine.Observe(context.Background(), "agent",
-		"Pguidanceobserve", &protocol.ObserveRequest{Reference: request.ObservationID})
+		"Pguidanceobserve", &protocol.ObserveRequest{Reference: request.Reference})
 	if apiErr != nil {
 		t.Fatalf("observe rejected: %v", apiErr)
 	}
-	if observed.Observation == nil || observed.Observation.ID == request.ObservationID {
+	if observed.Observation == nil || observed.Observation.ID == request.Reference {
 		t.Fatalf("observe did not publish a replacement: %+v", observed.Observation)
 	}
-	if got := observationStatus(h, request.ObservationID); got != ObservationRetired {
+	if got := observationStatus(h, request.Reference); got != ObservationRetired {
 		t.Fatalf("source observation status = %q, want retired", got)
 	}
 
@@ -1635,7 +1641,7 @@ func TestActTapGuidanceRetiredObservationReplayIsHistorical(t *testing.T) {
 	if delta := len(h.device.taps) - taps; delta != 0 {
 		t.Fatalf("retired guidance replay tap delta = %d, want zero", delta)
 	}
-	if got := observationStatus(h, request.ObservationID); got != ObservationRetired {
+	if got := observationStatus(h, request.Reference); got != ObservationRetired {
 		t.Fatalf("source observation status after replay = %q, want retired", got)
 	}
 }

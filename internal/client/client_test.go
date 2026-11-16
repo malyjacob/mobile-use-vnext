@@ -491,48 +491,49 @@ func TestAppEncodesKindBranches(t *testing.T) {
 		},
 		{
 			"open",
-			&protocol.AppRequest{Kind: protocol.AppKindOpen, ObservationID: "O1", App: "com.example"},
-			`{"kind":"open","observation_id":"O1","app":"com.example"}`,
+			&protocol.AppRequest{Kind: protocol.AppKindOpen, Reference: "O1",
+				Target: &protocol.AppTarget{App: "com.example"}},
+			`{"kind":"open","reference":"O1","target":{"app":"com.example"}}`,
 		},
 		{
 			"claim-task",
 			&protocol.AppRequest{
-				Kind: protocol.AppKindClaim, ObservationID: "O1",
+				Kind: protocol.AppKindClaim, Reference: "O1",
 				Target: &protocol.AppTarget{TaskID: 42, UseTask: true},
 			},
-			`{"kind":"claim","observation_id":"O1","target":{"task_id":42}}`,
+			`{"kind":"claim","reference":"O1","target":{"task_id":42}}`,
 		},
 		{
 			"claim-app",
 			&protocol.AppRequest{
-				Kind: protocol.AppKindClaim, ObservationID: "O1",
+				Kind: protocol.AppKindClaim, Reference: "O1",
 				Target: &protocol.AppTarget{App: "com.example"},
 			},
-			`{"kind":"claim","observation_id":"O1","target":{"app":"com.example"}}`,
+			`{"kind":"claim","reference":"O1","target":{"app":"com.example"}}`,
 		},
 		{
 			"handoff-restore",
 			&protocol.AppRequest{
-				Kind: protocol.AppKindHandoff, ObservationID: "O1",
+				Kind: protocol.AppKindHandoff, Reference: "O1",
 				Target: &protocol.AppTarget{TaskID: 42, UseTask: true}, RestoreForeground: true,
 			},
-			`{"kind":"handoff","observation_id":"O1","target":{"task_id":42},"restore_foreground":true}`,
+			`{"kind":"handoff","reference":"O1","target":{"task_id":42},"restore_foreground":true}`,
 		},
 		{
 			"close-borrowed",
 			&protocol.AppRequest{
-				Kind: protocol.AppKindClose, ObservationID: "O1",
+				Kind: protocol.AppKindClose, Reference: "O1",
 				Target: &protocol.AppTarget{App: "com.example"}, AllowBorrowed: true,
 			},
-			`{"kind":"close","observation_id":"O1","target":{"app":"com.example"},"allow_borrowed":true}`,
+			`{"kind":"close","reference":"O1","target":{"app":"com.example"},"allow_borrowed":true}`,
 		},
 		{
 			"kill-playback",
 			&protocol.AppRequest{
-				Kind: protocol.AppKindKill, ObservationID: "O1",
+				Kind: protocol.AppKindKill, Reference: "O1",
 				Target: &protocol.AppTarget{TaskID: 42, UseTask: true}, AllowStopPlayback: true,
 			},
-			`{"kind":"kill","observation_id":"O1","target":{"task_id":42},"allow_stop_playback":true}`,
+			`{"kind":"kill","reference":"O1","target":{"task_id":42},"allow_stop_playback":true}`,
 		},
 	}
 
@@ -581,12 +582,12 @@ func TestAppRejectsUnencodableBranchesWithoutSending(t *testing.T) {
 	}{
 		{"unknown-kind", &protocol.AppRequest{Kind: "bogus"}},
 		{"list-missing-reference", &protocol.AppRequest{Kind: protocol.AppKindList}},
-		{"open-missing-app", &protocol.AppRequest{Kind: protocol.AppKindOpen, ObservationID: "O1"}},
-		{"claim-missing-target", &protocol.AppRequest{Kind: protocol.AppKindClaim, ObservationID: "O1"}},
+		{"open-missing-target", &protocol.AppRequest{Kind: protocol.AppKindOpen, Reference: "O1"}},
+		{"claim-missing-target", &protocol.AppRequest{Kind: protocol.AppKindClaim, Reference: "O1"}},
 		{
 			"kill-package-target",
 			&protocol.AppRequest{
-				Kind: protocol.AppKindKill, ObservationID: "O1",
+				Kind: protocol.AppKindKill, Reference: "O1",
 				Target: &protocol.AppTarget{App: "com.example"},
 			},
 		},
@@ -702,7 +703,8 @@ func TestAppDecodesOpenView(t *testing.T) {
 
 	client := newTestClient(t, server.URL)
 	response, err := client.App(context.Background(),
-		&protocol.AppRequest{Kind: protocol.AppKindOpen, ObservationID: "O1", App: "com.example"},
+		&protocol.AppRequest{Kind: protocol.AppKindOpen, Reference: "O1",
+			Target: &protocol.AppTarget{App: "com.example"}},
 		WithOperationID("Pappopen"))
 	if err != nil {
 		t.Fatalf("App() error: %v", err)
@@ -738,7 +740,7 @@ func TestAppDecodesClaimAmbiguity(t *testing.T) {
 	client := newTestClient(t, server.URL)
 	response, err := client.App(context.Background(),
 		&protocol.AppRequest{
-			Kind: protocol.AppKindClaim, ObservationID: "O1",
+			Kind: protocol.AppKindClaim, Reference: "O1",
 			Target: &protocol.AppTarget{App: "com.example"},
 		}, WithOperationID("Pappclaim"))
 	if response == nil {
@@ -809,7 +811,7 @@ func TestActNestedErrorDetailsOverHTTP(t *testing.T) {
 
 			client := newTestClient(t, server.URL)
 			response, err := client.Act(context.Background(), &protocol.ActRequest{
-				ObservationID: "O1",
+				Reference: "O1",
 				Operation: protocol.Operation{
 					Type:   "tap",
 					Target: &protocol.Target{UseRef: true, Ref: "n491"},
@@ -867,7 +869,7 @@ func TestAppDecodesHandoffNullStatePreserved(t *testing.T) {
 	client := newTestClient(t, server.URL)
 	response, err := client.App(context.Background(),
 		&protocol.AppRequest{
-			Kind: protocol.AppKindHandoff, ObservationID: "O1",
+			Kind: protocol.AppKindHandoff, Reference: "O1",
 			Target: &protocol.AppTarget{TaskID: 42, UseTask: true},
 		}, WithOperationID("Papphandoff"))
 	if err != nil {
@@ -907,7 +909,7 @@ func TestAppDecodesCloseTasks(t *testing.T) {
 	client := newTestClient(t, server.URL)
 	response, err := client.App(context.Background(),
 		&protocol.AppRequest{
-			Kind: protocol.AppKindClose, ObservationID: "O1",
+			Kind: protocol.AppKindClose, Reference: "O1",
 			Target: &protocol.AppTarget{TaskID: 42, UseTask: true},
 		}, WithOperationID("Pappclose"))
 	if response == nil {
@@ -952,7 +954,7 @@ func TestAppDecodesKillPIDs(t *testing.T) {
 	client := newTestClient(t, server.URL)
 	response, err := client.App(context.Background(),
 		&protocol.AppRequest{
-			Kind: protocol.AppKindKill, ObservationID: "O1",
+			Kind: protocol.AppKindKill, Reference: "O1",
 			Target: &protocol.AppTarget{TaskID: 42, UseTask: true},
 		}, WithOperationID("Pappkill"))
 	if err != nil {
@@ -1019,7 +1021,7 @@ func TestActDecodesEffectAndQuality(t *testing.T) {
 
 			client := newTestClient(t, server.URL)
 			response, err := client.Act(context.Background(), &protocol.ActRequest{
-				ObservationID: "O1",
+				Reference: "O1",
 				Operation: protocol.Operation{
 					Type:      "scroll",
 					Container: &protocol.Target{UseRef: true, Ref: "n372"},
@@ -1150,9 +1152,9 @@ func TestInspectAndDiagnoseNeverAllocateOperation(t *testing.T) {
 
 	client := newTestClient(t, server.URL)
 	inspectResponse, err := client.Inspect(context.Background(), &protocol.InspectRequest{
-		ObservationID: "O2",
-		HasNode:       true,
-		Node:          "n7",
+		Reference: "O2",
+		HasNode:   true,
+		Node:      "n7",
 	})
 	if err != nil {
 		t.Fatalf("Inspect() error: %v", err)
@@ -1174,7 +1176,7 @@ func TestInspectAndDiagnoseNeverAllocateOperation(t *testing.T) {
 
 	assertToolRequest(t, inspectCapture, "/api/inspect")
 	assertNoOperationHeader(t, inspectCapture.headers)
-	if inspectCapture.body != `{"observation_id":"O2","node":"n7"}` {
+	if inspectCapture.body != `{"reference":"O2","node":"n7"}` {
 		t.Fatalf("inspect body = %q", inspectCapture.body)
 	}
 	assertToolRequest(t, diagnoseCapture, "/api/diagnose")
@@ -1412,7 +1414,7 @@ func TestTargetChangedKeepsDeliveredObservationAndRetry(t *testing.T) {
 	defer server.Close()
 
 	response, err := newTestClient(t, server.URL).Act(context.Background(), &protocol.ActRequest{
-		ObservationID: "O1",
+		Reference: "O1",
 		Operation: protocol.Operation{
 			Type: string(protocol.ActionTap),
 			Target: &protocol.Target{

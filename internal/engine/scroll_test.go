@@ -99,8 +99,8 @@ func scrollPageSpecsMoved(base []rawNodeSpec, delta int) []rawNodeSpec {
 func (h *harness) actP(t *testing.T, p, observationID string, operation protocol.Operation) *protocol.Result {
 	t.Helper()
 	result, apiErr := h.engine.Act(context.Background(), "agent", p, &protocol.ActRequest{
-		ObservationID: observationID,
-		Operation:     operation,
+		Reference: observationID,
+		Operation: operation,
 	})
 	if apiErr != nil {
 		t.Fatalf("act %s rejected at admission: %v", operation.Type, apiErr)
@@ -462,7 +462,7 @@ func TestScrollBusyKeepsObservationReady(t *testing.T) {
 		t.Fatalf("busy status(P) = %+v, want not_executed without effect", status)
 	}
 	duplicate, apiErr := h.engine.Act(context.Background(), "agent", "Pbusy", &protocol.ActRequest{
-		ObservationID: start.Observation.ID,
+		Reference: start.Observation.ID,
 		Operation: protocol.Operation{Type: "scroll",
 			Container: &protocol.Target{UseRef: true, Ref: container}, Direction: protocol.ScrollDirectionDown},
 	})

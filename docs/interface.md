@@ -58,13 +58,14 @@
 工具响应是一个 `Result` 对象，字段只在本次调用确有该事实时出现，固定顺序为：
 
 ```text
-operation_id, operation_state, outcome, phase, effect, target_reference, request_closed,
-blocking_operation_id, can_start, blocking_code, start_operation_id,
+operation_id, operation_state, outcome, phase, effect, text_input, target_reference,
+request_closed, blocking_operation_id, can_start, blocking_code, start_operation_id,
 observation_state, input_state, message_id, saved, session, observation, inspection,
 app, shell, wait, notification, diagnosis, cleanup, error, recovery
 ```
 
 事实互不替代：`outcome`（动作执行）、`effect`（本次受控滚动的位移观察）、
+`text_input`（复合 text 的 write/enter 原语）、
 `wait`（条件等待的退出分支、单帧匹配项与耗时）、
 `observation.status` 与 `observation.quality`（观察及其收敛质量）、`session.state`（会话）、
 `cleanup.*`（物理收尾）。`error` 只在失败时出现：
@@ -98,6 +99,9 @@ app, shell, wait, notification, diagnosis, cleanup, error, recovery
   `outcome=executed`（含 `executed_revoked`）或 `uncertain` 时出现；`not_executed` 永不出现。
   对象缺失表示本次结果没有该事实（可能是原操作不是 `scroll`、未执行，或原操作事实已封闭、
   已淘汰而不可用），缺失不表示“未观察到位移”。
+- `text_input` 只出现在已接纳且有效 `press_enter=true` 的 `text` 操作结果与仍保留该原操作的
+  P 视图；`write`、`enter` 两键固定出现，枚举与合法组合见 §6。显式 `press_enter=false`、
+  其他动作、认领前拒绝和未接纳调用都不出现该对象。它不替代 `outcome`、`error` 或后观察。
 
 `recovery` 的成员：
 
@@ -349,12 +353,12 @@ HTTP 状态映射（`protocol.Status`）：
 ## 6. `POST /api/act`
 
 ```json
-{"observation_id":"O1","operation":{"type":"tap","target":{"ref":"n1"}}}
+{"reference":"O1","operation":{"type":"tap","target":{"ref":"n1"}}}
 ```
 
 | 顶层字段 | 必填 | 说明 |
 | --- | --- | --- |
-| `observation_id` | 是 | 本次要消费的 ready O |
+| `reference` | 是 | 本次要消费的当前 ready O；旧 `observation_id` 不再是别名，按未知成员拒绝 |
 | `operation` | 是 | 非 null 对象，见下表 |
 | `image` | 否 | 布尔，默认 `false`；`true` 为本次后观察附加一张图片，规则见 §5 图片 |
 
@@ -362,18 +366,37 @@ HTTP 状态映射（`protocol.Status`）：
 
 | `type` | 允许成员 | 约束 |
 | --- | --- | --- |
-| `tap` | `target` | `target` 为 `{"ref":"n1"}` 或 `{"x":1,"y":2}` |
-| `long_press` | `target` | 同上 |
-| `text` | `target` + `text` | `ref` 目标必须指向可确认的输入对象（坐标目标在派发时绑定焦点输入）；`text` 必填字符串，可 `""`，≤4096 个 Unicode 码点 |
+| `tap` | `target` + 可选 `bubble` | `target` 为 `{"ref":"n1"}` 或 `{"x":1,"y":2}`；`bubble` 只适用于 ref 目标 |
+| `long_press` | `target` + 可选 `bubble` | 同上 |
+| `text` | `target` + `text` + 可选 `press_enter` | `ref` 目标必须指向可确认的输入对象（坐标目标在派发时绑定焦点输入）；`text` 必填字符串，可 `""`，≤4096 个 Unicode 码点 |
 | `swipe` | `from` + `to` + 可选 `duration_ms` | 两个坐标对象，起终点不能相同，不接受 `ref`；`duration_ms` 为 50–2000 的整数，省略为 300 |
 | `scroll` | `container` + `direction` + 可选 `amount` | `container` 为 `{"ref":"n1"}` 或 `{"x":1,"y":2}`；`direction` 为 `up`/`down`/`left`/`right`（大小写敏感）；`amount` 为 `page`（默认）或 `half` |
 | `key` | `key` | 固定白名单：`BACK`、`ENTER`、`DEL`、`TAB`、`ESCAPE`、`DPAD_UP`、`DPAD_DOWN`、`HOME`、`APP_SWITCH` |
+
+`bubble` 与 `press_enter` 都是 presence-aware 布尔：省略表示该适用分支的有效值为 `true`，
+显式 `false` 关闭；显式 `true` 与省略等价。`null`、非布尔、重复键和大小写变体按
+`422 invalid_request` 拒绝。`bubble` 只适用于 `tap`/`long_press` 的 `ref` 目标；坐标目标必须
+省略该成员，坐标目标携带 `bubble` 或其他 operation 携带 `bubble` 均为 `422 invalid_request`。
+`press_enter` 只适用于 `text`，其他 operation 携带即为 `422 invalid_request`。旧名
+`allow_ancestor_fallback` 不是别名，按未知成员拒绝。
 
 `target`/`container`/`from`/`to` 的规则：`ref` 与坐标互斥；坐标必须同时有 `x`、`y`，为 ≥0
 的整数；`ref` 不能为空或 `null`；`key`/`text` 不能是 `null`。分支成员互斥：`scroll` 不接受
 `target`/`from`/`to`/`key`/`text`/`duration_ms`，其他分支也不接受 `container`/`direction`/
 `amount`；`duration_ms` 只在 `swipe` 上出现。`duration_ms` 的显式 `null`、0、负数、非整数与
 越界一律拒绝。`swipe` 仍是原始手势，不承诺滚动语义；表达滚动意图用 `scroll`。
+
+`tap`/`long_press` 的 `ref` 目标有效 `bubble=true`（省略或显式 true）时：原目标自身已有请求
+动作则仍走下述直接目标规划，不提升；原目标完全没有 `tap`、`long_press`、`text` 任一动作时，
+服务沿公开树父链找到第一个 touch-interactive 祖先 A，且只把动作交给 A 一次。A 必须支持请求
+动作、未明确禁用、bounds 有效，并能在 A 的作用域内产生唯一可证安全点；A 不支持该动作或
+无安全点时返回 `422 unsupported_node_action`，不继续向更远祖先查找，也不认领 O。静态规划
+同时绑定原 child C 与 A。认领后必须重新唯一匹配 C 和 A，证明 A 仍是 fresh C 的祖先和最近
+交互祖先、C 的公开 Role 与完整 Label 未变、C 未新增任何 touch-interactive 能力、A 仍有请求
+动作与有效 bounds，并在 A 作用域内重算安全点。C 或 A 丢失/歧义、C 内容被替换、出现更近交互
+祖先或安全点落到另一独立交互目标时返回 `409 target_changed`，零派发；C 丢失时即使 A 仍唯一
+也不能把授权解绑为 A。有效 `bubble=false` 完全沿用下述直接目标算法与错误；坐标目标不进入该
+分支。
 
 `tap`/`long_press` 的 `ref` 目标使用子树安全落点规划。服务以目标 `raw` 矩形、逻辑屏与
 公开 `bounds` 的非空交集为基础，只把目标子树内 `actions` 含 `tap`、`long_press`、`text`
@@ -391,14 +414,16 @@ HTTP 状态映射（`protocol.Status`）：
 `422 unsupported_node_action`，不采集、不派发，O 保持 `ready`。目标子树外同级节点不参与
 阻塞或候选排序。坐标目标、`text`、`swipe`、`scroll` 与 `key` 不使用这套规划。
 
-`target.ref` 在返回原 `422 unsupported_node_action` 的路径中，仅当目标不是 root/`context`
-且不含 `tap`、`long_press`、`text` 任一动作时尝试祖先引导；目标含任一此类动作、即使不含
+在有效 `bubble=false`，或默认提升的最近祖先不存在/不支持请求动作而返回原
+`422 unsupported_node_action` 的路径中，仅当目标不是 root/`context` 且不含 `tap`、
+`long_press`、`text` 任一动作时尝试祖先引导；目标含任一此类动作、即使不含
 请求动作，也视为交互边界，不跳过自身。服务沿唯一父链向上，遇到 `context` 即停止，并把第一个
 含上述任一动作的节点作为唯一候选祖先。该祖先未明确禁用、bounds 与 source 有效、支持请求
 动作且按同一规划能产生可证点时，才尝试引导；任一条件不满足即整组省略，不继续越过它寻找
 更外层节点。`safe_point` 还必须通过整树单点解析并证明命中该祖先或其非阻塞承载作用域；
 无法完整证明时整组省略。`safe_carrier_ref` 可指原目标或该祖先的非阻塞后代承载节点候选，只解释坐标
-来源，不是可直接点击的替代 ref；服务绝不静默改派祖先。`occluding_ref` 只指出目标原中心的
+来源，不是可直接点击的替代 ref。该引导自身不改派祖先；默认 `bubble=true` 的目标提升是
+上一段的独立契约，不是从该引导静默改写而来。`occluding_ref` 只指出目标原中心的
 一个可定位阻塞 owner，不表示整个目标表面不可点。
 
 `scroll` 是受控滚动尝试：`container` 与 `direction` 必填，`amount` 省略为 `page`；
@@ -412,7 +437,7 @@ HTTP 状态映射（`protocol.Status`）：
 | `left` | 更靠左的内容 | 容器左部 → 右部 |
 
 ```json
-{"observation_id":"O1","operation":{"type":"scroll","container":{"ref":"n1"},
+{"reference":"O1","operation":{"type":"scroll","container":{"ref":"n1"},
  "direction":"down","amount":"page"}}
 ```
 
@@ -457,7 +482,8 @@ O 保持 `ready`。
 不继承显式时长） → 实时重验（目标显示仍存在、
 重新采集、前台包/任务与观察时一致；ref 目标使用下面的分层重验；坐标目标解析到唯一节点时，
 仍要求完整内容身份、祖先链和原点解析一致）→ 派发本次动作所需的输入（`text` 为焦点点击 +
-显示绑定写入，任何一步失败都不重放）。
+显示绑定写入；有效 `press_enter=true` 时在精确读回后再至多派发一次 ENTER，任何一步失败都
+不重放）。
 
 ref 目标按 Tier 1→2→3 匹配：Tier 1 要求目标 bounds 相同，祖先链 L1 不比较祖先 bounds、
 Focused/Selected；Tier 2 在 L1 相同时允许受限目标微移（重叠率至少 0.50，并检查尺寸、中心与
@@ -506,9 +532,9 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms）；
 
 | `outcome` | 含义 | 附带 |
 | --- | --- | --- |
-| `executed` | 输入已派发且有完成证据（`text` 以独立读回确认） | 后观察（full 或 delta）；若期间被撤销，则 `recovery` 为 `entry=status`、`reference=P`、`input_state=revoked`、`cause=executed_revoked`，且无后观察。`scroll` 必带 `effect`：有后树时为计算结果，撤销或无法计算时为 `unknown` |
-| `not_executed` | 未派发（静态拒绝、重验失败、工作被撤销等） | `error`、`recovery`；重验失败且已交付新帧时另带 `observation`。`not_executed` 不带 `effect` |
-| `uncertain` | 已派发但无法确认完成（传输失败、读回失败、超时） | `error`（`action_result_uncertain` / `text_target_uncertain` / `text_result_uncertain`）、`recovery` 为 `entry=status`、`reference=P`、`input_state=retired`；`scroll` 必带 `effect=unknown`（没有可计算的后树） |
+| `executed` | 输入已派发且有完成证据（`text` 以独立读回确认；默认/true 复合 text 还要求 `write=executed` 且 `enter=executed`） | 后观察（full 或 delta）；复合 text 另带 `text_input`；若期间被撤销，则 `recovery` 为 `entry=status`、`reference=P`、`input_state=revoked`、`cause=executed_revoked`，且无后观察。`scroll` 必带 `effect`：有后树时为计算结果，撤销或无法计算时为 `unknown` |
+| `not_executed` | 未派发（静态拒绝、重验失败、工作被撤销等） | `error`、`recovery`；重验失败且已交付新帧时另带 `observation`。默认/true 复合 text 的已接纳结果仍带初始或最后快照 `text_input`；`not_executed` 不带 `effect` |
+| `uncertain` | 已派发但无法确认完成（传输失败、读回失败、超时） | `error`（`action_result_uncertain` / `text_target_uncertain` / `text_result_uncertain`）、`recovery` 为 `entry=status`、`reference=P`、`input_state=retired`；复合 text 带当前 `text_input`，focus 已派发但两键未派发时整体仍为 `uncertain`；`scroll` 必带 `effect=unknown`（没有可计算的后树） |
 
 `scroll` 的 `effect` 只表示是否观察到容器内内容位移：`observed`/`not_observed`/`unknown` 的
 含义与固定判据见 §11。`effect` 不改写 `outcome`、`error`、`recovery` 或 `observation.status`；
@@ -524,16 +550,29 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms）；
 - 后观察在树收敛后采集（见 §1）；收敛期间被撤销时 `outcome` 仍是 `executed`、
   `recovery` 为 `entry=status`、`reference=P`、`input_state=revoked`、`cause=executed_revoked`、
   无后观察。收敛预算耗尽不算后观察失败：照常发布最后一帧。
-- `text` 先点击目标取得焦点，再做显示绑定的 `getTextOnDisplay` 唯一性确认、
-  `setTextOnDisplay`，最后以独立采集重新绑定并读回；读回值必须精确等于写入值才判
-  `executed`。该分支把目标框全文设为 text，不追加旧内容，也不发送 ENTER；需要提交时另一次
-  `act` 使用 `operation.type=key`、`operation.key=ENTER`。ref 输入绑定按
+- `text` 的 `press_enter` 省略或有效为 true 时执行复合流程：先点击目标取得焦点，再做显示绑定的
+  `getTextOnDisplay` 唯一性确认、`setTextOnDisplay`，然后以独立采集重新绑定并精确读回；读回
+  精确等于写入值且提交门禁通过后，在同一 work/P 内至多发送一次 `KEYCODE_ENTER`。返回值固定
+  携带 `text_input:{"write":…,"enter":…}`，两个键都出现，枚举仅为
+  `not_executed|uncertain|executed`；合法组合只有 `(N,N)`、`(U,N)`、`(E,N)`、`(E,U)`、
+  `(E,E)`。ENTER 非 `not_executed` 必须已有 `write=executed`。显式 `press_enter=false`
+  保持“焦点点击 + 写入 + 精确读回”，不授权也不发送 ENTER，并且不返回 `text_input`。
+  该分支把目标框全文设为 text，不追加旧内容；读回成功只确认写入，ENTER 只确认按键原语，
+  两者都不证明搜索、提交、导航或业务结果。`text_input.enter=uncertain` 时先观察当前页面，
+  不原样重发 ENTER；`write=executed,enter=not_executed` 且原会话仍活动时，可取新 O 后按需
+  单独发送 `operation.type=key,operation.key=ENTER`，不必重新填字。ref 输入绑定按
   exact（稳定锚点与相同 bounds）、near（覆盖点击点且重叠率至少
   0.80）、shifted（稳定锚点、同一水平带与受限尺寸的纵向位移）依次尝试；唯一性在 focus
   过滤前统计，焦点仅作安全门禁。所有分支保持 package/class 与 resource/description 的
   presence/值一致；要求 enabled 已知为真、password 已知为假、fresh focused 已知为真。每次
   Get/Set/readback 使用实际绑定的新鲜 bounds，set 只派发一次。相同 TaskID 只证明任务上下文，
   不证明 window 身份，完全同观测签名的字段替换不可辨识。
+- 复合 `text` 的 `text_input` 是 engine 在锁内发布的不可变快照：首次结果、运行中
+  `status(P)`、重复 P 与冻结结果都复制同一对象，不按 `phase` 或 `error.details` 重建。
+  冻结先到后，迟到回执不能回补；`write=executed,enter=not_executed` 不自动补发 ENTER，
+  `enter=uncertain` 也不是重试授权。焦点点击不在公开 `text_input` 内，但计入整体 outcome；
+  只有焦点点击、SetText 与 ENTER 都没有获得派发许可或均已确定未派发时整体才是
+  `not_executed`。`KnownOutcome=executed` 只在 write 与 enter 均确认后设置。
 - 坐标目标只证明一个点：`tap`/`long_press`/`text` 证明其 `target`，`swipe` 只证明起点
   `from`；终点是方向与幅度，不参与节点身份。观察时点解析不到节点时按前台级派发。`scroll`
   不证明叶节点或单点：它证明选定容器与新鲜 frame 中的整段轨迹，坐标只是容器选择器。
@@ -903,13 +942,14 @@ unknown；来源未知不能在构造时补成默认。五个状态的比较与�
 ### `POST /api/inspect`
 
 ```json
-{"observation_id":"O2"}
-{"observation_id":"O2","node":"n7"}
-{"observation_id":"O2","query":"确定"}
+{"reference":"O2"}
+{"reference":"O2","node":"n7"}
+{"reference":"O2","query":"确定"}
 ```
 
 `node` 与 `query` 互斥。`inspect` 只读保留中的历史树，不采集、不续租、不确认基线、
-不认领 O，也不需要 O 仍可输入。
+不认领 O，也不需要 O 仍可输入。`reference` 必须解析为保留中的历史 O；P 仍不可用，
+旧 `observation_id` 按未知成员拒绝。
 
 - 补看固定使用 `view=detailed`：逐节点展开、不折 `chain`、不隐藏已知几何；`tree` 作用域的
   `view` 在嵌套完整树里声明，`subtree`/`query` 在 inspection 信封声明一次；
@@ -980,17 +1020,19 @@ unknown；来源未知不能在构造时补成默认。五个状态的比较与�
 
 | kind | 必填（除 kind） | 可选与默认 | 不接受 |
 | --- | --- | --- | --- |
-| `find` | 无 | `query`：省略为全部；≤256 个 Unicode 码点；按本地化名称或包名做字面 Unicode 折叠子串匹配 | `reference`、`observation_id`、`target`、`app`、`scope` |
-| `list` | `reference`：当前 ready O，或能解析到活动原会话的 P | `scope=session`（默认）或 `primary`；`app`：明确包名过滤 | `observation_id`、`target`、`query` |
-| `open` | `observation_id`：当前 ready O；`app`：明确包名 | 无 | `reference`、`scope`、`target`、`query` |
-| `claim` | `observation_id`；`target` | 无 | `reference`、`scope`、`app`、`query` |
-| `handoff` | `observation_id`；`target` | `restore_foreground=false` | `reference`、`scope`、`app`、`query` |
-| `close` | `observation_id`；`target` | `allow_borrowed=false` | `reference`、`scope`、`app`、`query` |
-| `kill` | `observation_id`；`target={task_id}` | `allow_stop_playback=false` | 包名 `target`、`reference`、`scope`、`app`、`query` |
+| `find` | 无 | `query`：省略为全部；≤256 个 Unicode 码点；按本地化名称或包名做字面 Unicode 折叠子串匹配 | `reference`、`target`、`app`、`scope` |
+| `list` | `reference`：当前 ready O，或能解析到活动原会话的 P | `scope=session`（默认）或 `primary`；`app`：明确包名过滤 | `target`、`query` |
+| `open` | `reference`：当前 ready O；`target={app:包名}` | 无 | 顶层 `app`、`task_id` target、`scope`、`query` |
+| `claim` | `reference`：当前 ready O；`target` | 无 | `scope`、`app`、`query` |
+| `handoff` | `reference`：当前 ready O；`target` | `restore_foreground=false` | `scope`、`app`、`query` |
+| `close` | `reference`：当前 ready O；`target` | `allow_borrowed=false` | `scope`、`app`、`query` |
+| `kill` | `reference`：当前 ready O；`target={task_id}` | `allow_stop_playback=false` | 包名 `target`、`scope`、`app`、`query` |
 
 `target` 为 `{"task_id": 正整数}` 或 `{"app": 包名}`，恰好一种；`task_id` 与 `app` 互斥，
 两者都不出现、`task_id` 不是正整数或 `app` 不是明确包名都按 `422 invalid_request` 拒绝。
-`kill` 只接受 `task_id`；包名先由 `list` 解析。`target` 是选择器，不单独授予权限。
+`open` 只接受 `target.app`；`kill` 只接受 `target.task_id`，包名先由 `list` 解析。
+`claim`/`handoff`/`close` 接受 `task_id` 或 `app` 恰好一种。`target` 是选择器，不单独授予权限。
+顶层 `app` 只保留给 `list` 的包名过滤。旧 `observation_id` 在所有 app kind 中按未知成员拒绝。
 
 `find`/`list` 是查询：不消耗当前 ready O、不续租、不改变阅读基线，成功与失败都不带
 `outcome`。`open`/`claim`/`handoff`/`close`/`kill` 消费当前 ready O；成功后返回原会话屏的一次

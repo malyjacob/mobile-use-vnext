@@ -65,10 +65,11 @@ func TestServerInstructionsCarryCrossToolRules(t *testing.T) {
 		"wait.matched",
 		"observation.quality=unstable/unknown",
 		"目标框全文",
-		"不追加旧内容",
 		"不发送 ENTER",
-		"operation.type=key",
-		"operation.key=ENTER",
+		"press_enter",
+		"text_input",
+		"bubble",
+		"统一用 reference",
 		"not_executed",
 		"uncertain",
 		"executed",
@@ -84,26 +85,35 @@ func TestServerInstructionsCarryCrossToolRules(t *testing.T) {
 	}
 }
 
-// TestServerInstructionsKeepAPhaseBoundary proves the A-phase text does not
-// publish fields or defaults that only the later action-contract batch adds.
-// recovery.reference and body reference are existing fields and stay allowed.
+// TestServerInstructionsKeepAPhaseBoundary proves the instructions publish the
+// reference unification and the branch-qualified defaults, while never naming
+// the rejected alternative (allow_ancestor_fallback) or claiming a top-level
+// default that would apply to coordinates or other actions.
 func TestServerInstructionsKeepAPhaseBoundary(t *testing.T) {
 	instructions := ServerInstructions()
 	for _, forbidden := range []string{
-		"bubble",
-		"press_enter",
 		"allow_ancestor_fallback",
 		"默认发送 ENTER",
 		"统一 reference",
 		"统一为 reference",
 	} {
 		if strings.Contains(instructions, forbidden) {
-			t.Errorf("server instructions publish A-phase-forbidden %q", forbidden)
+			t.Errorf("server instructions publish forbidden wording %q", forbidden)
 		}
 	}
-	// The act input in A is observation_id, not a unified reference.
 	if !strings.Contains(instructions, "observation.id") {
 		t.Error("server instructions do not identify the observation id to reuse")
+	}
+	for _, required := range []string{
+		"请求引用统一用 reference",
+		"默认 bubble=true",
+		"默认 press_enter=true",
+		"operation.bubble=false",
+		"operation.press_enter=false",
+	} {
+		if !strings.Contains(instructions, required) {
+			t.Errorf("server instructions lack %q", required)
+		}
 	}
 }
 
@@ -122,7 +132,8 @@ func TestToolDescriptionsExcludeTreeGuide(t *testing.T) {
 
 // TestToolDescriptionsAreCallerOriented asserts every description states its
 // own purpose, key parameters/defaults, result or action boundary and minimal
-// recovery, and that internal algorithms and A-phase-forbidden names stay out.
+// recovery, and that internal algorithms and the rejected ancestor-fallback
+// name stay out.
 func TestToolDescriptionsAreCallerOriented(t *testing.T) {
 	required := map[string][]string{
 		"start": {
@@ -153,11 +164,11 @@ func TestToolDescriptionsAreCallerOriented(t *testing.T) {
 			"35 秒",
 		},
 		"act": {
-			"observation_id",
-			"operation.type=key",
-			"operation.key=ENTER",
-			"不发送 ENTER",
-			"不追加旧内容",
+			"reference",
+			"press_enter",
+			"text_input",
+			"bubble",
+			"另发 ENTER",
 			"unsupported_node_action",
 			"nearest_actionable_ref",
 			"safe_point",
@@ -219,7 +230,7 @@ func TestToolDescriptionsAreCallerOriented(t *testing.T) {
 				t.Errorf("%s description lacks %q", definition.name, fragment)
 			}
 		}
-		for _, forbidden := range []string{"bubble", "press_enter", "allow_ancestor_fallback"} {
+		for _, forbidden := range []string{"allow_ancestor_fallback"} {
 			if strings.Contains(definition.description, forbidden) {
 				t.Errorf("%s description publishes A-phase-forbidden %q", definition.name, forbidden)
 			}
@@ -250,10 +261,11 @@ func TestActDescriptionKeepsCallerRecovery(t *testing.T) {
 		}
 	}
 	for _, required := range []string{
-		"全文设为 text",
-		"不发送 ENTER",
-		"operation.type=key",
-		"operation.key=ENTER",
+		"全文写入",
+		"另发 ENTER",
+		"press_enter=false",
+		"text_input",
+		"bubble=true",
 		"用该 O 加新 P 重试",
 		"uncertain",
 		"不原样重发",

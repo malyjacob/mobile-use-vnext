@@ -1051,13 +1051,13 @@ func TestTextCarriesTreeBlock(t *testing.T) {
 			trailer:  "end tree\n",
 		},
 		{
-			name: "act", tool: "act", arguments: `{"observation_id":"O1","operation":{"type":"key","key":"BACK"}}`,
+			name: "act", tool: "act", arguments: `{"reference":"O1","operation":{"type":"key","key":"BACK"}}`,
 			response: `{"operation_id":"P2","outcome":"executed","observation":` + observation + `}`,
 			header:   "tree v2 format=full id=O1 scope=reported_visible_with_context view=compact nodes=1 entries=1",
 			trailer:  "end tree\n",
 		},
 		{
-			name: "app-open", tool: "app", arguments: `{"kind":"open","observation_id":"O1","app":"com.example.probe"}`,
+			name: "app-open", tool: "app", arguments: `{"kind":"open","reference":"O1","target":{"app":"com.example.probe"}}`,
 			response: `{"operation_id":"P2","outcome":"executed","app":{"kind":"open",` +
 				`"package":"com.example.probe","task_id":42,"display_id":12,"ownership":"owned",` +
 				`"reused":false,"state_preserved":false},"observation":` + observation + `}`,
@@ -1065,7 +1065,7 @@ func TestTextCarriesTreeBlock(t *testing.T) {
 			trailer: "end tree\n",
 		},
 		{
-			name: "inspect", tool: "inspect", arguments: `{"observation_id":"O1"}`,
+			name: "inspect", tool: "inspect", arguments: `{"reference":"O1"}`,
 			response: `{"inspection":{"observation_id":"O1","origin":"P1","revision":1,` +
 				`"captured_at":"2026-11-09T00:00:01Z","scope":"tree","tree":` + testDetailedTreeJSON + `}}`,
 			header:  "inspect v2 scope=tree observation=O1 revision=1 captured_at=2026-11-09T00:00:01Z tree_scope=reported_visible_with_context view=detailed nodes=1 entries=1",

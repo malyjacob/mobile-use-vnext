@@ -360,8 +360,8 @@ func TestToolCatalog(t *testing.T) {
 		"status":    {},
 		"observe":   {"reference"},
 		"wait_for":  {"reference", "timeout"},
-		"act":       {"observation_id", "operation"},
-		"inspect":   {"observation_id"},
+		"act":       {"reference", "operation"},
+		"inspect":   {"reference"},
 		"keepalive": {"reference"},
 		"end":       {"reference"},
 		"app":       {"kind"},
@@ -489,6 +489,21 @@ func TestActScrollSchema(t *testing.T) {
 	if duration.Type != "integer" || duration.Minimum != protocol.MinSwipeDurationMS || duration.Maximum != protocol.MaxSwipeDurationMS {
 		t.Fatalf("duration_ms schema = %+v", duration)
 	}
+	// bubble and press_enter are branch-qualified booleans. Publishing a
+	// default here would read as applying to coordinates or other actions.
+	for member, branch := range map[string]string{"bubble": "tap/long_press", "press_enter": "text"} {
+		var option struct {
+			Type        string `json:"type"`
+			Description string `json:"description"`
+			Default     *bool  `json:"default"`
+		}
+		if err := json.Unmarshal(operation.Properties[member], &option); err != nil {
+			t.Fatalf("%s schema: %v", member, err)
+		}
+		if option.Type != "boolean" || option.Default != nil || !strings.Contains(option.Description, branch) {
+			t.Fatalf("%s schema = %+v, want a branch-qualified boolean without default", member, option)
+		}
+	}
 	var target, container struct {
 		Description string          `json:"description"`
 		OneOf       json.RawMessage `json:"oneOf"`
@@ -536,7 +551,7 @@ func TestActScrollForwarded(t *testing.T) {
 	})
 	session := connectTestInMemory(t, newTestMCPServer(t, fake))
 	result := callTestTool(t, session, "act", map[string]any{
-		"observation_id": "O1",
+		"reference": "O1",
 		"operation": map[string]any{
 			"type":      "scroll",
 			"container": map[string]any{"ref": "n372"},
@@ -548,7 +563,7 @@ func TestActScrollForwarded(t *testing.T) {
 		t.Fatalf("scroll act reported an error: %s", testTextContent(t, result))
 	}
 	requests := fake.requestsFor("act")
-	wantBody := `{"observation_id":"O1","operation":{"type":"scroll",` +
+	wantBody := `{"reference":"O1","operation":{"type":"scroll",` +
 		`"container":{"ref":"n372"},"direction":"down","amount":"page"},"image":false}`
 	if len(requests) != 1 || requests[0].Body != wantBody {
 		t.Fatalf("scroll body changed: %+v", requests)
@@ -584,6 +599,11 @@ func TestStrictAdmission(t *testing.T) {
 		arguments map[string]any
 	}{
 		{name: "unknown member", tool: "start", arguments: map[string]any{"extra": true}},
+		{name: "retired act observation_id", tool: "act", arguments: map[string]any{
+			"observation_id": "O1",
+			"operation":      map[string]any{"type": "key", "key": "BACK"},
+		}},
+		{name: "retired inspect observation_id", tool: "inspect", arguments: map[string]any{"observation_id": "O1"}},
 		{name: "wrong type", tool: "observe", arguments: map[string]any{"reference": "O1", "wait_ms": "soon"}},
 		{name: "explicit null", tool: "observe", arguments: map[string]any{"reference": "O1", "full": nil}},
 		{name: "missing required", tool: "end", arguments: map[string]any{}},
@@ -813,8 +833,8 @@ func TestActOutcomes(t *testing.T) {
 		})
 		session := connectTestInMemory(t, newTestMCPServer(t, fake))
 		result := callTestTool(t, session, "act", map[string]any{
-			"observation_id": "O1",
-			"operation":      map[string]any{"type": "key", "key": "BACK"},
+			"reference": "O1",
+			"operation": map[string]any{"type": "key", "key": "BACK"},
 		})
 		if result.IsError {
 			t.Fatalf("executed act reported an error: %s", testTextContent(t, result))
@@ -834,8 +854,8 @@ func TestActOutcomes(t *testing.T) {
 		})
 		session := connectTestInMemory(t, newTestMCPServer(t, fake))
 		result := callTestTool(t, session, "act", map[string]any{
-			"observation_id": "O1",
-			"operation":      map[string]any{"type": "tap", "target": map[string]any{"ref": "n7"}},
+			"reference": "O1",
+			"operation": map[string]any{"type": "tap", "target": map[string]any{"ref": "n7"}},
 		})
 		if !result.IsError {
 			t.Fatal("not_executed act should be an error")
@@ -891,7 +911,7 @@ func TestReadOnlyToolProjections(t *testing.T) {
 					`"recovery":{"entry":"observe","reference":"P","input_state":"retired"}}`)
 		})
 		session := connectTestInMemory(t, newTestMCPServer(t, fake))
-		result := callTestTool(t, session, "inspect", map[string]any{"observation_id": "O2"})
+		result := callTestTool(t, session, "inspect", map[string]any{"reference": "O2"})
 		if !result.IsError {
 			t.Fatal("inspect content_unavailable should be an error")
 		}
@@ -1029,7 +1049,7 @@ func TestCancellationWorkToolDirect(t *testing.T) {
 	resultChannel := make(chan *execution, 1)
 	go func() {
 		resultChannel <- adapter.run(ctx, testDefinitionByName(t, "act"),
-			[]byte(`{"observation_id":"O1","operation":{"type":"key","key":"BACK"}}`))
+			[]byte(`{"reference":"O1","operation":{"type":"key","key":"BACK"}}`))
 	}()
 	actRequests := fake.waitFor(t, "act", 1, mcpTestTimeout)
 	operation := actRequests[0].OperationID
@@ -1120,8 +1140,8 @@ func TestCancellationInMemorySDK(t *testing.T) {
 		_, err := session.CallTool(ctx, &sdk.CallToolParams{
 			Name: "act",
 			Arguments: map[string]any{
-				"observation_id": "O1",
-				"operation":      map[string]any{"type": "key", "key": "BACK"},
+				"reference": "O1",
+				"operation": map[string]any{"type": "key", "key": "BACK"},
 			},
 		})
 		callDone <- err

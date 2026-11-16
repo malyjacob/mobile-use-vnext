@@ -29,25 +29,27 @@ func TestStrictAdmission(t *testing.T) {
 		{"observe wait over", `{"reference":"O1","wait_ms":10001}`, false},
 		{"end ok", `{"reference":"P1"}`, true},
 		{"end unknown", `{"reference":"P1","session_id":"x"}`, false},
-		{"act ok tap ref", `{"observation_id":"O1","operation":{"type":"tap","target":{"ref":"n1"}}}`, true},
-		{"act tap coords", `{"observation_id":"O1","operation":{"type":"tap","target":{"x":1,"y":2}}}`, true},
-		{"act tap bool coord", `{"observation_id":"O1","operation":{"type":"tap","target":{"x":true,"y":2}}}`, false},
-		{"act tap float coord", `{"observation_id":"O1","operation":{"type":"tap","target":{"x":1.5,"y":2}}}`, false},
-		{"act tap both", `{"observation_id":"O1","operation":{"type":"tap","target":{"ref":"n1","x":1,"y":2}}}`, false},
-		{"act tap one coord", `{"observation_id":"O1","operation":{"type":"tap","target":{"x":1}}}`, false},
-		{"act swipe ok", `{"observation_id":"O1","operation":{"type":"swipe","from":{"x":1,"y":2},"to":{"x":3,"y":4}}}`, true},
-		{"act swipe same", `{"observation_id":"O1","operation":{"type":"swipe","from":{"x":1,"y":2},"to":{"x":1,"y":2}}}`, false},
-		{"act swipe extra", `{"observation_id":"O1","operation":{"type":"swipe","from":{"x":1,"y":2},"to":{"x":3,"y":4},"text":"x"}}`, false},
-		{"act key ok", `{"observation_id":"O1","operation":{"type":"key","key":"BACK"}}`, true},
-		{"act key bad", `{"observation_id":"O1","operation":{"type":"key","key":"VOLUME_UP"}}`, false},
-		{"act key null", `{"observation_id":"O1","operation":{"type":"key","key":null}}`, false},
-		{"act key extra", `{"observation_id":"O1","operation":{"type":"key","key":"BACK","target":{"ref":"n1"}}}`, false},
-		{"act text empty", `{"observation_id":"O1","operation":{"type":"text","target":{"ref":"n1"},"text":""}}`, true},
-		{"act text null", `{"observation_id":"O1","operation":{"type":"text","target":{"ref":"n1"},"text":null}}`, false},
-		{"act text missing", `{"observation_id":"O1","operation":{"type":"text","target":{"ref":"n1"}}}`, false},
-		{"act unknown op", `{"observation_id":"O1","operation":{"type":"hover"}}`, false},
-		{"act unknown member", `{"observation_id":"O1","operation":{"type":"tap","target":{"ref":"n1"},"duration":10}}`, false},
-		{"act image null", `{"observation_id":"O1","operation":{"type":"tap","target":{"ref":"n1"}},"image":null}`, false},
+		{"act ok tap ref", `{"reference":"O1","operation":{"type":"tap","target":{"ref":"n1"}}}`, true},
+		{"act tap coords", `{"reference":"O1","operation":{"type":"tap","target":{"x":1,"y":2}}}`, true},
+		{"act tap bool coord", `{"reference":"O1","operation":{"type":"tap","target":{"x":true,"y":2}}}`, false},
+		{"act tap float coord", `{"reference":"O1","operation":{"type":"tap","target":{"x":1.5,"y":2}}}`, false},
+		{"act tap both", `{"reference":"O1","operation":{"type":"tap","target":{"ref":"n1","x":1,"y":2}}}`, false},
+		{"act tap one coord", `{"reference":"O1","operation":{"type":"tap","target":{"x":1}}}`, false},
+		{"act swipe ok", `{"reference":"O1","operation":{"type":"swipe","from":{"x":1,"y":2},"to":{"x":3,"y":4}}}`, true},
+		{"act swipe same", `{"reference":"O1","operation":{"type":"swipe","from":{"x":1,"y":2},"to":{"x":1,"y":2}}}`, false},
+		{"act swipe extra", `{"reference":"O1","operation":{"type":"swipe","from":{"x":1,"y":2},"to":{"x":3,"y":4},"text":"x"}}`, false},
+		{"act key ok", `{"reference":"O1","operation":{"type":"key","key":"BACK"}}`, true},
+		{"act key bad", `{"reference":"O1","operation":{"type":"key","key":"VOLUME_UP"}}`, false},
+		{"act key null", `{"reference":"O1","operation":{"type":"key","key":null}}`, false},
+		{"act key extra", `{"reference":"O1","operation":{"type":"key","key":"BACK","target":{"ref":"n1"}}}`, false},
+		{"act text empty", `{"reference":"O1","operation":{"type":"text","target":{"ref":"n1"},"text":""}}`, true},
+		{"act text null", `{"reference":"O1","operation":{"type":"text","target":{"ref":"n1"},"text":null}}`, false},
+		{"act text missing", `{"reference":"O1","operation":{"type":"text","target":{"ref":"n1"}}}`, false},
+		{"act unknown op", `{"reference":"O1","operation":{"type":"hover"}}`, false},
+		{"act unknown member", `{"reference":"O1","operation":{"type":"tap","target":{"ref":"n1"},"duration":10}}`, false},
+		{"act image null", `{"reference":"O1","operation":{"type":"tap","target":{"ref":"n1"}},"image":null}`, false},
+		{"act old observation_id", `{"observation_id":"O1","operation":{"type":"key","key":"BACK"}}`, false},
+		{"act missing reference", `{"operation":{"type":"key","key":"BACK"}}`, false},
 		{"wait_for ok sleep", `{"reference":"O1","timeout":1}`, true},
 		{"wait_for ok conditions", `{"reference":"O1","query":"加载","absent_query":"错误","timeout":40,"stable":true,"full":true,"image":true}`, true},
 		{"wait_for missing timeout", `{"reference":"O1"}`, false},
@@ -97,7 +99,7 @@ func TestStrictAdmission(t *testing.T) {
 
 func TestTextTooLong(t *testing.T) {
 	text := strings.Repeat("测", MaxTextRunes+1)
-	body := `{"observation_id":"O1","operation":{"type":"text","target":{"ref":"n1"},"text":"` + text + `"}}`
+	body := `{"reference":"O1","operation":{"type":"text","target":{"ref":"n1"},"text":"` + text + `"}}`
 	if _, err := DecodeAct([]byte(body)); err == nil {
 		t.Fatal("expected text_too_long")
 	}
@@ -105,7 +107,7 @@ func TestTextTooLong(t *testing.T) {
 
 // actBody wraps one raw operation object in the act envelope.
 func actBody(operation string) string {
-	return `{"observation_id":"O1","operation":` + operation + `}`
+	return `{"reference":"O1","operation":` + operation + `}`
 }
 
 // TestDecodeActScrollSchema is the strict schema matrix for the scroll branch:

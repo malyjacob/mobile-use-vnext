@@ -590,9 +590,9 @@ func prepareCall(service *client.Client, definition toolDefinition, body []byte)
 		}
 		call.run = func(ctx context.Context, operationID string) (*client.Response, error) {
 			return service.Act(ctx, &protocol.ActRequest{
-				ObservationID: request.ObservationID,
-				Operation:     request.Operation,
-				Image:         request.Image,
+				Reference: request.Reference,
+				Operation: request.Operation,
+				Image:     request.Image,
 			}, client.WithOperationID(operationID))
 		}
 	case "inspect":
@@ -602,11 +602,11 @@ func prepareCall(service *client.Client, definition toolDefinition, body []byte)
 		}
 		call.run = func(ctx context.Context, _ string) (*client.Response, error) {
 			return service.Inspect(ctx, &protocol.InspectRequest{
-				ObservationID: request.ObservationID,
-				Node:          request.Node,
-				Query:         request.Query,
-				HasNode:       request.HasNode,
-				HasQuery:      request.HasQuery,
+				Reference: request.Reference,
+				Node:      request.Node,
+				Query:     request.Query,
+				HasNode:   request.HasNode,
+				HasQuery:  request.HasQuery,
 			})
 		}
 	case "keepalive":

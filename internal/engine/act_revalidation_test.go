@@ -351,8 +351,8 @@ func TestActRevalidationHierarchyAndTiers(t *testing.T) {
 
 		h.device.scriptCaptures(makeStep(801))
 		res, apiErr := h.engine.Act(context.Background(), "agent", "", &protocol.ActRequest{
-			ObservationID: start.Observation.ID,
-			Operation:     protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: btnNode.Ref}},
+			Reference: start.Observation.ID,
+			Operation: protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: btnNode.Ref}},
 		})
 		if apiErr != nil || res.Outcome != OutcomeExecuted {
 			t.Fatalf("ancestor bounds delta should execute: err=%+v res=%+v", apiErr, res)
@@ -382,8 +382,8 @@ func TestActRevalidationHierarchyAndTiers(t *testing.T) {
 
 		h.device.scriptCaptures(makeStep(108, 188))
 		res, apiErr := h.engine.Act(context.Background(), "agent", "", &protocol.ActRequest{
-			ObservationID: start.Observation.ID,
-			Operation:     protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: btnNode.Ref}},
+			Reference: start.Observation.ID,
+			Operation: protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: btnNode.Ref}},
 		})
 		if apiErr != nil || res.Outcome != OutcomeExecuted {
 			t.Fatalf("8px shifted target should execute: err=%+v res=%+v", apiErr, res)
@@ -417,8 +417,8 @@ func TestActRevalidationHierarchyAndTiers(t *testing.T) {
 			return revalCapture(display, root, anc, wrap, btn), nil
 		})
 		res, apiErr := h.engine.Act(context.Background(), "agent", "", &protocol.ActRequest{
-			ObservationID: start.Observation.ID,
-			Operation:     protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: btnNode.Ref}},
+			Reference: start.Observation.ID,
+			Operation: protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: btnNode.Ref}},
 		})
 		if apiErr != nil || res.Outcome != OutcomeExecuted {
 			t.Fatalf("transparent wrapper Tier 3 should execute: err=%+v res=%+v", apiErr, res)
@@ -471,8 +471,8 @@ func TestActRevalidationHierarchyAndTiers(t *testing.T) {
 					return revalCapture(display, root, anc, wrap, btn), nil
 				})
 				res, apiErr := h.engine.Act(context.Background(), "agent", "", &protocol.ActRequest{
-					ObservationID: start.Observation.ID,
-					Operation:     protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: btnNode.Ref}},
+					Reference: start.Observation.ID,
+					Operation: protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: btnNode.Ref}},
 				})
 				if apiErr != nil {
 					t.Fatalf("unexpected APIError: %+v", apiErr)
@@ -507,8 +507,8 @@ func TestActRevalidationHierarchyAndTiers(t *testing.T) {
 			return revalCapture(display, root, wrap, btn), nil
 		})
 		res, apiErr := h.engine.Act(context.Background(), "agent", "", &protocol.ActRequest{
-			ObservationID: start.Observation.ID,
-			Operation:     protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: btnNode.Ref}},
+			Reference: start.Observation.ID,
+			Operation: protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: btnNode.Ref}},
 		})
 		if apiErr != nil || res.Outcome != OutcomeNotExecuted || res.Error == nil || res.Error.Code != protocol.CodeTargetChanged {
 			t.Fatalf("root-only L2 must reject with target_changed: err=%+v res=%+v", apiErr, res)
@@ -544,8 +544,8 @@ func TestActRevalidationHierarchyAndTiers(t *testing.T) {
 			return revalCapture(display, root, anc, btnA, btnB), nil
 		})
 		res, apiErr := h.engine.Act(context.Background(), "agent", "", &protocol.ActRequest{
-			ObservationID: start.Observation.ID,
-			Operation:     protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: btnNode.Ref}},
+			Reference: start.Observation.ID,
+			Operation: protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: btnNode.Ref}},
 		})
 		if apiErr != nil || res.Outcome != OutcomeNotExecuted || res.Error == nil || res.Error.Code != protocol.CodeTargetChanged {
 			t.Fatalf("ambiguous Tier 2 candidates must reject: err=%+v res=%+v", apiErr, res)
@@ -574,8 +574,8 @@ func TestActRevalidationHierarchyAndTiers(t *testing.T) {
 
 		h.device.scriptCaptures(makeStep("Share"))
 		res, apiErr := h.engine.Act(context.Background(), "agent", "", &protocol.ActRequest{
-			ObservationID: start.Observation.ID,
-			Operation:     protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: btnNode.Ref}},
+			Reference: start.Observation.ID,
+			Operation: protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: btnNode.Ref}},
 		})
 		if apiErr != nil || res.Outcome != OutcomeNotExecuted || res.Error == nil || res.Error.Code != protocol.CodeTargetChanged {
 			t.Fatalf("renamed target must reject: err=%+v res=%+v", apiErr, res)
@@ -611,8 +611,8 @@ func TestActRevalidationHierarchyAndTiers(t *testing.T) {
 			return revalCapture(display, root, anc, btnC), nil
 		})
 		res, apiErr := h.engine.Act(context.Background(), "agent", "", &protocol.ActRequest{
-			ObservationID: start.Observation.ID,
-			Operation:     protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: btnNode.Ref}},
+			Reference: start.Observation.ID,
+			Operation: protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: btnNode.Ref}},
 		})
 		if apiErr != nil || res.Outcome != OutcomeNotExecuted || res.Error == nil || res.Error.Code != protocol.CodeTargetChanged {
 			t.Fatalf("reverse incoming ambiguity must reject: err=%+v res=%+v", apiErr, res)
@@ -648,8 +648,8 @@ func TestActRevalidationHierarchyAndTiers(t *testing.T) {
 			return buildDeep(display), nil
 		})
 		res, apiErr := h.engine.Act(context.Background(), "agent", "", &protocol.ActRequest{
-			ObservationID: start.Observation.ID,
-			Operation:     protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: btnNode.Ref}},
+			Reference: start.Observation.ID,
+			Operation: protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: btnNode.Ref}},
 		})
 		if apiErr != nil {
 			t.Fatalf("unexpected APIError: %+v", apiErr)
@@ -696,8 +696,8 @@ func TestActRevalidationTapCarrier(t *testing.T) {
 
 		h2.device.scriptCaptures(makeCardStep(388, 468, 435, 388))
 		res, apiErr := h2.engine.Act(context.Background(), "agent", "", &protocol.ActRequest{
-			ObservationID: start2.Observation.ID,
-			Operation:     protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: cardNode2.Ref}},
+			Reference: start2.Observation.ID,
+			Operation: protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: cardNode2.Ref}},
 		})
 		if apiErr != nil || res.Outcome != OutcomeExecuted {
 			t.Fatalf("shifted carrier should recompute safe point and execute: err=%+v res=%+v", apiErr, res)
@@ -756,8 +756,8 @@ func TestActRevalidationTapCarrier(t *testing.T) {
 				return revalCapture(display, root, card, carrierB, blocker, centerCol), nil
 			})
 			res, apiErr := h.engine.Act(context.Background(), "agent", "", &protocol.ActRequest{
-				ObservationID: start.Observation.ID,
-				Operation:     protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: cardNode.Ref}},
+				Reference: start.Observation.ID,
+				Operation: protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: cardNode.Ref}},
 			})
 			if apiErr != nil || res.Outcome != OutcomeExecuted {
 				t.Fatalf("independent content unbind keep point failed: err=%+v res=%+v", apiErr, res)
@@ -813,8 +813,8 @@ func TestActRevalidationTapCarrier(t *testing.T) {
 				return revalCapture(display, root, card, nowInteractiveA, carrierB, blocker, centerCol), nil
 			})
 			res, apiErr := h.engine.Act(context.Background(), "agent", "", &protocol.ActRequest{
-				ObservationID: start.Observation.ID,
-				Operation:     protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: cardNode.Ref}},
+				Reference: start.Observation.ID,
+				Operation: protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: cardNode.Ref}},
 			})
 			if apiErr != nil || res.Outcome != OutcomeExecuted {
 				t.Fatalf("independent content unbind reselect failed: err=%+v res=%+v", apiErr, res)
@@ -862,8 +862,8 @@ func TestActRevalidationTapCarrier(t *testing.T) {
 				return revalCapture(display, root, card, blocker, centerCol), nil
 			})
 			res, apiErr := h.engine.Act(context.Background(), "agent", "", &protocol.ActRequest{
-				ObservationID: start.Observation.ID,
-				Operation:     protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: cardNode.Ref}},
+				Reference: start.Observation.ID,
+				Operation: protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: cardNode.Ref}},
 			})
 			if apiErr != nil || res.Outcome != OutcomeNotExecuted || res.Error == nil || res.Error.Code != protocol.CodeTargetChanged {
 				t.Fatalf("anonymous carrier loss must reject: err=%+v res=%+v", apiErr, res)
@@ -901,8 +901,8 @@ func TestActRevalidationTapCarrier(t *testing.T) {
 				return revalCapture(display, root, card, overlay), nil
 			})
 			res, apiErr := h.engine.Act(context.Background(), "agent", "", &protocol.ActRequest{
-				ObservationID: start.Observation.ID,
-				Operation:     protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: cardNode.Ref}},
+				Reference: start.Observation.ID,
+				Operation: protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: cardNode.Ref}},
 			})
 			if apiErr != nil || res.Outcome != OutcomeNotExecuted || res.Error == nil || res.Error.Code != protocol.CodeTargetChanged {
 				t.Fatalf("full overlay must reject: err=%+v res=%+v", apiErr, res)
@@ -956,8 +956,8 @@ func TestActRevalidationTapCarrier(t *testing.T) {
 			return revalCapture(display, root, list, card, carrierB, blocker, centerCol), nil
 		})
 		res, apiErr := h.engine.Act(context.Background(), "agent", "", &protocol.ActRequest{
-			ObservationID: start.Observation.ID,
-			Operation:     protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: cardNode.Ref}},
+			Reference: start.Observation.ID,
+			Operation: protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: cardNode.Ref}},
 		})
 		if apiErr != nil || res.Outcome != OutcomeNotExecuted || res.Error == nil || res.Error.Code != protocol.CodeTargetChanged {
 			t.Fatalf("shared list ancestor must not authorize carrier unbind: err=%+v res=%+v", apiErr, res)
@@ -989,8 +989,8 @@ func TestActRevalidationTapCarrier(t *testing.T) {
 			return revalCapture(display, root, btn, badge), nil
 		})
 		res, apiErr := h.engine.Act(context.Background(), "agent", "", &protocol.ActRequest{
-			ObservationID: start.Observation.ID,
-			Operation:     protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: btnNode.Ref}},
+			Reference: start.Observation.ID,
+			Operation: protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: btnNode.Ref}},
 		})
 		if apiErr != nil || res.Outcome != OutcomeExecuted {
 			t.Fatalf("should execute using original safe point: err=%+v res=%+v", apiErr, res)
@@ -1028,8 +1028,8 @@ func TestActRevalidationTapCarrier(t *testing.T) {
 			return revalCapture(display, root, anc, btn, blocker), nil
 		})
 		res, apiErr := h.engine.Act(context.Background(), "agent", "", &protocol.ActRequest{
-			ObservationID: start.Observation.ID,
-			Operation:     protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: btnNode.Ref}},
+			Reference: start.Observation.ID,
+			Operation: protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: btnNode.Ref}},
 		})
 		if apiErr != nil || res.Outcome != OutcomeExecuted {
 			t.Fatalf("blocked original point with safe subtree span should execute: err=%+v res=%+v", apiErr, res)
@@ -1061,8 +1061,8 @@ func TestActRevalidationTapCarrier(t *testing.T) {
 			return revalCapture(display, root, other, moved), nil
 		})
 		res, apiErr := h.engine.Act(context.Background(), "agent", "", &protocol.ActRequest{
-			ObservationID: start.Observation.ID,
-			Operation:     protocol.Operation{Type: "tap", Target: &protocol.Target{X: 200, Y: 250}},
+			Reference: start.Observation.ID,
+			Operation: protocol.Operation{Type: "tap", Target: &protocol.Target{X: 200, Y: 250}},
 		})
 		if apiErr != nil || res.Outcome != OutcomeNotExecuted || res.Error == nil || res.Error.Code != protocol.CodeTargetChanged {
 			t.Fatalf("coordinate tap resolved to different node must reject: err=%+v res=%+v", apiErr, res)
@@ -1135,7 +1135,7 @@ func TestScrollDynamicRevalidation(t *testing.T) {
 			return buildScrollList(display, device.Rect{Left: 0, Top: 500, Right: 1080, Bottom: 1800}, nil), nil
 		})
 		res, apiErr := h.engine.Act(context.Background(), "agent", "", &protocol.ActRequest{
-			ObservationID: start.Observation.ID,
+			Reference: start.Observation.ID,
 			Operation: protocol.Operation{
 				Type: "swipe",
 				From: &protocol.Point{X: 10, Y: 20},
@@ -1168,7 +1168,7 @@ func TestScrollDynamicRevalidation(t *testing.T) {
 			return buildScrollList(display, device.Rect{Left: 0, Top: 120, Right: 1080, Bottom: 2300}, &blocker), nil
 		})
 		res, apiErr := h.engine.Act(context.Background(), "agent", "", &protocol.ActRequest{
-			ObservationID: start.Observation.ID,
+			Reference: start.Observation.ID,
 			Operation: protocol.Operation{
 				Type:      "scroll",
 				Container: &protocol.Target{UseRef: true, Ref: listNode.Ref},
@@ -1197,7 +1197,7 @@ func TestScrollDynamicRevalidation(t *testing.T) {
 			return buildScrollList(display, device.Rect{Left: 180, Top: 200, Right: 1060, Bottom: 2200}, nil), nil
 		})
 		res, apiErr := h.engine.Act(context.Background(), "agent", "", &protocol.ActRequest{
-			ObservationID: start.Observation.ID,
+			Reference: start.Observation.ID,
 			Operation: protocol.Operation{
 				Type:      "scroll",
 				Container: &protocol.Target{UseRef: true, Ref: listNode.Ref},
@@ -1229,7 +1229,7 @@ func TestScrollDynamicRevalidation(t *testing.T) {
 			return buildScrollList(display, device.Rect{Left: 0, Top: 200, Right: 1080, Bottom: 2200}, &blocker), nil
 		})
 		res, apiErr := h.engine.Act(context.Background(), "agent", "", &protocol.ActRequest{
-			ObservationID: start.Observation.ID,
+			Reference: start.Observation.ID,
 			Operation: protocol.Operation{
 				Type:      "scroll",
 				Container: &protocol.Target{UseRef: true, Ref: listNode.Ref},
@@ -1263,7 +1263,7 @@ func TestScrollDynamicRevalidation(t *testing.T) {
 			return buildScrollList(display, device.Rect{Left: 0, Top: 200, Right: 1080, Bottom: 2200}, &blocker), nil
 		})
 		res, apiErr := h.engine.Act(context.Background(), "agent", "", &protocol.ActRequest{
-			ObservationID: start.Observation.ID,
+			Reference: start.Observation.ID,
 			Operation: protocol.Operation{
 				Type:      "scroll",
 				Container: &protocol.Target{UseRef: true, Ref: listNode.Ref},
@@ -1299,7 +1299,7 @@ func TestScrollDynamicRevalidation(t *testing.T) {
 			return cap, nil
 		})
 		res, apiErr := h.engine.Act(context.Background(), "agent", "", &protocol.ActRequest{
-			ObservationID: start.Observation.ID,
+			Reference: start.Observation.ID,
 			Operation: protocol.Operation{
 				Type:      "scroll",
 				Container: &protocol.Target{UseRef: true, Ref: listNode.Ref},
@@ -1340,7 +1340,7 @@ func TestTextFocusBinding(t *testing.T) {
 			buildTextCap(shiftedBounds, "hello", true), // readback
 		)
 		res, apiErr := h.engine.Act(context.Background(), "agent", "", &protocol.ActRequest{
-			ObservationID: start.Observation.ID,
+			Reference: start.Observation.ID,
 			Operation: protocol.Operation{
 				Type:   "text",
 				Target: &protocol.Target{UseRef: true, Ref: inputNode.Ref},
@@ -1400,7 +1400,7 @@ func TestTextFocusBinding(t *testing.T) {
 					},
 				)
 				res, apiErr := h.engine.Act(context.Background(), "agent", "", &protocol.ActRequest{
-					ObservationID: start.Observation.ID,
+					Reference: start.Observation.ID,
 					Operation: protocol.Operation{
 						Type:   "text",
 						Target: &protocol.Target{UseRef: true, Ref: inputNode.Ref},
@@ -1435,7 +1435,7 @@ func TestTextFocusBinding(t *testing.T) {
 
 			h.device.scriptCaptures(makeStep(false), makeStep(true))
 			res, apiErr := h.engine.Act(context.Background(), "agent", "", &protocol.ActRequest{
-				ObservationID: start.Observation.ID,
+				Reference: start.Observation.ID,
 				Operation: protocol.Operation{
 					Type:   "text",
 					Target: &protocol.Target{UseRef: true, Ref: firstInput.Ref},
@@ -1475,7 +1475,7 @@ func TestTextFocusBinding(t *testing.T) {
 				},
 			)
 			res, apiErr := h.engine.Act(context.Background(), "agent", "", &protocol.ActRequest{
-				ObservationID: start.Observation.ID,
+				Reference: start.Observation.ID,
 				Operation: protocol.Operation{
 					Type:   "text",
 					Target: &protocol.Target{UseRef: true, Ref: firstInput.Ref},
@@ -1527,7 +1527,7 @@ func TestTextFocusBinding(t *testing.T) {
 					},
 				)
 				res, apiErr := h.engine.Act(context.Background(), "agent", "", &protocol.ActRequest{
-					ObservationID: start.Observation.ID,
+					Reference: start.Observation.ID,
 					Operation: protocol.Operation{
 						Type:   "text",
 						Target: &protocol.Target{UseRef: true, Ref: inputNode.Ref},
@@ -1565,7 +1565,7 @@ func TestTextFocusBinding(t *testing.T) {
 			makeCap(2, "done"), // readback: focus jumped to field_2!
 		)
 		res, apiErr := h.engine.Act(context.Background(), "agent", "", &protocol.ActRequest{
-			ObservationID: start.Observation.ID,
+			Reference: start.Observation.ID,
 			Operation: protocol.Operation{
 				Type:   "text",
 				Target: &protocol.Target{UseRef: true, Ref: firstInput.Ref},
@@ -1598,7 +1598,7 @@ func TestTextFocusBinding(t *testing.T) {
 
 		h.device.scriptCaptures(makeStep(42), makeStep(99))
 		res, apiErr := h.engine.Act(context.Background(), "agent", "", &protocol.ActRequest{
-			ObservationID: start.Observation.ID,
+			Reference: start.Observation.ID,
 			Operation: protocol.Operation{
 				Type:   "text",
 				Target: &protocol.Target{UseRef: true, Ref: inputNode.Ref},
@@ -1641,7 +1641,7 @@ func TestTextFocusBinding(t *testing.T) {
 			makeStep(shiftedInputBounds, device.Rect{Left: 500, Top: 220, Right: 980, Bottom: 320}, "query", true),
 		)
 		res, apiErr := h.engine.Act(context.Background(), "agent", "", &protocol.ActRequest{
-			ObservationID: start.Observation.ID,
+			Reference: start.Observation.ID,
 			Operation: protocol.Operation{
 				Type:   "text",
 				Target: &protocol.Target{UseRef: true, Ref: inputNode.Ref},
@@ -1689,8 +1689,8 @@ func TestActRevalidationCancellationAndOrdering(t *testing.T) {
 			return device.DisplayState{}, errors.New("probe interrupted"), true
 		}
 		res, apiErr := h.engine.Act(context.Background(), "agent", "", &protocol.ActRequest{
-			ObservationID: start.Observation.ID,
-			Operation:     protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: btn.Ref}},
+			Reference: start.Observation.ID,
+			Operation: protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: btn.Ref}},
 		})
 		if apiErr != nil || res.Outcome != OutcomeNotExecuted || res.Error == nil || res.Error.Code != protocol.CodeStopped {
 			t.Fatalf("want CodeStopped after ProbeDisplay revocation, got err=%+v res=%+v", apiErr, res)
@@ -1724,8 +1724,8 @@ func TestActRevalidationCancellationAndOrdering(t *testing.T) {
 			return cap, err, true
 		}
 		res, apiErr := h.engine.Act(context.Background(), "agent", "", &protocol.ActRequest{
-			ObservationID: start.Observation.ID,
-			Operation:     protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: btn.Ref}},
+			Reference: start.Observation.ID,
+			Operation: protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: btn.Ref}},
 		})
 		if apiErr != nil || res.Outcome != OutcomeNotExecuted || res.Error == nil || res.Error.Code != protocol.CodeStopped {
 			t.Fatalf("want CodeStopped over target_changed after STOP, got err=%+v res=%+v", apiErr, res)
@@ -1763,7 +1763,7 @@ func TestActRevalidationCancellationAndOrdering(t *testing.T) {
 			return cap, err, true
 		}
 		res, apiErr := h.engine.Act(context.Background(), "agent", "", &protocol.ActRequest{
-			ObservationID: start.Observation.ID,
+			Reference: start.Observation.ID,
 			Operation: protocol.Operation{
 				Type:   "text",
 				Target: &protocol.Target{UseRef: true, Ref: input.Ref},
@@ -1792,8 +1792,8 @@ func TestActRevalidationCancellationAndOrdering(t *testing.T) {
 		start := h.startSession()
 		btn := findRole(currentTree(t, h.engine).Root, protocol.RoleButton)
 		res, apiErr := h.engine.Act(context.Background(), "agent", "", &protocol.ActRequest{
-			ObservationID: start.Observation.ID,
-			Operation:     protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: btn.Ref}},
+			Reference: start.Observation.ID,
+			Operation: protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: btn.Ref}},
 		})
 		if apiErr != nil || res.Outcome != OutcomeNotExecuted || res.Error == nil || res.Error.Code != protocol.CodeForegroundUnknown {
 			t.Fatalf("unknown foreground must reject with CodeForegroundUnknown: err=%+v res=%+v", apiErr, res)
@@ -1830,8 +1830,8 @@ func TestActRevalidationCancellationAndOrdering(t *testing.T) {
 		const loseOpID = "Preval_lose"
 		go func() {
 			r, e := h.engine.Act(context.Background(), "agent", winOpID, &protocol.ActRequest{
-				ObservationID: obsID,
-				Operation:     protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: btn.Ref}},
+				Reference: obsID,
+				Operation: protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: btn.Ref}},
 			})
 			ch1 <- out{r, e}
 		}()
@@ -1845,8 +1845,8 @@ func TestActRevalidationCancellationAndOrdering(t *testing.T) {
 			t.Fatal("timed out waiting for probe hook")
 		}
 		res2, err2 := h.engine.Act(context.Background(), "agent", loseOpID, &protocol.ActRequest{
-			ObservationID: obsID,
-			Operation:     protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: btn.Ref}},
+			Reference: obsID,
+			Operation: protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: btn.Ref}},
 		})
 		close(release)
 		res1Out := <-ch1
@@ -1860,8 +1860,8 @@ func TestActRevalidationCancellationAndOrdering(t *testing.T) {
 			t.Fatalf("concurrent claims must dispatch only once, got %d", len(rec.recordedTaps()))
 		}
 		replay, replayErr := h.engine.Act(context.Background(), "agent", winOpID, &protocol.ActRequest{
-			ObservationID: obsID,
-			Operation:     protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: btn.Ref}},
+			Reference: obsID,
+			Operation: protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: btn.Ref}},
 		})
 		if replayErr != nil || replay.Outcome != OutcomeExecuted || replay.OperationID != res1Out.res.OperationID {
 			t.Fatalf("replay mismatch: err=%+v res=%+v", replayErr, replay)

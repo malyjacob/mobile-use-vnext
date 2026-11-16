@@ -515,8 +515,8 @@ func TestRecoveryRetryKeepsObservation(t *testing.T) {
 
 	h.device.scriptCaptures()
 	retry, apiErr := h.engine.Act(context.Background(), "agent", "Pretry", &protocol.ActRequest{
-		ObservationID: start.Observation.ID,
-		Operation:     protocol.Operation{Type: "key", Key: "BACK"},
+		Reference: start.Observation.ID,
+		Operation: protocol.Operation{Type: "key", Key: "BACK"},
 	})
 	if apiErr != nil {
 		t.Fatalf("retry rejected: %v", apiErr)
@@ -539,7 +539,7 @@ func TestRecoveryDeliveryAfterClaim(t *testing.T) {
 	}
 	h.device.scriptCaptures(movedButtonCaptureStep())
 	result, apiErr := h.engine.Act(context.Background(), "agent", "Ptarget", &protocol.ActRequest{
-		ObservationID: start.Observation.ID,
+		Reference: start.Observation.ID,
 		Operation: protocol.Operation{Type: "tap",
 			Target: &protocol.Target{UseRef: true, Ref: button.Ref}},
 	})
@@ -600,8 +600,8 @@ func TestRecoverySessionEndIsEnd(t *testing.T) {
 		t.Fatalf("end rejected: %v", apiErr)
 	}
 	result, apiErr := h.engine.Act(context.Background(), "agent", "Pact", &protocol.ActRequest{
-		ObservationID: start.Observation.ID,
-		Operation:     protocol.Operation{Type: "key", Key: "BACK"},
+		Reference: start.Observation.ID,
+		Operation: protocol.Operation{Type: "key", Key: "BACK"},
 	})
 	if apiErr != nil {
 		t.Fatalf("act transport error: %v", apiErr)
@@ -734,7 +734,7 @@ func TestContractVersionMatchesGenerated(t *testing.T) {
 // TestRecoveryRejectedOnRequest is T12, the second reverse control: the service
 // only writes recovery; it never reads one from a request.
 func TestRecoveryRejectedOnRequest(t *testing.T) {
-	body := []byte(`{"observation_id":"O1","operation":{"type":"key","key":"BACK"},` +
+	body := []byte(`{"reference":"O1","operation":{"type":"key","key":"BACK"},` +
 		`"recovery":{"entry":"retry","reference":"O"}}`)
 	if _, apiErr := protocol.DecodeAct(body); apiErr == nil ||
 		apiErr.Code != protocol.CodeInvalidRequest {

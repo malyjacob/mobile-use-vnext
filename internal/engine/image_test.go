@@ -489,7 +489,7 @@ func tapButtonRequest(t *testing.T, h *harness, observationID string) *protocol.
 		t.Fatal("button not found in tree")
 	}
 	return &protocol.ActRequest{
-		ObservationID: observationID,
+		Reference: observationID,
 		Operation: protocol.Operation{
 			Type: "tap", Target: &protocol.Target{UseRef: true, Ref: button.Ref},
 		},

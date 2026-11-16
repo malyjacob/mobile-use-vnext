@@ -304,17 +304,34 @@ Invoke-RestMethod http://127.0.0.1:18881/api/status -Method Post `
 {"kind":"find","query":"设置"}
 {"kind":"list","reference":"O1"}
 {"kind":"list","reference":"P1","scope":"primary","app":"com.example.target"}
-{"kind":"open","observation_id":"O1","app":"com.example.target"}
-{"kind":"claim","observation_id":"O1","target":{"task_id":42}}
-{"kind":"handoff","observation_id":"O1","target":{"task_id":42},"restore_foreground":true}
-{"kind":"close","observation_id":"O1","target":{"app":"com.example.target"}}
-{"kind":"kill","observation_id":"O1","target":{"task_id":42}}
+{"kind":"open","reference":"O1","target":{"app":"com.example.target"}}
+{"kind":"claim","reference":"O1","target":{"task_id":42}}
+{"kind":"handoff","reference":"O1","target":{"task_id":42},"restore_foreground":true}
+{"kind":"close","reference":"O1","target":{"app":"com.example.target"}}
+{"kind":"kill","reference":"O1","target":{"task_id":42}}
 ```
 
-`target` 的 `task_id` 与 `app` 互斥；`kill` 只接受 `task_id`，包名先由 `list` 解析。
-`find`/`list` 是查询，成功或失败都不返回 `outcome`；其余五个 kind 成功返回
-`outcome=executed` 与原会话屏的一次 full 无图观察。`find` 使用 detached P；`list` 的 P 绑定
-`reference` 解析到的原会话。每次新调用都使用自己的新 P；重复 P 只返回原摘要。
+`target` 的 `task_id` 与 `app` 互斥；`open` 只接受 `target.app`，`kill` 只接受 `task_id`，
+包名先由 `list` 解析。`find`/`list` 是查询，成功或失败都不返回 `outcome`；其余五个 kind
+成功返回 `outcome=executed` 与原会话屏的一次 full 无图观察。`find` 使用 detached P；
+`list` 的 P 绑定 `reference` 解析到的原会话。每次新调用都使用自己的新 P；重复 P 只返回原摘要。
+`act`、`inspect` 与 `app` 的引用字段都是 `reference`；旧 `observation_id` 按未知成员拒绝。
+
+`act` 的常见省略形式与显式关闭：
+
+```json
+{"reference":"O1","operation":{"type":"tap","target":{"ref":"n1"}}}
+{"reference":"O1","operation":{"type":"text","target":{"ref":"n1"},"text":"查询"}}
+{"reference":"O1","operation":{"type":"tap","target":{"x":100,"y":200}}}
+{"reference":"O1","operation":{"type":"tap","target":{"ref":"n1"},"bubble":false}}
+{"reference":"O1","operation":{"type":"text","target":{"ref":"n1"},"text":"草稿","press_enter":false}}
+```
+
+ref 点按/长按默认 `bubble=true`，原目标完全没有 `tap`/`long_press`/`text` 任一动作时只向最近
+交互祖先提升一次；坐标目标不传 `bubble`。`text` 默认 `press_enter=true`，一次调用已包含自动
+聚焦、全文写入、精确读回和至多一次 ENTER，不需要先 tap 或另发 ENTER；草稿、多行、逐字段
+填写或清空但不提交时显式 `press_enter=false`。复合 text 结果携带 `text_input.write/enter`；
+`enter=uncertain` 先观察页面，不原样重发。
 
 P 的两种用法：`observe({"reference":"P9"})` 的 `reference` 引用本 Agent 已有的 P9 原操作，
 不是本次 `observe` 的请求体 P；本次调用仍使用自己的新 P。`status(P9)` 只返回操作摘要，

@@ -74,12 +74,9 @@ type AppRequest struct {
 	FilterApp string
 	HasFilter bool
 
-	// open
-	ObservationID string
-	App           string
+	// open, claim, handoff, close, kill; list also uses Reference.
+	Target *AppTarget
 
-	// claim / handoff / close / kill
-	Target            *AppTarget
 	RestoreForeground bool
 	AllowBorrowed     bool
 	AllowStopPlayback bool
@@ -120,13 +117,13 @@ type ShellRequest struct {
 	Root      bool
 }
 
-// InspectRequest is inspect(observation_id, node=None, query=None).
+// InspectRequest is inspect(reference, node=None, query=None).
 type InspectRequest struct {
-	ObservationID string
-	Node          string
-	Query         string
-	HasNode       bool
-	HasQuery      bool
+	Reference string
+	Node      string
+	Query     string
+	HasNode   bool
+	HasQuery  bool
 }
 
 // KeepaliveRequest is keepalive(reference, duration_minutes=2). Presence is
@@ -170,7 +167,6 @@ func DecodeApp(body []byte) (*AppRequest, *APIError) {
 		Reference         jsontext.Value `json:"reference"`
 		Scope             jsontext.Value `json:"scope"`
 		App               jsontext.Value `json:"app"`
-		ObservationID     jsontext.Value `json:"observation_id"`
 		Target            jsontext.Value `json:"target"`
 		RestoreForeground jsontext.Value `json:"restore_foreground"`
 		AllowBorrowed     jsontext.Value `json:"allow_borrowed"`
@@ -182,7 +178,6 @@ func DecodeApp(body []byte) (*AppRequest, *APIError) {
 		Reference         string        `json:"reference"`
 		Scope             string        `json:"scope"`
 		App               string        `json:"app"`
-		ObservationID     string        `json:"observation_id"`
 		Target            *rawAppTarget `json:"target"`
 		RestoreForeground bool          `json:"restore_foreground"`
 		AllowBorrowed     bool          `json:"allow_borrowed"`
@@ -203,7 +198,6 @@ func DecodeApp(body []byte) (*AppRequest, *APIError) {
 		{"reference", presence.Reference},
 		{"scope", presence.Scope},
 		{"app", presence.App},
-		{"observation_id", presence.ObservationID},
 		{"target", presence.Target},
 		{"restore_foreground", presence.RestoreForeground},
 		{"allow_borrowed", presence.AllowBorrowed},
@@ -252,18 +246,22 @@ func DecodeApp(body []byte) (*AppRequest, *APIError) {
 		}
 		return req, nil
 	case AppKindOpen:
-		req.ObservationID = wire.ObservationID
-		if err := checkReference(req.ObservationID); err != nil {
+		req.Reference = wire.Reference
+		if err := checkReference(req.Reference); err != nil {
 			return nil, err
 		}
-		if !ValidPackageName(wire.App) {
-			return nil, Invalid("app 必须是明确的应用包名")
+		if wire.Target == nil {
+			return nil, Invalid("open 需要 target")
 		}
-		req.App = wire.App
+		target, apiErr := parseAppTarget(kind, wire.Target)
+		if apiErr != nil {
+			return nil, apiErr
+		}
+		req.Target = target
 		return req, nil
 	case AppKindClaim, AppKindHandoff, AppKindClose, AppKindKill:
-		req.ObservationID = wire.ObservationID
-		if err := checkReference(req.ObservationID); err != nil {
+		req.Reference = wire.Reference
+		if err := checkReference(req.Reference); err != nil {
 			return nil, err
 		}
 		if wire.Target == nil {
@@ -290,26 +288,27 @@ func appKindMembers(kind string) map[string]bool {
 	case AppKindList:
 		return map[string]bool{"reference": true, "scope": true, "app": true}
 	case AppKindOpen:
-		return map[string]bool{"observation_id": true, "app": true}
+		return map[string]bool{"reference": true, "target": true}
 	case AppKindClaim:
-		return map[string]bool{"observation_id": true, "target": true}
+		return map[string]bool{"reference": true, "target": true}
 	case AppKindHandoff:
 		return map[string]bool{
-			"observation_id": true, "target": true, "restore_foreground": true,
+			"reference": true, "target": true, "restore_foreground": true,
 		}
 	case AppKindClose:
 		return map[string]bool{
-			"observation_id": true, "target": true, "allow_borrowed": true,
+			"reference": true, "target": true, "allow_borrowed": true,
 		}
 	case AppKindKill:
 		return map[string]bool{
-			"observation_id": true, "target": true, "allow_stop_playback": true,
+			"reference": true, "target": true, "allow_stop_playback": true,
 		}
 	}
 	return nil
 }
 
-// parseAppTarget admits exactly one selector. kill only accepts a task id.
+// parseAppTarget admits exactly one selector. kill only accepts a task id;
+// open only accepts a package.
 func parseAppTarget(kind string, raw *rawAppTarget) (*AppTarget, *APIError) {
 	hasTask := len(raw.TaskID) > 0
 	hasApp := len(raw.App) > 0
@@ -319,6 +318,9 @@ func parseAppTarget(kind string, raw *rawAppTarget) (*AppTarget, *APIError) {
 	case !hasTask && !hasApp:
 		return nil, Invalid("target 需要 task_id 或 app")
 	case hasTask:
+		if kind == AppKindOpen {
+			return nil, Invalid("open 只接受 target.app")
+		}
 		var taskID int
 		if err := json.Unmarshal(raw.TaskID, &taskID); err != nil {
 			return nil, Invalid("target.task_id 必须是整数")
@@ -404,26 +406,26 @@ func DecodeShell(body []byte) (*ShellRequest, *APIError) {
 	return &ShellRequest{Reference: wire.Reference, Command: wire.Command, Root: wire.Root}, nil
 }
 
-// DecodeInspect admits inspect(observation_id, node, query). node and query
+// DecodeInspect admits inspect(reference, node, query). node and query
 // are mutually exclusive and both are literals, never selector languages.
 func DecodeInspect(body []byte) (*InspectRequest, *APIError) {
 	var presence struct {
-		ObservationID jsontext.Value `json:"observation_id"`
-		Node          jsontext.Value `json:"node"`
-		Query         jsontext.Value `json:"query"`
+		Reference jsontext.Value `json:"reference"`
+		Node      jsontext.Value `json:"node"`
+		Query     jsontext.Value `json:"query"`
 	}
 	var wire struct {
-		ObservationID string `json:"observation_id"`
-		Node          string `json:"node"`
-		Query         string `json:"query"`
+		Reference string `json:"reference"`
+		Node      string `json:"node"`
+		Query     string `json:"query"`
 	}
 	if err := decodeStrict(body, &presence, &wire); err != nil {
 		return nil, invalidDecode(err)
 	}
-	if len(presence.ObservationID) == 0 || string(presence.ObservationID) == "null" {
-		return nil, Invalid("inspect 需要 observation_id")
+	if len(presence.Reference) == 0 || string(presence.Reference) == "null" {
+		return nil, Invalid("inspect 需要 reference")
 	}
-	if err := checkReference(wire.ObservationID); err != nil {
+	if err := checkReference(wire.Reference); err != nil {
 		return nil, err
 	}
 	hasNode := len(presence.Node) > 0
@@ -444,8 +446,8 @@ func DecodeInspect(body []byte) (*InspectRequest, *APIError) {
 		return nil, Invalid("query 超过长度上限").WithDetail("limit", MaxQueryRunes)
 	}
 	return &InspectRequest{
-		ObservationID: wire.ObservationID,
-		Node:          wire.Node, Query: wire.Query,
+		Reference: wire.Reference,
+		Node:      wire.Node, Query: wire.Query,
 		HasNode: hasNode, HasQuery: hasQuery,
 	}, nil
 }

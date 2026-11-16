@@ -97,14 +97,35 @@ func testSchema(name string, additional bool) map[string]any {
 		properties["reference"] = map[string]any{"type": "string"}
 		required = []string{"reference"}
 	case "act":
-		properties["observation_id"] = map[string]any{"type": "string"}
-		properties["operation"] = map[string]any{"type": "object"}
-		required = []string{"observation_id", "operation"}
+		properties["reference"] = map[string]any{"type": "string"}
+		properties["operation"] = map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"bubble":      map[string]any{"type": "boolean"},
+				"press_enter": map[string]any{"type": "boolean"},
+			},
+		}
+		required = []string{"reference", "operation"}
 	case "app":
 		properties["kind"] = map[string]any{
 			"type": "string",
 			"enum": []any{"find", "list", "open", "claim", "handoff", "close", "kill"},
 		}
+		properties["query"] = map[string]any{"type": "string"}
+		properties["reference"] = map[string]any{"type": "string"}
+		properties["scope"] = map[string]any{"type": "string"}
+		properties["app"] = map[string]any{"type": "string"}
+		properties["target"] = map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"task_id": map[string]any{"type": "integer"},
+				"app":     map[string]any{"type": "string"},
+			},
+			"additionalProperties": false,
+		}
+		properties["restore_foreground"] = map[string]any{"type": "boolean", "default": false}
+		properties["allow_borrowed"] = map[string]any{"type": "boolean", "default": false}
+		properties["allow_stop_playback"] = map[string]any{"type": "boolean", "default": false}
 		required = []string{"kind"}
 	}
 	return map[string]any{
@@ -513,7 +534,7 @@ func (f *fakeAdapter) handle(ctx context.Context, name string, request *sdk.Call
 		}
 		return f.imageResult(payload), nil
 	case "inspect":
-		observationID, _ := arguments["observation_id"].(string)
+		observationID, _ := arguments["reference"].(string)
 		if observationID == probeUnknownObservation {
 			return f.errorResult(map[string]any{
 				"error": map[string]any{"code": "observation_not_found"},
@@ -593,7 +614,10 @@ func (f *fakeAdapter) handle(ctx context.Context, name string, request *sdk.Call
 			}, ""), nil
 		}
 		if kind == "open" {
-			target, _ := arguments["app"].(string)
+			target := ""
+			if targetObject, ok := arguments["target"].(map[string]any); ok {
+				target, _ = targetObject["app"].(string)
+			}
 			o := f.nextID("O")
 			return f.result(map[string]any{
 				"operation_id": f.nextID("P"),
@@ -1496,9 +1520,9 @@ func (f *fakeRecoveryService) writeWait(writer http.ResponseWriter, operationID 
 
 func (f *fakeRecoveryService) writeAct(writer http.ResponseWriter, operationID string, body []byte) {
 	var actBody struct {
-		ObservationID string `json:"observation_id"`
-		Image         bool   `json:"image"`
-		Operation     struct {
+		Reference string `json:"reference"`
+		Image     bool   `json:"image"`
+		Operation struct {
 			Type string `json:"type"`
 		} `json:"operation"`
 	}
@@ -1514,7 +1538,7 @@ func (f *fakeRecoveryService) writeAct(writer http.ResponseWriter, operationID s
 	f.outcomes[operationID] = outcomeExecuted
 	result := &protocol.Result{
 		OperationID: operationID, Outcome: outcomeExecuted,
-		Observation: observation, TargetReference: actBody.ObservationID,
+		Observation: observation, TargetReference: actBody.Reference,
 	}
 	// Only a scroll act result carries an effect fact; key/tap/swipe results
 	// must omit it entirely.
@@ -1528,7 +1552,7 @@ func (f *fakeRecoveryService) writeAct(writer http.ResponseWriter, operationID s
 // writeInspect returns one complete historical tree for the inspect probe.
 func (f *fakeRecoveryService) writeInspect(writer http.ResponseWriter, body []byte) {
 	var inspectBody struct {
-		ObservationID string `json:"observation_id"`
+		Reference string `json:"reference"`
 	}
 	_ = json.Unmarshal(body, &inspectBody)
 	f.mutex.Lock()
@@ -1541,7 +1565,7 @@ func (f *fakeRecoveryService) writeInspect(writer http.ResponseWriter, body []by
 		})
 		return
 	}
-	observationID := inspectBody.ObservationID
+	observationID := inspectBody.Reference
 	if observationID == "" {
 		observationID = fmt.Sprintf("O%d", f.revision)
 	}
@@ -2028,7 +2052,7 @@ func TestProbeAgainstRealHTTPAdapter(t *testing.T) {
 // accepts: a container ref plus a declared direction, never a device target.
 func scrollActArguments() map[string]any {
 	return map[string]any{
-		"observation_id": "O1",
+		"reference": "O1",
 		"operation": map[string]any{
 			"type":      "scroll",
 			"container": map[string]any{"ref": "n2"},
@@ -2113,8 +2137,8 @@ func TestActScrollResultProjection(t *testing.T) {
 			}
 
 			key, failure := runner.call(ctx, "act", map[string]any{
-				"observation_id": "O2",
-				"operation":      map[string]any{"type": "key", "key": "BACK"},
+				"reference": "O2",
+				"operation": map[string]any{"type": "key", "key": "BACK"},
 			})
 			if failure != nil {
 				t.Fatalf("key act: %s %v", failure.reason, failure.fields)

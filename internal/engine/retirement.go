@@ -199,6 +199,9 @@ func (e *Engine) freezeWorkLocked(work *workState) {
 		if work.DispatchUnknown || work.UI != nil && work.UI.record.State != uiStateNotDispatched {
 			op.Outcome = OutcomeUncertain
 		}
+		if op.TextStage != nil {
+			op.Outcome = textOverallOutcome(op.TextStage)
+		}
 		if op.KnownOutcome != "" {
 			op.Outcome = op.KnownOutcome
 		}
@@ -285,7 +288,8 @@ func (e *Engine) compressOversizedRetiredLocked() bool {
 	return false
 }
 
-func (e *Engine) trimRetiredLocked() {	for len(e.retired) > 0 {
+func (e *Engine) trimRetiredLocked() {
+	for len(e.retired) > 0 {
 		items := make([]LedgerRetired, 0, len(e.retired))
 		for _, r := range e.retired {
 			items = append(items, r.ledger())

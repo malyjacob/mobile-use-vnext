@@ -24,7 +24,12 @@ type tapPlan struct {
 	targetRaw  *device.RawNode
 	carrierRef string
 	carrierRaw *device.RawNode
-	took       time.Duration
+	// bubbleAncestorRef/Raw are set only for a default-bubble ref target whose
+	// own node has no touch-interactive action. They bind the one nearest
+	// interactive ancestor that the action is planned against.
+	bubbleAncestorRef string
+	bubbleAncestorRaw *device.RawNode
+	took              time.Duration
 }
 
 type tapRawTopology struct {
@@ -903,6 +908,126 @@ func validTapPublicTarget(node *protocol.Node, action protocol.Action) bool {
 	return hasAction(node, action)
 }
 
+// nearestInteractiveAncestor returns the first touch-interactive public
+// ancestor above target. Context wrappers and plain containers are skipped;
+// the root is never a candidate. It never looks beyond that first ancestor.
+func nearestInteractiveAncestor(view *tapPublicView, target *protocol.Node) *protocol.Node {
+	if view == nil || target == nil {
+		return nil
+	}
+	info := view.info[target]
+	if info == nil {
+		return nil
+	}
+	for parent := info.parent; parent != nil; {
+		parentInfo := view.info[parent]
+		if parentInfo == nil || parent.Role == protocol.RoleRoot {
+			return nil
+		}
+		if parent.Context || !isTouchInteractive(parent) {
+			parent = parentInfo.parent
+			continue
+		}
+		return parent
+	}
+	return nil
+}
+
+// samePublicLabel compares the complete public label, not only a prefix.
+func samePublicLabel(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// chooseBubbleTapPoint selects one fixed safe point inside the ancestor scope.
+// The original child's center is preferred; every accepted point must prove
+// through the full public tree that it lands on the ancestor or a
+// non-interactive carrier inside that ancestor, never on a sibling interactive
+// target or a farther ancestor.
+func chooseBubbleTapPoint(scope *tapScope, view *tapPublicView,
+	ancestor, child *protocol.Node) (int, int, string, *tapCarrier, bool) {
+	if scope == nil || view == nil || ancestor == nil || child == nil {
+		return 0, 0, "", nil, false
+	}
+	if child.Bounds != nil {
+		rect := rectFromBounds(child.Bounds)
+		if rect.Width() > 0 && rect.Height() > 0 {
+			x, y, ok := tapSafeCenter(rect)
+			if ok && !scope.base.Contains(x, y) {
+				if clip := rect.Intersect(scope.base); !clip.Empty() {
+					x, y, ok = tapSafeCenter(clip)
+				} else {
+					ok = false
+				}
+			}
+			if ok && scope.base.Contains(x, y) &&
+				provesGuidancePoint(view, ancestor, scope, x, y) {
+				return x, y, tapModeCarrierNode, nil, true
+			}
+		}
+	}
+	ancestorInfo := view.info[ancestor]
+	var ancestorRaw *device.RawNode
+	if ancestorInfo != nil && ancestorInfo.hasSource && ancestorInfo.rawIndex >= 0 &&
+		ancestorInfo.rawIndex < len(view.capture.Nodes) {
+		ancestorRaw = &view.capture.Nodes[ancestorInfo.rawIndex]
+	}
+	for _, candidate := range enumerateTapCandidates(scope, ancestorRaw) {
+		if !provesGuidancePoint(view, ancestor, scope, candidate.x, candidate.y) {
+			continue
+		}
+		return candidate.x, candidate.y, candidate.strategy, candidate.carrier, true
+	}
+	return 0, 0, "", nil, false
+}
+
+// planBubbleTapTarget plans the one C->A target lift. A is the first
+// touch-interactive ancestor; the plan carries both raw identities so the
+// claim-time frame can re-prove both before any dispatch.
+func planBubbleTapTarget(obs *observationState, view *tapPublicView,
+	child, ancestor *protocol.Node, action protocol.Action, started time.Time) (*tapPlan, *protocol.APIError) {
+	if obs == nil || view == nil || child == nil || ancestor == nil {
+		return nil, tapHierarchyError()
+	}
+	// buildTapInput validates the full source map and fills view.byRaw for every
+	// public node, so the child lookup below has its raw index.
+	ancestorInput, apiErr := buildTapInput(obs, view, ancestor)
+	if apiErr != nil {
+		return nil, apiErr
+	}
+	childInfo := view.info[child]
+	if childInfo == nil || !childInfo.hasSource || childInfo.rawIndex < 0 ||
+		childInfo.rawIndex >= len(view.capture.Nodes) {
+		return nil, tapTargetSourceMissing()
+	}
+	scope, apiErr := collectTapScope(ancestorInput)
+	if apiErr != nil {
+		return nil, apiErr
+	}
+	x, y, strategy, carrier, ok := chooseBubbleTapPoint(scope, view, ancestor, child)
+	if !ok {
+		return nil, tapNoCandidateError(action)
+	}
+	plan := &tapPlan{
+		x: x, y: y, strategy: strategy, action: string(action),
+		targetRef: child.Ref, targetRaw: &view.capture.Nodes[childInfo.rawIndex],
+		bubbleAncestorRef: ancestor.Ref, bubbleAncestorRaw: ancestorInput.targetRaw,
+		took: time.Since(started),
+	}
+	if carrier != nil {
+		plan.carrierRef = carrier.node.Ref
+		plan.carrierRaw = carrier.raw
+	}
+	return plan, nil
+}
+
 func staticTapRefCheck(obs *observationState, operation *protocol.Operation) (
 	*pointCheck, *scrollPlan, *tapPlan, *protocol.APIError) {
 	started := time.Now()
@@ -932,6 +1057,15 @@ func staticTapRefCheck(obs *observationState, operation *protocol.Operation) (
 		return nil, nil, nil, protocol.NewError(409, protocol.CodeNodeDisabled, "目标节点已禁用")
 	}
 	if !hasAction(target, action) {
+		if operation.EffectiveBubble() && !isTouchInteractive(target) {
+			ancestor := nearestInteractiveAncestor(view, target)
+			if ancestor == nil || !validTapPublicTarget(ancestor, action) {
+				return nil, nil, nil, tapUnsupportedWithGuidance(obs, view, target, action,
+					unsupported)
+			}
+			bubblePlan, bubbleErr := planBubbleTapTarget(obs, view, target, ancestor, action, started)
+			return nil, nil, bubblePlan, bubbleErr
+		}
 		return nil, nil, nil, tapUnsupportedWithGuidance(obs, view, target, action, unsupported)
 	}
 	input, apiErr := buildTapInput(obs, view, target)
@@ -970,5 +1104,7 @@ func staticTextRefCheck(obs *observationState, operation *protocol.Operation) (
 	}
 	focus := *operation
 	focus.Type = "tap"
+	focus.PressEnter, focus.HasPressEnter = false, false
+	focus.Bubble, focus.HasBubble = false, true
 	return staticTapRefCheck(obs, &focus)
 }

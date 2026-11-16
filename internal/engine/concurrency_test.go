@@ -85,7 +85,7 @@ func awaitSignal(t *testing.T, ch <-chan struct{}) {
 	}
 }
 func tapRequest(id string) *protocol.ActRequest {
-	return &protocol.ActRequest{ObservationID: id, Operation: protocol.Operation{Type: "tap", Target: &protocol.Target{X: 20, Y: 20}}}
+	return &protocol.ActRequest{Reference: id, Operation: protocol.Operation{Type: "tap", Target: &protocol.Target{X: 20, Y: 20}}}
 }
 func stopNow(t *testing.T, h *harness) {
 	t.Helper()
@@ -553,8 +553,8 @@ func TestStopAfterExecutedActKeepsExecutionConfirmed(t *testing.T) {
 		t.Fatal("button not found in tree")
 	}
 	result, apiErr := h.engine.Act(context.Background(), "agent", "Pconfirmed", &protocol.ActRequest{
-		ObservationID: start.Observation.ID,
-		Operation:     protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: button.Ref}},
+		Reference: start.Observation.ID,
+		Operation: protocol.Operation{Type: "tap", Target: &protocol.Target{UseRef: true, Ref: button.Ref}},
 	})
 	if apiErr != nil || result.Outcome != OutcomeExecuted {
 		t.Fatalf("confirmed act failed: %+v %v", result, apiErr)

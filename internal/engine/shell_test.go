@@ -171,7 +171,7 @@ func TestShellThenActRevalidatesTheSameObservation(t *testing.T) {
 		t.Fatalf("Shell: result=%+v err=%v", result, apiErr)
 	}
 	result, apiErr := h.engine.Act(context.Background(), "agent", "Pact", &protocol.ActRequest{
-		ObservationID: first.Observation.ID,
+		Reference: first.Observation.ID,
 		Operation: protocol.Operation{Type: "tap",
 			Target: &protocol.Target{UseRef: true, Ref: button.Ref}},
 	})
@@ -203,7 +203,7 @@ func TestShellThenActRejectsAChangedTarget(t *testing.T) {
 		t.Fatalf("Shell: result=%+v err=%v", result, apiErr)
 	}
 	result, apiErr := h.engine.Act(context.Background(), "agent", "Pact", &protocol.ActRequest{
-		ObservationID: first.Observation.ID,
+		Reference: first.Observation.ID,
 		Operation: protocol.Operation{Type: "tap",
 			Target: &protocol.Target{UseRef: true, Ref: button.Ref}},
 	})
@@ -239,7 +239,7 @@ func TestShellThenActRejectsExpiredObservation(t *testing.T) {
 	h.engine.current.ActionableUntil = time.Now().Add(-time.Second)
 	h.engine.mu.Unlock()
 	result, apiErr := h.engine.Act(context.Background(), "agent", "Pact", &protocol.ActRequest{
-		ObservationID: first.Observation.ID,
+		Reference: first.Observation.ID,
 		Operation: protocol.Operation{Type: "tap",
 			Target: &protocol.Target{UseRef: true, Ref: button.Ref}},
 	})

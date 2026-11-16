@@ -124,8 +124,8 @@ func invisibleButtonCaptureStep() captureStep {
 func (h *harness) actCoordinate(t *testing.T, observationID string, operation protocol.Operation) *protocol.Result {
 	t.Helper()
 	result, apiErr := h.engine.Act(context.Background(), "agent", "", &protocol.ActRequest{
-		ObservationID: observationID,
-		Operation:     operation,
+		Reference: observationID,
+		Operation: operation,
 	})
 	if apiErr != nil {
 		t.Fatalf("act rejected at admission: %v", apiErr)
@@ -387,8 +387,8 @@ func TestActCoordinatePointKeepsObservationWhenProofFails(t *testing.T) {
 	requireRecovery(t, first, protocol.RecoveryEntryRetry, protocol.RecoveryReferenceO, protocol.RecoveryInputEffective, "")
 
 	second, apiErr := h.engine.Act(context.Background(), "agent", "", &protocol.ActRequest{
-		ObservationID: start.Observation.ID,
-		Operation:     protocol.Operation{Type: "tap", Target: &protocol.Target{X: 500, Y: 150}},
+		Reference: start.Observation.ID,
+		Operation: protocol.Operation{Type: "tap", Target: &protocol.Target{X: 500, Y: 150}},
 	})
 	if apiErr != nil {
 		t.Fatalf("second act rejected: %v", apiErr)

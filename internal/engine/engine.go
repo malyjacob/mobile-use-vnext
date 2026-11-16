@@ -540,6 +540,10 @@ type operationState struct {
 	// written once, before the operation finishes, and a duplicate P or
 	// status(P) republishes it without an observation.
 	Wait *protocol.WaitResult
+	// TextStage is the private cumulative primitive evidence of one accepted
+	// default/true text action. TextInput is its public immutable snapshot.
+	TextStage *textStage
+	TextInput *protocol.TextInputView
 }
 
 type workState struct {
@@ -1167,6 +1171,10 @@ func (e *Engine) operationViewLocked(op *operationState) *protocol.Result {
 		cloned := *op.Error
 		cloned.Details = protocol.CloneErrorDetails(op.Error.Details)
 		result.Error = &cloned
+	}
+	if op.TextInput != nil {
+		snapshot := *op.TextInput
+		result.TextInput = &snapshot
 	}
 	// The wait fact is one saved bounded outcome: a duplicate P or status(P)
 	// copies it and never recomputes a trigger, a match list or an elapsed time.

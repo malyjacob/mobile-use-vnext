@@ -153,7 +153,7 @@ func TestInspectReturnsTreeAndSubtree(t *testing.T) {
 	start := h.startSession()
 	tree := currentTree(t, h.engine)
 
-	result, apiErr := h.engine.Inspect("agent", &protocol.InspectRequest{ObservationID: start.Observation.ID})
+	result, apiErr := h.engine.Inspect("agent", &protocol.InspectRequest{Reference: start.Observation.ID})
 	if apiErr != nil {
 		t.Fatalf("inspect tree rejected: %v", apiErr)
 	}
@@ -182,7 +182,7 @@ func TestInspectReturnsTreeAndSubtree(t *testing.T) {
 		t.Fatal("fixture button missing")
 	}
 	subtree, apiErr := h.engine.Inspect("agent", &protocol.InspectRequest{
-		ObservationID: start.Observation.ID, Node: button.Ref, HasNode: true,
+		Reference: start.Observation.ID, Node: button.Ref, HasNode: true,
 	})
 	if apiErr != nil {
 		t.Fatalf("inspect subtree rejected: %v", apiErr)
@@ -193,7 +193,7 @@ func TestInspectReturnsTreeAndSubtree(t *testing.T) {
 	}
 
 	if _, apiErr := h.engine.Inspect("agent", &protocol.InspectRequest{
-		ObservationID: start.Observation.ID, Node: "n404", HasNode: true,
+		Reference: start.Observation.ID, Node: "n404", HasNode: true,
 	}); apiErr == nil || apiErr.Code != protocol.CodeNodeNotFound || apiErr.HTTPStatus != 409 {
 		t.Fatalf("missing node must be a controlled 409: %+v", apiErr)
 	}
@@ -226,7 +226,7 @@ func TestInspectQueryMatchesLabelValueHintResource(t *testing.T) {
 		{"没有任何命中", nil},
 	} {
 		result, apiErr := h.engine.Inspect("agent", &protocol.InspectRequest{
-			ObservationID: "O901", Query: tc.query, HasQuery: true,
+			Reference: "O901", Query: tc.query, HasQuery: true,
 		})
 		if apiErr != nil {
 			t.Fatalf("query %q rejected: %v", tc.query, apiErr)
@@ -253,7 +253,7 @@ func TestInspectQueryMatchesLabelValueHintResource(t *testing.T) {
 
 	// Empty matches stay a JSON array, never null.
 	result, apiErr := h.engine.Inspect("agent", &protocol.InspectRequest{
-		ObservationID: "O901", Query: "没有", HasQuery: true,
+		Reference: "O901", Query: "没有", HasQuery: true,
 	})
 	if apiErr != nil {
 		t.Fatalf("empty query result rejected: %v", apiErr)
@@ -278,7 +278,7 @@ func TestInspectReadableForEveryRetainedStatus(t *testing.T) {
 	} {
 		id := "O91" + string(rune('0'+i))
 		attachObservation(t, h.engine, id, "agent", status, tree)
-		result, apiErr := h.engine.Inspect("agent", &protocol.InspectRequest{ObservationID: id})
+		result, apiErr := h.engine.Inspect("agent", &protocol.InspectRequest{Reference: id})
 		if apiErr != nil {
 			t.Fatalf("status %s rejected: %v", status, apiErr)
 		}
@@ -293,18 +293,18 @@ func TestInspectRejectsForeignMissingAndEvictedContent(t *testing.T) {
 	start := h.startSession()
 
 	if _, apiErr := h.engine.Inspect("other", &protocol.InspectRequest{
-		ObservationID: start.Observation.ID,
+		Reference: start.Observation.ID,
 	}); apiErr == nil || apiErr.Code != protocol.CodeObservationGone {
 		t.Fatalf("foreign owner must be observation_not_found: %+v", apiErr)
 	}
 	if _, apiErr := h.engine.Inspect("agent", &protocol.InspectRequest{
-		ObservationID: "O404",
+		Reference: "O404",
 	}); apiErr == nil || apiErr.Code != protocol.CodeObservationGone {
 		t.Fatalf("missing observation must be observation_not_found: %+v", apiErr)
 	}
 	attachObservation(t, h.engine, "O902", "agent", ObservationRetired, nil)
 	if _, apiErr := h.engine.Inspect("agent", &protocol.InspectRequest{
-		ObservationID: "O902",
+		Reference: "O902",
 	}); apiErr == nil || apiErr.Code != protocol.CodeContentUnavailable ||
 		apiErr.HTTPStatus != 409 {
 		// inspect returns no operation, so its errors are access-layer errors:
@@ -319,7 +319,7 @@ func TestInspectBudgetsRejectOversizedUnits(t *testing.T) {
 
 	h.engine.cfg.MaxFullTreeBytes = 64
 	if _, apiErr := h.engine.Inspect("agent", &protocol.InspectRequest{
-		ObservationID: start.Observation.ID,
+		Reference: start.Observation.ID,
 	}); apiErr == nil || apiErr.Code != protocol.CodeInspectionTooLarge ||
 		apiErr.Details["limit"] != 64 {
 		t.Fatalf("full tree over budget: %+v", apiErr)
@@ -331,13 +331,13 @@ func TestInspectBudgetsRejectOversizedUnits(t *testing.T) {
 	attachObservation(t, h.engine, "O903", "agent", ObservationRetired, readonlyTree(huge))
 
 	if _, apiErr := h.engine.Inspect("agent", &protocol.InspectRequest{
-		ObservationID: "O903", Node: "n2", HasNode: true,
+		Reference: "O903", Node: "n2", HasNode: true,
 	}); apiErr == nil || apiErr.Code != protocol.CodeInspectionTooLarge ||
 		apiErr.Details["limit"] != h.engine.cfg.MaxInspectionUnitBytes {
 		t.Fatalf("oversized subtree: %+v", apiErr)
 	}
 	if _, apiErr := h.engine.Inspect("agent", &protocol.InspectRequest{
-		ObservationID: "O903", Query: "宽", HasQuery: true,
+		Reference: "O903", Query: "宽", HasQuery: true,
 	}); apiErr == nil || apiErr.Code != protocol.CodeInspectionTooLarge {
 		t.Fatalf("oversized query hit: %+v", apiErr)
 	}
@@ -350,7 +350,7 @@ func TestInspectDetailedTreeBudgetBoundary(t *testing.T) {
 	attachObservation(t, h.engine, "O905", "agent", ObservationRetired, readonlyTree(root))
 
 	result, apiErr := h.engine.Inspect("agent", &protocol.InspectRequest{
-		ObservationID: "O905",
+		Reference: "O905",
 	})
 	if apiErr != nil {
 		t.Fatalf("inspect tree at its exact budget: %v", apiErr)
@@ -365,7 +365,7 @@ func TestInspectDetailedTreeBudgetBoundary(t *testing.T) {
 
 	h.engine.cfg.MaxFullTreeBytes = limit - 1
 	if _, apiErr := h.engine.Inspect("agent", &protocol.InspectRequest{
-		ObservationID: "O905",
+		Reference: "O905",
 	}); apiErr == nil || apiErr.Code != protocol.CodeInspectionTooLarge ||
 		apiErr.Details["limit"] != limit-1 {
 		t.Fatalf("detailed tree at N-1: %+v", apiErr)
@@ -379,7 +379,7 @@ func TestInspectSubtreeBudgetBoundary(t *testing.T) {
 	attachObservation(t, h.engine, "O906", "agent", ObservationRetired, readonlyTree(root))
 
 	result, apiErr := h.engine.Inspect("agent", &protocol.InspectRequest{
-		ObservationID: "O906", Node: ref, HasNode: true,
+		Reference: "O906", Node: ref, HasNode: true,
 	})
 	if apiErr != nil {
 		t.Fatalf("inspect subtree at its exact budget: %v", apiErr)
@@ -396,7 +396,7 @@ func TestInspectSubtreeBudgetBoundary(t *testing.T) {
 
 	h.engine.cfg.MaxInspectionUnitBytes = limit - 1
 	if _, apiErr := h.engine.Inspect("agent", &protocol.InspectRequest{
-		ObservationID: "O906", Node: ref, HasNode: true,
+		Reference: "O906", Node: ref, HasNode: true,
 	}); apiErr == nil || apiErr.Code != protocol.CodeInspectionTooLarge ||
 		apiErr.Details["limit"] != limit-1 {
 		t.Fatalf("detailed subtree at N-1: %+v", apiErr)
@@ -424,7 +424,7 @@ func TestInspectQueryUnitBudgetBoundary(t *testing.T) {
 	limit := base + len(encodedHit)
 	h.engine.cfg.MaxInspectionUnitBytes = limit
 	result, apiErr := h.engine.Inspect("agent", &protocol.InspectRequest{
-		ObservationID: "O907", Query: "needle", HasQuery: true,
+		Reference: "O907", Query: "needle", HasQuery: true,
 	})
 	if apiErr != nil {
 		t.Fatalf("query hit at its exact budget: %v", apiErr)
@@ -436,7 +436,7 @@ func TestInspectQueryUnitBudgetBoundary(t *testing.T) {
 
 	h.engine.cfg.MaxInspectionUnitBytes = limit - 1
 	if _, apiErr := h.engine.Inspect("agent", &protocol.InspectRequest{
-		ObservationID: "O907", Query: "needle", HasQuery: true,
+		Reference: "O907", Query: "needle", HasQuery: true,
 	}); apiErr == nil || apiErr.Code != protocol.CodeInspectionTooLarge ||
 		apiErr.Details["limit"] != limit-1 {
 		t.Fatalf("query hit at N-1: %+v", apiErr)
@@ -473,7 +473,7 @@ func TestInspectQueryPrefixBudgetBoundary(t *testing.T) {
 	limit := base + first + 1 + second
 	h.engine.cfg.MaxInspectionUnitBytes = limit
 	result, apiErr := h.engine.Inspect("agent", &protocol.InspectRequest{
-		ObservationID: "O908", Query: "prefix", HasQuery: true,
+		Reference: "O908", Query: "prefix", HasQuery: true,
 	})
 	if apiErr != nil {
 		t.Fatalf("query prefix at its exact budget: %v", apiErr)
@@ -490,7 +490,7 @@ func TestInspectQueryPrefixBudgetBoundary(t *testing.T) {
 
 	h.engine.cfg.MaxInspectionUnitBytes = limit - 1
 	result, apiErr = h.engine.Inspect("agent", &protocol.InspectRequest{
-		ObservationID: "O908", Query: "prefix", HasQuery: true,
+		Reference: "O908", Query: "prefix", HasQuery: true,
 	})
 	if apiErr != nil {
 		t.Fatalf("query prefix at N-1: %v", apiErr)
@@ -518,7 +518,7 @@ func TestInspectQueryTruncatesOnlyCompleteUnits(t *testing.T) {
 	attachObservation(t, h.engine, "O904", "agent", ObservationRetired, readonlyTree(root))
 
 	result, apiErr := h.engine.Inspect("agent", &protocol.InspectRequest{
-		ObservationID: "O904", Query: "命中", HasQuery: true,
+		Reference: "O904", Query: "命中", HasQuery: true,
 	})
 	if apiErr != nil {
 		t.Fatalf("truncating query rejected: %v", apiErr)
@@ -579,12 +579,12 @@ func TestInspectDoesNotChangeAuthority(t *testing.T) {
 	h.engine.mu.Unlock()
 
 	if _, apiErr := h.engine.Inspect("agent", &protocol.InspectRequest{
-		ObservationID: start.Observation.ID,
+		Reference: start.Observation.ID,
 	}); apiErr != nil {
 		t.Fatalf("inspect tree: %v", apiErr)
 	}
 	if _, apiErr := h.engine.Inspect("agent", &protocol.InspectRequest{
-		ObservationID: start.Observation.ID, Query: "ok", HasQuery: true,
+		Reference: start.Observation.ID, Query: "ok", HasQuery: true,
 	}); apiErr != nil {
 		t.Fatalf("inspect query: %v", apiErr)
 	}

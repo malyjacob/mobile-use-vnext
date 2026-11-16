@@ -447,7 +447,7 @@ func TestSettleKeepsObservationShape(t *testing.T) {
 		t.Fatal("button not found in tree")
 	}
 	result, apiErr := h.engine.Act(context.Background(), "agent", "Psettleshape", &protocol.ActRequest{
-		ObservationID: start.Observation.ID,
+		Reference: start.Observation.ID,
 		Operation: protocol.Operation{
 			Type: "tap", Target: &protocol.Target{UseRef: true, Ref: button.Ref},
 		},
@@ -492,7 +492,7 @@ func TestSettleRecordsConvergenceFacts(t *testing.T) {
 		t.Fatal("button not found in tree")
 	}
 	if _, apiErr := h.engine.Act(context.Background(), "agent", "Psettlelog", &protocol.ActRequest{
-		ObservationID: start.Observation.ID,
+		Reference: start.Observation.ID,
 		Operation: protocol.Operation{
 			Type: "tap", Target: &protocol.Target{UseRef: true, Ref: button.Ref},
 		},

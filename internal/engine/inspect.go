@@ -55,7 +55,7 @@ func (e *Engine) Inspect(agent string, req *protocol.InspectRequest) (*protocol.
 	if req.HasQuery && req.Query == "" {
 		return nil, protocol.Invalid("query 不能为空")
 	}
-	source, apiErr := e.inspectionSource(agent, req.ObservationID)
+	source, apiErr := e.inspectionSource(agent, req.Reference)
 	if apiErr != nil {
 		return nil, apiErr
 	}

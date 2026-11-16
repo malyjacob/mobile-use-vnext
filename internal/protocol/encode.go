@@ -167,19 +167,22 @@ func (r *EndRequest) Encode() ([]byte, error) {
 	})
 }
 
-// Encode writes the canonical act(observation_id, operation, image) body.
+// Encode writes the canonical act(reference, operation, image) body.
 func (r *ActRequest) Encode() ([]byte, error) {
-	if r.ObservationID == "" {
-		return nil, errors.New("act requires an observation id")
+	if r.Reference == "" {
+		return nil, errors.New("act requires a reference")
+	}
+	if err := r.Operation.ValidateEffectiveDefaults(); err != nil {
+		return nil, errors.New("act operation has an invalid branch member")
 	}
 	return encodeRequest(func(enc *jsontext.Encoder) error {
 		if err := enc.WriteToken(jsontext.BeginObject); err != nil {
 			return err
 		}
-		if err := writeName(enc, "observation_id"); err != nil {
+		if err := writeName(enc, "reference"); err != nil {
 			return err
 		}
-		if err := writeString(enc, r.ObservationID); err != nil {
+		if err := writeString(enc, r.Reference); err != nil {
 			return err
 		}
 		if err := writeName(enc, "operation"); err != nil {
@@ -220,8 +223,22 @@ func encodeOperation(enc *jsontext.Encoder, op *Operation) error {
 		if err := rejectSwipeDuration(op); err != nil {
 			return err
 		}
+		if op.HasPressEnter {
+			return errors.New("press_enter is only valid for text")
+		}
+		if op.HasBubble && (op.Target == nil || !op.Target.UseRef) {
+			return errors.New("bubble is only valid for a ref target")
+		}
 		if err := writeTargetOrPoint(enc, "target", op.Target, nil); err != nil {
 			return err
+		}
+		if op.HasBubble {
+			if err := writeName(enc, "bubble"); err != nil {
+				return err
+			}
+			if err := writeBool(enc, op.Bubble); err != nil {
+				return err
+			}
 		}
 	case "text":
 		if err := rejectScrollMembers(op); err != nil {
@@ -229,6 +246,9 @@ func encodeOperation(enc *jsontext.Encoder, op *Operation) error {
 		}
 		if err := rejectSwipeDuration(op); err != nil {
 			return err
+		}
+		if op.HasBubble {
+			return errors.New("bubble is only valid for tap or long_press")
 		}
 		if err := writeTargetOrPoint(enc, "target", op.Target, nil); err != nil {
 			return err
@@ -238,6 +258,14 @@ func encodeOperation(enc *jsontext.Encoder, op *Operation) error {
 		}
 		if err := writeString(enc, op.Text); err != nil {
 			return err
+		}
+		if op.HasPressEnter {
+			if err := writeName(enc, "press_enter"); err != nil {
+				return err
+			}
+			if err := writeBool(enc, op.PressEnter); err != nil {
+				return err
+			}
 		}
 	case "swipe":
 		if op.Target != nil || op.Container != nil || op.Direction != "" || op.Amount != "" {
@@ -431,10 +459,10 @@ func writePointField(enc *jsontext.Encoder, name string, point *Point) error {
 	return enc.WriteToken(jsontext.EndObject)
 }
 
-// Encode writes the canonical inspect(observation_id, node, query) body.
+// Encode writes the canonical inspect(reference, node, query) body.
 func (r *InspectRequest) Encode() ([]byte, error) {
-	if r.ObservationID == "" {
-		return nil, errors.New("inspect requires an observation id")
+	if r.Reference == "" {
+		return nil, errors.New("inspect requires a reference")
 	}
 	if r.HasNode && r.HasQuery {
 		return nil, errors.New("inspect node and query are mutually exclusive")
@@ -443,10 +471,10 @@ func (r *InspectRequest) Encode() ([]byte, error) {
 		if err := enc.WriteToken(jsontext.BeginObject); err != nil {
 			return err
 		}
-		if err := writeName(enc, "observation_id"); err != nil {
+		if err := writeName(enc, "reference"); err != nil {
 			return err
 		}
-		if err := writeString(enc, r.ObservationID); err != nil {
+		if err := writeString(enc, r.Reference); err != nil {
 			return err
 		}
 		if r.HasNode {
@@ -569,29 +597,32 @@ func (r *AppRequest) Encode() ([]byte, error) {
 				}
 			}
 		case AppKindOpen:
-			if r.ObservationID == "" || r.App == "" {
-				return errors.New("app.open requires observation_id and app")
+			if r.Reference == "" || r.Target == nil || !r.Target.UseTask && r.Target.App == "" {
+				return errors.New("app.open requires reference and target.app")
 			}
-			if err := writeName(enc, "observation_id"); err != nil {
+			if r.Target.UseTask {
+				return errors.New("app.open only accepts a package target")
+			}
+			if err := writeName(enc, "reference"); err != nil {
 				return err
 			}
-			if err := writeString(enc, r.ObservationID); err != nil {
+			if err := writeString(enc, r.Reference); err != nil {
 				return err
 			}
-			if err := writeName(enc, "app"); err != nil {
+			if err := writeName(enc, "target"); err != nil {
 				return err
 			}
-			if err := writeString(enc, r.App); err != nil {
+			if err := encodeAppTarget(enc, r.Kind, r.Target); err != nil {
 				return err
 			}
 		case AppKindClaim, AppKindHandoff, AppKindClose, AppKindKill:
-			if r.ObservationID == "" || r.Target == nil {
-				return errors.New("app target kind requires observation_id and target")
+			if r.Reference == "" || r.Target == nil {
+				return errors.New("app target kind requires reference and target")
 			}
-			if err := writeName(enc, "observation_id"); err != nil {
+			if err := writeName(enc, "reference"); err != nil {
 				return err
 			}
-			if err := writeString(enc, r.ObservationID); err != nil {
+			if err := writeString(enc, r.Reference); err != nil {
 				return err
 			}
 			if err := writeName(enc, "target"); err != nil {

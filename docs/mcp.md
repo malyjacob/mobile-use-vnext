@@ -15,7 +15,7 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
   `wait_for`、`act`、`inspect`、`keepalive`、`end`、`app`、`notify`、`shell`、`diagnose`。
   不注册 `/health`、认证初始化、旧工具别名或旧协议回退。
 - 目录指纹是工具数、注册顺序、名称、描述与入参 schema 的 canonical SHA-256，当前为
-  `312b6975e7a4706241c5a17c0cfcb0336330799e29286f98a4619a9f219c40fd`；发布清单与探针按
+  `c5fdc545cc77882a4662b6a4524517475065cfc3248ec42223ae4c1189529928`；发布清单与探针按
   它比对实际 `tools/list`，任一条描述或 schema 变化都会改变该值。工具目录指纹不覆盖
   server instructions；instructions 由探针把 `server/discover` 返回的说明与构建内的固定
   说明源逐字节比较，并附加兼容 `initialize` 检查。
@@ -27,34 +27,46 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
 
 每个工具以显式 JSON Schema 发布：`type=object`、`properties`、`required` 与
 `additionalProperties=false`。可选参数缺省等于其声明默认值；`act.operation` 只允许
-`tap`、`long_press`、`text`、`swipe`、`scroll`、`key` 六个分支及其声明成员。
+`tap`、`long_press`、`text`、`swipe`、`scroll`、`key` 六个分支及其声明成员。`act`、
+`inspect` 与 `app` 的请求引用字段统一为 `reference`；旧 `observation_id` 是未知成员，
+不提供别名。`act` 的 `reference`、`app` 的五个变更 kind 必须指向当前 ready O；
+`inspect` 必须指向保留中的历史 O；`app.list` 仍接受能解析到活动原会话的 P。
+`operation.bubble` 与 `operation.press_enter` 是 presence-aware 布尔，省略与显式 true
+在该适用分支等价；schema 的字段说明明确它们只对 ref tap/long_press 或 text 生效，不发布
+可能被误读为全类型生效的通用 `default`。
 
 `act` 的滚动与手势输入与 [接口契约](interface.md) §6 一致：`scroll` 用 `container`（ref 或
 坐标）与 `direction`（`up`/`down`/`left`/`right`）表达，可选 `amount`（`page` 默认或
 `half`）；`swipe` 仍以 `from`/`to` 表达原始手势，并接受可选 `duration_ms`（50–2000，默认
 300）。分支成员互斥：`scroll` 不接受 `target`/`from`/`to`/`key`/`text`/`duration_ms`，其他
 分支也不接受 `container`/`direction`/`amount`。`operation` schema 因此暴露 `scroll`、
-`container`、`direction`、`amount` 与 `duration_ms`；服务端严格解码仍是权威。
+`container`、`direction`、`amount`、`duration_ms`、`bubble` 与 `press_enter`；服务端严格
+解码仍是权威。
 
-`tap`/`long_press` 的 `ref` 目标在目标子树内按固定有限候选规划安全落点，静态无可证点时
-返回 `422 unsupported_node_action`。只有目标自身不含 `tap`、`long_press`、`text` 动作且
-不是 root/`context` 时，才尝试同一观察内的祖先引导；目标含其中任一动作时，即使不含请求
-动作也不跳过自身。父链上的第一个交互节点是唯一候选，须未明确禁用、动作/几何/source 可用
-并产生双重可证点，否则整组省略。可证时 `nearest_actionable_ref` 与 `safe_point` 原子出现，
-点来自承载节点时再附 `safe_carrier_ref`；该 ref 只解释坐标来源，不是可点击替代。认领后按分层身份与子树安全规则优先保留原点，
-必要时在同一目标内重算安全坐标；载体替换还需目标独立身份。静态规划无候选且目标原中心有阻塞证据时，`occluding_ref` 只
-指出该阻塞 owner，不表示整个目标表面不可点。子树规划不解决子树外同级或跨窗口 z 序、未发布
-透明层或实际事件消费者，输入执行也不证明应用业务结果。
+`tap`/`long_press` 的 `ref` 目标有效 `bubble=true`（省略或显式 true）时，原目标自身已有
+请求动作仍走直接目标规划；原目标完全没有 `tap`、`long_press`、`text` 动作时，只向最近的
+touch-interactive 祖先提升一次。该祖先必须支持请求动作并产生唯一可证安全点，不支持时不
+继续向更远祖先查找。静态规划同时绑定原 child 与祖先；认领后重验两者、公开 Role 与完整
+Label、最近祖先关系及安全点，child 丢失或内容被替换返回 `409 target_changed`，零派发。
+有效 `bubble=false` 保持直接目标错误；坐标目标必须省略 `bubble`。该提升只在一次调用内
+派发一个动作，不模拟 DOM 多级事件传播。
+
+`text` 的 `press_enter` 省略或有效为 true 时，一次调用完成自动聚焦、将目标框全文设为 text、
+精确读回，并至多发送一次 ENTER；普通输入不需要先 tap 或另发 ENTER。显式 false 只自动聚焦、
+写入并读回，不发送 ENTER，也不返回 `text_input`。复合 text 的 `text_input` 在首次结果、
+运行中 `status(P)`、重复 P 与冻结结果中保持同一份 `{write,enter}` 快照；ENTER 只证明按键
+原语，不证明业务提交，`enter=uncertain` 时先观察而不是原样重发。字段与合法组合见
+[接口契约](interface.md) §6。
 
 公共树语法与调用规则由 server instructions 发布：`server/discover` 与兼容 `initialize`
-返回同一份说明，完整树块词表恰好出现一次，另含会话推进、O/P 身份、租期、工具选择、
-`text` 输入语义与恢复分类；12 个工具描述不再内联树引导，只保留各自用途、关键参数/默认、
-结果或动作边界与最少恢复路径。`start` 描述保留一段短兼容提示：O 是可消费观察，P 是该操作
-的幂等/查询编号；full 是完整树，delta 只相对其 base 且新 delta 覆盖旧 delta。树块词表
-本身不变：树节点行的动作列仍只有 `tap`、`long_press`、`text`、`swipe`（`Node.actions`
-不新增枚举）；`actions=swipe` 只是节点的源能力，不是 raw `swipe` 授权，滚动用
-`operation.type=scroll` 与 `container` 表达。引导声明块头 `view=`、块头后的空行、
-`entries` 计数与 `chain` 行。
+返回同一份说明，完整树块词表恰好出现一次，另含会话推进、O/P 身份、统一 `reference`、
+租期、工具选择、默认 `bubble`/`press_enter`、`text_input` 事实与恢复分类；12 个工具描述不再
+内联树引导，只保留各自用途、关键参数/默认、结果或动作边界与最少恢复路径。`start` 描述保留
+一段短兼容提示：O 是可消费观察，P 是该操作的幂等/查询编号；full 是完整树，delta 只相对其
+base 且新 delta 覆盖旧 delta。树块词表本身不变：树节点行的动作列仍只有 `tap`、`long_press`、
+`text`、`swipe`（`Node.actions` 不新增枚举）；`actions=swipe` 只是节点的源能力，不是 raw
+`swipe` 授权，滚动用 `operation.type=scroll` 与 `container` 表达。引导声明块头 `view=`、
+块头后的空行、`entries` 计数与 `chain` 行。
 
 调用参数在进入客户端前由 `internal/protocol` 的严格解码器接入：未知成员、重复键、大小写
 变体、尾随第二个 JSON 值、类型混用与未声明 `null` 都被拒绝，且不产生设备调用。参数错误
@@ -79,24 +91,28 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
 解码器可判定的非法组合在发出 HTTP 请求前被拒；两个条件折叠后相同由引擎准入在请求发出后
 拒绝，不接触设备。
 
-`app` 的根 schema 继续声明统一的 `properties`、`required=["kind"]` 与
-`additionalProperties=false`，再按 kind 列出互斥成员；服务端严格解码是权威，不依赖宿主
-是否完整执行条件子 schema：
+`app` 的根 schema 是一个扁平、封闭对象：根声明
+`properties={kind,query,reference,scope,app,target,restore_foreground,allow_borrowed,
+allow_stop_playback}`、`required=["kind"]` 与 `additionalProperties=false`；`target` 也是
+扁平对象 `{task_id,app}`、`additionalProperties=false`。根内不使用 `allOf`、`if`/`then`/
+`else`、`not` 或 `oneOf`。根字段可见不代表每个 kind 都接受；服务端 `DecodeApp` 的封闭
+kind 成员矩阵是互斥权威：
 
 | kind | 必填（除 kind） | 可选与默认 |
 | --- | --- | --- |
 | `find` | 无 | `query`（≤256 码点） |
-| `list` | `reference` | `scope=session`（默认）或 `primary`、`app`（包名过滤） |
-| `open` | `observation_id`、`app` | 无 |
-| `claim` | `observation_id`、`target` | 无 |
-| `handoff` | `observation_id`、`target` | `restore_foreground=false` |
-| `close` | `observation_id`、`target` | `allow_borrowed=false` |
-| `kill` | `observation_id`、`target={task_id}` | `allow_stop_playback=false` |
+| `list` | `reference`：ready O 或活动原会话 P | `scope=session`（默认）或 `primary`、`app`（包名过滤） |
+| `open` | `reference`（当前 ready O）、`target={app}` | 无 |
+| `claim` | `reference`（当前 ready O）、`target` | 无 |
+| `handoff` | `reference`（当前 ready O）、`target` | `restore_foreground=false` |
+| `close` | `reference`（当前 ready O）、`target` | `allow_borrowed=false` |
+| `kill` | `reference`（当前 ready O）、`target={task_id}` | `allow_stop_playback=false` |
 
-`target` 为 `{"task_id": 正整数}` 或 `{"app": 包名}`，恰好一种；`kill` 只接受 `task_id`。
-`find`/`list` 是查询，成功与失败均无 `outcome`；结果各按 32 KiB 完整条目前缀返回，
-`total`/`truncated` 说明预算前数量与截断；其余五个 kind 消费当前 ready O，成功返回原会话屏
-的一次 full 无图观察。查询与变更的 P 绑定、IsError 与取消差异见第 3、6 节。
+`target` 为 `{"task_id": 正整数}` 或 `{"app": 包名}`，恰好一种；`open` 只接受 `target.app`，
+`kill` 只接受 `target.task_id`，`claim`/`handoff`/`close` 接受两者之一。顶层 `app` 只保留给
+`list` 过滤。`find`/`list` 是查询，成功与失败均无 `outcome`；结果各按 32 KiB 完整条目前缀
+返回，`total`/`truncated` 说明预算前数量与截断；其余五个 kind 消费当前 ready O，成功返回
+原会话屏的一次 full 无图观察。查询与变更的 P 绑定、IsError 与取消差异见第 3、6 节。
 
 ## 3. 结果投影
 
@@ -122,6 +138,12 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
 操作结果与保留的 P 视图携带，带树的观察都携带 `observation.quality`（未采样或重验交付为
 `unknown`/`0`/`not_sampled`），只有没有树的失败观察不携带它。两者的成员与取值见
 [接口契约](interface.md) §11。
+
+复合 `text` 的 `text_input` 也按同一份 `Result` 投影：`result v2` 在 `effect` 之后输出
+`text_input.write` 与 `text_input.enter` 两个 token（固定顺序，枚举
+`not_executed|uncertain|executed`），`structured` 与 `both` 的 `structuredContent` 保留同一
+对象；显式 `press_enter=false` 和非法组合不会产生该对象。首次结果、运行中 `status(P)`、
+重复 P 与冻结结果使用同一快照。
 
 `wait_for` 的 `wait` 对象也按同一份 `Result` 投影：`result v2` 输出 `wait.trigger`（token）、
 `wait.matched`（紧凑 JSON 数组）与 `wait.elapsed_ms`（数字字面量），成员顺序固定为

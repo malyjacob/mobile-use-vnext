@@ -37,8 +37,8 @@ type taskEntry struct {
 func (e *Engine) appOpen(ctx context.Context, op *operationState, req *protocol.AppRequest) (*protocol.Result, *protocol.APIError) {
 	now := time.Now()
 	e.mu.Lock()
-	_, session, staticErr := e.appStaticCheckLocked(op.Agent, req.ObservationID, now)
-	if staticErr == nil && session.Mode == "virtual" && req.App == e.cfg.ControlPackage {
+	_, session, staticErr := e.appStaticCheckLocked(op.Agent, req.Reference, now)
+	if staticErr == nil && session.Mode == "virtual" && req.Target.App == e.cfg.ControlPackage {
 		staticErr = protocol.NewError(409, protocol.CodeControlUI,
 			"控制界面不能在虚拟屏上打开")
 	}
@@ -58,28 +58,28 @@ func (e *Engine) appOpen(ctx context.Context, op *operationState, req *protocol.
 	preTasks, tasksKnown := e.dev.TasksOnDisplay(work.Ctx, session.Display.ID)
 	if !tasksKnown {
 		return e.finishAppError(op, "admission",
-			&protocol.AppView{Kind: req.Kind, Package: req.App},
+			&protocol.AppView{Kind: req.Kind, Package: req.Target.App},
 			protocol.NewError(503, protocol.CodeDeviceUnavailable, "无法读取目标屏幕任务"))
 	}
 	foreground, _ := e.dev.Foreground(work.Ctx, session.Display.ID)
-	reuse := selectReusableTask(preTasks, req.App, session.Display.ID, foreground)
+	reuse := selectReusableTask(preTasks, req.Target.App, session.Display.ID, foreground)
 
 	component := ""
 	if reuse == nil {
-		resolved, found, resolveErr := e.dev.ResolveLauncher(work.Ctx, req.App)
+		resolved, found, resolveErr := e.dev.ResolveLauncher(work.Ctx, req.Target.App)
 		if resolveErr != nil {
 			if e.detachedWorkRevoked(work) {
 				return e.finishAppError(op, "admission",
-					&protocol.AppView{Kind: req.Kind, Package: req.App},
+					&protocol.AppView{Kind: req.Kind, Package: req.Target.App},
 					protocol.NewError(409, protocol.CodeStopped, "应用启动已撤销"))
 			}
 			return e.finishAppError(op, "admission",
-				&protocol.AppView{Kind: req.Kind, Package: req.App},
+				&protocol.AppView{Kind: req.Kind, Package: req.Target.App},
 				protocol.NewError(503, protocol.CodeDeviceUnavailable, "无法确认应用启动入口"))
 		}
 		if !found {
 			return e.finishAppError(op, "admission",
-				&protocol.AppView{Kind: req.Kind, Package: req.App},
+				&protocol.AppView{Kind: req.Kind, Package: req.Target.App},
 				protocol.NewError(409, protocol.CodeAppNotFound, "手机上找不到可启动的该应用"))
 		}
 		component = resolved
@@ -90,23 +90,23 @@ func (e *Engine) appOpen(ctx context.Context, op *operationState, req *protocol.
 	if session.Mode == "virtual" && (reuse == nil || e.isNewSessionTask(session, reuse.TaskID)) {
 		e.mu.Lock()
 		refusal := e.appCapacityRefusalLocked(&LedgerTask{
-			TaskID: 2147483647, Package: req.App, DisplayID: session.Display.ID,
+			TaskID: 2147483647, Package: req.Target.App, DisplayID: session.Display.ID,
 			RootTaskID: 2147483647, Ownership: TaskOwned, Proven: true,
 		}, nil)
 		e.mu.Unlock()
 		if refusal != nil {
 			return e.finishAppError(op, "admission",
-				&protocol.AppView{Kind: req.Kind, Package: req.App}, refusal)
+				&protocol.AppView{Kind: req.Kind, Package: req.Target.App}, refusal)
 		}
 	}
 
 	e.mu.Lock()
-	claimErr := e.claimObservationLocked(op, op.Agent, work, e.observations[req.ObservationID],
+	claimErr := e.claimObservationLocked(op, op.Agent, work, e.observations[req.Reference],
 		e.session, time.Now())
 	e.mu.Unlock()
 	if claimErr != nil {
 		return e.finishAppError(op, "claim",
-			&protocol.AppView{Kind: req.Kind, Package: req.App}, claimErr)
+			&protocol.AppView{Kind: req.Kind, Package: req.Target.App}, claimErr)
 	}
 
 	probeCtx, cancel := context.WithTimeout(work.Ctx, 5*time.Second)
@@ -114,18 +114,18 @@ func (e *Engine) appOpen(ctx context.Context, op *operationState, req *protocol.
 	cancel()
 	if probeErr != nil || !displayState.Exists {
 		return e.finishAppError(op, "revalidate",
-			&protocol.AppView{Kind: req.Kind, Package: req.App},
+			&protocol.AppView{Kind: req.Kind, Package: req.Target.App},
 			protocol.NewError(503, protocol.CodeDisplayUnavailable, "目标屏幕不可用"))
 	}
 	if e.detachedWorkRevoked(work) {
 		return e.finishAppError(op, "revalidate",
-			&protocol.AppView{Kind: req.Kind, Package: req.App},
+			&protocol.AppView{Kind: req.Kind, Package: req.Target.App},
 			protocol.NewError(409, protocol.CodeStopped, "应用启动已撤销"))
 	}
 	if session.Mode == "primary" {
-		return e.finishOpenPrimary(work, op, session, req.App, component, reuse, preTasks)
+		return e.finishOpenPrimary(work, op, session, req.Target.App, component, reuse, preTasks)
 	}
-	return e.finishOpenVirtual(work, op, session, req.App, component, reuse, preTasks)
+	return e.finishOpenVirtual(work, op, session, req.Target.App, component, reuse, preTasks)
 }
 
 // isNewSessionTask reports whether this task id is not yet in the registry.
@@ -203,7 +203,7 @@ func (e *Engine) finishOpenVirtual(work *workState, op *operationState, session 
 			Kind: protocol.AppKindOpen, Package: app,
 			TaskID: appIntPtr(reuse.TaskID), DisplayID: appIntPtr(session.Display.ID),
 			Ownership: TaskOwned, Reused: appBoolPtr(true),
-			StatePreserved: e.reuseStatePreserved(work, session, reuse),
+			StatePreserved:    e.reuseStatePreserved(work, session, reuse),
 			HasStatePreserved: true,
 		})
 	}
@@ -295,7 +295,7 @@ func (e *Engine) finishOpenPrimary(work *workState, op *operationState, session 
 			Kind: protocol.AppKindOpen, Package: app,
 			TaskID: appIntPtr(reuse.TaskID), DisplayID: appIntPtr(0),
 			Ownership: TaskShared, Reused: appBoolPtr(true),
-			StatePreserved: e.reuseStatePreserved(work, session, reuse),
+			StatePreserved:    e.reuseStatePreserved(work, session, reuse),
 			HasStatePreserved: true,
 		})
 	}
