@@ -48,6 +48,7 @@
 | 公共树表示与交付预算（契约 11） | 已实现 | 已实测（部分）：0.11.0/契约 11/versionCode 13 整组构建、清单核验、手机覆盖安装与私有数据保留；实机契约 10 拒绝、最小 STOP 接纳、`start→full`、同基线空 delta、inspect 插入不改基线、query 与 end；stdio 与手机 HTTP 两个 MCP 入口的 both/text/structured 探针均 PASS。未执行：`verify-m6`（用户排除）、真实 Capture 压缩比/token/耗时/进程峰值（用户排除）、`act` 重验失败交付的实机样本（[记录](verification/compact-node-tree-presentation.md)） |
 | 受控滚动中心线安全区间、原段重验与联动视口效果（契约 13） | 已实现 | 已部署 0.13.0/契约 13/versionCode 15；契约边界实测（旧 12 与缺头均 `409 contract_mismatch`、最小 STOP 独立、`13` 受理）；Settings 7 次垂直 scroll 全部 `executed`、0 次 `target_changed`，取得 4 次实机 `observed`（`anchors=17`/`coverage=80`）与 6 次 `not_observed`；X 首页复现 `2242↔2400` 容器伸缩但受内容换血限制仍为 `unknown`；Zhihu/X 嵌套作用域取得真实 `422` 且零采集零派发。联动栏下的实机 `observed` 与合成覆盖层页未取得（[记录](verification/scroll-safe-trajectory-and-viewport-effect.md)） |
 | tap/long_press 子树安全落点与结构化引导（契约 14） | 已实现 / 已实测（有限） | 已部署 0.14.0/契约 14/versionCode 16；静态子树规划、固定点重验、R1 原子引导、`occluding_ref` 边界及嵌套详情所有权已实现并单测；实机临时复合卡片验证正文引导 `nearest_actionable_ref=n21`、`safe_point={540,331}`、`safe_carrier_ref=n22`，独立 O 上卡片 tap ×3 与 long_press 均与内按钮 0 次隔离；契约 13 拒绝/14 受理、恢复屏障与最小 STOP 通过。外部 MCP 宿主未操作，手机 stdio 旧进程需宿主重启；`occluding_ref` 专门页面与活动会话 STOP 未单独实机构造（[记录](verification/act-tap-safe-scope-and-guidance.md)） |
+| 统一 reference 与受控动作契约（契约 15） | 已实现 / 已实测（有限） | `d529ee7` 完成 #17/#18/#19/#23：act/inspect/app 统一 `reference`、扁平 app Schema 与 `open.target.app`、ref bubble 默认一次最近交互祖先提升、text 默认 `press_enter` 与 `text_input`；单测、反向对照、engine 全量、探针与实机 open/text/bubble/重复 P 已执行，docs 独立审计 CLEAN。未冻结版本、未发布、未归档提案；实机 STOP/ENTER 回执注入、claim/handoff 与真实宿主 Instructions 回放未执行（[记录](verification/agent-reference-and-action-contract.md)） |
 | 观察连续性、结构差分与动作重验（契约 15） | 已实现 | 已实测（有限）：净化/严格三态、五阶段连续性、结构差分与双应用器、动作层级重验及消费者同步已落地；D01 contract 15 三轮 pass，D02 三轮无 fail但缺 native scroll，D03 24 pass/3 fail，D04 3 fail/15 gap，D05 最新 1 pass/1 fail，D06 在 `38`/`049` 各三轮 pass；S6 最终 61 个五样本子项、305 行。缺口已接受（[记录](verification/observation-continuity-and-revalidation.md)、[基准](verification/observation-continuity-benchmarks.md)） |
 
 ## 3. 未验证 / 证据缺口
@@ -101,6 +102,7 @@
 - [主屏多窗口层级修复与实机验证](verification/primary-display-multi-window.md)
 - [契约 11 公共树表示、交付预算与文本 v2 的实现与验证](verification/compact-node-tree-presentation.md)
 - [tap/long_press 子树安全落点与结构化引导的实现与验证](verification/act-tap-safe-scope-and-guidance.md)
+- [统一 reference 与受控动作契约的实现、单测与实机验证](verification/agent-reference-and-action-contract.md)
 - [观察连续性、结构差分与动作重验的实现、发布、实机与归档记录](verification/observation-continuity-and-revalidation.md)
 - [S6 统一基准记录（B01–B06）](verification/observation-continuity-benchmarks.md)
 - [工程决策](decisions.md)
