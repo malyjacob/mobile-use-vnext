@@ -1,12 +1,16 @@
 # 分册 05：实施顺序、验证计划与交付门禁
 
-状态：提案，未实现。
+状态：已实现（代码全覆盖；实机验证有限；最后实现/发行锚点提交 `049583d328e335c56d56f153b7464ea03f1ca814`，2026-11-16）。
 基线提交：`6ec25c87daefbc01c99f78d968214304641d119d`（2026-11-15；代码前进后须重新核对）。
-适用范围：本目录四个设计分册的开发、验证、文档同步、实现提交、发布核验与归档。
-影响范围：当前只补充本文件与 README；未来实现涉及的文件和公开语义以分册 01–04 为准。
-契约：本册不增加公开字段或放宽判据；沿用总览所列的共同 contract_version 变更。
+适用范围：四册依赖、V/I/B/D 验证矩阵、阶段出口、版本/发布/归档和发行锚点。
+影响范围：四册全部代码面、正式文档、版本生成、构建/发布/部署脚本及 maintenance 验证记录。
+契约：改变。沿共同 `contract_version` 14→15；本册自身不另增公开字段或判据。
+最后实现/发行锚点：`049583d328e335c56d56f153b7464ea03f1ca814`。
+全部实现提交：`900e640fe8343f92c4e8dd82dd3df839dde20756`、`bb43c1943d66e3ea5fe5fd938f9a5b68c82dfdeb`、`38f47e38fd85ffa8b79e8b9dbea13a4c00babe14`、`049583d328e335c56d56f153b7464ea03f1ca814`。
+验证记录：[实现与验证](../../../verification/observation-continuity-and-revalidation.md)、[统一基准](../../../verification/observation-continuity-benchmarks.md)。
+史实边界：正文设计论证及其中“提案未实现”“当前未执行”“未来”等陈述按基线写作时点保留；源码定位、行号、常量与默认值仍以基线为准，代码前进后须重新核对。实施结论以 §11 和验证记录为准。
 
-所属总览：[README.md](README.md)。依据：[工程流程](../../process.md) 与[提案模板](../template.md)，尤其模板 §6–§11、流程 §3/§5–§8，以及 [AGENTS.md](../../../AGENTS.md) 的先红复现、验证边界、文档审计、单一版本源和归档顺序。
+所属总览：[README.md](README.md)。依据：[工程流程](../../../process.md) 与[提案模板](../../template.md)，尤其模板 §6–§11、流程 §3/§5–§8，以及 [AGENTS.md](../../../../AGENTS.md) 的先红复现、验证边界、文档审计、单一版本源和归档顺序。
 
 ## 0. 本册定位
 
@@ -122,7 +126,7 @@ V12–V14 必须同时覆盖内部 Node 和公开逻辑 ReadNode，不能只测�
 
 默认只使用一部已有支持设备、一个已选显示模式和一个实际 MCP 宿主入口；默认手机适配器路径。stdio/主机 HTTP 的编码边界先由 I08 覆盖，不因本提案扩展无关设备、模式、应用生命周期或断电恢复矩阵。若真实改动进入其他分支，再按差异增加对应路径。
 
-使用本仓库 [android-control/test-target](../../../android-control/test-target/) 的受控页面；现有页面不具备的状态先扩展合成 fixture，再记录新增测试代码与构建/安装命令，不假定当前 probe 已能覆盖骨架、包装层和位移。只有固定测试包允许承受设计的点击、滚动和文本写入。
+使用本仓库 [android-control/test-target](../../../../android-control/test-target/) 的受控页面；现有页面不具备的状态先扩展合成 fixture，再记录新增测试代码与构建/安装命令，不假定当前 probe 已能覆盖骨架、包装层和位移。只有固定测试包允许承受设计的点击、滚动和文本写入。
 
 | 场景 | 执行步骤 | 验收与记录 |
 | --- | --- | --- |
@@ -261,12 +265,12 @@ S5 内部顺序为纯 matcher/原因分类 → ref 点击和 carrier/frame → t
 | S6 联动与成本 | 运行 I01–I08 和 B01–B06；核对全套相关包、不可变性、源码/协议守卫反向对照；比较旧新计数、字节、耗时、分配 | 正反用例无错误接纳/误派发；确定性预算达标；成本变化有记录与归因，不能用改变上限/70%/STOP换绿；真实改动的包回归完成 |
 | S7 文档/版本/提交前构建 | 确定版本组合并运行生成脚本；同步已具备行为到受影响 docs；运行版本 freshness、linux/arm64/CGO=0 构建、控制 APK 候选编译；test-target 改动时 probe APK 也编译，并做消费者检查 | 构建和相关测试通过；独立只读审计覆盖本次全部 docs，发现修正并复检 clean。审计期间不改被审 docs，不因尚未返回中断/重启 |
 | S8 实现提交 | 反向核对四册与本计划的功能、契约、边界和未执行项；将源码/测试/docs/生成版本按 coherent 单位提交 | 实现提交 hash 存在，提案仍“提案，未实现”；提交说明写分诊、必要跳步理由（若有）、文档审计结论及偏离；工作树满足正式发布所需干净条件 |
-| S9 完整制品与系统/实机 | 在 S8 的干净提交构建完整 release，verify manifest 后覆盖部署、重启实际 MCP 进程，再执行 D01–D06 | manifest complete=true、source_commit=实际HEAD、source_dirty=false，版本/哈希/目录指纹全符；D01–D06 全通过，或按 S0 接受的交付范围逐项记录未执行缺口，新缺口须再获接受；不把无实机误写成已实测，也不把验证缺口自动等同于代码部分实现。失败先归因修复、相关测试/审计及新实现提交，再重建核验，不归档为全部完成 |
+| S9 完整制品与系统/实机 | 在 S8 的干净提交构建完整 release，verify manifest 后覆盖部署、重启实际 MCP 进程，再执行 D01–D06 | manifest 字段与现行 verifier/schema 一致，`source_commit=实际HEAD`、`source_dirty=false`，版本/哈希/目录指纹全符；D01–D06 全通过，或按 S0 接受的交付范围逐项记录未执行缺口，新缺口须再获接受；不把无实机误写成已实测，也不把验证缺口自动等同于代码部分实现。失败先归因修复、相关测试/审计及新实现提交，再重建核验，不归档为全部完成 |
 | S10 验证记录/归档/发行锚点 | 完成 §8.6 记录；先存在最后实现 hash，再移动整个提案目录、重写链接和追加 §11 两表；单独归档提交 | README 与01–05每份头部按真实代码覆盖改为已实现/部分实现（最后实现hash、日期）并加验证记录链接，缺口逐条说明；status.md 仅真实结论变化时修改；发行源保持最后实现提交 |
 
 ### 10.2 manifest 与提交顺序的特殊约束
 
-实际 [verify-manifest.ps1](../../../scripts/verify-manifest.ps1) 要求“已提交、源码干净、manifest.source_commit 与实际 HEAD 一致”，[build-release.ps1](../../../scripts/build-release.ps1) 的 `-SkipAndroid` 包标为不完整。因此正式 manifest PASS 不能被写成 S8 实现提交前已完成的门禁；S7 完成的是测试/生成 freshness/构建及文档审计，S9 才产生可部署制品的正式核验。
+实际 [verify-manifest.ps1](../../../../scripts/verify-manifest.ps1) 要求“已提交、源码干净、manifest.source_commit 与实际 HEAD 一致”，[build-release.ps1](../../../../scripts/build-release.ps1) 的 `-SkipAndroid` 包标为不完整。因此正式 manifest PASS 不能被写成 S8 实现提交前已完成的门禁；S7 完成的是测试/生成 freshness/构建及文档审计，S9 才产生可部署制品的正式核验。
 
 本计划固定最后实现提交（S8，若 S9 修复则取最后一个新实现 hash）为发行源。S9 在该提交的干净 checkout 构建、核验、部署和实测；S10 归档提交携带已经产生的验证记录和 §11，明确它是维护记录提交，不是这次发行源码。这样验证证据先存在，再由归档记录引用，不要求归档提交记录它自己的未来核验结果。
 
@@ -285,11 +289,52 @@ S9 无实机环境或某 fixture 未覆盖时，不伪造通过；在验证记�
 - 文档审计：只读审计结论未返回就等待；明确失败/无响应且记录原因后才重发，提交说明记录原因。
 - 版本/manifest/签名/配对不符：按现行发布流程排查，不跳清单、不手改多个版本、不卸载/清库解围。
 
-## 11. 实现结果（归档时填写）
+## 11. 实现结果
 
-本次没有实现提交或新方案验证结论。归档时在 README 写最后实现 hash、全部实现提交与验证记录链接；README 与01–05六份文件头部都更新真实状态、最后实现 hash、归档日期及验证记录链接，并为本册及四个设计分册补两张表：
+最后实现/发行锚点为 `049583d328e335c56d56f153b7464ea03f1ca814`（2026-11-16）。
+全部实现提交按顺序为 S1–S5 `900e640fe8343f92c4e8dd82dd3df839dde20756`、S8
+`bb43c1943d66e3ea5fe5fd938f9a5b68c82dfdeb`、S9 探针修复
+`38f47e38fd85ffa8b79e8b9dbea13a4c00babe14` 和最终 docs 澄清/发行锚点
+`049583d328e335c56d56f153b7464ea03f1ca814`。四册默认范围的代码和测试落点全覆盖；
+实机验证覆盖有限，两个结论分开记录。公共记录见
+[实现与验证](../../../verification/observation-continuity-and-revalidation.md)与
+[统一基准](../../../verification/observation-continuity-benchmarks.md)。
 
-- §11.1：分册条目、V/I/B/D ID → 实际文件/函数/测试/实现提交及真实验证范围。
-- §11.2：与提案不同或未执行的项 → 实际行为、缺口与理由；判据/契约/时序偏离附重新确认依据。
+### 11.1 已落地
 
-整目录移到 `maintenance/proposals/implemented/observation-continuity-and-revalidation/` 后，本册到仓库源码/docs 的相对链接需再上一层，到 maintenance verification 的链接也需重新计算；保留各文件名并检查所有目标。验证记录写本次真实实施，不把本册的未来命令或前轮静态审核记录直接复制成已执行结果。
+| 阶段/条目 | 实际落点与结果 |
+| --- | --- |
+| S0/S1 | 六份提案、范围确认、先红用例、参考输入、计数接缝和合成 fixture 落盘；分诊及旧基线证据保存在本目录正文和公共验证记录。 |
+| S2 | 分册 01 的净化、最近公开父、三态、`defaults` 删除、inspect/MCP/probe/预算及 client/httpapi 消费者；实现提交 `900e640...`。 |
+| S3 | 分册 02 的公共索引、五阶段双向锚定、确定性预算、局部恢复、高水位与 Candidate/Preview 回滚；实现提交 `900e640...`。 |
+| S4 | 分册 03 的最终图规划、Node/Read Apply、严格 wire、70% 运行时选择和 full 回退；实现提交 `900e640...`。 |
+| S5 | 分册 04 的 Tier 1–3、tap/carrier/frame、scroll、text focus binding、O/P/STOP/错误族及 Android 实际参数消费；实现提交 `900e640...`。 |
+| S6 | V01–V20、I01–I08、B01–B06 的单元、假设备、联动、反向对照与基准映射；详细函数和用例见公共验证记录与统一基准。 |
+| S7 | 共同 `contract_version=15`、release `0.15.0`、Android versionCode `17`；版本生成 freshness、控制/probe 候选构建、vet、linux/arm64 构建和独立只读文档审计完成。S7 的 Gemini 审计首轮因配额失败，续审发现 4 类问题；修正后本次全部九份 `docs/` CLEAN。 |
+| S8 | 四册与计划的完整实现交付提交 `bb43c194...`。 |
+| S9 修复 | 探针空正文解析和失败后自身会话收尾修复提交 `38f47e38...`；先红、根因、同类核查和回归见验证记录。 |
+| S9 最终 docs 澄清 | `049583d...` 修正四份 `docs/`；最终 Ollama 审计首轮发现 3 类问题，修正后原审计者明确全部九份 `docs/` CLEAN，过程无中断、重启或 quota 错误。 |
+| 完整制品 | 在 `049583d...` 上实际执行完整 `build-release`、`verify-release`、`host-build`、`host-VerifyOnly` 和 `deploy`，均 PASS。manifest 的 `source_commit` 为 `049583d328e335c56d56f153b7464ea03f1ca814`，`source_dirty=false`；六个制品完整且未使用 `SkipAndroid`。 |
+| Control APK | 新 Control APK 的 SHA-256 为 `18a6e7ce612bd5ec1d70b9f78910169762dfb7ce09fbf4fb6c216da6362f6235`。 |
+| Smoke | 新锚点首次 smoke `start` 返回 `control_revoked`；状态会话结束且 `can_start=true` 后重跑通过。`s9-anchor-smoke-rerun` 记录为 PASS。 |
+| D06 | 新锚点 `.state/s9-anchor-d06.json` 三轮通过：固定 full 后单 delta、BACK、inspect 当前 O、end。 |
+| S10 | 六文件移到 `maintenance/proposals/implemented/observation-continuity-and-revalidation/`，统一更新头字段与相对链接并补 §11.1/§11.2；归档提交只承载维护记录，不是发行源码。 |
+
+`V01–V20`、`I01–I08`、`B01–B06` 的详细函数、测试和真实计数沿用公共验证记录及统一基准，本表只给交付索引，不另造通过数。
+
+### 11.2 与提案不同或未执行
+
+| 项 | 实际行为、缺口与理由 |
+| --- | --- |
+| 缺口接受 | 用户于 2026-11-16 明确选择“接受上述缺口，继续归档”。该接受允许记录有限实机覆盖并完成归档，不改写原失败报告，也不把未执行场景标成 PASS。 |
+| manifest 字段 | 完整构建脚本和 verifier 已 PASS；当前 manifest 没有名为 `complete` 的可选键，因此记录不补造该字段。 |
+| 发行锚点与制品来源 | `049583d...` 只修改四份 `docs/`；Go 服务、MCP 和固定制品内容 hash 与 `38f47e38...` 相同。049 上重新执行了完整构建、核验、部署和 smoke，但不能把 D01–D05 的旧设备结果改写成在 049 重跑。 |
+| D01 | contract 15 新轮次 3/3 PASS；旧基线 5 次尝试为 4 pass、1 `shell_result_unconfirmed`/uncertain，原报告保留。新轮次来自 `bb43c...` 的 release APK，且 `d01_host_disk_log_proof: external_host_evidence_required` 仍缺。 |
+| D02 | 3 轮在 `38f47e38...` 上均为 `gap`、`fail=0`、`result=partial`；缺 `native_scroll_unavailable`，原生列表滚动未覆盖，不能写 D02 整体 PASS。 |
+| D03 | 27 case 为 24 pass、3 fail；失败来自所选 `ScrollView` 的无滚动祖先兄弟 overlay，属 fixture 负例越界，现行契约明确不阻塞。原报告 `result=fail` 和 3 个 failed checks 保留。`d03_primitive_count` 仍缺。 |
+| D04 | 18 case 为 3 fail、15 gap；A 值精确、B 不变，但键盘前后均 hidden，3 个 readback fail 的唯一 false check 为 `focus_window_observed`。键盘顶起、精确 focus race 和 `d04_primitive_count` 未覆盖，原报告 fail 保留。 |
+| D05 新复跑 | 第 1 轮 pass 后，第 2 轮直接新 `start` 以 `display_create_failed` 中止并结束原会话，总结果 `1 pass / 1 fail`。 |
+| D05 旧报告与 STOP | 旧三轮除 driver 强求 wait outcome 的判据错误外均成立，`control_revoked` 已表达真实撤权，原报告 fail 不改。精确 capture、preview、post-dispatch STOP 注入及 primitive 精确计数仍未实测，相关 gap 保留。 |
+| D06 与宿主 | 新锚点三轮 PASS 只覆盖固定 full 基线后的单 delta，不能扩大为多 delta、滚动或复杂重挂矩阵。实际外部 MCP 宿主重连/工具重发现由用户自行处理，未独立确认；用户已接受该缺口。 |
+| 证据来源 | D01 的设备矩阵属于 `bb43c...`，D02–D05 属于 `38f47e38...`，D06 和最终 smoke 属于 049 锚点执行链。D02/D06 JSON 没有内嵌 source hash 时按真实调用时序记录，不补造字段，也不把 docs-only 049 的相同制品 hash 写成旧矩阵重跑。 |
+| 代码状态 | 四册默认范围代码全覆盖；设备场景有限、fixture 越界和外部宿主缺口均属于验证覆盖，不回写成部分实现。 |

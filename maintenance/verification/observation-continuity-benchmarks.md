@@ -5,7 +5,12 @@
 - 正式执行日期：`2026-11-16`（Asia/Shanghai）。
 - 源码基准锚点：`bd770565cedde2391a55ab2a49e87a84adc6edba`，加本文列出的 S6 候选文件修改。
 - 旧基线：`6ec25c87daefbc01c99f78d968214304641d119d`。
-- 提案依据：[分册 05 §8.3/§10](../proposals/observation-continuity-and-revalidation/05-implementation-and-validation-plan.md) 与分册 01–04 的预算边界。
+- 已归档提案依据：[分册 05 §8.3/§10](../proposals/implemented/observation-continuity-and-revalidation/05-implementation-and-validation-plan.md) 与分册 01–04 的预算边界。
+- 归档来源说明：§7 的 S6 数据测量自 `bd77056` 加所列最终候选文件，S8 提交
+  `bb43c1943d66e3ea5fe5fd938f9a5b68c82dfdeb` 收录这些实现；S9 提交
+  `38f47e38fd85ffa8b79e8b9dbea13a4c00babe14` 只修复 probe，最终
+  `049583d328e335c56d56f153b7464ea03f1ca814` 只澄清四份 docs，均不改本表涉及的
+  observation/engine 基准路径。本文始终是 Windows 主机合成证据，不替代 S9 实机结论。
 - 最终统一驱动：[internal/observation/s6_benchmark_test.go](../../internal/observation/s6_benchmark_test.go)，SHA-256 `316e3a5e585090c78e0cc258092b39f22593ecfe8601a79713bf66ca304b9d0a`。
 - 最终候选文件：`match.go` SHA-256 `e4600051b1dcadb50dd25d1e79eb0607b154203ba1a5ce275849d84a09b49bf7`；`delta_benchmark_test.go` SHA-256 `10d825c2035f07f65d7c0d646d67b04af5e46d06d88478a9ddad6feae244bb2d`。
 - 环境：Windows 主机，`go1.27.1 windows/amd64`，`GOEXPERIMENT=jsonv2`，`CGO_ENABLED=0`，CPU `AMD Ryzen 7 5700X 8-Core Processor`。

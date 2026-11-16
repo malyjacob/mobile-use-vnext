@@ -1,8 +1,15 @@
 # 议题 2：跨帧节点引用稳定映射（Ref Continuity）
 
-状态：提案，未实现。
-基准提交：`6ec25c87daefbc01c99f78d968214304641d119d`
+状态：已实现（代码全覆盖；实机验证有限；最后实现/发行锚点提交 `049583d328e335c56d56f153b7464ea03f1ca814`，2026-11-16）。
+基线提交：`6ec25c87daefbc01c99f78d968214304641d119d`（2026-11-15）。
+适用范围：同会话跨帧公开节点 ref 连续性、source/context 身份、候选与 Preview 高水位。
+影响范围：`internal/observation/match.go`、`internal/observation/build.go` 的 Candidate/Preview/提交接缝，以及连续性、候选和基准测试。
+契约：改变行为语义，不新增 wire 字段；共同 `contract_version` 由 14 升至 15；五阶段双向唯一匹配、确定性预算、无证据新号。
+最后实现/发行锚点：`049583d328e335c56d56f153b7464ea03f1ca814`。
+全部实现提交：`900e640fe8343f92c4e8dd82dd3df839dde20756`、`bb43c1943d66e3ea5fe5fd938f9a5b68c82dfdeb`、`38f47e38fd85ffa8b79e8b9dbea13a4c00babe14`、`049583d328e335c56d56f153b7464ea03f1ca814`。
+验证记录：[实现与验证](../../../verification/observation-continuity-and-revalidation.md)、[统一基准](../../../verification/observation-continuity-benchmarks.md)。
 所属总览：[README.md](README.md)
+史实边界：正文设计论证及其中“提案未实现”“当前未执行”“未来”等陈述按基线写作时点保留；源码定位、行号、常量与默认值仍以基线为准，代码前进后须重新核对。实施结论以 §11 和验证记录为准。
 
 ## 1. 问题诊断与源码归因
 
@@ -12,11 +19,11 @@
 
 以下“现状”均指基线提交中的实现；阶段、索引与谓词是本提案的待实现设计。静态反例属于设计推演，不等于已经执行单测或实机验证。
 
-现行 [internal/observation/match.go](../../../internal/observation/match.go) 的组合存在两处根因，导致列表只要发生 1 个元素的位移，整屏容器和控件就可能发生错位漂移甚至全量重分配：
+现行 [internal/observation/match.go](../../../../internal/observation/match.go) 的组合存在两处根因，导致列表只要发生 1 个元素的位移，整屏容器和控件就可能发生错位漂移甚至全量重分配：
 
 ### 1.1 局限一：`signature()` 在存在 `resource-id` 时抹除了 `label` 特征
 
-现行 `signature()` 位于 [internal/observation/match.go:77-102](../../../internal/observation/match.go#L77-L102)：
+现行 `signature()` 位于 [internal/observation/match.go:77-102](../../../../internal/observation/match.go#L77-L102)：
 
 ```go
 func signature(raw *device.RawNode, role protocol.Role) matchKey {
@@ -50,11 +57,11 @@ func signature(raw *device.RawNode, role protocol.Role) matchKey {
   - 卡片 3 的标题：`resource="com.app:id/tv_title"`, `text="商品 C"`
 - 因为 `raw.ResourceID != ""`，`!key.hasRes` 为 `false`！`signature()` **直接丢弃了 `"商品 A"`、`"商品 B"`、`"商品 C"` 的 `key.label`**！
 - 结果这 3 个标题节点的 `matchKey` 在 identity 字段上完全相同：`role`、`class`、`pkg`、`resource`、`label=""` 均相同。
-- 现行全局 Pass 3 通过 `hasIdentity()` 与 `sameUnit()` 统计候选，见 [match.go:367-385](../../../internal/observation/match.go#L367-L385)。由于身份桶内有 3 个旧节点和 3 个新节点，标题无法唯一匹配，匿名卡片容器也就少了一条可用的后代证据。
+- 现行全局 Pass 3 通过 `hasIdentity()` 与 `sameUnit()` 统计候选，见 [match.go:367-385](../../../../internal/observation/match.go#L367-L385)。由于身份桶内有 3 个旧节点和 3 个新节点，标题无法唯一匹配，匿名卡片容器也就少了一条可用的后代证据。
 
 ### 1.2 风险二：`Pass 1` 在内容匹配前盲目按同形状兄弟序号（`ordinalSibling`）抢配匿名容器
 
-现行容器 pass 位于 [internal/observation/match.go:291-335](../../../internal/observation/match.go#L291-L335)：
+现行容器 pass 位于 [internal/observation/match.go:291-335](../../../../internal/observation/match.go#L291-L335)：
 
 ```go
 if countCurrentSiblings(childrenOf, curSig, parentOf[i], curSig[i]) == 1 {
@@ -75,7 +82,7 @@ if ref, pos, ok := ordinalSibling(prev, usedPos, childrenOf[parentOf[i]], curSig
 }
 ```
 
-其中 [ordinalSibling()](../../../internal/observation/match.go#L539-L570) 在旧、新同形兄弟数量相等时，按前序序号返回候选：
+其中 [ordinalSibling()](../../../../internal/observation/match.go#L539-L570) 在旧、新同形兄弟数量相等时，按前序序号返回候选：
 
 ```go
 if len(candidates) != sameShapeCount || len(candidates) == 0 || rank >= len(candidates) {
@@ -97,7 +104,7 @@ return unit.ref, unit.position, true
    - ……依此类推，5 张卡片容器的 `nXX` **全部张冠李戴**！
 4. 更糟糕的是，随后的 `Pass 2`（同父节点下 `sameUnit` 匹配）和 `Pass 5`（同父节点下 `samePublic` 匹配）要求候选位于当前已匹配父锚点下。基线保存的是旧公开前序位置 `anchorPos`，不是字符串 ref；下面的 `nXX` 只用于指认节点：
    - 当前 `Card_B` 容器已被错配成 `Card_A` 的 ref `n10`，所以其子节点的 `prevParent[parent]` 是旧 `Card_A` 的位置。若标题带各卡共享的 resource，签名又不含唯一文本，局部 Pass 2 会把 `Card_B` 标题错配给旧 `Card_A` 标题 `n11`，并非只能新号；全局 Pass 3 也无法用完整树中的重复资源键找回真实 `n21`；若标题没有 resource、文本全局唯一，Pass 3 虽能找回 `n21`，该标题的公开父仍然错成 `n10`；
-   - `Card_B` 内部的 `"收藏"` 按钮在各卡片间重复，无法全局唯一。由于所在容器的父锚点已错成旧 `Card_A` 的位置，局部 Pass 2 会在旧 `Card_A`（已滚出屏幕）的公开直接子节点中寻找同形 `"收藏"` 按钮，并把 `Card_A` 的按钮 ref **`n12`** 错配给 `Card_B` 的按钮；基线相关锚点检查见 [match.go:343-358](../../../internal/observation/match.go#L343-L358) 与 [match.go:428-443](../../../internal/observation/match.go#L428-L443)。
+   - `Card_B` 内部的 `"收藏"` 按钮在各卡片间重复，无法全局唯一。由于所在容器的父锚点已错成旧 `Card_A` 的位置，局部 Pass 2 会在旧 `Card_A`（已滚出屏幕）的公开直接子节点中寻找同形 `"收藏"` 按钮，并把 `Card_A` 的按钮 ref **`n12`** 错配给 `Card_B` 的按钮；基线相关锚点检查见 [match.go:343-358](../../../../internal/observation/match.go#L343-L358) 与 [match.go:428-443](../../../../internal/observation/match.go#L428-L443)。
 5. **最终灾难**：
    - `Card_B` 的外层卡片容器变成了 `Card_A` 的 `n10`，收藏按钮变成了 `Card_A` 的 `n12`；带 resource 的标题也错拿旧 `Card_A` 的标题 ref，而无 resource 的唯一标题会以 `n21` 跨父挂到 `n10`。两种分支都撕裂了同一张卡片内部的连续性。
    - 对无 resource 标题分支，`diff.go` 会看到 `n21` 从旧父 `n20` 迁到 `n10`；对共享 resource 标题分支，即使容器错配，标题也失去本可保留的内容证据。若新滑入卡片再触发差分的跨父/删除限制，输出会进一步退化为 `full`。
@@ -112,14 +119,14 @@ return unit.ref, unit.position, true
 
 #### 2.1.1 继续使用现行 `matchKey`，明确字段来源与三态规则
 
-基线代码已经使用 `matchKey`。字段与生成逻辑见 [internal/observation/match.go:44-102](../../../internal/observation/match.go#L44-L102)。本提案扩展原结构，不引入另一套节点签名。
+基线代码已经使用 `matchKey`。字段与生成逻辑见 [internal/observation/match.go:44-102](../../../../internal/observation/match.go#L44-L102)。本提案扩展原结构，不引入另一套节点签名。
 
-原始字段的“已知/未知”规则直接来自 [internal/device/types.go:79-118](../../../internal/device/types.go#L79-L118)：
+原始字段的“已知/未知”规则直接来自 [internal/device/types.go:79-118](../../../../internal/device/types.go#L79-L118)：
 
 - 只有 `raw.ResourceSet && raw.ResourceID != ""` 才令 `hasRes=true`。`ResourceSet=false` 与“显式报告空资源”都不能被推断为某个可见资源身份。
 - 保护态只用 `raw.HasPassword && raw.Password`；不得直接读取可能未上报的 `raw.Password` 单独作判据。
 - `tap/long_press/text/swipe` 分别只由 `HasClickable/Clickable`、`HasLongClick/LongClickable`、`Editable`、`HasScrollable/Scrollable` 产生。未知能力不转成默认 `false` 或默认 `true`；进入 identity 的是已经投影的 action mask。
-- 普通 label 只取 `TextSet && Text != ""` 和 `DescSet && Description != ""` 的非空部分；描述作为输入锚点也只在 `DescSet` 时可用，保护输入不把描述或文本当作公开内容身份。基线 `labelParts()` 见 [build.go:345-360](../../../internal/observation/build.go#L345-L360)。
+- 普通 label 只取 `TextSet && Text != ""` 和 `DescSet && Description != ""` 的非空部分；描述作为输入锚点也只在 `DescSet` 时可用，保护输入不把描述或文本当作公开内容身份。基线 `labelParts()` 见 [build.go:345-360](../../../../internal/observation/build.go#L345-L360)。
 - 非输入、非保护的文本/描述 label 在存在 resource ID 时也保留。resource 回答“这是模板里的哪个字段”，label 回答“当前是哪一条内容”，两者承担不同作用。
 
 计划中的 `signature()` 保持现行函数形态：
@@ -153,9 +160,9 @@ func signature(raw *device.RawNode, role protocol.Role) matchKey {
 
 #### 2.1.2 `hasIdentity()` 负责资格，`sameUnit()` 负责显式字段等价
 
-现行 [hasIdentity()](../../../internal/observation/match.go#L488-L499) 已经按角色区分身份资格：输入框可由 class、resource 或非空描述提供资格；普通节点要求 resource 或 label；保护节点可单独构成身份。这个资格规则继续保留。
+现行 [hasIdentity()](../../../../internal/observation/match.go#L488-L499) 已经按角色区分身份资格：输入框可由 class、resource 或非空描述提供资格；普通节点要求 resource 或 label；保护节点可单独构成身份。这个资格规则继续保留。
 
-基线 [sameUnit()](../../../internal/observation/match.go#L665-L671) 比较 role、class、package、resource presence/value、label 与 protected，**没有比较 actions、editable 或 input anchor**。同父 Pass 2 还会用 `countCurrentIdentitySiblings()` 要求当前侧同键候选恰为一个，因此一个无 resource、无描述的 EditText 只要在已匹配父节点下旧、新两侧各只有一个，现行测试就会保号；两个同 class 输入则全部不保号。基线证据见 [match.go:338-358](../../../internal/observation/match.go#L338-L358) 与 [continuity_test.go:86-101](../../../internal/observation/continuity_test.go#L86-L101)。
+基线 [sameUnit()](../../../../internal/observation/match.go#L665-L671) 比较 role、class、package、resource presence/value、label 与 protected，**没有比较 actions、editable 或 input anchor**。同父 Pass 2 还会用 `countCurrentIdentitySiblings()` 要求当前侧同键候选恰为一个，因此一个无 resource、无描述的 EditText 只要在已匹配父节点下旧、新两侧各只有一个，现行测试就会保号；两个同 class 输入则全部不保号。基线证据见 [match.go:338-358](../../../../internal/observation/match.go#L338-L358) 与 [continuity_test.go:86-101](../../../../internal/observation/continuity_test.go#L86-L101)。
 
 计划中的 `sameUnit()` 使用显式字段表，避免旧草案的 `a == b` 隐式包含未来字段，也避免基线漏掉 actions、editable 与 input anchor：
 
@@ -190,7 +197,7 @@ func eligibleForGlobalExact(k matchKey) bool {
 
 调用点仍先执行 `hasIdentity(a) && hasIdentity(b)`。全局精确 pass 另需执行 `eligibleForGlobalExact()`；它允许普通身份节点以及带 resource 或非空描述锚点的 input，但排除“仅凭 class 获得资格”的无锚点 input。因此：
 
-- 有唯一 class 的无资源、无描述 EditText 仍可在已锚定父节点下按 `sameUnit` 保号。现行逻辑正是由 Pass 2 完成这一点，见 [match.go:338-365](../../../internal/observation/match.go#L338-L365)；不能把 `resource/label` 守卫写进 `sameUnit` 本身。
+- 有唯一 class 的无资源、无描述 EditText 仍可在已锚定父节点下按 `sameUnit` 保号。现行逻辑正是由 Pass 2 完成这一点，见 [match.go:338-365](../../../../internal/observation/match.go#L338-L365)；不能把 `resource/label` 守卫写进 `sameUnit` 本身。
 - 两个同 class 的无锚点输入框在同一父节点下会形成两侧各 2 个候选，必须全部不匹配；不能因遍历先后让第一个输入框抢走唯一旧 ref。
 - 唯一但跨父的无锚点 input 也不能由全局 Pass 3 配对；只有同父 Pass 2 的完整单元唯一规则可以接受它。
 - 输入值不进入 `matchKey`。资源或非空描述继续由专用输入锚点规则帮助跨值修改保号。
@@ -199,11 +206,11 @@ func eligibleForGlobalExact(k matchKey) bool {
 
 现行输入行为需要按以下顺序保留：
 
-1. **同父 Pass 2 精确单元**：无资源、无描述输入框由 role/class/package/resource presence、label、anchor、actions、editable、protected 的完整字段在已匹配父节点下双向唯一匹配。基线对应逻辑不考虑 actions/anchor，本提案补齐；现有 [TestContinuityInputValueChangeWithoutAnchorKeepsRef](../../../internal/observation/continuity_test.go#L86-L101) 覆盖“单个输入框值修改后仍保号”。
-2. **同父 Pass 4 输入锚点**：基线 [sameInputAnchor()](../../../internal/observation/match.go#L674-L688) 要求 role/class/package/protected 一致；两侧都有 resource 时比较 resource，两侧都无 resource 时要求非空描述相同。提案再要求 actions 相同；用户输入值仍不进入身份。
+1. **同父 Pass 2 精确单元**：无资源、无描述输入框由 role/class/package/resource presence、label、anchor、actions、editable、protected 的完整字段在已匹配父节点下双向唯一匹配。基线对应逻辑不考虑 actions/anchor，本提案补齐；现有 [TestContinuityInputValueChangeWithoutAnchorKeepsRef](../../../../internal/observation/continuity_test.go#L86-L101) 覆盖“单个输入框值修改后仍保号”。
+2. **同父 Pass 4 输入锚点**：基线 [sameInputAnchor()](../../../../internal/observation/match.go#L674-L688) 要求 role/class/package/protected 一致；两侧都有 resource 时比较 resource，两侧都无 resource 时要求非空描述相同。提案再要求 actions 相同；用户输入值仍不进入身份。
 3. **无锚点兜底不算全局身份**：没有 resource、没有非空描述且 class 相同的输入框，只能在同一已匹配父节点内按完整 shape 双向唯一时保号。候选数任一大于 1，全部放弃，不引入坐标或遍历优先。
 
-提案会把 `actions` 纳入 exact/input/public 比较，以符合正式契约 [docs/architecture.md:274-278](../../../docs/architecture.md#L274-L278) 的身份维度。保护态或已公开动作变化改变 identity，不允许只凭 resource 复用旧 ref。无锚点 input 的例外只放宽“是否需要描述/resource 才能在**同父**下识别”，不放宽全局作用域。
+提案会把 `actions` 纳入 exact/input/public 比较，以符合正式契约 [docs/architecture.md:274-278](../../../../docs/architecture.md#L274-L278) 的身份维度。保护态或已公开动作变化改变 identity，不允许只凭 resource 复用旧 ref。无锚点 input 的例外只放宽“是否需要描述/resource 才能在**同父**下识别”，不放宽全局作用域。
 
 同父输入锚点 pass 的计划判定为：
 
@@ -248,7 +255,7 @@ func sameResourceOnly(a, b matchKey) bool {
 
 #### 2.1.5 公开身份回退补齐 actions
 
-现行 [publicSignature()](../../../internal/observation/match.go#L140-L158) 只保存公开 role、label、resource、anchor、editable、protected；[samePublicUnit()](../../../internal/observation/match.go#L656-L663) 也没有比较 actions。这与正式文档的身份维度不一致。提案计划让 `publicKey` 携带已投影 action mask，并由 `samePublicUnit()` 比较该字段。
+现行 [publicSignature()](../../../../internal/observation/match.go#L140-L158) 只保存公开 role、label、resource、anchor、editable、protected；[samePublicUnit()](../../../../internal/observation/match.go#L656-L663) 也没有比较 actions。这与正式文档的身份维度不一致。提案计划让 `publicKey` 携带已投影 action mask，并由 `samePublicUnit()` 比较该字段。
 
 ```go
 type publicKey struct {
@@ -318,7 +325,7 @@ flowchart TD
 
 #### 公共索引与术语
 
-匹配全部发生在**公开投影树**上，而不是 raw 直接父子关系上。现行实现已经先用 `preorder(cap)` 保留 `units[i].published` 节点，再用 [nearestPublishedParent()](../../../internal/observation/match.go#L590-L610) 跳过未发布 raw 祖先，见 [match.go:212-225](../../../internal/observation/match.go#L212-L225)。提案复用同一语义，并为新旧帧建立：
+匹配全部发生在**公开投影树**上，而不是 raw 直接父子关系上。现行实现已经先用 `preorder(cap)` 保留 `units[i].published` 节点，再用 [nearestPublishedParent()](../../../../internal/observation/match.go#L590-L610) 跳过未发布 raw 祖先，见 [match.go:212-225](../../../../internal/observation/match.go#L212-L225)。提案复用同一语义，并为新旧帧建立：
 
 - `order`：公开节点前序；
 - `parent`：公开直接父；
@@ -334,7 +341,7 @@ Stage 1、Stage 2、Stage 4 的每个 pass，以及 Stage 3/5 的每个 proposal
 
 #### Stage 1：唯一结构容器自顶向下匹配（`matchUniqueContainers`）
 
-合成 root 是“当前显示”的阅读单元，不是应用节点。只要 previous snapshot 存在，就在任何形状匹配之前无条件令 `refs[cap.Root] = prev.root.Ref`，并令当前 root 的 previous 父位置指向 previous root；现行实现见 [match.go:266-279](../../../internal/observation/match.go#L266-L279)。raw root 的 class/package 形状变化不得令合成 root 换号。
+合成 root 是“当前显示”的阅读单元，不是应用节点。只要 previous snapshot 存在，就在任何形状匹配之前无条件令 `refs[cap.Root] = prev.root.Ref`，并令当前 root 的 previous 父位置指向 previous root；现行实现见 [match.go:266-279](../../../../internal/observation/match.go#L266-L279)。raw root 的 class/package 形状变化不得令合成 root 换号。
 
 其余节点按公开 `order` 自顶向下处理：
 
@@ -454,13 +461,13 @@ Stage 5 只运行一次。完成后允许重新运行 Stage 4 的局部恢复，
 Wmax = 128 * (Np + Nc + 1) + 65_536
 ```
 
-这是本提案选定的实现初值。当前层级制品限制为最大深度 50、单次最多 20,000 个 raw 节点，见 [hierarchy.go:15](../../../internal/android/hierarchy.go#L15) 与 [hierarchy.go:18](../../../internal/android/hierarchy.go#L18)；这些限制只用于给 `128` 和 `65_536` 选择保守余量，不能据此声称已证明 50 层传播的严格工作量上界。两棵 20,000 节点公开树达到上限时，公式给出约 5.18M 个确定性计费操作。该值没有经过性能实测，只通过可选匹配推断的停点控制保号率；初值偏低时结果是更多节点分配新号及更保守的 delta，初值偏高时是更多计算，二者都不能授权未经证明的 ref 复用。
+这是本提案选定的实现初值。当前层级制品限制为最大深度 50、单次最多 20,000 个 raw 节点，见 [hierarchy.go:15](../../../../internal/android/hierarchy.go#L15) 与 [hierarchy.go:18](../../../../internal/android/hierarchy.go#L18)；这些限制只用于给 `128` 和 `65_536` 选择保守余量，不能据此声称已证明 50 层传播的严格工作量上界。两棵 20,000 节点公开树达到上限时，公式给出约 5.18M 个确定性计费操作。该值没有经过性能实测，只通过可选匹配推断的停点控制保号率；初值偏低时结果是更多节点分配新号及更保守的 delta，初值偏高时是更多计算，二者都不能授权未经证明的 ref 复用。
 
 预算只统计算法检查，例如“检查一个节点是否命中桶”“比较一对候选是否同键”“检查一个匹配对是否属于容器/区间”“校验一个 proposal 端点”。每次命中不在扫描中途修改映射；若当前 batch 在应用前耗尽预算，放弃这一整批，保留此前已原子提交的唯一匹配，然后停止所有可选推断。不得用墙钟、随机 map 顺序或后台超时决定截断点。
 
 桶和 proposal 的遍历顺序由公开前序首次出现顺序决定，map 只做查找，不作为迭代顺序来源。测试记录剩余预算和枚举原因码；这些 `matchSource/budget` 仅用于内部测试或批准的事件计数，不进入公开树或日志正文。
 
-预算耗尽时，root 的既有 ref 继续，随后按公开前序把所有剩余未匹配节点从 Builder 当前会话高水位 `b.nextRef` 分配新号。这个降级只降低保号率，不会把未证明候选挪给旧 ref；多余的新号会令 delta 更保守，但不会破坏 Ref 唯一性。`Candidate` 中被丢弃的构建本来就通过 [build.go:83-94](../../../internal/observation/build.go#L83-L94) 恢复旧 `prev/nextRef`，所以试探分配也不会污染后续发布树。
+预算耗尽时，root 的既有 ref 继续，随后按公开前序把所有剩余未匹配节点从 Builder 当前会话高水位 `b.nextRef` 分配新号。这个降级只降低保号率，不会把未证明候选挪给旧 ref；多余的新号会令 delta 更保守，但不会破坏 Ref 唯一性。`Candidate` 中被丢弃的构建本来就通过 [build.go:83-94](../../../../internal/observation/build.go#L83-L94) 恢复旧 `prev/nextRef`，所以试探分配也不会污染后续发布树。
 
 ---
 
@@ -532,7 +539,7 @@ func (b *Builder) matchRefs(cap *device.Capture, units []unit, refs []string) {
 }
 ```
 
-入口伪代码保留基线 [matchRefs()](../../../internal/observation/match.go#L181-L184) 的 Builder 方法及原地写 `refs` 形态。新号来自 [match.go:248-256](../../../internal/observation/match.go#L248-L256) 的 `b.nextRef`；root 延续见 [match.go:266-279](../../../internal/observation/match.go#L266-L279)。[build.go:83-94](../../../internal/observation/build.go#L83-L94) 的 Candidate 回滚负责恢复试探构建期间的 `prev/nextRef`，不存在按上一帧可见 ref 最大值重算的高水位，也不存在由调用方写回的第二计数器。
+入口伪代码保留基线 [matchRefs()](../../../../internal/observation/match.go#L181-L184) 的 Builder 方法及原地写 `refs` 形态。新号来自 [match.go:248-256](../../../../internal/observation/match.go#L248-L256) 的 `b.nextRef`；root 延续见 [match.go:266-279](../../../../internal/observation/match.go#L266-L279)。[build.go:83-94](../../../../internal/observation/build.go#L83-L94) 的 Candidate 回滚负责恢复试探构建期间的 `prev/nextRef`，不存在按上一帧可见 ref 最大值重算的高水位，也不存在由调用方写回的第二计数器。
 
 最小反例：会话最高曾分配 `n20`，上一帧目前只可见 `n1,n11`，Builder 的 `b.nextRef` 已是 21。若按“上一帧可见 ref 最大值”加一，会从 12 分配并可能复活已消失的 `n12..n20`；正确做法始终从 Builder 的 21 继续，并在 Candidate 被丢弃时由既有回滚保留原 21。这个语义避免已消失 ref 被复活，也不依赖 root 或上一帧的排序。
 
@@ -1068,7 +1075,7 @@ Stage 5 可以从同一 `baseR` 接受 G1，但 G2 仍没有独立固定点，�
 
 ### 4.5 输入框的作用域反例
 
-- 单个无 resource、无描述 EditText 在已匹配父节点下从空值变为 `"hello"`：输入值不进入 key，旧、新同父精确桶各 1 个，保号；这是现有测试 [continuity_test.go:86-101](../../../internal/observation/continuity_test.go#L86-L101) 覆盖的行为。
+- 单个无 resource、无描述 EditText 在已匹配父节点下从空值变为 `"hello"`：输入值不进入 key，旧、新同父精确桶各 1 个，保号；这是现有测试 [continuity_test.go:86-101](../../../../internal/observation/continuity_test.go#L86-L101) 覆盖的行为。
 - 两个同 class、同 action 的无锚点 EditText 同父并存：任一 pass 的未匹配旧桶和新桶都为 2，二者全部取新号，不能第一个先抢 `nX`。
 - 唯一无锚点 EditText 从父 A 移到父 B：同父规则不再适用，全局 Pass 3 因 `eligibleForGlobalExact=false` 跳过它；它取新号，不能用“全树只有一个”跨父猜配。
 
@@ -1091,9 +1098,9 @@ Stage 5 可以从同一 `baseR` 接受 G1，但 G2 仍没有独立固定点，�
 
 | 路径 | 计划内容 |
 | --- | --- |
-| [internal/observation/match.go](../../../internal/observation/match.go) | 1. 扩展 `matchKey/publicKey` 的实际比较字段；<br>2. 增加 `sameResourceOnly`、全局 input 作用域守卫、`localUnmatchedUniverse/globalFullUniverse` 批量桶选择与 `matchSource` 内部状态；<br>3. 建立公开 parent/children/Euler 索引；<br>4. 按 Stage 1–5 替换容器优先的逐节点抢配；<br>5. 全局 Pass 3/6 先对完整公开树建桶与定基数，再检查端点是否未匹配；<br>6. 实现确定性预算与安全收尾。 |
-| [internal/observation/continuity_test.go](../../../internal/observation/continuity_test.go) | 保留现有保号、角色变化、复现节点、歧义重复、root 和跨父用例，并加入本节 5.2 的连续性/反例测试。 |
-| [internal/observation/candidate_test.go](../../../internal/observation/candidate_test.go) | 保留现有 [TestCandidateDoesNotAdvanceContinuity:26-58](../../../internal/observation/candidate_test.go#L26-L58) 对“丢弃候选不消耗新号”的证明；若索引或多阶段分配改变，只扩展该路径，不另建第二套高水位。 |
+| [internal/observation/match.go](../../../../internal/observation/match.go) | 1. 扩展 `matchKey/publicKey` 的实际比较字段；<br>2. 增加 `sameResourceOnly`、全局 input 作用域守卫、`localUnmatchedUniverse/globalFullUniverse` 批量桶选择与 `matchSource` 内部状态；<br>3. 建立公开 parent/children/Euler 索引；<br>4. 按 Stage 1–5 替换容器优先的逐节点抢配；<br>5. 全局 Pass 3/6 先对完整公开树建桶与定基数，再检查端点是否未匹配；<br>6. 实现确定性预算与安全收尾。 |
+| [internal/observation/continuity_test.go](../../../../internal/observation/continuity_test.go) | 保留现有保号、角色变化、复现节点、歧义重复、root 和跨父用例，并加入本节 5.2 的连续性/反例测试。 |
+| [internal/observation/candidate_test.go](../../../../internal/observation/candidate_test.go) | 保留现有 [TestCandidateDoesNotAdvanceContinuity:26-58](../../../../internal/observation/candidate_test.go#L26-L58) 对“丢弃候选不消耗新号”的证明；若索引或多阶段分配改变，只扩展该路径，不另建第二套高水位。 |
 | `internal/observation/refstability_test.go`（计划新增） | 若实施选择新增该文件，则覆盖多轮滚动、全局单调新号、Candidate 丢弃回滚和不同遍历顺序的确定性；不把它写成已有文件。 |
 | 构建/事件计数适配 | 仅当实施需要暴露预算截断的内部测试接缝或批准事件计数时修改；不得把匹配 key、投票集合、标签或正文写入日志。 |
 
@@ -1134,15 +1141,36 @@ Stage 5 可以从同一 `baseR` 接受 G1，但 G2 仍没有独立固定点，�
 
 | 发现 | 提案落点 | 基线证据与反例 | 路线内修正 | 验收 |
 | --- | --- | --- | --- | --- |
-| 1. 无锚点 input 的同父行为与草案的全局作用域混淆 | [02-ref-matching-and-continuity.md:158-231](02-ref-matching-and-continuity.md#L158-L231) | [match.go:338-358](../../../internal/observation/match.go#L338-L358) 已按父锚点处理 Pass 2；[match.go:488-498](../../../internal/observation/match.go#L488-L498) 让 class-only input 也有身份资格，因此若直接搬进全局 Pass 3，唯一但跨父的 EditText 会被错配。基线本身没有“无锚点只能同父”的全局守卫 | 同父 Pass 2 保留双端唯一保号；全局 exact 增加 `eligibleForGlobalExact()`，排除无 resource/无描述 input；`sameInputAnchor()` 补 actions | 5.2 第 1、13 项 |
-| 2. Stage 3 的单向候选不足以证明完整容器 | [02-ref-matching-and-continuity.md:360-397](02-ref-matching-and-continuity.md#L360-L397)、[02-ref-matching-and-continuity.md:542-623](02-ref-matching-and-continuity.md#L542-L623) | 基线只建立公开 parent/children 后逐 pass 匹配，见 [match.go:212-225](../../../internal/observation/match.go#L212-L225)，没有 Stage 3；草案若只验证“当前 c 的已匹配后代都指向旧 p”，最小反例是旧 p 另有后代已匹配到 c 外，仍会误把 p 交给 c | 统一要求 `R_c != ∅ && R_c == R_p`，完整集合同时排除 split/merge/跨 anchor；同一 `R` 快照构造并原子应用 batch | 5.2 第 3、4 项 |
-| 3. “剩余唯一”和逐节点即时提交仍会按遍历事实抢配 | [02-ref-matching-and-continuity.md:281-295](02-ref-matching-and-continuity.md#L281-L295)、[02-ref-matching-and-continuity.md:398-415](02-ref-matching-and-continuity.md#L398-L415) | 基线容器 pass 在 [match.go:291-335](../../../internal/observation/match.go#L291-L335) 逐节点查 `used`。最小反例：旧 A..E → 新 B..F，Stage 3 配完 B..E 后旧 A、新 F 恰都“剩余 1”，若 Local-Structure 只看未匹配集合就会再次 A↔F | 每个 pass 先快照；同父身份 pass 只对 pass 起始未匹配直接子各 1 配对；Local-Structure 统计父内全部同形兄弟；全局 Pass 3/6 另按完整公开树定桶基数；冲突整批不提交 | 5.2 第 2、5 项 |
-| 4. Stage 4 的固定轮数和严格线性复杂度没有证明 | [02-ref-matching-and-continuity.md:398-464](02-ref-matching-and-continuity.md#L398-L464) | 最深 50 的匿名嵌套中可每轮只新锚定一层；基线层级上限 [hierarchy.go:15](../../../internal/android/hierarchy.go#L15)、[hierarchy.go:18](../../../internal/android/hierarchy.go#L18) 只给有限深度/节点数，不能推出 `O(N)`；`Wmax` 也没有性能实测 | dirty queue 传播到固定点或预算耗尽；索引、期望线性 hash 扫描、潜在二次候选检查和确定性预算分开描述；采用 `Wmax = 128*(Np+Nc+1)+65_536` 初值；耗尽时剩余节点全分新号，偏低结果只增加新号与 delta 保守度 | 5.2 第 11、14 项 |
-| 5. Stage 5 的零位移旧守卫不要求任何固定点 | [02-ref-matching-and-continuity.md:416-441](02-ref-matching-and-continuity.md#L416-L441)、[02-ref-matching-and-continuity.md:893-994](02-ref-matching-and-continuity.md#L893-L994) | 基线 ordinal 只比较同形总数并取同 rank，见 [match.go:539-570](../../../internal/observation/match.go#L539-L570)。最小反例：旧 A/B 全换 C/D、无任何唯一匹配，旧草案仍会把 A↔C、B↔D | 要求 `K>1`、两侧等数、至少一个 pre-Stage-5 同 rank 独立强固定点；ordinal pair 本身不算证据；任一既有配对移位、跨 shape 桶或 reverse 冲突即整桶拒绝；Stage 5 只跑一次 | 5.2 第 6–9 项 |
-| 6. 旧伪码的类型、索引与 ref 高水位均与基线不符 | [02-ref-matching-and-continuity.md:319-334](02-ref-matching-and-continuity.md#L319-L334)、[02-ref-matching-and-continuity.md:470-538](02-ref-matching-and-continuity.md#L470-L538) | 基线入口 [match.go:181-184](../../../internal/observation/match.go#L181-L184) 是 Builder 方法；新号从 [match.go:248-256](../../../internal/observation/match.go#L248-L256) 的 `b.nextRef` 来；公开父见 [match.go:212-225](../../../internal/observation/match.go#L212-L225)，root 见 [match.go:266-279](../../../internal/observation/match.go#L266-L279)。最小反例：上一帧可见 `n1,n11` 但 Builder 已到 21，按上一帧可见最大值从 12 续号会复活旧 ref | 伪码改回 `(b *Builder) matchRefs(...)`、`matchKey/publicKey/unit`、`cap.Root` 与公开 parent/children/Euler 索引；新号只用 `b.nextRef`，Candidate 仍回滚试探状态 | 5.2 第 10 项 |
-| 7. Has*、重复内容和预算截断缺少端到端验收 | [02-ref-matching-and-continuity.md:117-156](02-ref-matching-and-continuity.md#L117-L156)、[02-ref-matching-and-continuity.md:442-464](02-ref-matching-and-continuity.md#L442-L464)、[02-ref-matching-and-continuity.md:996-1022](02-ref-matching-and-continuity.md#L996-L1022) | [types.go:79-118](../../../internal/device/types.go#L79-L118) 把 presence 与值分开；只有 `ResourceSet && ResourceID != ""`、`HasPassword && Password` 才是对应 positive evidence。最小反例：同 resource、同 label 的重复行没有唯一证据，却因同 rank 被复用 | 明确 TextSet/DescSet/ResourceSet/HasClickable/HasLongClick/HasScrollable/HasPassword 规则；重复内容无固定点即新号；预算按确定性逻辑操作计费，耗尽只停止推断并给剩余节点分新号；`Wmax` 初值未经性能实测 | 5.2 第 11–13 项 |
-| 8. 局部消耗重复项会把剩余 `1/1` 伪造成全局唯一 | [02-ref-matching-and-continuity.md:281-295](02-ref-matching-and-continuity.md#L281-L295)、[02-ref-matching-and-continuity.md:347-358](02-ref-matching-and-continuity.md#L347-L358)、[02-ref-matching-and-continuity.md:695-891](02-ref-matching-and-continuity.md#L695-L891)、[02-ref-matching-and-continuity.md:1075-1084](02-ref-matching-and-continuity.md#L1075-L1084) | 基线 exact 全局 pass 对旧侧跳过 `usedPos`，当前侧却由 [match.go:367-383](../../../internal/observation/match.go#L367-L383) 与 [match.go:501-511](../../../internal/observation/match.go#L501-L511) 扫描全部当前身份；public pass 同构，见 [match.go:447-465](../../../internal/observation/match.go#L447-L465)、[match.go:636-648](../../../internal/observation/match.go#L636-L648)。若草案把两侧都改成剩余集合，旧 A/B 与新 A/C 在局部消耗 A 后会留下旧 B/新 C 的 `1/1` | Pass 2/2b/4/5 保留 `localUnmatchedUniverse`；Pass 3/6 使用 `globalFullUniverse`，matched 与 unmatched 全计入基数，只有完整桶各 1 且唯一端点未匹配才配对。局部 Pass 2b 的受限证据不得命名成全局唯一 | 5.2 第 14 项 |
+| 1. 无锚点 input 的同父行为与草案的全局作用域混淆 | [02-ref-matching-and-continuity.md:158-231](02-ref-matching-and-continuity.md#L158-L231) | [match.go:338-358](../../../../internal/observation/match.go#L338-L358) 已按父锚点处理 Pass 2；[match.go:488-498](../../../../internal/observation/match.go#L488-L498) 让 class-only input 也有身份资格，因此若直接搬进全局 Pass 3，唯一但跨父的 EditText 会被错配。基线本身没有“无锚点只能同父”的全局守卫 | 同父 Pass 2 保留双端唯一保号；全局 exact 增加 `eligibleForGlobalExact()`，排除无 resource/无描述 input；`sameInputAnchor()` 补 actions | 5.2 第 1、13 项 |
+| 2. Stage 3 的单向候选不足以证明完整容器 | [02-ref-matching-and-continuity.md:360-397](02-ref-matching-and-continuity.md#L360-L397)、[02-ref-matching-and-continuity.md:542-623](02-ref-matching-and-continuity.md#L542-L623) | 基线只建立公开 parent/children 后逐 pass 匹配，见 [match.go:212-225](../../../../internal/observation/match.go#L212-L225)，没有 Stage 3；草案若只验证“当前 c 的已匹配后代都指向旧 p”，最小反例是旧 p 另有后代已匹配到 c 外，仍会误把 p 交给 c | 统一要求 `R_c != ∅ && R_c == R_p`，完整集合同时排除 split/merge/跨 anchor；同一 `R` 快照构造并原子应用 batch | 5.2 第 3、4 项 |
+| 3. “剩余唯一”和逐节点即时提交仍会按遍历事实抢配 | [02-ref-matching-and-continuity.md:281-295](02-ref-matching-and-continuity.md#L281-L295)、[02-ref-matching-and-continuity.md:398-415](02-ref-matching-and-continuity.md#L398-L415) | 基线容器 pass 在 [match.go:291-335](../../../../internal/observation/match.go#L291-L335) 逐节点查 `used`。最小反例：旧 A..E → 新 B..F，Stage 3 配完 B..E 后旧 A、新 F 恰都“剩余 1”，若 Local-Structure 只看未匹配集合就会再次 A↔F | 每个 pass 先快照；同父身份 pass 只对 pass 起始未匹配直接子各 1 配对；Local-Structure 统计父内全部同形兄弟；全局 Pass 3/6 另按完整公开树定桶基数；冲突整批不提交 | 5.2 第 2、5 项 |
+| 4. Stage 4 的固定轮数和严格线性复杂度没有证明 | [02-ref-matching-and-continuity.md:398-464](02-ref-matching-and-continuity.md#L398-L464) | 最深 50 的匿名嵌套中可每轮只新锚定一层；基线层级上限 [hierarchy.go:15](../../../../internal/android/hierarchy.go#L15)、[hierarchy.go:18](../../../../internal/android/hierarchy.go#L18) 只给有限深度/节点数，不能推出 `O(N)`；`Wmax` 也没有性能实测 | dirty queue 传播到固定点或预算耗尽；索引、期望线性 hash 扫描、潜在二次候选检查和确定性预算分开描述；采用 `Wmax = 128*(Np+Nc+1)+65_536` 初值；耗尽时剩余节点全分新号，偏低结果只增加新号与 delta 保守度 | 5.2 第 11、14 项 |
+| 5. Stage 5 的零位移旧守卫不要求任何固定点 | [02-ref-matching-and-continuity.md:416-441](02-ref-matching-and-continuity.md#L416-L441)、[02-ref-matching-and-continuity.md:893-994](02-ref-matching-and-continuity.md#L893-L994) | 基线 ordinal 只比较同形总数并取同 rank，见 [match.go:539-570](../../../../internal/observation/match.go#L539-L570)。最小反例：旧 A/B 全换 C/D、无任何唯一匹配，旧草案仍会把 A↔C、B↔D | 要求 `K>1`、两侧等数、至少一个 pre-Stage-5 同 rank 独立强固定点；ordinal pair 本身不算证据；任一既有配对移位、跨 shape 桶或 reverse 冲突即整桶拒绝；Stage 5 只跑一次 | 5.2 第 6–9 项 |
+| 6. 旧伪码的类型、索引与 ref 高水位均与基线不符 | [02-ref-matching-and-continuity.md:319-334](02-ref-matching-and-continuity.md#L319-L334)、[02-ref-matching-and-continuity.md:470-538](02-ref-matching-and-continuity.md#L470-L538) | 基线入口 [match.go:181-184](../../../../internal/observation/match.go#L181-L184) 是 Builder 方法；新号从 [match.go:248-256](../../../../internal/observation/match.go#L248-L256) 的 `b.nextRef` 来；公开父见 [match.go:212-225](../../../../internal/observation/match.go#L212-L225)，root 见 [match.go:266-279](../../../../internal/observation/match.go#L266-L279)。最小反例：上一帧可见 `n1,n11` 但 Builder 已到 21，按上一帧可见最大值从 12 续号会复活旧 ref | 伪码改回 `(b *Builder) matchRefs(...)`、`matchKey/publicKey/unit`、`cap.Root` 与公开 parent/children/Euler 索引；新号只用 `b.nextRef`，Candidate 仍回滚试探状态 | 5.2 第 10 项 |
+| 7. Has*、重复内容和预算截断缺少端到端验收 | [02-ref-matching-and-continuity.md:117-156](02-ref-matching-and-continuity.md#L117-L156)、[02-ref-matching-and-continuity.md:442-464](02-ref-matching-and-continuity.md#L442-L464)、[02-ref-matching-and-continuity.md:996-1022](02-ref-matching-and-continuity.md#L996-L1022) | [types.go:79-118](../../../../internal/device/types.go#L79-L118) 把 presence 与值分开；只有 `ResourceSet && ResourceID != ""`、`HasPassword && Password` 才是对应 positive evidence。最小反例：同 resource、同 label 的重复行没有唯一证据，却因同 rank 被复用 | 明确 TextSet/DescSet/ResourceSet/HasClickable/HasLongClick/HasScrollable/HasPassword 规则；重复内容无固定点即新号；预算按确定性逻辑操作计费，耗尽只停止推断并给剩余节点分新号；`Wmax` 初值未经性能实测 | 5.2 第 11–13 项 |
+| 8. 局部消耗重复项会把剩余 `1/1` 伪造成全局唯一 | [02-ref-matching-and-continuity.md:281-295](02-ref-matching-and-continuity.md#L281-L295)、[02-ref-matching-and-continuity.md:347-358](02-ref-matching-and-continuity.md#L347-L358)、[02-ref-matching-and-continuity.md:695-891](02-ref-matching-and-continuity.md#L695-L891)、[02-ref-matching-and-continuity.md:1075-1084](02-ref-matching-and-continuity.md#L1075-L1084) | 基线 exact 全局 pass 对旧侧跳过 `usedPos`，当前侧却由 [match.go:367-383](../../../../internal/observation/match.go#L367-L383) 与 [match.go:501-511](../../../../internal/observation/match.go#L501-L511) 扫描全部当前身份；public pass 同构，见 [match.go:447-465](../../../../internal/observation/match.go#L447-L465)、[match.go:636-648](../../../../internal/observation/match.go#L636-L648)。若草案把两侧都改成剩余集合，旧 A/B 与新 A/C 在局部消耗 A 后会留下旧 B/新 C 的 `1/1` | Pass 2/2b/4/5 保留 `localUnmatchedUniverse`；Pass 3/6 使用 `globalFullUniverse`，matched 与 unmatched 全计入基数，只有完整桶各 1 且唯一端点未匹配才配对。局部 Pass 2b 的受限证据不得命名成全局唯一 | 5.2 第 14 项 |
 
 ### 5.4 事实状态
 
 本分册仍是“提案，未实现”。本次修订实际完成的是基线源码/正式文档的只读核对、设计反例推演、相对链接与伪码符号检查；没有修改产品代码，没有执行新增连续性测试、构建或设备验证，因此不能把 4.x 场景写成“已单测”或“已实测”。实施时先按 §5.2 写失败用例，再落地算法，最后另记真实命令和结果。
+
+## 11. 实现结果
+
+实现提交：`900e640fe8343f92c4e8dd82dd3df839dde20756` 首次落地，最后由发行锚点 `049583d328e335c56d56f153b7464ea03f1ca814` 覆盖。公共记录见[实现与验证](../../../verification/observation-continuity-and-revalidation.md)与[统一基准](../../../verification/observation-continuity-benchmarks.md)。
+
+### 11.1 已落地
+
+| 提案条目 | 代码落点 | 验证范围 |
+| --- | --- | --- |
+| §2.1 身份签名与 source/input/action 边界 | `internal/observation/match.go` 的 `signature`、`publicSignature`、`sameUnit`、`sameInputAnchor`、`sameResourceOnly`、`eligibleForGlobalExact` | V07–V11 的身份、三态、重复与跨父反例 |
+| §2.2 五阶段双向锚定 | `match.go` 的 `buildPublicMatchIndex`、`matchUniqueContainers`、`matchContentPasses`、`matchContainersByDescendants`、`matchLocalUnderAnchoredParents`、`matchOrdinalContainersZeroShift` | 五卡滚动、后代集合投票、局部恢复、ordinal 固定点/冲突；V07–V11 |
+| 确定性预算、高水位与 Candidate/Rollback | `match.go` 的 `workBudget`、`matchState`；`internal/observation/build.go` 的 `Builder.Candidate`、`Builder.Preview`；`internal/engine/capture.go` 的提交门禁 | V10–V11、I01–I03、B02/B04 |
+
+### 11.2 与提案不同或未执行
+
+| 项 | 结论与理由 |
+| --- | --- |
+| 代码状态 | 五阶段、预算截断、局部恢复、ref 高水位与候选回滚代码全覆盖；代码状态与实机覆盖分开。 |
+| D02 | 3 轮均为 `gap`、`fail=0`、`result=partial`；固定 full 基线差分、ReadApply、ref 保留/F 新号和旧 O inspect 通过，但 `native_scroll_unavailable` 未覆盖，不能写整体 PASS。 |
+| D06 | 3 轮为固定 full 后的单个 delta，不能扩大为多 delta 连续性矩阵。 |
+| 实现偏差 | 没有把预算截断、局部恢复或高水位改成第二份状态权威，也没有以 D02 缺口改写算法完成状态。 |

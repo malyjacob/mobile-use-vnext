@@ -1,13 +1,17 @@
 # 观察连续性、结构差分与动作重验：实现与验证记录
 
-- 状态：**S0–S7 完成，最终实现提交门禁满足；完整制品、实机与归档结论在 S9–S10 定稿。**
-- 本次涉及实机：**截至本实现提交尚未进行**。当前证据为 Windows 主机的算法/假设备联动、统一基准、全仓测试、双语言候选编译及文档审计；完整发布清单与 D01–D06 在干净实现提交上执行，不能把当前证据称为实机通过。
-- 提案目录（仍保持“提案，未实现”）：[README.md](../proposals/observation-continuity-and-revalidation/README.md)、[分册 05 实施与验证计划](../proposals/observation-continuity-and-revalidation/05-implementation-and-validation-plan.md)。
+- 状态：**S0–S10 完成，维护记录已定稿。代码已按提案范围全部落地；实机与宿主证据存在有限缺口，用户已于 2026-11-16 明确接受并授权归档。**
+- 本次涉及实机：**是。** D01–D06 已在 contract 15 上执行。D01 来自 `bb43c19` 完整 release；D02–D05 及首轮 D06 运行于 `38f47e3` 发布链；docs-only 最终锚点 `049583d` 上重建、重部署、smoke 与 D06 复核结果另列。失败、gap 与来源限制均按实际报告保留。
+- 已归档提案：[README.md](../proposals/implemented/observation-continuity-and-revalidation/README.md)、[分册 05 实施与验证计划](../proposals/implemented/observation-continuity-and-revalidation/05-implementation-and-validation-plan.md)。
 - 代码基线：`6ec25c87daefbc01c99f78d968214304641d119d`（2026-11-15）。
 - 提案落盘提交：`70f390edc0af794649c74ce8ccab532b60f977ad`（`docs(maintenance): 新增观察连续性、结构差分与动作重验提案`）。
 - S1–S5 实现提交：`900e640fe8343f92c4e8dd82dd3df839dde20756`（`feat(observation,engine): 完成观察净化、连续性、B2差分与动作重验（S1-S5）`）。
+- S8 实现提交：`bb43c1943d66e3ea5fe5fd938f9a5b68c82dfdeb`。
+- S9 探针修复：`38f47e38fd85ffa8b79e8b9dbea13a4c00babe14`。
+- 最终 docs 澄清及发行源码锚点：`049583d328e335c56d56f153b7464ea03f1ca814`；该提交仅修改四份 `docs/`，没有源码、版本或运行时功能变化。
+- 全部实现提交：`900e640fe8343f92c4e8dd82dd3df839dde20756`、`bb43c1943d66e3ea5fe5fd938f9a5b68c82dfdeb`、`38f47e38fd85ffa8b79e8b9dbea13a4c00babe14`、`049583d328e335c56d56f153b7464ea03f1ca814`。
 - 环境：Windows 主机，`go1.27.1`，`GOEXPERIMENT=jsonv2`，`CGO_ENABLED=0`；工具目录为 `12` 个工具、`sha256=1a319cb307821d51bccfa1ed3df307c363b758973174623ee935c45bac2ffc55`；当前版本源为 `release=0.15.0 / contract=15 / android_version_code=17`（S1–S5 时为 `0.14.0 / 14 / 16`）。
-- 全部实现提交：`900e640fe8343f92c4e8dd82dd3df839dde20756` 与本记录所在的最终实现提交；S10 在后者落盘后登记完整 hash。
+- 设备为 `24117RK2CC / Android API 36`，报告 physical=`1440x3200` 覆盖 `1080x2400`，density=`600` 覆盖 `450`，会话模式为 `virtual`。
 
 ## 1. 阶段进度总览（S0–S10）
 
@@ -21,9 +25,9 @@
 | S5 动作策略与实际派发 | 已完成（已单测/假设备） | Tier 1–3 层级匹配、透明层三态与 L1/L2 约束、`tapFrame` 安全载体解绑、`scrollFrame` 同容器动态重规划、`text` `exact/near/shifted` 与焦点/来源门禁、`android` 传输/RPC 边界测试与 MCP schema/stdio/httpapi/client/probe 对齐（`V16–V20`、`I04–I08`、`B05` 基准） |
 | S6 联动与成本 | 已完成 | I01–I03 真实入口/18 项提交竞争门禁、I01–I08 回归；新增显示身份缺陷先红并修复；B01–B06 最终 61 个五样本子项与 6ec25c8 同驱动对照 |
 | S7 文档/版本/提交前构建 | 已完成 | 0.15.0/15/17、生成 freshness、九份 docs 独立审计 CLEAN；control/probe APK、vet、linux/arm64 构建及全仓 2,847 个 pass 事件 |
-| S8 最终实现提交 | 提交门禁已满足 | 本记录与完整源码/测试/版本/正式文档一起提交；提案仍保持 `提案，未实现` |
-| S9 完整制品与系统/实机 | 尚未执行 | 在 S8 干净 HEAD 构建/核验完整 release，再做部署、实际 MCP 进程刷新与 D01–D06；缺口须获用户接受 |
-| S10 验证记录/归档/发行锚点 | 尚未执行 | 先取得 S8 hash 及 S9 证据，再移动整目录、定稿 §11/链接/status 并单独提交；不 push |
+| S8 实现提交 | 已完成 | `bb43c19` 落盘 S6/S7、contract 15、生成物与九份正式 docs；提案当时仍保持“提案，未实现” |
+| S9 完整制品与系统/实机 | 已完成（有限验证，缺口已接受） | D01 来自 `bb43c19` 的完整 release；`38f47e3` 完成 probe 修复、完整 release、部署与 smoke，并执行 D02–D05 与首轮 D06；`049583d` 仅作四份 docs 澄清并重建、重部署、复跑 smoke/D06，D01–D05 来源不被迁移 |
+| S10 验证记录/归档/发行锚点 | 已完成 | 提案/验证记录进入单独归档提交；用户于 2026-11-16 接受缺口，四份 docs 经独立复检 CLEAN，发行源码固定为 `049583d` 的独立干净 checkout |
 
 ## 2. S1–S5 已落地内容与测试落点（`900e640`）
 
@@ -88,7 +92,7 @@ git diff --check
 
 ## 4. S6–S10 执行清单（阶段实绩见 §5 起）
 
-本次从提交 `900e640` 及维护提交 `bd77056` 继续，按 [分册 05 §10](../proposals/observation-continuity-and-revalidation/05-implementation-and-validation-plan.md) 的下列清单推进；清单本身不表示所列命令已经执行：
+以下清单写于 S6 开始前，保留当时计划原文；实际执行、结果与偏离以 §5 起的记录为准。当时依据为 [分册 05 §10](../proposals/implemented/observation-continuity-and-revalidation/05-implementation-and-validation-plan.md)。
 
 1. **S6（联动与成本）**：
    - 检查并补齐跨包端到端 `I01–I03` 测试（采集→净化→匹配→`ReadDiff`→固定基线多增量→`inspect` 原 `O`，以及 Candidate/Preview/STOP/显示代次竞争撤销），联合运行 `I01–I08`。
@@ -355,6 +359,31 @@ integration/interface/mcp/phone-operations/release/runbook；审计期间冻结 
 审计者修改文件。审计期间没有中断/重启未返回的任务；仅在首次明确配额失败后等待重置窗口，
 由原审计者续审。最终实现提交说明同时记录此失败原因、四类修正和 CLEAN 结论。
 
+### 6.1 S10 最终文档审计：Ollama/Nietzsche
+
+最终实现前，九份 docs 另交独立只读 Ollama/Nietzsche（max，agent
+`01a1e1c0-eeed-7021-afec-f27386835e31`）审计。此次与 S7 的 Gemini 审计是两个独立流程：
+S7 保留首次 `Individual quota reached` 后由原审计者续审并最终 CLEAN 的历史；S10 全程没有
+quota 错误、中断、重启或提供方错误。
+
+此前 `docs/architecture.md` 的 scroll 例外澄清本身已审计通过。完整九份 docs 首轮继续返回
+三类必须修正项：
+
+| 审计时位置 | 冲突 | 最小修正 |
+| --- | --- | --- |
+| `docs/control-protocol.md:46-56`、`docs/interface.md:590-600` | 五个 AppSync 字段标为必填，与实际允许省略不一致 | 按既有 wire 解析与省略语义统一为非必填 |
+| `docs/architecture.md:511-516`、`docs/phone-operations.md:179-183` | 把 21 KiB 单条优先压缩与 `complete → unconfirmed → pending` 驱逐顺序混同 | 分开描述压缩优先级和退休池驱逐顺序 |
+| `docs/control-protocol.md:214-215` | 把 service 换实例写成清除 pending STOP 的条件，顺序写反 | 明确 service 换实例不抹除既有 pending STOP 保留条件 |
+
+主协调者逐项对照源码复核后，交原文档作者 Ramanujan 对四份 docs 作最小修正；提交
+`049583d328e335c56d56f153b7464ea03f1ca814` 只改
+`docs/architecture.md`、`docs/control-protocol.md`、`docs/interface.md`、
+`docs/phone-operations.md`，统计为 35 insertions / 23 deletions，没有产品源码、版本号或
+运行时契约改动。修正后冻结九份 docs，交同一 Ollama/Nietzsche 只读审计者复检四份修改文件，
+并合并此前五份未改文件的审阅结论。最终原话为：
+
+> 本次全部九份docs CLEAN
+
 ## 7. S8 反向核对与提交边界
 
 分册 01–05 的当前默认范围均落地：源事实不改写、source/context 闭包及三态无 Defaults；
@@ -365,14 +394,16 @@ Tier 4 按已确认默认排除，没有增加动态文案转换。新增内部�
 
 本次完整实现提交涵盖 S6 补充、受控测试 APK fixture、版本源与生成物、九份 CLEAN 正式文档
 及 S6/S7 验证留痕；不提前修改六份提案的“提案，未实现”头部、不归档、不推送。
-S9 的正式 manifest 必须来自该提交的干净 HEAD，不能把提交前候选 APK 或旧版本清单充作发布证据。
+S9 首轮正式 manifest 来自该提交的干净 HEAD。其后的 `38f47e3` 只修复 probe，最终
+`049583d` 只澄清四份 docs；最终锚点仍需在独立干净 checkout 按 manifest 重新核验，不能把
+提交前候选 APK、旧版本清单或归档后的主树 HEAD 充作同源发布证据。
 
 ### 7.1 S9 探针修复：空 delta 读取与失败会话收尾
 
 已有 S8 实现提交为 `bb43c1943d66e3ea5fe5fd938f9a5b68c82dfdeb`。本次是两个缺陷的
 实现修复，不改变产品契约、版本源或正式文档，修复只涉及
 `scripts/mcp-probe/checks.go`、`probe_test.go`、`result_modes_test.go` 与
-`result_text.go`。新实现提交由协调者随后生成并登记；本节不预填提交 hash。
+`result_text.go`；修复提交为 `38f47e38fd85ffa8b79e8b9dbea13a4c00babe14`。
 
 真实失败与先红证据：
 
@@ -442,6 +473,215 @@ go test ./internal/engine -run 'TestWaitForPureSleepPublishesTimeoutFrame|TestWa
 - `./internal/engine`：退出 0，`ok`（`4.141s`）；两个指定 fake-device wait 用例通过。
 
 本次没有产品契约变化、源码 `docs/` 变更或版本变更。S7 的九份 `docs/*.md` 独立只读审计
-结论继续沿用为全部 CLEAN；本次未触发新的文档审计，也未以本实现记录自审代替独立审计。
-本节不登记后续 manifest、部署或 smoke 的通过结论，不把上述相关包测试表述为 S9 系统/实机
-PASS。
+结论继续对该时点有效；`38f47e3` 本身未触发新的 docs 审计。后续 docs-only `049583d`
+触发 §6.1 的独立审计，并由同一审计者复检至九份 CLEAN。本节只记录 probe 先红、修复及相关
+包回归；manifest、部署、smoke、D01–D06 的系统与实机结论见 §8。
+
+## 8. S9 完整制品、部署、smoke 与 D01–D06
+
+### 8.1 `38f47e3` 发布链与实机边界
+
+`38f47e38fd85ffa8b79e8b9dbea13a4c00babe14` 修复探针空 delta 解析及失败后自身会话收尾，
+随后在该干净 HEAD 上生成完整 release（未使用 `-SkipAndroid`），manifest 和 verifier 均记录
+`release=0.15.0 / contract=15 / android=0.15.0(17) / source_dirty=false`，六制品齐全。
+部署使用 `adb install -r` 覆盖安装并保留 App 私有数据；未卸载、未清库、未重配配对。最终
+`s9-final-smoke.log` 为 `RESULT PASS`，auth/Origin/token、connect、12 工具/schema、status、
+start、observe 图片、wait_for、shell、timeline、inspect、BACK、执行后观察与 end 均通过。
+
+在这条失败到修复的链路上，第一次默认 deploy 启动的 Origin 白名单与 probe 使用值不一致，
+请求返回 `403`；随后以 `-McpAllowedOrigins @('http://127.0.0.1:3000')` 重部署，使服务端
+白名单与既有 probe 配置一致。继续执行时 smoke 暴露空 delta 的文本解析错误。
+`38f47e3` 修复该解析与失败后会话收尾，重跑得到上述
+final smoke PASS；不能把此前那次 `403` 写成最终 smoke 失败，也不能把修复前的 parser 错误
+留作未解释的已知失败。
+
+Windows 宿主侧，协调者精确停止了旧 MCP 适配器 PID `6684`、`10504`，随后观察到
+`0.15.0` 进程 PID `6180`。这只登记实际观察到的进程序列；真实外部宿主刷新与重新发现
+仍由用户自行处理，未独立确认，不能仅凭 PID 变化写成宿主刷新验证完成。
+
+D01 的 contract 15 结果来自 `bb43c19` 的完整 release：control APK SHA-256
+`8536b366bd1ce9817e5b66b70d592dc3ac345ef90dddb4eccbc1324019c407c3`。旧 contract 14 与
+新 contract 15 共用同一 D01 fixture APK，SHA-256
+`35a67ff897912d8f51f0e3f3c51eb69eef53dffecb6209863f9410a2072849b6`。
+
+- 旧 contract 14 最终执行 5 次：4 pass、1 fail；iteration 4 为
+  `shell_result_unconfirmed / outcome=uncertain`，随后原会话受控 end 到 `ended`，报告总结果
+  仍为 fail。
+- 新 contract 15 执行 3 次且全部 pass，但报告总结果为 partial，因为
+  `d01_host_disk_log_proof=external_host_evidence_required` 仍缺独立宿主落盘证明。
+
+下表旧值为 4 个成功样本的中位，新值为 3 个成功样本的中位；失败轮次不计入中位。
+
+| 输入 | 侧 | compact 空叶 | public nodes | compact tree B | detailed tree B | inspect text B | observe text B |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | contract 14 | 0 | 9 | 815 | 957 | 851 | 1,218 |
+| 0 | contract 15 | 0 | 9 | 771 | 913 | 811 | 1,178 |
+| 32 | contract 14 | 32 | 42 | 1,755 | 2,776 | 2,063 | 1,716 |
+| 32 | contract 15 | 0 | 9 | 774 | 916 | 814 | 1,181 |
+| 256 | contract 14 | 256 | 266 | 8,240 | 15,209 | 10,466 | 5,291 |
+| 256 | contract 15 | 0 | 9 | 776 | 918 | 816 | 1,183 |
+
+三轮 contract 15 均保留 semantic sibling、text 与可 tap 的动作语义，并完成
+compact/detailed 与 text 测量。
+
+D02 `s9-closeout-d02.json` 为 3 个 case，均 `gap`、无 fail，总结果 partial；三轮唯一覆盖
+缺口均为 `native_scroll_unavailable`，且 `initial_scroll_skipped=true`。每轮 21/21 check
+为 true：首次 confirmed full 后，3 个 delta 均相对同一固定 full，3/3 与 inspect 一致，
+1/1 full 与 inspect 一致，`ReadApply` 恢复结果逐字段等于当前 inspect。三轮 delta/full
+比例均为 `0.1071 / 0.1530 / 0.1071`，中位 `0.1071`、最大 `0.1530`。旧 O 的 tree bytes
+前后均为 `2,530`、inspect text bytes 均为 `1,925`；B/C/D/E 的 card/title/body 各保留
+4 个稳定 ref，A 移除，F 出现时使用新 ref。该结果不写成 D02 整体 PASS，也不声称原生列表
+滚动已验证。
+
+D03 `s9-closeout-rerun-d03.json` 共 27 个 case：24 pass、3 fail，原报告
+`result=fail`。唯一失败为 `d03_scroll_full_blocker_reject` 三轮，三轮均记录 failed checks
+`no_blocker_tap / outcome_not_executed / no_effect_on_rejection`，actual
+`outcome=executed`、未记录错误码、`effect=not_observed`，fixture blocker tap 计数各 1。
+固定 fixture 把全尺寸可点击 blocker 作为所选 `ScrollView` 的同级兄弟节点加入同一
+`FrameLayout`；blocker 没有滚动祖先。现行契约明确“没有滚动祖先的候选不阻塞”，生产路径
+也按此执行，因此该项归类为 fixture 未覆盖现行受控滚动安全范围，原报告仍保留 fail。
+滚动中心线被容器作用域内完整阻断的 in-scope 负例仍未覆盖；顶层另保留
+`d03_primitive_count=service_internal_primitive_count_unavailable` gap。fixture 的 blocker
+点击监听计数不是服务内部 primitive 精确计数。
+
+D04 `s9-closeout-rerun-d04.json` 共 18 个 case：0 pass、3 fail、15 gap，顶层 17 个
+coverage gap。3 个 `d04_text_focus_readback` 的唯一 false check 为
+`focus_window_observed`；三轮均为 `focus_before=b / keyboard_before=hidden`、
+`focus_after=a / keyboard_after=hidden`，A 值读回精确、B 未变、
+`edits_a=1 / edits_b=0`，source 前后 stable、revision 未变，其余 readback、来源、其他字段
+与 cleanup checks 均为 true。失败原因是 fixture 没有构造出键盘顶起窗口，不是 A/B 绑定或
+读回错误。其余 15 个 source 变体输入与 duplicate binding 断言通过，但
+`focus_shift_window_unproven`、全局 `d04_focus_shift_race` 与
+`d04_primitive_count=text_watcher_callback_count_is_not_primitive_count` 仍为 gap。
+
+D05 最新 `s9-closeout-rerun-d05.json` 为 1 pass、1 fail，
+`result=admission_refused`：第一轮全部通过；第二轮直接发起新 `start` 时以
+`display_create_failed` 中止，原会话 end confirmed。不能写成三轮通过。旧
+`s9-closeout-d05.json` 保持原样：0 pass、3 fail，报告结果仍为 fail。每轮 27 checks 中
+唯一 false 为 `wait_p_outcome_not_executed`；实际撤权错误为 `control_revoked`，其余 26 项
+均 true：`busyP=waitP` 且 busy 返回 `device_busy`，wait 与其 status 均为
+`control_revoked`，原 P finished、原 O retired、无迟到观察，新 P/O 与旧 P/O、wait P 均
+不同，`can_start=true`，新会话 start/initial full/end confirmed。旧 fail 来自 driver 对
+只读 wait 强求 `outcome=not_executed` 的判据错误，但原报告不改写。最新与旧报告仍保留
+capture/preview/post-dispatch STOP 注入不可用的覆盖缺口。
+
+首轮 D06 在 `38f47e3` 上为 3/3 case pass，总结果因
+`external_s9_probe_required` 为 partial。每轮只执行 full→1 个 delta→`act key=BACK`→
+inspect→end，`delta_checks=1`、`later_deltas_checked=false`；该证据保留，不因后续锚点
+重跑而改写。
+
+### 8.2 `049583d` 最终发行锚点
+
+`049583d328e335c56d56f153b7464ea03f1ca814` 在 `38f47e3` 之后只修改
+`architecture.md`、`control-protocol.md`、`interface.md`、`phone-operations.md` 四份
+docs，统计为 35 insertions / 23 deletions。Go 服务、MCP、observation/engine 与固定制品源码
+没有功能变化；该提交是最终实现与发行来源，但归档提交不是发行源。
+
+在 `049583d` 的干净 HEAD 上运行完整 `./scripts/build-release.ps1`，未使用
+`-SkipAndroid`；`./scripts/verify-manifest.ps1 -Manifest build/release/manifest.json`
+返回：
+
+```text
+PASS manifest=build/release/manifest.json release=0.15.0 contract=15 android=0.15.0/17
+artifacts=6 tool_catalog=12/1a319cb307821d51bccfa1ed3df307c363b758973174623ee935c45bac2ffc55
+source_commit=049583d328e335c56d56f153b7464ea03f1ca814 source_dirty=False
+head=049583d328e335c56d56f153b7464ea03f1ca814
+```
+
+manifest 的 `built_at` 为 `2026-11-16T00:58:51Z`，没有可选 `complete` 字段；准确结论是
+“六制品齐全且现行 verifier PASS”，不补造 `complete=true`。
+
+| 制品 | 字节 | SHA-256 |
+| --- | ---: | --- |
+| `device-service` | 8,978,592 | `a04bb99b603dc482a0236339b4eb47f82505d85a283a2c7f9435c5196421f097` |
+| `device-mcp` | 9,175,200 | `c1f9eca808ea09b0a0748abdd57c31916da787dc469ef7508d40bf84703312f4` |
+| `control.apk` | 103,965 | `18a6e7ce612bd5ec1d70b9f78910169762dfb7ce09fbf4fb6c216da6362f6235` |
+| `u2.jar` | 3,306,229 | `28361193de3d13303543c13bdc7268c22edecabfa4e68e6fbdfc35fffe1406a3` |
+| `applist.dex` | 4,316 | `63818f32f7263d6be9136b2c5cb08c32e6eb1473c10ca1908f63f98c1f94dba8` |
+| `service.sh` | 3,643 | `4b568a9aa3078933b77db780e6db2617f20d1fe6ada5a8b8700d39f3a9d46ea0` |
+
+相较 `38f47e3`，Android 源码与版本没有变化；重新构建的 `control.apk` SHA-256 为
+`18a6e7ce...`，其余五个制品 hash 与 `38` 完全一致。未分析该 APK 字节差的来源。该对应
+关系不替代在 `38` 上取得的 D01–D05 原始报告，也不把它们改写成 `049` 实测。
+
+Host tools manifest 同样记录 `source_commit=049583d... / source_dirty=false /
+contract=15`，`./scripts/build-host-tools.ps1 -VerifyOnly` PASS、2 个制品：
+
+| 制品 | 字节 | SHA-256 |
+| --- | ---: | --- |
+| `device-mcp.exe` | 10,096,128 | `828b4bb0773c4c44c696890f2ab8cca1bbbdf3a3c312dbe4a81952816b9cf056` |
+| `mcp-probe.exe` | 9,704,960 | `b5a8d800c8ac7f5c4599b855ffeae8d84af5b9e1aef53a76d7d66293be37a0ea` |
+
+`s9-anchor-deploy.log` 的 manifest 与 HEAD 均为 `049583d`、`source_dirty=False`。控制 App
+以 `adb install -r` 覆盖安装并保留私有数据，安装身份为
+`com.mobileuse.vnext / 0.15.0 / versionCode 17`。设备服务、控制 App 与手机 HTTP MCP
+adapter 均启动；version、App 配对、当前准入/恢复屏障、STOP availability 与运行中
+`device-mcp` 二进制 hash 均 PASS。手机 adapter 为
+`127.0.0.1:18882`、入口 `http://127.0.0.1:18883/mcp`，工具目录仍为 12 项且指纹不变。
+
+新锚点首次 `s9-anchor-smoke.log` 中，auth/Origin/token、connect、工具、
+catalog/fingerprint、schema、status 与 result_error 已通过，随后首次 `start` 返回
+`FAIL start reason=tool_is_error code=control_revoked`。独立只读 status 当时显示
+`can_start=true`、旧会话 `ended (reason=service_restarted)` 且 cleanup state 为
+`unconfirmed`；不把旧会话的 `service_restarted` reason 武断认定为本次撤权根因。
+`s9-anchor-smoke-rerun.log` 随后完整 PASS：start、image observe、wait_for、shell、
+timeline、inspect、BACK、后观察、end 与 cancel 均通过；end 为
+`executed/session=ended/cleanup.state=pending`，cancel 返回 `context_error`，会话仍 ended
+且 `can_start=true`。
+
+新锚点 `s9-anchor-d06.json` 为 3/3 case pass，总结果仍是 partial，唯一 gap 为
+`external_s9_probe_required`。每轮执行 full→对固定 full 的首个 delta→BACK→inspect→end；
+`delta_checks=1`、`later_deltas_checked=false`、`delta_base_valid=true`、
+`delta_base_unchanged=true`。每轮 full tree 为 `2,220 B`、full text 为
+`2,096/2,098 B`、delta 为 `238/919 B`；BACK 为 executed 且后观察 complete，inspect 指向
+当前 O，end 为 executed/ended。iteration 2/3 cleanup complete 分别为 `2,602 ms`、
+`2,513 ms`；iteration 1 的 `fixture_settle.attempted=false`，但完整 smoke 仍通过。实际外部 MCP 宿主
+刷新由用户自行处理，未独立确认工具重新发现；该 gap 已接受，D06 不扩大为多 delta、滚动或
+STOP 注入矩阵。
+
+同仓库 `.state/release-source-049583d` 保存固定 `049583d` 干净 checkout、六产物与 manifest；
+在该 checkout 重跑 `verify-manifest.ps1` 得到 `.state/s9-anchor-preserved-verify.log` PASS，
+HEAD 与 manifest source 均为 `049583d`。其 host 2 exe 与 manifest 也经
+`build-host-tools.ps1 -VerifyOnly`，由 `.state/s9-anchor-preserved-host-verify.log` 返回 PASS。
+S10 归档后的主工作树 HEAD 不是发行源；后续复核必须在固定 checkout 执行，不得在新 HEAD
+复用旧 manifest 冒充同源 PASS。
+
+## 9. S10 归档、覆盖分层与发行锚点
+
+2026-11-16，用户明确选择“接受上述缺口，继续归档”。S0–S10 的代码范围全部落地，因此提案
+实现状态为“已实现”；D01–D06 的宿主证据、原生滚动、fixture/注入和外部宿主刷新缺口属于
+“实机验证有限”，不改写为代码部分实现。
+
+事实分层如下：
+
+- 已实现：净化与严格三态、五阶段连续性、结构差分/双应用器、动作层级重验、载体/scroll/text
+  安全绑定、消费者同步、条件化提交与预算计数。
+- 已单测/假设备：V01–V20、I01–I08、N1–N43 映射及反向对照；显示代次迟到候选缺陷先红修复。
+- 主机合成基准：B01–B06 最终 61 个五样本子项、305 行，见
+  [统一基准记录](observation-continuity-benchmarks.md)。
+- 已实测：contract 15 完整 release/部署/现行 verifier/smoke；D01 三轮 contract 15 pass；
+  D02 三轮无 fail但 native-scroll gap；D03 24 pass/3 fail；D04 3 fail/15 gap；
+  D05 最新 1 pass/1 fail且旧三轮原报告 fail；D06 在 `38` 与 `049` 各三轮单 delta 闭环
+  pass，外部宿主刷新仍未独立确认。
+- 未覆盖：D01 宿主落盘、D02 native scroll、D03 in-scope 完整阻断与 primitive 精确计数、
+  D04 键盘顶起/focus race/primitive 精确计数、D05 capture/preview/post-dispatch STOP
+  注入、D06 实际外部 MCP 宿主刷新。以上缺口均由用户接受。
+
+最终文档审计由独立只读 Ollama/Nietzsche（max，agent
+`01a1e1c0-eeed-7021-afec-f27386835e31`）完成。§6.1 的三类首轮发现由原文档作者 Ramanujan
+最小修正四份文件；同一审计者复检并合并五份未改文件结论，最终原话为
+“本次全部九份docs CLEAN”。此次无中断、重启或提供方错误，不与 S7 Gemini 的配额失败和
+四类发现历史混同。
+
+全部实现提交为 `900e640fe8343f92c4e8dd82dd3df839dde20756`、
+`bb43c1943d66e3ea5fe5fd938f9a5b68c82dfdeb`、
+`38f47e38fd85ffa8b79e8b9dbea13a4c00babe14`、
+`049583d328e335c56d56f153b7464ea03f1ca814`。最终已验证发行源码锚点为 `049583d...`；
+归档提交只承载维护记录与已归档提案，不能写成产生上述 manifest 的发行源。若需再次核验或
+发布，应在 `049583d` 的固定干净 checkout 使用保存的六产物/host 2 exe 与 manifest 重新
+执行原 verifier。
+
+归档静态检查覆盖六份提案、主验证记录、统一基准和 status 共 9 个维护文件：354 个本地链接、
+226 个行号片段与 1 个标题片段均可达，错误和旧提案目录链接残留均为 0。4 个历史越界行号
+链接只将 href 收敛到现存源码文件，显示的历史行号与基线语境保留。六份头部状态、最后实现
+hash、验证入口及各一份 §11.1/§11.2 均已核对；归档提交仅承载上述维护材料。

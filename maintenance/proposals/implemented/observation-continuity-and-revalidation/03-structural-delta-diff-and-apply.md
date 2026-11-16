@@ -1,10 +1,15 @@
 # 议题 3：树比较与增量差分（Delta Diff & Apply 路线 B2）
 
-状态：提案，未实现。
-
-基准提交：`6ec25c87daefbc01c99f78d968214304641d119d`
-
-所属总览：[README.md](README.md)
+状态：已实现（代码全覆盖；实机验证有限；最后实现/发行锚点提交 `049583d328e335c56d56f153b7464ea03f1ca814`，2026-11-16）。
+基线提交：`6ec25c87daefbc01c99f78d968214304641d119d`（2026-11-15）。
+适用范围：compact full/delta 规划、运行时 delta 选择、内部 `Node` 与公开 `ReadNode` 两端 Apply、固定基线增量。
+影响范围：`internal/observation/{diff,apply,read_diff}.go`、`internal/engine/capture.go`、delta/read 测试与基准。
+契约：改变。共同 `contract_version` 由 14 升至 15；五块 delta 的结构组合与原子应用语义变化，不增加顶层字段。
+最后实现/发行锚点：`049583d328e335c56d56f153b7464ea03f1ca814`。
+全部实现提交：`900e640fe8343f92c4e8dd82dd3df839dde20756`、`bb43c1943d66e3ea5fe5fd938f9a5b68c82dfdeb`、`38f47e38fd85ffa8b79e8b9dbea13a4c00babe14`、`049583d328e335c56d56f153b7464ea03f1ca814`。
+验证记录：[实现与验证](../../../verification/observation-continuity-and-revalidation.md)、[统一基准](../../../verification/observation-continuity-benchmarks.md)。
+所属总览：[README.md](README.md)。
+史实边界：正文设计论证及其中“提案未实现”“当前未执行”“未来”等陈述按基线写作时点保留；源码定位、行号、常量与默认值仍以基线为准，代码前进后须重新核对。实施结论以 §11 和验证记录为准。
 
 ## 1. 问题诊断与源码归因
 
@@ -18,26 +23,26 @@
 - `children`：给出父节点最终、完整的直接子 ref 列表；
 - `replace`：以地图键作为基线 ref 锚点，给出该锚点的新完整节点定义。
 
-内部类型见 [internal/protocol/node.go:610-618](../../../internal/protocol/node.go#L610-L618)；
+内部类型见 [internal/protocol/node.go:610-618](../../../../internal/protocol/node.go#L610-L618)；
 公开 compact 类型见
-[internal/protocol/read_tree.go:683-693](../../../internal/protocol/read_tree.go#L683-L693)。
+[internal/protocol/read_tree.go:683-693](../../../../internal/protocol/read_tree.go#L683-L693)。
 `add` 的最终父位置只能由父节点的 `children` 完整列表建立。根 ref 是差分作用域的锚点；
 `Diff` 与 `ReadDiff` 都拒绝根 ref 变化
-（[internal/observation/diff.go:57-62](../../../internal/observation/diff.go#L57-L62)、
-[internal/observation/read_diff.go:53-56](../../../internal/observation/read_diff.go#L53-L56)）。
+（[internal/observation/diff.go:57-62](../../../../internal/observation/diff.go#L57-L62)、
+[internal/observation/read_diff.go:53-56](../../../../internal/observation/read_diff.go#L53-L56)）。
 根 ref 变化仍直接退化为 full。
 
 运行时差分对象是 compact `ReadTree` 与 `ReadDelta`。
 `Engine.Differ` 的公共接口只接收 `ReadTree`
-（[internal/engine/engine.go:296-299](../../../internal/engine/engine.go#L296-L299)）；
+（[internal/engine/engine.go:296-299](../../../../internal/engine/engine.go#L296-L299)）；
 `publishTreeAttempt` 调用 `ReadDiff`，失败或超过 70% 阈值时改发 compact full
-（[internal/engine/capture.go:258-276](../../../internal/engine/capture.go#L258-L276)）。
+（[internal/engine/capture.go:258-276](../../../../internal/engine/capture.go#L258-L276)）。
 `ReadDiff` 自己负责展开 chain、规划、重新打包和往返校验
-（[internal/observation/read_diff.go:9-48](../../../internal/observation/read_diff.go#L9-L48)）。
+（[internal/observation/read_diff.go:9-48](../../../../internal/observation/read_diff.go#L9-L48)）。
 
 `inspect` 不使用 delta。它从留存观察读取内部完整树，并总是投影为 detailed full：
-[internal/engine/inspect.go:36-76](../../../internal/engine/inspect.go#L36-L76)、
-[internal/engine/inspect.go:98-117](../../../internal/engine/inspect.go#L98-L117)。
+[internal/engine/inspect.go:36-76](../../../../internal/engine/inspect.go#L36-L76)、
+[internal/engine/inspect.go:98-117](../../../../internal/engine/inspect.go#L98-L117)。
 本提案后续提到 Read 路径时，只指 `observe` / `act` / `wait_for` 等使用的
 public compact observation。
 
@@ -51,8 +56,8 @@ if p := curParent[ref]; p != "" && baseNodes[p] == nil {
 }
 ```
 
-见 [internal/observation/diff.go:72-85](../../../internal/observation/diff.go#L72-L85) 与
-[internal/observation/read_diff.go:65-75](../../../internal/observation/read_diff.go#L65-L75)。
+见 [internal/observation/diff.go:72-85](../../../../internal/observation/diff.go#L72-L85) 与
+[internal/observation/read_diff.go:65-75](../../../../internal/observation/read_diff.go#L65-L75)。
 
 第二，一个基线节点从当前帧消失，但其旧子树内仍有存续节点时，规划器拒绝：
 
@@ -62,11 +67,11 @@ if hasSurvivingDescendant(baseNodes[ref], kind) {
 }
 ```
 
-见 [internal/observation/diff.go:101-115](../../../internal/observation/diff.go#L101-L115) 与
-[internal/observation/read_diff.go:91-103](../../../internal/observation/read_diff.go#L91-L103)。
+见 [internal/observation/diff.go:101-115](../../../../internal/observation/diff.go#L101-L115) 与
+[internal/observation/read_diff.go:91-103](../../../../internal/observation/read_diff.go#L91-L103)。
 
 当前 Apply 会递归删除整个 remove 子树
-（[internal/observation/apply.go:357-367](../../../internal/observation/apply.go#L357-L367)），
+（[internal/observation/apply.go:357-367](../../../../internal/observation/apply.go#L357-L367)），
 因此第二道拦截保护的是现有“remove 删除整棵基线子树”的解释。B2 不能只删除守卫；
 还必须把 remove 改为“删除旧结构区域中未通过最终有效图保留的残余节点”。
 
@@ -76,9 +81,9 @@ if hasSurvivingDescendant(baseNodes[ref], kind) {
 两个父分别发布最终 `children` 列表即可表达跨父移动：
 
 - 内部树的既有回归：
-  [internal/observation/delta_test.go:308-337](../../../internal/observation/delta_test.go#L308-L337)；
+  [internal/observation/delta_test.go:308-337](../../../../internal/observation/delta_test.go#L308-L337)；
 - compact chain 成员的既有回归：
-  [internal/observation/read_test.go:335-361](../../../internal/observation/read_test.go#L335-L361)。
+  [internal/observation/read_test.go:335-361](../../../../internal/observation/read_test.go#L335-L361)。
 
 因此 B2 必须把“现有父 → 现有父”纳入统一的最终拓扑模型，不得在实现时新增
 “父必须相同”的检查。当前源码注释和正式文档仍把“跨父移动”概括为不可表达，
@@ -93,20 +98,20 @@ if hasSurvivingDescendant(baseNodes[ref], kind) {
 - Replace 的独立展开顺序；
 - Add 的独立展开顺序。
 
-见 [internal/observation/apply.go:49-150](../../../internal/observation/apply.go#L49-L150)；
+见 [internal/observation/apply.go:49-150](../../../../internal/observation/apply.go#L49-L150)；
 ReadApply 同样如此，
-[internal/observation/read_diff.go:312-401](../../../internal/observation/read_diff.go#L312-L401)。
-[internal/observation/delta_test.go:416-435](../../../internal/observation/delta_test.go#L416-L435)
+[internal/observation/read_diff.go:312-401](../../../../internal/observation/read_diff.go)。
+[internal/observation/delta_test.go:416-435](../../../../internal/observation/delta_test.go#L416-L435)
 也已经覆盖 Replace 单独生效。
 
 真正的 Apply 限制是：
 
 - Add 展开后只把 Add 定义根登记到根级 `nodes`
-  （[internal/observation/apply.go:132-150](../../../internal/observation/apply.go#L132-L150)）；
+  （[internal/observation/apply.go:132-150](../../../../internal/observation/apply.go#L132-L150)）；
 - `definitionSet` 包含定义内所有 ref；
 - 当前不允许 `children` 指向任何完整定义内节点，
-  （[internal/observation/apply.go:185-193](../../../internal/observation/apply.go#L185-L193)、
-  [internal/observation/read_diff.go:431-438](../../../internal/observation/read_diff.go#L431-L438)）。
+  （[internal/observation/apply.go:185-193](../../../../internal/observation/apply.go#L185-L193)、
+  [internal/observation/read_diff.go:431-438](../../../../internal/observation/read_diff.go)）。
 
 所以 B2 若直接把截断定义根放进 Add，再把同一根放进 `children`，会被 Apply 拒绝。
 本提案必须显式定义“可被 children 接管的顶层新增组装根”。
@@ -114,13 +119,13 @@ ReadApply 同样如此，
 ### 1.5 现有 Replace 不能承担跨父落位
 
 当前 Replace 安装节点时依赖基线旧父槽位：
-[internal/observation/apply.go:125-129](../../../internal/observation/apply.go#L125-L129)。
+[internal/observation/apply.go:125-129](../../../../internal/observation/apply.go#L125-L129)。
 这在未迁移的封闭区域中是正确的，但如果 B2 先摘除迁移节点，再把 `parent[ref]`
 清空，Replace 就无法安装。
 
 Replace 的区域封闭判据没有要求区域根自身仍处于基线父节点下，
-见 [internal/observation/diff.go:117-165](../../../internal/observation/diff.go#L117-L165) 与
-[internal/observation/read_diff.go:105-137](../../../internal/observation/read_diff.go#L105-L137)。
+见 [internal/observation/diff.go:117-165](../../../../internal/observation/diff.go#L117-L165) 与
+[internal/observation/read_diff.go:105-137](../../../../internal/observation/read_diff.go#L105-L137)。
 因此“区域足够大而选择 Replace，同时区域根跨父迁移”是规划器可能真实生成的组合。
 B2 必须继续支持这个封闭优化，但 Replace 只替换该 ref 的节点内容；
 最终父位置必须由统一 claims 与 `children` 决定，不能再依赖旧父槽位。
@@ -344,7 +349,7 @@ children 的父只能是基线节点或顶层 Add 组装根，不寻址嵌套定
   explicit false 归并。
 
 基线比较器仍存在按字段默认值把 nil 折成 bool 的逻辑
-（[internal/observation/tree.go:97-112](../../../internal/observation/tree.go#L97-L112)）。
+（[internal/observation/tree.go:97-112](../../../../internal/observation/tree.go#L97-L112)）。
 阶段 1 已要求统一三态后，B2 的 `sameOwnFields`、`diffLogicalFields`、`ReadDiff` 和最终
 等值不得复用旧的 default-collapsing 比较；wire 省略只在编码/解码边界映射为契约默认，
 进入 planner 的逻辑值仍必须是 strict tri-state。
@@ -1266,12 +1271,12 @@ Apply 流程，最后对结果 `PackTree`。完整节点的 `checked` 缺席解�
 
 | 文件 | 具体变更 |
 | --- | --- |
-| [internal/observation/diff.go](../../../internal/observation/diff.go) | 删除“存续节点进入新增父”和“删除区域含存续后代”两个硬返回；实现 assembly frontier、remove 根和现有 Replace 区域根可迁移的统一规划。 |
-| [internal/observation/read_diff.go](../../../internal/observation/read_diff.go) | 在 `UnpackTree` 后的逻辑 Read 树上复用相同拓扑规划；保持 Add/Replace 打包、逻辑等值和 canonical bytes 校验。 |
-| [internal/observation/apply.go](../../../internal/observation/apply.go) | 改为基线 claims 驱动的原子 Apply；区分 `closedNode` 与 `assemblyRoot`；先检查冲突与闭包，再实例化最终图；Replace 不再依赖旧父槽位。 |
-| [internal/observation/read_diff.go](../../../internal/observation/read_diff.go) | `applyReadDelta` 同样使用 claims、残余闭包和全图校验；保留三态字段与 chain 适配。 |
-| [internal/observation/delta_test.go](../../../internal/observation/delta_test.go) | 增加内部树的 wrapper、unwrap、跨父 Replace、循环、多父、孤儿和序列化回归。 |
-| [internal/observation/read_test.go](../../../internal/observation/read_test.go) | 增加 compact/chain wrapper、显式空 children、wire 严格往返和 canonical bytes 回归。 |
+| [internal/observation/diff.go](../../../../internal/observation/diff.go) | 删除“存续节点进入新增父”和“删除区域含存续后代”两个硬返回；实现 assembly frontier、remove 根和现有 Replace 区域根可迁移的统一规划。 |
+| [internal/observation/read_diff.go](../../../../internal/observation/read_diff.go) | 在 `UnpackTree` 后的逻辑 Read 树上复用相同拓扑规划；保持 Add/Replace 打包、逻辑等值和 canonical bytes 校验。 |
+| [internal/observation/apply.go](../../../../internal/observation/apply.go) | 改为基线 claims 驱动的原子 Apply；区分 `closedNode` 与 `assemblyRoot`；先检查冲突与闭包，再实例化最终图；Replace 不再依赖旧父槽位。 |
+| [internal/observation/read_diff.go](../../../../internal/observation/read_diff.go) | `applyReadDelta` 同样使用 claims、残余闭包和全图校验；保留三态字段与 chain 适配。 |
+| [internal/observation/delta_test.go](../../../../internal/observation/delta_test.go) | 增加内部树的 wrapper、unwrap、跨父 Replace、循环、多父、孤儿和序列化回归。 |
+| [internal/observation/read_test.go](../../../../internal/observation/read_test.go) | 增加 compact/chain wrapper、显式空 children、wire 严格往返和 canonical bytes 回归。 |
 
 按已完成的阶段 1 接口，公开 `ReadDelta` 最终只保留 `format/base/view` 和五块；
 B2 自身不增加任何顶层字段。内部 `Delta` 的既有五块也保持原形状。
@@ -1444,3 +1449,29 @@ $env:GOEXPERIMENT='jsonv2'; go test ./internal/observation -run 'TestDiffCrossPa
 
 结果为三个测试全部通过。这些只证明基线已有行为和现有回归通过，
 不表示 B2 已实现或 B2 用例已通过。
+
+## 11. 实现结果
+
+实现提交：`900e640fe8343f92c4e8dd82dd3df839dde20756` 首次落地，最后由发行锚点
+`049583d328e335c56d56f153b7464ea03f1ca814` 覆盖。公共记录见
+[实现与验证](../../../verification/observation-continuity-and-revalidation.md)与
+[统一基准](../../../verification/observation-continuity-benchmarks.md)。
+
+### 11.1 已落地
+
+| 提案条目 | 代码落点 | 验证范围 |
+| --- | --- | --- |
+| §2–§3 最终图规划、assembly frontier、remove 根与 Replace 封闭性 | `internal/observation/diff.go` 的 `Diff`、`planStructuralDelta`、`chooseReplaceRegions`、`collectRemoveRoots`、`computeAddFrontier`、`collectChildBlocks`、`validatePlannedOwnership` | 内部 Node 的 wrapper/unwrap、跨父移动、存活穿透、最高 remove 祖先、显式空 children 与封闭 Replace；V12–V15 |
+| §4 基线 claims 驱动的原子 Apply 与最终图拒绝 | `internal/observation/apply.go` 的 `Apply`、`applyStructuralDelta`、`validateRemoveRoots`、`validateReplaceRoots`、`expandDefinitions`、`finalChildList` | 精确还原、不可变性，以及循环、多父、孤儿、remove 根冲突和孤立定义的整树拒绝；V12–V15 |
+| §5 公开 Read 路径 | `internal/observation/read_diff.go` 的 `ReadDiff`、`planReadStructuralDelta`、`ReadApply`、`diffReadFields`、`applyReadSet` | compact/chain、严格 wire 往返、五 bool 三态与 canonical bytes；V15 |
+| 运行时选择与回退 | `internal/engine/capture.go` 的 `captureAndPublish`、`publishTreeAttempt`、`projectCapture` | 固定 full 基线上的 delta 选择、`< full × 70%` 门禁、根/ref/角色变化回退 full；I01–I03、B03/B06、D02/D06 |
+
+### 11.2 与提案不同或未执行
+
+| 项 | 结论与理由 |
+| --- | --- |
+| 代码状态 | 本册默认算法和运行时选择路径代码全覆盖；设备场景覆盖有限，不能把未构造场景写成算法未实现。 |
+| D02 | 3 轮均为 `gap`、`fail=0`、`result=partial`；相对固定已确认 full 基线的 delta、ReadApply 和 ref 检查通过，但 `native_scroll_unavailable` 未覆盖，不能写成 D02 整体 PASS。 |
+| D06 | 3 轮均为固定 full 基线后的单个 delta，经 BACK、inspect 与 end 闭环通过；没有覆盖多 delta、滚动或复杂重挂矩阵。 |
+| 历史行号链接 | 正文中两处 `read_diff.go` 基线行号已超出当前重构文件范围；归档时仅将 href 收敛到现存文件，label 与头部基线语境保持原样，不伪造当前行号。 |
+| 设计边界 | 未增加顶层 delta 字段；根 ref/角色变化仍回退 full；70% 门禁、非法最终图拒绝和原子应用语义均保留。 |

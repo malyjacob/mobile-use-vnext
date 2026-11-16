@@ -1,10 +1,15 @@
 # 分册 01：源头净化（空叶过滤）与状态位表达精简
 
-状态：提案，未实现。
-
-所属总览：[README.md](README.md)
-
-基线提交：`6ec25c87daefbc01c99f78d968214304641d119d`
+状态：已实现（代码全覆盖；实机验证有限；最后实现/发行锚点提交 `049583d328e335c56d56f153b7464ea03f1ca814`，2026-11-16）。
+基线提交：`6ec25c87daefbc01c99f78d968214304641d119d`（2026-11-15）。
+适用范围：公开观察树净化、跨非目标 display 的公开父组装、完整节点状态 wire、`delta.set` 三态、inspect/MCP/probe 文本与预算。
+影响范围：`internal/observation/{build,read,tree}.go`、`internal/protocol/{node,read_tree,surface,decode_response}.go`、`internal/engine/inspect.go`、MCP/probe/client 消费者。
+契约：改变。共同 `contract_version` 由 14 升至 15；移除 `defaults`，完整节点已知默认省略且 unknown 为 `null`，`set` 保留显式 `false/0/""/[]/null`。
+最后实现/发行锚点：`049583d328e335c56d56f153b7464ea03f1ca814`。
+全部实现提交：`900e640fe8343f92c4e8dd82dd3df839dde20756`、`bb43c1943d66e3ea5fe5fd938f9a5b68c82dfdeb`、`38f47e38fd85ffa8b79e8b9dbea13a4c00babe14`、`049583d328e335c56d56f153b7464ea03f1ca814`。
+验证记录：[实现与验证](../../../verification/observation-continuity-and-revalidation.md)、[统一基准](../../../verification/observation-continuity-benchmarks.md)。
+所属总览：[README.md](README.md)。
+史实边界：正文设计论证及其中“提案未实现”“当前未执行”“未来”等陈述按基线写作时点保留；源码定位、行号、常量与默认值仍以基线为准，代码前进后须重新核对。实施结论以 §11 和验证记录为准。
 
 ---
 
@@ -33,11 +38,11 @@
 真实基线没有草稿中出现的 `filterTree`、`roleOf` 或“`FrameLayout` 被映射成
 `RoleGroup`”逻辑。实际投影链是：
 
-- [`project`](../../../internal/observation/build.go#L215-L259) 后序计算哪些节点进入公开树；
-- [`hasSemantics`](../../../internal/observation/build.go#L297-L302) 判断叶自身是否有语义；
-- [`classifyRole`](../../../internal/observation/build.go#L307-L343) 根据真实能力、状态和类名映射
+- [`project`](../../../../internal/observation/build.go#L215-L259) 后序计算哪些节点进入公开树；
+- [`hasSemantics`](../../../../internal/observation/build.go#L297-L302) 判断叶自身是否有语义；
+- [`classifyRole`](../../../../internal/observation/build.go#L307-L343) 根据真实能力、状态和类名映射
   public role；
-- [`newPublicNode`](../../../internal/observation/build.go#L364-L413) 才把通过过滤的节点投影成
+- [`newPublicNode`](../../../../internal/observation/build.go#L364-L413) 才把通过过滤的节点投影成
   `protocol.Node`。
 
 基线 `hasSemantics` 为：
@@ -82,11 +87,11 @@ n11 view
 
 ### 1.2 证据链二：非目标 display 包装层会断开目标后代
 
-[`project`](../../../internal/observation/build.go#L238-L254) 对
+[`project`](../../../../internal/observation/build.go#L238-L254) 对
 `DisplayID != cap.Display.ID` 的节点直接跳过；但其目标 display 后代仍可成为已发布 unit。
-然而 [`Build` 的组装步骤](../../../internal/observation/build.go#L119-L145)只复制 raw
+然而 [`Build` 的组装步骤](../../../../internal/observation/build.go#L119-L145)只复制 raw
 直接子节点中已有公开节点的项，并未把跨越未发布包装层的后代挂到最近公开祖先。
-[`nearestPublishedParent`](../../../internal/observation/match.go#L590-L610)目前只供匹配
+[`nearestPublishedParent`](../../../../internal/observation/match.go#L590-L610)目前只供匹配
 建立父索引，不能修复公开树本身。
 
 最小反例：
@@ -107,7 +112,7 @@ synthetic root 作为所有最近公开祖先为 raw root 的节点父节点。�
 
 ### 1.3 证据链三：来源与内部状态本来就是三态
 
-[`RawNode`](../../../internal/device/types.go#L76-L119) 明确把 `Has*` 与对应值分开：
+[`RawNode`](../../../../internal/device/types.go#L76-L119) 明确把 `Has*` 与对应值分开：
 
 ```go
 HasEnabled  bool
@@ -130,8 +135,8 @@ false = 已知 false
 true  = 已知 true
 ```
 
-当前 [`newPublicNode`](../../../internal/observation/build.go#L384-L410) 通过
-[`triBool`](../../../internal/observation/build.go#L477-L485) 保留这一区别；[`AnonymousPlain`](../../../internal/observation/read.go#L17-L39)
+当前 [`newPublicNode`](../../../../internal/observation/build.go#L384-L410) 通过
+[`triBool`](../../../../internal/observation/build.go#L477-L485) 保留这一区别；[`AnonymousPlain`](../../../../internal/observation/read.go#L17-L39)
 也要求五个状态均为非 nil 的已知默认值时，节点才可能成为 anonymous plain。
 
 因此不能以“统一序列化”为理由，在构建阶段把所有 nil 改成已知默认值。这会把来源事实
@@ -139,7 +144,7 @@ true  = 已知 true
 
 ### 1.4 证据链四：`ReadNode` 已具备正确的 complete-node wire 模型
 
-[`ReadNode.MarshalJSONTo`](../../../internal/protocol/read_tree.go#L203-L397) 当前行为是：
+[`ReadNode.MarshalJSONTo`](../../../../internal/protocol/read_tree.go#L203-L397) 当前行为是：
 
 - `enabled=true` 省略，`enabled=false` 显式，`enabled=null` 表示 unknown；
 - `focused/selected/protected/checked=false` 省略，`true` 或 `null` 显式；
@@ -147,7 +152,7 @@ true  = 已知 true
   字符串仍显式输出。该可选字符串规则与五个布尔状态的 unknown 显式 null 规则不同。
   `axis` 的 absent/null 表示 unknown，非空有效枚举才表示已知。
 
-[`ReadNode.UnmarshalJSONFrom`](../../../internal/protocol/read_tree.go#L421-L526) 在完整节点中
+[`ReadNode.UnmarshalJSONFrom`](../../../../internal/protocol/read_tree.go#L421-L526) 在完整节点中
 把成员缺席还原成已知默认值，把显式 `null` 还原成 nil：
 
 ```text
@@ -159,19 +164,19 @@ explicit null                      -> unknown
 
 这是 wire 层消费规则，不得反向用于 `RawNode` 或 Build 阶段的候选状态。
 
-内部 [`protocol.Node`](../../../internal/protocol/node.go#L192-L356) 的 enabled/focused/
+内部 [`protocol.Node`](../../../../internal/protocol/node.go#L192-L356) 的 enabled/focused/
 selected/protected 已采用相近模型，但 checked 当前仍是“nil 省略、false 显式”，与本分册
 统一后的完整节点格式不同。本分册要把 `Node.checked` 对齐到 `ReadNode.checked`。
 
 ### 1.5 证据链五：状态相等当前会吞掉 unknown/default 跃迁
 
-[`equalTriBool`](../../../internal/observation/tree.go#L97-L106) 目前把 nil 当作调用方传入的
+[`equalTriBool`](../../../../internal/observation/tree.go#L97-L106) 目前把 nil 当作调用方传入的
 已知默认值。该函数被：
 
-- [`Equal`](../../../internal/observation/tree.go#L25-L95)；
-- [`diffFields`](../../../internal/observation/diff.go#L439-L488)；
-- [`ReadEqual`](../../../internal/observation/read.go#L286-L341)；
-- [`diffReadFields`](../../../internal/observation/read_diff.go#L655-L702)。
+- [`Equal`](../../../../internal/observation/tree.go#L25-L95)；
+- [`diffFields`](../../../../internal/observation/diff.go#L439-L488)；
+- [`ReadEqual`](../../../../internal/observation/read.go#L286-L341)；
+- [`diffReadFields`](../../../../internal/observation/read_diff.go)。
 
 共同使用。
 
@@ -179,7 +184,7 @@ selected/protected 已采用相近模型，但 checked 当前仍是“nil 省略
 `set.focused`；Apply 后仍是 nil。公开 `ReadDiff` 最后会因规范字节不一致拒绝该 delta 并回退
 full，内部 `Diff` 也可能因为 `Equal` 同样使用默认化比较而错误通过。
 
-`checked` 当前通过 [`equalOptionalBool`](../../../internal/observation/tree.go#L108-L113)
+`checked` 当前通过 [`equalOptionalBool`](../../../../internal/observation/tree.go#L108-L113)
 精确比较，反而是正确方向。不能按草稿把 checked 改成 `equalTriBool(..., false)`，否则
 `checked:null -> false` 和反向跃迁都会被吞掉。
 
@@ -187,17 +192,17 @@ full，内部 `Diff` 也可能因为 `Equal` 同样使用默认化比较而错�
 
 除协议编码类型外，当前还存在以下真实调用点：
 
-- [`ReadDiff`](../../../internal/observation/read_diff.go#L15-L49) 给 delta 填写 `Defaults`；
-- [`engine inspect subtree`](../../../internal/engine/inspect.go#L120-L148) 与
-  [`query`](../../../internal/engine/inspect.go#L220-L239) 的精确字节预算对象包含
+- [`ReadDiff`](../../../../internal/observation/read_diff.go#L15-L49) 给 delta 填写 `Defaults`；
+- [`engine inspect subtree`](../../../../internal/engine/inspect.go#L120-L148) 与
+  [`query`](../../../../internal/engine/inspect.go#L220-L239) 的精确字节预算对象包含
   `protocol.Defaults`；
-- [`InspectionView` 编码](../../../internal/protocol/surface.go#L1058-L1147)与
-  [`响应解码`](../../../internal/protocol/decode_response.go#L521-L600)要求 envelope 或嵌套树
+- [`InspectionView` 编码](../../../../internal/protocol/surface.go#L1058-L1147)与
+  [`响应解码`](../../../../internal/protocol/decode_response.go#L521-L600)要求 envelope 或嵌套树
   携带 defaults；
-- [`MCP 工具说明`](../../../internal/mcp/schema.go#L16-L38)和
-  [`tree text`](../../../internal/mcp/tree_text.go#L65-L84)固定声明 defaults；
-- [`mcp-probe` 文本解析](../../../scripts/mcp-probe/result_text.go#L172-L269)及
-  [`结果字段检查`](../../../scripts/mcp-probe/result.go#L317-L360)依赖 defaults。
+- [`MCP 工具说明`](../../../../internal/mcp/schema.go#L16-L38)和
+  [`tree text`](../../../../internal/mcp/tree_text.go#L65-L84)固定声明 defaults；
+- [`mcp-probe` 文本解析](../../../../scripts/mcp-probe/result_text.go#L172-L269)及
+  [`结果字段检查`](../../../../scripts/mcp-probe/result.go#L317-L360)依赖 defaults。
 
 只删除 `protocol.Defaults` 或只删除 MCP 一行会破坏编译、预算一致性和文本回放检查。
 
@@ -321,7 +326,7 @@ func retainsIntrinsicLeafRole(role protocol.Role) bool {
 
 非空 `resource-id` 本身不是可读内容、动作或状态，不能单独让一个可见叶通过过滤。
 
-当前 [`needsResourceHint`](../../../internal/observation/build.go#L415-L423) 只对“无标签且
+当前 [`needsResourceHint`](../../../../internal/observation/build.go#L415-L423) 只对“无标签且
 可点击”的节点发布 resource hint；一个既无动作、无内容、无固有叶角色、也无保留后代的
 resource-only 普通节点本来就没有可发布的 resource，继续保留只会制造空节点。
 
@@ -361,13 +366,13 @@ resource-id 语义。
 
 ### 3.6 非目标 display 祖先边界
 
-[`project`](../../../internal/observation/build.go#L238-L253) 对
+[`project`](../../../../internal/observation/build.go#L238-L253) 对
 `DisplayID != cap.Display.ID` 的节点始终不发布，即使它是目标 display 内容的祖先包装层。
 
 目标 display 中保留下来的节点必须通过 raw parent 链连接到最近的已发布祖先；公开树不会
 为了保持其他 display 的原始包装层而创建 context。基线注释表达了这一规则，但
-[`Build`](../../../internal/observation/build.go#L119-L145)仍只挂 raw 直接子节点，
-[`nearestPublishedParent`](../../../internal/observation/match.go#L590-L610)也只在匹配阶段
+[`Build`](../../../../internal/observation/build.go#L119-L145)仍只挂 raw 直接子节点，
+[`nearestPublishedParent`](../../../../internal/observation/match.go#L590-L610)也只在匹配阶段
 使用，因此实施时需要按 §1.2 修正组装，而不是把注释当成已实现事实。验收必须同时证明
 目标后代可达、没有为非目标包装层生成 context，以及树、ref 列表和 source 索引闭包一致。
 
@@ -430,7 +435,7 @@ context 固定为：
 ### 3.8 不变式 I-1 的准确范围
 
 构建完成并对 `protocol.Node` 做 compact 投影后，若一个节点满足
-[`AnonymousPlain`](../../../internal/observation/read.go#L17-L39)，则该节点必须拥有至少一个
+[`AnonymousPlain`](../../../../internal/observation/read.go#L17-L39)，则该节点必须拥有至少一个
 子节点。
 
 这是关于“符合匿名谓词的普通 view/group”的限定不变式：
@@ -449,8 +454,8 @@ context 固定为：
 不能把它扩大为“公开树绝不存在无文本叶”或“所有视觉占位都已过滤”。
 
 I-1 也只约束公开投影，不约束原始设备事实。分册 04 的
-[`matchFreshNode`](../../../internal/engine/act.go#L886-L916)与
-[`lineageOf`](../../../internal/engine/act.go#L866-L886)消费
+[`matchFreshNode`](../../../../internal/engine/act.go#L886-L916)与
+[`lineageOf`](../../../../internal/engine/act.go#L866-L886)消费
 `device.Capture.Nodes` 及 raw parent 链，因此空 `FrameLayout` 即使不进入公开树，仍可
 留在重验原始事实中供 L2 判断；不能为了满足 I-1 去改写或过滤 `Capture.Nodes`。验收应分别
 证明：公开树按 I-1 不含匿名普通叶；同一 capture 的 raw parent 链与 04 所需的祖先事实未被
@@ -497,13 +502,13 @@ root 的 checked 变为已知 false 后，完整节点 wire 会按默认规则�
 
 ### 4.4 `set`
 
-`SetNode`/`ReadSetNode` 继续使用 [`Field[T]`](../../../internal/protocol/node.go#L558-L583)：
+`SetNode`/`ReadSetNode` 继续使用 [`Field[T]`](../../../../internal/protocol/node.go#L558-L583)：
 
 - 只有 `Set=true` 才编码，保留 false/0/""/[]/null；
 - `IsZero` 只代表整个 set 条目没有字段，不改变单个字段的三态。
 
-[`applySet`](../../../internal/observation/apply.go#L289-L334)和
-[`applyReadSet`](../../../internal/observation/read_diff.go#L499-L542)已经按“出现即完整新值”
+[`applySet`](../../../../internal/observation/apply.go#L289-L334)和
+[`applyReadSet`](../../../../internal/observation/read_diff.go)已经按“出现即完整新值”
 执行；保留这一结构，不把 null 替换成默认。
 
 ### 4.5 Equal、ReadEqual 与 diff
@@ -540,7 +545,7 @@ true    -> unknown: set null
 完整节点解码后的缺省默认已经变成已知指针，因此 exact compare 不会把合法的 wire 缺省
 误判为 unknown。
 
-现有 [`TestEqualCanonicalDefaults`](../../../internal/observation/delta_test.go#L563-L586)
+现有 [`TestEqualCanonicalDefaults`](../../../../internal/observation/delta_test.go#L563-L586)
 把“内部指针为 nil”和“已知默认值”断言为相等，这正是需要推翻的旧规则。实施时应把它改成
 两项事实：内部 `nil != true/false`；只有把完整节点 wire 的成员缺席解码后，才得到已知
 默认指针。不能通过保留默认化比较来让旧测试继续通过。
@@ -611,7 +616,7 @@ defaults {"checked":false}
 
 ### 5.3 inspect 精确预算
 
-[`inspectionSubtree`](../../../internal/engine/inspect.go#L120-L148) 的 unit 内容对象从：
+[`inspectionSubtree`](../../../../internal/engine/inspect.go#L120-L148) 的 unit 内容对象从：
 
 ```text
 {view, defaults, root}
@@ -625,7 +630,7 @@ defaults {"checked":false}
 
 具体触点包括 `internal/engine/inspect.go:136` 的匿名预算结构体字段。
 
-[`queryEmptyBytes`](../../../internal/engine/inspect.go#L220-L239) 从：
+[`queryEmptyBytes`](../../../../internal/engine/inspect.go#L220-L239) 从：
 
 ```text
 {view, defaults, matches, total, truncated}
@@ -730,19 +735,19 @@ defaults {"checked":false}
 - context 五个状态仍 nil；
 - synthetic root `Checked` 为已知 false。
 
-现有 [`TestBuildSyntheticRoot`](../../../internal/observation/build_test.go#L38-L71)、
-[`TestBuildVisibleFilteringAndContextAncestor`](../../../internal/observation/build_test.go#L73-L128)、
-[`TestBuildRoleAndActionMapping`](../../../internal/observation/build_test.go#L130-L187) 和
-[`TestBuildCheckedValueAndDefaults`](../../../internal/observation/build_test.go#L189-L264)
+现有 [`TestBuildSyntheticRoot`](../../../../internal/observation/build_test.go#L38-L71)、
+[`TestBuildVisibleFilteringAndContextAncestor`](../../../../internal/observation/build_test.go#L73-L128)、
+[`TestBuildRoleAndActionMapping`](../../../../internal/observation/build_test.go#L130-L187) 和
+[`TestBuildCheckedValueAndDefaults`](../../../../internal/observation/build_test.go#L189-L264)
 需要扩展而不是删除 unknown 断言。
 
-[`TestActTapCarrierNodePrefersNamedBeforeAnonymous`](../../../internal/engine/act_tap_scope_test.go#L1078-L1107)
+[`TestActTapCarrierNodePrefersNamedBeforeAnonymous`](../../../../internal/engine/act_tap_scope_test.go#L1078-L1107)
 当前用无子空 `FrameLayout` 作为 anonymous carrier。实施时给它增加一个真实保留子节点，使其
 成为符合 I-1 的匿名容器；测试意图仍是“具名 carrier 优先”。
 
 ### 6.2 Compact / Pack / ReadEqual
 
-扩展 [`read_test.go`](../../../internal/observation/read_test.go)：
+扩展 [`read_test.go`](../../../../internal/observation/read_test.go)：
 
 - `AnonymousPlain` 对五个状态任一 nil 都返回 false；
 - unknown 节点不隐藏 bounds、不参与 chain；
@@ -769,9 +774,9 @@ defaults {"checked":false}
 | checked true | true | 已知 true |
 | checked nil | null | unknown |
 
-同步修改 [`protocol_test.go`](../../../internal/protocol/protocol_test.go)、
-[`decode_response_test.go`](../../../internal/protocol/decode_response_test.go) 和
-[`surface_test.go`](../../../internal/protocol/surface_test.go) 中依赖 defaults 的断言。
+同步修改 [`protocol_test.go`](../../../../internal/protocol/protocol_test.go)、
+[`decode_response_test.go`](../../../../internal/protocol/decode_response_test.go) 和
+[`surface_test.go`](../../../../internal/protocol/surface_test.go) 中依赖 defaults 的断言。
 
 ### 6.4 Delta set 三态往返
 
@@ -866,3 +871,25 @@ defaults {"checked":false}
 
 本分册的落地目标不是增加新公开字段，而是修正来源过滤并让现有树、差分和阅读表示在
 “已知默认省略、真实 unknown=null、set 显式赋值”三层上保持一致。
+
+## 11. 实现结果
+
+实现提交：`900e640fe8343f92c4e8dd82dd3df839dde20756` 首次落地，最后由发行锚点 `049583d328e335c56d56f153b7464ea03f1ca814` 覆盖。公共记录见[实现与验证](../../../verification/observation-continuity-and-revalidation.md)与[统一基准](../../../verification/observation-continuity-benchmarks.md)。
+
+### 11.1 已落地
+
+| 提案条目 | 代码落点 | 验证范围 |
+| --- | --- | --- |
+| §2 三态与 synthetic root/context | `internal/observation/build.go` 的 `triBool`、`newRootNode`、`newPublicNode`；`tree.go` 的 `Equal`、`equalOptionalBool`；`read.go` 的 `projectReadNode`、`ReadEqual` | 完整节点三态、root/context 与严格比较；V04–V05、V10 基础路径 |
+| §3 源头净化与公开父 | `internal/observation/build.go` 的 `project`、`hasSemantics`、`retainsIntrinsicLeafRole`、`classifyRole`；`internal/observation/match.go` 的 `nearestPublishedParent` | 空叶、固有叶、非目标 display、source/context 闭包；V01–V03 |
+| §4 full/add/replace/set/Pack/Apply | `internal/protocol/node.go`、`read_tree.go`；`internal/observation/read.go` 的 `PackTree`、`PackDelta`、`UnpackTree`、`ReadEqual`；diff/apply 严格三态路径 | wire 往返、显式 `false/0/""/[]/null`、canonical bytes；V04–V05 |
+| §5 `defaults`、inspect 预算与消费者 | `internal/protocol/surface.go`、`decode_response.go`；`internal/engine/inspect.go` 的 `inspectionTree`、`inspectionSubtree`、`inspectionQuery`、`queryEmptyBytes`；`internal/observation/read.go` 的 `SnapshotCost`；MCP/probe/client | 128 KiB/32 KiB/留存边界、文本与结构化结果；V05–V06、I08 |
+
+### 11.2 与提案不同或未执行
+
+| 项 | 结论与理由 |
+| --- | --- |
+| 代码状态 | 本册默认范围代码全覆盖；没有把有限的设备覆盖回写为部分实现。 |
+| D01 | contract 15 新轮次 3/3 PASS；旧基线 5 次尝试为 4 pass、1 `shell_result_unconfirmed`/uncertain，原报告结论保留。新轮次来自 `bb43c...` release APK，不是最终锚点 APK 重跑。 |
+| 宿主落盘证明 | `d01_host_disk_log_proof: external_host_evidence_required` 仍缺；不从 smoke 或画面推断宿主日志是否落盘。 |
+| 历史行号链接 | `diffReadFields` 与 `applyReadSet` 的基线 `read_diff.go` 行号已超出当前重构文件范围；归档时将 href 收敛到文件级，label 与头部基线语境不变，不伪造当前行号。 |

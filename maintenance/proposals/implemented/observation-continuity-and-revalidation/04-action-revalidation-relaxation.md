@@ -1,10 +1,15 @@
 # 议题 4：动作观察重验放宽（Action Revalidation Relaxation）
 
-状态：提案，未实现。
-
-基准提交：`6ec25c87daefbc01c99f78d968214304641d119d`
-
-所属总览：[README.md](README.md)
+状态：已实现（代码全覆盖；实机验证有限；最后实现/发行锚点提交 `049583d328e335c56d56f153b7464ea03f1ca814`，2026-11-16）。
+基线提交：`6ec25c87daefbc01c99f78d968214304641d119d`（2026-11-15）。
+适用范围：`act` 的 ref 点击/长按/输入/滚动重验、实际派发、O/P/STOP/错误分层；坐标动作与 raw swipe 不获得重定向能力。
+影响范围：`internal/engine/{act,act_revalidation_policy,tap_scope,scroll,ui_execution}.go`、策略/假设备/运行时测试及 Android transport/RPC 消费者。
+契约：改变动作重验契约。共同 `contract_version` 由 14 升至 15；不新增公开字段或错误码，保留既有 `CodeStopped`/`CodeHierarchyFailed` 族。
+最后实现/发行锚点：`049583d328e335c56d56f153b7464ea03f1ca814`。
+全部实现提交：`900e640fe8343f92c4e8dd82dd3df839dde20756`、`bb43c1943d66e3ea5fe5fd938f9a5b68c82dfdeb`、`38f47e38fd85ffa8b79e8b9dbea13a4c00babe14`、`049583d328e335c56d56f153b7464ea03f1ca814`。
+验证记录：[实现与验证](../../../verification/observation-continuity-and-revalidation.md)、[统一基准](../../../verification/observation-continuity-benchmarks.md)。
+所属总览：[README.md](README.md)。
+史实边界：正文设计论证及其中“提案未实现”“当前未执行”“未来”等陈述按基线写作时点保留；源码定位、行号、常量与默认值仍以基线为准，代码前进后须重新核对。实施结论以 §11 和验证记录为准。
 
 本次修订保留“祖先链去坐标、目标分层几何、点击/滚动动态安全点、软键盘位移后的有身份约束输入绑定”四条总体路线，但不把四条路线实现成一次无差别的 `matchFreshNode` 放宽。执行目标、坐标动作、原始 swipe、滚动容器和文字焦点分别保留自己的授权证明。
 
@@ -18,17 +23,17 @@ Tier 4 的“任意文案变化仍视为同一目标”不进入默认实现。�
 
 | 编号 | 修订前原稿位置 | 原稿问题 | 当前源码证据 | 最小反例或触发序列 | 本稿修正 |
 | --- | --- | --- | --- | --- | --- |
-| A1 | `04:11-14, 50-58, 74-107, 333-382` | 原稿把 `Act` 描述成先有 `planTapTarget`/`planScrollTarget`，并引用 `captureActiveWindow`、`textAnchor`、`buildTapScope`、`effectiveCarrierForTarget` 等不存在或签名错误的入口。`planTapTarget` 在当前源码中确实存在，但只有定义、没有调用处。 | 实际入口是 [`Act`](../../../internal/engine/act.go#L15)、静态准入 [`staticActCheckLocked`](../../../internal/engine/act.go#L26)、认领 [`claimObservationLocked`](../../../internal/engine/act.go#L342)、重验 [`revalidateActTarget`](../../../internal/engine/act.go#L379)、点击重验 [`revalidateTapTarget`](../../../internal/engine/act.go#L429) 和派发 [`dispatchAct`](../../../internal/engine/act.go#L615)。点击静态入口是 [`staticTapRefCheck`](../../../internal/engine/tap_scope.go#L906)，滚动静态入口是 [`resolveScrollPlan`](../../../internal/engine/scroll.go#L452)。 | 按原稿伪代码搜索函数会得到零调用处，无法确定真实锁边界、O/P 认领和 runtime 消费点。 | 全部改为 HEAD 的入口和函数职责；新增策略函数明确插在认领后、`beginUIDispatch` 前。 |
-| A2 | `04:74-96, 289-315` | 原稿把 `carrierRaw` 当成可点击祖先，并在祖先链变化时向上重新寻找载体。后续收紧又改成“原 carrier 消失一律拒绝”，撤掉了提案希望支持的动态载体路线。 | `tapPlan.carrierRaw` 是安全子载体，字段定义见 [`tap_scope.go:26`](../../../internal/engine/tap_scope.go#L26)，子载体类型见 [`tap_scope.go:79`](../../../internal/engine/tap_scope.go#L79)。`collectTapScope` 只遍历 `input.target.Children`，见 [`tap_scope.go:468`](../../../internal/engine/tap_scope.go#L468)；候选和落点证明也只接受目标子树内的安全载体，见 [`tap_scope.go:551`](../../../internal/engine/tap_scope.go#L551) 和 [`tap_scope.go:634`](../../../internal/engine/tap_scope.go#L634)，完整选择入口见 [`chooseTapPlan`](../../../internal/engine/tap_scope.go#L722)。 | 稳定 item `item_42` 的原图片载体 A 被移除，新图片 B 仍在同一 target scope 且安全。只绑定 A 会错误拒绝；但若只看目标位置，另一个同类大按钮或全尺寸交互覆盖可能被误点。 | 禁止向上搜索和穿过 blocker。原静态点仍可证明时优先保留；原点失效后，原 carrier 仍匹配且安全时优先沿用。原 carrier 已失效时，只有目标双向唯一、公开 action 仍有效且有独立强内容身份，才可在同一 target scope 内重选安全 carrier/点。没有独立目标身份时拒绝。 |
-| A3 | `04:134-151, 393-441` | 原稿的 `coreCapabilityMatch`、L2 和文本伪代码直接把缺失的 `Has*` 当普通 `false/true`。 | `RawNode` 明确保存 `HasEnabled/HasFocused/HasPassword/HasClickable/HasLongClick/HasScrollable` 等 presence，见 [`device/types.go:76`](../../../internal/device/types.go#L76)；公开投影用 `triBool` 保留 nil，见 [`build.go:477`](../../../internal/observation/build.go#L477)；动作只由已知正向能力产生，见 [`build.go:440`](../../../internal/observation/build.go#L440)。文本当前还要求已知 focused/enabled/non-password，见 [`act.go:798`](../../../internal/engine/act.go#L798)。 | 源帧没有 `HasFocused`，原稿归一成 false；新帧唯一获焦，归一成 true，于是错误地认为目标焦点状态已确认。 | 执行匹配始终消费 `RawNode.Has*`。known-known 相等才算已知相等；known-unknown 是失配；unknown-unknown 不产生正向证据。 |
-| A4 | `04:214-233` | 原稿 L2 跳过所有“无 resource-id、不可滚动”的祖先，未排除文本、点击、长按、编辑和 password/protected 边界；收紧版又只看三个字符串是否为空。 | 公开动作来自源能力，见 [`build.go:440`](../../../internal/observation/build.go#L440)；protected 来自 password，见 [`build.go:363`](../../../internal/observation/build.go#L363)；点击 scope 本身把 tap/long_press/text 视为交互边界，见 [`tap_scope.go:418`](../../../internal/engine/tap_scope.go#L418)；源 presence 与值分开保存在 `TextSet/DescSet/ResourceSet`，见 [`types.go:76`](../../../internal/device/types.go#L76)。 | 旧 wrapper 的 `TextSet=false`，新帧同值字符串为空或 presence 缺失；只比较 `Text==""` 会把未知内容当成已知空。 | `TextSet && Text==""`、`DescSet && Description==""`、`ResourceSet && ResourceID==""` 三者同时成立才允许视为三项内容为空；任一 presence 缺失均不透明。交互能力仍需已知安全。 |
+| A1 | `04:11-14, 50-58, 74-107, 333-382` | 原稿把 `Act` 描述成先有 `planTapTarget`/`planScrollTarget`，并引用 `captureActiveWindow`、`textAnchor`、`buildTapScope`、`effectiveCarrierForTarget` 等不存在或签名错误的入口。`planTapTarget` 在当前源码中确实存在，但只有定义、没有调用处。 | 实际入口是 [`Act`](../../../../internal/engine/act.go#L15)、静态准入 [`staticActCheckLocked`](../../../../internal/engine/act.go#L26)、认领 [`claimObservationLocked`](../../../../internal/engine/act.go#L342)、重验 [`revalidateActTarget`](../../../../internal/engine/act.go#L379)、点击重验 [`revalidateTapTarget`](../../../../internal/engine/act.go#L429) 和派发 [`dispatchAct`](../../../../internal/engine/act.go#L615)。点击静态入口是 [`staticTapRefCheck`](../../../../internal/engine/tap_scope.go#L906)，滚动静态入口是 [`resolveScrollPlan`](../../../../internal/engine/scroll.go#L452)。 | 按原稿伪代码搜索函数会得到零调用处，无法确定真实锁边界、O/P 认领和 runtime 消费点。 | 全部改为 HEAD 的入口和函数职责；新增策略函数明确插在认领后、`beginUIDispatch` 前。 |
+| A2 | `04:74-96, 289-315` | 原稿把 `carrierRaw` 当成可点击祖先，并在祖先链变化时向上重新寻找载体。后续收紧又改成“原 carrier 消失一律拒绝”，撤掉了提案希望支持的动态载体路线。 | `tapPlan.carrierRaw` 是安全子载体，字段定义见 [`tap_scope.go:26`](../../../../internal/engine/tap_scope.go#L26)，子载体类型见 [`tap_scope.go:79`](../../../../internal/engine/tap_scope.go#L79)。`collectTapScope` 只遍历 `input.target.Children`，见 [`tap_scope.go:468`](../../../../internal/engine/tap_scope.go#L468)；候选和落点证明也只接受目标子树内的安全载体，见 [`tap_scope.go:551`](../../../../internal/engine/tap_scope.go#L551) 和 [`tap_scope.go:634`](../../../../internal/engine/tap_scope.go#L634)，完整选择入口见 [`chooseTapPlan`](../../../../internal/engine/tap_scope.go#L722)。 | 稳定 item `item_42` 的原图片载体 A 被移除，新图片 B 仍在同一 target scope 且安全。只绑定 A 会错误拒绝；但若只看目标位置，另一个同类大按钮或全尺寸交互覆盖可能被误点。 | 禁止向上搜索和穿过 blocker。原静态点仍可证明时优先保留；原点失效后，原 carrier 仍匹配且安全时优先沿用。原 carrier 已失效时，只有目标双向唯一、公开 action 仍有效且有独立强内容身份，才可在同一 target scope 内重选安全 carrier/点。没有独立目标身份时拒绝。 |
+| A3 | `04:134-151, 393-441` | 原稿的 `coreCapabilityMatch`、L2 和文本伪代码直接把缺失的 `Has*` 当普通 `false/true`。 | `RawNode` 明确保存 `HasEnabled/HasFocused/HasPassword/HasClickable/HasLongClick/HasScrollable` 等 presence，见 [`device/types.go:76`](../../../../internal/device/types.go#L76)；公开投影用 `triBool` 保留 nil，见 [`build.go:477`](../../../../internal/observation/build.go#L477)；动作只由已知正向能力产生，见 [`build.go:440`](../../../../internal/observation/build.go#L440)。文本当前还要求已知 focused/enabled/non-password，见 [`act.go:798`](../../../../internal/engine/act.go#L798)。 | 源帧没有 `HasFocused`，原稿归一成 false；新帧唯一获焦，归一成 true，于是错误地认为目标焦点状态已确认。 | 执行匹配始终消费 `RawNode.Has*`。known-known 相等才算已知相等；known-unknown 是失配；unknown-unknown 不产生正向证据。 |
+| A4 | `04:214-233` | 原稿 L2 跳过所有“无 resource-id、不可滚动”的祖先，未排除文本、点击、长按、编辑和 password/protected 边界；收紧版又只看三个字符串是否为空。 | 公开动作来自源能力，见 [`build.go:440`](../../../../internal/observation/build.go#L440)；protected 来自 password，见 [`build.go:363`](../../../../internal/observation/build.go#L363)；点击 scope 本身把 tap/long_press/text 视为交互边界，见 [`tap_scope.go:418`](../../../../internal/engine/tap_scope.go#L418)；源 presence 与值分开保存在 `TextSet/DescSet/ResourceSet`，见 [`types.go:76`](../../../../internal/device/types.go#L76)。 | 旧 wrapper 的 `TextSet=false`，新帧同值字符串为空或 presence 缺失；只比较 `Text==""` 会把未知内容当成已知空。 | `TextSet && Text==""`、`DescSet && Description==""`、`ResourceSet && ResourceID==""` 三者同时成立才允许视为三项内容为空；任一 presence 缺失均不透明。交互能力仍需已知安全。 |
 | A5 | `04:214-233, 275-279` | 原稿允许 L2 只匹配合成根，且 Tier 2 在多个候选中取最大 overlap。 | 根是合成阅读节点，不承载源控件业务身份。README 已规定几何最大值不能在多候选中胜出，见 [README §2.3](README.md)。 | 同 App、同 task 的另一个页面有两个同 class/text 控件，bounding box 分别重叠 0.81 和 0.79；最大者胜出即错误派发。 | 每个 Tier 必须恰好一个候选；零个继续下一层，多个立即拒绝。Tier 3 还必须保留至少一个非根语义边界锚点。 |
-| A6 | `04:279` | Tier 4 允许仅因 `coreCapabilityMatch` 就忽略任意文本变化。 | `Text` 是源业务标签，当前完整身份包含 Text，见 [`identity.go:8`](../../../internal/engine/identity.go#L8)。 | 旧按钮文案“删除”，新按钮文案“分享”，位置、class、resource-id 和能力相同；自动 Tier 4 会接受。 | 默认路径只实现 Tier 1–3。Tier 4 保留为未决取舍；若未来启用，只能使用经用户批准的受限转换集合。 |
-| A7 | `04:387-390` | 原稿 `shifted` 的全屏“唯一同类型获焦输入框”不构成目标身份。 | 当前 `bindFocusedText` 的精确分支使用 resource/class/description，弱分支要求原点和几何重叠，见 [`act.go:798`](../../../internal/engine/act.go#L798)。`RawNode` 没有 Hint 字段。 | 点击输入框 A 后页面自动把同 class 的搜索框 B 聚焦；全屏只有 B 获焦，原稿会绑定 B。 | 删除 `anyFocusedSameType`。shifted 必须有非空 ResourceID 或 Description 锚点，并在旧帧和新帧各自唯一；只放宽纵向位移。 |
-| A8 | `04:333-382` | 原稿引用不存在的 `axisBounds`、`intervalOverlapRatio`、三参数 `scrollGeometry` 和 `planScrollTarget`。 | `scrollPlan` 只有 `start/end`，见 [`scroll.go:325`](../../../internal/engine/scroll.go#L325)；实际几何函数为 `scrollGeometry(rect, screen, direction, amount)`，见 [`scroll.go:352`](../../../internal/engine/scroll.go#L352)；实际安全区间 helper 见 [`scroll.go:180`](../../../internal/engine/scroll.go#L180)、[`scroll.go:255`](../../../internal/engine/scroll.go#L255)、[`scroll.go:279`](../../../internal/engine/scroll.go#L279) 和 [`scroll.go:289`](../../../internal/engine/scroll.go#L289)。 | 仅比较轴向区间重叠会把横轴已移到另一列的同内容容器当成同一个；按原稿签名无法编译。 | 使用真实 clipped rect 和 helper；同时要求轴向连续、离轴边缘稳定，并对整条新轨迹做 `provesSegment`。 |
-| A9 | `04:333-382` | 原稿声称更新 plan 后 `dispatchScroll` 会使用新轨迹，但没有说明当前 dispatch 消费的是 `scrollFrame`。 | 当前派发直接使用 [`scrollFrame.start/end`](../../../internal/engine/scroll.go#L716)，不是本地重建的 plan 副本。 | 重算只写入局部 `*scrollPlan`，传入 `dispatchScroll` 的 frame 仍是旧端点，实际设备仍收到旧轨迹。 | 重验生成新的不可变 `scrollFrame`，重算端点写入该 frame，`dispatchScroll` 只消费该 frame。 |
-| A10 | `04 §2（修订前约 :153-166）` | 原稿称 settle 后重验 100% 通过，并写成统一 150ms。 | 当前策略是 act 400ms、start 300ms、open-app 600ms，见 [`settle.go:45`](../../../internal/engine/settle.go#L45)；摘要为严格 19 字段，见 [`settle.go:310`](../../../internal/engine/settle.go#L310)；未知前台仍拒绝动作，见 [`act.go:588`](../../../internal/engine/act.go#L588)。 | 两帧完全一致只能证明采样到的源树未变，不能排除前景 unknown、L2 根-only、多个同身份候选或焦点在帧后变化。 | settle 完全不变。动作重验是独立门禁，不承诺任何 100% 或 300ms/600ms 关系。 |
-| A11 | `04:74-107, 289-441` | 原稿把 O/P、STOP、Preview、source mapping 和最终派发门禁省略在示意算法外。 | 单向认领见 [`act.go:342`](../../../internal/engine/act.go#L342)；Preview 不推进 ref 连续性，见 [`build.go:171`](../../../internal/observation/build.go#L171)；最终派发门禁见 [`ui_execution.go:86`](../../../internal/engine/ui_execution.go#L86)；工作撤权条件见 [`operations.go:420`](../../../internal/engine/operations.go#L420)。 | 匹配函数单独写对仍可能在 STOP 后派发，或把 Preview 当成会话候选提交。 | 算法明确保留静态准入、一次认领、Preview 只读、锁外计算、`beginUIDispatch` 最终重检和拒绝观察交付路径。 |
+| A6 | `04:279` | Tier 4 允许仅因 `coreCapabilityMatch` 就忽略任意文本变化。 | `Text` 是源业务标签，当前完整身份包含 Text，见 [`identity.go:8`](../../../../internal/engine/identity.go#L8)。 | 旧按钮文案“删除”，新按钮文案“分享”，位置、class、resource-id 和能力相同；自动 Tier 4 会接受。 | 默认路径只实现 Tier 1–3。Tier 4 保留为未决取舍；若未来启用，只能使用经用户批准的受限转换集合。 |
+| A7 | `04:387-390` | 原稿 `shifted` 的全屏“唯一同类型获焦输入框”不构成目标身份。 | 当前 `bindFocusedText` 的精确分支使用 resource/class/description，弱分支要求原点和几何重叠，见 [`act.go:798`](../../../../internal/engine/act.go#L798)。`RawNode` 没有 Hint 字段。 | 点击输入框 A 后页面自动把同 class 的搜索框 B 聚焦；全屏只有 B 获焦，原稿会绑定 B。 | 删除 `anyFocusedSameType`。shifted 必须有非空 ResourceID 或 Description 锚点，并在旧帧和新帧各自唯一；只放宽纵向位移。 |
+| A8 | `04:333-382` | 原稿引用不存在的 `axisBounds`、`intervalOverlapRatio`、三参数 `scrollGeometry` 和 `planScrollTarget`。 | `scrollPlan` 只有 `start/end`，见 [`scroll.go:325`](../../../../internal/engine/scroll.go#L325)；实际几何函数为 `scrollGeometry(rect, screen, direction, amount)`，见 [`scroll.go:352`](../../../../internal/engine/scroll.go#L352)；实际安全区间 helper 见 [`scroll.go:180`](../../../../internal/engine/scroll.go#L180)、[`scroll.go:255`](../../../../internal/engine/scroll.go#L255)、[`scroll.go:279`](../../../../internal/engine/scroll.go#L279) 和 [`scroll.go:289`](../../../../internal/engine/scroll.go#L289)。 | 仅比较轴向区间重叠会把横轴已移到另一列的同内容容器当成同一个；按原稿签名无法编译。 | 使用真实 clipped rect 和 helper；同时要求轴向连续、离轴边缘稳定，并对整条新轨迹做 `provesSegment`。 |
+| A9 | `04:333-382` | 原稿声称更新 plan 后 `dispatchScroll` 会使用新轨迹，但没有说明当前 dispatch 消费的是 `scrollFrame`。 | 当前派发直接使用 [`scrollFrame.start/end`](../../../../internal/engine/scroll.go#L716)，不是本地重建的 plan 副本。 | 重算只写入局部 `*scrollPlan`，传入 `dispatchScroll` 的 frame 仍是旧端点，实际设备仍收到旧轨迹。 | 重验生成新的不可变 `scrollFrame`，重算端点写入该 frame，`dispatchScroll` 只消费该 frame。 |
+| A10 | `04 §2（修订前约 :153-166）` | 原稿称 settle 后重验 100% 通过，并写成统一 150ms。 | 当前策略是 act 400ms、start 300ms、open-app 600ms，见 [`settle.go:45`](../../../../internal/engine/settle.go#L45)；摘要为严格 19 字段，见 [`settle.go:310`](../../../../internal/engine/settle.go#L310)；未知前台仍拒绝动作，见 [`act.go:588`](../../../../internal/engine/act.go#L588)。 | 两帧完全一致只能证明采样到的源树未变，不能排除前景 unknown、L2 根-only、多个同身份候选或焦点在帧后变化。 | settle 完全不变。动作重验是独立门禁，不承诺任何 100% 或 300ms/600ms 关系。 |
+| A11 | `04:74-107, 289-441` | 原稿把 O/P、STOP、Preview、source mapping 和最终派发门禁省略在示意算法外。 | 单向认领见 [`act.go:342`](../../../../internal/engine/act.go#L342)；Preview 不推进 ref 连续性，见 [`build.go:171`](../../../../internal/observation/build.go#L171)；最终派发门禁见 [`ui_execution.go:86`](../../../../internal/engine/ui_execution.go#L86)；工作撤权条件见 [`operations.go:420`](../../../../internal/engine/operations.go#L420)。 | 匹配函数单独写对仍可能在 STOP 后派发，或把 Preview 当成会话候选提交。 | 算法明确保留静态准入、一次认领、Preview 只读、锁外计算、`beginUIDispatch` 最终重检和拒绝观察交付路径。 |
 
 ### 0.2 与分册 01 的状态语义交叉
 
@@ -67,34 +72,34 @@ Tier 4 的“任意文案变化仍视为同一目标”不进入默认实现。�
 | A14 | `TaskID` 曾被写成“相同窗口”的证明。现有 `RawNode`/`device.Capture` 没有 window token，同一 task 可以切换页面或替换同签名节点。 | 接口和文字统一降格为“同前台 task 上下文”；TaskID 只与该事实一起使用，不承诺窗口身份。该限制保留为匹配能力边界。 | N36 和文字绑定验收必须覆盖“同 TaskID、不同页面/同签名替换”，不得以 TaskID 或全屏唯一焦点宣称目标已证明。 |
 | A15 | 上一版为双向唯一构造 `original × fresh` 全量边集；20k×20k 可达 4 亿对，而且目标和点击载体各重跑一次。长祖先链也没有确定性的匹配工作量上限。 | 每个 Tier 只做两次定向扫描：固定 `want` 扫描 fresh 求唯一 outgoing；成功后固定该 fresh 反扫 original 求唯一 incoming。lineage 仅按实际比较到的索引惰性缓存。候选访问、祖先遍历和 lineage 比较均有确定性上限，并在扫描点检查 `ctx`；预算耗尽映射既有层级错误。 | N37 用 20k×20k 零/单候选计数排除 N²；N38 验证预算耗尽返回 `CodeHierarchyFailed` 且不尝试下一 Tier；N33 仍由反扫 incoming 计数拒绝。 |
 | A16 | N21 只写“anchor 缺失或不同”，没有区分可观察差异与完全同签名替换。 | N21 只在候选不在原点击点/原几何，或 class、anchor、来源 presence 等可观察身份有异时承诺拒绝。若全部可观察签名一致，保留为 N36 已声明的不可辨识边界，不能靠唯一焦点伪造拒绝能力，也不能反过来承诺总能识别替换。 | N21 验证可观察差异拒绝；N36 只验证实现如实保留“同 task、非 window proof”的能力边界，不要求对完全同签名替换承诺总拒绝或总成功。 |
-| A17 | matcher 把取消、预算耗尽、畸形树和普通无候选/歧义都压成统一的“不匹配”，调用层容易统一映射成 `target_changed`。Probe/Capture 的错误分支也没有在解释设备错误前重新检查撤权。 现有 `protocol.CodeStopped` 的值为 `control_revoked`，见 [`errors.go:177`](../../../internal/protocol/errors.go#L177)；层级失败为 `hierarchy_unavailable`，见 [`errors.go:174`](../../../internal/protocol/errors.go#L174)。撤权判断见 [`workRevoked`](../../../internal/engine/operations.go#L386)，最终派发门禁见 [`beginUIDispatch`](../../../internal/engine/ui_execution.go#L86)。可交付的 rejected frame 只包含 target/foreground/node-not-found，见 [`deliverableRejection`](../../../internal/engine/delivery.go#L76)。 | STOP 恰在扫描末尾到达，matcher 已有一个候选，却返回 `target_changed`；调用层再把它当普通业务拒绝交付 retry。 | matcher 和调用层显式区分 unique/none/ambiguous/cancelled/budget/malformed；撤权用既有 `CodeStopped`，预算/畸形树用既有 `CodeHierarchyFailed`。target/scroll 的 none/ambiguous 映射 `target_changed`；carrier 的 none/ambiguous 只有在独立目标身份成立时进入安全解绑，否则同样拒绝。撤权、预算和层级失败都不 delivery、不 `markDelivered`、不生成 retry 新 O。 |
-| A18 | 当前 `revalidateTapTarget` 在任何 carrier 失配时直接拒绝，因而无法在同 target 子树内安全换用另一个非阻塞载体。 carrier 只是安全子载体，不是点击祖先；动态候选只能来自目标子树。现有目标选择由 [`chooseTapPlan`](../../../internal/engine/tap_scope.go#L722) 完成，且所有点仍由 [`provesSubtreeTapPoint`](../../../internal/engine/tap_scope.go#L551) 证明。 | 稳定 item 的图片 A 消失、图片 B 仍安全；只绑定 A 会拒绝合法重试。反例是目标只靠 A 区分，换 B 后无法证明目标身份。 | 目标双向唯一、公开 action 有效且有独立强内容身份时允许安全解绑；优先原点，其次原 carrier，再在 target scope 内重选。原 carrier 是唯一目标身份时拒绝；全尺寸交互 blocker 覆盖时 `chooseTapPlan` 必须失败。 |
-| A19 | `transparentWrapper` 只检查 `Text/Description/ResourceID` 的值是否为空，没有要求相应 presence 位明确存在。 三个 presence 与值分开存储在 [`types.go:76`](../../../internal/device/types.go#L76)。`false` 不能为动作身份伪造“已知空字符串”。 | `TextSet=false, Text=""` 的 wrapper 被当成透明层，可能吞掉未知内容边界。 | 三项都必须 `Set=true && value==""`；任一 presence 缺失、任一值非空或任一能力未知/不安全都保持为边界。 |
-| A20 | `lineageL1` 每次 cache miss 都 `make(map[int]struct{}, len(capture.Nodes))`。深度 1 的 20k 个候选仍会反复预留整棵树大小的 visited 容量，而且这部分分配未进入预算。 当前 visited 只用于一次祖先回溯，见 [`act.go:866`](../../../internal/engine/act.go#L866) 的基线形式；提案需要 cycle-safe，但不能按全树容量反复分配。 | 20k 个同层候选全部在深度 1 失配，若每次预留 20k map bucket，会产生与候选数乘树大小相关的巨大临时分配。 | visited map 改为首次访问时才创建、容量随实际深度增长；每次首次创建都发生在一次已计费 lineage step 之后。N37 记录候选/lineage 操作计数及 lineage 相关总 allocation count/bytes，包括 visited map、lineage slice 和 memo backing store；不把候选扫描线性说成总分配恒定。 |
+| A17 | matcher 把取消、预算耗尽、畸形树和普通无候选/歧义都压成统一的“不匹配”，调用层容易统一映射成 `target_changed`。Probe/Capture 的错误分支也没有在解释设备错误前重新检查撤权。 现有 `protocol.CodeStopped` 的值为 `control_revoked`，见 [`errors.go:177`](../../../../internal/protocol/errors.go#L177)；层级失败为 `hierarchy_unavailable`，见 [`errors.go:174`](../../../../internal/protocol/errors.go#L174)。撤权判断见 [`workRevoked`](../../../../internal/engine/operations.go#L386)，最终派发门禁见 [`beginUIDispatch`](../../../../internal/engine/ui_execution.go#L86)。可交付的 rejected frame 只包含 target/foreground/node-not-found，见 [`deliverableRejection`](../../../../internal/engine/delivery.go#L76)。 | STOP 恰在扫描末尾到达，matcher 已有一个候选，却返回 `target_changed`；调用层再把它当普通业务拒绝交付 retry。 | matcher 和调用层显式区分 unique/none/ambiguous/cancelled/budget/malformed；撤权用既有 `CodeStopped`，预算/畸形树用既有 `CodeHierarchyFailed`。target/scroll 的 none/ambiguous 映射 `target_changed`；carrier 的 none/ambiguous 只有在独立目标身份成立时进入安全解绑，否则同样拒绝。撤权、预算和层级失败都不 delivery、不 `markDelivered`、不生成 retry 新 O。 |
+| A18 | 当前 `revalidateTapTarget` 在任何 carrier 失配时直接拒绝，因而无法在同 target 子树内安全换用另一个非阻塞载体。 carrier 只是安全子载体，不是点击祖先；动态候选只能来自目标子树。现有目标选择由 [`chooseTapPlan`](../../../../internal/engine/tap_scope.go#L722) 完成，且所有点仍由 [`provesSubtreeTapPoint`](../../../../internal/engine/tap_scope.go#L551) 证明。 | 稳定 item 的图片 A 消失、图片 B 仍安全；只绑定 A 会拒绝合法重试。反例是目标只靠 A 区分，换 B 后无法证明目标身份。 | 目标双向唯一、公开 action 有效且有独立强内容身份时允许安全解绑；优先原点，其次原 carrier，再在 target scope 内重选。原 carrier 是唯一目标身份时拒绝；全尺寸交互 blocker 覆盖时 `chooseTapPlan` 必须失败。 |
+| A19 | `transparentWrapper` 只检查 `Text/Description/ResourceID` 的值是否为空，没有要求相应 presence 位明确存在。 三个 presence 与值分开存储在 [`types.go:76`](../../../../internal/device/types.go#L76)。`false` 不能为动作身份伪造“已知空字符串”。 | `TextSet=false, Text=""` 的 wrapper 被当成透明层，可能吞掉未知内容边界。 | 三项都必须 `Set=true && value==""`；任一 presence 缺失、任一值非空或任一能力未知/不安全都保持为边界。 |
+| A20 | `lineageL1` 每次 cache miss 都 `make(map[int]struct{}, len(capture.Nodes))`。深度 1 的 20k 个候选仍会反复预留整棵树大小的 visited 容量，而且这部分分配未进入预算。 当前 visited 只用于一次祖先回溯，见 [`act.go:866`](../../../../internal/engine/act.go#L866) 的基线形式；提案需要 cycle-safe，但不能按全树容量反复分配。 | 20k 个同层候选全部在深度 1 失配，若每次预留 20k map bucket，会产生与候选数乘树大小相关的巨大临时分配。 | visited map 改为首次访问时才创建、容量随实际深度增长；每次首次创建都发生在一次已计费 lineage step 之后。N37 记录候选/lineage 操作计数及 lineage 相关总 allocation count/bytes，包括 visited map、lineage slice 和 memo backing store；不把候选扫描线性说成总分配恒定。 |
 
 ## 1. 当前真实调用链
 
 ### 1.1 `Act` 的总顺序
 
-当前 [`Act`](../../../internal/engine/act.go#L15) 的顺序是：
+当前 [`Act`](../../../../internal/engine/act.go#L15) 的顺序是：
 
 1. `registerOperation` 处理 P 去重；
-2. 在状态锁内执行静态准入，见 [`act.go:26`](../../../internal/engine/act.go#L26)；
+2. 在状态锁内执行静态准入，见 [`act.go:26`](../../../../internal/engine/act.go#L26)；
 3. 静态内容规划和错误在认领前完成，静态拒绝不认领 O；
-4. `acquireWork` 取得唯一普通工作位置，见 [`act.go:59`](../../../internal/engine/act.go#L59)；
-5. `claimObservationLocked` 完成 `ready -> claimed(P)`，见 [`act.go:65`](../../../internal/engine/act.go#L65)；
-6. 认领后抓取 live capture 并做重验，见 [`act.go:76`](../../../internal/engine/act.go#L76)；
-7. 重验拒绝时，只有既有可交付错误族可使用已经读到的帧执行 `deliverRejection`；撤权、层级失败、预算和畸形树不交付。原 O 不归还 ready，见 [`delivery.go:9`](../../../internal/engine/delivery.go#L9)；
-8. 成功后才进入 dispatch，见 [`act.go:107`](../../../internal/engine/act.go#L107)；
-9. 每个真实输入 primitive 都必须经过 `beginUIDispatch`，见 [`ui_execution.go:86`](../../../internal/engine/ui_execution.go#L86)。
+4. `acquireWork` 取得唯一普通工作位置，见 [`act.go:59`](../../../../internal/engine/act.go#L59)；
+5. `claimObservationLocked` 完成 `ready -> claimed(P)`，见 [`act.go:65`](../../../../internal/engine/act.go#L65)；
+6. 认领后抓取 live capture 并做重验，见 [`act.go:76`](../../../../internal/engine/act.go#L76)；
+7. 重验拒绝时，只有既有可交付错误族可使用已经读到的帧执行 `deliverRejection`；撤权、层级失败、预算和畸形树不交付。原 O 不归还 ready，见 [`delivery.go:9`](../../../../internal/engine/delivery.go#L9)；
+8. 成功后才进入 dispatch，见 [`act.go:107`](../../../../internal/engine/act.go#L107)；
+9. 每个真实输入 primitive 都必须经过 `beginUIDispatch`，见 [`ui_execution.go:86`](../../../../internal/engine/ui_execution.go#L86)。
 
 本提案只替换第 6 步中的目标证明策略和第 8 步实际消费的重验结果，不改变上述权限顺序。
 
 ### 1.2 当前节点身份的严格点
 
-[`rawIdentity`](../../../internal/engine/identity.go#L8) 包含 Bounds、文本、能力、password、enabled/checked/selected/focused 及各自 presence。`identityOf` 同时被 settle 的层级摘要使用，不能为动作宽松匹配直接改写。
+[`rawIdentity`](../../../../internal/engine/identity.go#L8) 包含 Bounds、文本、能力、password、enabled/checked/selected/focused 及各自 presence。`identityOf` 同时被 settle 的层级摘要使用，不能为动作宽松匹配直接改写。
 
-[`lineageOf`](../../../internal/engine/act.go#L866) 把每个祖先的完整 `rawIdentity`（包括 Bounds）加入链；[`matchFreshNode`](../../../internal/engine/act.go#L888) 要求目标完整身份和整条祖先链都完全相等，并且候选唯一。
+[`lineageOf`](../../../../internal/engine/act.go#L866) 把每个祖先的完整 `rawIdentity`（包括 Bounds）加入链；[`matchFreshNode`](../../../../internal/engine/act.go#L888) 要求目标完整身份和整条祖先链都完全相等，并且候选唯一。
 
 因此，旧稿的痛点诊断在方向上成立：
 
@@ -107,9 +112,9 @@ Tier 4 的“任意文案变化仍视为同一目标”不进入默认实现。�
 
 ### 1.3 点击载体是子节点
 
-[`collectTapScope`](../../../internal/engine/tap_scope.go#L468) 从目标节点开始，只遍历其 children。非交互、非 context、有 source mapping 和正几何的后代成为 `tapCarrier`。交互节点成为 blocker/owner，而不是可用的穿透载体。
+[`collectTapScope`](../../../../internal/engine/tap_scope.go#L468) 从目标节点开始，只遍历其 children。非交互、非 context、有 source mapping 和正几何的后代成为 `tapCarrier`。交互节点成为 blocker/owner，而不是可用的穿透载体。
 
-[`provesSubtreeTapPoint`](../../../internal/engine/tap_scope.go#L551) 只证明一个点：
+[`provesSubtreeTapPoint`](../../../../internal/engine/tap_scope.go#L551) 只证明一个点：
 
 - 在目标 raw/public 交集内；
 - 不落入目标子树中的 blocker；
@@ -119,15 +124,15 @@ Tier 4 的“任意文案变化仍视为同一目标”不进入默认实现。�
 
 ### 1.4 滚动当前仍是固定轨迹
 
-静态 [`resolveScrollPlan`](../../../internal/engine/scroll.go#L452) 在认领前用 `scrollSafeSpans`、`longestSpan`、`safeRect` 和 `scrollGeometry` 生成固定 `start/end`。认领后的 [`revalidateScrollTarget`](../../../internal/engine/scroll.go#L619) 只证明原轨迹整段仍安全，注释还明确表示不会重新选最长区间或重算端点，见 [`scroll.go:515`](../../../internal/engine/scroll.go#L515) 和 [`scroll.go:685`](../../../internal/engine/scroll.go#L685)。
+静态 [`resolveScrollPlan`](../../../../internal/engine/scroll.go#L452) 在认领前用 `scrollSafeSpans`、`longestSpan`、`safeRect` 和 `scrollGeometry` 生成固定 `start/end`。认领后的 [`revalidateScrollTarget`](../../../../internal/engine/scroll.go#L619) 只证明原轨迹整段仍安全，注释还明确表示不会重新选最长区间或重算端点，见 [`scroll.go:515`](../../../../internal/engine/scroll.go#L515) 和 [`scroll.go:685`](../../../../internal/engine/scroll.go#L685)。
 
 本提案要改变这一契约。实施时不能只删除固定点比较，还必须更新正式 docs、MCP 工具说明、相关注释和测试，把“重验原固定轨迹”改成“重验原轨迹，必要时在同一已匹配容器内生成新的可证明轨迹”。
 
-当前正式契约仍明确写着不重新规划固定轨迹，见 [`docs/interface.md:475`](../../../docs/interface.md#L475)；MCP `act` 说明也写着认领后只重验固定点，见 [`internal/mcp/schema.go:181`](../../../internal/mcp/schema.go#L181)。本提案不能把源码和这些契约分开改。
+当前正式契约仍明确写着不重新规划固定轨迹，见 [`docs/interface.md:475`](../../../../docs/interface.md#L475)；MCP `act` 说明也写着认领后只重验固定点，见 [`internal/mcp/schema.go:181`](../../../../internal/mcp/schema.go#L181)。本提案不能把源码和这些契约分开改。
 
 ### 1.5 文字输入当前焦点门禁
 
-[`bindFocusedText`](../../../internal/engine/act.go#L798) 只接受：
+[`bindFocusedText`](../../../../internal/engine/act.go#L798) 只接受：
 
 - `Visible == true`；
 - `HasFocused && Focused`；
@@ -1239,7 +1244,7 @@ resource 已足以保留 item_42 的 A→B 安全解绑。若只有其它 descen
 
 ### 4.3 实际 runtime 消费
 
-当前 [`dispatchAct`](../../../internal/engine/act.go#L615) 对 ref tap/long_press 读取 `tap.x/tap.y`。实施时应改为显式接收 `tapFrame`，或确保同一个可变 plan 实例被 dispatch 消费；`text` 分支也必须把该 frame 传给 focus tap，不能因为转到 `dispatchText` 就退回 raw center。
+当前 [`dispatchAct`](../../../../internal/engine/act.go#L615) 对 ref tap/long_press 读取 `tap.x/tap.y`。实施时应改为显式接收 `tapFrame`，或确保同一个可变 plan 实例被 dispatch 消费；`text` 分支也必须把该 frame 传给 focus tap，不能因为转到 `dispatchText` 就退回 raw center。
 
 推荐不可变接口：
 
@@ -1448,7 +1453,7 @@ func (e *Engine) revalidateScrollTarget(work *workState,
 }
 ```
 
-[`dispatchScroll`](../../../internal/engine/scroll.go#L716) 必须使用返回 frame 的 `start/end`。测试应在假设备的 `Swipe` 调用参数上断言新值，不能只断言 `revalidateScrollTarget` 返回成功。
+[`dispatchScroll`](../../../../internal/engine/scroll.go#L716) 必须使用返回 frame 的 `start/end`。测试应在假设备的 `Swipe` 调用参数上断言新值，不能只断言 `revalidateScrollTarget` 返回成功。
 
 ### 5.3 最大安全区间的边界
 
@@ -1732,7 +1737,7 @@ func bindFocusedText(original, fresh *device.Capture, want *device.RawNode,
 
 ### 6.4 `input_text` 派发修正
 
-当前 [`dispatchText`](../../../internal/engine/act.go#L681) 的顺序应保留为：
+当前 [`dispatchText`](../../../../internal/engine/act.go#L681) 的顺序应保留为：
 
 1. 对 ref 目标使用 `tapFrame.x/y` 中的已证明安全焦点，对坐标目标使用原坐标；写入目标在绑定后使用 fresh bounds；
 2. `beginUIDispatch("tap")`；
@@ -1941,7 +1946,7 @@ func (e *Engine) Act(ctx context.Context, agent, p string,
 
 本提案不改动：
 
-- [`DefaultSettlePolicies`](../../../internal/engine/settle.go#L45) 的 act 400ms、start 300ms、open-app 600ms；
+- [`DefaultSettlePolicies`](../../../../internal/engine/settle.go#L45) 的 act 400ms、start 300ms、open-app 600ms；
 - 最小/最大采样数；
 - 19 字段 `rawIdentity`；
 - `hierarchyDigest` 的逐节点父 fingerprint 链；
@@ -1959,7 +1964,7 @@ settle 只说明“当前采样帧在这个严格摘要上相同”。settled �
 - 滚动原轨迹被新 blocker 截断；
 - Display/work/session/STOP 门禁失败。
 
-因此 README 不得再声称 settled 帧会 100% 通过 relaxed revalidation；本提案也不扩展 settle 摘要来“保证一致”。实现时应修正 [`identity.go:19`](../../../internal/engine/identity.go#L19) 的旧注释，因为动作匹配将不再与 settle 使用完全相同身份。
+因此 README 不得再声称 settled 帧会 100% 通过 relaxed revalidation；本提案也不扩展 settle 摘要来“保证一致”。实现时应修正 [`identity.go:19`](../../../../internal/engine/identity.go#L19) 的旧注释，因为动作匹配将不再与 settle 使用完全相同身份。
 
 ## 9. 负例与验收矩阵
 
@@ -2053,29 +2058,29 @@ N21 与 N36 的边界必须分别测试：前者要求实现拒绝可观察身�
 
 ### 10.2 接入 ref 目标
 
-1. 在 [`revalidateActTarget`](../../../internal/engine/act.go#L379) 中只对 ref 目标调用新 matcher；ProbeDisplay/Capture 返回后先检查 workRevoked/work.Ctx，再解释 display/hierarchy 错误。
+1. 在 [`revalidateActTarget`](../../../../internal/engine/act.go#L379) 中只对 ref 目标调用新 matcher；ProbeDisplay/Capture 返回后先检查 workRevoked/work.Ctx，再解释 display/hierarchy 错误。
 2. 坐标目标继续走原 point proof；raw key/swipe 不获得重定位能力。
 3. 将 `revalidateTapTarget` 的结果改为 frame 或等价显式结构；`revalidateActTarget` 相应返回 `capture + raw + tapFrame + 时长 + error`，避免在调用层丢失重算点。
 4. `dispatchAct` 使用 frame 中的重算坐标。
 5. 保留 `validateTapRawTopology`、`Preview`、`checkTapSourceMapping`、`validTapPublicTarget` 和 `collectTapScope`；carrier 失配时仅在 target 有独立内容身份后复用同一 scope 的 `chooseTapPlan`。
 6. 替换当前刻意固定旧行为的测试：
-   - [`act_tap_scope_test.go:639`](../../../internal/engine/act_tap_scope_test.go#L639) 的“新安全候选不抢原点”继续保留；
-   - [`act_tap_scope_test.go:652`](../../../internal/engine/act_tap_scope_test.go#L652) 中 carrier moved 改为成功重算；disappeared 时分别覆盖“独立 target 身份 + B 安全成功”和“无独立身份拒绝”，context/interactive/full overlay 仍拒绝；
+   - [`act_tap_scope_test.go:639`](../../../../internal/engine/act_tap_scope_test.go#L639) 的“新安全候选不抢原点”继续保留；
+   - [`act_tap_scope_test.go:652`](../../../../internal/engine/act_tap_scope_test.go#L652) 中 carrier moved 改为成功重算；disappeared 时分别覆盖“独立 target 身份 + B 安全成功”和“无独立身份拒绝”，context/interactive/full overlay 仍拒绝；
    - `TestActTapCardKeepsFixedPointWhenFreshMovesOutsideElement` 改为同 carrier/target 内重算。
 
 ### 10.3 接入 scroll
 
-1. 在 [`revalidateScrollTarget`](../../../internal/engine/scroll.go#L619) 中先使用唯一容器 matcher，再检查 `sameScrollScope`；Probe/Capture 和 Tier 边界的撤权检查与 target/carrier 共用。
+1. 在 [`revalidateScrollTarget`](../../../../internal/engine/scroll.go#L619) 中先使用唯一容器 matcher，再检查 `sameScrollScope`；Probe/Capture 和 Tier 边界的撤权检查与 target/carrier 共用。
 2. 使用真实 `scrollSafeSpans(projection, freshIndex, clipped, direction)`。
 3. 原 `provesSegment` 通过时保持原轨迹；失败时使用 `longestSpan`、`safeRect`、四参数 `scrollGeometry` 重算，并再次 `provesSegment`。
 4. 返回包含实际新 `start/end` 的 `scrollFrame`。
-5. 在 [`scroll_revalidate_test.go:61`](../../../internal/engine/scroll_revalidate_test.go#L61) 和 [`scroll_revalidate_test.go:180`](../../../internal/engine/scroll_revalidate_test.go#L180) 基础上分离：
+5. 在 [`scroll_revalidate_test.go:61`](../../../../internal/engine/scroll_revalidate_test.go#L61) 和 [`scroll_revalidate_test.go:180`](../../../../internal/engine/scroll_revalidate_test.go#L180) 基础上分离：
    - 轴向伸缩/移动允许；
    - 离轴移动超容差拒绝；
    - 原 segment 局部中断时可重算；
    - 全部 span 不安全仍拒绝；
    - fake device 收到新 frame 坐标。
-6. 同步 [`scroll.go:515`](../../../internal/engine/scroll.go#L515)、[`scroll.go:685`](../../../internal/engine/scroll.go#L685) 的旧“不重算”注释，并验证 budget/malformed 为 hierarchy、cancelled 为 CodeStopped。
+6. 同步 [`scroll.go:515`](../../../../internal/engine/scroll.go#L515)、[`scroll.go:685`](../../../../internal/engine/scroll.go#L685) 的旧“不重算”注释，并验证 budget/malformed 为 hierarchy、cancelled 为 CodeStopped。
 
 ### 10.4 接入 text
 
@@ -2084,7 +2089,7 @@ N21 与 N36 的边界必须分别测试：前者要求实现拒绝可观察身�
 3. 删除任何全屏唯一同类型获焦回退。
 4. 在 tap 后和每次 readback 前重新核对 foreground/task 上下文，并明确该证据不是 window token。
 5. 将 `tapFrame` 传给 `dispatchText`，focus tap 使用重算点；将绑定结果携带到 `textTargetOf`，确保 `Get/SetTextOnDisplay` 使用新 bounds。
-6. 保持 [`TestTextFocusReadFailureDoesNotReopenEndedTap`](../../../internal/engine/ui_execution_test.go#L292) 的 uncertain 语义。
+6. 保持 [`TestTextFocusReadFailureDoesNotReopenEndedTap`](../../../../internal/engine/ui_execution_test.go#L292) 的 uncertain 语义。
 
 ### 10.5 门禁、日志和契约
 
@@ -2095,8 +2100,8 @@ N21 与 N36 的边界必须分别测试：前者要求实现拒绝可观察身�
 
 实现落地后才同步正式文档和版本，本次不修改它们：
 
-- [`docs/interface.md`](../../../docs/interface.md) 的动作重验、fixed trajectory 和错误恢复说明；
-- [`internal/mcp/schema.go`](../../../internal/mcp/schema.go) 的 act 工具说明，尤其固定点/固定轨迹措辞；
+- [`docs/interface.md`](../../../../docs/interface.md) 的动作重验、fixed trajectory 和错误恢复说明；
+- [`internal/mcp/schema.go`](../../../../internal/mcp/schema.go) 的 act 工具说明，尤其固定点/固定轨迹措辞；
 - 相关源码注释和测试；
 - 按仓库流程同步 contract version、生成常量和发布清单，且只手改 `release/versions.json`。
 
@@ -2112,3 +2117,35 @@ N21 与 N36 的边界必须分别测试：前者要求实现拒绝可观察身�
 Tier 4 仍未决，默认关闭。实现者需要在获得用户确认后选择“永久移除”或“受限转换”；未确认时只实现 Tier 1–3。
 
 本文件仍为“提案，未实现”。错误分类只复用既有 `CodeStopped` 与 `CodeHierarchyFailed`；STOP 不 delivery、不生成 retry 新 O。本次审核基于源码、静态推演和现有测试契约，不把任何拟议行为写成已实现或已实测，也没有修改 product code、`docs/`、版本、其它提案或设备状态。
+
+### 11.1 已落地
+
+| 提案条目 | 代码落点 | 验证范围 |
+| --- | --- | --- |
+| Tier 1–3、L1/L2、透明 wrapper 与三态身份 | `internal/engine/act_revalidation_policy.go` 的 `compareTri`、`lineageL1`、`transparentWrapper`、`lineageL2`、`tierMatcher`、`matchActTarget` | V16、V19；N1–N7、N31–N33、N37–N41 |
+| 点击/长按、点击载体与安全 frame | `internal/engine/act.go` 的 `revalidateActTarget`、`revalidateTapTargetFrame`、`dispatchAct`；`tap_scope.go` 的 `collectTapScope`、`chooseTapPlan`、`validTapPublicTarget`；`act_revalidation_policy.go` 的 `tapFrame` | V17、V19；N8–N13、N42、N43 |
+| scroll 同容器动态安全轨迹 | `internal/engine/scroll.go` 的 `scrollSafeSpans`、`sameScrollScope`、`revalidateScrollTarget`、`dispatchScroll` | V18–V19；N14–N19 |
+| text focus binding、shifted 与来源/焦点门禁 | `internal/engine/act.go` 的 `bindFocusedText`、`sameTextSourcePresence`、`anchorCount`、`textTargetOf`、`dispatchText`；`act_revalidation_policy.go` 的 `stableNonEmptyContent`、`sameTargetResource`、`independentTargetContent` | V18–V19；N20–N24、N34–N36、N42 |
+| O/P、STOP、Preview、派发与错误分层 | `internal/engine/act.go` 的 `Act`、`staticActCheckLocked`、`claimObservationLocked`、`captureForActRevalidation`、`probeActNode`；`ui_execution.go` 的 `beginUIDispatch` | V19、I04–I08；N25–N30、N37–N41 |
+| Android transport/RPC 参数消费 | `internal/android` 的受管 Tap、Swipe、Get、SetText 路径及对应 fake/RPC 精确断言 | V20、I07 |
+
+本册实现提交为 `900e640fe8343f92c4e8dd82dd3df839dde20756`，最后由发行锚点
+`049583d328e335c56d56f153b7464ea03f1ca814` 覆盖。公共记录见
+[实现与验证](../../../verification/observation-continuity-and-revalidation.md)与
+[统一基准](../../../verification/observation-continuity-benchmarks.md)。
+
+### 11.2 与提案不同或未执行
+
+| 项 | 结论与理由 |
+| --- | --- |
+| 代码状态 | 默认范围内的 Tier 1–3、tap/carrier、scroll、text、O/P/STOP 与 Android 消费路径代码全覆盖；设备覆盖有限另行记录。 |
+| Tier 4 | 未执行，保持默认关闭。用户确认范围没有选择“任意动态文案变化永久移除”或“受限转换”；Tier 1–3 已覆盖。 |
+| D03 | 27 case 中 24 pass、3 fail。唯一失败为 `d03_scroll_full_blocker_reject` 三轮；fixture 把全尺寸 blocker 作为所选 `ScrollView` 的兄弟 overlay，blocker 没有滚动祖先，而现行契约明确这类候选不阻塞，因此该负例越出受控滚动安全范围。原报告 `result=fail` 和 3 个 failed checks 必须保留，不改写为通过。 |
+| D03 primitive gap | `service_internal_primitive_count_unavailable` 保留；不能用 fixture 中的 blocker tap 冒充服务内部 primitive 计数。 |
+| D04 | 18 case 为 3 fail、15 gap。三个 `d04_text_focus_readback` 的唯一 false check 为 `focus_window_observed`；A 值精确、B 不变，来源和多数读回检查通过，但键盘前后均为 hidden。原报告 `result=fail` 保留。 |
+| D04 focus gap | 键盘顶起位移窗口未构造；`focus_shift_window_unproven`、`d04_focus_shift_race` 与精确 focus race 仍是覆盖缺口。15 个 source 变体或 duplicate 绑定断言不能替代该窗口。 |
+| D04 primitive gap | `d04_primitive_count` 未实测，不能由其他检查推导。 |
+| D05 最新复跑 | 第 1 轮全部 pass；第 2 轮直接新 `start` 后以 `display_create_failed` 中止，原会话 `end` confirmed。总结果为 `1 pass / 1 fail`，不能写成三轮通过。 |
+| D05 旧报告 | 旧报告三轮保持原样 `0 pass / 3 fail`。每轮仅 `wait_p_outcome_not_executed` false；实际撤权以 `control_revoked` 表达，其余 26 个 checks、原 P/O 撤权、wait P 的 busy 指向、新 P/O 互异重入和 end confirmed 均成立。该解释只纠正 driver 强求 wait outcome 的判据，不改写原报告 fail。 |
+| D05 STOP gap | 精确 capture、preview、post-dispatch STOP 注入及 primitive 精确计数未实测；`capture_preview_or_post_dispatch_stop_not_injectable` 保留。 |
+| D06 与宿主 | 3 轮 full→固定 full 基线后的单 delta→BACK executed→inspect current O→end executed 闭环通过；不能扩大为滚动、多 delta 或完整动作矩阵。实际外部 MCP 宿主刷新/工具重发现由用户自行处理，未独立确认，按用户明确接受记录。 |
