@@ -613,6 +613,9 @@ func (e *Engine) revalidateBubbleTapFrame(ctx context.Context,
 		return nil, stoppedActRevalidation()
 	}
 	if apiErr != nil {
+		if apiErr.Code == protocol.CodeHierarchyFailed {
+			return nil, apiErr
+		}
 		return nil, tapTargetChanged()
 	}
 	x, y, strategy, carrier, ok := chooseBubbleTapPoint(scope, view, ancestorPublic, childPublic)

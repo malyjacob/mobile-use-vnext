@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/malyjacob/mobile-use-vnext/internal/device"
 	"github.com/malyjacob/mobile-use-vnext/internal/protocol"
@@ -20,6 +21,86 @@ func bubbleStep(cardBounds, childBounds device.Rect, childText string,
 	childClickable bool) captureStep {
 	return func(_ *fakeDevice, display device.Display) (device.Capture, error) {
 		return bubblePage(display, cardBounds, childBounds, childText, childClickable), nil
+	}
+}
+
+// bubbleRootOnly returns one capture with the root and a single child, used to
+// prove a lost ancestor cannot be replaced by the child alone.
+func bubbleRootOnly(display device.Display, childBounds device.Rect) device.Capture {
+	child := tapRawNode(1, 0, 1, display.ID, childBounds,
+		"android.widget.TextView", "post", false, false)
+	return device.Capture{
+		Display: display, Root: 0, CapturedAt: time.Now(),
+		Foreground: device.Foreground{
+			State: device.ForegroundPresent, Package: "com.example", TaskID: intPtr(42),
+		},
+		Nodes: []device.RawNode{
+			{
+				Index: 0, Parent: -1, Children: []int{1}, Depth: 0, DisplayID: display.ID,
+				Visible: true, RawBounds: screenRect(), Bounds: screenRect(),
+				Package: "com.example", ClassName: "android.widget.FrameLayout",
+				HasEnabled: true, Enabled: true,
+			},
+			child,
+		},
+	}
+}
+
+// bubbleNestedPage inserts one fresh interactive ancestor between the card and
+// the child, so the original nearest ancestor is no longer the nearest.
+func bubbleNestedPage(display device.Display, cardBounds, wrapperBounds,
+	childBounds device.Rect) device.Capture {
+	card := tapRawNode(1, 0, 1, display.ID, cardBounds,
+		"android.widget.FrameLayout", "", true, true)
+	card.Children = []int{2}
+	wrapper := tapRawNode(2, 1, 2, display.ID, wrapperBounds,
+		"android.widget.Button", "wrapper", true, true)
+	wrapper.Children = []int{3}
+	child := tapRawNode(3, 2, 3, display.ID, childBounds,
+		"android.widget.TextView", "post", false, false)
+	return device.Capture{
+		Display: display, Root: 0, CapturedAt: time.Now(),
+		Foreground: device.Foreground{
+			State: device.ForegroundPresent, Package: "com.example", TaskID: intPtr(42),
+		},
+		Nodes: []device.RawNode{
+			{
+				Index: 0, Parent: -1, Children: []int{1}, Depth: 0, DisplayID: display.ID,
+				Visible: true, RawBounds: screenRect(), Bounds: screenRect(),
+				Package: "com.example", ClassName: "android.widget.FrameLayout",
+				HasEnabled: true, Enabled: true,
+			},
+			card, wrapper, child,
+		},
+	}
+}
+
+// bubbleDuplicateAncestorPage adds a second card with the same raw identity as
+// the planned ancestor, making the ancestor lookup ambiguous while the child
+// stays unique.
+func bubbleDuplicateAncestorPage(display device.Display, cardBounds,
+	childBounds device.Rect) device.Capture {
+	first := tapRawNode(1, 0, 1, display.ID, cardBounds,
+		"android.widget.FrameLayout", "", true, true)
+	first.Children = []int{3}
+	second := tapRawNode(2, 0, 1, display.ID, cardBounds,
+		"android.widget.FrameLayout", "", true, true)
+	child := tapRawNode(3, 1, 2, display.ID, childBounds,
+		"android.widget.TextView", "post", false, false)
+	return device.Capture{
+		Display: display, Root: 0, CapturedAt: time.Now(),
+		Foreground: device.Foreground{
+			State: device.ForegroundPresent, Package: "com.example", TaskID: intPtr(42),
+		},
+		Nodes: []device.RawNode{
+			{
+				Index: 0, Parent: -1, Children: []int{1, 2}, Depth: 0, DisplayID: display.ID,
+				Visible: true, RawBounds: screenRect(), Bounds: screenRect(),
+				Package: "com.example", ClassName: "android.widget.FrameLayout",
+				HasEnabled: true, Enabled: true,
+			},
+			first, second, child,
+		},
 	}
 }
 
@@ -135,6 +216,100 @@ func TestActBubbleFreshFrameRequiresChildAndAncestor(t *testing.T) {
 				if result.Outcome != OutcomeNotExecuted || result.Error == nil ||
 					result.Error.Code != protocol.CodeTargetChanged {
 					t.Fatalf("child gained action result=%+v, want target_changed/not_executed", result)
+				}
+			},
+		},
+		{
+			name: "child_public_role_changed",
+			step: func(_ *fakeDevice, display device.Display) (device.Capture, error) {
+				capture := bubblePage(display, cardBounds, childBounds, "post", false)
+				capture.Nodes[2].HasCheckable = true
+				capture.Nodes[2].Checkable = true
+				return capture, nil
+			},
+			check: func(t *testing.T, result *protocol.Result) {
+				t.Helper()
+				if result.Outcome != OutcomeNotExecuted || result.Error == nil ||
+					result.Error.Code != protocol.CodeTargetChanged {
+					t.Fatalf("role change result=%+v, want target_changed/not_executed", result)
+				}
+			},
+		},
+		{
+			name: "ancestor_lost",
+			step: func(_ *fakeDevice, display device.Display) (device.Capture, error) {
+				return bubbleRootOnly(display, childBounds), nil
+			},
+			check: func(t *testing.T, result *protocol.Result) {
+				t.Helper()
+				if result.Outcome != OutcomeNotExecuted || result.Error == nil ||
+					result.Error.Code != protocol.CodeTargetChanged {
+					t.Fatalf("ancestor lost result=%+v, want target_changed/not_executed", result)
+				}
+			},
+		},
+		{
+			name: "ancestor_action_lost",
+			step: func(_ *fakeDevice, display device.Display) (device.Capture, error) {
+				capture := bubblePage(display, cardBounds, childBounds, "post", false)
+				capture.Nodes[1].HasClickable = true
+				capture.Nodes[1].Clickable = false
+				capture.Nodes[1].HasLongClick = true
+				capture.Nodes[1].LongClickable = false
+				capture.Nodes[1].TextSet = true
+				capture.Nodes[1].Text = "card"
+				return capture, nil
+			},
+			check: func(t *testing.T, result *protocol.Result) {
+				t.Helper()
+				if result.Outcome != OutcomeNotExecuted || result.Error == nil ||
+					result.Error.Code != protocol.CodeTargetChanged {
+					t.Fatalf("ancestor action lost result=%+v, want target_changed/not_executed", result)
+				}
+			},
+		},
+		{
+			name: "nearest_ancestor_changed",
+			step: func(_ *fakeDevice, display device.Display) (device.Capture, error) {
+				return bubbleNestedPage(display, cardBounds,
+					device.Rect{Left: 150, Top: 350, Right: 850, Bottom: 750},
+					childBounds), nil
+			},
+			check: func(t *testing.T, result *protocol.Result) {
+				t.Helper()
+				if result.Outcome != OutcomeNotExecuted || result.Error == nil ||
+					result.Error.Code != protocol.CodeTargetChanged {
+					t.Fatalf("nearest ancestor changed result=%+v, want target_changed/not_executed", result)
+				}
+			},
+		},
+		{
+			name: "ancestor_ambiguous",
+			step: func(_ *fakeDevice, display device.Display) (device.Capture, error) {
+				return bubbleDuplicateAncestorPage(display, cardBounds, childBounds), nil
+			},
+			check: func(t *testing.T, result *protocol.Result) {
+				t.Helper()
+				if result.Outcome != OutcomeNotExecuted || result.Error == nil ||
+					result.Error.Code != protocol.CodeTargetChanged {
+					t.Fatalf("ancestor ambiguous result=%+v, want target_changed/not_executed", result)
+				}
+			},
+		},
+		{
+			name: "safe_point_blocked_by_sibling",
+			step: func(_ *fakeDevice, display device.Display) (device.Capture, error) {
+				return tapPageWithChildren(display, cardBounds,
+					tapRawNode(2, 1, 2, display.ID, childBounds,
+						"android.widget.TextView", "post", false, false),
+					tapRawNode(3, 1, 2, display.ID, cardBounds,
+						"android.widget.Button", "cover", true, true)), nil
+			},
+			check: func(t *testing.T, result *protocol.Result) {
+				t.Helper()
+				if result.Outcome != OutcomeNotExecuted || result.Error == nil ||
+					result.Error.Code != protocol.CodeTargetChanged {
+					t.Fatalf("blocked safe point result=%+v, want target_changed/not_executed", result)
 				}
 			},
 		},

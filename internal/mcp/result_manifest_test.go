@@ -210,6 +210,36 @@ func TestCanonicalJSONCoversManifest(t *testing.T) {
 	}
 }
 
+// TestCanonicalTextInputStates pins every legal write/enter snapshot,
+// including the write-only and not-dispatched states that the manifest
+// fixtures must keep representable.
+func TestCanonicalTextInputStates(t *testing.T) {
+	cases := []*protocol.TextInputView{
+		{Write: protocol.TextInputNotExecuted, Enter: protocol.TextInputNotExecuted},
+		{Write: protocol.TextInputUncertain, Enter: protocol.TextInputNotExecuted},
+		{Write: protocol.TextInputExecuted, Enter: protocol.TextInputNotExecuted},
+		{Write: protocol.TextInputExecuted, Enter: protocol.TextInputUncertain},
+		{Write: protocol.TextInputExecuted, Enter: protocol.TextInputExecuted},
+	}
+	for _, snapshot := range cases {
+		value, err := canonicalResult(&execution{result: &protocol.Result{
+			OperationID: "P1", Outcome: "uncertain", TextInput: snapshot,
+		}})
+		if err != nil {
+			t.Fatalf("canonicalResult(%+v): %v", snapshot, err)
+		}
+		var decoded struct {
+			TextInput *protocol.TextInputView `json:"text_input"`
+		}
+		if err := jsonv2.Unmarshal(value, &decoded); err != nil {
+			t.Fatalf("decode canonical text_input: %v", err)
+		}
+		if !reflect.DeepEqual(decoded.TextInput, snapshot) {
+			t.Fatalf("text_input = %+v, want %+v", decoded.TextInput, snapshot)
+		}
+	}
+}
+
 func TestCanonicalJSONDeterministic(t *testing.T) {
 	var first []byte
 	for iteration := 0; iteration < 32; iteration++ {
@@ -1187,10 +1217,41 @@ func rmfResultFixtures() []rmfFixture {
 			},
 		},
 	}
+	textInputWriteOnly := rmfFixture{
+		name: "text_input_write_only",
+		result: protocol.Result{
+			OperationID: "P20",
+			Outcome:     "uncertain",
+			TextInput: &protocol.TextInputView{
+				Write: protocol.TextInputExecuted, Enter: protocol.TextInputNotExecuted,
+			},
+		},
+	}
+	textInputNotDispatched := rmfFixture{
+		name: "text_input_not_dispatched",
+		result: protocol.Result{
+			OperationID: "P21",
+			Outcome:     "uncertain",
+			TextInput: &protocol.TextInputView{
+				Write: protocol.TextInputNotExecuted, Enter: protocol.TextInputNotExecuted,
+			},
+		},
+	}
+	textInputEnterUncertain := rmfFixture{
+		name: "text_input_enter_uncertain",
+		result: protocol.Result{
+			OperationID: "P22",
+			Outcome:     "uncertain",
+			TextInput: &protocol.TextInputView{
+				Write: protocol.TextInputExecuted, Enter: protocol.TextInputUncertain,
+			},
+		},
+	}
 	return []rmfFixture{
 		full, delta, query,
 		appFind, appList, appListUnknownForeground, appOpen, appClaim, appHandoff, appClose, appKill,
 		scrollNotObserved, scrollUnknownEffect, notSampled,
+		textInputWriteOnly, textInputNotDispatched, textInputEnterUncertain,
 	}
 }
 

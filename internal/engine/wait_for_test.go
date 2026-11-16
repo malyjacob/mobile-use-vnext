@@ -254,6 +254,7 @@ func TestWaitForMaxSamplesGuardReportsTimeout(t *testing.T) {
 	h.device.scriptCaptures(
 		markerCapture("甲"), markerCapture("乙"), markerCapture("甲"),
 		markerCapture("乙"), markerCapture("甲"))
+	before := h.device.captureCount()
 	result, apiErr := h.engine.WaitFor(context.Background(), "agent", "",
 		&protocol.WaitForRequest{
 			Reference: reference, Query: "永不出现", HasQuery: true, Timeout: 20,
@@ -264,6 +265,9 @@ func TestWaitForMaxSamplesGuardReportsTimeout(t *testing.T) {
 	if result.Error != nil {
 		t.Fatalf("wait_for failed: %+v", result.Error)
 	}
+	if reads := h.device.captureCount() - before; reads != policy.MaxSamples {
+		t.Fatalf("capture reads = %d, want %d with terminal reuse", reads, policy.MaxSamples)
+	}
 	if result.Wait.Trigger != protocol.WaitTriggerTimeout {
 		t.Fatalf("trigger = %s, want timeout for the guard exit", result.Wait.Trigger)
 	}
@@ -273,6 +277,9 @@ func TestWaitForMaxSamplesGuardReportsTimeout(t *testing.T) {
 	quality := result.Observation.Quality
 	if quality.State != protocol.QualityUnstable || quality.StopReason != protocol.QualityStopMaxSamples {
 		t.Fatalf("quality = %+v, want unstable/max_samples", quality)
+	}
+	if quality.Samples != policy.MaxSamples {
+		t.Fatalf("quality samples = %d, want %d", quality.Samples, policy.MaxSamples)
 	}
 }
 

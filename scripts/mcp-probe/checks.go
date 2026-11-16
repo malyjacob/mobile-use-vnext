@@ -261,7 +261,7 @@ func checkInstructions(result *sdk.InitializeResult) *checkError {
 	return nil
 }
 
-// catalogCheck asserts the exact 11-tool catalog, the live/source semantic
+// catalogCheck asserts the exact 12-tool catalog, the live/source semantic
 // equality and the source fingerprint identity.
 func (p *probe) catalogCheck(ctx context.Context) bool {
 	list, err := p.session.ListTools(ctx, nil)
@@ -1018,6 +1018,10 @@ func (p *probe) actCheck(ctx context.Context, observationID string) bool {
 	}
 	if projected.result.IsError {
 		p.reporter.fail("act", "tool_is_error", field("code", codeOf(view)))
+		return false
+	}
+	if view.TextInput != nil {
+		p.reporter.fail("act", "key_carries_text_input")
 		return false
 	}
 	observation := view.Observation

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json/jsontext"
 	"errors"
+	"unicode/utf8"
 )
 
 // The request types in this package are the single public model shared by the
@@ -545,10 +546,94 @@ func (r *DiagnoseRequest) Encode() ([]byte, error) {
 	})
 }
 
+// validateAppRequest applies the same closed kind matrix the service decoder
+// enforces to a typed request before encoding. Without it a caller that fills a
+// member outside the selected branch would send a different request than the
+// struct describes: the encoder writes only branch members, so the extra value
+// would disappear instead of being rejected.
+func validateAppRequest(r *AppRequest) error {
+	if r == nil {
+		return errors.New("app request is required")
+	}
+	allowed := appKindMembers(r.Kind)
+	if allowed == nil {
+		return errors.New("unsupported app kind")
+	}
+	if !allowed["query"] && (r.HasQuery || r.Query != "") {
+		return errors.New(r.Kind + " does not accept query")
+	}
+	if allowed["query"] {
+		if r.Query != "" && !r.HasQuery {
+			return errors.New("app.query is set without HasQuery")
+		}
+		if utf8.RuneCountInString(r.Query) > MaxQueryRunes {
+			return errors.New("app.query exceeds the length limit")
+		}
+	}
+	if !allowed["reference"] && r.Reference != "" {
+		return errors.New(r.Kind + " does not accept reference")
+	}
+	if allowed["reference"] {
+		if apiErr := checkReference(r.Reference); apiErr != nil {
+			return errors.New(apiErr.Message)
+		}
+	}
+	if !allowed["scope"] && r.Scope != "" {
+		return errors.New(r.Kind + " does not accept scope")
+	}
+	if allowed["scope"] && r.Scope != "" && r.Scope != AppScopeSession && r.Scope != AppScopePrimary {
+		return errors.New("app.scope must be session or primary")
+	}
+	if !allowed["app"] && (r.HasFilter || r.FilterApp != "") {
+		return errors.New(r.Kind + " does not accept app")
+	}
+	if allowed["app"] {
+		if !r.HasFilter && r.FilterApp != "" {
+			return errors.New("app filter is set without HasFilter")
+		}
+		if r.HasFilter && !ValidPackageName(r.FilterApp) {
+			return errors.New("app filter must be an explicit package name")
+		}
+	}
+	if !allowed["target"] && r.Target != nil {
+		return errors.New(r.Kind + " does not accept target")
+	}
+	if allowed["target"] {
+		if r.Target == nil {
+			return errors.New(r.Kind + " requires target")
+		}
+		if r.Target.UseTask {
+			if r.Target.TaskID <= 0 || r.Target.App != "" {
+				return errors.New("app task target requires one positive task_id")
+			}
+			if r.Kind == AppKindOpen {
+				return errors.New("app.open only accepts a package target")
+			}
+		} else {
+			if r.Target.TaskID != 0 || !ValidPackageName(r.Target.App) {
+				return errors.New("app package target requires one explicit package")
+			}
+			if r.Kind == AppKindKill {
+				return errors.New("app.kill requires a task id target")
+			}
+		}
+	}
+	if !allowed["restore_foreground"] && r.RestoreForeground {
+		return errors.New(r.Kind + " does not accept restore_foreground")
+	}
+	if !allowed["allow_borrowed"] && r.AllowBorrowed {
+		return errors.New(r.Kind + " does not accept allow_borrowed")
+	}
+	if !allowed["allow_stop_playback"] && r.AllowStopPlayback {
+		return errors.New(r.Kind + " does not accept allow_stop_playback")
+	}
+	return nil
+}
+
 // Encode writes the canonical app kind branch body.
 func (r *AppRequest) Encode() ([]byte, error) {
-	if appKindMembers(r.Kind) == nil {
-		return nil, errors.New("unsupported app kind")
+	if err := validateAppRequest(r); err != nil {
+		return nil, err
 	}
 	return encodeRequest(func(enc *jsontext.Encoder) error {
 		if err := enc.WriteToken(jsontext.BeginObject); err != nil {

@@ -524,6 +524,7 @@ func (e *Engine) absorbWaitTerminalFrame(run *waitRun, tree *treeAttempt) {
 		run.consecutive++
 	} else {
 		run.consecutive = 1
+		run.lastDigest = digest
 	}
 	run.samples++
 }

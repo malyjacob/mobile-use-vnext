@@ -85,17 +85,14 @@ func TestServerInstructionsCarryCrossToolRules(t *testing.T) {
 	}
 }
 
-// TestServerInstructionsKeepAPhaseBoundary proves the instructions publish the
-// reference unification and the branch-qualified defaults, while never naming
-// the rejected alternative (allow_ancestor_fallback) or claiming a top-level
-// default that would apply to coordinates or other actions.
-func TestServerInstructionsKeepAPhaseBoundary(t *testing.T) {
+// TestServerInstructionsKeepContractBoundary proves the instructions publish
+// the reference unification and the branch-qualified defaults, while never
+// naming the rejected alternative (allow_ancestor_fallback) or claiming a
+// top-level default that would apply to coordinates or other actions.
+func TestServerInstructionsKeepContractBoundary(t *testing.T) {
 	instructions := ServerInstructions()
 	for _, forbidden := range []string{
 		"allow_ancestor_fallback",
-		"默认发送 ENTER",
-		"统一 reference",
-		"统一为 reference",
 	} {
 		if strings.Contains(instructions, forbidden) {
 			t.Errorf("server instructions publish forbidden wording %q", forbidden)

@@ -1523,7 +1523,8 @@ func (f *fakeRecoveryService) writeAct(writer http.ResponseWriter, operationID s
 		Reference string `json:"reference"`
 		Image     bool   `json:"image"`
 		Operation struct {
-			Type string `json:"type"`
+			Type       string `json:"type"`
+			PressEnter *bool  `json:"press_enter"`
 		} `json:"operation"`
 	}
 	_ = json.Unmarshal(body, &actBody)
@@ -1544,6 +1545,14 @@ func (f *fakeRecoveryService) writeAct(writer http.ResponseWriter, operationID s
 	// must omit it entirely.
 	if actBody.Operation.Type == "scroll" && !f.omitScrollEffect {
 		result.Effect = &protocol.Effect{State: protocol.EffectObserved}
+	}
+	// An accepted text act carries the stage snapshot unless the caller
+	// explicitly disabled ENTER; that false branch keeps the old shape.
+	if actBody.Operation.Type == "text" &&
+		(actBody.Operation.PressEnter == nil || *actBody.Operation.PressEnter) {
+		result.TextInput = &protocol.TextInputView{
+			Write: protocol.TextInputExecuted, Enter: protocol.TextInputExecuted,
+		}
 	}
 	f.mutex.Unlock()
 	f.writeResult(writer, result)
@@ -2162,6 +2171,87 @@ func TestActScrollResultProjection(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestActTextInputProjection drives composite text results through the real
+// adapter and asserts the fixed stage object in text, structured and both
+// modes, including the explicit press_enter=false shape with no object.
+func TestActTextInputProjection(t *testing.T) {
+	for _, mode := range []string{resultModeBoth, resultModeText, resultModeStructured} {
+		t.Run(mode, func(t *testing.T) {
+			fake := startFakeRecoveryService(t)
+			session, service := newRealAdapterSession(t, fake, mode)
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			runner := &probe{
+				reporter: newReporter(io.Discard), session: session,
+				service: service, resultMode: mode,
+			}
+
+			entered, failure := runner.call(ctx, "act", map[string]any{
+				"reference": "O2",
+				"operation": map[string]any{
+					"type": "text", "target": map[string]any{"ref": "n1"}, "text": "probe",
+				},
+			})
+			if failure != nil {
+				t.Fatalf("default text act: %s %v", failure.reason, failure.fields)
+			}
+			if entered.view.TextInput == nil ||
+				entered.view.TextInput.Write != protocol.TextInputExecuted ||
+				entered.view.TextInput.Enter != protocol.TextInputExecuted {
+				t.Fatalf("default text_input = %+v, want executed/executed", entered.view.TextInput)
+			}
+
+			inputOnly, failure := runner.call(ctx, "act", map[string]any{
+				"reference": "O2",
+				"operation": map[string]any{
+					"type": "text", "target": map[string]any{"ref": "n1"},
+					"text": "probe", "press_enter": false,
+				},
+			})
+			if failure != nil {
+				t.Fatalf("input-only text act: %s %v", failure.reason, failure.fields)
+			}
+			if inputOnly.view.TextInput != nil {
+				t.Fatalf("press_enter=false text_input = %+v, want absent", inputOnly.view.TextInput)
+			}
+			if _, present := lookupPath(inputOnly.object, []string{"text_input"}); present {
+				t.Fatal("press_enter=false object carries text_input")
+			}
+		})
+	}
+}
+
+// TestCheckTextInputSnapshot guards the fixed stage object: only the five
+// ordered combinations are accepted and a partial or unknown state fails.
+func TestCheckTextInputSnapshot(t *testing.T) {
+	legal := []*textInputView{
+		{Write: textInputNotExecuted, Enter: textInputNotExecuted},
+		{Write: textInputUncertain, Enter: textInputNotExecuted},
+		{Write: textInputExecuted, Enter: textInputNotExecuted},
+		{Write: textInputExecuted, Enter: textInputUncertain},
+		{Write: textInputExecuted, Enter: textInputExecuted},
+	}
+	for _, input := range legal {
+		if failure := checkTextInputSnapshot(input); failure != nil {
+			t.Fatalf("legal snapshot %+v rejected: %s", input, failure.reason)
+		}
+	}
+	if failure := checkTextInputSnapshot(nil); failure != nil {
+		t.Fatalf("absent snapshot rejected: %s", failure.reason)
+	}
+	illegal := []*textInputView{
+		{Write: "", Enter: textInputNotExecuted},
+		{Write: textInputNotExecuted, Enter: textInputExecuted},
+		{Write: textInputUncertain, Enter: textInputUncertain},
+		{Write: "unknown", Enter: textInputNotExecuted},
+	}
+	for _, input := range illegal {
+		if failure := checkTextInputSnapshot(input); failure == nil {
+			t.Fatalf("illegal snapshot %+v accepted", input)
+		}
 	}
 }
 

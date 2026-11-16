@@ -35,6 +35,10 @@ const (
 	qualityUnknown        = "unknown"
 	qualityStopNotSampled = "not_sampled"
 	waitTriggerTimeout    = "timeout"
+
+	textInputNotExecuted = "not_executed"
+	textInputUncertain   = "uncertain"
+	textInputExecuted    = "executed"
 )
 
 // Frozen public enumerations of the act quality/effect projection. The probe
@@ -166,12 +170,20 @@ type cleanupView struct {
 	Display   string `json:"display"`
 }
 
+// textInputView is the fixed composite-text stage snapshot. Both members must
+// be present on the wire; the probe treats a partial object as a failure.
+type textInputView struct {
+	Write string `json:"write"`
+	Enter string `json:"enter"`
+}
+
 // resultView is the probe's read-only projection of structuredContent.
 type resultView struct {
 	OperationID      string           `json:"operation_id"`
 	OperationState   string           `json:"operation_state"`
 	Outcome          string           `json:"outcome"`
 	Phase            string           `json:"phase"`
+	TextInput        *textInputView   `json:"text_input"`
 	Effect           *effectView      `json:"effect"`
 	TargetReference  string           `json:"target_reference"`
 	RequestClosed    *bool            `json:"request_closed"`
@@ -310,7 +322,30 @@ func project(result *sdk.CallToolResult, mode string) (*callResult, *checkError)
 		projected.view = structuredView
 		projected.object = structuredObject
 	}
+	if failure := checkTextInputSnapshot(projected.view.TextInput); failure != nil {
+		return nil, failure
+	}
 	return projected, nil
+}
+
+// checkTextInputSnapshot validates the fixed composite-text stage object. A
+// result without the object is valid; a present object must carry both members
+// with one of the five legal stage combinations.
+func checkTextInputSnapshot(input *textInputView) *checkError {
+	if input == nil {
+		return nil
+	}
+	valid := func(value string) bool {
+		return value == textInputNotExecuted ||
+			value == textInputUncertain || value == textInputExecuted
+	}
+	if !valid(input.Write) || !valid(input.Enter) {
+		return failf("text_input_state_invalid")
+	}
+	if input.Enter != textInputNotExecuted && input.Write != textInputExecuted {
+		return failf("text_input_stage_order_invalid")
+	}
+	return nil
 }
 
 // comparableResultObject strips the block bodies that the readable decoder

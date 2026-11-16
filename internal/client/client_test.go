@@ -591,6 +591,54 @@ func TestAppRejectsUnencodableBranchesWithoutSending(t *testing.T) {
 				Target: &protocol.AppTarget{App: "com.example"},
 			},
 		},
+		{
+			"find-with-reference",
+			&protocol.AppRequest{Kind: protocol.AppKindFind, Reference: "O1"},
+		},
+		{
+			"list-with-target",
+			&protocol.AppRequest{
+				Kind: protocol.AppKindList, Reference: "O1",
+				Target: &protocol.AppTarget{App: "com.example"},
+			},
+		},
+		{
+			"open-with-top-level-app",
+			&protocol.AppRequest{
+				Kind: protocol.AppKindOpen, Reference: "O1",
+				FilterApp: "com.example", HasFilter: true,
+				Target: &protocol.AppTarget{App: "com.example"},
+			},
+		},
+		{
+			"claim-with-close-option",
+			&protocol.AppRequest{
+				Kind: protocol.AppKindClaim, Reference: "O1",
+				Target: &protocol.AppTarget{App: "com.example"}, AllowBorrowed: true,
+			},
+		},
+		{
+			"ambiguous-target",
+			&protocol.AppRequest{
+				Kind: protocol.AppKindClaim, Reference: "O1",
+				Target: &protocol.AppTarget{UseTask: true, TaskID: 42, App: "com.example"},
+			},
+		},
+		{
+			"invalid-reference",
+			&protocol.AppRequest{Kind: protocol.AppKindList, Reference: "X1"},
+		},
+		{
+			"invalid-filter-package",
+			&protocol.AppRequest{
+				Kind: protocol.AppKindList, Reference: "O1",
+				FilterApp: "not a package", HasFilter: true,
+			},
+		},
+		{
+			"query-without-presence",
+			&protocol.AppRequest{Kind: protocol.AppKindFind, Query: "设置"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -238,8 +238,10 @@ func resultModeFixtures() []resultModeFixture {
 		`"recovery":{"entry":"retry","reference":"O","input_state":"effective"}}`)
 	add("act", "scroll_effect_quality", `{"operation_id":"P1","outcome":"executed","phase":"completed","effect":{"state":"observed"},"target_reference":"O1","observation":{"status":"complete","id":"O2","origin":"P1","revision":2,"quality":{"state":"unstable","samples":5,"stop_reason":"max_samples"},"tree":`+testFullTreeJSON+`}}`)
 	add("act", "scroll_effect_unknown", `{"operation_id":"P1","outcome":"uncertain","effect":{"state":"unknown"},"observation":{"status":"complete","id":"O3","quality":{"state":"unknown","samples":0,"stop_reason":"not_sampled"}},"error":{"code":"action_unknown","message":"动作结果不确定"}}`)
-	add("act", "text_input_enter_deferred", `{"operation_id":"P1","outcome":"executed","text_input":{"write":"executed","enter":"not_executed"}}`)
+	add("act", "text_input_enter_deferred", `{"operation_id":"P1","outcome":"uncertain","text_input":{"write":"executed","enter":"not_executed"}}`)
 	add("act", "text_input_write_uncertain", `{"operation_id":"P1","outcome":"uncertain","text_input":{"write":"uncertain","enter":"not_executed"}}`)
+	add("act", "text_input_not_dispatched", `{"operation_id":"P1","outcome":"uncertain","text_input":{"write":"not_executed","enter":"not_executed"}}`)
+	add("act", "text_input_enter_uncertain", `{"operation_id":"P1","outcome":"uncertain","text_input":{"write":"executed","enter":"uncertain"}}`)
 	fixtures = append(fixtures, resultModeFixture{tool: "act", name: "executed_cancelled", raw: `{"outcome":"executed"}`, cancelled: true})
 	// The inspection tree scope carries the detailed view inside the nested
 	// complete tree; subtree and query declare it on the envelope.

@@ -24,10 +24,9 @@ type tapPlan struct {
 	targetRaw  *device.RawNode
 	carrierRef string
 	carrierRaw *device.RawNode
-	// bubbleAncestorRef/Raw are set only for a default-bubble ref target whose
-	// own node has no touch-interactive action. They bind the one nearest
-	// interactive ancestor that the action is planned against.
-	bubbleAncestorRef string
+	// bubbleAncestorRaw is set only for a default-bubble ref target whose own
+	// node has no touch-interactive action. It binds the one nearest interactive
+	// ancestor that the action is planned against.
 	bubbleAncestorRaw *device.RawNode
 	took              time.Duration
 }
@@ -1018,8 +1017,8 @@ func planBubbleTapTarget(obs *observationState, view *tapPublicView,
 	plan := &tapPlan{
 		x: x, y: y, strategy: strategy, action: string(action),
 		targetRef: child.Ref, targetRaw: &view.capture.Nodes[childInfo.rawIndex],
-		bubbleAncestorRef: ancestor.Ref, bubbleAncestorRaw: ancestorInput.targetRaw,
-		took: time.Since(started),
+		bubbleAncestorRaw: ancestorInput.targetRaw,
+		took:              time.Since(started),
 	}
 	if carrier != nil {
 		plan.carrierRef = carrier.node.Ref

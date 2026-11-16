@@ -36,8 +36,8 @@ func (e *Engine) registerOperation(p, agent, kind string) (*operationState, *pro
 }
 
 // registerDetachedOperation admits a P that is deliberately not bound to the
-// current session (apps/notify discovery calls). end(thatP) therefore cannot
-// terminate an unrelated active session.
+// current session (app.find and notify discovery calls). end(thatP)
+// therefore cannot terminate an unrelated active session.
 func (e *Engine) registerDetachedOperation(p, agent, kind string) (*operationState, *protocol.Result, *protocol.APIError) {
 	return e.registerOperationBound(p, agent, kind, false)
 }
