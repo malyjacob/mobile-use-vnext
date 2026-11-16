@@ -47,19 +47,24 @@
 | --- | --- | --- |
 | contract_version | 是 | 共同普通契约；必须等于 `"15"` |
 | app_instance_id | 是 | 本次 App 进程实例，UUID；重建即变化 |
-| app_version | 是 | 仅发行标识，不参与能力协商 |
+| app_version | 否（App 应发送） | 仅发行标识，不参与能力协商 |
 | selected_mode | 是 | `virtual` 或 `primary`；App 重建默认 virtual |
 | mode_generation | 是 | 用户选择代次，UUID；模式切换即变化 |
-| mode_ready | 是 | 所选模式有效且没有待同步的本地 STOP；不表示虚拟显示已创建或权限已就绪 |
-| stop_ready | 是 | 通知 + 前台服务等停止通道均可用 |
-| notifications_enabled | 是 | 系统通知关闭时为 false |
-| background_running | 是 | 前台服务仍在运行 |
+| mode_ready | 否（App 应发送） | 所选模式有效且没有待同步的本地 STOP；不表示虚拟显示已创建或权限已就绪 |
+| stop_ready | 否（App 应发送） | 通知 + 前台服务等停止通道均可用 |
+| notifications_enabled | 否（App 应发送） | 系统通知关闭时为 false |
+| background_running | 否（App 应发送） | 前台服务仍在运行 |
 | power_interactive / keyguard_locked | 否 | `true`/`false`；未知为 `null` 或省略 |
 | primary_display | virtual 模式应有 | 主屏实际逻辑尺寸；出现时校验形状（无效返回 `422 invalid_request`）；`display_id` 必须为 0；virtual 模式缺失不单独阻断准入；可选 `ime_hide`（布尔） |
 | display | 有自有虚拟屏时 | 本次 App 实际持有的虚拟屏；可选 `ime_hide`（布尔） |
 | command_results | 否 | 对上一拍命令的回执；省略/null 按 `[]` 处理 |
 | stop_pending | 否 | 未被服务受理的本地停止意图 |
 | message_acks | 否 | App 已保存的消息 ID，至多 32 个；省略/null 按 `[]` 处理；未知或已释放的 ID 忽略 |
+
+`AppSyncRequest` 没有字段 presence。上表五个“否（App 应发送）”字段缺失时，字符串按空值、
+布尔按 `false` 处理；可用性通常因此为 `blocked`，但不会仅因缺字段返回 `422`。服务对必填
+存在性显式校验的是 `contract_version`、`app_instance_id`、`selected_mode` 和
+`mode_generation`。
 
 `primary_display.generation` 必须等于本次同步中的 `mode_generation`。App 不得把缓存描述当作
 物理存在；`display` 只表示当前 attempt，且只在系统仍报告该显示时出现。退休 attempt 不回退为
@@ -211,8 +216,9 @@ App 只能从 `control` 与本机事实构造界面，不显示 Agent step，也
 - 服务实例变化时，App 先使旧命令与旧回执失效，保持不可准入，等待新的恢复结果；
   不得把 `revision` 归零当作旧响应。
 - App 重建默认 virtual；主屏授权不持久化，必须重新由用户确认。
-- 服务重启撤销旧输入授权，不重放旧命令；App 的待同步停止意图在服务实例变化后仍保留，
-  直到取得原意图的确认或明确服务已换实例。
+- 服务重启撤销旧输入授权，不重放旧命令；App 的待同步停止意图在服务实例变化后仍保留。
+  只有同一 App 实例、同一 `seq` 且被服务受理的原意图得到确认时才清除 pending；服务实例
+  变化本身不作废该 pending 意图。
 - 服务重启后的旧 session 转退休记录；版本 3/4/5 中已发出预算且仍为 `pending` 的旧补偿先持久化为 `unconfirmed`。
   retired/旧 cleanup 不作为 App 的模式准备或新 create 门禁，当前 descriptor 与当前能力就绪
   后可建立新 attempt。

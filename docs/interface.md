@@ -591,13 +591,13 @@ raw `swipe` 仍不接受 `ref`。
 | --- | --- | --- | --- |
 | `contract_version` | 是 | 字符串 | 必须为 `"15"`，否则 `409 contract_mismatch` |
 | `app_instance_id` | 是 | UUID | App 进程实例；变化会撤销旧归属 |
-| `app_version` | 是 | 字符串 | 仅发行标识 |
+| `app_version` | 否（App 应发送） | 字符串 | 仅发行标识 |
 | `selected_mode` | 是 | `virtual`/`primary` | 用户选择 |
 | `mode_generation` | 是 | 1–64 字符 | 选择代次 |
-| `mode_ready` | 是 | 布尔 | 所选模式可用 |
-| `stop_ready` | 是 | 布尔 | 停止通道可用 |
-| `notifications_enabled` | 是 | 布尔 | 通知可用 |
-| `background_running` | 是 | 布尔 | 前台服务运行中 |
+| `mode_ready` | 否（App 应发送） | 布尔 | 所选模式可用 |
+| `stop_ready` | 否（App 应发送） | 布尔 | 停止通道可用 |
+| `notifications_enabled` | 否（App 应发送） | 布尔 | 通知可用 |
+| `background_running` | 否（App 应发送） | 布尔 | 前台服务运行中 |
 | `power_interactive` | 否 | 布尔或 `null` | 未知为 `null`/省略 |
 | `keyguard_locked` | 否 | 布尔或 `null` | 未知为 `null`/省略 |
 | `primary_display` | 否 | 对象或 `null` | 出现时 `display_id` 必须为 0，宽/高/密度 >0，旋转 0–3，`generation` 非空；可选 `ime_hide`（布尔） |

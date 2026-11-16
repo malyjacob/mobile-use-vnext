@@ -178,11 +178,13 @@ versionName/versionCode 一致：
   shell 运行目录。
 - 账本 v5 按实际序列化分区：完整账本 ≤64 KiB；base（不含 `retired` 与 `task_transfers`）
   ≤20 KiB；`retired` ≤8 项且 ≤24 KiB；`task_transfers` ≤16 项、每项 ≤1000 B、数组 ≤16 KiB。
-  `retired` 超过 8 条或序列化集合超过 24 KiB 时的压缩/驱逐顺序为 `complete` → `unconfirmed`
-  → `pending`，按该顺序驱逐最旧记录（同状态取开始时间更早者）；被驱逐的未完成清理记为
-  `unconfirmed` 并计入 `dropped_unconfirmed`，不能把淘汰写成 `complete`。保护池项的回收
-  必须晚于所有可能删除同一任务的引用；`prepared`/`may_dispatch`/`unknown` 的出站记录不得
-  为腾空间丢弃。
+- `retired` 仅在超过 8 条或序列化集合超过 24 KiB 时进入容量裁剪。裁剪时先压缩一条尚未
+  压缩且单条编码超过 21 KiB 的退休记录，停止其 cleanup、收缩归属摘要，再重新检查容量；
+  没有可压缩记录时才驱逐。
+- 驱逐顺序为 `complete` → `unconfirmed` → `pending`，仅适用于实际移除记录；同状态先驱逐
+  开始时间更早者。被压缩或驱逐的未完成清理记为 `unconfirmed` 并计入
+  `dropped_unconfirmed`，不能写成 `complete`。保护池项的回收必须晚于所有可能删除同一任务
+  的引用；`prepared`/`may_dispatch`/`unknown` 的出站记录不得为腾空间丢弃。
 - 服务日志只在 `service.sh start` 时轮转（`.log.1`、`.log.1.old`）；长期不重启时需外部
   轮转或监控磁盘，不要删除正在写入的日志。
 - 受管 shell 的单次运行目录位于 `/data/local/tmp/mobile-use-shell/<run-id>/`；确认结束后

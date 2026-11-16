@@ -163,8 +163,10 @@ engine 的状态锁只做有限内存检查与转换：锁内不等待 ADB、u2 
   服务不做祖先晋升；坐标候选归约到最近的可滚动祖先，出现多个不同滚动作用域时要求调用方
   显式给 `container.ref`；
 - 静态规划固定容器正交中心坐标，用一次整树遍历把每个节点归约到最近的公开滚动作用域，把
-  不属于选定容器及其 `raw` 外层祖先的候选投影成轴上的阻塞区间，再从「裁剪矩形 ∩ 公开矩形」
-  的基础区间中扣除；最长可证区间决定 `page`/`half` 的留白与幅度，等长区间按手势起点侧取定；
+  具有可用最近滚动作用域、且不属于选定容器及其 `raw` 外层祖先的候选投影成轴上的阻塞区间；
+  没有滚动祖先的候选不阻塞，最近作用域来源未知或越界时按阻塞处理且不回退外层。再从
+  「裁剪矩形 ∩ 公开矩形」的基础区间中扣除；最长可证区间决定 `page`/`half` 的留白与幅度，
+  等长区间按手势起点侧取定；
 - 认领后容器走 Tier 1–3 双向唯一匹配；轴向伸缩仍需足够重叠，离轴两边受固定容差限制。
   新鲜树先证明原段；若失效，只在同一容器中重新归约安全区间并规划/证明整段。实际
   `scrollFrame` 的起终点与受控时长进入设备 Swipe；没有安全段则 `target_changed`；
@@ -509,10 +511,12 @@ P 已无法定位时，`end(P)` 返回 `409 operation_unknown`、`phase=referenc
 - 容量分区（按实际序列化计）：完整账本 ≤64 KiB；retired 数组 ≤8 项且 ≤24 KiB；base（不含
   retired 与 task_transfers）≤20 KiB；task_transfers 全局 ≤16 项、每项 ≤1000 B、数组 ≤16 KiB；
   根对象拼接开销 ≤512 B。独立分区不能替代完整编码门禁；
-- 退休明细超过 8 条或序列化集合超过 24 KiB 时，`trimRetiredLocked` 的压缩/驱逐顺序为
-  `complete` → `unconfirmed` → `pending`，按该顺序驱逐最旧记录（同状态取开始时间更早者）；
-  被驱逐的未完成清理终止为 `unconfirmed` 并计入 `dropped_unconfirmed`，不得把淘汰写成
-  `complete`。只有
+- 退休池仅在超过 8 条或序列化集合超过 24 KiB 时进入 `trimRetiredLocked` 容量门禁。门禁
+  成立时，先压缩一条尚未压缩且单条编码超过 21 KiB 的退休记录：停止其 cleanup、收缩归属
+  摘要，然后重新检查容量门禁；不存在这类记录时才实际驱逐。
+- 驱逐顺序为 `complete` → `unconfirmed` → `pending`，仅适用于实际移除记录；同状态先移除
+  开始时间更早者。被压缩或驱逐的未完成清理终止为 `unconfirmed` 并计入
+  `dropped_unconfirmed`，不得写成 `complete`。只有
   不存在任何仍可删除同一目标的引用时，才回收对应 `task_transfers` 项；
   `prepared`/`may_dispatch`/`unknown` 的出站记录不得因腾空间被丢弃；
 - 内容只有归属与资源证据：原 service instance、origin/agent/mode/state/App 实例/boot/device
