@@ -1,6 +1,7 @@
 # 提案：压缩 Agent 输出并复用 `wait_for` 已采样终帧
 
-状态：提案，未实现。
+状态：已实现（实现提交 `792c973`，`2026-11-17`）。
+实现与验证记录：[agent-output-and-wait-acquisition.md](../../verification/agent-output-and-wait-acquisition.md)。
 基线提交：`4fe270de7cd979cba9659a6662677b111028d4c6`（分支 `master`，`2026-11-17`）。
 适用范围：`device-mcp` 默认结果模式、MCP `server/discover`/兼容 `initialize` 返回的 instructions 与固定工具目录描述、`wait_for` 的 timeout/max_samples 终帧选择，以及 #21 落地后的 full/delta 策略取证。
 影响范围：`cmd/device-mcp`、`internal/mcp`、`internal/engine`、相关测试与探针、MCP/架构/接口/发布文档和最终共同发布生成物。
@@ -423,21 +424,31 @@ docs 不写 `reference` 统一名、`bubble`、`press_enter` 或两个默认 `tr
 6. **B2**：#19 与 #23 顺序合并；若改为并行，必须先隔离 act 请求接口、任务状态和测试写集。
 7. **发布门禁**：两批功能路径通过验证后，在 `release/versions.json` 一次冻结共同新版本并生成 Go/Java/XML 常量，随后同步正式文档、完成相关检查及独立文档审计；实现提交和提案归档按仓库流程分开。最后从干净已提交源码构建、生成并核验唯一新契约/目录/产物 manifest；不在 A 或 B 中间发布，也不在清单核验后再改版本。
 
-## 11. 实现结果（归档时补写）
+## 11. 实现结果
 
-归档时补写。
+实现提交：`07c85b6`（第一批功能）、`792c973`（联合验收、0.16.0 版本冻结与文档同步）。
+验证记录：[agent-output-and-wait-acquisition.md](../../verification/agent-output-and-wait-acquisition.md)。
 
 ### 11.1 已落地
 
 | 提案条目 | 落点 |
 | --- | --- |
-| 归档时填写 | 填写真实实现提交、文件与函数落点 |
+| #21 默认 text | `07c85b6`：`cmd/device-mcp/main.go:configuredResultMode` 无 flag/env 时返回 `ResultModeText`；enum 零值、显式 both/structured、env/flag/header 优先级不变；`cmd/device-mcp/main_test.go` 覆盖默认与优先级。 |
+| #16 instructions 与描述 | `07c85b6`：`internal/mcp/schema.go:ServerInstructions` 与 `toolCatalog` 将完整 tree guide、O/P 与租期规则集中一次；六处描述去重；`internal/mcp/server.go:NewServer` 设置 `ServerOptions.Instructions`；`scripts/mcp-probe/checks.go:instructionsCheck`/`compatibilityInstructionsCheck`/`catalogCheck` 校验 live说明与 12 工具；`internal/mcp/schema_test.go` 覆盖去重、caller-oriented、体积预算与指纹。 |
+| #22 wait 终帧复用 | `07c85b6`：`internal/engine/wait_for.go` 引入 `waitFrameSource`、`waitRun.lastFrame`、`terminalFrameReusable`/`waitQualityOf`，timeout/max_samples 在最后成功且无后续失败、选择与提交均在 `CaptureMaxAge` 内时复用；`792c973` 在 `absorbWaitTerminalFrame` 同步 `lastDigest`。`internal/engine/wait_for_test.go` 覆盖复用、失败后成功、过期、STOP/显示代次、图片 partial 与提交拒绝。 |
+| #20 delta 策略 | 无生产代码变更；保留 `internal/engine/capture.go` 的 `revision-baseline.Revision < 12`、基线龄 `< 180s`、严格 `< 70%`。聚合证据与保留理由见验证记录 §3.5、§8.5。 |
+| 元数据体积 | `internal/mcp/schema_test.go:TestDiscoveryByteBudget` 固定同一基线 `36250`；0.16.0 实测 `instructions=5958`、`tools_list=19118`、描述 `7393`、schema `11126`、总量 `25076`。 |
+| 发布与文档 | `792c973`：`release/versions.json` 一次冻结 `0.16.0`/`16`/`18`，生成 Go/Java/XML 常量；同步 `docs/mcp.md`、`docs/architecture.md`、`docs/interface.md`、`docs/integration.md`、`docs/runbook.md`、`docs/release.md` 与 README。 |
 
 ### 11.2 与提案不同或未执行
 
 | 项 | 结论与理由 |
 | --- | --- |
-| 归档时填写 | 包括 #20 保留现值、偏离和未执行验证的真实理由 |
+| #20 数值 | 未调整，保留 `12/70/180s`。没有同宿主/模型/上下文保留策略下的任务回放、Token、误用率、锚点距离或 full 频率证据；结构 benchmark 最大 `7.361%` 不足以区分 `70/50/45%` 对真实页面的影响，按 §4.4 保留现值，不判为第一批失败。 |
+| A 阶段真实宿主/模型工具轨迹 | 未执行。最终验证做了 live `server/discover`/兼容 initialize、三编码与真实工具结果，但未运行同一模型宿主的 A/B 轨迹，不冒充模型行为结论。 |
+| 慢 hierarchy 与 STOP/end 迟到 O | 未执行。当前设备没有可控慢 dump 环境；由 engine 终帧复用、提交门禁与撤销测试覆盖，验证记录明确标为未实测。 |
+| 发布时机 | 按提案要求两批完成后一次发布；未发布 A 或 B 中间态，清单在唯一版本冻结与干净实现提交后生成。 |
+| 判据/契约 | 未改变已确认的判据、默认值或时序；新增的终帧 `lastDigest` 同步只修正内部状态一致性，不改变公开行为。 |
 
 ---
 

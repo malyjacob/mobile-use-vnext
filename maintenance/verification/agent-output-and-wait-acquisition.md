@@ -1,8 +1,10 @@
 # 验证记录：Agent 输出与 wait 终帧复用（第一批）
 
-状态：2026-11-17。实现提交：`07c85b6`（分支 `zcode/agent-tool-evolution`）。
-提案：[agent-output-and-wait-acquisition.md](../proposals/agent-output-and-wait-acquisition.md)。
-本记录只覆盖第一批 #16/#21/#22 与 #20 取证结论；第二份提案未开始，提案未归档，版本未冻结。
+状态：2026-11-17。第一批实现提交：`07c85b6`；最终联合实现与版本冻结：`792c973`（`0.16.0` / 契约
+`16` / versionCode `18`）。
+提案：[agent-output-and-wait-acquisition.md](../proposals/implemented/agent-output-and-wait-acquisition.md)。
+本记录覆盖第一批 #16/#21/#22 与 #20 取证结论；§8 记录 0.16.0 联合验收补记，早期章节的
+“未冻结/未实测”表述保留为当时状态。
 
 ## 1. 范围与结论
 
@@ -230,3 +232,99 @@ base 锚点距离、full 频率或 p95 延迟。
   manifest 并做 live catalog/指纹比对。
 - 已知构建产物：`build/host-tools-manifest.json` 与 `build/release/manifest.json` 仍是旧
   目录指纹；不要用它们核验本提交，需在后续发布流程重建。
+
+## 8. 0.16.0 联合验收补记（2026-11-17）
+
+本节记录第三会话的最终联合验收，补充而不是改写前七节的历史状态。
+
+### 8.1 实现与版本
+
+- 最终联合实现提交：`792c973fc70399e0a063fdd13b2b1c2a4056950d`，在 `07c85b6` 的第一批实现
+  之上补齐两批联调缺口并完成唯一版本冻结。
+- `release/versions.json` 一次冻结为 `release_version=0.16.0`、`contract_version=16`、
+  `android_version_code=18`；Go/Java/XML 常量由 `scripts/generate-version.ps1` 生成，
+  `-Check` 通过。
+- 第一批范围内新增/修正：`wait_for` 终帧吸收在成功帧更新 `lastDigest`；result manifest 与
+  probe 覆盖 `text_input` 的 write-only、not-dispatched、enter-uncertain 状态；probe 在
+  text/structured/both 三种编码下校验阶段对象并断言 key 动作不携带 `text_input`；
+  max_samples 用例断言终帧复用读取次数；修正 parity 中非法的 `executed` + `(E,N)` 组合。
+
+### 8.2 已单测
+
+| 命令 | 结果 |
+| --- | --- |
+| `GOEXPERIMENT=jsonv2 go test ./internal/engine -count=1` | `ok 505.245s` |
+| `GOEXPERIMENT=jsonv2 go test ./cmd/device-mcp/... ./internal/protocol/... ./internal/client/... ./internal/httpapi/... ./internal/mcp/... ./scripts/mcp-probe/... -count=1` | 全部 `ok` |
+| `GOEXPERIMENT=jsonv2 go test ./internal/android/... ./internal/device/... ./internal/imaging/... ./internal/observation/... ./internal/store/... -count=1` | 全部 `ok` |
+| `GOEXPERIMENT=jsonv2 go vet ./...` | 无输出（通过） |
+| `GOEXPERIMENT=jsonv2 GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build ./...` | 无输出（通过） |
+
+新增/加强的确定性断言：
+
+- `TestCanonicalTextInputStates`：五种合法 `write/enter` 组合均可由 canonical Result 还原。
+- `TestActTextInputProjection`：text、structured、both 三模式下默认 text 得到
+  `{executed,executed}`；显式 `press_enter=false` 的对象与可读编码均无 `text_input`。
+- `TestCheckTextInputSnapshot`：拒绝缺键、未知值与非法阶段顺序。
+- `TestCanonicalJSONCoversManifest` 新增 write-only、not-dispatched、enter-uncertain fixtures。
+- `TestWaitForMaxSamplesGuardReportsTimeout` 断言读取次数与 quality samples 均等于
+  `MaxSamples`，证明终帧复用未追加第二次读取。
+- `TestActBubbleFreshFrameRequiresChildAndAncestor` 扩展 child 角色变化、祖先丢失、祖先失去
+  动作、最近祖先变化、祖先歧义与安全点被 sibling 阻断，全部 `target_changed`、零派发。
+
+反向对照：临时让 `AppRequest.Encode` 跳过完整成员矩阵校验后，
+`TestAppRejectsUnencodableBranchesWithoutSending` 的 9 个跨 kind/非法成员用例全部变红并
+触达服务；恢复后转绿。
+
+### 8.3 元数据体积与目录指纹
+
+同一 live in-memory SDK 提取，基线仍为 #16 实施前的 `1cb6fbd`（`36250` 字节）：
+
+| 分项 | 基线 | 0.16.0 |
+| --- | ---: | ---: |
+| `instructions_utf8_bytes` | 0 | 5958 |
+| `tools_list_utf8_bytes` | 36250 | 19118 |
+| 12 个 description UTF-8 小计 | 21430 | 7393 |
+| 12 个 input schema UTF-8 小计 | 12668 | 11126 |
+| **总量** | **36250** | **25076** |
+
+总量严格低于基线 `11174` 字节（`30.8%`）。目录指纹：
+`c5fdc545cc77882a4662b6a4524517475065cfc3248ec42223ae4c1189529928`（12 工具），与
+release 与 host-tools 清单一致。
+
+### 8.4 已实测（系统级）
+
+- 整组部署：`scripts/deploy.ps1 -SkipBuild` PASS；`/health` 返回
+  `release_version=0.16.0`、`contract_version=16`；控制 App 安装后为 `0.16.0/18`；
+  手机 HTTP MCP 适配器映像 SHA-256 与 release `device-mcp` 一致。
+- 默认结果模式：无 `-result-mode`、无环境变量启动 stdio 适配器，`mcp.start` 记录
+  `tools=12 result_mode=text`。
+- 主机 stdio 探针（`build/device-mcp.exe` + `.state/mcp-config.json`）：
+  - `-result-mode text` smoke PASS：instructions 5958 字节、兼容 initialize 同源、12 工具、
+    两个清单指纹一致、完整 start/observe/wait_for/shell/inspect/act(图片)/end/cancel；
+  - `-result-mode structured` PASS；
+  - `-result-mode both` PASS；
+  - `-suite app-lifecycle -app-target com.mobileuse.probe` PASS，`app_open/list/kill/close`
+    实测，`app_claim` 仍因受控主屏任务不存在而 SKIP。
+- 主机 HTTP 探针 PASS：401/403/agent-token 边界、默认 text、instructions、目录、清单指纹、
+  start/observe/wait/act/end/cancel。
+- 手机 HTTP MCP：authenticated `initialize` 返回 `instructions` 与源码
+  `ServerInstructions()` 逐字节相等（5958 字节），capabilities.tools=true；两个手机适配器
+  `/proc/<pid>/exe` 均为 release SHA-256 `20c82ded...`。完整 `http-remote` 探针未跑完：
+  部署默认 `allowed_origins` 为空，探针的 `origin_allowed` 反例按设计得到 403；这不是契约
+  失败，记录为未执行项。
+- 首次 smoke 在服务刚重启时 `start` 返回一次 `control_revoked`；独立只读 `status` 为
+  `can_start=true`、旧会话 `ended(reason=service_restarted)`、cleanup complete，随后重跑
+  完整 PASS。该现象与上一记录的重启窗口一致，不判为缺陷。
+- 主机侧二进制：`scripts/build-host-tools.ps1` 从 `792c973` 干净树重建
+  `build/device-mcp.exe`（SHA-256 `323e2b3480dc8ac98a1451af0ae84f5a3094381a3df87aab953f10ae5d001659`）
+  与 `build/mcp-probe.exe`，`-VerifyOnly` PASS。按用户后续指示不再管理 Codex 进程。
+
+### 8.5 未执行项与原因
+
+| 项 | 原因 |
+| --- | --- |
+| 慢 hierarchy 设备的 wait timeout/max_samples Capture 次数、p95、STOP/end 迟到 O | 当前设备无可控慢 dump 环境；终帧复用、提交门禁与撤销由 engine 测试覆盖。 |
+| #20 真实宿主/模型任务回放、Token、误用率、锚点距离、full 频率 | 没有同宿主/模型/上下文保留策略材料；按 §4.4 继续保留 `12/70/180s`，不判为第一批失败。 |
+| 真实模型按 Instructions 的 A/B 工具轨迹 | 未运行；只做 live discovery/字节语义与清单指纹检查，不冒充模型行为结论。 |
+| 手机 `http-remote` 完整探针 | 部署默认 origin allowlist 为空；已用 authenticated initialize 精确比对说明并以映像哈希确认两个适配器为同一发布产物。 |
+| Codex 宿主实际工具调用 | 用户明确无需管理 Codex；主机侧二进制与清单已重建，后续由用户自行触发。 |

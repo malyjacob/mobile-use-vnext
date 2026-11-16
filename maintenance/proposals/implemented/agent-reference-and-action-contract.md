@@ -1,6 +1,7 @@
 # 提案：统一 Agent 请求引用并收紧受控动作契约
 
-状态：提案，未实现。
+状态：已实现（实现提交 `792c973`，`2026-11-17`）。
+实现与验证记录：[agent-reference-and-action-contract.md](../../verification/agent-reference-and-action-contract.md)。
 基线提交：`4fe270de7cd979cba9659a6662677b111028d4c6`（分支 `master`，`2026-11-17`）。
 适用范围：`act`、`inspect`、`app` 的 HTTP 与 MCP 输入，`act` 的 tap/long_press 目标规划与 text 执行结果，MCP Instructions 中的动作调用决策，以及客户端、状态/重复 P、冻结结果和结果投影路径。
 影响范围：`internal/protocol`、`internal/engine`、`internal/mcp`（含 server Instructions 与 act 描述）、`internal/client`、`scripts/mcp-probe`、相关测试、正式文档与最终共同发布清单；不修改 Android 业务逻辑、uiautomator JAR 或既有设备 RPC，共同版本生成的 Java/XML 和配套 APK 仍随整组发布更新。
@@ -854,23 +855,36 @@ child+A 双绑定、公开 Role/Label、STOP/冻结、阶段快照和各 primiti
 若实施资源只允许串行，优先完成 B1，因为它统一后续 B2–B4 的请求样本和 Schema 基线，但不得
 把该排序描述为逻辑硬依赖。
 
-## 11. 实现结果（归档时补写）
+## 11. 实现结果
 
-实现提交：待归档。
-
-实现与验证记录：待归档时链接 `../../verification/agent-reference-and-action-contract.md`。
+实现提交：`d529ee7`（#17/#18/#19/#23 功能）、`792c973`（联合验收、编码器补齐与 0.16.0
+版本冻结）。验证记录：[agent-reference-and-action-contract.md](../../verification/agent-reference-and-action-contract.md)。
 
 ### 11.1 已落地
 
 | 提案条目 | 落点 |
 | --- | --- |
-| 待归档 | 本提案尚未实现，归档时填写真实代码提交与函数/文件落点 |
+| #17 统一 `reference` | `d529ee7`：`internal/protocol/requests.go` 的 `ActRequest` 只解码 `reference`；`internal/protocol/surface.go` 的 `DecodeInspect`/`DecodeApp` 同步；旧 `observation_id` 作为未知成员拒绝；`internal/client/client.go` 与 `internal/mcp/schema.go` 改用新字段；`scripts/mcp-probe` 与 protocol/client/MCP 测试覆盖新旧字段矩阵。 |
+| #18 扁平 `app` 与 `open.target.app` | `d529ee7`：`internal/protocol/surface.go:DecodeApp`/`appKindMembers`/`parseAppTarget` 保持七 kind 封闭矩阵；`internal/mcp/schema.go` 的 app 根与 target 改为扁平封闭对象；`open` 只接受 `target.app`，`list` 保留顶层 `app` 过滤；`scripts/mcp-probe/checks.go:checkAppSchema` 断言无组合器。 |
+| #19 `operation.bubble` | `d529ee7`：`internal/protocol/requests.go` 的 presence-aware 布尔与 `EffectiveBubble`/`ValidateEffectiveDefaults`；`internal/engine/tap_scope.go` 的 `planBubbleTapTarget`/`chooseBubbleTapPoint`/`nearestInteractiveAncestor`；`internal/engine/act.go:revalidateBubbleTapFrame` 的 child+A 双绑定、Role/Label、最近祖先与安全点重验。`792c973` 将 fresh 阶段 `CodeHierarchyFailed` 原样返回，与 direct 路径一致。 |
+| #23 `press_enter` 与 `text_input` | `d529ee7`：`internal/protocol/responses.go` 的 `TextInputView` 与 `Result.text_input`；`decode_response.go` 严格解码；`internal/engine/act.go` 的聚焦/写入/精确读回/ENTER 流程；`internal/engine/text_stage.go` 的锁内阶段提交；`ui_execution.go` 的持久 may_dispatch；`operations.go`/`retirement.go`/`engine.go:operationViewLocked` 的 status/重复 P/冻结投影；`internal/mcp/result_text.go` 的文本投影。`792c973` 补齐 manifest/probe 的阶段覆盖。 |
+| 请求编码一致性 | `792c973`：`internal/protocol/encode.go:validateAppRequest` 在 `AppRequest.Encode` 前执行与 `DecodeApp` 相同的封闭成员矩阵，拒绝跨 kind 成员、错配 target、非法 reference/包名和未声明 presence；显式 `false` 保持保真。 |
+| Instructions 与 12 工具 | `d529ee7`/`07c85b6`：`internal/mcp/schema.go:ServerInstructions` 与 `toolCatalog` 统一 caller-agent 文案，含统一 `reference`、默认 `bubble`/`press_enter`、显式 false 场景、`text_input` 与恢复入口；固定 12 工具、顺序与扁平 app schema 不变。 |
+| 客户端与探针 | `d529ee7`：`internal/client` 保留 `act/app` 预分配 P 与显式 false 编码；`scripts/mcp-probe` 更新 act/app 样例、app schema、旧名拒绝与指纹；`792c973` 增加 text/structured/both 的 `text_input` 投影检查与阶段对象校验。 |
+| 版本与发布 | `792c973`：`release/versions.json` 一次冻结 `0.16.0`/`16`/`18`；生成 Go/Java/XML 常量；同步 README 与 `docs/interface.md`、`docs/mcp.md`、`docs/architecture.md`、`docs/integration.md`、`docs/client.md`、`docs/phone-operations.md`、`docs/release.md`、`docs/runbook.md`。 |
 
 ### 11.2 与提案不同或未执行
 
 | 项 | 结论与理由 |
 | --- | --- |
-| 待归档 | 归档时逐项记录偏离、未执行项与理由；当前不预填实现结论 |
+| 编码器补齐 | 不是契约偏离：§5.1 要求客户端编码器与服务端接受/拒绝同一组样本。实现发现 typed `AppRequest` 可带跨 kind 成员而被编码器静默丢弃，因此在 `Encode` 前增加与服务端相同的成员矩阵；新增反向对照先红后绿。 |
+| bubble 层级错误码 | 不是判据偏离：proposal §4.3 要求层级损坏保留 `hierarchy_unavailable`。fresh 重验此前统一映射为 `target_changed`，现与 direct ref 路径一致，仍零派发。 |
+| 显式 false | 保持 `press_enter=false` 只输入、零 ENTER、无 `text_input`；`text_input` 五组合、status/重复 P/冻结投影均一致。 |
+| 实机 STOP/ENTER 回执注入 | 未执行：部署无故障注入面；由 `TestActTextStopAfterWrite...`、`TestActTextStopBeforeFirstInput...`、ENTER 未派发/未知与冻结竞争测试覆盖。 |
+| `app.claim`/`handoff` 实机成功路径 | 未执行：probe app-lifecycle 的 claim 因受控主屏任务不存在 SKIP；open/list/kill/close 已实测。 |
+| 真实宿主/模型 Instructions 回放 | 未执行：只验证 live discovery、三编码与实际工具结果，不冒充模型行为结论。 |
+| `status(O)` 文档措辞 | 文档澄清，不改契约：`end(O)` 解析到所属会话并执行收尾；`status(O)` 不发布 `entry=end` 恢复项，原句可能被读成运行时会发布该入口。 |
+| 判据/时序 | 未改变已确认的引用范围、默认值、双绑定、安全点、阶段事实或发布时序。 |
 
 ---
 

@@ -1,6 +1,6 @@
 # 项目实施状态
 
-状态：2026-11-16，S10 归档记录已定稿。本页承载用户可见的阶段进度、已实现/已实测/未验证分层与未决项；
+状态：2026-11-17，契约 16 联合验收与 0.16.0 发布记录已定稿。本页承载用户可见的阶段进度、已实现/已实测/未验证分层与未决项；
 `docs/` 只保留正式架构、现行契约与运维说明。
 
 ## 1. 阶段
@@ -48,7 +48,8 @@
 | 公共树表示与交付预算（契约 11） | 已实现 | 已实测（部分）：0.11.0/契约 11/versionCode 13 整组构建、清单核验、手机覆盖安装与私有数据保留；实机契约 10 拒绝、最小 STOP 接纳、`start→full`、同基线空 delta、inspect 插入不改基线、query 与 end；stdio 与手机 HTTP 两个 MCP 入口的 both/text/structured 探针均 PASS。未执行：`verify-m6`（用户排除）、真实 Capture 压缩比/token/耗时/进程峰值（用户排除）、`act` 重验失败交付的实机样本（[记录](verification/compact-node-tree-presentation.md)） |
 | 受控滚动中心线安全区间、原段重验与联动视口效果（契约 13） | 已实现 | 已部署 0.13.0/契约 13/versionCode 15；契约边界实测（旧 12 与缺头均 `409 contract_mismatch`、最小 STOP 独立、`13` 受理）；Settings 7 次垂直 scroll 全部 `executed`、0 次 `target_changed`，取得 4 次实机 `observed`（`anchors=17`/`coverage=80`）与 6 次 `not_observed`；X 首页复现 `2242↔2400` 容器伸缩但受内容换血限制仍为 `unknown`；Zhihu/X 嵌套作用域取得真实 `422` 且零采集零派发。联动栏下的实机 `observed` 与合成覆盖层页未取得（[记录](verification/scroll-safe-trajectory-and-viewport-effect.md)） |
 | tap/long_press 子树安全落点与结构化引导（契约 14） | 已实现 / 已实测（有限） | 已部署 0.14.0/契约 14/versionCode 16；静态子树规划、固定点重验、R1 原子引导、`occluding_ref` 边界及嵌套详情所有权已实现并单测；实机临时复合卡片验证正文引导 `nearest_actionable_ref=n21`、`safe_point={540,331}`、`safe_carrier_ref=n22`，独立 O 上卡片 tap ×3 与 long_press 均与内按钮 0 次隔离；契约 13 拒绝/14 受理、恢复屏障与最小 STOP 通过。外部 MCP 宿主未操作，手机 stdio 旧进程需宿主重启；`occluding_ref` 专门页面与活动会话 STOP 未单独实机构造（[记录](verification/act-tap-safe-scope-and-guidance.md)） |
-| 统一 reference 与受控动作契约（契约 15） | 已实现 / 已实测（有限） | `d529ee7` 完成 #17/#18/#19/#23：act/inspect/app 统一 `reference`、扁平 app Schema 与 `open.target.app`、ref bubble 默认一次最近交互祖先提升、text 默认 `press_enter` 与 `text_input`；单测、反向对照、engine 全量、探针与实机 open/text/bubble/重复 P 已执行，docs 独立审计 CLEAN。未冻结版本、未发布、未归档提案；实机 STOP/ENTER 回执注入、claim/handoff 与真实宿主 Instructions 回放未执行（[记录](verification/agent-reference-and-action-contract.md)） |
+| Agent 输出、instructions 与 wait 终帧复用（契约 16） | 已实现 / 已实测（有限） | `07c85b6` + `792c973`：device-mcp 默认 text、server instructions 集中与 12 描述去重、wait timeout/max_samples 复用最新新鲜帧；0.16.0/契约 16/versionCode 18 整组发布，discovery 元数据 `25076` 严格低于基线 `36250`，目录指纹 `c5fdc545...`；主机 stdio text/structured/both、主机 HTTP 与真实服务 smoke/app-lifecycle PASS。慢 hierarchy wait、真实宿主/模型 #20 与 Instructions 轨迹未执行（[记录](verification/agent-output-and-wait-acquisition.md)） |
+| 统一 reference 与受控动作契约（契约 16） | 已实现 / 已实测（有限） | `d529ee7` + `792c973` 完成 #17/#18/#19/#23：act/inspect/app 统一 `reference`、扁平 app Schema 与 `open.target.app`、ref bubble 默认一次最近交互祖先提升、text 默认 `press_enter` 与 `text_input`；编码器与服务端共享封闭 kind 矩阵。0.16.0 已整组发布并部署；实机 text 默认/显式 false、status/重复 P、旧字段/坐标 bubble/旧 app 拒绝、bubble 提升与 end/cleanup 已执行，docs 独立审计 CLEAN。实机 STOP/ENTER 回执注入、claim/handoff 与真实宿主 Instructions 回放未执行（[记录](verification/agent-reference-and-action-contract.md)） |
 | 观察连续性、结构差分与动作重验（契约 15） | 已实现 | 已实测（有限）：净化/严格三态、五阶段连续性、结构差分与双应用器、动作层级重验及消费者同步已落地；D01 contract 15 三轮 pass，D02 三轮无 fail但缺 native scroll，D03 24 pass/3 fail，D04 3 fail/15 gap，D05 最新 1 pass/1 fail，D06 在 `38`/`049` 各三轮 pass；S6 最终 61 个五样本子项、305 行。缺口已接受（[记录](verification/observation-continuity-and-revalidation.md)、[基准](verification/observation-continuity-benchmarks.md)） |
 
 ## 3. 未验证 / 证据缺口
@@ -85,6 +86,9 @@
 | 观察连续性 D03 | 27 case 中 24 pass、3 fail；越界兄弟 overlay、in-scope 完整阻断负例与 service primitive 精确计数仍缺 |
 | 观察连续性 D04 | 18 case 中 3 fail、15 gap；键盘顶起、focus-shift race 与 primitive 精确计数仍缺 |
 | 观察连续性 D05/D06 | D05 最新 1 pass/1 fail，旧报告保留 3 fail；STOP 注入与真实外部 MCP 宿主刷新未独立确认 |
+| 0.16.0 慢 hierarchy wait / STOP、end 迟到 O | 未执行：当前设备没有可控慢 dump 环境；终帧复用、提交门禁与撤销由 engine 测试覆盖（[记录](verification/agent-output-and-wait-acquisition.md) §8.5） |
+| 0.16.0 真实宿主/模型 #20 与 Instructions 轨迹 | 未执行：没有同宿主/模型/上下文保留策略材料；#20 继续保留 `12/70/180s`，不冒充模型行为结论（[记录](verification/agent-output-and-wait-acquisition.md) §8.5、[第二份记录](verification/agent-reference-and-action-contract.md) §8.4） |
+| 0.16.0 实机 STOP/ENTER 回执注入、claim/handoff 成功路径 | 未执行：部署无故障注入面，claim 因受控主屏任务不存在 SKIP；由合成测试覆盖，不冒充实机结论（[记录](verification/agent-reference-and-action-contract.md) §8.4） |
 
 ## 4. 证据入口
 
@@ -102,6 +106,7 @@
 - [主屏多窗口层级修复与实机验证](verification/primary-display-multi-window.md)
 - [契约 11 公共树表示、交付预算与文本 v2 的实现与验证](verification/compact-node-tree-presentation.md)
 - [tap/long_press 子树安全落点与结构化引导的实现与验证](verification/act-tap-safe-scope-and-guidance.md)
+- [Agent 输出、instructions 与 wait 终帧复用的实现、发布与联合验证](verification/agent-output-and-wait-acquisition.md)
 - [统一 reference 与受控动作契约的实现、单测与实机验证](verification/agent-reference-and-action-contract.md)
 - [观察连续性、结构差分与动作重验的实现、发布、实机与归档记录](verification/observation-continuity-and-revalidation.md)
 - [S6 统一基准记录（B01–B06）](verification/observation-continuity-benchmarks.md)
@@ -114,7 +119,7 @@
 - 历史时点：契约 14 阶段部署为 `0.14.0`（`contract_version=14`、
   `android_version_code=16`），构建自 `cc71c87`、`source_dirty=false`；该描述保留为
   契约 14 发布演进记录（[记录](verification/act-tap-safe-scope-and-guidance.md)）。
-- 当前已验证部署为 `0.15.0 / contract_version=15 / android_version_code=17`。release 与
+- 历史时点：已验证部署为 `0.15.0 / contract_version=15 / android_version_code=17`。release 与
   host manifests 的 `source_commit` 均为
   `049583d328e335c56d56f153b7464ea03f1ca814`、`source_dirty=false`；完整 release 六制品
   齐全且现行 verifier PASS，manifest 没有 `complete` 字段。控制 App 以 `adb install -r`
@@ -124,6 +129,24 @@
   `18a6e7ce612bd5ec1d70b9f78910169762dfb7ce09fbf4fb6c216da6362f6235`，其余五制品
   hash 与 `38` 完全一致；host 2 exe hash/大小不变。Android 源码与版本没有变化，未分析该
   APK 字节差的来源。
+- 当前已验证部署为 `0.16.0 / contract_version=16 / android_version_code=18`。release 与
+  host-tools manifest 均构建自干净实现提交
+  `792c973fc70399e0a063fdd13b2b1c2a4056950d`、`source_dirty=false`；release 六制品齐全，
+  `verify-manifest.ps1` PASS，host tools `-VerifyOnly` PASS，目录指纹
+  `c5fdc545cc77882a4662b6a4524517475065cfc3248ec42223ae4c1189529928`（12 工具）。
+  控制 App 以 `adb install -r` 覆盖安装并保留私有数据，安装后 `0.16.0/18`。部署后 health、
+  App 配对、恢复屏障、STOP availability、两个手机 MCP 适配器 `/proc/<pid>/exe` 与新
+  `device-mcp` 一致。主机 stdio text/structured/both、主机 HTTP、真实服务 smoke 与
+  app-lifecycle 探针 PASS；instructions 5958 字节且与源码逐字节一致。按用户指示，Codex
+  宿主工具调用不作为本轮验收项；主机侧二进制已重建为 0.16.0 并 `-VerifyOnly` PASS
+  （[第一份记录](verification/agent-output-and-wait-acquisition.md) §8、[第二份记录](verification/agent-reference-and-action-contract.md) §8）。
+- 0.16.0 首次 smoke 在服务重启窗口同样出现一次 `start=control_revoked`；独立 status 为
+  `can_start=true`、旧会话 `ended(reason=service_restarted)`、cleanup complete，重跑完整
+  PASS，未判为契约缺陷。
+- 契约 16 的两份提案已归档到 `proposals/implemented/`：
+  `agent-output-and-wait-acquisition.md`（实现 `07c85b6`、`792c973`）与
+  `agent-reference-and-action-contract.md`（实现 `d529ee7`、`792c973`），§11 记录已落地
+  落点、#20 保留现值与未执行验证。
 - 新锚点首次 smoke 在 auth/Origin/token、connect、工具、catalog、schema 与 status 通过后，
   `start` 返回 `control_revoked`；随后独立只读 status 为 `can_start=true`、旧会话
   `ended(reason=service_restarted)`、cleanup `unconfirmed`，未把该 reason 武断认定为本次
