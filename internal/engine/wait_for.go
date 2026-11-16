@@ -32,6 +32,24 @@ type waitFrame struct {
 	digest  sampleDigest
 }
 
+// waitFrameSource is the closed set of origins of the frame a wait publishes.
+// It stays internal: the public result expresses the same fact through the
+// frozen trigger, the quality and the observation id alone.
+type waitFrameSource string
+
+const (
+	// waitFrameMatched is the frame that satisfied a literal condition or the
+	// stability gate during the waiting phase.
+	waitFrameMatched waitFrameSource = "matched"
+	// waitFrameTerminalReuse is the last successful poll frame, published
+	// without another device read because it is still fresh and no later
+	// attempt failed.
+	waitFrameTerminalReuse waitFrameSource = "terminal_reuse"
+	// waitFrameTerminalCapture is a fresh read performed by the verification
+	// acquisition.
+	waitFrameTerminalCapture waitFrameSource = "terminal_capture"
+)
+
 // waitRun accumulates the facts of one waiting phase. Only the three bounded
 // quality facts and the frozen trigger reach the result; the frames themselves
 // stay local to the call.
@@ -39,6 +57,13 @@ type waitRun struct {
 	samples     int
 	consecutive int
 	lastDigest  sampleDigest
+	// lastFrame is the latest successful Capture+Preview+digest frame. It is
+	// cleared by every failed polling attempt, so it exists only while the
+	// most recent attempt succeeded.
+	lastFrame *waitFrame
+	// reuse records that the selection returned lastFrame as terminal_reuse
+	// instead of a matched candidate or a fresh terminal read.
+	reuse bool
 	// stopReason is the real reason the waiting phase ended: condition, stable,
 	// timeout or max_samples. It is fixed before the verification acquisition.
 	stopReason string
@@ -105,6 +130,14 @@ func (e *Engine) WaitFor(ctx context.Context, agent, p string,
 	if pollErr != nil {
 		return e.finishObserveError(op, "wait", pollErr), nil
 	}
+	source := waitFrameTerminalCapture
+	switch {
+	case candidate == nil:
+	case run.reuse:
+		source = waitFrameTerminalReuse
+	default:
+		source = waitFrameMatched
+	}
 
 	e.setOperationPhase(op, "capture")
 	e.setWorkPhase(work, "wait_for.capture")
@@ -116,7 +149,7 @@ func (e *Engine) WaitFor(ctx context.Context, agent, p string,
 	}
 	captureCtx, captureCancel := context.WithTimeout(work.Ctx, waitCaptureReserve)
 	publication, captureErr := e.completeWaitCapture(captureCtx, work, session, candidate,
-		req, run, trigger, forceFull)
+		req, run, trigger, source, forceFull)
 	captureCancel()
 	// T2: the elapsed fact covers admission through publication, including the
 	// verification acquisition.
@@ -166,8 +199,10 @@ func (e *Engine) WaitFor(ctx context.Context, agent, p string,
 
 // pollWaitConditions runs the waiting phase. It returns the frozen trigger and,
 // only when a condition or the stability gate actually held, the frame to
-// publish. A pure sleep, an expired wait deadline or the sample guard returns a
-// nil candidate, which the verification acquisition re-reads.
+// publish. A timeout or sample-guard exit may still return the last successful
+// poll frame for terminal_reuse; a pure sleep, a revoked wait or a run whose
+// last attempt failed returns a nil candidate, which the verification
+// acquisition re-reads exactly once.
 func (e *Engine) pollWaitConditions(work *workState, session *sessionState,
 	req *protocol.WaitForRequest, run *waitRun, deadline time.Time) (string, *waitFrame, *protocol.APIError) {
 	policy := e.cfg.Wait
@@ -189,24 +224,32 @@ func (e *Engine) pollWaitConditions(work *workState, session *sessionState,
 		}
 		if time.Until(deadline) <= 0 {
 			run.stopReason = protocol.QualityStopTimeout
-			return protocol.WaitTriggerTimeout, nil, nil
+			return protocol.WaitTriggerTimeout, e.terminalReuse(run), nil
 		}
 		// The guard counts valid readable frames only, so a device that never
 		// produces a frame is bounded by its own deadline, not by this counter.
 		if run.samples >= policy.MaxSamples {
 			run.stopReason = protocol.QualityStopMaxSamples
-			return protocol.WaitTriggerTimeout, nil, nil
+			return protocol.WaitTriggerTimeout, e.terminalReuse(run), nil
 		}
 
-		frame, frameTimeout := e.sampleWaitFrame(work, session, deadline)
+		frame, frameTimeout, attempted := e.sampleWaitFrame(work, session, deadline)
 		if frame == nil {
+			// A slow (capped) read, a device error, a Preview/digest failure or
+			// a display-probe failure all end the chain: a frame read before the
+			// failed attempt is never published as still-fresh evidence. Running
+			// out of the caller's window before a read starts is not an attempt,
+			// so it must not invalidate the last success.
+			if attempted {
+				run.lastFrame = nil
+			}
 			if work.Ctx.Err() != nil {
 				return "", nil, stoppedWaitError()
 			}
 			// Running out of the caller's own window is never a device failure.
 			if time.Until(deadline) <= 0 {
 				run.stopReason = protocol.QualityStopTimeout
-				return protocol.WaitTriggerTimeout, nil, nil
+				return protocol.WaitTriggerTimeout, e.terminalReuse(run), nil
 			}
 			// A frame that hit only its own single-read cap is a transient miss:
 			// it resets the stability counter but never the caller's deadline.
@@ -216,7 +259,7 @@ func (e *Engine) pollWaitConditions(work *workState, session *sessionState,
 				remProbe := min(probeOnFailTimeout, time.Until(deadline))
 				if remProbe <= 0 {
 					run.stopReason = protocol.QualityStopTimeout
-					return protocol.WaitTriggerTimeout, nil, nil
+					return protocol.WaitTriggerTimeout, e.terminalReuse(run), nil
 				}
 				probeCtx, cancel := context.WithTimeout(work.Ctx, remProbe)
 				state, probeErr := e.dev.ProbeDisplay(probeCtx, session.Display.ID)
@@ -228,7 +271,7 @@ func (e *Engine) pollWaitConditions(work *workState, session *sessionState,
 					return "", nil, stoppedWaitError()
 				case time.Until(deadline) <= 0:
 					run.stopReason = protocol.QualityStopTimeout
-					return protocol.WaitTriggerTimeout, nil, nil
+					return protocol.WaitTriggerTimeout, e.terminalReuse(run), nil
 				default:
 					return "", nil, protocol.NewError(503, protocol.CodeDisplayUnavailable,
 						"目标屏幕不可用")
@@ -248,6 +291,9 @@ func (e *Engine) pollWaitConditions(work *workState, session *sessionState,
 		}
 		run.samples++
 		run.lastDigest = frame.digest
+		// Only the latest successful attempt may be reused, so the candidate is
+		// replaced on every readable frame and cleared on every failure above.
+		run.lastFrame = frame
 
 		readable := hasReadableContent(frame.tree)
 		queryHit := req.HasQuery && readable && treeMatchesFolded(frame.tree, folded)
@@ -285,7 +331,7 @@ func (e *Engine) pollWaitConditions(work *workState, session *sessionState,
 				return "", nil, stoppedWaitError()
 			}
 			run.stopReason = protocol.QualityStopTimeout
-			return protocol.WaitTriggerTimeout, nil, nil
+			return protocol.WaitTriggerTimeout, e.terminalReuse(run), nil
 		}
 		if !pauseInterruptible(work.Ctx, gap) {
 			return "", nil, stoppedWaitError()
@@ -293,43 +339,66 @@ func (e *Engine) pollWaitConditions(work *workState, session *sessionState,
 	}
 }
 
+// terminalReuse returns the frame selected for a terminal_reuse publication, or
+// nil when the verification acquisition must read a fresh terminal frame.
+//
+// The frame qualifies only when the most recent polling attempt succeeded (a
+// later failure cleared it), it is still inside the publish age at selection
+// time, and the waiting phase ended by its frozen timeout or sample guard. A
+// revocation, lease loss or work loss ends the poll with an error before this
+// selector; the commit gate re-checks all of them, the display identity and the
+// age again.
+func (e *Engine) terminalReuse(run *waitRun) *waitFrame {
+	if run == nil || run.lastFrame == nil {
+		return nil
+	}
+	if time.Since(run.lastFrame.capture.CapturedAt) > e.cfg.CaptureMaxAge {
+		return nil
+	}
+	run.reuse = true
+	return run.lastFrame
+}
+
 // sampleWaitFrame reads, projects and digests exactly one poll frame under the
 // lesser of the caller's remaining window and the fixed single-read cap. The
 // second result reports whether the failure was that cap rather than a device
-// or tree failure.
+// or tree failure. The third result reports whether a device read was actually
+// attempted: a window that expired before the read started is not a failed
+// attempt and must not invalidate the previous successful frame.
 func (e *Engine) sampleWaitFrame(work *workState, session *sessionState,
-	deadline time.Time) (*waitFrame, bool) {
+	deadline time.Time) (*waitFrame, bool, bool) {
 	frameTimeout := min(time.Until(deadline), e.cfg.Wait.FrameTimeout)
 	if frameTimeout <= 0 {
-		return nil, false
+		return nil, false, false
 	}
 	frameCtx, cancel := context.WithTimeout(work.Ctx, frameTimeout)
 	defer cancel()
 	cap, apiErr := e.readPollCapture(frameCtx, session)
 	if apiErr != nil {
-		return nil, frameCtx.Err() != nil
+		return nil, frameCtx.Err() != nil, true
 	}
 	projection, projectErr := work.Projector.Preview(&cap)
 	if projectErr != nil {
-		return nil, false
+		return nil, false, true
 	}
 	digest, digestErr := sampleDigestOf(&cap, projection.Tree)
 	if digestErr != nil {
-		return nil, false
+		return nil, false, true
 	}
-	return &waitFrame{capture: cap, tree: projection.Tree, digest: digest}, false
+	return &waitFrame{capture: cap, tree: projection.Tree, digest: digest}, false, true
 }
 
 // completeWaitCapture runs the verification acquisition that publishes the one
 // new observation and returns the quality fact of exactly that frame.
 //
-// A candidate frame from the waiting phase is never re-read from the device: a
+// A matched or reused candidate frame is never re-read from the device: a
 // second read could no longer satisfy the condition, and it would break the
 // stability result the caller was promised. Only a wait that ended without a
-// candidate reads the terminal frame itself.
+// reusable candidate reads the terminal frame itself, exactly once. All three
+// sources share projectCapture and the single publishTreeAttempt commit gate.
 func (e *Engine) completeWaitCapture(ctx context.Context, work *workState,
 	session *sessionState, candidate *waitFrame, req *protocol.WaitForRequest,
-	run *waitRun, trigger string, forceFull bool) (*waitPublication, *protocol.APIError) {
+	run *waitRun, trigger string, source waitFrameSource, forceFull bool) (*waitPublication, *protocol.APIError) {
 	const phase = "wait_for"
 	publication := &waitPublication{}
 
@@ -371,7 +440,7 @@ func (e *Engine) completeWaitCapture(ctx context.Context, work *workState,
 			e.absorbWaitTerminalFrame(run, tree)
 		}
 	}
-	publication.quality = waitQualityOf(e.cfg.Wait, run, candidate != nil)
+	publication.quality = waitQualityOf(e.cfg.Wait, run, source)
 	if tree == nil {
 		e.encodeImage(attempt, session)
 		if attempt.meta != nil {
@@ -460,16 +529,18 @@ func (e *Engine) absorbWaitTerminalFrame(run *waitRun, tree *treeAttempt) {
 }
 
 // waitQualityOf projects one waiting phase onto the quality of exactly the frame
-// that is published. A reused candidate keeps the comparison it was chosen by; a
-// re-read terminal frame has already been folded into the run by the caller.
-func waitQualityOf(policy WaitPolicy, run *waitRun, reused bool) *protocol.Quality {
+// that is published. A matched candidate keeps the condition/stable comparison
+// it was chosen by; a reused terminal frame reports the comparison the run
+// already contains without counting the frame again; a re-read terminal frame
+// has already been folded into the run by the caller.
+func waitQualityOf(policy WaitPolicy, run *waitRun, source waitFrameSource) *protocol.Quality {
 	if run == nil {
 		return &protocol.Quality{
 			State: protocol.QualityUnknown, Samples: 0,
 			StopReason: protocol.QualityStopNotSampled,
 		}
 	}
-	if reused {
+	if source == waitFrameMatched {
 		switch {
 		case run.consecutive >= policy.StableFrames:
 			return &protocol.Quality{
@@ -485,6 +556,35 @@ func waitQualityOf(policy WaitPolicy, run *waitRun, reused bool) *protocol.Quali
 			return &protocol.Quality{
 				State: protocol.QualityUnknown, Samples: run.samples,
 				StopReason: protocol.QualityStopCondition,
+			}
+		}
+	}
+	if source == waitFrameTerminalReuse {
+		// The frame is already one of the counted samples; only the frozen stop
+		// reason of the waiting phase describes why the run ended.
+		stopReason := run.stopReason
+		switch stopReason {
+		case protocol.QualityStopTimeout, protocol.QualityStopMaxSamples:
+		default:
+			// Defensive: reuse is selected only on a timeout or a sample-guard
+			// exit, and an empty reason must never escape as an enum gap.
+			stopReason = protocol.QualityStopTimeout
+		}
+		switch {
+		case run.consecutive >= policy.StableFrames:
+			return &protocol.Quality{
+				State: protocol.QualityStable, Samples: run.samples,
+				StopReason: protocol.QualityStopStable,
+			}
+		case run.samples >= 2:
+			return &protocol.Quality{
+				State: protocol.QualityUnstable, Samples: run.samples,
+				StopReason: stopReason,
+			}
+		default:
+			return &protocol.Quality{
+				State: protocol.QualityUnknown, Samples: run.samples,
+				StopReason: stopReason,
 			}
 		}
 	}

@@ -15,8 +15,10 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
   `wait_for`、`act`、`inspect`、`keepalive`、`end`、`app`、`notify`、`shell`、`diagnose`。
   不注册 `/health`、认证初始化、旧工具别名或旧协议回退。
 - 目录指纹是工具数、注册顺序、名称、描述与入参 schema 的 canonical SHA-256，当前为
-  `1a319cb307821d51bccfa1ed3df307c363b758973174623ee935c45bac2ffc55`；发布清单与探针按
-  它比对实际 `tools/list`，任一条描述或 schema 变化都会改变该值。
+  `312b6975e7a4706241c5a17c0cfcb0336330799e29286f98a4619a9f219c40fd`；发布清单与探针按
+  它比对实际 `tools/list`，任一条描述或 schema 变化都会改变该值。工具目录指纹不覆盖
+  server instructions；instructions 由探针把 `server/discover` 返回的说明与构建内的固定
+  说明源逐字节比较，并附加兼容 `initialize` 检查。
 - stdio 模式的 stdout 只承载 MCP 协议帧；日志与诊断一律写 stderr。
 - 私有配置把适配进程绑定到一个可信 Agent 的服务凭据；该凭据不是工具参数，不进入日志、
   错误、结果或 MCP 正文。
@@ -44,10 +46,15 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
 指出该阻塞 owner，不表示整个目标表面不可点。子树规划不解决子树外同级或跨窗口 z 序、未发布
 透明层或实际事件消费者，输入执行也不证明应用业务结果。
 
-工具描述中的树引导与树块词表一致：树节点行的动作列仍只有 `tap`、`long_press`、`text`、
-`swipe`（`Node.actions` 不新增枚举）；`actions=swipe` 只是节点的源能力，不是 raw `swipe`
-授权，滚动用 `operation.type=scroll` 与 `container` 表达。引导同时声明块头 `view=`、
-块头后的空行、`entries` 计数与 `chain` 行，避免同一语法出现两份漂移表述。
+公共树语法与调用规则由 server instructions 发布：`server/discover` 与兼容 `initialize`
+返回同一份说明，完整树块词表恰好出现一次，另含会话推进、O/P 身份、租期、工具选择、
+`text` 输入语义与恢复分类；12 个工具描述不再内联树引导，只保留各自用途、关键参数/默认、
+结果或动作边界与最少恢复路径。`start` 描述保留一段短兼容提示：O 是可消费观察，P 是该操作
+的幂等/查询编号；full 是完整树，delta 只相对其 base 且新 delta 覆盖旧 delta。树块词表
+本身不变：树节点行的动作列仍只有 `tap`、`long_press`、`text`、`swipe`（`Node.actions`
+不新增枚举）；`actions=swipe` 只是节点的源能力，不是 raw `swipe` 授权，滚动用
+`operation.type=scroll` 与 `container` 表达。引导声明块头 `view=`、块头后的空行、
+`entries` 计数与 `chain` 行。
 
 调用参数在进入客户端前由 `internal/protocol` 的严格解码器接入：未知成员、重复键、大小写
 变体、尾随第二个 JSON 值、类型混用与未声明 `null` 都被拒绝，且不产生设备调用。参数错误
@@ -55,19 +62,22 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
 
 `keepalive` 的 schema 声明可选的整数 `duration_minutes`（1～120，省略为 2），适配器按参数
 是否存在选择 SDK 的默认调用或含时长调用，完整透传到服务；不会在本地补默认值、丢弃显式
-时长或改写成单调续租。工具描述与参数说明明确：每个新 P 覆盖原截止时间且可缩短，省略也
-重设为两分钟；普通活动只按两分钟取最大值，不继承本次时长；start 使用五分钟租期，会话没有
-累计时长硬上限。调用取消仍按第 6 节撤销授权，长租约不覆盖取消边界。
+时长或改写成单调续租。server instructions 与参数说明明确：显式续期覆盖原截止时间且可
+缩短，省略也重设为两分钟；普通活动在续期点取 `max(现有截止时间, now + 2 分钟)`，不继承
+本次时长；start 使用五分钟租期，会话没有累计时长硬上限。调用取消仍按第 6 节撤销授权，
+长租约不覆盖取消边界。
 
 `wait_for` 的 schema 以 `reference` 与 `timeout` 为必填，`query`、`absent_query`、`stable`、
 `full`、`image` 可选：`timeout` 是 1–40 的整数，`stable=true` 时至少 2；两个条件字符串各
-至多 256 个码点。工具描述向 Agent 声明三条使用契约：到时同样按成功返回并发布验证采集得到的
-那个观察，调用方须检查 `wait.trigger` 与 `wait.matched`，连续 3 帧稳定由
-`observation.quality.state=stable` 表达；`wait.elapsed_ms` 计自准入完成至终帧发布，因需补采
-或复用验证帧，实际耗时可超过 `timeout` 至多约 35 秒；两个条件只匹配当前公开可见树且
-`stable=true` 对整树计算摘要，页面有倒计时或实时进度变化时应保持 `stable=false`。参数在
-适配器侧按同一严格解码器接入，解码器可判定的非法组合在发出 HTTP 请求前被拒；两个条件折叠
-后相同由引擎准入在请求发出后拒绝，不接触设备。
+至多 256 个码点。该工具的说明与结果契约：到时同样按成功返回并发布一个观察
+（条件或稳态命中复用候选帧；到时或采样上限退出时，最新成功轮询帧仍在 `CaptureMaxAge=15s`
+内且之后没有失败尝试则复用该帧，否则做一次终帧采集），调用方须检查 `wait.trigger` 与
+`wait.matched`，连续 3 帧稳定由 `observation.quality.state=stable` 表达；
+`wait.elapsed_ms` 计自准入完成至终帧发布，验证采集整体受 35 秒固定预留约束，实际耗时可
+超过 `timeout` 至多约 35 秒；两个条件只匹配当前公开可见树且 `stable=true` 对整树计算摘要，
+页面有倒计时或实时进度变化时应保持 `stable=false`。参数在适配器侧按同一严格解码器接入，
+解码器可判定的非法组合在发出 HTTP 请求前被拒；两个条件折叠后相同由引擎准入在请求发出后
+拒绝，不接触设备。
 
 `app` 的根 schema 继续声明统一的 `properties`、`required=["kind"]` 与
 `additionalProperties=false`，再按 kind 列出互斥成员；服务端严格解码是权威，不依赖宿主
@@ -94,8 +104,8 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
 
 | 模式 | `content` | `structuredContent` |
 | --- | --- | --- |
-| `both`（默认） | 完整 `result v2` 文本与图片 | 完整 `Result` JSON |
-| `text` | 完整 `result v2` 文本与图片 | 不发送 |
+| `both` | 完整 `result v2` 文本与图片 | 完整 `Result` JSON |
+| `text`（默认） | 完整 `result v2` 文本与图片 | 不发送 |
 | `structured` | 图片；`isError=true` 时附最小 `diagnostic v1` 文本 | 完整 `Result` JSON |
 
 完整结果是 `(canonical A, CallToolResult.IsError, ImageContent)`。`A` 是去除图片 base64
@@ -305,7 +315,7 @@ device-mcp -transport stdio -config <private-config> -result-mode text
 - 每条工具调用在独立请求上下文中执行；宿主发送 `notifications/cancelled` 时，本次调用
   上下文被取消，由取消包装按第 6 节处理。
 - 进程退出、stdin 关闭与连接断开都不证明设备动作已撤回或原执行链已结束。
-- 默认模式按显式 `-result-mode` > `MOBILE_USE_MCP_RESULT_MODE` > `both` 选择；
+- 默认模式按显式 `-result-mode` > `MOBILE_USE_MCP_RESULT_MODE` > `text` 选择；
   值仅接受 `both`、`text`、`structured`。显式空值、前后空白、大小写变体或非法值启动失败，
   退出码为 `2`，不会回退到环境变量。
 

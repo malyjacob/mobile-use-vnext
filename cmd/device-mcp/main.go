@@ -119,7 +119,7 @@ func configuredResultMode(flags *flag.FlagSet, flagValue string, lookupEnv func(
 	if value, present := lookupEnv(mcpserver.ResultModeEnv); present {
 		return mcpserver.ParseResultMode(value)
 	}
-	return mcpserver.ResultModeBoth, nil
+	return mcpserver.ResultModeText, nil
 }
 
 func logMCPStart(logger *slog.Logger, transport string, resultMode mcpserver.ResultMode) {

@@ -128,7 +128,12 @@ func TestStopPassesLedgerWaitAndPreventsCreateDispatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	blocked := &blockingStore{Store: h.store, entered: make(chan struct{}), release: make(chan struct{})}
+	// Swap the store under persistMu: persistAsync may read the interface from
+	// another goroutine, and an unlocked interface write can be observed as a
+	// torn value.
+	h.engine.persistMu.Lock()
 	h.engine.store = blocked
+	h.engine.persistMu.Unlock()
 	var once sync.Once
 	defer once.Do(func() { close(blocked.release) })
 	done := make(chan callResult, 1)

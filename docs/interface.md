@@ -115,8 +115,10 @@ app, shell, wait, notification, diagnosis, cleanup, error, recovery
   没有该成员时是该操作原请求引用的 O，重复 `P` 时即本次请求体里的 O。重复 `P`、`status(P)` 与
   冻结结果的视图不携带 O 编号，调用方须使用自己原先持有的 O。该入口总是 `reference=O`、
   `input_state=effective`。
-- `observe`：观察证据作废，需要重新采集；`reference=P`，这里的 P 是下一个请求的新幂等键，
-  不能复用本结果的 `operation_id`。
+- `observe`：观察证据作废，需要重新采集；`reference=P`。这里的 P 是已有、且其原会话仍是
+  当前活动会话的操作编号（常见为 `session.origin`，也可用该会话所属的 `operation_id`）；
+  它不是本次 `observe` 调用新分配的 P。请求体 `reference` 与本次调用 P 是两个字段，规则
+  见 §5。
 - `status`：结果未定或收尾未完成；轮询对象按工具取本结果的 `operation_id`、
   `start_operation_id`、`target_reference` 或 `blocking_operation_id`。
 - `end`：会话已结束、过期或被撤销；`reference` 为 P，只有 `status(O)` 的撤销分支为 O。
@@ -524,7 +526,9 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms）；
   无后观察。收敛预算耗尽不算后观察失败：照常发布最后一帧。
 - `text` 先点击目标取得焦点，再做显示绑定的 `getTextOnDisplay` 唯一性确认、
   `setTextOnDisplay`，最后以独立采集重新绑定并读回；读回值必须精确等于写入值才判
-  `executed`。ref 输入绑定按 exact（稳定锚点与相同 bounds）、near（覆盖点击点且重叠率至少
+  `executed`。该分支把目标框全文设为 text，不追加旧内容，也不发送 ENTER；需要提交时另一次
+  `act` 使用 `operation.type=key`、`operation.key=ENTER`。ref 输入绑定按
+  exact（稳定锚点与相同 bounds）、near（覆盖点击点且重叠率至少
   0.80）、shifted（稳定锚点、同一水平带与受限尺寸的纵向位移）依次尝试；唯一性在 focus
   过滤前统计，焦点仅作安全门禁。所有分支保持 package/class 与 resource/description 的
   presence/值一致；要求 enabled 已知为真、password 已知为假、fresh focused 已知为真。每次
@@ -1174,7 +1178,7 @@ task；应用在本屏前台、前台未知、前台服务或播放状态未知�
 | `absent_query` | 否 | 同上 | 帧已具备最小可读证据，且整棵公开树没有任何节点命中该文本 |
 | `stable` | 否 | 布尔，默认 `false` | 要求整树连续 3 帧一致；有查询时是条件满足后的门禁，无查询时是独立触发分支 |
 | `full` | 否 | 布尔，默认 `false` | `true` 强制本次发布的观察为 full |
-| `image` | 否 | 布尔，默认 `false` | `true` 在同一次验证采集中附加一张图片；条件命中帧复用而不重采树 |
+| `image` | 否 | 布尔，默认 `false` | `true` 在同一次验证采集中附加一张图片；`matched` 与 `terminal_reuse` 复用已选帧、不重采树，`terminal_capture` 读取一次终帧 |
 
 接入拒绝项（一律 `422 invalid_request`，不接触设备）：未知成员、重复成员、大小写变体、
 尾随第二个 JSON 值、类型混用、显式 `null`；`reference` 或 `timeout` 缺失；`timeout` 不是
@@ -1220,13 +1224,19 @@ task；应用在本屏前台、前台未知、前台服务或播放状态未知�
 
 `observation.quality` 永远描述最终发布的那一帧：
 
-- 命中条件或稳态退出时复用候选帧、不重采树：连续 3 帧一致为 `state=stable`、
+- 终帧来源有三种：`matched`、`terminal_reuse`、`terminal_capture`。命中条件或稳态退出使用
+  命中的候选帧（`matched`），不重采树：连续 3 帧一致为 `state=stable`、
   `stop_reason=stable`；否则 `samples>=2` 为 `unstable`、`<2` 为 `unknown`，两种情况的
   `stop_reason` 都是 `condition`。
-- 到时或触达采样上限时重采终帧：等待期没有任何有效帧（纯等待或全部采集失败）为
-  `unknown`/`samples=0`/`not_sampled`；有有效历史帧时把终帧并入同一比较，连续 3 帧一致为
-  `stable`/`stable`，否则 `samples>=2` 为 `unstable`、`<2` 为 `unknown`，`stop_reason` 为
-  `timeout` 或 `max_samples`。
+- 到时或触达采样上限时，若最后一次轮询尝试成功、选择时该帧在 `CaptureMaxAge=15s` 内、且
+  之后没有失败尝试，复用该帧（`terminal_reuse`），不新增采样：连续 3 帧一致为
+  `stable`/`stable`；否则 `samples>=2` 为 `unstable`、`<2` 为 `unknown`，`stop_reason` 为
+  冻结的 `timeout` 或 `max_samples`。之后发生的失败或选择时已过期都使该帧不参与复用。
+- 不能复用时执行一次终帧采集（`terminal_capture`）：等待期没有任何有效帧（纯等待或全部采集
+  失败）为 `unknown`/`samples=0`/`not_sampled`；有有效历史帧时把终帧并入同一比较，连续 3 帧
+  一致为 `stable`/`stable`，否则 `samples>=2` 为 `unstable`、`<2` 为 `unknown`，
+  `stop_reason` 为 `timeout` 或 `max_samples`。
+- 复用帧的 `captured_at` 是该帧实际采集时间；`elapsed_ms` 仍计自准入完成到发布。
 - 复用候选帧且 `image=true` 时，截图与候选树的跨度超过固定图片预算则按 §5 的
   `image_stale` 规则丢图：观察为 `partial`、`missing=["image"]`，树与 `wait` 不变。
 
@@ -1245,8 +1255,9 @@ task；应用在本屏前台、前台未知、前台服务或播放状态未知�
 - 工作上下文继承调用方的 HTTP 请求上下文：STOP 与 `end` 立即释放工作位，等待返回
   `409 control_revoked`，不发布迟到观察；MCP 取消与客户端断连同样立即关闭等待并释放工作位，
   但调用方按适配器或传输层的取消结果收尾，不保证送达该 409。
-- 验证采集时目标显示不可用返回 `503 display_unavailable`；候选帧在提交门禁被拒绝时沿用
-  既有错误（`stale_screen`、`control_revoked`、`tree_too_large` 等），不发布新 O。
+- 验证采集时目标显示不可用返回 `503 display_unavailable`；候选帧（含复用的终帧）在提交门禁
+  被拒绝时沿用既有错误（`stale_screen`、`control_revoked`、`tree_too_large` 等），不发布
+  新 O，也不再发起第二次终帧读取。
 - 验证采集失败时结果仍带 `wait` 的 `trigger` 与 `elapsed_ms`，省略 `matched`；观察形状为
   `observation.status=failed`（`image=true` 且截图成功、核心树失败时为只读图的 `partial`，
   两者都没有观察 id），失败原因在 `observation.error`，并随结果携带 `recovery`。这样的结果

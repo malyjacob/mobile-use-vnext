@@ -35,8 +35,11 @@ func TestResultModeDefaultAndPrecedence(t *testing.T) {
 		want        mcpserver.ResultMode
 		wantErr     bool
 	}{
-		{name: "default both", want: mcpserver.ResultModeBoth},
+		{name: "default text", want: mcpserver.ResultModeText},
+		{name: "explicit both remains selectable", args: []string{"-result-mode=both"}, want: mcpserver.ResultModeBoth},
+		{name: "environment both remains selectable", environment: map[string]string{mcpserver.ResultModeEnv: "both"}, want: mcpserver.ResultModeBoth},
 		{name: "environment text", environment: map[string]string{mcpserver.ResultModeEnv: "text"}, want: mcpserver.ResultModeText},
+		{name: "flag both over environment text", args: []string{"-result-mode=both"}, environment: map[string]string{mcpserver.ResultModeEnv: "text"}, want: mcpserver.ResultModeBoth},
 		{name: "flag structured over environment text", args: []string{"-result-mode=structured"}, environment: map[string]string{mcpserver.ResultModeEnv: "text"}, want: mcpserver.ResultModeStructured},
 		{name: "flag text over invalid environment", args: []string{"-result-mode=text"}, environment: map[string]string{mcpserver.ResultModeEnv: "legacy"}, want: mcpserver.ResultModeText},
 		{name: "empty environment rejected", environment: map[string]string{mcpserver.ResultModeEnv: ""}, wantErr: true},
@@ -62,6 +65,18 @@ func TestResultModeDefaultAndPrecedence(t *testing.T) {
 				t.Fatalf("configured result mode = %v, want %v", got, test.want)
 			}
 		})
+	}
+}
+
+func TestResultModeBothRemainsZeroValue(t *testing.T) {
+	t.Parallel()
+
+	var zero mcpserver.ResultMode
+	if zero != mcpserver.ResultModeBoth {
+		t.Fatalf("zero ResultMode = %v, want both", zero)
+	}
+	if mcpserver.ResultModeBoth.String() != "both" {
+		t.Fatalf("ResultModeBoth.String() = %q, want both", mcpserver.ResultModeBoth.String())
 	}
 }
 

@@ -60,6 +60,7 @@ func NewServer(opts Options) (*sdk.Server, error) {
 		Version: version,
 	}, &sdk.ServerOptions{
 		SupportedProtocolVersions: []string{protocolVersion},
+		Instructions:              ServerInstructions(),
 	})
 	adapter := &adapter{client: opts.Client, logger: logger, defaultResultMode: opts.DefaultResultMode}
 	for _, definition := range toolCatalog {

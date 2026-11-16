@@ -162,7 +162,12 @@ func TestDiscardedCleanupCannotDispatchAfterLedgerWait(t *testing.T) {
 		t.Fatal(err)
 	}
 	gate := &blockingStore{Store: h.store, entered: make(chan struct{}), release: make(chan struct{})}
+	// Swap the store under persistMu: persistAsync may read the interface from
+	// another goroutine, and an unlocked interface write can be observed as a
+	// torn value.
+	h.engine.persistMu.Lock()
 	h.engine.store = gate
+	h.engine.persistMu.Unlock()
 	h.engine.mu.Lock()
 	h.engine.session.Tasks = []taskEntry{{TaskID: 41, DisplayID: 12, Proven: true}}
 	h.engine.mu.Unlock()

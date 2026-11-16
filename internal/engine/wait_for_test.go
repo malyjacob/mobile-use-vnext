@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"math"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/malyjacob/mobile-use-vnext/internal/device"
+	"github.com/malyjacob/mobile-use-vnext/internal/imaging"
 	"github.com/malyjacob/mobile-use-vnext/internal/protocol"
 )
 
@@ -557,5 +559,598 @@ func TestWaitForImageReuseKeepsCandidateSpan(t *testing.T) {
 	}
 	if calls := fakeImageCalls(h.device); calls != 1 {
 		t.Fatalf("image reads = %d, want 1", calls)
+	}
+}
+
+// ------------------------------------------------------- terminal reuse helpers
+
+// agedWaitCapture applies an explicit capture timestamp offset to a scripted
+// step, so a test can control the publish age of a frame without sleeping.
+func agedWaitCapture(age time.Duration, step captureStep) captureStep {
+	return func(f *fakeDevice, display device.Display) (device.Capture, error) {
+		capture, err := step(f, display)
+		if err != nil {
+			return capture, err
+		}
+		capture.CapturedAt = time.Now().Add(-age)
+		return capture, nil
+	}
+}
+
+// phaseAlternatingCapture labels every poll read with an alternating marker and
+// labels a verification read distinctly. The work phase is read under the state
+// lock from inside the device call, so the test proves which acquisition path
+// produced the published frame without a wall-clock assertion.
+func phaseAlternatingCapture(h *harness, terminal string) captureStep {
+	var polls int
+	return func(f *fakeDevice, display device.Display) (device.Capture, error) {
+		h.engine.mu.Lock()
+		phase := ""
+		if h.engine.work != nil {
+			phase = h.engine.work.Phase
+		}
+		h.engine.mu.Unlock()
+		if phase == "wait_for.tree" {
+			return markerCapture(terminal)(f, display)
+		}
+		polls++
+		marker := "甲"
+		if polls%2 == 0 {
+			marker = "乙"
+		}
+		return markerCapture(marker)(f, display)
+	}
+}
+
+// slowWaitImageEncoder delays the single output encode, which is the last step
+// before the commit gate, to cross the publish age deterministically.
+type slowWaitImageEncoder struct {
+	*fakeImageEncoder
+	delay time.Duration
+}
+
+func (s slowWaitImageEncoder) Encode(source device.ImageSource, display device.Display,
+	maxLongSide, quality, maxBytes int) (*protocol.ImageMeta, []byte, error) {
+	time.Sleep(s.delay)
+	return s.fakeImageEncoder.Encode(source, display, maxLongSide, quality, maxBytes)
+}
+
+// gateWaitImageEncoder blocks inside the output encode until the test releases
+// it, which keeps a commit-gate test deterministic without a timing race.
+type gateWaitImageEncoder struct {
+	entered chan struct{}
+	release chan struct{}
+	data    []byte
+	once    sync.Once
+}
+
+func (g *gateWaitImageEncoder) Encode(source device.ImageSource, display device.Display,
+	maxLongSide, quality, maxBytes int) (*protocol.ImageMeta, []byte, error) {
+	g.once.Do(func() { close(g.entered) })
+	<-g.release
+	return &protocol.ImageMeta{
+		CapturedAt: source.CapturedAt.UTC().Format(time.RFC3339),
+		Width:      540, Height: 1200, MediaType: imaging.MediaTypeJPEG,
+	}, g.data, nil
+}
+
+// currentTreeHasLabel reports the label of the engine's committed tree,
+// independent of the result's full/delta projection.
+func currentTreeHasLabel(h *harness, label string) bool {
+	h.engine.mu.Lock()
+	defer h.engine.mu.Unlock()
+	if h.engine.current == nil || h.engine.current.Projection == nil {
+		return false
+	}
+	return treeHasLabel(h.engine.current.Projection.Tree.Root, label)
+}
+
+// ------------------------------------------------------- terminal reuse tests
+
+// TestWaitForTimeoutReusesLatestFreshFrame proves the timeout path publishes the
+// last successful poll frame without a second hierarchy read. The published
+// marker is a polling marker, never the terminal-read marker, so the assertion
+// does not depend on capture counts alone.
+func TestWaitForTimeoutReusesLatestFreshFrame(t *testing.T) {
+	h, reference := waitForTestHarness(t)
+	policy := fastWaitPolicy()
+	policy.MinDwell = 100 * time.Millisecond
+	policy.MaxSamples = 1000
+	h.engine.cfg.Wait = policy
+	h.device.scriptCaptures(phaseAlternatingCapture(h, "终帧"))
+	before := h.device.captureCount()
+	result, apiErr := h.engine.WaitFor(context.Background(), "agent", "",
+		&protocol.WaitForRequest{
+			Reference: reference, Query: "永不出现", HasQuery: true, Timeout: 1,
+		})
+	if apiErr != nil {
+		t.Fatalf("wait_for rejected: %v", apiErr)
+	}
+	if result.Error != nil {
+		t.Fatalf("wait_for failed: %+v", result.Error)
+	}
+	if result.Wait == nil || result.Wait.Trigger != protocol.WaitTriggerTimeout {
+		t.Fatalf("trigger = %+v, want timeout", result.Wait)
+	}
+	if len(result.Wait.Matched) != 1 || result.Wait.Matched[0] != protocol.WaitTriggerTimeout {
+		t.Fatalf("matched = %v, want only timeout", result.Wait.Matched)
+	}
+	if result.Observation == nil || result.Observation.ID == "" {
+		t.Fatalf("timeout published no observation: %+v", result.Observation)
+	}
+	quality := result.Observation.Quality
+	if quality == nil || quality.State != protocol.QualityUnstable ||
+		quality.StopReason != protocol.QualityStopTimeout || quality.Samples < 2 {
+		t.Fatalf("quality = %+v, want unstable/timeout with at least two samples", quality)
+	}
+	if reads := h.device.captureCount() - before; reads != quality.Samples {
+		t.Fatalf("reads = %d, samples = %d; reuse must not add a read or a sample",
+			reads, quality.Samples)
+	}
+	tree := currentTree(t, h.engine)
+	if treeHasLabel(tree.Root, "终帧") {
+		t.Fatal("published a terminal re-read instead of reusing the last poll frame")
+	}
+	if !treeHasLabel(tree.Root, "甲") && !treeHasLabel(tree.Root, "乙") {
+		t.Fatal("published tree is not a polling frame")
+	}
+	if status := observationStatus(h, reference); status != ObservationRetired {
+		t.Fatalf("prior ready O status = %q, want retired", status)
+	}
+}
+
+// TestWaitForMaxSamplesReusesLatestFreshFrame proves the sample-guard exit also
+// reuses the last frame, keeps the public trigger at timeout, and reports the
+// frozen max_samples stop reason.
+func TestWaitForMaxSamplesReusesLatestFreshFrame(t *testing.T) {
+	h, reference := waitForTestHarness(t)
+	policy := fastWaitPolicy()
+	policy.MinDwell = time.Millisecond
+	policy.MaxSamples = 3
+	h.engine.cfg.Wait = policy
+	h.device.scriptCaptures(phaseAlternatingCapture(h, "终帧"))
+	before := h.device.captureCount()
+	result, apiErr := h.engine.WaitFor(context.Background(), "agent", "",
+		&protocol.WaitForRequest{
+			Reference: reference, Query: "永不出现", HasQuery: true, Timeout: 20,
+		})
+	if apiErr != nil {
+		t.Fatalf("wait_for rejected: %v", apiErr)
+	}
+	if result.Error != nil {
+		t.Fatalf("wait_for failed: %+v", result.Error)
+	}
+	if result.Wait == nil || result.Wait.Trigger != protocol.WaitTriggerTimeout {
+		t.Fatalf("trigger = %+v, want the public timeout projection", result.Wait)
+	}
+	if len(result.Wait.Matched) != 1 || result.Wait.Matched[0] != protocol.WaitTriggerTimeout {
+		t.Fatalf("matched = %v, want only timeout", result.Wait.Matched)
+	}
+	requireQuality(t, result.Observation.Quality, protocol.QualityUnstable, 3,
+		protocol.QualityStopMaxSamples)
+	if reads := h.device.captureCount() - before; reads != 3 {
+		t.Fatalf("reads = %d, want the three poll frames and no terminal capture", reads)
+	}
+	if currentTreeHasLabel(h, "终帧") {
+		t.Fatal("published a terminal re-read instead of reusing the last poll frame")
+	}
+}
+
+// TestWaitForLatestSuccessFollowedByFailureCapturesTerminalFrame proves a failed
+// last attempt invalidates the earlier successful frame: the verification
+// acquisition reads exactly one fresh terminal frame and publishes it.
+//
+// The first frame is aged past the dwell window, so the loop attempts the next
+// read immediately, that read fails, and the remaining window is spent on the
+// failure pause. The next stop therefore reaches the selector with the
+// pre-failure success still in hand, which is exactly the frame the invalidation
+// must drop.
+func TestWaitForLatestSuccessFollowedByFailureCapturesTerminalFrame(t *testing.T) {
+	h, reference := waitForTestHarness(t)
+	h.engine.cfg.CaptureMaxAge = 10 * time.Second
+	policy := fastWaitPolicy()
+	policy.MinDwell = 2 * time.Second
+	h.engine.cfg.Wait = policy
+	var calls int
+	h.device.scriptCaptures(func(f *fakeDevice, display device.Display) (device.Capture, error) {
+		h.engine.mu.Lock()
+		phase := ""
+		if h.engine.work != nil {
+			phase = h.engine.work.Phase
+		}
+		h.engine.mu.Unlock()
+		if phase == "wait_for.tree" {
+			return markerCapture("新")(f, display)
+		}
+		calls++
+		if calls == 1 {
+			return agedWaitCapture(5*time.Second, markerCapture("旧"))(f, display)
+		}
+		return device.Capture{}, errors.New("read failed after the success")
+	})
+	before := h.device.captureCount()
+	result, apiErr := h.engine.WaitFor(context.Background(), "agent", "",
+		&protocol.WaitForRequest{
+			Reference: reference, Query: "永不出现", HasQuery: true, Timeout: 1,
+		})
+	if apiErr != nil {
+		t.Fatalf("wait_for rejected: %v", apiErr)
+	}
+	if result.Error != nil {
+		t.Fatalf("wait_for failed: %+v", result.Error)
+	}
+	if result.Observation == nil || result.Observation.ID == "" {
+		t.Fatalf("no observation published: %+v", result.Observation)
+	}
+	if reads := h.device.captureCount() - before; reads != 3 {
+		t.Fatalf("reads = %d, want one success, one failed attempt and one terminal capture", reads)
+	}
+	if !currentTreeHasLabel(h, "新") {
+		t.Fatalf("published the pre-failure frame instead of the fresh terminal frame")
+	}
+	requireQuality(t, result.Observation.Quality, protocol.QualityUnstable, 2,
+		protocol.QualityStopTimeout)
+}
+
+// TestWaitForFailureThenSuccessReusesLastSuccess proves the reuse candidate is
+// the latest success, not the first one before a failed attempt, and that no
+// terminal read follows it.
+func TestWaitForFailureThenSuccessReusesLastSuccess(t *testing.T) {
+	h, reference := waitForTestHarness(t)
+	policy := fastWaitPolicy()
+	policy.MinDwell = time.Millisecond
+	policy.MaxSamples = 2
+	h.engine.cfg.Wait = policy
+	var calls int
+	h.device.scriptCaptures(func(f *fakeDevice, display device.Display) (device.Capture, error) {
+		calls++
+		switch calls {
+		case 1:
+			return device.Capture{}, errors.New("transient read failure")
+		case 2:
+			return markerCapture("先")(f, display)
+		default:
+			return markerCapture("后")(f, display)
+		}
+	})
+	before := h.device.captureCount()
+	result, apiErr := h.engine.WaitFor(context.Background(), "agent", "",
+		&protocol.WaitForRequest{
+			Reference: reference, Query: "永不出现", HasQuery: true, Timeout: 20,
+		})
+	if apiErr != nil {
+		t.Fatalf("wait_for rejected: %v", apiErr)
+	}
+	if result.Error != nil {
+		t.Fatalf("wait_for failed: %+v", result.Error)
+	}
+	requireQuality(t, result.Observation.Quality, protocol.QualityUnstable, 2,
+		protocol.QualityStopMaxSamples)
+	if reads := h.device.captureCount() - before; reads != 3 {
+		t.Fatalf("reads = %d, want one failure, two successes and no terminal capture", reads)
+	}
+	if !currentTreeHasLabel(h, "后") {
+		t.Fatalf("published an earlier success instead of the latest one")
+	}
+}
+
+// TestWaitForNeverSuccessfulPollsReadOneTerminalFrame proves a wait that never
+// produced a readable frame still performs exactly one terminal read (which here
+// also fails) and never invents a reusable frame.
+func TestWaitForNeverSuccessfulPollsReadOneTerminalFrame(t *testing.T) {
+	h, reference := waitForTestHarness(t)
+	policy := fastWaitPolicy()
+	policy.MinDwell = 2 * time.Second
+	h.engine.cfg.Wait = policy
+	h.device.scriptCaptures(failingCapture())
+	before := h.device.captureCount()
+	result, apiErr := h.engine.WaitFor(context.Background(), "agent", "",
+		&protocol.WaitForRequest{
+			Reference: reference, Query: "永不出现", HasQuery: true, Timeout: 1,
+		})
+	if apiErr != nil {
+		t.Fatalf("wait_for rejected: %v", apiErr)
+	}
+	if result.Error != nil {
+		t.Fatalf("the terminal read failure must be a result, not a top-level rejection: %+v", result.Error)
+	}
+	if result.Wait == nil || result.Wait.Trigger != protocol.WaitTriggerTimeout {
+		t.Fatalf("wait = %+v, want the frozen timeout fact", result.Wait)
+	}
+	if result.Observation == nil || result.Observation.ID != "" ||
+		result.Observation.Status != "failed" {
+		t.Fatalf("observation = %+v, want a failed frame without an id", result.Observation)
+	}
+	if reads := h.device.captureCount() - before; reads != 2 {
+		t.Fatalf("reads = %d, want one failed poll and exactly one terminal read", reads)
+	}
+}
+
+// TestWaitForStaleAtSelectionCapturesTerminalFrame proves a frame that is fresh
+// when read but too old at selection time is not reused: the wait falls back to
+// exactly one terminal capture of a fresh frame.
+func TestWaitForStaleAtSelectionCapturesTerminalFrame(t *testing.T) {
+	h, reference := waitForTestHarness(t)
+	h.engine.cfg.CaptureMaxAge = 100 * time.Millisecond
+	policy := fastWaitPolicy()
+	policy.MinDwell = 2 * time.Second
+	h.engine.cfg.Wait = policy
+	var calls int
+	h.device.scriptCaptures(func(f *fakeDevice, display device.Display) (device.Capture, error) {
+		calls++
+		if calls == 1 {
+			return agedWaitCapture(50*time.Millisecond, markerCapture("旧"))(f, display)
+		}
+		return markerCapture("新")(f, display)
+	})
+	before := h.device.captureCount()
+	result, apiErr := h.engine.WaitFor(context.Background(), "agent", "",
+		&protocol.WaitForRequest{
+			Reference: reference, Query: "永不出现", HasQuery: true, Timeout: 1,
+		})
+	if apiErr != nil {
+		t.Fatalf("wait_for rejected: %v", apiErr)
+	}
+	if result.Error != nil {
+		t.Fatalf("wait_for failed: %+v", result.Error)
+	}
+	if result.Observation == nil || result.Observation.ID == "" {
+		t.Fatalf("fresh terminal capture published no observation: %+v", result.Observation)
+	}
+	if reads := h.device.captureCount() - before; reads != 2 {
+		t.Fatalf("reads = %d, want one poll frame and one terminal capture", reads)
+	}
+	if !currentTreeHasLabel(h, "新") {
+		t.Fatalf("published the stale poll frame instead of the fresh terminal frame")
+	}
+	requireQuality(t, result.Observation.Quality, protocol.QualityUnstable, 2,
+		protocol.QualityStopTimeout)
+}
+
+// TestWaitForTerminalReuseStaleAtCommitPublishesNothing proves the selection and
+// commit freshness gates are separate: a reuse candidate that ages out during
+// the image/projection work returns the existing stale error, publishes no new
+// O, and never falls back to a second terminal capture.
+func TestWaitForTerminalReuseStaleAtCommitPublishesNothing(t *testing.T) {
+	encoder := &slowWaitImageEncoder{
+		fakeImageEncoder: &fakeImageEncoder{
+			data: []byte{0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46},
+		},
+		delay: 300 * time.Millisecond,
+	}
+	h := imageHarness(t, encoder)
+	policy := fastWaitPolicy()
+	policy.MinDwell = time.Millisecond
+	policy.MaxSamples = 1
+	h.engine.cfg.Wait = policy
+	start := h.startSession()
+	h.engine.cfg.CaptureMaxAge = 200 * time.Millisecond
+	setFakeImageSource(h, time.Now())
+	h.device.scriptCaptures(markerCapture("复用"))
+	before := h.device.captureCount()
+	result, apiErr := h.engine.WaitFor(context.Background(), "agent", "",
+		&protocol.WaitForRequest{
+			Reference: start.Observation.ID, Query: "永不出现", HasQuery: true,
+			Timeout: 5, Image: true,
+		})
+	if apiErr != nil {
+		t.Fatalf("wait_for rejected: %v", apiErr)
+	}
+	if result.Error != nil {
+		t.Fatalf("the commit rejection must be a result, not a top-level rejection: %+v", result.Error)
+	}
+	if result.Wait == nil || result.Wait.Trigger != protocol.WaitTriggerTimeout {
+		t.Fatalf("wait = %+v, want the frozen timeout fact", result.Wait)
+	}
+	if result.Observation == nil || result.Observation.ID != "" {
+		t.Fatalf("a stale reuse candidate published an observation: %+v", result.Observation)
+	}
+	if result.Observation.Status != "failed" || result.Observation.Error == nil ||
+		result.Observation.Error.Code != protocol.CodeStaleScreen {
+		t.Fatalf("observation = %+v, want the existing stale_screen failure", result.Observation)
+	}
+	if reads := h.device.captureCount() - before; reads != 1 {
+		t.Fatalf("reads = %d, want only the poll frame and no second terminal capture", reads)
+	}
+	h.engine.mu.Lock()
+	current := h.engine.current
+	h.engine.mu.Unlock()
+	if current == nil || current.ID != start.Observation.ID {
+		t.Fatal("a rejected reuse candidate replaced the prior current observation")
+	}
+	if status := observationStatus(h, start.Observation.ID); status != ObservationReady {
+		t.Fatalf("prior O status = %q, want ready", status)
+	}
+}
+
+// TestWaitForTerminalReuseKeepsImagePartialIndependent proves tree success and
+// image staleness stay separate facts on a reused frame: the tree is published,
+// the stale image marks the observation partial, and no extra tree read occurs.
+func TestWaitForTerminalReuseKeepsImagePartialIndependent(t *testing.T) {
+	encoder := &fakeImageEncoder{
+		data: []byte{0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46},
+	}
+	h := imageHarness(t, encoder)
+	policy := fastWaitPolicy()
+	policy.MinDwell = time.Millisecond
+	policy.MaxSamples = 2
+	h.engine.cfg.Wait = policy
+	h.engine.cfg.ImageMaxSpan = time.Millisecond
+	start := h.startSession()
+	setFakeImageSource(h, time.Now())
+	h.device.scriptCaptures(
+		agedWaitCapture(100*time.Millisecond, markerCapture("甲")),
+		agedWaitCapture(100*time.Millisecond, markerCapture("乙")))
+	before := h.device.captureCount()
+	result, apiErr := h.engine.WaitFor(context.Background(), "agent", "",
+		&protocol.WaitForRequest{
+			Reference: start.Observation.ID, Query: "永不出现", HasQuery: true,
+			Timeout: 20, Image: true,
+		})
+	if apiErr != nil {
+		t.Fatalf("wait_for rejected: %v", apiErr)
+	}
+	if result.Error != nil {
+		t.Fatalf("an image failure must not fail the tree acquisition: %+v", result.Error)
+	}
+	if result.Observation == nil || result.Observation.ID == "" {
+		t.Fatalf("reuse published no tree: %+v", result.Observation)
+	}
+	if result.Observation.Status != "partial" {
+		t.Fatalf("status = %q, want partial with a stale image", result.Observation.Status)
+	}
+	if result.Observation.Image == nil || result.Observation.Image.Error == nil ||
+		result.Observation.Image.Error.Code != protocol.CodeImageStale {
+		t.Fatalf("image = %+v, want the stale image error", result.Observation.Image)
+	}
+	if len(result.Observation.Missing) != 1 || result.Observation.Missing[0] != "image" {
+		t.Fatalf("missing = %v, want only image", result.Observation.Missing)
+	}
+	if !currentTreeHasLabel(h, "乙") {
+		t.Fatal("published tree is not the last reused polling frame")
+	}
+	if reads := h.device.captureCount() - before; reads != 2 {
+		t.Fatalf("reads = %d, want the two poll frames and no extra tree read", reads)
+	}
+	if calls := fakeImageCalls(h.device); calls != 1 {
+		t.Fatalf("image reads = %d, want 1", calls)
+	}
+}
+
+// TestWaitForTerminalReuseCommitGateRefusesDisplayChange proves the reuse path
+// still passes through the single commit gate: a display-generation change after
+// selection refuses publication, publishes no new O and keeps the prior O.
+func TestWaitForTerminalReuseCommitGateRefusesDisplayChange(t *testing.T) {
+	encoder := &gateWaitImageEncoder{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+		data:    []byte{0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46},
+	}
+	h := imageHarness(t, encoder)
+	policy := fastWaitPolicy()
+	policy.MinDwell = time.Millisecond
+	policy.MaxSamples = 1
+	h.engine.cfg.Wait = policy
+	start := h.startSession()
+	setFakeImageSource(h, time.Now())
+	h.device.scriptCaptures(markerCapture("复用"))
+	before := h.device.captureCount()
+	done := make(chan *protocol.Result, 1)
+	go func() {
+		result, _ := h.engine.WaitFor(context.Background(), "agent", "",
+			&protocol.WaitForRequest{
+				Reference: start.Observation.ID, Query: "永不出现", HasQuery: true,
+				Timeout: 5, Image: true,
+			})
+		done <- result
+	}()
+	select {
+	case <-encoder.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("verification acquisition never reached the image encode")
+	}
+	// The selection is already made; only the commit gate remains.
+	h.engine.mu.Lock()
+	h.engine.session.Display.Generation = "44444444-4444-4444-8444-444444444444"
+	h.engine.mu.Unlock()
+	close(encoder.release)
+	var result *protocol.Result
+	select {
+	case result = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("wait did not return after the gate was released")
+	}
+	if result.Error != nil {
+		t.Fatalf("the commit rejection must be a result, not a top-level rejection: %+v", result.Error)
+	}
+	if result.Observation == nil || result.Observation.ID != "" {
+		t.Fatalf("a display-changed reuse candidate published an observation: %+v", result.Observation)
+	}
+	if result.Observation.Error == nil || result.Observation.Error.Code != protocol.CodeStaleScreen {
+		t.Fatalf("observation = %+v, want stale_screen", result.Observation)
+	}
+	if result.Wait == nil || result.Wait.Trigger != protocol.WaitTriggerTimeout {
+		t.Fatalf("wait = %+v, want the frozen timeout fact", result.Wait)
+	}
+	if reads := h.device.captureCount() - before; reads != 1 {
+		t.Fatalf("reads = %d, want only the poll frame and no terminal re-read", reads)
+	}
+	h.engine.mu.Lock()
+	current := h.engine.current
+	h.engine.mu.Unlock()
+	if current == nil || current.ID != start.Observation.ID {
+		t.Fatal("a rejected reuse candidate replaced the prior current observation")
+	}
+	if status := observationStatus(h, start.Observation.ID); status != ObservationReady {
+		t.Fatalf("prior O status = %q, want ready", status)
+	}
+}
+
+// TestWaitForTerminalReuseCommitGateRefusesRevocation proves the same reuse path
+// refuses a late publication when the request is revoked after selection: no
+// new O, the prior O stays ready, and no terminal re-read is attempted.
+func TestWaitForTerminalReuseCommitGateRefusesRevocation(t *testing.T) {
+	encoder := &gateWaitImageEncoder{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+		data:    []byte{0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46},
+	}
+	h := imageHarness(t, encoder)
+	policy := fastWaitPolicy()
+	policy.MinDwell = time.Millisecond
+	policy.MaxSamples = 1
+	h.engine.cfg.Wait = policy
+	start := h.startSession()
+	setFakeImageSource(h, time.Now())
+	h.device.scriptCaptures(markerCapture("复用"))
+	before := h.device.captureCount()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan *protocol.Result, 1)
+	go func() {
+		result, _ := h.engine.WaitFor(ctx, "agent", "",
+			&protocol.WaitForRequest{
+				Reference: start.Observation.ID, Query: "永不出现", HasQuery: true,
+				Timeout: 5, Image: true,
+			})
+		done <- result
+	}()
+	select {
+	case <-encoder.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("verification acquisition never reached the image encode")
+	}
+	// The selection is already made; revoke before the commit gate runs.
+	cancel()
+	close(encoder.release)
+	var result *protocol.Result
+	select {
+	case result = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("wait did not return after the gate was released")
+	}
+	if result.Error != nil {
+		t.Fatalf("the commit rejection must be a result, not a top-level rejection: %+v", result.Error)
+	}
+	if result.Observation == nil || result.Observation.ID != "" {
+		t.Fatalf("a revoked reuse candidate published an observation: %+v", result.Observation)
+	}
+	if result.Observation.Error == nil || result.Observation.Error.Code != protocol.CodeStopped {
+		t.Fatalf("observation = %+v, want control_revoked", result.Observation)
+	}
+	if result.Wait == nil || result.Wait.Trigger != protocol.WaitTriggerTimeout {
+		t.Fatalf("wait = %+v, want the frozen timeout fact", result.Wait)
+	}
+	if reads := h.device.captureCount() - before; reads != 1 {
+		t.Fatalf("reads = %d, want only the poll frame and no terminal re-read", reads)
+	}
+	h.engine.mu.Lock()
+	current := h.engine.current
+	h.engine.mu.Unlock()
+	if current == nil || current.ID != start.Observation.ID {
+		t.Fatal("a revoked reuse candidate replaced the prior current observation")
+	}
+	if status := observationStatus(h, start.Observation.ID); status != ObservationReady {
+		t.Fatalf("prior O status = %q, want ready", status)
 	}
 }

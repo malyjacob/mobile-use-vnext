@@ -190,6 +190,11 @@ MCP 的 `act` schema 含 `scroll` 分支（`container`/`direction`/`amount`）�
 只替换手机上的二进制或重启 service 进程，不会让已连接的宿主自动刷新工具；必须重启宿主进程/
 连接。MCP 适配器本身不保存会话，重启后重新发现即可。
 
+MCP 服务在 `server/discover` 与兼容 `initialize` 响应中发布 server instructions：完整树语法
+一次加跨工具调用规则（会话推进、O/P、租期、工具选择、`text` 输入与恢复）。宿主应把该说明
+提供给模型；未展示说明的宿主可从 `start` 描述取得最小提示：O 是可消费观察，P 是操作幂等/
+查询编号，full 是完整树，delta 只相对其 base 且新 delta 覆盖旧 delta。
+
 ### 4.5 结果模式
 
 MCP 适配器对每次工具调用提供 `both`、`text`、`structured` 三种结果模式。模式只选择表示
@@ -197,8 +202,8 @@ MCP 适配器对每次工具调用提供 `both`、`text`、`structured` 三种�
 
 | 模式 | `content` | `structuredContent` | 适用 |
 | --- | --- | --- | --- |
-| `both`（默认） | 完整 `result v2` 文本与图片 | 完整 `Result` JSON | 兼容默认；同时需要两种形式 |
-| `text` | 完整 `result v2` 文本与图片 | 不发送 | 只读取文本通道的宿主 |
+| `both` | 完整 `result v2` 文本与图片 | 完整 `Result` JSON | 显式选择；同时需要两种形式 |
+| `text`（默认） | 完整 `result v2` 文本与图片 | 不发送 | 默认模式；只读取文本通道的宿主 |
 | `structured` | 图片；`isError=true` 时附最小 `diagnostic v1` 文本 | 完整 `Result` JSON | 会把结构化结果交给模型或程序的宿主 |
 
 - `both` 同时发送两份完整编码，传输与上下文占用更大；宿主明确只消费一种形式时使用对应
@@ -214,7 +219,7 @@ MCP 适配器对每次工具调用提供 `both`、`text`、`structured` 三种�
 选择方式：
 
 - **进程默认（stdio 与 HTTP 进程均适用）**：显式 `-result-mode` >
-  `MOBILE_USE_MCP_RESULT_MODE` > `both`。
+  `MOBILE_USE_MCP_RESULT_MODE` > `text`。
   值只接受 `both`、`text`、`structured`；显式空值、前后空白、大小写变体或非法值启动失败，
   退出码为 `2`，不回退到环境变量。
 - **HTTP 每请求**：`X-Mobile-Use-Result-Mode: both|text|structured` 覆盖进程默认。该头必须
@@ -246,7 +251,7 @@ HTTP 宿主在原有 `Authorization` 头之外按需添加：
 ```
 
 结果模式不是 `mcp-config.json` 的成员；适配器配置是严格 JSON，加入 `result_mode` 等未知
-成员会被拒绝。默认部署启动的手机适配器使用 `both`，且部署参数中没有单独的结果模式选项；
+成员会被拒绝。默认部署启动的手机适配器使用 `text`，且部署参数中没有单独的结果模式选项；
 客户端用每请求头覆盖。若要在该进程上改变启动默认值，需按其启动方式传入
 `-result-mode` 或在进程环境中设置 `MOBILE_USE_MCP_RESULT_MODE`，然后重启适配器。逐块
 语法、取消保留键与图片规则见 [MCP 入口](mcp.md)。
@@ -427,8 +432,8 @@ $json = $config | ConvertTo-Json -Depth 5
 ```
 
 宿主只引用二进制和配置路径，不把 token 写进宿主文件。重启宿主后应看到 12 个工具。
-只读文本的 stdio 宿主在 `args` 中追加 `"-result-mode", "text"`；结构化宿主可用
-`structured`；不写时默认 `both`。结果模式不是 JSON 配置成员，选择规则见第 4.5 节。
+stdio 宿主不写 `-result-mode` 时默认 `text`；需要结构化结果时追加
+`"-result-mode", "structured"`。结果模式不是 JSON 配置成员，选择规则见第 4.5 节。
 
 ### 6.4 主机 HTTP 适配器
 
@@ -441,8 +446,8 @@ URL:    http://127.0.0.1:18882/mcp
 Header: Authorization: Bearer <hostMcpToken>
 ```
 
-需要非默认模式时，在请求头中加 `X-Mobile-Use-Result-Mode: text|structured`；该头按请求
-生效，不写入配置（见第 4.5 节）。
+需要显式指定模式时，在请求头中加 `X-Mobile-Use-Result-Mode: both|text|structured`；该头
+按请求生效，不写入配置（见第 4.5 节）。
 
 主机 HTTP 适配器使用主机 `18882`；手机适配器已转发到主机 `18883`，两者不冲突。不要把
 手机 `18882` 再转发到主机 `18882`，否则主机适配器无法绑定该端口。
@@ -456,7 +461,7 @@ Header: Authorization: Bearer <hostMcpToken>
 | HTTP 入口 | 手机 `18882/mcp`；主机转发 `18883/mcp` | 主机 `18882/mcp` |
 | Token | `.state/deploy.json` 的 `mcp_token` | `.state/mcp-config.json` 的 `http.token` |
 | stdio | Android 宿主需自行提供拉起封装 | 宿主直接拉起 `device-mcp.exe` |
-| 结果模式 | 默认 `both`；HTTP 每请求头覆盖 | 默认 `both`；启动参数/环境变量与每请求头 |
+| 结果模式 | 默认 `text`；HTTP 每请求头覆盖 | 默认 `text`；启动参数/环境变量与每请求头 |
 | 适用 | 主机/手机 HTTP MCP 客户端 | 只支持 stdio 的宿主，或主机本地 HTTP |
 
 ## 7. 路径 D：手机内宿主
@@ -468,7 +473,7 @@ Header: Authorization: Bearer <hostMcpToken>
 ```text
 URL:    http://127.0.0.1:18882/mcp
 Header: Authorization: Bearer <mcp_token>
-可选:   X-Mobile-Use-Result-Mode: text|structured（默认 both）
+可选:   X-Mobile-Use-Result-Mode: both|text|structured（默认 text）
 ```
 
 - 不需要 `agent_token`，也不需要 `control_token`；适配器在 chroot 内读取服务凭据。

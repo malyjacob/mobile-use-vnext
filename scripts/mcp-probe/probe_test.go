@@ -977,11 +977,14 @@ func writeFakeDiagnosis(builder *strings.Builder, value any) {
 	writeFakeBlock(builder, block.String())
 }
 
-// startFakeAdapter serves the 12 tools over the SDK in-memory transport.
+// startFakeAdapter serves the 12 tools over the SDK in-memory transport. It
+// publishes the source server instructions so the discovery checks exercise the
+// same text a real adapter serves.
 func startFakeAdapter(t *testing.T, adapter *fakeAdapter) *sdk.ClientSession {
 	t.Helper()
 	ctx := context.Background()
-	server := sdk.NewServer(&sdk.Implementation{Name: "fake-adapter", Version: "1"}, nil)
+	server := sdk.NewServer(&sdk.Implementation{Name: "fake-adapter", Version: "1"},
+		&sdk.ServerOptions{Instructions: mcpserver.ServerInstructions()})
 	for _, tool := range sourceCatalogTools(t) {
 		name := tool.Name
 		server.AddTool(tool,
@@ -1172,6 +1175,113 @@ func TestAdapterChecksImageLeakFails(t *testing.T) {
 	if !strings.Contains(output.String(), "reason=text_carries_base64") &&
 		!strings.Contains(output.String(), "reason=both_mode_object_mismatch") {
 		t.Fatalf("leak was not attributed:\n%s", output.String())
+	}
+}
+
+// TestInstructionsCheck proves the mandatory discovery check compares the live
+// instructions with the source accessor and rejects a missing payload.
+func TestInstructionsCheck(t *testing.T) {
+	session := startFakeAdapter(t, newFakeAdapter())
+	var output bytes.Buffer
+	runner := &probe{reporter: newReporter(&output), session: session}
+	if !runner.instructionsCheck() {
+		t.Fatalf("instructions check failed:\n%s", output.String())
+	}
+	if !strings.Contains(output.String(), "PASS instructions") ||
+		!strings.Contains(output.String(), "source_match=true") {
+		t.Fatalf("missing instructions pass:\n%s", output.String())
+	}
+
+	empty := startNoInstructionsAdapter(t)
+	output.Reset()
+	runner = &probe{reporter: newReporter(&output), session: empty}
+	if runner.instructionsCheck() {
+		t.Fatalf("empty instructions passed:\n%s", output.String())
+	}
+	if !strings.Contains(output.String(), "FAIL instructions reason=instructions_missing") {
+		t.Fatalf("missing instructions failure:\n%s", output.String())
+	}
+}
+
+// TestCompatibilityInstructionsCheck proves the additional initialize-era check
+// reads the same instructions and requires the compatibility protocol version.
+func TestCompatibilityInstructionsCheck(t *testing.T) {
+	server := sdk.NewServer(&sdk.Implementation{Name: "fake-adapter", Version: "1"},
+		&sdk.ServerOptions{Instructions: mcpserver.ServerInstructions()})
+	connector := inMemoryCompatibilityInitialize(server, compatibilityProtocolVersion)
+	var output bytes.Buffer
+	runner := &probe{reporter: newReporter(&output), compatInitialize: connector}
+	if !runner.compatibilityInstructionsCheck(context.Background()) {
+		t.Fatalf("compatibility instructions check failed:\n%s", output.String())
+	}
+	if !strings.Contains(output.String(), "PASS instructions_compat") ||
+		!strings.Contains(output.String(), "protocol="+compatibilityProtocolVersion) {
+		t.Fatalf("missing compatibility pass:\n%s", output.String())
+	}
+
+	mismatched := sdk.NewServer(&sdk.Implementation{Name: "fake-adapter", Version: "1"},
+		&sdk.ServerOptions{Instructions: mcpserver.ServerInstructions() + "stale"})
+	output.Reset()
+	runner = &probe{reporter: newReporter(&output),
+		compatInitialize: inMemoryCompatibilityInitialize(mismatched, compatibilityProtocolVersion)}
+	if runner.compatibilityInstructionsCheck(context.Background()) {
+		t.Fatalf("mismatched instructions passed:\n%s", output.String())
+	}
+	if !strings.Contains(output.String(), "FAIL instructions_compat reason=instructions_mismatch") {
+		t.Fatalf("missing mismatch failure:\n%s", output.String())
+	}
+
+	output.Reset()
+	runner = &probe{reporter: newReporter(&output)}
+	if !runner.compatibilityInstructionsCheck(context.Background()) {
+		t.Fatalf("nil connector should be skipped, not failed:\n%s", output.String())
+	}
+	if !strings.Contains(output.String(), "SKIP instructions_compat reason=no_secondary_transport") {
+		t.Fatalf("missing skip line:\n%s", output.String())
+	}
+}
+
+// startNoInstructionsAdapter serves an empty server over the in-memory
+// transport, which is the reverse control for the instructions check.
+func startNoInstructionsAdapter(t *testing.T) *sdk.ClientSession {
+	t.Helper()
+	ctx := context.Background()
+	server := sdk.NewServer(&sdk.Implementation{Name: "no-instructions", Version: "1"}, nil)
+	serverTransport, clientTransport := sdk.NewInMemoryTransports()
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	t.Cleanup(func() { _ = serverSession.Close() })
+	session, err := newMCPClient().Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+	return session
+}
+
+// inMemoryCompatibilityInitialize opens a second in-memory session pinned to the
+// given protocol version against the same server and returns its initialize
+// result.
+func inMemoryCompatibilityInitialize(server *sdk.Server, protocolVersion string) func(context.Context) (*sdk.InitializeResult, *checkError) {
+	return func(ctx context.Context) (*sdk.InitializeResult, *checkError) {
+		serverTransport, clientTransport := sdk.NewInMemoryTransports()
+		serverSession, err := server.Connect(ctx, serverTransport, nil)
+		if err != nil {
+			return nil, failf("server_connect_failed")
+		}
+		session, err := newMCPClient().Connect(ctx, clientTransport, &sdk.ClientSessionOptions{
+			ProtocolVersion: protocolVersion,
+		})
+		if err != nil {
+			_ = serverSession.Close()
+			return nil, failf("client_connect_failed")
+		}
+		result := session.InitializeResult()
+		_ = session.Close()
+		_ = serverSession.Close()
+		return result, nil
 	}
 }
 
@@ -2069,5 +2179,67 @@ func TestActScrollEffectOmissionFails(t *testing.T) {
 	if failure := checkScrollActResult(projected, resultModeBoth); failure == nil ||
 		failure.reason != "scroll_effect_missing" {
 		t.Fatalf("omitted effect accepted: %v", failure)
+	}
+}
+
+// TestReadInitializeResponse covers the two Streamable HTTP response shapes the
+// compatibility initialize check accepts. It asserts only the public facts the
+// probe reads and never depends on a full session.
+func TestReadInitializeResponse(t *testing.T) {
+	cases := []struct {
+		name        string
+		contentType string
+		body        string
+		wantProto   string
+		wantBytes   int
+		wantFail    string
+	}{
+		{
+			name: "json", contentType: "application/json",
+			body:      `{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","instructions":"guide"}}`,
+			wantProto: "2025-11-25", wantBytes: 5,
+		},
+		{
+			name: "sse", contentType: "text/event-stream",
+			body:      "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-11-25\",\"instructions\":\"guide\"}}\n\n",
+			wantProto: "2025-11-25", wantBytes: 5,
+		},
+		{
+			name: "json_error", contentType: "application/json",
+			body:     `{"jsonrpc":"2.0","id":1,"error":{"code":-32600}}`,
+			wantFail: "compat_response_error",
+		},
+		{
+			name: "missing_result", contentType: "application/json",
+			body:     `{"jsonrpc":"2.0","id":1}`,
+			wantFail: "compat_response_missing",
+		},
+		{
+			name: "malformed", contentType: "application/json",
+			body:     `not-json`,
+			wantFail: "compat_response_invalid",
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			response := &http.Response{
+				Header: http.Header{"Content-Type": []string{testCase.contentType}},
+				Body:   io.NopCloser(strings.NewReader(testCase.body)),
+			}
+			result, failure := readInitializeResponse(response)
+			if testCase.wantFail != "" {
+				if failure == nil || failure.reason != testCase.wantFail {
+					t.Fatalf("failure = %+v, want %s", failure, testCase.wantFail)
+				}
+				return
+			}
+			if failure != nil {
+				t.Fatalf("unexpected failure: %+v", failure)
+			}
+			if result.ProtocolVersion != testCase.wantProto || len(result.Instructions) != testCase.wantBytes {
+				t.Fatalf("result = %+v, want protocol=%s bytes=%d",
+					result, testCase.wantProto, testCase.wantBytes)
+			}
+		})
 	}
 }

@@ -36,7 +36,9 @@ cmd/device-mcp
   会话、账本与设备。
 - `internal/android` 只执行有界设备 I/O 并返回受控事实；不决定观察什么、操作什么。
 - `internal/mcp` 只依赖 `protocol` 与 `client`，不导入 `engine`、`android`、`store`，不因
-  同仓而绕过认证与服务状态；`internal/client` 只依赖 `protocol`。
+  同仓而绕过认证与服务状态；`internal/client` 只依赖 `protocol`。该包以单一固定说明源生成
+  server instructions（完整树语法一次加跨工具调用规则），由 `server/discover` 与兼容
+  `initialize` 发布；12 个工具描述不内联树引导。
 - `internal/store` 实现 `engine.Store` 与 `engine.MessageStore`，分别持久化 `engine.Ledger`
   与有界 Agent 消息。两者是不同文件、不同语义：账本只含归属与资源证据，消息文件只含待
   投递正文，正文不进入账本。
@@ -219,14 +221,18 @@ Tier 1 保持目标 bounds，Tier 2 允许受限微移；Tier 3 只移除三项�
 - 退出分支（`query`、`absent_query`、连续 3 帧稳定、`timeout` 到期、采样上限守卫）在进入
   验证采集前冻结为 `wait.trigger`；命中优先级为 `query > absent_query`，到时与守卫都记
   `timeout`。
-- 验证采集先 `ProbeDisplay`，需要图片时先读图；条件命中或稳态退出时复用候选帧、不重采树，
-  只有到时或守卫退出才重读终帧。提交仍走 `publishTreeAttempt` 的会话、工作权、显示代次与
-  采集龄门禁，撤销后不发布迟到候选。
-- `observation.quality` 永远描述最终发布的那一帧：复用候选帧时连稳 3 帧为
-  `stable`/`stable`，否则 `stop_reason=condition`（`samples>=2` 为 `unstable`，`<2` 为
-  `unknown`）；重读终帧时没有有效帧为 `unknown`/`0`/`not_sampled`，有历史帧则把终帧并入
-  同一比较：连稳 3 帧为 `stable`/`stable`，否则 `stop_reason` 为 `timeout` 或
-  `max_samples`。
+- 验证采集先 `ProbeDisplay`，需要图片时先读图。终帧来源固定为三种：条件或稳态退出的
+  命中候选（`matched`）直接复用；到时或采样上限退出时，若最后一次轮询尝试成功、该帧在
+  `CaptureMaxAge=15s` 内且之后没有失败尝试，复用该帧（`terminal_reuse`）；不能复用时只做
+  一次终帧读取（`terminal_capture`）。所有来源都经 `projectCapture` 与
+  `publishTreeAttempt` 的会话、工作权、显示代次与采集龄门禁；复用帧在提交门禁过期时返回
+  既有 `stale_screen`，不发布新 O，也不再读一次终帧。
+- `observation.quality` 永远描述最终发布的那一帧：命中候选保持
+  `condition`/`stable` 口径（连稳 3 帧为 `stable`/`stable`，否则 `stop_reason=condition`）；
+  `terminal_reuse` 不新增样本，连稳 3 帧为 `stable`/`stable`，否则 `samples>=2` 为
+  `unstable`、`<2` 为 `unknown`，`stop_reason` 为冻结的 `timeout` 或 `max_samples`；
+  `terminal_capture` 把终帧并入同一比较：没有有效帧为 `unknown`/`0`/`not_sampled`，连稳
+  3 帧为 `stable`/`stable`，否则 `stop_reason` 为 `timeout` 或 `max_samples`。
 - `wait.matched` 只在最终发布帧上判定，只含 `query`、`absent_query`、`timeout`；`stable`
   由 `observation.quality.state` 表达。空列表时整个成员省略。`wait.elapsed_ms` 计自准入
   完成到终帧发布。
@@ -270,8 +276,9 @@ Tier 1 保持目标 bounds，Tier 2 允许受限微移；Tier 3 只移除三项�
 校验并提交为新的 ready O。
 
 `wait_for` 的验证采集直接进入同一 `publishTreeAttempt`，不经过本节的收敛采样：等待期的只读
-采样不发布、不推进基线，命中或稳态退出时复用候选帧，只有到时或采样守卫退出才读终帧；它的
-`observation.quality` 由等待比较得出（见 §3 条件等待）。
+采样不发布、不推进基线；命中或稳态退出复用候选帧，到时或采样守卫退出时若最新成功帧仍新鲜
+且之后没有失败，复用该帧，否则只读一次终帧。它的 `observation.quality` 由等待比较得出
+（见 §3 条件等待）。
 
 公开 delta 相对已确认基线的同一 compact 阅读表示计算：先展开双方 chain，按原 ref 比较逻辑
 节点，再把 `add`/`replace` 定义折回 chain 并校验 `Apply` 守恒。70% 判据用有界整数关系
@@ -588,7 +595,8 @@ Go/Java 常量。`scripts/build-release.ps1` 产出整组产物与 `build/releas
 （源码提交、Go 版本、MCP SDK/协议、各产物 SHA-256/大小、Android 包名/版本、工具目录指纹）。
 工具目录固定为 `scripts/toolcatalog` 投影的 12 个工具，指纹是该目录注册顺序、名称、描述与
 入参 schema 的 canonical SHA-256；描述或 schema 变化都会改变指纹，因此清单必须在对应源码
-树上重建。
+树上重建。该指纹不覆盖 server instructions；`mcp-probe` 把 live `server/discover` 返回的
+说明与构建内固定说明源逐字节比较，并附加兼容 `initialize` 检查。
 清单必须来自干净的已提交工作树：`scripts/verify-manifest.ps1` 拒绝已有跟踪改动的工作树、
 `source_commit` 不是实际 `HEAD` 前缀、`source_dirty=true`、`complete=false`（部分构建）与
 缺失必需产物的清单，并重算产物哈希、Android 身份与工具目录指纹。

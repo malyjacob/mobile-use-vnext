@@ -192,8 +192,9 @@ curl -s -X POST http://127.0.0.1:18881/api/status \
 - `can_start=false` 时读 `blocking_code` 与 `cleanup`/`session`；
 - 端口已监听、`/health` 正常、进程存在都不能替代这个门禁。
 
-工具目录由探针的 `tools/list` 核对；工具端点可用一次最小条件等待验证（`reference` 用当前
-`ready` 的 O）：
+工具目录与 server instructions 由探针核对：前者按 `tools/list` 的 12 个工具与目录指纹，
+后者把 live `server/discover` 返回的说明与构建内固定说明源逐字节比较，并附加兼容
+`initialize` 检查。工具端点可用一次最小条件等待验证（`reference` 用当前 `ready` 的 O）：
 
 ```bash
 curl -s -X POST http://127.0.0.1:18881/api/wait_for \
@@ -370,7 +371,8 @@ MCP 客户端应使用 POST。手机内 Android 宿主直接使用 `127.0.0.1:18
 HTTP 入口的每个请求都需要 `Authorization: Bearer <MCP token>`；携带 `Origin` 时必须命中
 `allowed_origins`。缺失/错误令牌返回 `401`，不允许的 Origin 返回 `403`。MCP 会话按请求
 隔离；现代协议只接受 `2026-07-28`；旧版 `initialize` 收到 `2025-11-25` 生命周期答复后
-应断开，不提供旧协议回退。
+应断开，不提供旧协议回退。`server/discover` 与兼容 `initialize` 发布同一份 server
+instructions（完整树语法与跨工具调用规则）；工具描述只保留各自用途、参数/默认与恢复路径。
 
 取消与漏收：stdio 的 `notifications/cancelled` 与 HTTP 的请求 SSE 流关闭都映射为本次调用
 取消；有本次 P 时适配进程发起有界 `end(P)`，只读工具仅取消读取。连接断开或 `end` 发出都
@@ -378,10 +380,10 @@ HTTP 入口的每个请求都需要 `Authorization: Bearer <MCP token>`；携带
 
 ### 10.3 结果模式
 
-默认 `both` 发送完整文本与结构化结果；`text` 发送完整文本与图片；`structured` 发送完整
-结构化结果与图片，错误时附最小诊断文本。模式只改变表示，事实和图片一致。HTTP 客户端在
-每个请求上设置 `X-Mobile-Use-Result-Mode: text` 或 `structured`，不设置时使用进程默认。
-空值、多值、逗号、前后空白或非法值返回 `400`，不会执行工具；该头不传给设备服务。
+默认 `text` 发送完整文本与图片；`both` 同时发送完整文本、结构化结果与图片；`structured`
+发送完整结构化结果与图片，错误时附最小诊断文本。模式只改变表示，事实和图片一致。HTTP
+客户端在每个请求上设置 `X-Mobile-Use-Result-Mode: both` 或 `structured`，不设置时使用进程
+默认。空值、多值、逗号、前后空白或非法值返回 `400`，不会执行工具；该头不传给设备服务。
 
 ```powershell
 ./build/device-mcp.exe -transport stdio -config .state/mcp-config.json -result-mode text
@@ -390,14 +392,15 @@ $env:MOBILE_USE_MCP_RESULT_MODE = 'structured'
 Remove-Item Env:MOBILE_USE_MCP_RESULT_MODE
 ```
 
-优先级为显式 `-result-mode` > 环境变量 > `both`。显式空值与非法值退出 `2`，不回退。
+优先级为显式 `-result-mode` > 环境变量 > `text`。显式空值与非法值退出 `2`，不回退。
 HTTP 进程也可用同一参数设置默认值，每请求头优先。完整文本以 `result v2 is_error=…`
 开头、`end result` 结束；错误最小诊断以 `diagnostic v1 is_error=true` 开头、
 `end diagnostic` 结束。缺尾表示对应文本被宿主截断，可改用 `structured` 或收窄 inspect。
 文本格式取代旧摘要，解析旧文本的宿主须迁移；成功的 `structured` 结果可以是 `content=[]`，
 不接受它的宿主使用 `both`/`text`。详细语法、取消保留键与图片规则见 [MCP 入口](mcp.md)。
 
-探针默认检查 `both`；可用 `-result-mode text|structured` 检查其他投影，例如：
+探针自身的默认检查模式是 `both`（与适配器的默认 `text` 无关）；可用
+`-result-mode text|structured` 检查其他投影，例如：
 
 ```powershell
 go run ./scripts/mcp-probe -config .state/mcp-config.json -binary build/device-mcp.exe -transport stdio -result-mode text
@@ -407,6 +410,8 @@ go run ./scripts/mcp-probe -config .state/mcp-config.json -binary build/device-m
 
 - `mcp-probe` 的 `-transport http-remote` 只连接已运行的手机适配器，不启动或停止远端进程；
   `-suite app-lifecycle` 只操作受控 test-target 包，要求原会话为 virtual，不自动切换显示模式。
+- 探针把 live `server/discover` 的 instructions 与构建内固定说明源逐字节比较，并附加兼容
+  `initialize` 检查；`tools/list` 只核对 12 个工具与目录指纹。
 
 ```powershell
 ./build/mcp-probe.exe -transport stdio -binary ./build/device-mcp.exe -config .state/mcp-config.json -result-mode text

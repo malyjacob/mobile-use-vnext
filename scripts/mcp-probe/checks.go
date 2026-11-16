@@ -11,6 +11,7 @@ import (
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/malyjacob/mobile-use-vnext/internal/client"
+	mcpsource "github.com/malyjacob/mobile-use-vnext/internal/mcp"
 	"github.com/malyjacob/mobile-use-vnext/internal/protocol"
 )
 
@@ -44,15 +45,18 @@ var toolNames = []string{
 var legacyToolNames = []string{"apps", "open_app"}
 
 // probe carries the connected session and the typed service client used for
-// independent status polling.
+// independent status polling. compatInitialize optionally reads one
+// compatibility initialize result; it is set for every real transport and is
+// nil for the service-only p-recovery entry.
 type probe struct {
-	reporter   *reporter
-	session    *sdk.ClientSession
-	service    *client.Client
-	resultMode string
-	suite      string
-	appTarget  string
-	manifests  []string
+	reporter         *reporter
+	session          *sdk.ClientSession
+	service          *client.Client
+	resultMode       string
+	suite            string
+	appTarget        string
+	manifests        []string
+	compatInitialize func(context.Context) (*sdk.InitializeResult, *checkError)
 }
 
 // schemaView is the probe's projection of one published input schema.
@@ -70,9 +74,16 @@ type startSummary struct {
 	Mode          string
 }
 
-// runChecks performs the catalog, session and cancellation checks. It reports
-// whether the service was not admissible before device work (BLOCKED).
+// runChecks performs the discovery, catalog, session and cancellation checks.
+// It reports whether the service was not admissible before device work
+// (BLOCKED).
 func (p *probe) runChecks(ctx context.Context) bool {
+	if !p.instructionsCheck() {
+		return false
+	}
+	if !p.compatibilityInstructionsCheck(ctx) {
+		return false
+	}
 	if !p.catalogCheck(ctx) {
 		return false
 	}
@@ -180,6 +191,74 @@ func (p *probe) errorProjectionCheck(ctx context.Context) bool {
 		field("mode", p.mode()), field("code", projected.view.Error.Code),
 		"is_error=true")
 	return true
+}
+
+// instructionsCheck is mandatory for every transport that has an MCP session.
+// It compares the live discovery instructions with the source accessor instead
+// of duplicating the text, so a running adapter cannot publish a stale guide.
+func (p *probe) instructionsCheck() bool {
+	if p.session == nil {
+		p.reporter.fail("instructions", "session_missing")
+		return false
+	}
+	result := p.session.InitializeResult()
+	if failure := checkInstructions(result); failure != nil {
+		p.reporter.fail("instructions", failure.reason, failure.fields...)
+		return false
+	}
+	p.reporter.pass("instructions",
+		field("bytes", strconv.Itoa(len(result.Instructions))),
+		field("source_bytes", strconv.Itoa(len(mcpsource.ServerInstructions()))),
+		"source_match=true", field("protocol", result.ProtocolVersion))
+	return true
+}
+
+// compatibilityInstructionsCheck is the additional initialize-era check. It
+// reads exactly one compatibility initialize result (a legacy stdio session or
+// a single stateless HTTP initialize request) and proves it carries the same
+// instructions. It is skipped only when the probe has no compatibility reader
+// (the service-only p-recovery entry).
+func (p *probe) compatibilityInstructionsCheck(ctx context.Context) bool {
+	if p.compatInitialize == nil {
+		p.reporter.skip("instructions_compat", "no_secondary_transport")
+		return true
+	}
+	result, failure := p.compatInitialize(ctx)
+	if failure != nil {
+		p.reporter.fail("instructions_compat", failure.reason, failure.fields...)
+		return false
+	}
+	if failure := checkInstructions(result); failure != nil {
+		p.reporter.fail("instructions_compat", failure.reason, failure.fields...)
+		return false
+	}
+	if result.ProtocolVersion != compatibilityProtocolVersion {
+		p.reporter.fail("instructions_compat", "protocol_not_compatibility",
+			field("protocol", result.ProtocolVersion))
+		return false
+	}
+	p.reporter.pass("instructions_compat",
+		field("protocol", result.ProtocolVersion),
+		field("bytes", strconv.Itoa(len(result.Instructions))), "source_match=true")
+	return true
+}
+
+// checkInstructions reduces one initialize/discover result to a controlled
+// failure. It never echoes the instructions text.
+func checkInstructions(result *sdk.InitializeResult) *checkError {
+	if result == nil || result.Instructions == "" {
+		return failf("instructions_missing")
+	}
+	want := mcpsource.ServerInstructions()
+	if want == "" {
+		return failf("source_instructions_missing")
+	}
+	if result.Instructions != want {
+		return failf("instructions_mismatch",
+			field("bytes", strconv.Itoa(len(result.Instructions))),
+			field("source_bytes", strconv.Itoa(len(want))))
+	}
+	return nil
 }
 
 // catalogCheck asserts the exact 11-tool catalog, the live/source semantic

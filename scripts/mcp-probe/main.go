@@ -171,6 +171,7 @@ func runAdapterMode(ctx context.Context, cfg *config, reporter *reporter,
 		}
 		defer stop()
 		probe.session = session
+		probe.compatInitialize = compatibilityHTTPInitialize(cfg)
 		reporter.pass("connect", "transport=http", field("result_mode", resultMode))
 	case modeHTTPRemote:
 		// Reuse the typed service client's health/contract check before any MCP
@@ -194,6 +195,7 @@ func runAdapterMode(ctx context.Context, cfg *config, reporter *reporter,
 		}
 		defer stop()
 		probe.session = session
+		probe.compatInitialize = compatibilityHTTPInitialize(cfg)
 		reporter.pass("connect", "transport=http-remote",
 			field("result_mode", resultMode), "process_managed=false")
 	default:
@@ -204,6 +206,7 @@ func runAdapterMode(ctx context.Context, cfg *config, reporter *reporter,
 		}
 		defer stop()
 		probe.session = session
+		probe.compatInitialize = compatibilityStdioInitialize(binaryPath, configPath, resultMode)
 		reporter.pass("connect", "transport=stdio", field("result_mode", resultMode))
 	}
 
