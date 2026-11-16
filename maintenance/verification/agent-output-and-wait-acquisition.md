@@ -328,3 +328,13 @@ release 与 host-tools 清单一致。
 | 真实模型按 Instructions 的 A/B 工具轨迹 | 未运行；只做 live discovery/字节语义与清单指纹检查，不冒充模型行为结论。 |
 | 手机 `http-remote` 完整探针 | 部署默认 origin allowlist 为空；已用 authenticated initialize 精确比对说明并以映像哈希确认两个适配器为同一发布产物。 |
 | Codex 宿主实际工具调用 | 用户明确无需管理 Codex；主机侧二进制与清单已重建，后续由用户自行触发。 |
+
+### 8.6 归档后的清单重建
+
+归档提交 `685d8dc` 只移动 maintenance 文档，不改变 Go/Java/XML 源码；但它改变 HEAD，使
+`source_commit=792c973` 的清单不再满足 verifier 的精确 HEAD 门禁。按发布要求从 `685d8dc`
+重新执行 `build-release.ps1` 与 `build-host-tools.ps1`，`verify-manifest.ps1` 与
+`-VerifyOnly` 均 PASS；Go 制品、固定制品与工具目录指纹不变，`control.apk` 重新签名后 hash
+变化，已用 `adb install -r` 重新部署并重跑 stdio text smoke 与 app-lifecycle，均 PASS。
+本记录提交也会再次改变 HEAD；最终清单从本记录所在提交重建并核验，`source_commit` 以
+`build/release/manifest.json` 与 `build/host-tools-manifest.json` 为准。

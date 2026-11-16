@@ -129,9 +129,11 @@
   `18a6e7ce612bd5ec1d70b9f78910169762dfb7ce09fbf4fb6c216da6362f6235`，其余五制品
   hash 与 `38` 完全一致；host 2 exe hash/大小不变。Android 源码与版本没有变化，未分析该
   APK 字节差的来源。
-- 当前已验证部署为 `0.16.0 / contract_version=16 / android_version_code=18`。release 与
-  host-tools manifest 均构建自干净实现提交
-  `792c973fc70399e0a063fdd13b2b1c2a4056950d`、`source_dirty=false`；release 六制品齐全，
+- 当前已验证部署为 `0.16.0 / contract_version=16 / android_version_code=18`。实现提交为
+  `792c973fc70399e0a063fdd13b2b1c2a4056950d`；归档提交 `685d8dc` 改变 HEAD 后，按
+  verifier 的精确 HEAD 门禁从当时 HEAD 重建 release 与 host-tools 清单并重新部署。最终
+  清单 `source_commit` 为本记录所在提交（见 `build/release/manifest.json` 与
+  `build/host-tools-manifest.json`）、`source_dirty=false`；release 六制品齐全，
   `verify-manifest.ps1` PASS，host tools `-VerifyOnly` PASS，目录指纹
   `c5fdc545cc77882a4662b6a4524517475065cfc3248ec42223ae4c1189529928`（12 工具）。
   控制 App 以 `adb install -r` 覆盖安装并保留私有数据，安装后 `0.16.0/18`。部署后 health、

@@ -255,3 +255,12 @@ schema required_act=2 required_app=1 additional_properties_false=12
 | `app.claim`/`handoff` 实机成功路径 | 探针的 claim 因受控主屏任务不存在 SKIP；未构造第二任务。 |
 | 真实宿主/模型按 Instructions 的工具轨迹回放 | 未运行同一模型宿主的 A/B 轨迹；只验证 live discovery、字节语义与实际工具结果。 |
 | Codex 宿主工具调用 | 用户明确无需管理 Codex；主机侧 `build/device-mcp.exe` 已重建为 0.16.0 并 `-VerifyOnly` PASS，后续由用户自行触发。 |
+
+### 8.5 归档后的清单重建
+
+归档提交 `685d8dc` 只移动 maintenance 文档，不改变 Go/Java/XML 源码；它改变 HEAD 后，
+`source_commit=792c973` 的清单不再满足 verifier 的精确 HEAD 门禁。按发布要求从 `685d8dc`
+重建 release 与 host-tools 清单并重新部署；Go/固定制品与目录指纹不变，`control.apk` 重签
+hash 变化。重建后的 stdio text smoke、app-lifecycle 与真实 text/status/重复 P/bubble/
+严格拒绝/end 流程再次 PASS。本记录提交后最终清单从记录所在提交重建，`source_commit` 以
+build 清单为准。
