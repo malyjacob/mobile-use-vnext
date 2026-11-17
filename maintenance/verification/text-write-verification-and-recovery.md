@@ -112,8 +112,10 @@ host-tools manifest: PASS（companion 清单、source_commit、契约、目录�
 
 归档提交后，按仓库既有做法在归档 HEAD 重新执行 `scripts/build-release.ps1`、
 `scripts/verify-manifest.ps1`、`deploy.ps1 -SkipBuild` 与 `scripts/build-host-tools.ps1`：
-归档只改 `maintenance/`，重建产物的 SHA-256 与上表一致；两份清单的 `source_commit`
-记录归档 HEAD，实现源码仍是 `b0e54a4`，部署与探针在最终清单上复跑通过。
+归档只改 `maintenance/`；Go 服务、手机 MCP、固定 JAR、`applist.dex` 与 `service.sh`
+重建哈希与上表一致。Android APK 的签名/ZIP 时间戳不承诺逐字节可重现，最终部署以重建
+清单中的 APK 哈希为准（版本身份仍为 0.18.0/20）。两份清单的 `source_commit` 记录归档
+HEAD，实现源码仍是 `b0e54a4`；部署、实机 text 闭环与 MCP 探针在最终清单上复跑通过。
 
 ## 6. 实机最小闭环
 
