@@ -124,6 +124,13 @@ HEAD，实现源码仍是 `b0e54a4`；部署、实机 text 闭环与 MCP 探针�
 脚本与日志位于被忽略的 `build/live_text_test.py`、`build/live_text_test.log` 等；记录不保存
 token 或输入正文以外的设备材料。
 
+一次中间尝试：在实机 `end` 后立即启动 MCP 探针，`create_display` 与尚未完成的
+`close_display` 竞争，探针 `start` 返回 `display_create_failed`；随后控制 App 进入本地
+`stop_superseded` 停止重试，新的 `start` 返回 `control_revoked`。`am force-stop` 重启
+控制 App（不清除私有数据）后恢复；之后按“先跑 MCP 探针、等待 cleanup、再跑实机 text”
+复跑，两项均 PASS。该现象属于控制 App 的本地 STOP 状态机与清理竞争，不在 text 路径，
+本轮未修改 App 代码，只记录为环境事实。
+
 | 步骤 | 实际结果 |
 | --- | --- |
 | `status` | `can_start=true` |
