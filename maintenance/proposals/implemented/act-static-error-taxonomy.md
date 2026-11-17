@@ -673,6 +673,7 @@ message 的最终短句可在 §4.3 模板内校订；枚举、网格取值、�
 
 实现提交：`a02d305f29f27fdfe6b63faf356116e137432c1a`（`2026-11-18`）。
 验证记录：[act-static-error-taxonomy.md](../../verification/act-static-error-taxonomy.md)。
+正式整组构建、部署与实机验证追加于 `2026-11-18`，见验证记录 §8。
 
 ### 11.1 已落地
 
@@ -695,9 +696,9 @@ message 的最终短句可在 §4.3 模板内校订；枚举、网格取值、�
 | 项 | 结论与理由 |
 | --- | --- |
 | text 聚焦错误 | 未接入新分类。`staticTextRefCheck` 使用基线实现副本，保持提案“不改 text 错误”的范围；新分类只覆盖 `tap`/`long_press`。 |
-| 实机分类、禁用/无 bounds、祖先与建议点样本 | 未执行。没有接入设备或部署指令；合成树单测覆盖分类与边界，不假定真实 UI 可稳定构造全部形态。 |
-| 发布清单、整组构建/核验、部署与手机覆盖安装 | 未执行。版本源已按建议值冻结并生成常量，但未安排发布窗口；未运行 `build-release.ps1`、`verify-manifest.ps1`、`deploy.ps1`。 |
-| 主机适配器重建/`-VerifyOnly` 与外部 MCP 宿主刷新 | 未执行。依赖整组发布决定；宿主刷新由用户操作，本次只验证源码说明、目录指纹与 Instructions 源。 |
+| 实机分类、禁用/无 bounds、祖先与建议点样本 | 已执行（2026-11-18，设备 `17efb04a`，见验证记录 §8.5/§8.6）。覆盖全遮挡、歧义、混合、十字遮挡、外部 owner 反例、缺动作引导、仅 long_press、无祖先、祖先缺动作/禁用与根 ref；`context` 与 `no_geometry` 无法由受控页面发布，仍仅由合成单测覆盖。 |
+| 发布清单、整组构建/核验、部署与手机覆盖安装 | 已执行（2026-11-18，构建 HEAD `5e10d07`、`source_dirty=false`）。`build-release.ps1`、`verify-manifest.ps1`、`deploy.ps1 -SkipBuild` 均通过；App 安装为 0.17.0/versionCode 19，手机产物哈希与清单一致，见验证记录 §8.2/§8.3。 |
+| 主机适配器重建/`-VerifyOnly` 与外部 MCP 宿主刷新 | 主机工具已重建并通过 `-VerifyOnly`，新 stdio 与手机 HTTP 探针均 PASS；外部 `codex.exe` 宿主仍运行旧 stdio 镜像，其 `tools/list` 重发现未执行，需用户重启宿主，见验证记录 §6/§8.7。 |
 | 实机大树性能与分配矩阵 | 未执行。只记录 1002 节点/100 原候选的合成失败路径基准；不把它写成实机延迟或零分配保证。 |
 | 其他工具同名 code | 未改。`scroll` 等既有 `unsupported_node_action` 语义不变；`occluding_ref` 仍可能由基线文本聚焦检查产生，但不再出现在本次 tap/long_press 静态候选耗尽出口。 |
 

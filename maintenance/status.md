@@ -1,6 +1,6 @@
 # 项目实施状态
 
-状态：2026-11-17，契约 16 联合验收与 0.16.0 发布记录已定稿。本页承载用户可见的阶段进度、已实现/已实测/未验证分层与未决项；
+状态：2026-11-18，契约 17 静态错误分类已实现、整组构建/部署并完成有限实机验证；契约 16 联合验收与 0.16.0 发布记录已定稿。本页承载用户可见的阶段进度、已实现/已实测/未验证分层与未决项；
 `docs/` 只保留正式架构、现行契约与运维说明。
 
 ## 1. 阶段
@@ -50,6 +50,7 @@
 | tap/long_press 子树安全落点与结构化引导（契约 14） | 已实现 / 已实测（有限） | 已部署 0.14.0/契约 14/versionCode 16；静态子树规划、固定点重验、R1 原子引导、`occluding_ref` 边界及嵌套详情所有权已实现并单测；实机临时复合卡片验证正文引导 `nearest_actionable_ref=n21`、`safe_point={540,331}`、`safe_carrier_ref=n22`，独立 O 上卡片 tap ×3 与 long_press 均与内按钮 0 次隔离；契约 13 拒绝/14 受理、恢复屏障与最小 STOP 通过。外部 MCP 宿主未操作，手机 stdio 旧进程需宿主重启；`occluding_ref` 专门页面与活动会话 STOP 未单独实机构造（[记录](verification/act-tap-safe-scope-and-guidance.md)） |
 | Agent 输出、instructions 与 wait 终帧复用（契约 16） | 已实现 / 已实测（有限） | `07c85b6` + `792c973`：device-mcp 默认 text、server instructions 集中与 12 描述去重、wait timeout/max_samples 复用最新新鲜帧；0.16.0/契约 16/versionCode 18 整组发布，discovery 元数据 `25076` 严格低于基线 `36250`，目录指纹 `c5fdc545...`；主机 stdio text/structured/both、主机 HTTP 与真实服务 smoke/app-lifecycle PASS。慢 hierarchy wait、真实宿主/模型 #20 与 Instructions 轨迹未执行（[记录](verification/agent-output-and-wait-acquisition.md)） |
 | 统一 reference 与受控动作契约（契约 16） | 已实现 / 已实测（有限） | `d529ee7` + `792c973` 完成 #17/#18/#19/#23：act/inspect/app 统一 `reference`、扁平 app Schema 与 `open.target.app`、ref bubble 默认一次最近交互祖先提升、text 默认 `press_enter` 与 `text_input`；编码器与服务端共享封闭 kind 矩阵。0.16.0 已整组发布并部署；实机 text 默认/显式 false、status/重复 P、旧字段/坐标 bubble/旧 app 拒绝、bubble 提升与 end/cleanup 已执行，docs 独立审计 CLEAN。实机 STOP/ENTER 回执注入、claim/handoff 与真实宿主 Instructions 回放未执行（[记录](verification/agent-reference-and-action-contract.md)） |
+| act 静态目标拒绝分类（契约 17） | 已实现 / 已实测（有限） | `a02d305`：三码 `invalid_target`/`unsupported_node_action`/`no_safe_point`、封闭 reason、定向 details 与 3×3 建议点；0.17.0/契约 17/versionCode 19 整组构建、清单核验与覆盖部署，App/服务/手机 HTTP 适配器版本匹配。实机 10 类静态拒绝、O 保持 ready、建议点稳定帧执行、旧契约 409/最小 STOP 旧契约受理、主机 stdio 与手机 HTTP 探针 PASS；外部 `codex.exe` 宿主未重启，`context`/`no_geometry` 实机页面与实机大树性能未取得（[记录](verification/act-static-error-taxonomy.md)） |
 | 观察连续性、结构差分与动作重验（契约 15） | 已实现 | 已实测（有限）：净化/严格三态、五阶段连续性、结构差分与双应用器、动作层级重验及消费者同步已落地；D01 contract 15 三轮 pass，D02 三轮无 fail但缺 native scroll，D03 24 pass/3 fail，D04 3 fail/15 gap，D05 最新 1 pass/1 fail，D06 在 `38`/`049` 各三轮 pass；S6 最终 61 个五样本子项、305 行。缺口已接受（[记录](verification/observation-continuity-and-revalidation.md)、[基准](verification/observation-continuity-benchmarks.md)） |
 
 ## 3. 未验证 / 证据缺口
