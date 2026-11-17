@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"fmt"
+	"sort"
 	"time"
 
 	"github.com/malyjacob/mobile-use-vnext/internal/device"
@@ -12,6 +14,28 @@ const (
 	tapModeCarrierNode   = "carrier_node"
 	tapModeCenterSpan    = "center_span"
 	tapModeRejected      = "rejected"
+)
+
+// Static tap/long_press ref reasons. They are a closed enum on the three
+// static error codes and never extend another tool's same-named code.
+const (
+	tapStaticReasonRoot                  = "root"
+	tapStaticReasonContext               = "context"
+	tapStaticReasonNoGeometry            = "no_geometry"
+	tapStaticReasonTargetMissingAction   = "target_missing_action"
+	tapStaticReasonTargetHasOtherAction  = "target_has_other_action"
+	tapStaticReasonAncestorMissingAction = "ancestor_missing_action"
+	tapStaticReasonAncestorInvalid       = "ancestor_invalid"
+	tapStaticReasonNoInteractiveAncestor = "no_interactive_ancestor"
+	tapStaticReasonBlocked               = "blocked"
+	tapStaticReasonAmbiguous             = "ambiguous"
+	tapStaticReasonOwnerMismatch         = "owner_mismatch"
+	tapStaticReasonMixed                 = "mixed"
+)
+
+const (
+	tapStaticScopeTarget   = "target"
+	tapStaticScopeAncestor = "ancestor"
 )
 
 // tapPlan is the immutable request-local result of static planning. It never
@@ -697,13 +721,12 @@ func enumerateTapCandidates(scope *tapScope, raw *device.RawNode) []tapCandidate
 	return candidates
 }
 
-func occludingTapRef(scope *tapScope, raw *device.RawNode) string {
-	if scope == nil || raw == nil {
-		return ""
-	}
-	x, y, ok := tapSafeCenter(raw.Bounds)
-	if !ok || !scope.base.Contains(x, y) {
-		return ""
+// tapBlockingOwnerAt returns the blocking boundary owner of one point. It is
+// the single owner-selection rule shared by the legacy center hint and the
+// static candidate diagnosis: deepest owner first, then earliest preorder.
+func tapBlockingOwnerAt(scope *tapScope, x, y int) (*protocol.Node, int, int) {
+	if scope == nil {
+		return nil, -1, 0
 	}
 	var best *protocol.Node
 	bestDepth, bestOrder := -1, 0
@@ -717,6 +740,18 @@ func occludingTapRef(scope *tapScope, raw *device.RawNode) string {
 			bestDepth, bestOrder = blocked.ownerDepth, blocked.ownerOrder
 		}
 	}
+	return best, bestDepth, bestOrder
+}
+
+func occludingTapRef(scope *tapScope, raw *device.RawNode) string {
+	if scope == nil || raw == nil {
+		return ""
+	}
+	x, y, ok := tapSafeCenter(raw.Bounds)
+	if !ok || !scope.base.Contains(x, y) {
+		return ""
+	}
+	best, _, _ := tapBlockingOwnerAt(scope, x, y)
 	if best == nil {
 		return ""
 	}
@@ -771,16 +806,27 @@ func planTapTarget(obs *observationState, target *protocol.Node,
 func tapUnsupportedWithGuidance(obs *observationState, view *tapPublicView,
 	target *protocol.Node, action protocol.Action, message string) *protocol.APIError {
 	apiErr := protocol.NewError(422, protocol.CodeNodeUnsupported, message)
+	attachTapGuidance(apiErr, obs, view, target, action)
+	return apiErr
+}
+
+// attachTapGuidance adds the legacy atomic ancestor group when the baseline
+// position attempted it. It never widens its search: a nil result omits the
+// whole group.
+func attachTapGuidance(apiErr *protocol.APIError, obs *observationState,
+	view *tapPublicView, target *protocol.Node, action protocol.Action) {
+	if apiErr == nil {
+		return
+	}
 	guidance := tapGuidanceFor(obs, view, target, action)
 	if guidance == nil {
-		return apiErr
+		return
 	}
 	apiErr.WithDetail("nearest_actionable_ref", guidance.ref)
 	apiErr.WithDetail("safe_point", map[string]any{"x": guidance.x, "y": guidance.y})
 	if guidance.carrierRef != "" {
 		apiErr.WithDetail("safe_carrier_ref", guidance.carrierRef)
 	}
-	return apiErr
 }
 
 func tapGuidanceFor(obs *observationState, view *tapPublicView,
@@ -987,6 +1033,548 @@ func chooseBubbleTapPoint(scope *tapScope, view *tapPublicView,
 	return 0, 0, "", nil, false
 }
 
+// tapStaticPoint is one logical point tested by the static planner or by the
+// bounded suggestion grid. It never leaves the error path.
+type tapStaticPoint struct {
+	x, y int
+}
+
+type tapStaticPointFailure struct {
+	kind       string
+	owner      *protocol.Node
+	ownerDepth int
+	ownerOrder int
+	related    []*protocol.Node
+}
+
+type tapStaticOwnerFact struct {
+	depth int
+	order int
+}
+
+// tapStaticDiagnosis is the bounded failure summary of the original fixed
+// candidates plus the optional suggestion group. Ref lists are already
+// deduplicated, ordered and truncated.
+type tapStaticDiagnosis struct {
+	reason              string
+	occludingRefs       []string
+	ambiguousRefs       []string
+	ownerRefs           []string
+	suggestedPoint      *tapStaticPoint
+	suggestedCarrierRef string
+}
+
+func tapPublicOrder(view *tapPublicView, node *protocol.Node) int {
+	if view != nil && node != nil {
+		if info := view.info[node]; info != nil {
+			return info.order
+		}
+	}
+	return int(^uint(0) >> 1)
+}
+
+// tapSubtreePointOwners replays the deepest-node rule of
+// provesSubtreeTapPoint and also returns every tied deepest node in public
+// preorder. The boolean is false when the walk cannot complete.
+func tapSubtreePointOwners(scope *tapScope, x, y int) (*protocol.Node, []*protocol.Node, bool) {
+	if scope == nil || scope.target == nil {
+		return nil, nil, false
+	}
+	bestDepth, bestCount := -1, 0
+	var best *protocol.Node
+	var ties []*protocol.Node
+	visited := map[*protocol.Node]bool{}
+	var walk func(node *protocol.Node, depth int) bool
+	walk = func(node *protocol.Node, depth int) bool {
+		if node == nil || visited[node] {
+			return false
+		}
+		visited[node] = true
+		if !node.Context && node.Role != protocol.RoleRoot && node.Bounds != nil {
+			rect := rectFromBounds(node.Bounds)
+			if rect.Width() > 0 && rect.Height() > 0 && rect.Contains(x, y) {
+				switch {
+				case depth > bestDepth:
+					bestDepth, best, bestCount = depth, node, 1
+					ties = []*protocol.Node{node}
+				case depth == bestDepth:
+					bestCount++
+					ties = append(ties, node)
+				}
+			}
+		}
+		for _, child := range node.Children {
+			if !walk(child, depth+1) {
+				return false
+			}
+		}
+		return true
+	}
+	if !walk(scope.target, 0) {
+		return best, ties, false
+	}
+	return best, ties, true
+}
+
+// tapWholeTreePointOwners replays resolvePoint and returns the tied deepest
+// nodes for the ambiguity diagnosis.
+func tapWholeTreePointOwners(view *tapPublicView, x, y int) (*protocol.Node, []*protocol.Node, pointState) {
+	if view == nil || view.tree == nil || view.tree.Root == nil {
+		return nil, nil, pointNone
+	}
+	bestDepth, bestCount := -1, 0
+	var best *protocol.Node
+	var ties []*protocol.Node
+	var walk func(node *protocol.Node, depth int)
+	walk = func(node *protocol.Node, depth int) {
+		if node == nil {
+			return
+		}
+		if depth > 0 && !node.Context && node.Role != protocol.RoleRoot &&
+			node.Bounds != nil && node.Bounds.Contains(x, y) {
+			switch {
+			case depth > bestDepth:
+				bestDepth, best, bestCount = depth, node, 1
+				ties = []*protocol.Node{node}
+			case depth == bestDepth:
+				bestCount++
+				ties = append(ties, node)
+			}
+		}
+		for _, child := range node.Children {
+			walk(child, depth+1)
+		}
+	}
+	walk(view.tree.Root, 0)
+	switch {
+	case bestCount == 0:
+		return nil, nil, pointNone
+	case bestCount > 1:
+		return nil, ties, pointAmbiguous
+	default:
+		return best, nil, pointUnique
+	}
+}
+
+// classifyTapStaticPoint replays the original predicate short-circuit order:
+// blocking first, then the subtree deepest-node rule, then, for a lifted
+// bubble target, the whole-tree ownership rule.
+func classifyTapStaticPoint(view *tapPublicView, scope *tapScope,
+	object *protocol.Node, bubble bool, x, y int) tapStaticPointFailure {
+	if object == nil || scope == nil {
+		return tapStaticPointFailure{kind: tapStaticReasonAmbiguous}
+	}
+	if owner, ownerDepth, ownerOrder := tapBlockingOwnerAt(scope, x, y); owner != nil {
+		return tapStaticPointFailure{
+			kind: tapStaticReasonBlocked, owner: owner,
+			ownerDepth: ownerDepth, ownerOrder: ownerOrder,
+		}
+	}
+	best, ties, ok := tapSubtreePointOwners(scope, x, y)
+	if !ok || best == nil || len(ties) != 1 {
+		return tapStaticPointFailure{kind: tapStaticReasonAmbiguous, related: ties}
+	}
+	if best != object && scope.carrierByNode[best] == nil {
+		return tapStaticPointFailure{kind: tapStaticReasonAmbiguous, related: ties}
+	}
+	if !bubble {
+		return tapStaticPointFailure{}
+	}
+	hit, wholeTies, state := tapWholeTreePointOwners(view, x, y)
+	switch state {
+	case pointAmbiguous:
+		return tapStaticPointFailure{kind: tapStaticReasonAmbiguous, related: wholeTies}
+	case pointNone:
+		return tapStaticPointFailure{kind: tapStaticReasonAmbiguous}
+	}
+	if hit == nil {
+		return tapStaticPointFailure{kind: tapStaticReasonAmbiguous}
+	}
+	if info := view.info[hit]; info == nil || !info.hasSource {
+		return tapStaticPointFailure{kind: tapStaticReasonAmbiguous}
+	}
+	if hit == object {
+		return tapStaticPointFailure{}
+	}
+	if carrier := scope.carrierByRef[hit.Ref]; carrier != nil && carrier.node == hit {
+		return tapStaticPointFailure{}
+	}
+	return tapStaticPointFailure{
+		kind: tapStaticReasonOwnerMismatch, related: []*protocol.Node{hit},
+	}
+}
+
+// tapStaticCandidatePoints replays exactly the direct-target candidates the
+// planner tested. The list may contain more than three points and is only used
+// to classify every original failure.
+func tapStaticCandidatePoints(scope *tapScope, raw *device.RawNode) []tapStaticPoint {
+	var points []tapStaticPoint
+	for _, candidate := range enumerateTapCandidates(scope, raw) {
+		points = append(points, tapStaticPoint{x: candidate.x, y: candidate.y})
+	}
+	return points
+}
+
+// tapStaticBubbleCandidatePoints replays the child center (including its clip
+// fallback) before the ancestor candidate sequence, preserving the original
+// order and duplicate behavior.
+func tapStaticBubbleCandidatePoints(scope *tapScope, view *tapPublicView,
+	ancestor, child *protocol.Node) []tapStaticPoint {
+	var points []tapStaticPoint
+	if scope == nil || view == nil {
+		return points
+	}
+	if child != nil && child.Bounds != nil {
+		rect := rectFromBounds(child.Bounds)
+		if rect.Width() > 0 && rect.Height() > 0 {
+			x, y, ok := tapSafeCenter(rect)
+			if ok && !scope.base.Contains(x, y) {
+				if clip := rect.Intersect(scope.base); !clip.Empty() {
+					x, y, ok = tapSafeCenter(clip)
+				} else {
+					ok = false
+				}
+			}
+			if ok && scope.base.Contains(x, y) {
+				points = append(points, tapStaticPoint{x: x, y: y})
+			}
+		}
+	}
+	ancestorInfo := view.info[ancestor]
+	var ancestorRaw *device.RawNode
+	if ancestorInfo != nil && ancestorInfo.hasSource && ancestorInfo.rawIndex >= 0 &&
+		ancestorInfo.rawIndex < len(view.capture.Nodes) {
+		ancestorRaw = &view.capture.Nodes[ancestorInfo.rawIndex]
+	}
+	for _, candidate := range enumerateTapCandidates(scope, ancestorRaw) {
+		points = append(points, tapStaticPoint{x: candidate.x, y: candidate.y})
+	}
+	return points
+}
+
+// tapFiveSixths returns floor(5*width/6) without computing 5*width.
+func tapFiveSixths(width int) int {
+	quotient, remainder := width/6, width%6
+	result := quotient*5 + remainder
+	if remainder > 0 {
+		result--
+	}
+	return result
+}
+
+// tapStaticGridPoints returns the fixed 3x3 probe over the half-open scope
+// base, y outer and x inner. Duplicate coordinates are removed.
+func tapStaticGridPoints(base device.Rect) []tapStaticPoint {
+	width, height := base.Width(), base.Height()
+	if width <= 0 || height <= 0 {
+		return nil
+	}
+	xs := [3]int{base.Left + width/6, base.Left + width/2, base.Left + tapFiveSixths(width)}
+	ys := [3]int{base.Top + height/6, base.Top + height/2, base.Top + tapFiveSixths(height)}
+	var points []tapStaticPoint
+	seen := map[[2]int]bool{}
+	for _, y := range ys {
+		for _, x := range xs {
+			key := [2]int{x, y}
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			points = append(points, tapStaticPoint{x: x, y: y})
+		}
+	}
+	return points
+}
+
+func tapStaticOrderedRefs(view *tapPublicView, orders map[string]int) []string {
+	refs := make([]string, 0, len(orders))
+	for ref := range orders {
+		refs = append(refs, ref)
+	}
+	sort.Slice(refs, func(i, j int) bool {
+		if orders[refs[i]] != orders[refs[j]] {
+			return orders[refs[i]] < orders[refs[j]]
+		}
+		return refs[i] < refs[j]
+	})
+	if len(refs) > 3 {
+		refs = refs[:3]
+	}
+	return refs
+}
+
+func tapStaticOccludingRefs(view *tapPublicView,
+	facts map[string]tapStaticOwnerFact) []string {
+	refs := make([]string, 0, len(facts))
+	for ref := range facts {
+		refs = append(refs, ref)
+	}
+	sort.Slice(refs, func(i, j int) bool {
+		left, right := facts[refs[i]], facts[refs[j]]
+		if left.depth != right.depth {
+			return left.depth > right.depth
+		}
+		if left.order != right.order {
+			return left.order < right.order
+		}
+		return refs[i] < refs[j]
+	})
+	if len(refs) > 3 {
+		refs = refs[:3]
+	}
+	return refs
+}
+
+// tapSuggestStaticPoint probes at most nine new grid points. A point is
+// suggested only when it passes the full branch predicate, including the
+// whole-tree unique ownership and source checks required by the guidance
+// predicate. The original request is still rejected.
+func tapSuggestStaticPoint(view *tapPublicView, scope *tapScope,
+	object *protocol.Node, original []tapStaticPoint) (*tapStaticPoint, string) {
+	if view == nil || view.tree == nil || view.tree.Root == nil || scope == nil || object == nil {
+		return nil, ""
+	}
+	tested := map[[2]int]bool{}
+	for _, point := range original {
+		tested[[2]int{point.x, point.y}] = true
+	}
+	seen := map[[2]int]bool{}
+	for _, point := range tapStaticGridPoints(scope.base) {
+		key := [2]int{point.x, point.y}
+		if tested[key] || seen[key] {
+			continue
+		}
+		seen[key] = true
+		if !provesGuidancePoint(view, object, scope, point.x, point.y) {
+			continue
+		}
+		ref, state := resolvePoint(view.tree.Root, point.x, point.y)
+		if state != pointUnique || ref == "" {
+			continue
+		}
+		carrierRef := ""
+		if ref != object.Ref {
+			carrier := scope.carrierByRef[ref]
+			if carrier == nil || carrier.node == nil || carrier.node.Ref != ref {
+				continue
+			}
+			carrierRef = ref
+		}
+		suggested := point
+		return &suggested, carrierRef
+	}
+	return nil, ""
+}
+
+func diagnoseTapStaticFailure(view *tapPublicView, scope *tapScope,
+	object *protocol.Node, bubble bool, original []tapStaticPoint) *tapStaticDiagnosis {
+	occluding := map[string]tapStaticOwnerFact{}
+	ambiguous := map[string]int{}
+	owners := map[string]int{}
+	categories := map[string]bool{}
+	for _, point := range original {
+		failure := classifyTapStaticPoint(view, scope, object, bubble, point.x, point.y)
+		if failure.kind == "" {
+			continue
+		}
+		categories[failure.kind] = true
+		switch failure.kind {
+		case tapStaticReasonBlocked:
+			if failure.owner == nil {
+				continue
+			}
+			previous, exists := occluding[failure.owner.Ref]
+			if !exists || failure.ownerDepth > previous.depth ||
+				(failure.ownerDepth == previous.depth && failure.ownerOrder < previous.order) {
+				occluding[failure.owner.Ref] = tapStaticOwnerFact{
+					depth: failure.ownerDepth, order: failure.ownerOrder,
+				}
+			}
+		case tapStaticReasonAmbiguous:
+			for _, node := range failure.related {
+				if node == nil || node.Ref == "" {
+					continue
+				}
+				ambiguous[node.Ref] = tapPublicOrder(view, node)
+			}
+		case tapStaticReasonOwnerMismatch:
+			for _, node := range failure.related {
+				if node == nil || node.Ref == "" {
+					continue
+				}
+				owners[node.Ref] = tapPublicOrder(view, node)
+			}
+		}
+	}
+	reason := ""
+	for kind := range categories {
+		if reason == "" {
+			reason = kind
+			continue
+		}
+		reason = tapStaticReasonMixed
+		break
+	}
+	if reason == "" {
+		// The healthy scope always classifies at least one original candidate.
+		// Keep the closed enum and do not invent a success for this path.
+		reason = tapStaticReasonMixed
+	}
+	diagnosis := &tapStaticDiagnosis{
+		reason:        reason,
+		occludingRefs: tapStaticOccludingRefs(view, occluding),
+		ambiguousRefs: tapStaticOrderedRefs(view, ambiguous),
+		ownerRefs:     tapStaticOrderedRefs(view, owners),
+	}
+	diagnosis.suggestedPoint, diagnosis.suggestedCarrierRef =
+		tapSuggestStaticPoint(view, scope, object, original)
+	return diagnosis
+}
+
+func tapStaticScopeNoun(scope string) string {
+	if scope == tapStaticScopeAncestor {
+		return "提升祖先"
+	}
+	return "目标节点"
+}
+
+func tapStaticActionLabel(action protocol.Action) string {
+	switch action {
+	case protocol.ActionTap:
+		return "点击"
+	case protocol.ActionLongPress:
+		return "长按"
+	case protocol.ActionText:
+		return "文本输入"
+	case protocol.ActionSwipe:
+		return "滑动"
+	}
+	return string(action)
+}
+
+// tapPublicActions returns the complete public action list in the fixed
+// tap/long_press/text/swipe order, deduplicated and never nil.
+func tapPublicActions(node *protocol.Node) []string {
+	actions := make([]string, 0, 4)
+	if node == nil {
+		return actions
+	}
+	for _, action := range []protocol.Action{
+		protocol.ActionTap, protocol.ActionLongPress,
+		protocol.ActionText, protocol.ActionSwipe,
+	} {
+		if hasAction(node, action) {
+			actions = append(actions, string(action))
+		}
+	}
+	return actions
+}
+
+func tapActionsText(actions []string) string {
+	if len(actions) == 0 {
+		return "无"
+	}
+	labels := make([]string, 0, len(actions))
+	for _, action := range actions {
+		labels = append(labels, tapStaticActionLabel(protocol.Action(action)))
+	}
+	result := ""
+	for index, label := range labels {
+		if index > 0 {
+			result += "、"
+		}
+		result += label
+	}
+	return result
+}
+
+func newTapInvalidTargetError(reason, scope, scopeRef string) *protocol.APIError {
+	message := tapStaticScopeNoun(scope) + "没有可用几何"
+	switch reason {
+	case tapStaticReasonRoot:
+		message = "root 节点不能作为操作目标"
+	case tapStaticReasonContext:
+		message = "context 节点不能作为操作目标"
+	}
+	return protocol.NewError(422, protocol.CodeInvalidTarget, message).
+		WithDetail("reason", reason).
+		WithDetail("scope", scope).
+		WithDetail("scope_ref", scopeRef)
+}
+
+func newTapStaticUnsupportedError(reason string, action protocol.Action,
+	targetActions, ancestorActions []string, ancestorRef string) *protocol.APIError {
+	message := "目标节点不含点击、长按或文本输入能力"
+	switch reason {
+	case tapStaticReasonTargetHasOtherAction:
+		message = fmt.Sprintf("目标节点不支持%s，公开动作：%s",
+			tapStaticActionLabel(action), tapActionsText(targetActions))
+	case tapStaticReasonAncestorMissingAction:
+		message = fmt.Sprintf("最近的交互祖先不支持%s，公开动作：%s",
+			tapStaticActionLabel(action), tapActionsText(ancestorActions))
+	case tapStaticReasonAncestorInvalid:
+		message = "最近的交互祖先不可用"
+	case tapStaticReasonNoInteractiveAncestor:
+		message = "没有可提升的交互祖先"
+	}
+	apiErr := protocol.NewError(422, protocol.CodeNodeUnsupported, message).
+		WithDetail("reason", reason).
+		WithDetail("target_actions", targetActions)
+	if ancestorRef != "" {
+		apiErr.WithDetail("ancestor_ref", ancestorRef)
+	}
+	if ancestorActions != nil {
+		apiErr.WithDetail("ancestor_actions", ancestorActions)
+	}
+	return apiErr
+}
+
+func newTapNoSafePointError(action protocol.Action, scope, scopeRef,
+	ancestorRef string, diagnosis *tapStaticDiagnosis) *protocol.APIError {
+	reason := tapStaticReasonMixed
+	suffix := "存在多类失败"
+	if diagnosis != nil {
+		reason = diagnosis.reason
+		switch reason {
+		case tapStaticReasonBlocked:
+			suffix = "候选点均受阻塞"
+		case tapStaticReasonAmbiguous:
+			suffix = "候选点均有归属歧义"
+		case tapStaticReasonOwnerMismatch:
+			suffix = "候选点归属不符"
+		}
+	}
+	message := fmt.Sprintf("未能从%s的固定候选中证明%s落点：%s",
+		tapStaticScopeNoun(scope), tapStaticActionLabel(action), suffix)
+	apiErr := protocol.NewError(422, protocol.CodeNoSafePoint, message).
+		WithDetail("reason", reason).
+		WithDetail("scope", scope).
+		WithDetail("scope_ref", scopeRef)
+	if ancestorRef != "" {
+		apiErr.WithDetail("ancestor_ref", ancestorRef)
+	}
+	if diagnosis != nil {
+		if len(diagnosis.occludingRefs) > 0 {
+			apiErr.WithDetail("occluding_refs", diagnosis.occludingRefs)
+		}
+		if len(diagnosis.ambiguousRefs) > 0 {
+			apiErr.WithDetail("ambiguous_refs", diagnosis.ambiguousRefs)
+		}
+		if len(diagnosis.ownerRefs) > 0 {
+			apiErr.WithDetail("owner_refs", diagnosis.ownerRefs)
+		}
+		if diagnosis.suggestedPoint != nil {
+			apiErr.WithDetail("suggested_point", map[string]any{
+				"x": diagnosis.suggestedPoint.x, "y": diagnosis.suggestedPoint.y,
+			})
+			if diagnosis.suggestedCarrierRef != "" {
+				apiErr.WithDetail("suggested_carrier_ref", diagnosis.suggestedCarrierRef)
+			}
+		}
+	}
+	return apiErr
+}
+
 // planBubbleTapTarget plans the one C->A target lift. A is the first
 // touch-interactive ancestor; the plan carries both raw identities so the
 // claim-time frame can re-prove both before any dispatch.
@@ -1008,11 +1596,18 @@ func planBubbleTapTarget(obs *observationState, view *tapPublicView,
 	}
 	scope, apiErr := collectTapScope(ancestorInput)
 	if apiErr != nil {
+		if apiErr.Code == protocol.CodeNodeUnsupported {
+			return nil, newTapInvalidTargetError(tapStaticReasonNoGeometry,
+				tapStaticScopeAncestor, ancestor.Ref)
+		}
 		return nil, apiErr
 	}
 	x, y, strategy, carrier, ok := chooseBubbleTapPoint(scope, view, ancestor, child)
 	if !ok {
-		return nil, tapNoCandidateError(action)
+		original := tapStaticBubbleCandidatePoints(scope, view, ancestor, child)
+		diagnosis := diagnoseTapStaticFailure(view, scope, ancestor, true, original)
+		return nil, newTapNoSafePointError(action, tapStaticScopeAncestor,
+			ancestor.Ref, ancestor.Ref, diagnosis)
 	}
 	plan := &tapPlan{
 		x: x, y: y, strategy: strategy, action: string(action),
@@ -1028,6 +1623,103 @@ func planBubbleTapTarget(obs *observationState, view *tapPublicView,
 }
 
 func staticTapRefCheck(obs *observationState, operation *protocol.Operation) (
+	*pointCheck, *scrollPlan, *tapPlan, *protocol.APIError) {
+	started := time.Now()
+	view, apiErr := collectTapPublicView(obs)
+	if apiErr != nil {
+		return nil, nil, nil, apiErr
+	}
+	target := view.byRef[operation.Target.Ref]
+	if target == nil {
+		return nil, nil, nil, protocol.NewError(409, protocol.CodeNodeNotFound, "目标节点不存在")
+	}
+	action := protocol.ActionTap
+	if operation.Type == "long_press" {
+		action = protocol.ActionLongPress
+	}
+	// Keep the baseline order: root, context, missing bounds, disabled,
+	// action/lift, then the planner-owned source and geometry checks.
+	if target.Role == protocol.RoleRoot {
+		return nil, nil, nil, newTapInvalidTargetError(tapStaticReasonRoot,
+			tapStaticScopeTarget, target.Ref)
+	}
+	if target.Context {
+		return nil, nil, nil, newTapInvalidTargetError(tapStaticReasonContext,
+			tapStaticScopeTarget, target.Ref)
+	}
+	if target.Bounds == nil {
+		apiErr := newTapInvalidTargetError(tapStaticReasonNoGeometry,
+			tapStaticScopeTarget, target.Ref)
+		attachTapGuidance(apiErr, obs, view, target, action)
+		return nil, nil, nil, apiErr
+	}
+	if target.Enabled != nil && !*target.Enabled {
+		return nil, nil, nil, protocol.NewError(409, protocol.CodeNodeDisabled, "目标节点已禁用")
+	}
+	targetActions := tapPublicActions(target)
+	if !hasAction(target, action) {
+		if operation.EffectiveBubble() && !isTouchInteractive(target) {
+			ancestor := nearestInteractiveAncestor(view, target)
+			if ancestor == nil {
+				apiErr := newTapStaticUnsupportedError(tapStaticReasonNoInteractiveAncestor,
+					action, targetActions, nil, "")
+				attachTapGuidance(apiErr, obs, view, target, action)
+				return nil, nil, nil, apiErr
+			}
+			if ancestorActions := tapPublicActions(ancestor); ancestor.Enabled != nil && !*ancestor.Enabled ||
+				ancestor.Bounds == nil || ancestor.Bounds.Width() <= 0 || ancestor.Bounds.Height() <= 0 {
+				apiErr := newTapStaticUnsupportedError(tapStaticReasonAncestorInvalid,
+					action, targetActions, ancestorActions, ancestor.Ref)
+				attachTapGuidance(apiErr, obs, view, target, action)
+				return nil, nil, nil, apiErr
+			} else if !hasAction(ancestor, action) {
+				apiErr := newTapStaticUnsupportedError(tapStaticReasonAncestorMissingAction,
+					action, targetActions, ancestorActions, ancestor.Ref)
+				attachTapGuidance(apiErr, obs, view, target, action)
+				return nil, nil, nil, apiErr
+			}
+			bubblePlan, bubbleErr := planBubbleTapTarget(obs, view, target, ancestor, action, started)
+			return nil, nil, bubblePlan, bubbleErr
+		}
+		reason := tapStaticReasonTargetMissingAction
+		if isTouchInteractive(target) {
+			reason = tapStaticReasonTargetHasOtherAction
+		}
+		apiErr := newTapStaticUnsupportedError(reason, action, targetActions, nil, "")
+		attachTapGuidance(apiErr, obs, view, target, action)
+		return nil, nil, nil, apiErr
+	}
+	input, apiErr := buildTapInput(obs, view, target)
+	if apiErr != nil {
+		return nil, nil, nil, apiErr
+	}
+	scope, apiErr := collectTapScope(input)
+	if apiErr != nil {
+		if apiErr.HTTPStatus == 422 {
+			plan := &tapPlan{
+				strategy: tapModeRejected, action: string(action),
+				targetRef: target.Ref, targetRaw: input.targetRaw,
+				took: time.Since(started),
+			}
+			return nil, nil, plan, newTapInvalidTargetError(
+				tapStaticReasonNoGeometry, tapStaticScopeTarget, target.Ref)
+		}
+		return nil, nil, nil, apiErr
+	}
+	plan, apiErr := chooseTapPlan(scope, input, target, action, started)
+	if apiErr != nil {
+		original := tapStaticCandidatePoints(scope, input.targetRaw)
+		diagnosis := diagnoseTapStaticFailure(view, scope, target, false, original)
+		plan.took = time.Since(started)
+		return nil, nil, plan, newTapNoSafePointError(action,
+			tapStaticScopeTarget, target.Ref, "", diagnosis)
+	}
+	return nil, nil, plan, nil
+}
+
+// staticTapRefCheckLegacy preserves the pre-taxonomy static tap behavior for
+// the text focus tap. Text errors are outside the tap/long_press taxonomy.
+func staticTapRefCheckLegacy(obs *observationState, operation *protocol.Operation) (
 	*pointCheck, *scrollPlan, *tapPlan, *protocol.APIError) {
 	started := time.Now()
 	view, apiErr := collectTapPublicView(obs)
@@ -1062,7 +1754,7 @@ func staticTapRefCheck(obs *observationState, operation *protocol.Operation) (
 				return nil, nil, nil, tapUnsupportedWithGuidance(obs, view, target, action,
 					unsupported)
 			}
-			bubblePlan, bubbleErr := planBubbleTapTarget(obs, view, target, ancestor, action, started)
+			bubblePlan, bubbleErr := planBubbleTapTargetLegacy(obs, view, target, ancestor, action, started)
 			return nil, nil, bubblePlan, bubbleErr
 		}
 		return nil, nil, nil, tapUnsupportedWithGuidance(obs, view, target, action, unsupported)
@@ -1087,6 +1779,41 @@ func staticTapRefCheck(obs *observationState, operation *protocol.Operation) (
 	return nil, nil, plan, apiErr
 }
 
+func planBubbleTapTargetLegacy(obs *observationState, view *tapPublicView,
+	child, ancestor *protocol.Node, action protocol.Action, started time.Time) (*tapPlan, *protocol.APIError) {
+	if obs == nil || view == nil || child == nil || ancestor == nil {
+		return nil, tapHierarchyError()
+	}
+	ancestorInput, apiErr := buildTapInput(obs, view, ancestor)
+	if apiErr != nil {
+		return nil, apiErr
+	}
+	childInfo := view.info[child]
+	if childInfo == nil || !childInfo.hasSource || childInfo.rawIndex < 0 ||
+		childInfo.rawIndex >= len(view.capture.Nodes) {
+		return nil, tapTargetSourceMissing()
+	}
+	scope, apiErr := collectTapScope(ancestorInput)
+	if apiErr != nil {
+		return nil, apiErr
+	}
+	x, y, strategy, carrier, ok := chooseBubbleTapPoint(scope, view, ancestor, child)
+	if !ok {
+		return nil, tapNoCandidateError(action)
+	}
+	plan := &tapPlan{
+		x: x, y: y, strategy: strategy, action: string(action),
+		targetRef: child.Ref, targetRaw: &view.capture.Nodes[childInfo.rawIndex],
+		bubbleAncestorRaw: ancestorInput.targetRaw,
+		took:              time.Since(started),
+	}
+	if carrier != nil {
+		plan.carrierRef = carrier.node.Ref
+		plan.carrierRaw = carrier.raw
+	}
+	return plan, nil
+}
+
 // staticTextRefCheck keeps the text capability checks in the shared static
 // content pass and plans the focus tap with the same target-subtree planner as
 // tap. The returned plan carries the focus action; the text target itself is
@@ -1105,5 +1832,5 @@ func staticTextRefCheck(obs *observationState, operation *protocol.Operation) (
 	focus.Type = "tap"
 	focus.PressEnter, focus.HasPressEnter = false, false
 	focus.Bubble, focus.HasBubble = false, true
-	return staticTapRefCheck(obs, &focus)
+	return staticTapRefCheckLegacy(obs, &focus)
 }

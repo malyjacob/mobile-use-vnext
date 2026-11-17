@@ -59,6 +59,11 @@ const callerGuidance = "会话与推进：首次可直接 start({})；已有 act
 	"observation.quality=unstable/unknown 本身不阻止输入，不要仅为追求 stable 重复 observe。\n\n" +
 	"act 的 ref 点按/长按默认 bubble=true：原目标完全没有 tap、long_press、text 任一动作时，可交给最近的交互祖先做一次目标提升；" +
 	"该祖先不支持本动作或不能生成唯一安全落点时就按恢复指引调整调用，不继续向更远祖先查找。" +
+	"ref 静态拒绝按 code 区分：invalid_target 表示目标结构或几何不可用；" +
+	"unsupported_node_action 表示请求动作或提升前提不满足；" +
+	"no_safe_point 表示目标或祖先支持动作但固定候选都不可证明，此时不要向更远祖先找目标；" +
+	"details 的 reason、阻塞/歧义 refs 与建议坐标只提供调用线索，建议坐标不是执行授权。" +
+	"三类静态拒绝都不消费 O，按 recovery 用新 P 重试。" +
 	"坐标目标不传 bubble；需要只点原目标时显式 operation.bubble=false。" +
 	"一次调用只派发一个动作，不沿祖先逐层点击。\n\n" +
 	"text 默认 press_enter=true，一次调用完成自动聚焦、把目标框全文设为 text、精确读回，并在读回成功后至多发送一次 ENTER；" +
@@ -239,7 +244,12 @@ var toolCatalog = []toolDefinition{
 			"滚动用 operation.type=scroll + container 表达，swipe 是原始手势，只承诺手势而不承诺滚动语义。" +
 			"树块动作列里的 `swipe` 只是节点的源能力，不是 raw swipe 授权；" +
 			"`scroll` 不承诺真实方向、触摸消费者或业务安全。" +
-			"目标不支持该动作返回 422 unsupported_node_action，details 可带 nearest_actionable_ref 与 safe_point；" +
+			"目标不支持该动作返回 422 unsupported_node_action，目标结构或几何不可用返回 422 invalid_target，" +
+			"目标或提升祖先具备请求动作但固定候选都无法证明时返回 422 no_safe_point；" +
+			"后者不要向更远祖先查找替代目标，details 的 reason、阻塞或歧义 refs 与可选建议坐标提供调用线索，" +
+			"建议坐标不是执行授权，仍需新 P 独立准入。" +
+			"这三类静态拒绝都是 not_executed，不消费 O，按结果带的 recovery 处理；" +
+			"details 可带 nearest_actionable_ref 与 safe_point；" +
 			"坐标目标或树变化返回 target_changed。" +
 			"重验失败且结果带新 observation.id 时，用该 O 加新 P 重试，不必再 observe。" +
 			"`unstable`/`unknown` 质量（observation.quality）不阻止输入。" +

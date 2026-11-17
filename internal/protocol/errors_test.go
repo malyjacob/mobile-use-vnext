@@ -1,7 +1,9 @@
 package protocol
 
 import (
+	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -110,5 +112,83 @@ func TestAmbiguousPointStatus(t *testing.T) {
 	}
 	if got := AccessRecovery(CodeInvalidRequest); got != nil {
 		t.Fatalf("AccessRecovery(%s) = %+v, want no projection", CodeInvalidRequest, got)
+	}
+}
+
+// TestStaticTargetTaxonomyStatus pins the tap/long_press ref static error
+// classification: all three codes are 422 admission rejections, while the
+// unchanged node-level and hierarchy codes keep their statuses.
+func TestStaticTargetTaxonomyStatus(t *testing.T) {
+	for _, code := range []string{CodeInvalidTarget, CodeNoSafePoint, CodeNodeUnsupported} {
+		if got := Status(code); got != http.StatusUnprocessableEntity {
+			t.Fatalf("Status(%s) = %d, want 422", code, got)
+		}
+		if got := AccessRecovery(code); got != nil {
+			t.Fatalf("AccessRecovery(%s) = %+v, want no projection", code, got)
+		}
+	}
+	if got := Status(CodeNodeNotFound); got != http.StatusConflict {
+		t.Fatalf("Status(%s) = %d, want 409", CodeNodeNotFound, got)
+	}
+	if got := Status(CodeNodeDisabled); got != http.StatusConflict {
+		t.Fatalf("Status(%s) = %d, want 409", CodeNodeDisabled, got)
+	}
+	if got := Status(CodeHierarchyFailed); got != http.StatusServiceUnavailable {
+		t.Fatalf("Status(%s) = %d, want 503", CodeHierarchyFailed, got)
+	}
+}
+
+// TestAPIErrorPublicCopiesStaticTaxonomyDetails proves the new list and point
+// facts follow the same ownership rule as the baseline guidance details.
+func TestAPIErrorPublicCopiesStaticTaxonomyDetails(t *testing.T) {
+	source := NewError(http.StatusUnprocessableEntity, CodeNoSafePoint, "无安全落点").
+		WithDetail("reason", "mixed").
+		WithDetail("scope", "target").
+		WithDetail("scope_ref", "n2").
+		WithDetail("target_actions", []string{}).
+		WithDetail("occluding_refs", []string{"n3", "n4"}).
+		WithDetail("ambiguous_refs", []string{"n5", "n6"}).
+		WithDetail("owner_refs", []string{"n7"}).
+		WithDetail("suggested_point", map[string]any{"x": 0, "y": 0})
+	first := source.Public()
+	second := source.Public()
+
+	first.Details["occluding_refs"].([]string)[0] = "mutated"
+	first.Details["target_actions"] = []string{"tap"}
+	first.Details["suggested_point"].(map[string]any)["x"] = 99
+	if got := source.Details["occluding_refs"].([]string)[0]; got != "n3" {
+		t.Fatalf("Public shared occluding_refs with APIError: %#v", source.Details)
+	}
+	if got := source.Details["target_actions"].([]string); len(got) != 0 {
+		t.Fatalf("Public shared target_actions with APIError: %#v", source.Details)
+	}
+	if got := source.Details["suggested_point"].(map[string]any)["x"]; got != 0 {
+		t.Fatalf("Public shared suggested_point with APIError: %#v", source.Details)
+	}
+	if got := second.Details["suggested_point"].(map[string]any)["x"]; got != 0 {
+		t.Fatalf("two Public projections shared suggested_point: %#v", second.Details)
+	}
+	if actions, ok := second.Details["target_actions"].([]string); !ok || actions == nil || len(actions) != 0 {
+		t.Fatalf("empty target_actions lost its non-nil empty array: %#v", second.Details["target_actions"])
+	}
+}
+
+// TestErrorEncodesEmptyActionList proves the declared action array keeps `[]`
+// on the wire instead of becoming null or disappearing.
+func TestErrorEncodesEmptyActionList(t *testing.T) {
+	encoded, err := json.Marshal(&Error{
+		Code:    CodeNodeUnsupported,
+		Message: "目标节点不含点击、长按或文本输入能力",
+		Details: map[string]any{
+			"reason":         "target_missing_action",
+			"target_actions": []string{},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal error: %v", err)
+	}
+	text := string(encoded)
+	if !strings.Contains(text, `"target_actions":[]`) {
+		t.Fatalf("empty target_actions encoded as %s, want []", text)
 	}
 }

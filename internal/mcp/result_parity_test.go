@@ -236,6 +236,18 @@ func resultModeFixtures() []resultModeFixture {
 		`"error":{"code":"unsupported_node_action","message":"目标节点不支持点击","details":`+
 		`{"nearest_actionable_ref":"n516","safe_point":{"x":0,"y":0},"task_ids":[0,42]}},`+
 		`"recovery":{"entry":"retry","reference":"O","input_state":"effective"}}`)
+	// The static taxonomy carries empty action arrays, bounded ref lists and an
+	// optional suggested point; all three result modes must preserve them.
+	add("act", "unsupported_empty_actions", `{"operation_id":"P16","operation_state":"finished","outcome":"not_executed",`+
+		`"error":{"code":"unsupported_node_action","message":"目标节点不含点击、长按或文本输入能力","details":`+
+		`{"reason":"target_missing_action","target_actions":[]}},`+
+		`"recovery":{"entry":"retry","reference":"O","input_state":"effective"}}`)
+	add("act", "no_safe_point_details", `{"operation_id":"P17","operation_state":"finished","outcome":"not_executed",`+
+		`"error":{"code":"no_safe_point","message":"未能从目标节点的固定候选中证明点击落点：存在多类失败","details":`+
+		`{"reason":"mixed","scope":"target","scope_ref":"n2",`+
+		`"occluding_refs":["n3","n4"],"ambiguous_refs":["n5"],`+
+		`"suggested_point":{"x":0,"y":0},"suggested_carrier_ref":"n6"}},`+
+		`"recovery":{"entry":"retry","reference":"O","input_state":"effective"}}`)
 	add("act", "scroll_effect_quality", `{"operation_id":"P1","outcome":"executed","phase":"completed","effect":{"state":"observed"},"target_reference":"O1","observation":{"status":"complete","id":"O2","origin":"P1","revision":2,"quality":{"state":"unstable","samples":5,"stop_reason":"max_samples"},"tree":`+testFullTreeJSON+`}}`)
 	add("act", "scroll_effect_unknown", `{"operation_id":"P1","outcome":"uncertain","effect":{"state":"unknown"},"observation":{"status":"complete","id":"O3","quality":{"state":"unknown","samples":0,"stop_reason":"not_sampled"}},"error":{"code":"action_unknown","message":"动作结果不确定"}}`)
 	add("act", "text_input_enter_deferred", `{"operation_id":"P1","outcome":"uncertain","text_input":{"write":"executed","enter":"not_executed"}}`)
@@ -472,7 +484,7 @@ func TestHTTPModesSelectProjectionPerCall(t *testing.T) {
 func TestCatalogFingerprintBaseline(t *testing.T) {
 	// The catalog has twelve tools. This baseline covers the caller-oriented
 	// descriptions after the tree guide moved to the server instructions.
-	const baseline = "c5fdc545cc77882a4662b6a4524517475065cfc3248ec42223ae4c1189529928"
+	const baseline = "7efcd25506af221876900f4d8a2063f6c09e0658bcd9db350f8f8cfe75eef02e"
 	if got := CatalogFingerprint(); got != baseline {
 		t.Fatalf("catalog changed: %s", got)
 	}

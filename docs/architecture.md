@@ -183,9 +183,9 @@ raw `swipe` 仍是原始手势：起点 `from` 继续走完整内容身份、祖
 
 `tap`/`long_press` 的 `ref` 目标在有效 `bubble=true`（省略或显式 true）时，先判断原目标自身
 是否有请求动作：有动作时仍走直接目标规划；完全没有 `tap`/`long_press`/`text` 动作时，沿公开
-父链找到第一个 touch-interactive 祖先 A，只把本次动作规划给 A 一次。A 必须支持请求动作、
-未明确禁用、bounds 有效，并在 A 作用域内产生唯一可证安全点；否则静态返回
-`422 unsupported_node_action`，不继续寻找更远祖先。source 映射缺失或层级损坏仍按各自的
+父链找到第一个 touch-interactive 祖先 A，只把本次动作规划给 A 一次。A 不存在、不可用或
+不支持请求动作时静态返回 `422 unsupported_node_action`，A 支持动作但没有可证安全点时返回
+`422 no_safe_point`，都不继续寻找更远祖先。source 映射缺失或层级损坏仍按各自的
 `409 node_not_found`/`503 hierarchy_unavailable` 拒绝，不降级为可执行提升。静态 plan 同时
 绑定原 child C 与 A；认领后
 分别 Tier 1–3 匹配两者，并要求 A 仍是 fresh C 的祖先和最近交互祖先、C 的公开 Role 与完整
@@ -198,8 +198,14 @@ C 或 A 丢失/歧义、C 内容被替换、出现更近交互祖先或点落到
 bounds 的非空交集为基础，只在目标子树内扣除已知交互节点及其后代和 context 边界，依次测试
 原中心或交集中心、承载节点中心、中心线最长可证区间中点。候选点必须同时避开阻塞区，并让
 目标子树内包含该点的最深非 root、非 context 节点唯一属于目标非阻塞作用域。没有可证候选时
-在认领前返回 `422 unsupported_node_action`；目标原中心有可定位阻塞 owner 时附
-`occluding_ref`，该键不证明整个表面不可点。
+在认领前返回 `422 no_safe_point`；`reason` 区分 `blocked`/`ambiguous`/`owner_mismatch`/`mixed`，
+有界 ref 列表分别给出阻塞 owner、首个失败解析层的最深并列节点与整树唯一但越界的 owner。
+目标结构或几何不可用则由 `422 invalid_target` 的 `reason=root`/`context`/`no_geometry`
+表达。候选全失败后另做固定 3×3 网格探测，只有同时通过分支谓词与整树唯一归属/source 证明的
+点才作为 `suggested_point` 返回，并可附 `suggested_carrier_ref`；它是提示而非执行授权，
+不改变本次拒绝。`invalid_target`/`no_safe_point` 只覆盖 `tap`/`long_press` 的 ref 静态分支；
+`unsupported_node_action` 仅在该分支按新分类收窄，`scroll` 等既有用法不变。`occluding_ref`
+不再出现在该静态候选耗尽出口。
 
 认领后 ref 目标使用有界 Tier 1–3 双向唯一匹配：L1 不比较祖先 bounds、Focused/Selected，
 Tier 1 保持目标 bounds，Tier 2 允许受限微移；Tier 3 只移除三项内容均已知空且状态/能力已知
@@ -619,7 +625,7 @@ P 已无法定位时，`end(P)` 返回 `409 operation_unknown`、`phase=referenc
 ### 发布
 
 `release/versions.json` 是发行号、共同契约号与 Android versionCode 的唯一来源；当前为
-`release_version=0.16.0`、`contract_version=16`、`android_version_code=18`，构建生成
+`release_version=0.17.0`、`contract_version=17`、`android_version_code=19`，构建生成
 Go/Java 常量。`scripts/build-release.ps1` 产出整组产物与 `build/release/manifest.json`
 （源码提交、Go 版本、MCP SDK/协议、各产物 SHA-256/大小、Android 包名/版本、工具目录指纹）。
 工具目录固定为 `scripts/toolcatalog` 投影的 12 个工具，指纹是该目录注册顺序、名称、描述与

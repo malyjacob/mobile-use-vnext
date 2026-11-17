@@ -78,6 +78,9 @@ func TestServerInstructionsCarryCrossToolRules(t *testing.T) {
 		"target_reference",
 		"device_busy",
 		"pending cleanup",
+		"no_safe_point",
+		"不要向更远祖先找目标",
+		"建议坐标不是执行授权",
 	} {
 		if !strings.Contains(instructions, required) {
 			t.Errorf("server instructions lack %q", required)
@@ -166,7 +169,10 @@ func TestToolDescriptionsAreCallerOriented(t *testing.T) {
 			"text_input",
 			"bubble",
 			"另发 ENTER",
+			"invalid_target",
 			"unsupported_node_action",
+			"no_safe_point",
+			"reason",
 			"nearest_actionable_ref",
 			"safe_point",
 			"target_changed",

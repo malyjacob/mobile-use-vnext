@@ -798,8 +798,17 @@ func TestActTapContentGuidanceStopsAtNOrNearestAncestorBoundary(t *testing.T) {
 
 		result := h.actWith(t, "PguideN", tapRefRequest(start.Observation.ID, contentPublic.Ref))
 		requireNotExecuted(t, result, protocol.CodeNodeUnsupported)
-		if result.Error == nil || len(result.Error.Details) != 0 {
-			t.Fatalf("interactive target still produced guidance: %+v", result.Error)
+		if result.Error == nil || result.Error.Details["reason"] != "target_has_other_action" {
+			t.Fatalf("interactive target reason = %+v, want target_has_other_action", result.Error)
+		}
+		if actions, ok := result.Error.Details["target_actions"].([]string); !ok ||
+			len(actions) != 1 || actions[0] != "long_press" {
+			t.Fatalf("target_actions = %#v, want [long_press]", result.Error.Details["target_actions"])
+		}
+		for _, key := range []string{"nearest_actionable_ref", "safe_point", "safe_carrier_ref"} {
+			if _, exists := result.Error.Details[key]; exists {
+				t.Fatalf("interactive target still produced guidance %q: %+v", key, result.Error.Details)
+			}
 		}
 		requireReadyObservation(t, h, start.Observation.ID)
 	})
@@ -814,8 +823,13 @@ func TestActTapContentGuidanceStopsAtNOrNearestAncestorBoundary(t *testing.T) {
 
 		result := h.actWith(t, "PguideDisabled", tapRefRequest(start.Observation.ID, content.Ref))
 		requireNotExecuted(t, result, protocol.CodeNodeUnsupported)
-		if result.Error == nil || len(result.Error.Details) != 0 {
-			t.Fatalf("disabled nearest ancestor still produced guidance: %+v", result.Error)
+		if result.Error == nil || result.Error.Details["reason"] != "target_missing_action" {
+			t.Fatalf("disabled ancestor reason = %+v, want target_missing_action", result.Error)
+		}
+		for _, key := range []string{"nearest_actionable_ref", "safe_point", "safe_carrier_ref"} {
+			if _, exists := result.Error.Details[key]; exists {
+				t.Fatalf("disabled nearest ancestor still produced guidance %q: %+v", key, result.Error.Details)
+			}
 		}
 		requireReadyObservation(t, h, start.Observation.ID)
 	})
@@ -871,8 +885,13 @@ func TestActTapContentGuidanceRejectsDeeperExternalUniqueHit(t *testing.T) {
 	if result.Error == nil {
 		t.Fatal("content tap rejection carried no error")
 	}
-	if len(result.Error.Details) != 0 {
-		t.Fatalf("external deeper winner still produced guidance: %#v", result.Error.Details)
+	if result.Error.Details["reason"] != "target_missing_action" {
+		t.Fatalf("external deeper winner reason = %#v, want target_missing_action", result.Error.Details)
+	}
+	for _, key := range []string{"nearest_actionable_ref", "safe_point", "safe_carrier_ref"} {
+		if _, exists := result.Error.Details[key]; exists {
+			t.Fatalf("external deeper winner still produced guidance %q: %#v", key, result.Error.Details)
+		}
 	}
 	requireReadyObservation(t, h, start.Observation.ID)
 }
@@ -886,8 +905,13 @@ func TestActTapContentGuidanceRejectsSameDepthExternalAmbiguity(t *testing.T) {
 
 	result := h.actWith(t, "Psamedepth", tapRefRequest(start.Observation.ID, content.Ref))
 	requireNotExecuted(t, result, protocol.CodeNodeUnsupported)
-	if result.Error == nil || len(result.Error.Details) != 0 {
-		t.Fatalf("same-depth external ambiguity still produced guidance: %+v", result.Error)
+	if result.Error == nil || result.Error.Details["reason"] != "target_missing_action" {
+		t.Fatalf("same-depth external ambiguity reason = %+v, want target_missing_action", result.Error)
+	}
+	for _, key := range []string{"nearest_actionable_ref", "safe_point", "safe_carrier_ref"} {
+		if _, exists := result.Error.Details[key]; exists {
+			t.Fatalf("same-depth ambiguity still produced guidance %q: %#v", key, result.Error.Details)
+		}
 	}
 	if len(h.device.taps) != 0 {
 		t.Fatalf("ambiguous guidance rejection dispatched input: %v", h.device.taps)
@@ -956,12 +980,21 @@ func TestActTapFullyOccludedCardRejectsBeforeClaim(t *testing.T) {
 	probes, captures := h.device.probeCount(), h.device.captureCount()
 
 	result := h.actWith(t, "Poccluded", tapRefRequest(start.Observation.ID, card.Ref))
-	requireNotExecuted(t, result, protocol.CodeNodeUnsupported)
+	requireNotExecuted(t, result, protocol.CodeNoSafePoint)
 	if result.Error == nil {
 		t.Fatal("occluded card rejection carried no error")
 	}
-	if got := result.Error.Details["occluding_ref"]; got != cover.Ref {
-		t.Fatalf("occluding_ref = %#v, want %q", got, cover.Ref)
+	details := result.Error.Details
+	if details["reason"] != "blocked" || details["scope"] != "target" ||
+		details["scope_ref"] != card.Ref {
+		t.Fatalf("occluded details = %#v, want blocked/target/%q", details, card.Ref)
+	}
+	if refs, ok := details["occluding_refs"].([]string); !ok ||
+		len(refs) != 1 || refs[0] != cover.Ref {
+		t.Fatalf("occluding_refs = %#v, want [%q]", details["occluding_refs"], cover.Ref)
+	}
+	if _, exists := details["occluding_ref"]; exists {
+		t.Fatalf("legacy occluding_ref survived: %#v", details)
 	}
 	if len(h.device.taps) != 0 {
 		t.Fatalf("occluded card dispatched input: %v", h.device.taps)
@@ -983,12 +1016,22 @@ func TestActTapAmbiguousCardRejectsWithoutOccludingRef(t *testing.T) {
 	probes, captures := h.device.probeCount(), h.device.captureCount()
 
 	result := h.actWith(t, "Pambiguous", tapRefRequest(start.Observation.ID, card.Ref))
-	requireNotExecuted(t, result, protocol.CodeNodeUnsupported)
+	requireNotExecuted(t, result, protocol.CodeNoSafePoint)
 	if result.Error == nil {
 		t.Fatal("ambiguous card rejection carried no error")
 	}
-	if _, exists := result.Error.Details["occluding_ref"]; exists {
-		t.Fatalf("ambiguity-only rejection claimed a blocker: %#v", result.Error.Details)
+	details := result.Error.Details
+	if details["reason"] != "ambiguous" || details["scope"] != "target" ||
+		details["scope_ref"] != card.Ref {
+		t.Fatalf("ambiguous details = %#v, want ambiguous/target/%q", details, card.Ref)
+	}
+	if refs, ok := details["ambiguous_refs"].([]string); !ok || len(refs) != 2 {
+		t.Fatalf("ambiguous_refs = %#v, want two tied nodes", details["ambiguous_refs"])
+	}
+	for _, key := range []string{"occluding_refs", "occluding_ref"} {
+		if _, exists := details[key]; exists {
+			t.Fatalf("ambiguity-only rejection claimed a blocker %q: %#v", key, details)
+		}
 	}
 	if len(h.device.taps) != 0 {
 		t.Fatalf("ambiguous card dispatched input: %v", h.device.taps)
@@ -1175,9 +1218,14 @@ func TestActTapContextDescendantBlocksWithoutOwnBoundsOrSource(t *testing.T) {
 	}
 
 	result := h.actWith(t, "Pcontextblocked", tapRefRequest(start.Observation.ID, card.Ref))
-	requireNotExecuted(t, result, protocol.CodeNodeUnsupported)
-	if result.Error == nil || result.Error.Details["occluding_ref"] != contextNode.Ref {
+	requireNotExecuted(t, result, protocol.CodeNoSafePoint)
+	if result.Error == nil || result.Error.Details["reason"] != "blocked" {
 		t.Fatalf("context descendant did not block the card: %+v", result.Error)
+	}
+	if refs, ok := result.Error.Details["occluding_refs"].([]string); !ok ||
+		len(refs) != 1 || refs[0] != contextNode.Ref {
+		t.Fatalf("occluding_refs = %#v, want [%q]",
+			result.Error.Details["occluding_refs"], contextNode.Ref)
 	}
 	if len(h.device.taps) != 0 {
 		t.Fatalf("context-blocked card dispatched input: %v", h.device.taps)
@@ -1254,7 +1302,10 @@ func TestActTapCompetingDescendantCapabilitiesBlockBothActions(t *testing.T) {
 				}
 
 				result := h.actWith(t, "Pblock"+variant.name+operation, request)
-				requireNotExecuted(t, result, protocol.CodeNodeUnsupported)
+				requireNotExecuted(t, result, protocol.CodeNoSafePoint)
+				if result.Error == nil || result.Error.Details["reason"] != "blocked" {
+					t.Fatalf("%s/%s reason = %+v, want blocked", variant.name, operation, result.Error)
+				}
 				if len(h.device.taps) != 0 {
 					t.Fatalf("%s/%s dispatched input: %v", variant.name, operation, h.device.taps)
 				}

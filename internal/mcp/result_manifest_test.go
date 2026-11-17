@@ -299,6 +299,12 @@ func TestCancellationDetailsParity(t *testing.T) {
 							"nearest_actionable_ref": "n516",
 							"safe_point":             map[string]any{"x": 0, "y": 0},
 							"task_ids":               []int{0, 42},
+							"reason":                 "target_missing_action",
+							"target_actions":         []string{},
+							"scope":                  "target",
+							"scope_ref":              "n2",
+							"occluding_refs":         []string{"n3", "n4"},
+							"suggested_point":        map[string]any{"x": 1, "y": 2},
 						},
 					},
 				}
@@ -340,6 +346,21 @@ func TestCancellationDetailsParity(t *testing.T) {
 					taskIDs, ok := details["task_ids"].([]any)
 					if !ok || len(taskIDs) != 2 || taskIDs[0] != float64(0) || taskIDs[1] != float64(42) {
 						t.Fatalf("canonical details lost numeric array: %#v", details)
+					}
+					if details["reason"] != "target_missing_action" || details["scope"] != "target" ||
+						details["scope_ref"] != "n2" {
+						t.Fatalf("canonical details lost static taxonomy facts: %#v", details)
+					}
+					if actions, ok := details["target_actions"].([]any); !ok || len(actions) != 0 {
+						t.Fatalf("canonical details lost empty target_actions: %#v", details)
+					}
+					if refs, ok := details["occluding_refs"].([]any); !ok || len(refs) != 2 ||
+						refs[0] != "n3" || refs[1] != "n4" {
+						t.Fatalf("canonical details lost occluding_refs: %#v", details)
+					}
+					suggested, ok := details["suggested_point"].(map[string]any)
+					if !ok || suggested["x"] != float64(1) || suggested["y"] != float64(2) {
+						t.Fatalf("canonical details lost suggested_point: %#v", details)
 					}
 				} else {
 					if code != "call_cancelled" || message != "测试取消" {

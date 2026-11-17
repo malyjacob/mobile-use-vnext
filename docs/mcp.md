@@ -15,7 +15,7 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
   `wait_for`、`act`、`inspect`、`keepalive`、`end`、`app`、`notify`、`shell`、`diagnose`。
   不注册 `/health`、认证初始化、旧工具别名或旧协议回退。
 - 目录指纹是工具数、注册顺序、名称、描述与入参 schema 的 canonical SHA-256，当前为
-  `c5fdc545cc77882a4662b6a4524517475065cfc3248ec42223ae4c1189529928`；发布清单与探针按
+  `7efcd25506af221876900f4d8a2063f6c09e0658bcd9db350f8f8cfe75eef02e`；发布清单与探针按
   它比对实际 `tools/list`，任一条描述或 schema 变化都会改变该值。工具目录指纹不覆盖
   server instructions；instructions 由探针把 `server/discover` 返回的说明与构建内的固定
   说明源逐字节比较，并附加兼容 `initialize` 检查。
@@ -45,11 +45,19 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
 
 `tap`/`long_press` 的 `ref` 目标有效 `bubble=true`（省略或显式 true）时，原目标自身已有
 请求动作仍走直接目标规划；原目标完全没有 `tap`、`long_press`、`text` 动作时，只向最近的
-touch-interactive 祖先提升一次。该祖先必须支持请求动作并产生唯一可证安全点，不支持时不
+touch-interactive 祖先提升一次。该祖先不存在、不可用或不支持请求动作时返回
+`422 unsupported_node_action`，支持动作但没有可证安全点时返回 `422 no_safe_point`，都不
 继续向更远祖先查找。静态规划同时绑定原 child 与祖先；认领后重验两者、公开 Role 与完整
 Label、最近祖先关系及安全点，child 丢失或内容被替换返回 `409 target_changed`，零派发。
 有效 `bubble=false` 保持直接目标错误；坐标目标必须省略 `bubble`。该提升只在一次调用内
 派发一个动作，不模拟 DOM 多级事件传播。
+
+`tap`/`long_press` 的 ref 静态拒绝按 code 区分：`invalid_target` 表示目标结构或几何不可用，
+`unsupported_node_action` 表示请求动作或提升前提不满足（含祖先不可用），`no_safe_point` 表示有动作但
+固定候选都无法证明。`no_safe_point` 不是向祖先继续查找目标的指令；`error.details` 的
+`reason`、有界阻塞/歧义/归属 ref 列表与可选 `suggested_point` 只描述同一 O 上可用的调用线索。
+三类静态拒绝都不消费 O、结果为 `not_executed`；建议坐标不是执行授权，坐标重试须使用新 P
+并独立通过准入与重验。
 
 `text` 的 `press_enter` 省略或有效为 true 时，一次调用完成自动聚焦、将目标框全文设为 text、
 精确读回，并至多发送一次 ENTER；普通输入不需要先 tap 或另发 ENTER。显式 false 只自动聚焦、

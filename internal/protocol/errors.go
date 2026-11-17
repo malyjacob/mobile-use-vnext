@@ -11,8 +11,12 @@ import (
 // carry whitelisted controlled JSON facts: limit, budget, limit_ms, limit_s,
 // app_code, field, task_ids, allowed_kinds, allowed_scopes,
 // blocking_operation_id, start_operation_id, nearest_actionable_ref,
-// safe_carrier_ref, safe_point (x/y integers), and occluding_ref. They never
-// carry user text, device output, trees, commands or credentials.
+// safe_carrier_ref, safe_point (x/y integers), occluding_ref,
+// reason, target_actions, ancestor_ref, ancestor_actions, scope, scope_ref,
+// occluding_refs, ambiguous_refs, owner_refs, suggested_point,
+// suggested_carrier_ref. The last group belongs to the tap/long_press ref static
+// error taxonomy; no other tool inherits its reason or scope values. Details
+// never carry user text, device output, trees, commands or credentials.
 type APIError struct {
 	Code       string
 	Message    string
@@ -158,6 +162,8 @@ const (
 	CodeNodeNotFound       = "node_not_found"
 	CodeNodeDisabled       = "node_disabled"
 	CodeNodeUnsupported    = "unsupported_node_action"
+	CodeInvalidTarget      = "invalid_target"
+	CodeNoSafePoint        = "no_safe_point"
 	CodeInvalidCoordinates = "invalid_coordinates"
 	CodeAmbiguousPoint     = "ambiguous_point"
 	CodeInvalidKey         = "unsupported_key"
@@ -235,7 +241,8 @@ var ErrBusy = errors.New("device work position is occupied")
 func Status(code string) int {
 	switch code {
 	case CodeInvalidRequest, CodeReferenceInvalid, CodeInvalidCoordinates,
-		CodeAmbiguousPoint, CodeInvalidKey, CodeTextTooLong, CodeNodeUnsupported:
+		CodeAmbiguousPoint, CodeInvalidKey, CodeTextTooLong, CodeNodeUnsupported,
+		CodeInvalidTarget, CodeNoSafePoint:
 		return http.StatusUnprocessableEntity
 	case CodeUnauthorized, CodeForbidden:
 		return http.StatusUnauthorized
