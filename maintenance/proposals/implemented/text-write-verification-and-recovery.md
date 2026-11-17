@@ -1,6 +1,7 @@
 # 提案：简化 text 写入确认并补齐错误详情与恢复指引
 
-状态：提案，未实现。
+状态：已实现（实现提交 `b0e54a4fc91de239b677cc163c44c2cf5db46717`，2026-11-18）。
+实现与验证记录：[text-write-verification-and-recovery.md](../../verification/text-write-verification-and-recovery.md)。
 基线提交：`70607aa901f00a23fd718602e899716b6bb32e5f`（分支 `master`，2026-11-18）。
 适用范围：`act.operation.type=text` 的 ref/坐标目标、两种 `press_enter` 分支、错误结果、原 P 的查询与重放。
 影响范围：`internal/engine`、`internal/android`、`internal/protocol`、`internal/mcp`、相关测试/探针、版本生成与正式文档；复用固定 uiautomator JAR。
@@ -8,7 +9,7 @@
 
 本文引用的函数名、行号、常量与默认值均以该基线提交为准。实现前代码若前进，须重新核对
 `act.go`、`text_stage.go`、`recovery.go`、固定 JAR 哈希与 `release/versions.json`。
-本提案没有获得实施确认，不改变现行规范。独立审查结论不代替用户对提案的确认。
+提案编写时未获得实施确认；用户于 2026-11-18 明确要求按本提案实施，实现结果见 §11。
 
 ---
 
@@ -36,16 +37,16 @@
 
 | 基线落点 | 核对事实 |
 | --- | --- |
-| [act.go:979–1053](../../internal/engine/act.go#L979-L1053) | 两种 press_enter 都无条件点击聚焦，再采集/绑定，再 GetText，最后 SetText；false 仅跳过 ENTER/公开复合阶段 |
-| [act.go:1065–1128](../../internal/engine/act.go#L1065-L1128) | SetText 的 `Value` 未用于完成判断；随后重新采集、绑定、GetText。候选数不为 1 立即返回 target uncertain，延迟循环只在值尚不相等/未知时继续 |
-| [act.go:1166–1177](../../internal/engine/act.go#L1166-L1177) | 两种 text uncertain 构造器仅给 code/message，没有阶段或具体原因 |
-| [text.go:81–135](../../internal/android/text.go#L81-L135)、[text.go:210–241](../../internal/android/text.go#L210-L241) | 固定 set 响应要求四成员齐全，返回 `CandidateCount/Value/Issued/Accepted`；正常解析后 receipt 为 terminated，传输/畸形响应不伪造结束回执 |
+| [act.go:979–1053](../../../internal/engine/act.go#L979-L1053) | 两种 press_enter 都无条件点击聚焦，再采集/绑定，再 GetText，最后 SetText；false 仅跳过 ENTER/公开复合阶段 |
+| [act.go:1065–1128](../../../internal/engine/act.go#L1065-L1128) | SetText 的 `Value` 未用于完成判断；随后重新采集、绑定、GetText。候选数不为 1 立即返回 target uncertain，延迟循环只在值尚不相等/未知时继续 |
+| [act.go:1166–1177](../../../internal/engine/act.go#L1166-L1177) | 两种 text uncertain 构造器仅给 code/message，没有阶段或具体原因 |
+| [text.go:81–135](../../../internal/android/text.go#L81-L135)、[text.go:210–241](../../../internal/android/text.go#L210-L241) | 固定 set 响应要求四成员齐全，返回 `CandidateCount/Value/Issued/Accepted`；正常解析后 receipt 为 terminated，传输/畸形响应不伪造结束回执 |
 | 固定 JAR，SHA-256 `28361193DE3D13303543C13BDC7268C22EDECABFA4E68E6FBDFC35FFFE1406A3`；classes8.dex 的 DisplayBoundTextService 方法 | setTextOnDisplay 的指令偏移 0x0047 调用 performAction，0x004b 调用 readValue；readValue 的 0x0000 调用 refresh，0x0011 后读取 getText。候选计数在动作前取得，写后值来自同一节点刷新；refresh 失败返回 null，value 不是请求回显 |
-| [固定制品说明](../../third_party/uiautomator/README.md#patch-contents) | 候选须在指定 display 且 focused/editable/visible/enabled/non-password，并精确匹配结构属性与可见 bounds；`issued` 与 `accepted` 分别表达调用发生和框架布尔回执 |
-| [text_stage.go:19–61](../../internal/engine/text_stage.go#L19-L61)、[act.go:79–81](../../internal/engine/act.go#L79-L81) | 当前私有累计 text 阶段只在有效 press_enter=true 时初始化；false 的诊断/冻结若要使用派发事实，需要同步保存有界私有证据 |
-| [recovery.go:96–98](../../internal/engine/recovery.go#L96-L98)、[engine.go:1200–1207](../../internal/engine/engine.go#L1200-L1207) | uncertain 默认指向 status；finished P 通常重放原恢复投影，因此不能指望重复 status 将冻结的 text 改判成功 |
-| [errors.go:9–48](../../internal/protocol/errors.go#L9-L48)、[interface.md:428–444](../../docs/interface.md#L428-L444) | 统一存在 error.details，但 tap/long_press 的 reason 只适用其 ref 静态拒绝，不能直接套入 text |
-| [text.go:235–239](../../internal/android/text.go#L235-L239)、[eventlog/log.go:63–98](../../internal/eventlog/log.go#L63-L98) | set 日志提供 issued/accepted，但两键不在事件字段白名单，会被过滤 |
+| [固定制品说明](../../../third_party/uiautomator/README.md#patch-contents) | 候选须在指定 display 且 focused/editable/visible/enabled/non-password，并精确匹配结构属性与可见 bounds；`issued` 与 `accepted` 分别表达调用发生和框架布尔回执 |
+| [text_stage.go:19–61](../../../internal/engine/text_stage.go#L19-L61)、[act.go:79–81](../../../internal/engine/act.go#L79-L81) | 当前私有累计 text 阶段只在有效 press_enter=true 时初始化；false 的诊断/冻结若要使用派发事实，需要同步保存有界私有证据 |
+| [recovery.go:96–98](../../../internal/engine/recovery.go#L96-L98)、[engine.go:1200–1207](../../../internal/engine/engine.go#L1200-L1207) | uncertain 默认指向 status；finished P 通常重放原恢复投影，因此不能指望重复 status 将冻结的 text 改判成功 |
+| [errors.go:9–48](../../../internal/protocol/errors.go#L9-L48)、[interface.md:428–444](../../../docs/interface.md#L428-L444) | 统一存在 error.details，但 tap/long_press 的 reason 只适用其 ref 静态拒绝，不能直接套入 text |
+| [text.go:235–239](../../../internal/android/text.go#L235-L239)、[eventlog/log.go:63–98](../../../internal/eventlog/log.go#L63-L98) | set 日志提供 issued/accepted，但两键不在事件字段白名单，会被过滤 |
 
 本次只读调查运行了 text 相关定向测试，并通过未跟踪的 Go overlay 注入了：写后 RPC 候选数为
 0/2、值已改变而 accepted=false、写后采集时焦点丢失。前三类得到 target uncertain，最后一类
@@ -548,18 +549,36 @@ Windows 测试只支持开发检查，不作为 Linux 运行账本耐久证据�
 7. 独立只读 docs 审计，修正并复检 clean；先提交实现，提案状态保持“提案，未实现”。
 8. 实现提交存在后补 §11、验证记录和审查记录，移入 implemented 并重写链接，单独提交归档。
 
-## 11. 实现结果（归档时补写）
+## 11. 实现结果
 
-尚无实现提交。本节保留模板位置，确认和实现前不填写已落地结论或虚构 hash。
-归档时按维护流程补实现提交与验证记录链接，并重写本文件全部相对链接。
+实现提交：`b0e54a4fc91de239b677cc163c44c2cf5db46717`（2026-11-18，`master`）。
+实现与验证记录：[text-write-verification-and-recovery.md](../../verification/text-write-verification-and-recovery.md)。
 
 ### 11.1 已落地
 
-无。本提案尚未实施。
+| 提案条目 | 代码落点 |
+| --- | --- |
+| §4.1 目标与聚焦：已聚焦 ref 通过完整绑定门禁后跳过焦点 tap；其他目标一次必要聚焦；坐标不扩权 | `internal/engine/act.go` `dispatchText`、`focusTextRef`、`focusTextPoint` |
+| §4.2 写入完成证据：完整终止回执、`candidateCount=1`、`issued=true`、同节点刷新值精确相等；`accepted` 不单独否决；删除写前 GetText 与写后重新采集/重绑定/GetText | `internal/engine/act.go` `dispatchText`；`internal/android/text.go` `textSetResult` |
+| §4.3 未知/未派发/畸形回执：负计数、唯一未 issued、非唯一却 issued/accepted/value 均为畸形未知回执；三原语 dispatch 事实 | `internal/android/text.go`；`internal/device/errors.go` `ErrTextResultInvalid`；`internal/engine/text_stage.go` |
+| §4.4 ENTER 独立边界：一次只读前台核对与一次严格 GetText，随后至多一次 ENTER；失败保留 write executed | `internal/engine/act.go` `dispatchTextEnter` |
+| §4.5 有界私有事实与冻结：false 也初始化 `textStage`；累计原语、dispatch、认领绑定、`currentStage`；false 的 write 与 `KnownOutcome` 同锁提交；冻结区分撤销/期限 | `internal/engine/text_stage.go`、`internal/engine/ui_execution.go`、`internal/engine/retirement.go` |
+| §4.6 text 错误详情：`stage/reason/dispatch/candidate_count` 与阶段内 code/HTTP | `internal/engine/act.go` `textError`/`staticTextError`/`decorateTextRevalidateError`；`internal/engine/operations.go`；`internal/protocol/errors.go` |
+| §4.7 recovery：finished text uncertain 为 observe/P(retired)；实时账本/会话/recovering/设备/控制/忙覆盖到结果副本 | `internal/engine/recovery.go`、`internal/engine/text_recovery.go`、`internal/engine/status.go`、`internal/engine/engine.go` |
+| §6.1 接入层与文件同步：Android 组合校验、详情白名单、MCP 三模式、客户端解码 | `internal/android/text.go`、`internal/mcp/schema.go`、`internal/protocol/responses.go`、`internal/httpapi/server.go` |
+| §6.3 日志：批准 `issued`/`accepted` 与 text 事件字段；新增 `engine.text.finished` | `internal/eventlog/log.go`、`internal/engine/text_recovery.go` `logTextFinished` |
+| §6.5 版本与文档：0.18.0 / contract 18 / Android `versionCode=20`，docs 同步并经独立只读审计 | `release/versions.json`、生成文件、`docs/*`、`README.md` |
+| §8 测试：先红复现、android 组合校验、详情/恢复/冻结、HTTP/MCP 投影 | `internal/engine/text_write_evidence_test.go`、`internal/android/text_rpc_contract_test.go`、`internal/httpapi/text_status_test.go`、`internal/mcp/result_parity_test.go` |
 
 ### 11.2 与提案不同或未执行
 
-无实施偏离可记录。实机验证、版本生成、发布、部署与 docs 修改均未执行，因为当前仅获授权起草和审查提案。
+| 项 | 结论与理由 |
+| --- | --- |
+| 认领前静态 text 拒绝的 422 | 已实现，但 HTTP 状态原本只由 `protocol.Status(code)` 决定，同一 `text_target_uncertain` 在认领后必须为 409。为保留提案的 422，增加不序列化的 `Result.HTTPStatus` 传输提示，由 engine 在阶段特定状态时保存，`httpapi` 优先使用；首次结果、`status(P)` 与重复 P 一致。线缆 code/message/details 不变。 |
+| 异步更新/立即重建控件的实机比例 | 未执行。探针 App 只有同步单行输入框；未新增会改变发布范围的 fixture。相关分支由合成测试覆盖，未写成实机结论。 |
+| 明确多行输入框的精确相等成功 | 未执行。探针输入框为单行；实机执行了换行被应用改为空格的负例，返回 `verify/readback_mismatch` 且不发送 ENTER，与提案 §7.2 一致。 |
+| STOP/截止在五个阶段上的实机注入、稳定场景 10 次重复、primary 模式与其他设备/App 矩阵 | 未执行实机；前两项由合成测试覆盖，后两项未扩大矩阵。验证记录 §8 已列明。 |
+| 固定 JAR | 未修改，哈希仍为 `28361193DE3D13303543C13BDC7268C22EDECABFA4E68E6FBDFC35FFFE1406A3`。 |
 
 ---
 

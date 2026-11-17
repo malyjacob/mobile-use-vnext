@@ -5,7 +5,7 @@
 
 ## 1. 范围与基线
 
-- 提案：[text-write-verification-and-recovery.md](../proposals/text-write-verification-and-recovery.md)。
+- 提案：[text-write-verification-and-recovery.md](../proposals/implemented/text-write-verification-and-recovery.md)。
 - 代码基线：`70607aa901f00a23fd718602e899716b6bb32e5f`，`master`，2026-11-18。
 - 基线版本：0.17.0 / contract 17 / Android versionCode 19；本次没有修改版本源或生成文件。
 - 只使用本仓库源码、正式契约及固定制品，没有访问其他项目。
