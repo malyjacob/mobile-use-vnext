@@ -1,6 +1,7 @@
 # 提案：act 静态目标拒绝的稳定错误分类与可操作详情
 
-状态：提案，未实现。
+状态：已实现（实现提交 `a02d305f29f27fdfe6b63faf356116e137432c1a`，`2026-11-18`）。
+实现与验证记录：[act-static-error-taxonomy.md](../../verification/act-static-error-taxonomy.md)。
 基线提交：`4c60ca1649b79d482512e20813ddef30a9ae4678`（分支 `master`，`2026-11-17`）。
 适用范围：`act` 的 `tap`/`long_press` 且 `target.ref` 在认领前的静态拒绝——错误码、`message` 与
 `error.details`。不改坐标目标、`text`、`swipe`、`scroll`、`key`，不改候选顺序、落点算法、
@@ -18,15 +19,15 @@ Android 业务逻辑不变，但共同契约升级要求手机端整组 APK/服�
 版本源。
 
 分诊：取舍。当前共码行为与正式契约一致，本提案改变公开错误分类，不按实现缺陷处理。
-本文路线、枚举与取值均为建议，仍须按 [工程流程](../process.md) §5 确认后才能实施。
+本文路线、枚举与取值均为建议，仍须按 [工程流程](../../process.md) §5 确认后才能实施。
 本次仅审查与修订提案，不实施、发布或部署；不读取、不修改悬置的
 `maintenance/verification/tap-targeting-and-bubble-analysis.md`，也不以其中的结论作证据。
 
 本文引用的函数名、行号、常量与默认值均以该基线提交为准；实现落地前若代码已前进，须按当时的
-`HEAD` 重新核对，重点：[tap_scope.go](../../internal/engine/tap_scope.go)、
-[act.go](../../internal/engine/act.go)、[errors.go](../../internal/protocol/errors.go)、
-[schema.go](../../internal/mcp/schema.go)、[interface.md](../../docs/interface.md) 与
-[versions.json](../../release/versions.json)。
+`HEAD` 重新核对，重点：[tap_scope.go](../../../internal/engine/tap_scope.go)、
+[act.go](../../../internal/engine/act.go)、[errors.go](../../../internal/protocol/errors.go)、
+[schema.go](../../../internal/mcp/schema.go)、[interface.md](../../../docs/interface.md) 与
+[versions.json](../../../release/versions.json)。
 
 ---
 
@@ -77,28 +78,28 @@ O/P、STOP 与 `recovery` 的规则不变；静态拒绝自身不认领 O、零�
 ### 1.2 证据链
 
 1. **静态入口只按一个 code 返回。** `staticTapRefCheck`
-   （[tap_scope.go:1030-1088](../../internal/engine/tap_scope.go#L1030-L1088)）对 root/context/
+   （[tap_scope.go:1030-1088](../../../internal/engine/tap_scope.go#L1030-L1088)）对 root/context/
    无 bounds、缺动作、bubble 祖先问题分别返回 `422 unsupported_node_action`；直接目标的候选
    耗尽走 `tapNoCandidateError`
-   （[tap_scope.go:135-141](../../internal/engine/tap_scope.go#L135-L141)），bubble 的 A 候选
-   耗尽走同一函数（[tap_scope.go:1013-1016](../../internal/engine/tap_scope.go#L1013-L1016)）。
+   （[tap_scope.go:135-141](../../../internal/engine/tap_scope.go#L135-L141)），bubble 的 A 候选
+   耗尽走同一函数（[tap_scope.go:1013-1016](../../../internal/engine/tap_scope.go#L1013-L1016)）。
 2. **缺动作引导与候选耗尽走不同出口。** `tapUnsupportedWithGuidance`
-   （[tap_scope.go:771-784](../../internal/engine/tap_scope.go#L771-L784)）在“目标缺动作”时
-   尝试 `tapGuidanceFor`（[tap_scope.go:786-848](../../internal/engine/tap_scope.go#L786-L848)）；
+   （[tap_scope.go:771-784](../../../internal/engine/tap_scope.go#L771-L784)）在“目标缺动作”时
+   尝试 `tapGuidanceFor`（[tap_scope.go:786-848](../../../internal/engine/tap_scope.go#L786-L848)）；
    直接目标候选耗尽则直接返回 `tapNoCandidateError`，只可能附 `occluding_ref`
-   （[tap_scope.go:746-749](../../internal/engine/tap_scope.go#L746-L749)）。bubble 的
+   （[tap_scope.go:746-749](../../../internal/engine/tap_scope.go#L746-L749)）。bubble 的
    `planBubbleTapTarget` 在 `chooseBubbleTapPoint` 失败时返回同一句无落点错误，但没有任何
-   details（[tap_scope.go:1013-1016](../../internal/engine/tap_scope.go#L1013-L1016)）。
+   details（[tap_scope.go:1013-1016](../../../internal/engine/tap_scope.go#L1013-L1016)）。
 3. **静态规划确实是有限的。** `enumerateTapCandidates`
-   （[tap_scope.go:638-698](../../internal/engine/tap_scope.go#L638-L698)）只产生中心、carrier
+   （[tap_scope.go:638-698](../../../internal/engine/tap_scope.go#L638-L698)）只产生中心、carrier
    中心与两条中心线候选；`chooseTapPlan`
-   （[tap_scope.go:726-751](../../internal/engine/tap_scope.go#L726-L751)）逐个调用
-   `provesSubtreeTapPoint`（[tap_scope.go:555-598](../../internal/engine/tap_scope.go#L555-L598)）。
+   （[tap_scope.go:726-751](../../../internal/engine/tap_scope.go#L726-L751)）逐个调用
+   `provesSubtreeTapPoint`（[tap_scope.go:555-598](../../../internal/engine/tap_scope.go#L555-L598)）。
    所有候选失败后统一返回同一个错误出口，不区分失败类别。
 4. **全遮挡与同深并列都能复现。** `TestActTapFullyOccludedCardRejectsBeforeClaim`
-   （[act_tap_scope_test.go:950](../../internal/engine/act_tap_scope_test.go#L950)）构造卡片与
+   （[act_tap_scope_test.go:950](../../../internal/engine/act_tap_scope_test.go#L950)）构造卡片与
    同 bounds 的 `ImageButton`；`TestActTapAmbiguousCardRejectsWithoutOccludingRef`
-   （[act_tap_scope_test.go:978](../../internal/engine/act_tap_scope_test.go#L978)）构造两个
+   （[act_tap_scope_test.go:978](../../../internal/engine/act_tap_scope_test.go#L978)）构造两个
    bounds 相同的非交互子节点。两者在当前实现都返回 `not_executed/unsupported_node_action`、
    零 probe/capture/派发、O 保持 `ready`；前者带 `occluding_ref`，后者不带。两条用例于
    `2026-11-17` 在本次基线重新执行通过，包结果 `1.529s`；准确命令见本节末。用例证明现有
@@ -108,38 +109,38 @@ O/P、STOP 与 `recovery` 的规则不变；静态拒绝自身不认领 O、零�
    都失败”。这是算法边界分析；本次未新增或运行十字遮挡复现，不引用悬置记录的坐标结论。
 6. **静态拒绝的恢复语义是统一的。** 这些错误都发生在 claim 之前，`planRecovery` 对 act 的
    `not_executed` 且未认领的普通分支返回 `retry/O/effective`
-   （[recovery.go:120-129](../../internal/engine/recovery.go#L120-L129)）；O 仍 `ready`，
+   （[recovery.go:120-129](../../../internal/engine/recovery.go#L120-L129)）；O 仍 `ready`，
    没有后观察。该静态拒绝自身不消费 O，不保证并发 STOP、到期或其他调用之后 O 仍有效。
    新增 code 不应改变既有恢复、冻结与终态投影。
 7. **MCP 目前向调用方公开的是同一个 code。** `act` 描述只写“目标不支持该动作返回 422
    `unsupported_node_action`，details 可带 `nearest_actionable_ref` 与 `safe_point`”
-   （[schema.go:229-246](../../internal/mcp/schema.go#L229-L246)），没有区分“缺动作”与
+   （[schema.go:229-246](../../../internal/mcp/schema.go#L229-L246)），没有区分“缺动作”与
    “候选耗尽”，也没有告诉调用方后者不要向祖先找目标。
-8. **正式契约同样把两种语义写在同一段。** [interface.md:390-428](../../docs/interface.md#L390-L428)
+8. **正式契约同样把两种语义写在同一段。** [interface.md:390-428](../../../docs/interface.md#L390-L428)
    把 bubble 祖先失败与直接目标候选耗尽都描述为 `422 unsupported_node_action`；
-   [interface.md:469-480](../../docs/interface.md#L469-L480) 只约定静态拒绝的 recovery。
+   [interface.md:469-480](../../../docs/interface.md#L469-L480) 只约定静态拒绝的 recovery。
 9. **共享函数也被引导与 fresh 重验调用。** `tapGuidanceFor` 调用 `chooseTapPlan`
-   （[tap_scope.go:815-835](../../internal/engine/tap_scope.go#L815-L835)）；
+   （[tap_scope.go:815-835](../../../internal/engine/tap_scope.go#L815-L835)）；
    `chooseUnboundTapPlan` 的 fresh 回退也调用它
-   （[act_revalidation_policy.go:847-859](../../internal/engine/act_revalidation_policy.go#L847-L859)）。
+   （[act_revalidation_policy.go:847-859](../../../internal/engine/act_revalidation_policy.go#L847-L859)）。
    bubble 重验的作用域或落点失败转为 `target_changed`
-   （[act.go:611-623](../../internal/engine/act.go#L611-L623)）。不能直接在共享函数里启用新诊断。
+   （[act.go:611-623](../../../internal/engine/act.go#L611-L623)）。不能直接在共享函数里启用新诊断。
 10. **检查顺序有语义。** 入口先校验公开树，再查 ref、root、context/缺 bounds、disabled、
     动作/提升；只有进入规划才校验 source/raw 拓扑与基础矩形
-    （[tap_scope.go:1030-1087](../../internal/engine/tap_scope.go#L1030-L1087)、
-    [tap_scope.go:389-418](../../internal/engine/tap_scope.go#L389-L418)）。不能把所有几何或 source
+    （[tap_scope.go:1030-1087](../../../internal/engine/tap_scope.go#L1030-L1087)、
+    [tap_scope.go:389-418](../../../internal/engine/tap_scope.go#L389-L418)）。不能把所有几何或 source
     检查前移，再声称只改变错误表达。
 11. **ref 与坐标的证明不同。** 直接 ref 只检查子树；bubble 还调用整树 `resolvePoint`
-    （[tap_scope.go:874-896](../../internal/engine/tap_scope.go#L874-L896)）。坐标目标按整树最深唯一
+    （[tap_scope.go:874-896](../../../internal/engine/tap_scope.go#L874-L896)）。坐标目标按整树最深唯一
     节点绑定 source，再在 fresh 帧证明同一节点
-    （[point.go:97-130](../../internal/engine/point.go#L97-L130)、
-    [act.go:822-847](../../internal/engine/act.go#L822-L847)）。只通过直接 ref 谓词的点，可能在同一 O
+    （[point.go:97-130](../../../internal/engine/point.go#L97-L130)、
+    [act.go:822-847](../../../internal/engine/act.go#L822-L847)）。只通过直接 ref 谓词的点，可能在同一 O
     上就被坐标路径判歧义或绑定到外部节点。
 12. **目录指纹与发布门禁有明确边界。** `CatalogFingerprint` 包含工具数量、名称、描述与输入
-    schema，不包含 Instructions（[catalog.go:36-68](../../internal/mcp/catalog.go#L36-L68)）。手机清单要求
+    schema，不包含 Instructions（[catalog.go:36-68](../../../internal/mcp/catalog.go#L36-L68)）。手机清单要求
     已提交源码与 `source_dirty=false`，主机工具也要求配套手机清单
-    （[verify-manifest.ps1:174-196](../../scripts/verify-manifest.ps1#L174-L196)、
-    [build-host-tools.ps1:18-32](../../scripts/build-host-tools.ps1#L18-L32)）。正式构建、核验与部署
+    （[verify-manifest.ps1:174-196](../../../scripts/verify-manifest.ps1#L174-L196)、
+    [build-host-tools.ps1:18-32](../../../scripts/build-host-tools.ps1#L18-L32)）。正式构建、核验与部署
     必须排在实现提交之后。
 
 本次仅重跑现有基线用例，PowerShell 命令如下；退出码为 0，两个用例均 PASS：
@@ -279,7 +280,7 @@ return unsupported_node_action(reason=target_missing_action, 原有 guidance?)
 ```
 
 `nearestInteractiveAncestor` 仍只选最近一个含 `tap`/`long_press`/`text` 的祖先，跳过 context，
-不越过第一个交互祖先（[tap_scope.go:913-933](../../internal/engine/tap_scope.go#L913-L933)）。
+不越过第一个交互祖先（[tap_scope.go:913-933](../../../internal/engine/tap_scope.go#L913-L933)）。
 祖先引导 `tapGuidanceFor` 遇到 context 则停止，两者不能合并成同一个查找规则。
 `isTouchInteractive` 仍不包含单独的 `swipe`。因此 C 只有 `swipe` 且不提升时，仍属于
 `target_missing_action`，但 `target_actions` 必须如实为 `["swipe"]`。
@@ -670,19 +671,35 @@ message 的最终短句可在 §4.3 模板内校订；枚举、网格取值、�
 
 ## 11. 实现结果（归档时补写）
 
-实现提交：归档时填写真实 hash；当前没有本提案的实现提交。
-验证记录：实现后建立 `maintenance/verification/act-static-error-taxonomy.md`；归档移入
-`implemented/` 后链接为 `../../verification/act-static-error-taxonomy.md`，届时检查目标存在。
+实现提交：`a02d305f29f27fdfe6b63faf356116e137432c1a`（`2026-11-18`）。
+验证记录：[act-static-error-taxonomy.md](../../verification/act-static-error-taxonomy.md)。
 
 ### 11.1 已落地
 
 | 提案条目 | 落点 |
 | --- | --- |
+| 新增 `invalid_target`、`no_safe_point` 与 422 映射；扩展 details 白名单注释 | [internal/protocol/errors.go](../../../internal/protocol/errors.go)：`CodeInvalidTarget`、`CodeNoSafePoint`、`Status` |
+| 直接目标静态分类、baseline 检查顺序 | [internal/engine/tap_scope.go](../../../internal/engine/tap_scope.go)：`staticTapRefCheck` |
+| `unsupported_node_action` 封闭 reason、`target_actions`/`ancestor_*` | `tap_scope.go`：`newTapStaticUnsupportedError`、`tapPublicActions` |
+| `no_safe_point` 候选归集、`occluding_refs`/`ambiguous_refs`/`owner_refs` | `tap_scope.go`：`diagnoseTapStaticFailure`、`classifyTapStaticPoint`、`tapStaticCandidatePoints`、`tapStaticBubbleCandidatePoints` |
+| 固定 3×3 建议点与整树归属/source 证明 | `tap_scope.go`：`tapStaticGridPoints`、`tapFiveSixths`、`tapSuggestStaticPoint` |
+| bubble 祖先范围分类与诊断 | `tap_scope.go`：`planBubbleTapTarget`、`newTapNoSafePointError` |
+| text 聚焦保持基线错误 | `tap_scope.go`：`staticTapRefCheckLegacy`、`planBubbleTapTargetLegacy`；`staticTextRefCheck` 调用前者 |
+| `act` 描述与 Instructions 的三码/建议点指引 | [internal/mcp/schema.go](../../../internal/mcp/schema.go) |
+| 契约、静态检查、details 与恢复说明 | [docs/interface.md](../../../docs/interface.md)、[docs/architecture.md](../../../docs/architecture.md)、[docs/mcp.md](../../../docs/mcp.md)、README |
+| 契约 17 与发行 0.17.0 / Android 19 | [release/versions.json](../../../release/versions.json) 与生成常量 |
+| 分类、建议点、列表边界、谓词等价与投影测试 | [internal/engine/tap_static_error_test.go](../../../internal/engine/tap_static_error_test.go)、`act_tap_scope_test.go`、`internal/protocol/errors_test.go`、`internal/mcp/result_parity_test.go`、`result_manifest_test.go` |
 
 ### 11.2 与提案不同或未执行
 
 | 项 | 结论与理由 |
 | --- | --- |
+| text 聚焦错误 | 未接入新分类。`staticTextRefCheck` 使用基线实现副本，保持提案“不改 text 错误”的范围；新分类只覆盖 `tap`/`long_press`。 |
+| 实机分类、禁用/无 bounds、祖先与建议点样本 | 未执行。没有接入设备或部署指令；合成树单测覆盖分类与边界，不假定真实 UI 可稳定构造全部形态。 |
+| 发布清单、整组构建/核验、部署与手机覆盖安装 | 未执行。版本源已按建议值冻结并生成常量，但未安排发布窗口；未运行 `build-release.ps1`、`verify-manifest.ps1`、`deploy.ps1`。 |
+| 主机适配器重建/`-VerifyOnly` 与外部 MCP 宿主刷新 | 未执行。依赖整组发布决定；宿主刷新由用户操作，本次只验证源码说明、目录指纹与 Instructions 源。 |
+| 实机大树性能与分配矩阵 | 未执行。只记录 1002 节点/100 原候选的合成失败路径基准；不把它写成实机延迟或零分配保证。 |
+| 其他工具同名 code | 未改。`scroll` 等既有 `unsupported_node_action` 语义不变；`occluding_ref` 仍可能由基线文本聚焦检查产生，但不再出现在本次 tap/long_press 静态候选耗尽出口。 |
 
 ---
 
