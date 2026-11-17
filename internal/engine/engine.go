@@ -502,11 +502,14 @@ type operationState struct {
 	Kind            string
 	// AppKind is the app branch of this operation. It is the only fact a
 	// duplicate P or status(P) summary republishes.
-	AppKind       string
-	State         string
-	Phase         string
-	Outcome       string
-	Error         *protocol.Error
+	AppKind string
+	State   string
+	Phase   string
+	Outcome string
+	Error   *protocol.Error
+	// HTTPStatus is the phase-specific transport status hint for this
+	// operation error; it never appears on the wire.
+	HTTPStatus    int
 	SessionOrigin string
 	CreatedAt     time.Time
 	FinishedAt    time.Time
@@ -540,10 +543,12 @@ type operationState struct {
 	// written once, before the operation finishes, and a duplicate P or
 	// status(P) republishes it without an observation.
 	Wait *protocol.WaitResult
-	// TextStage is the private cumulative primitive evidence of one accepted
-	// default/true text action. TextInput is its public immutable snapshot.
-	TextStage *textStage
-	TextInput *protocol.TextInputView
+	// TextStage is the private cumulative primitive evidence of one claimed
+	// text action (both press_enter branches). TextInput is its public immutable
+	// snapshot and exists only for the composite branch.
+	TextStagePressEnter bool
+	TextStage           *textStage
+	TextInput           *protocol.TextInputView
 }
 
 type workState struct {
@@ -1171,6 +1176,7 @@ func (e *Engine) operationViewLocked(op *operationState) *protocol.Result {
 		cloned := *op.Error
 		cloned.Details = protocol.CloneErrorDetails(op.Error.Details)
 		result.Error = &cloned
+		result.HTTPStatus = op.HTTPStatus
 	}
 	if op.TextInput != nil {
 		snapshot := *op.TextInput
@@ -1205,6 +1211,9 @@ func (e *Engine) operationViewLocked(op *operationState) *protocol.Result {
 		result.Recovery = recoveryReplay(op.Recovery)
 	} else {
 		result.Recovery = op.Recovery
+	}
+	if op.Kind == "act" && op.ActAction == "text" && op.State == OperationFinished && op.Claimed {
+		e.applyLiveTextRecoveryLocked(op, result, time.Now())
 	}
 	if session := e.sessionByOriginLocked(op.SessionOrigin); session != nil {
 		result.Session = e.sessionViewLocked(session)

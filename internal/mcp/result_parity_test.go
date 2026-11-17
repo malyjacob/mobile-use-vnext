@@ -484,7 +484,7 @@ func TestHTTPModesSelectProjectionPerCall(t *testing.T) {
 func TestCatalogFingerprintBaseline(t *testing.T) {
 	// The catalog has twelve tools. This baseline covers the caller-oriented
 	// descriptions after the tree guide moved to the server instructions.
-	const baseline = "7efcd25506af221876900f4d8a2063f6c09e0658bcd9db350f8f8cfe75eef02e"
+	const baseline = "82da6a0ef0d577b214095d9cb22e2585812827c3ddc28ef16d453bf8ab262538"
 	if got := CatalogFingerprint(); got != baseline {
 		t.Fatalf("catalog changed: %s", got)
 	}
@@ -547,5 +547,63 @@ func TestCancellationWithSimultaneousServiceResult(t *testing.T) {
 				t.Fatalf("end count=%d want=%d", got, want)
 			}
 		})
+	}
+}
+
+// TestHTTPTextErrorDetailsAcrossModes proves the text detail group survives the
+// full HTTP → client → MCP structured/text path, including a nested dispatch
+// object and an explicit candidate_count=0.
+func TestHTTPTextErrorDetailsAcrossModes(t *testing.T) {
+	fake := newTestDeviceService(t)
+	fake.setHandler("act", func(w http.ResponseWriter, r *http.Request, body string) {
+		writeTestJSON(w, http.StatusConflict,
+			`{"operation_id":"P16","operation_state":"finished","outcome":"not_executed",`+
+				`"error":{"code":"text_target_uncertain","message":"目标输入对象无法唯一确认","details":`+
+				`{"stage":"write","reason":"no_unique_target","candidate_count":0,`+
+				`"dispatch":{"focus":"not_attempted","write":"not_dispatched","enter":"not_attempted"}}},`+
+				`"recovery":{"entry":"observe","reference":"P","input_state":"retired"}}`)
+	})
+	a := &adapter{client: newTestDeviceClient(t, fake)}
+	execution := a.run(context.Background(), testDefinitionByName(t, "act"),
+		[]byte(`{"reference":"O1","operation":{"type":"text","target":{"ref":"n1"},"text":"x","press_enter":false}}`))
+	if execution.result == nil || execution.result.Error == nil {
+		t.Fatalf("HTTP text failure was not projected: %#v", execution)
+	}
+	details := execution.result.Error.Details
+	if details["stage"] != "write" || details["reason"] != "no_unique_target" || details["candidate_count"] != float64(0) {
+		t.Fatalf("client lost text details: %#v", details)
+	}
+	dispatch, ok := details["dispatch"].(map[string]any)
+	if !ok || dispatch["focus"] != "not_attempted" || dispatch["write"] != "not_dispatched" ||
+		dispatch["enter"] != "not_attempted" {
+		t.Fatalf("client lost nested dispatch: %#v", details["dispatch"])
+	}
+
+	canonical, err := canonicalResult(execution)
+	if err != nil {
+		t.Fatalf("canonicalResult: %v", err)
+	}
+	want, err := decodeResultJSON(canonical)
+	if err != nil {
+		t.Fatalf("decode canonical: %v", err)
+	}
+	for _, mode := range []ResultMode{ResultModeBoth, ResultModeText, ResultModeStructured} {
+		out := projectExecution(execution, "act", mode)
+		if !out.IsError {
+			t.Fatalf("mode %v: text failure was not an error", mode)
+		}
+		if mode == ResultModeStructured {
+			if got := rmfStructuredBytes(t, out.StructuredContent); !bytes.Equal(got, canonical) {
+				t.Fatalf("mode %v: structuredContent differs from canonical", mode)
+			}
+			diagnostic := testTextContent(t, out)
+			requireTestContains(t, diagnostic, `"candidate_count":0`)
+			requireTestContains(t, diagnostic, `"dispatch":{"enter":"not_attempted","focus":"not_attempted","write":"not_dispatched"}`)
+			continue
+		}
+		decoded, flag, err := decodeResultText(t, testTextContent(t, out))
+		if err != nil || !flag || !reflect.DeepEqual(want, decoded) {
+			t.Fatalf("mode %v text parity error=%v flag=%t", mode, err, flag)
+		}
 	}
 }

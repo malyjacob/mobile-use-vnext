@@ -126,8 +126,12 @@ func (e *Engine) beginUIDispatchStage(work *workState, kind, primitive string) *
 	e.executionEvidenceRevision++
 	// The primitive becomes uncertain in the same lock that creates the
 	// may-dispatch token. A freeze that wins here cannot project not_executed
-	// for a command that may already be runnable.
+	// for a command that may already be runnable. The dispatch fact moves to
+	// unknown for the same reason.
 	e.markTextPrimitiveLocked(work, primitive, protocol.TextInputUncertain)
+	if op := e.operations[work.OperationID]; op != nil && op.TextStage != nil && primitive != "" {
+		textDispatchField(op.TextStage, primitive, textDispatchUnknown)
+	}
 	e.mu.Unlock()
 	if err := e.persistSync(work.Ctx); err != nil {
 		e.recordUIReceipt(work, device.DispatchNotDispatched)
@@ -168,29 +172,17 @@ func (e *Engine) clearTextPrimitive(work *workState, primitive string) {
 	switch primitive {
 	case "focus":
 		op.TextStage.focus = textFocusNotExecuted
+		op.TextStage.dispatchFocus = textDispatchNotDispatched
 	case "write":
 		op.TextStage.write = protocol.TextInputNotExecuted
+		op.TextStage.dispatchWrite = textDispatchNotDispatched
 	case "enter":
 		op.TextStage.enter = protocol.TextInputNotExecuted
+		op.TextStage.dispatchEnter = textDispatchNotDispatched
 	default:
 		return
 	}
 	e.publishTextInputLocked(op)
-}
-
-// textStageAuthorizedLocked requires the display identity fixed at text
-// admission to be unchanged. A session display switch invalidates any pending
-// text primitive rather than binding it to a different screen.
-func (e *Engine) textStageAuthorizedLocked(work *workState) bool {
-	if work == nil {
-		return false
-	}
-	op := e.operations[work.OperationID]
-	if op == nil || op.TextStage == nil {
-		return true
-	}
-	return e.session != nil && e.session.Display.ID == op.TextStage.displayID &&
-		e.session.Display.Generation == op.TextStage.displayGeneration
 }
 
 // recordUIReceipt closes the dispatch window of the original token even after

@@ -41,7 +41,7 @@ adb forward          主机 18881 → 服务；主机 18883 → 手机 MCP
    `adb forward`，也不需要 Agent token。
 
 只需要直连 HTTP 的 Agent 则使用 `http://127.0.0.1:18881/api/<tool>`、`agent_token` 与
-`X-Mobile-Use-Contract: 17`。
+`X-Mobile-Use-Contract: 18`。
 
 ## 1. 默认部署后的网络与进程
 
@@ -275,7 +275,7 @@ HTTP 宿主在原有 `Authorization` 头之外按需添加：
 
 ```text
 Authorization: Bearer <agent_token>
-X-Mobile-Use-Contract: 17
+X-Mobile-Use-Contract: 18
 Content-Type: application/json; charset=utf-8
 ```
 
@@ -283,7 +283,7 @@ Content-Type: application/json; charset=utf-8
 $deploy = Get-Content .state/deploy.json -Raw | ConvertFrom-Json
 $headers = @{
     Authorization           = "Bearer $($deploy.agent_token)"
-    'X-Mobile-Use-Contract' = '17'
+    'X-Mobile-Use-Contract' = '18'
 }
 Invoke-RestMethod http://127.0.0.1:18881/api/status -Method Post `
   -Headers $headers -ContentType 'application/json' -Body '{}'
@@ -328,10 +328,13 @@ Invoke-RestMethod http://127.0.0.1:18881/api/status -Method Post `
 ```
 
 ref 点按/长按默认 `bubble=true`，原目标完全没有 `tap`/`long_press`/`text` 任一动作时只向最近
-交互祖先提升一次；坐标目标不传 `bubble`。`text` 默认 `press_enter=true`，一次调用已包含自动
-聚焦、全文写入、精确读回和至多一次 ENTER，不需要先 tap 或另发 ENTER；草稿、多行、逐字段
-填写或清空但不提交时显式 `press_enter=false`。复合 text 结果携带 `text_input.write/enter`；
-`enter=uncertain` 先观察页面，不原样重发。
+交互祖先提升一次；坐标目标不传 `bubble`。`text` 默认 `press_enter=true`，一次调用已包含必要
+聚焦（已聚焦 ref 不重复点击）、全文写入、同节点刷新精确读回和至多一次 ENTER，不需要先 tap
+或另发 ENTER；草稿、多行、逐字段填写或清空但不提交时显式 `press_enter=false`。复合 text
+结果携带 `text_input.write/enter`；`enter=uncertain` 先观察页面，不原样重发。text 失败时
+读取 `error.details.stage/reason/dispatch` 区分未派发、目标不唯一、读回不等与 ENTER 问题，
+不要解析 `message`；写入或 ENTER 仍 uncertain 且会话活动时按 `recovery.entry=observe` 用
+新 P 获取现场，而不是循环 `status(P)`。
 
 P 的两种用法：`observe({"reference":"P9"})` 的 `reference` 引用本 Agent 已有的 P9 原操作，
 不是本次 `observe` 的请求体 P；本次调用仍使用自己的新 P。`status(P9)` 只返回操作摘要，
@@ -504,7 +507,7 @@ Header: Authorization: Bearer <mcp_token>
 两种选择：
 
 ```text
-直连 HTTP:  http://127.0.0.1:18880/api/<tool>   + agent_token + X-Mobile-Use-Contract: 17
+直连 HTTP:  http://127.0.0.1:18880/api/<tool>   + agent_token + X-Mobile-Use-Contract: 18
 MCP HTTP:   http://127.0.0.1:18882/mcp          + mcp_token
 ```
 
@@ -689,7 +692,7 @@ GET 判断工具是否可用。
 $deploy = Get-Content .state/deploy.json -Raw | ConvertFrom-Json
 $headers = @{
     Authorization           = "Bearer $($deploy.agent_token)"
-    'X-Mobile-Use-Contract' = '17'
+    'X-Mobile-Use-Contract' = '18'
 }
 $start = Invoke-RestMethod http://127.0.0.1:18881/api/start -Method Post `
   -Headers $headers -ContentType 'application/json' -Body '{}'

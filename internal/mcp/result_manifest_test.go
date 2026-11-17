@@ -47,6 +47,7 @@ var rmfKnownExclusions = map[string]string{
 	"protocol.AppView.HasRemainingPIDs":       "presence flag",
 	"protocol.AppView.HasRestarted":           "presence flag",
 	"protocol.ImageMeta.Base64":               "transport-only",
+	"protocol.Result.HTTPStatus":               "transport-only",
 	"protocol.ReadTreeValue.Full":             "variant wrapper",
 	"protocol.ReadTreeValue.Delta":            "variant wrapper",
 	// A read node carries exactly one definition anchor: its own ref or the

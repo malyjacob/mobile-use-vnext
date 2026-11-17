@@ -477,9 +477,14 @@ func (s *Server) finish(w http.ResponseWriter, result *protocol.Result, apiErr *
 	status := http.StatusOK
 	if result.Error != nil {
 		code := result.Error.Code
-		status = protocol.Status(code)
-		if status == http.StatusInternalServerError {
-			status = http.StatusConflict
+		// A phase-specific status is a transport hint only; the wire error keeps
+		// its code/message/details.
+		status = result.HTTPStatus
+		if status == 0 {
+			status = protocol.Status(code)
+			if status == http.StatusInternalServerError {
+				status = http.StatusConflict
+			}
 		}
 	} else if result.Observation != nil &&
 		(result.Observation.Status == "failed" ||

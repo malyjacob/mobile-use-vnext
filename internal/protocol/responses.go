@@ -752,6 +752,11 @@ type Result struct {
 	InputState          string
 	MessageID           string
 	Saved               *bool
+	// HTTPStatus is a transport-only hint for a controlled tool error whose
+	// HTTP status depends on the phase rather than the code alone (for example
+	// a pre-claim text target rejection is 422 while the same code after claim
+	// is 409). It is never serialized and never changes the wire error.
+	HTTPStatus int
 }
 
 // MarshalJSONTo writes the result fields in the fixed public order.

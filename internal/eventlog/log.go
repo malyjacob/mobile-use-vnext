@@ -95,6 +95,11 @@ var allowedKeys = map[string]struct{}{
 	// Condition-wait facts. The trigger is a closed enum, never the query or
 	// absent_query text that produced it.
 	"trigger": {},
+	// Text primitive facts. issued/accepted are framework booleans of the
+	// pinned set RPC; the three dispatch fields are closed enums. No input,
+	// readback value, length or hash is ever whitelisted.
+	"issued": {}, "accepted": {}, "stage": {},
+	"focus_dispatch": {}, "write_dispatch": {}, "enter_dispatch": {},
 }
 
 // Logger is a bounded, drop-counting event sink.

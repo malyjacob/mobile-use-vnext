@@ -227,7 +227,8 @@ func (f *fakeDevice) SetTextOnDisplay(_ context.Context, target device.TextTarge
 	defer f.mu.Unlock()
 	f.inputText = text
 	f.texts = append(f.texts, text)
-	return device.TextResult{CandidateCount: 1, Issued: true, Accepted: true, Receipt: device.DispatchTerminated}, nil
+	return device.TextResult{CandidateCount: 1, Value: &text, Issued: true, Accepted: true,
+		Receipt: device.DispatchTerminated}, nil
 }
 func (f *fakeDevice) Capture(_ context.Context, display device.Display) (device.Capture, error) {
 	f.mu.Lock()

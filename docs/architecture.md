@@ -228,17 +228,29 @@ Tier 1 保持目标 bounds，Tier 2 允许受限微移；Tier 3 只移除三项�
 
 ### text 的复合输入阶段
 
-`text` 的 `press_enter` 省略或有效为 true 时，engine 在成功认领 O 的同一状态锁内初始化私有
-`textStage` 与公开不可变 `text_input:{write,enter}` 快照；显式 false 分支不初始化该对象，
-继续既有输入链路。焦点 tap、SetText 与 ENTER 各自在创建 `may_dispatch` 令牌的同一短锁内
-推进为 `uncertain`；持久化与最终授权在锁外/后续锁完成，失败回退为确定未派发，回执返回后
-再按终止/确定未派发/不可用分别推进。SetText 只有终止回执、唯一目标、Issued/Accepted、独立精确
-readback 与提交门禁全部成立后才为 `write=executed`；ENTER 只在 write 已确认、同一 work/P、
-同一 display generation 和最终归属门禁通过后发送一次。两键均确认时在同一临界区写入
-`enter=executed` 与 `KnownOutcome=executed`。冻结从累计 focus/write/enter 事实推导整体
-outcome：全部原语未获派发许可才是 `not_executed`，两键 executed 才是 `executed`，其余
-（包括焦点 tap 已派发但两键未派发）均为 `uncertain`。status(P)、重复 P 与冻结结果只复制
-最后一次已提交快照，迟到回执不能回补，也不持久化为普通动作历史。
+`text` 在任何有效 `press_enter` 分支下，engine 都在成功认领 O 的同一状态锁内初始化私有
+`textStage`；仅有效 `press_enter=true` 另有公开不可变 `text_input:{write,enter}` 快照。
+`textStage` 保存累计 focus/write/enter 原语状态、三个原语的 dispatch 事实
+（`not_attempted`/`not_dispatched`/`dispatched`/`unknown`）、认领时的
+sessionEpoch/AppInstanceID/ModeGeneration/显示 ID 与 generation 不可变绑定，以及
+`currentStage`（target/focus/write/verify/enter）。焦点 tap、SetText 与 ENTER 各自在创建
+`may_dispatch` 令牌的同一短锁内把原语推进为 `uncertain`、dispatch 推进为 `unknown`；
+持久化与最终授权失败回退为确定未派发，回执返回后再按终止/确定未派发/不可用分别推进。
+ref 目标在新鲜帧中已聚焦且通过完整绑定时跳过焦点 tap，其他目标只做一次必要聚焦。
+
+写入完成证据是一次 SetText 的完整终止回执、`candidateCount=1`、`issued=true`，以及固定
+helper 对同一候选节点刷新后的完整 value 与请求精确相等；`accepted` 只是框架回执，不单独
+否决。engine 不再做写前 GetText，也不在写后重新采集/重绑定/GetText。候选成立后在同一短锁
+提交 `write=executed`；显式 false 同时提交 `KnownOutcome=executed`，复合分支保留 ENTER 的
+独立门禁。ENTER 只在 write 已确认、一次只读前台核对与一次同目标 GetText 均确认任务上下文与
+完整值后，经同一 work/P、同一显示绑定和最终归属门禁发送一次；两键均确认时在同一临界区写入
+`enter=executed` 与 `KnownOutcome=executed`。冻结从累计事实推导整体 outcome：全部原语未获
+派发许可才是 `not_executed`，两键 executed（或 false 的 write executed）才是 `executed`，
+其余（包括焦点 tap 已派发但两键未派发）均为 `uncertain`；`currentStage` 与 dispatch 快照
+随冻结错误一起投影，reason 为 `authorization_revoked` 或 `deadline_exceeded`。
+status(P)、重复 P 与冻结结果只复制最后一次已提交快照，迟到回执不能回补，也不持久化为普通
+动作历史。已认领 text 的恢复投影在只读结果副本上叠加实时会话/耐久/设备/忙覆盖；临时阻塞
+不写回原操作保存的语义入口。
 
 ### 条件等待（wait_for）
 
@@ -625,7 +637,7 @@ P 已无法定位时，`end(P)` 返回 `409 operation_unknown`、`phase=referenc
 ### 发布
 
 `release/versions.json` 是发行号、共同契约号与 Android versionCode 的唯一来源；当前为
-`release_version=0.17.0`、`contract_version=17`、`android_version_code=19`，构建生成
+`release_version=0.18.0`、`contract_version=18`、`android_version_code=20`，构建生成
 Go/Java 常量。`scripts/build-release.ps1` 产出整组产物与 `build/release/manifest.json`
 （源码提交、Go 版本、MCP SDK/协议、各产物 SHA-256/大小、Android 包名/版本、工具目录指纹）。
 工具目录固定为 `scripts/toolcatalog` 投影的 12 个工具，指纹是该目录注册顺序、名称、描述与

@@ -195,18 +195,64 @@ func (e *Engine) freezeWorkLocked(work *workState) {
 			return
 		}
 		op.Phase = "work_deadline"
+		if op.TextStage != nil {
+			op.Outcome = textOverallOutcome(op.TextStage)
+			if op.KnownOutcome != "" {
+				op.Outcome = op.KnownOutcome
+			}
+			e.freezeTextLocked(op, work)
+			return
+		}
 		op.Outcome = OutcomeNotExecuted
 		if work.DispatchUnknown || work.UI != nil && work.UI.record.State != uiStateNotDispatched {
 			op.Outcome = OutcomeUncertain
-		}
-		if op.TextStage != nil {
-			op.Outcome = textOverallOutcome(op.TextStage)
 		}
 		if op.KnownOutcome != "" {
 			op.Outcome = op.KnownOutcome
 		}
 		op.Error = &protocol.Error{Code: protocol.CodeStopped, Message: "原工作已撤销"}
 	}
+}
+
+// freezeTextLocked records the frozen text facts from the last timely stage
+// and dispatch snapshot. A work deadline with a live original session reports
+// deadline_exceeded; a revocation or any session change reports
+// authorization_revoked. The caller holds e.mu.
+func (e *Engine) freezeTextLocked(op *operationState, work *workState) {
+	stage := op.TextStage
+	now := time.Now()
+	deadline := !work.Deadline.IsZero() && !now.Before(work.Deadline)
+	if !deadline && work.Ctx != nil && work.Ctx.Err() == context.DeadlineExceeded {
+		deadline = true
+	}
+	sessionValid := e.session != nil && e.session.State != SessionEnded &&
+		e.session.Epoch == work.SessionEpoch && now.Before(e.session.ExpiresAt)
+	code, reason, message := protocol.CodeStopped, textReasonAuthorizationRevoked, "原工作已撤销"
+	if sessionValid && deadline {
+		code, reason, message = protocol.CodeTextResultUnknown, textReasonDeadlineExceeded,
+			"文字写入结果无法确认"
+	}
+	details := map[string]any{
+		"stage":  stage.currentStage,
+		"reason": reason,
+		"dispatch": map[string]any{
+			"focus": stage.dispatchFocus, "write": stage.dispatchWrite, "enter": stage.dispatchEnter,
+		},
+	}
+	if stage.failureKnown {
+		details["candidate_count"] = stage.failureCount
+	}
+	op.Error = &protocol.Error{Code: code, Message: message, Details: details}
+	inputState := inputStateFor(op.Kind, op.AppKind, op.Reference, code, op.Claimed)
+	if inputState == "" {
+		inputState = protocol.RecoveryInputRetired
+	}
+	op.Recovery = planRecovery(recoveryInput{
+		Tool: op.Kind, AppKind: op.AppKind, Reference: op.Reference, Code: code,
+		Phase: op.Phase, Outcome: op.Outcome, Claimed: op.Claimed,
+		InputState: inputState, ActAction: op.ActAction,
+		Cleanup: cleanupValue(e.cleanupForOriginLocked(op.SessionOrigin)),
+	})
 }
 
 func ledgerSessionOf(s *sessionState) *LedgerSession {

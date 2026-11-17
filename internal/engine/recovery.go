@@ -33,6 +33,10 @@ type recoveryInput struct {
 	// AppKind is the app branch of an app-tool request. It selects the app
 	// planner; an empty value means the request is not an app call.
 	AppKind string
+	// ActAction is the semantic act branch ("text", "scroll") recorded on the
+	// operation before the work position was taken. It selects the text
+	// terminal projection and never changes another action's plan.
+	ActAction string
 	// Cleanup is the cleanup fact visible when the result is finished:
 	// none / pending / unconfirmed / complete.
 	Cleanup string
@@ -92,6 +96,15 @@ func planRecoveryFor(in recoveryInput) *protocol.Recovery {
 		if in.Claimed || in.Tool != "act" {
 			return newRecovery(protocol.RecoveryEntryObserve, protocol.RecoveryReferenceP, in.InputState, "")
 		}
+	}
+	if in.Tool == "act" && in.ActAction == "text" && in.Claimed &&
+		in.Outcome == OutcomeUncertain {
+		// A finished text action whose write/ENTER facts remain unconfirmed is
+		// not a self-loop on status: the semantic next step is one new
+		// observation. Live session/durability/device blockers may still
+		// override this read-only projection.
+		return newRecovery(protocol.RecoveryEntryObserve, protocol.RecoveryReferenceP,
+			protocol.RecoveryInputRetired, "")
 	}
 	if in.Outcome == OutcomeUncertain {
 		return newRecovery(protocol.RecoveryEntryStatus, protocol.RecoveryReferenceP, in.InputState, "")

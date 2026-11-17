@@ -121,18 +121,24 @@ func (e *Engine) evictOperationsLocked() {
 	}
 }
 
-// recordScrollAction records the semantic action of one controlled-scroll
-// attempt before the work position is taken. The status lock is held only for
-// the one bounded write; an existing action is never overwritten.
-func (e *Engine) recordScrollAction(op *operationState) {
-	if op == nil {
+// recordActAction records the semantic action of one act attempt before the
+// work position is taken. The status lock is held only for the one bounded
+// write; an existing action is never overwritten.
+func (e *Engine) recordActAction(op *operationState, action string) {
+	if op == nil || action == "" {
 		return
 	}
 	e.mu.Lock()
 	if op.State == OperationRunning && op.ActAction == "" {
-		op.ActAction = "scroll"
+		op.ActAction = action
 	}
 	e.mu.Unlock()
+}
+
+// recordScrollAction records the semantic action of one controlled-scroll
+// attempt before the work position is taken.
+func (e *Engine) recordScrollAction(op *operationState) {
+	e.recordActAction(op, "scroll")
 }
 
 // commitScrollEffect saves the computed effect as a bounded operation fact. It
@@ -184,6 +190,9 @@ func (e *Engine) finishOperation(op *operationState, outcome, phase string, apiE
 	if apiErr != nil {
 		op.Error = apiErr.Public()
 		code = apiErr.Code
+		if apiErr.HTTPStatus != 0 && apiErr.HTTPStatus != protocol.Status(apiErr.Code) {
+			op.HTTPStatus = apiErr.HTTPStatus
+		}
 	}
 	inputState := op.InputState
 	if inputState == "" {
@@ -192,9 +201,15 @@ func (e *Engine) finishOperation(op *operationState, outcome, phase string, apiE
 	op.Recovery = planRecovery(recoveryInput{
 		Tool: op.Kind, AppKind: op.AppKind, Reference: op.Reference, Code: code, Phase: phase,
 		Outcome: outcome, Claimed: op.Claimed, Delivered: op.Delivered,
-		InputState: inputState,
-		Cleanup:    cleanupValue(e.cleanupForOriginLocked(op.SessionOrigin)),
+		InputState: inputState, ActAction: op.ActAction,
+		Cleanup: cleanupValue(e.cleanupForOriginLocked(op.SessionOrigin)),
 	})
+	if op.Kind == "act" && op.ActAction == "text" {
+		// Text recovery is projected read-only from the saved semantic plan plus
+		// live facts. Temporary durability blockers must not pollute the stored
+		// observe base.
+		return op.Recovery
+	}
 	op.Recovery = e.durabilityRecoveryLocked(protocol.RecoveryReferenceP, inputState, op.Recovery)
 	return op.Recovery
 }
@@ -504,6 +519,10 @@ func (e *Engine) finishWithError(op *operationState, phase string, apiErr *proto
 	result := e.newResult(op)
 	result.Outcome = apiErr.Outcome
 	result.Error = apiErr.Public()
+	if apiErr.HTTPStatus != 0 && apiErr.HTTPStatus != protocol.Status(apiErr.Code) {
+		// Preserve phase-specific HTTP status without changing the wire code.
+		result.HTTPStatus = apiErr.HTTPStatus
+	}
 	result.Recovery = e.finishOperation(op, apiErr.Outcome, phase, apiErr)
 	if apiErr.Details != nil {
 		if blocking, ok := apiErr.Details["blocking_operation_id"].(string); ok {

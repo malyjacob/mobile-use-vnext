@@ -3,6 +3,7 @@ package android
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -486,3 +487,117 @@ func TestTextTargetValidationBoundaries(t *testing.T) {
 	set := receiveTextRPC(t, requests)
 	requireTextArguments(t, set.request.Params, target, &replacement)
 }
+
+// TestSetTextRPCRejectsIncompleteOrContradictoryResults proves the decode layer
+// never turns a missing member, a negative count or a combination the fixed
+// helper cannot produce into 0/false/"" or into a successful result. Every such
+// response keeps the dispatch receipt unknown.
+func TestSetTextRPCRejectsIncompleteOrContradictoryResults(t *testing.T) {
+	target := textTargetFixture()
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"result is not an object", `{"jsonrpc":"2.0","id":1,"result":"done"}`},
+		{"missing candidateCount", `{"jsonrpc":"2.0","id":1,"result":{"value":null,"issued":false,"accepted":false}}`},
+		{"negative candidateCount", `{"jsonrpc":"2.0","id":1,"result":{"candidateCount":-1,"value":null,"issued":false,"accepted":false}}`},
+		{"fractional candidateCount", `{"jsonrpc":"2.0","id":1,"result":{"candidateCount":1.5,"value":null,"issued":true,"accepted":true}}`},
+		{"missing value", `{"jsonrpc":"2.0","id":1,"result":{"candidateCount":1,"issued":true,"accepted":true}}`},
+		{"missing issued", `{"jsonrpc":"2.0","id":1,"result":{"candidateCount":1,"value":"new","accepted":true}}`},
+		{"missing accepted", `{"jsonrpc":"2.0","id":1,"result":{"candidateCount":1,"value":"new","issued":true}}`},
+		{"non-string value", `{"jsonrpc":"2.0","id":1,"result":{"candidateCount":1,"value":7,"issued":true,"accepted":true}}`},
+		{"non-boolean issued", `{"jsonrpc":"2.0","id":1,"result":{"candidateCount":1,"value":"new","issued":"yes","accepted":true}}`},
+		{"unique but not issued", `{"jsonrpc":"2.0","id":1,"result":{"candidateCount":1,"value":"new","issued":false,"accepted":false}}`},
+		{"non-unique but issued", `{"jsonrpc":"2.0","id":1,"result":{"candidateCount":0,"value":null,"issued":true,"accepted":false}}`},
+		{"non-unique but accepted", `{"jsonrpc":"2.0","id":1,"result":{"candidateCount":0,"value":null,"issued":false,"accepted":true}}`},
+		{"non-unique with a value", `{"jsonrpc":"2.0","id":1,"result":{"candidateCount":2,"value":"new","issued":false,"accepted":false}}`},
+		{"negative count with issued", `{"jsonrpc":"2.0","id":1,"result":{"candidateCount":-2,"value":null,"issued":true,"accepted":true}}`},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.WriteString(w, testCase.body)
+			}))
+			defer server.Close()
+			d := rpcDevice(t, server)
+			result, err := d.SetTextOnDisplay(t.Context(), target, "new")
+			if err == nil || !errors.Is(err, device.ErrTextResultInvalid) {
+				t.Fatalf("error = %v, want ErrTextResultInvalid", err)
+			}
+			if result.Receipt != device.DispatchUnknown {
+				t.Fatalf("receipt = %d, want unknown", result.Receipt)
+			}
+		})
+	}
+}
+
+// TestSetTextRPCAcceptsTheTwoCompleteHelperShapes proves both shapes the fixed
+// helper can produce stay complete terminated results, including the
+// unique/issued/readback combination that does not require accepted=true.
+func TestSetTextRPCAcceptsTheTwoCompleteHelperShapes(t *testing.T) {
+	target := textTargetFixture()
+	cases := []struct {
+		name   string
+		body   string
+		count  int
+		value  *string
+		issued bool
+	}{
+		{name: "non-unique not called", body: `{"jsonrpc":"2.0","id":1,"result":{"candidateCount":0,"value":null,"issued":false,"accepted":false}}`, count: 0},
+		{name: "unique called but accepted false", body: `{"jsonrpc":"2.0","id":1,"result":{"candidateCount":1,"value":"new","issued":true,"accepted":false}}`, count: 1, value: stringPtr("new"), issued: true},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.WriteString(w, testCase.body)
+			}))
+			defer server.Close()
+			d := rpcDevice(t, server)
+			result, err := d.SetTextOnDisplay(t.Context(), target, "new")
+			if err != nil {
+				t.Fatalf("SetTextOnDisplay: %v", err)
+			}
+			if result.Receipt != device.DispatchTerminated || result.CandidateCount != testCase.count ||
+				result.Issued != testCase.issued {
+				t.Fatalf("result = %+v", result)
+			}
+			if testCase.value == nil {
+				if result.Value != nil {
+					t.Fatalf("value = %q, want nil", *result.Value)
+				}
+			} else if result.Value == nil || *result.Value != *testCase.value {
+				t.Fatalf("value = %v, want %q", result.Value, *testCase.value)
+			}
+		})
+	}
+}
+
+// TestGetTextRPCRequiresCountAndValue proves the ENTER gate cannot treat a
+// missing count or value as a valid exact readback.
+func TestGetTextRPCRequiresCountAndValue(t *testing.T) {
+	target := textTargetFixture()
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"missing candidateCount", `{"jsonrpc":"2.0","id":1,"result":{"value":"old"}}`},
+		{"missing value", `{"jsonrpc":"2.0","id":1,"result":{"candidateCount":1}}`},
+		{"negative candidateCount", `{"jsonrpc":"2.0","id":1,"result":{"candidateCount":-1,"value":"old"}}`},
+		{"non-string value", `{"jsonrpc":"2.0","id":1,"result":{"candidateCount":1,"value":true}}`},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.WriteString(w, testCase.body)
+			}))
+			defer server.Close()
+			d := rpcDevice(t, server)
+			if _, err := d.GetTextOnDisplay(t.Context(), target); err == nil ||
+				!errors.Is(err, device.ErrTextResultInvalid) {
+				t.Fatalf("error = %v, want ErrTextResultInvalid", err)
+			}
+		})
+	}
+}
+
+func stringPtr(value string) *string { return &value }

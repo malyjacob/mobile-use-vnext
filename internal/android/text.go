@@ -3,7 +3,6 @@ package android
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"time"
 
 	"github.com/malyjacob/mobile-use-vnext/internal/device"
@@ -36,105 +35,56 @@ func textArguments(target device.TextTarget, text *string) []any {
 	return arguments
 }
 
-// textResult decodes one patched text RPC map. Missing keys stay zero so the
-// caller can reject an incomplete answer instead of inventing values.
+// errTextResultInvalid classifies a complete-looking text RPC value whose
+// members or combination cannot come from the fixed helper. The code stays the
+// stable RPC code while the device sentinel lets the engine tell a malformed
+// result apart from a transport failure without importing this package.
+var errTextResultInvalid = newErr(CodeRPC, "the text result is invalid", device.ErrTextResultInvalid)
+
+// textResult decodes one patched get RPC map. Both candidateCount and value
+// must be present with usable types: the ENTER gate compares the refreshed
+// value of the same node, so a missing member is an invalid result, never an
+// empty string or a zero count. Optional issued/accepted members are validated
+// when present so a type-mixed response is not silently accepted.
 func textResult(value any) (device.TextResult, error) {
 	mapping, ok := value.(map[string]any)
 	if !ok {
-		return device.TextResult{}, errRPCMalformed
+		return device.TextResult{}, errTextResultInvalid
 	}
 	var result device.TextResult
-	if raw, present := mapping["candidateCount"]; present {
-		count, ok := asInt(raw)
-		if !ok {
-			return device.TextResult{}, errRPCMalformed
-		}
-		result.CandidateCount = count
-	}
-	if raw, present := mapping["value"]; present && raw != nil {
-		text, ok := raw.(string)
-		if !ok {
-			return device.TextResult{}, errRPCMalformed
-		}
-		result.Value = &text
-	}
-	if raw, present := mapping["issued"]; present {
-		issued, ok := raw.(bool)
-		if !ok {
-			return device.TextResult{}, errRPCMalformed
-		}
-		result.Issued = issued
-	}
-	if raw, present := mapping["accepted"]; present {
-		accepted, ok := raw.(bool)
-		if !ok {
-			return device.TextResult{}, errRPCMalformed
-		}
-		result.Accepted = accepted
-	}
-	return result, nil
-}
-
-// textSetResult requires every member documented by the pinned set RPC. A
-// complete method result proves that this call is no longer in flight even if
-// its semantic issued/accepted values are false.
-func textSetResult(value any) (device.TextResult, error) {
-	mapping, ok := value.(map[string]any)
-	if !ok {
-		return device.TextResult{}, errRPCMalformed
-	}
-	var result device.TextResult
-
 	rawCount, present := mapping["candidateCount"]
 	if !present {
-		return device.TextResult{}, errRPCMalformed
+		return device.TextResult{}, errTextResultInvalid
 	}
-	number, ok := rawCount.(float64)
-	if !ok {
-		return device.TextResult{}, errRPCMalformed
-	}
-	count := int(number)
-	if float64(count) != number {
-		return device.TextResult{}, errRPCMalformed
+	count, ok := strictInt(rawCount)
+	if !ok || count < 0 {
+		return device.TextResult{}, errTextResultInvalid
 	}
 	result.CandidateCount = count
-
 	rawValue, present := mapping["value"]
 	if !present {
-		return device.TextResult{}, errRPCMalformed
+		return device.TextResult{}, errTextResultInvalid
 	}
 	if rawValue != nil {
 		text, ok := rawValue.(string)
 		if !ok {
-			return device.TextResult{}, errRPCMalformed
+			return device.TextResult{}, errTextResultInvalid
 		}
 		result.Value = &text
 	}
-
-	rawIssued, present := mapping["issued"]
-	if !present {
-		return device.TextResult{}, errRPCMalformed
+	for _, name := range []string{"issued", "accepted"} {
+		if raw, present := mapping[name]; present {
+			if _, ok := raw.(bool); !ok {
+				return device.TextResult{}, errTextResultInvalid
+			}
+		}
 	}
-	issued, ok := rawIssued.(bool)
-	if !ok {
-		return device.TextResult{}, errRPCMalformed
-	}
-	result.Issued = issued
-
-	rawAccepted, present := mapping["accepted"]
-	if !present {
-		return device.TextResult{}, errRPCMalformed
-	}
-	accepted, ok := rawAccepted.(bool)
-	if !ok {
-		return device.TextResult{}, errRPCMalformed
-	}
-	result.Accepted = accepted
 	return result, nil
 }
 
-// asInt accepts the JSON number forms a Java Map can produce.
-func asInt(value any) (int, bool) {
+// strictInt accepts only JSON numeric integer forms. The patched helpers emit
+// JSON numbers, and a string or boolean must not become a count.
+func strictInt(value any) (int, bool) {
 	switch typed := value.(type) {
 	case float64:
 		if typed != float64(int(typed)) {
@@ -145,14 +95,79 @@ func asInt(value any) (int, bool) {
 		return typed, true
 	case int64:
 		return int(typed), true
-	case string:
-		parsed, err := strconv.Atoi(typed)
-		if err != nil {
-			return 0, false
-		}
-		return parsed, true
 	}
 	return 0, false
+}
+
+// textSetResult requires every member documented by the pinned set RPC and
+// rejects combinations the fixed helper cannot produce. A complete method
+// result proves that this call is no longer in flight even if its semantic
+// issued/accepted values are false; an incomplete or contradictory value is an
+// unknown receipt and is never converted to zero/false/"".
+//
+// The fixed helper has exactly two normal shapes: non-unique candidates never
+// call the write primitive (issued=false, accepted=false, value=null), and a
+// unique candidate calls it once (issued=true, with an optional refreshed
+// value). Unique-but-not-issued and non-unique-but-issued are contradictions.
+func textSetResult(value any) (device.TextResult, error) {
+	mapping, ok := value.(map[string]any)
+	if !ok {
+		return device.TextResult{}, errTextResultInvalid
+	}
+	var result device.TextResult
+
+	rawCount, present := mapping["candidateCount"]
+	if !present {
+		return device.TextResult{}, errTextResultInvalid
+	}
+	count, ok := strictInt(rawCount)
+	if !ok || count < 0 {
+		return device.TextResult{}, errTextResultInvalid
+	}
+	result.CandidateCount = count
+
+	rawValue, present := mapping["value"]
+	if !present {
+		return device.TextResult{}, errTextResultInvalid
+	}
+	if rawValue != nil {
+		text, ok := rawValue.(string)
+		if !ok {
+			return device.TextResult{}, errTextResultInvalid
+		}
+		result.Value = &text
+	}
+
+	rawIssued, present := mapping["issued"]
+	if !present {
+		return device.TextResult{}, errTextResultInvalid
+	}
+	issued, ok := rawIssued.(bool)
+	if !ok {
+		return device.TextResult{}, errTextResultInvalid
+	}
+	result.Issued = issued
+
+	rawAccepted, present := mapping["accepted"]
+	if !present {
+		return device.TextResult{}, errTextResultInvalid
+	}
+	accepted, ok := rawAccepted.(bool)
+	if !ok {
+		return device.TextResult{}, errTextResultInvalid
+	}
+	result.Accepted = accepted
+
+	if count == 1 {
+		if !issued {
+			return device.TextResult{}, errTextResultInvalid
+		}
+		return result, nil
+	}
+	if issued || accepted || result.Value != nil {
+		return device.TextResult{}, errTextResultInvalid
+	}
+	return result, nil
 }
 
 // validateTextTarget rejects a structurally incomplete identity before any

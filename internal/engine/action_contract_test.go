@@ -519,7 +519,8 @@ func TestActTextExplicitFalseOnlyInputs(t *testing.T) {
 }
 
 // TestActTextReadbackMismatchNeverSendsEnter proves the exact readback gate is
-// a hard precondition for ENTER.
+// a hard precondition for ENTER. The set call's own refreshed value confirmed
+// the write; the later ENTER probe sees a different value and stops.
 func TestActTextReadbackMismatchNeverSendsEnter(t *testing.T) {
 	bounds := device.Rect{Left: 100, Top: 300, Right: 900, Bottom: 400}
 	h, dev, obsRef, ref := newTextFlowHarness(t, bounds)
@@ -536,7 +537,7 @@ func TestActTextReadbackMismatchNeverSendsEnter(t *testing.T) {
 	if result.Outcome != OutcomeUncertain {
 		t.Fatalf("readback mismatch outcome = %q, want uncertain (%+v)", result.Outcome, result)
 	}
-	requireTextInput(t, result, protocol.TextInputUncertain, protocol.TextInputNotExecuted)
+	requireTextInput(t, result, protocol.TextInputExecuted, protocol.TextInputNotExecuted)
 	if dev.keyCalls != 0 {
 		t.Fatalf("readback mismatch sent %d ENTER calls, want 0", dev.keyCalls)
 	}

@@ -14,4 +14,9 @@ var (
 	// ErrShellStartUnconfirmed means the dispatch was issued but no start or
 	// finish evidence was readable within the bounded window.
 	ErrShellStartUnconfirmed = errors.New("managed shell start is unconfirmed")
+	// ErrTextResultInvalid means a patched text RPC returned a value whose
+	// members or semantic combination cannot be a complete result of the fixed
+	// helper. The engine classifies it as an unknown receipt, never as
+	// not-dispatched or as a successful readback.
+	ErrTextResultInvalid = errors.New("text rpc result is invalid")
 )

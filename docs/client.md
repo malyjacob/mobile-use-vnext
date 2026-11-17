@@ -19,7 +19,7 @@ instance, err := c.Discover(ctx)
 `POST /api/status {}` 取得当前准入事实（`can_start`、`blocking_code`、本 Agent 的
 `session`、`start_operation_id` 与 `cleanup`）。它不生成 P、不续租、不创建会话。
 
-当前共同契约为 `"17"`。契约版本不等时返回 `contract_mismatch`；客户端不刷新版本、不重发
+当前共同契约为 `"18"`。契约版本不等时返回 `contract_mismatch`；客户端不刷新版本、不重发
 业务动作。端口可应答、`/health` 正常都不等于 `can_start=true`。
 
 公开树与 detailed inspection 使用相同的完整节点布尔默认/unknown 规则，不携带 defaults。
@@ -124,6 +124,8 @@ MCP 适配器的严格解码拒绝；两个条件折叠后相同则是引擎准�
 也不在本地选择容器或起止点；`status(P)` 与重复 P 视图中的 `effect` 只按服务返回值读取，不重算。
 `Result.text_input` 出现时 `write` 与 `enter` 都必须存在且属于固定枚举，合法组合受响应
 解码器约束；客户端不补 `not_executed`、不根据 `phase` 推导阶段，也不在本地改写快照。
+`text` 错误的 `details` 保留嵌套 `dispatch` 对象、`stage`/`reason` 与 `candidate_count`；
+响应解码器不把 `0` 当成缺失、不改写枚举，客户端也不据此重建 `text_input` 或恢复入口。
 
 `Client.App(ctx, *protocol.AppRequest, ...Option)` 按 `Kind` 编码七个互斥分支：编码器只写所选
 分支的成员；分支不完整、缺少选择器，或 `open`/`kill` 使用不允许的选择器时，`Encode` 在发送

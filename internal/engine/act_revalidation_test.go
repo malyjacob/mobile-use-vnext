@@ -1545,7 +1545,10 @@ func TestTextFocusBinding(t *testing.T) {
 	})
 
 	t.Run("focus_switched_before_readback_uncertain", func(t *testing.T) {
-		// Covers N24: focus moves to another node before readback -> must finish uncertain without re-tapping.
+		// Covers N24: focus moves to another node before the ENTER probe -> must
+		// finish uncertain without re-tapping. The write itself is confirmed by
+		// the set call's refreshed value; the independent Get sees no unique
+		// focused target and ENTER is not dispatched.
 		h, rec := newRevalHarness(t)
 		makeCap := func(focusIdx int, val string) captureStep {
 			return func(_ *fakeDevice, display device.Display) (device.Capture, error) {
@@ -1555,14 +1558,16 @@ func TestTextFocusBinding(t *testing.T) {
 				return revalCapture(display, root, inp1, inp2), nil
 			}
 		}
+		rec.getTextFunc = func(context.Context, device.TextTarget) (device.TextResult, error) {
+			return device.TextResult{CandidateCount: 0}, nil
+		}
 		h.device.scriptCaptures(makeCap(0, ""))
 		start := h.startSession()
 		firstInput := mustFindNodeByTextOrResource(t, currentTree(t, h.engine).Root, "first")
 
 		h.device.scriptCaptures(
-			makeCap(0, ""),     // revalidate
-			makeCap(1, ""),     // afterTap
-			makeCap(2, "done"), // readback: focus jumped to field_2!
+			makeCap(0, ""), // revalidate
+			makeCap(1, ""), // afterTap
 		)
 		res, apiErr := h.engine.Act(context.Background(), "agent", "", &protocol.ActRequest{
 			Reference: start.Observation.ID,
@@ -1660,7 +1665,7 @@ func TestTextFocusBinding(t *testing.T) {
 			t.Fatalf("SetTextOnDisplay target = %+v, want fresh bounds %+v", setTargets, shiftedInputBounds)
 		}
 		getTargets := rec.recordedGetTextTargets()
-		if len(getTargets) < 2 || getTargets[0].Bounds != shiftedInputBounds {
+		if len(getTargets) < 1 || getTargets[0].Bounds != shiftedInputBounds {
 			t.Fatalf("GetTextOnDisplay targets = %+v, want fresh bounds %+v", getTargets, shiftedInputBounds)
 		}
 	})

@@ -14,9 +14,12 @@ import (
 // safe_carrier_ref, safe_point (x/y integers), occluding_ref,
 // reason, target_actions, ancestor_ref, ancestor_actions, scope, scope_ref,
 // occluding_refs, ambiguous_refs, owner_refs, suggested_point,
-// suggested_carrier_ref. The last group belongs to the tap/long_press ref static
-// error taxonomy; no other tool inherits its reason or scope values. Details
-// never carry user text, device output, trees, commands or credentials.
+// suggested_carrier_ref, stage, dispatch (focus/write/enter closed-state
+// object), candidate_count (non-negative integer). The reason/scope group
+// belongs to the tap/long_press ref static error taxonomy; the text action owns
+// stage/reason/dispatch/candidate_count and no other tool inherits either
+// vocabulary. Details never carry user text, device output, trees, commands or
+// credentials.
 type APIError struct {
 	Code       string
 	Message    string

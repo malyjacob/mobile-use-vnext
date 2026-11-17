@@ -143,6 +143,11 @@ func (e *Engine) statusOperationLocked(agent, reference string,
 			Cleanup: cleanupValue(cleanup),
 		})
 	}
+	if op.Kind == "act" && op.ActAction == "text" {
+		// The read-only text projection already applied the same durability
+		// override to this result copy; never write it back to the saved plan.
+		return result, nil
+	}
 	result.Recovery = e.durabilityRecoveryLocked(protocol.RecoveryReferenceP,
 		inputStateFor(op.Kind, op.AppKind, op.Reference, "", op.Claimed), result.Recovery)
 	return result, nil

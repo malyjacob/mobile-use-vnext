@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/malyjacob/mobile-use-vnext/internal/device"
@@ -26,8 +27,17 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 	if duplicate != nil {
 		return duplicate, nil
 	}
-	defer func() { e.applyFrozenResult(op, &finalResult) }()
+	defer func() {
+		e.applyFrozenResult(op, &finalResult)
+		e.applyLiveTextProjection(op, &finalResult)
+		e.logTextFinished(op, finalResult)
+	}()
 	e.setOperationReference(op, protocol.RecoveryReferenceO)
+	if req.Operation.Type == "text" {
+		// Record the semantic action before the work position is taken so a
+		// static rejection, busy exit or frozen P still knows it was text.
+		e.recordActAction(op, "text")
+	}
 
 	e.mu.Lock()
 	staticErr := e.staticActCheckLocked(agent, req.Reference, &req.Operation, time.Now())
@@ -76,7 +86,8 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 		e.mu.Unlock()
 		return e.finishWithError(op, "claim", claimErr), nil
 	}
-	if req.Operation.Type == "text" && req.Operation.EffectivePressEnter() {
+	if req.Operation.Type == "text" {
+		op.TextStagePressEnter = req.Operation.EffectivePressEnter()
 		e.initTextStageLocked(op, session)
 	}
 	e.touchSessionLocked(time.Now())
@@ -98,6 +109,9 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 	if revalidateErr != nil {
 		if e.workRevoked(work) || work.Ctx.Err() != nil {
 			revalidateErr = stoppedActRevalidation()
+		}
+		if req.Operation.Type == "text" {
+			e.decorateTextRevalidateError(op, revalidateErr)
 		}
 		e.logActPoint(op.ID, point, false)
 		revalidateErr.Outcome = OutcomeNotExecuted
@@ -297,12 +311,10 @@ func staticActContentCheck(obs *observationState, operation *protocol.Operation)
 				}
 			case "text":
 				if node.Role != protocol.RoleInput || !hasAction(node, protocol.ActionText) {
-					return nil, nil, protocol.NewError(422, protocol.CodeTextTargetUnknown,
-						"文字操作需要可确认的真实输入对象")
+					return nil, nil, staticTextError(textReasonTargetNotEditable)
 				}
 				if node.Protected == nil || *node.Protected {
-					return nil, nil, protocol.NewError(422, protocol.CodeTextTargetUnknown,
-						"无法确认该输入对象不受保护")
+					return nil, nil, staticTextError(textReasonTargetProtected)
 				}
 			}
 			return nil, nil, nil
@@ -966,194 +978,339 @@ func (e *Engine) dispatchAct(work *workState, op *operationState, obs *observati
 	return OutcomeExecuted, nil
 }
 
-// dispatchText performs the focus tap, display-bound set and independent live
-// readback. The set is never replayed and text is never rolled back. When the
-// effective press_enter value is true, the same call may dispatch one ENTER
-// after the exact readback and exposes the fixed text_input snapshot.
+// dispatchText performs at most one focus tap, one display-bound set and one
+// independent ENTER. A ref that is already focused in the fresh frame and
+// passes the complete binding gate skips the focus tap. The set call's own
+// refreshed value of the same node is the write completion evidence; no second
+// tree acquisition or GetText is used to re-prove the write. The set is never
+// replayed and text is never rolled back.
 func (e *Engine) dispatchText(work *workState, op *operationState, session *sessionState,
 	obs *observationState, operation *protocol.Operation,
 	fresh *device.Capture, frame *tapFrame) (string, *protocol.APIError) {
 	if operation == nil || operation.Target == nil || fresh == nil {
-		return OutcomeNotExecuted, tapTargetChanged()
+		return OutcomeNotExecuted, e.textError(op, 409, protocol.CodeTextTargetUnknown,
+			"无法唯一绑定目标输入对象", textStageTarget, textReasonTargetUnconfirmed,
+			OutcomeNotExecuted, nil)
 	}
 	composite := operation.EffectivePressEnter()
-	primitive := func(name string) string {
-		if composite {
-			return name
-		}
-		return ""
-	}
-	displayID := session.Display.ID
-	tapX, tapY := operation.Target.X, operation.Target.Y
-	var want *device.RawNode
-	if operation.Target.UseRef {
-		if frame == nil {
-			return OutcomeNotExecuted, tapTargetChanged()
-		}
-		tapX, tapY = frame.x, frame.y
-		want = frame.raw
-	}
-	if apiErr := e.beginUIDispatchStage(work, "tap", primitive("focus")); apiErr != nil {
-		return OutcomeNotExecuted, apiErr
-	}
-	receipt, tapErr := e.dev.Tap(work.Ctx, displayID, tapX, tapY)
-	e.recordUIReceipt(work, receipt)
-	if composite {
-		switch receipt {
-		case device.DispatchTerminated:
-			e.setTextPrimitive(work, op, "focus", textFocusExecuted)
-		case device.DispatchNotDispatched:
-			e.setTextPrimitive(work, op, "focus", textFocusNotExecuted)
-		default:
-			e.setTextPrimitive(work, op, "focus", textFocusUncertain)
-		}
-	}
-	if receipt == device.DispatchNotDispatched {
-		return OutcomeNotExecuted, protocol.NewError(503, protocol.CodeDeviceUnavailable, "输入未派发")
-	}
-	if tapErr != nil || receipt != device.DispatchTerminated {
-		return OutcomeUncertain, actionUncertain()
-	}
-	// The tap is a dispatched input side effect: from here every unknown is
-	// uncertain and the original observation is not returned.
-	if e.workRevoked(work) {
-		return OutcomeUncertain, actionUncertain()
-	}
-	afterTap, err := e.dev.Capture(work.Ctx, session.Display)
-	if err != nil {
-		return OutcomeUncertain, textTargetUncertain()
-	}
-	if e.workRevoked(work) || work.Ctx.Err() != nil {
-		return OutcomeUncertain, actionUncertain()
-	}
+
 	var bound textBinding
-	var ok bool
-	if want != nil {
-		bound, ok = bindFocusedText(
-			fresh, &afterTap, want, fresh.Foreground, tapX, tapY)
+	var apiErr *protocol.APIError
+	if operation.Target.UseRef {
+		if frame == nil || obs == nil || obs.Projection == nil || obs.Projection.Capture == nil {
+			return OutcomeNotExecuted, e.textError(op, 409, protocol.CodeTextTargetUnknown,
+				"无法唯一绑定目标输入对象", textStageTarget, textReasonTargetUnconfirmed,
+				OutcomeNotExecuted, nil)
+		}
+		tapX, tapY := frame.x, frame.y
+		want := frame.raw
+		// The no-tap fast path is allowed only for a ref that is already known
+		// focused and safe in the fresh frame, and only through the complete
+		// binder: anchor uniqueness, TaskID and source presence are unchanged.
+		if want != nil && want.Visible && want.Editable && want.HasFocused && want.Focused &&
+			want.HasEnabled && want.Enabled && want.HasPassword && !want.Password {
+			var ok bool
+			bound, ok = bindFocusedText(obs.Projection.Capture, fresh, want, obs.Foreground, tapX, tapY)
+			if !ok {
+				bound = textBinding{}
+			}
+		}
+		if bound.raw == nil {
+			bound, apiErr = e.focusTextRef(work, op, session, obs, fresh, want, tapX, tapY)
+			if apiErr != nil {
+				return apiErr.Outcome, apiErr
+			}
+		}
 	} else {
-		var raw *device.RawNode
-		raw, ok = bindFocusedTextAtPoint(&afterTap, nil, tapX, tapY)
-		bound = textBinding{raw: raw, mode: textNear}
-	}
-	if !ok {
-		return OutcomeUncertain, textTargetUncertain()
+		tapX, tapY := operation.Target.X, operation.Target.Y
+		bound, apiErr = e.focusTextPoint(work, op, session, fresh, tapX, tapY)
+		if apiErr != nil {
+			return apiErr.Outcome, apiErr
+		}
 	}
 	target := textTargetOf(bound.raw, session.Display)
-	current, err := e.dev.GetTextOnDisplay(work.Ctx, target)
-	if err != nil || current.CandidateCount != 1 {
-		return OutcomeUncertain, textTargetUncertain()
+
+	if !e.setTextStage(work, op, textStageWrite) {
+		return OutcomeUncertain, e.textError(op, 409, protocol.CodeStopped,
+			"原工作已撤销", e.textCurrentStage(op), textReasonAuthorizationRevoked,
+			OutcomeUncertain, nil)
 	}
-	if e.workRevoked(work) || work.Ctx.Err() != nil {
-		return OutcomeUncertain, actionUncertain()
-	}
-	if apiErr := e.beginUIDispatchStage(work, "text", primitive("write")); apiErr != nil {
-		return OutcomeUncertain, apiErr
+	if apiErr := e.beginUIDispatchStage(work, "text", "write"); apiErr != nil {
+		if apiErr.Code == protocol.CodeStopped {
+			return e.textFailureOutcome(op), e.textError(op, 409, protocol.CodeStopped,
+				"输入未派发：原工作已撤销", textStageWrite, textReasonAuthorizationRevoked,
+				e.textFailureOutcome(op), nil)
+		}
+		return e.textFailureOutcome(op), e.textError(op, 503, protocol.CodeDeviceUnavailable,
+			"输入未派发", textStageWrite, textReasonDispatchNotSent,
+			e.textFailureOutcome(op), nil)
 	}
 	result, err := e.dev.SetTextOnDisplay(work.Ctx, target, operation.Text)
 	e.recordUIReceipt(work, result.Receipt)
-	if composite {
-		switch result.Receipt {
-		case device.DispatchNotDispatched:
-			e.setTextPrimitive(work, op, "write", protocol.TextInputNotExecuted)
-		case device.DispatchTerminated:
-			// The write stays uncertain until the exact readback commits.
-		default:
-			e.setTextPrimitive(work, op, "write", protocol.TextInputUncertain)
-		}
+	if result.Receipt == device.DispatchNotDispatched {
+		e.commitTextReceipt(work, op, "write", result.Receipt, err)
+		return e.textFailureOutcome(op), e.textError(op, 503, protocol.CodeDeviceUnavailable,
+			"输入未派发", textStageWrite, textReasonDispatchNotSent,
+			e.textFailureOutcome(op), nil)
 	}
-	if err != nil || result.Receipt != device.DispatchTerminated {
-		return OutcomeUncertain, textResultUncertain()
+	if result.Receipt != device.DispatchTerminated {
+		e.commitTextReceipt(work, op, "write", result.Receipt, err)
+		reason := textReasonReceiptUnknown
+		if err != nil && errors.Is(err, device.ErrTextResultInvalid) {
+			reason = textReasonRPCResultInvalid
+		}
+		return OutcomeUncertain, e.textError(op, 409, protocol.CodeTextResultUnknown,
+			"文字写入结果无法确认", textStageWrite, reason, OutcomeUncertain, nil)
 	}
-	if result.CandidateCount != 1 || !result.Issued || !result.Accepted {
-		return OutcomeUncertain, textTargetUncertain()
+	e.commitTextReceipt(work, op, "write", device.DispatchTerminated, err)
+	if err != nil {
+		reason := textReasonReceiptUnknown
+		if errors.Is(err, device.ErrTextResultInvalid) {
+			reason = textReasonRPCResultInvalid
+		}
+		return OutcomeUncertain, e.textError(op, 409, protocol.CodeTextResultUnknown,
+			"文字写入结果无法确认", textStageWrite, reason, OutcomeUncertain, nil)
 	}
-	delays := []time.Duration{0, 100 * time.Millisecond, 250 * time.Millisecond,
-		500 * time.Millisecond, 1000 * time.Millisecond}
-	previous := &afterTap
-	for _, delay := range delays {
-		if delay > 0 {
-			timer := time.NewTimer(delay)
-			select {
-			case <-timer.C:
-			case <-work.Ctx.Done():
-				timer.Stop()
-				return OutcomeUncertain, actionUncertain()
-			}
-			timer.Stop()
+	if result.CandidateCount != 1 {
+		// A complete response with zero or multiple candidates proves the fixed
+		// helper never called the write primitive for this target. A response
+		// that nevertheless claims issuance or a value is contradictory and
+		// stays an unknown receipt.
+		if result.Issued || result.Accepted || result.Value != nil {
+			return OutcomeUncertain, e.textError(op, 409, protocol.CodeTextResultUnknown,
+				"文字写入结果无法确认", textStageWrite, textReasonRPCResultInvalid,
+				OutcomeUncertain, nil)
 		}
-		if e.workRevoked(work) {
-			return OutcomeUncertain, actionUncertain()
-		}
-		readCapture, captureErr := e.dev.Capture(work.Ctx, session.Display)
-		if captureErr != nil {
-			return OutcomeUncertain, textResultUncertain()
-		}
-		if e.workRevoked(work) || work.Ctx.Err() != nil {
-			return OutcomeUncertain, actionUncertain()
-		}
-		if want != nil {
-			bound, ok = bindFocusedText(
-				previous, &readCapture, bound.raw, fresh.Foreground, tapX, tapY)
-		} else {
-			var raw *device.RawNode
-			raw, ok = bindFocusedTextAtPoint(&readCapture, bound.raw, tapX, tapY)
-			bound = textBinding{raw: raw, mode: textNear}
-		}
-		if !ok {
-			return OutcomeUncertain, textResultUncertain()
-		}
-		previous = &readCapture
-		readTarget := textTargetOf(bound.raw, session.Display)
-		readback, readErr := e.dev.GetTextOnDisplay(work.Ctx, readTarget)
-		if readErr != nil {
-			return OutcomeUncertain, textResultUncertain()
-		}
-		if readback.CandidateCount != 1 {
-			return OutcomeUncertain, textTargetUncertain()
-		}
-		if readback.Value != nil && *readback.Value == operation.Text {
-			if !e.confirmDispatch(work) {
-				return OutcomeUncertain, actionUncertain()
-			}
-			if !composite {
-				return OutcomeExecuted, nil
-			}
-			if !e.writeTextExecuted(work, op) {
-				return OutcomeUncertain, actionUncertain()
-			}
-			return e.dispatchTextEnter(work, op, displayID)
-		}
+		e.setTextWriteNotDispatched(work, op)
+		count := result.CandidateCount
+		return e.textFailureOutcome(op), e.textError(op, 409, protocol.CodeTextTargetUnknown,
+			"目标输入对象无法唯一确认", textStageWrite, textReasonNoUniqueTarget,
+			e.textFailureOutcome(op), &count)
 	}
-	return OutcomeUncertain, textResultUncertain()
+	if !result.Issued {
+		// The decode layer rejects this contradiction; keep the same unknown
+		// receipt classification if a different adapter ever produces it.
+		return OutcomeUncertain, e.textError(op, 409, protocol.CodeTextResultUnknown,
+			"文字写入结果无法确认", textStageWrite, textReasonRPCResultInvalid,
+			OutcomeUncertain, nil)
+	}
+	if !e.noteTextWriteDispatched(work, op) {
+		return OutcomeUncertain, e.textError(op, 409, protocol.CodeStopped,
+			"原工作已撤销", e.textCurrentStage(op), textReasonAuthorizationRevoked,
+			OutcomeUncertain, nil)
+	}
+	count := 1
+	if result.Value == nil {
+		return OutcomeUncertain, e.textError(op, 409, protocol.CodeTextResultUnknown,
+			"文字写入结果无法确认", textStageVerify, textReasonReadbackUnavailable,
+			OutcomeUncertain, &count)
+	}
+	if *result.Value != operation.Text {
+		return OutcomeUncertain, e.textError(op, 409, protocol.CodeTextResultUnknown,
+			"目标输入框的完整内容与请求不一致", textStageVerify, textReasonReadbackMismatch,
+			OutcomeUncertain, &count)
+	}
+	if !e.commitTextWrite(work, op) {
+		return OutcomeUncertain, e.textError(op, 409, protocol.CodeStopped,
+			"原工作已撤销", e.textCurrentStage(op), textReasonAuthorizationRevoked,
+			OutcomeUncertain, nil)
+	}
+	if !composite {
+		return OutcomeExecuted, nil
+	}
+	return e.dispatchTextEnter(work, op, session, obs, target, operation.Text)
 }
 
-// dispatchTextEnter sends at most one ENTER after the write was committed. A
-// definite not-dispatched receipt leaves write=executed, enter=not_executed;
-// an unusable receipt leaves enter=uncertain. Neither case is replayed.
-func (e *Engine) dispatchTextEnter(work *workState, op *operationState,
-	displayID int) (string, *protocol.APIError) {
+// focusTextRef performs the one allowed focus tap for a ref target and binds
+// the focused field in the after-tap frame under the current strict rules.
+func (e *Engine) focusTextRef(work *workState, op *operationState, session *sessionState,
+	obs *observationState, fresh *device.Capture, want *device.RawNode,
+	tapX, tapY int) (textBinding, *protocol.APIError) {
+	if !e.setTextStage(work, op, textStageFocus) {
+		return textBinding{}, e.textError(op, 409, protocol.CodeStopped,
+			"原工作已撤销", textStageFocus, textReasonAuthorizationRevoked,
+			OutcomeUncertain, nil)
+	}
+	if apiErr := e.beginUIDispatchStage(work, "tap", "focus"); apiErr != nil {
+		return textBinding{}, e.focusTextBeginError(op, apiErr)
+	}
+	receipt, tapErr := e.dev.Tap(work.Ctx, session.Display.ID, tapX, tapY)
+	e.recordUIReceipt(work, receipt)
+	e.commitTextReceipt(work, op, "focus", receipt, tapErr)
+	if receipt == device.DispatchNotDispatched {
+		return textBinding{}, e.textError(op, 503, protocol.CodeDeviceUnavailable,
+			"输入未派发", textStageFocus, textReasonFocusNotSent,
+			e.textFailureOutcome(op), nil)
+	}
+	if tapErr != nil || receipt != device.DispatchTerminated {
+		return textBinding{}, e.textError(op, 504, protocol.CodeActionUnknown,
+			"输入已派发，但完成结果无法确认", textStageFocus, textReasonFocusUnconfirmed,
+			OutcomeUncertain, nil)
+	}
+	if e.workRevoked(work) {
+		return textBinding{}, e.textError(op, 409, protocol.CodeStopped,
+			"原工作已撤销", textStageFocus, textReasonAuthorizationRevoked,
+			OutcomeUncertain, nil)
+	}
+	afterTap, err := e.dev.Capture(work.Ctx, session.Display)
+	if err != nil {
+		return textBinding{}, e.textError(op, 409, protocol.CodeTextTargetUnknown,
+			"无法唯一绑定目标输入对象", textStageFocus, textReasonFocusUnconfirmed,
+			OutcomeUncertain, nil)
+	}
+	if e.workRevoked(work) || work.Ctx.Err() != nil {
+		return textBinding{}, e.textError(op, 409, protocol.CodeStopped,
+			"原工作已撤销", textStageFocus, textReasonAuthorizationRevoked,
+			OutcomeUncertain, nil)
+	}
+	bound, ok := bindFocusedText(fresh, &afterTap, want, fresh.Foreground, tapX, tapY)
+	if !ok {
+		return textBinding{}, e.textError(op, 409, protocol.CodeTextTargetUnknown,
+			"无法唯一绑定目标输入对象", textStageFocus, textReasonFocusUnconfirmed,
+			OutcomeUncertain, nil)
+	}
+	return bound, nil
+}
+
+// focusTextPoint preserves the coordinate-text path: the authorized point is
+// focused once and only a unique safe focused field covering it can bind.
+func (e *Engine) focusTextPoint(work *workState, op *operationState, session *sessionState,
+	fresh *device.Capture, tapX, tapY int) (textBinding, *protocol.APIError) {
+	if !e.setTextStage(work, op, textStageFocus) {
+		return textBinding{}, e.textError(op, 409, protocol.CodeStopped,
+			"原工作已撤销", textStageFocus, textReasonAuthorizationRevoked,
+			OutcomeUncertain, nil)
+	}
+	if apiErr := e.beginUIDispatchStage(work, "tap", "focus"); apiErr != nil {
+		return textBinding{}, e.focusTextBeginError(op, apiErr)
+	}
+	receipt, tapErr := e.dev.Tap(work.Ctx, session.Display.ID, tapX, tapY)
+	e.recordUIReceipt(work, receipt)
+	e.commitTextReceipt(work, op, "focus", receipt, tapErr)
+	if receipt == device.DispatchNotDispatched {
+		return textBinding{}, e.textError(op, 503, protocol.CodeDeviceUnavailable,
+			"输入未派发", textStageFocus, textReasonFocusNotSent,
+			e.textFailureOutcome(op), nil)
+	}
+	if tapErr != nil || receipt != device.DispatchTerminated {
+		return textBinding{}, e.textError(op, 504, protocol.CodeActionUnknown,
+			"输入已派发，但完成结果无法确认", textStageFocus, textReasonFocusUnconfirmed,
+			OutcomeUncertain, nil)
+	}
+	if e.workRevoked(work) {
+		return textBinding{}, e.textError(op, 409, protocol.CodeStopped,
+			"原工作已撤销", textStageFocus, textReasonAuthorizationRevoked,
+			OutcomeUncertain, nil)
+	}
+	afterTap, err := e.dev.Capture(work.Ctx, session.Display)
+	if err != nil {
+		return textBinding{}, e.textError(op, 409, protocol.CodeTextTargetUnknown,
+			"无法唯一绑定目标输入对象", textStageFocus, textReasonFocusUnconfirmed,
+			OutcomeUncertain, nil)
+	}
+	if e.workRevoked(work) || work.Ctx.Err() != nil {
+		return textBinding{}, e.textError(op, 409, protocol.CodeStopped,
+			"原工作已撤销", textStageFocus, textReasonAuthorizationRevoked,
+			OutcomeUncertain, nil)
+	}
+	raw, ok := bindFocusedTextAtPoint(&afterTap, nil, tapX, tapY)
+	if !ok {
+		return textBinding{}, e.textError(op, 409, protocol.CodeTextTargetUnknown,
+			"无法唯一绑定目标输入对象", textStageFocus, textReasonFocusUnconfirmed,
+			OutcomeUncertain, nil)
+	}
+	return textBinding{raw: raw, mode: textNear}, nil
+}
+
+func (e *Engine) focusTextBeginError(op *operationState, apiErr *protocol.APIError) *protocol.APIError {
+	if apiErr.Code == protocol.CodeStopped {
+		return e.textError(op, 409, protocol.CodeStopped,
+			"输入未派发：原工作已撤销", textStageFocus, textReasonAuthorizationRevoked,
+			e.textFailureOutcome(op), nil)
+	}
+	return e.textError(op, 503, protocol.CodeDeviceUnavailable,
+		"输入未派发", textStageFocus, textReasonFocusNotSent,
+		e.textFailureOutcome(op), nil)
+}
+
+// dispatchTextEnter performs the independent ENTER boundary. The write is
+// already confirmed; one read-only foreground check and one fresh exact read of
+// the same target decide whether ENTER may be authorized. It is sent at most
+// once and is never replayed.
+func (e *Engine) dispatchTextEnter(work *workState, op *operationState, session *sessionState,
+	obs *observationState, target device.TextTarget, text string) (string, *protocol.APIError) {
+	if !e.setTextStage(work, op, textStageEnter) {
+		return OutcomeUncertain, e.textError(op, 409, protocol.CodeStopped,
+			"原工作已撤销", textStageEnter, textReasonAuthorizationRevoked,
+			OutcomeUncertain, nil)
+	}
+	if e.workRevoked(work) {
+		return OutcomeUncertain, e.textError(op, 409, protocol.CodeStopped,
+			"原工作已撤销", textStageEnter, textReasonAuthorizationRevoked,
+			OutcomeUncertain, nil)
+	}
+	foreground, err := e.dev.Foreground(work.Ctx, session.Display.ID)
+	if err != nil || !sameTextTaskContext(obs.Foreground, foreground) {
+		return OutcomeUncertain, e.textError(op, 409, protocol.CodeTextTargetUnknown,
+			"无法确认 ENTER 的目标上下文", textStageEnter,
+			textReasonEnterContextUnconfirmed, OutcomeUncertain, nil)
+	}
+	if e.workRevoked(work) {
+		return OutcomeUncertain, e.textError(op, 409, protocol.CodeStopped,
+			"原工作已撤销", textStageEnter, textReasonAuthorizationRevoked,
+			OutcomeUncertain, nil)
+	}
+	read, readErr := e.dev.GetTextOnDisplay(work.Ctx, target)
+	if readErr != nil || read.CandidateCount != 1 || read.Value == nil || *read.Value != text {
+		var count *int
+		if readErr == nil {
+			count = &read.CandidateCount
+		}
+		return OutcomeUncertain, e.textError(op, 409, protocol.CodeTextTargetUnknown,
+			"无法确认 ENTER 的目标输入对象", textStageEnter,
+			textReasonEnterTargetUnconfirmed, OutcomeUncertain, count)
+	}
+	if e.workRevoked(work) || work.Ctx.Err() != nil {
+		return OutcomeUncertain, e.textError(op, 409, protocol.CodeStopped,
+			"原工作已撤销", textStageEnter, textReasonAuthorizationRevoked,
+			OutcomeUncertain, nil)
+	}
 	if !e.beginTextEnter(work, op) {
-		return OutcomeUncertain, actionUncertain()
+		return OutcomeUncertain, e.textError(op, 409, protocol.CodeStopped,
+			"原工作已撤销", textStageEnter, textReasonAuthorizationRevoked,
+			OutcomeUncertain, nil)
 	}
 	if apiErr := e.beginUIDispatchStage(work, "key", "enter"); apiErr != nil {
-		return OutcomeUncertain, apiErr
+		if apiErr.Code == protocol.CodeStopped {
+			return OutcomeUncertain, e.textError(op, 409, protocol.CodeStopped,
+				"输入未派发：原工作已撤销", textStageEnter,
+				textReasonAuthorizationRevoked, OutcomeUncertain, nil)
+		}
+		return OutcomeUncertain, e.textError(op, 504, protocol.CodeActionUnknown,
+			"ENTER 未派发", textStageEnter, textReasonEnterNotSent,
+			OutcomeUncertain, nil)
 	}
-	receipt, err := e.dev.Key(work.Ctx, displayID, "ENTER")
+	receipt, keyErr := e.dev.Key(work.Ctx, session.Display.ID, "ENTER")
 	e.recordUIReceipt(work, receipt)
-	switch receipt {
-	case device.DispatchNotDispatched:
-		e.setTextPrimitive(work, op, "enter", protocol.TextInputNotExecuted)
-		return OutcomeUncertain, actionUncertain()
-	case device.DispatchTerminated:
-		if err == nil && e.confirmTextEnter(work, op) {
+	if receipt == device.DispatchNotDispatched {
+		e.commitTextReceipt(work, op, "enter", receipt, keyErr)
+		return OutcomeUncertain, e.textError(op, 504, protocol.CodeActionUnknown,
+			"ENTER 未派发", textStageEnter, textReasonEnterNotSent,
+			OutcomeUncertain, nil)
+	}
+	if receipt == device.DispatchTerminated && keyErr == nil {
+		e.commitTextReceipt(work, op, "enter", receipt, nil)
+		if e.confirmTextEnter(work, op) {
 			return OutcomeExecuted, nil
 		}
-		return OutcomeUncertain, actionUncertain()
-	default:
-		e.setTextPrimitive(work, op, "enter", protocol.TextInputUncertain)
-		return OutcomeUncertain, actionUncertain()
+		return OutcomeUncertain, e.textError(op, 409, protocol.CodeStopped,
+			"原工作已撤销", textStageEnter, textReasonAuthorizationRevoked,
+			OutcomeUncertain, nil)
 	}
+	e.commitTextReceipt(work, op, "enter", receipt, keyErr)
+	return OutcomeUncertain, e.textError(op, 504, protocol.CodeActionUnknown,
+		"输入已派发，但完成结果无法确认", textStageEnter,
+		textReasonEnterUnconfirmed, OutcomeUncertain, nil)
 }
 
 func actionUncertain() *protocol.APIError {
@@ -1163,18 +1320,63 @@ func actionUncertain() *protocol.APIError {
 	}
 }
 
-func textTargetUncertain() *protocol.APIError {
+func staticTextError(reason string) *protocol.APIError {
+	message := "文字操作需要可确认的真实输入对象"
+	if reason == textReasonTargetProtected {
+		message = "无法确认该输入对象不受保护"
+	}
 	return &protocol.APIError{
-		Code: protocol.CodeTextTargetUnknown, Message: "无法唯一绑定目标输入对象",
-		HTTPStatus: 409, Outcome: OutcomeUncertain,
+		Code: protocol.CodeTextTargetUnknown, Message: message,
+		HTTPStatus: 422, Outcome: OutcomeNotExecuted,
+		Details: map[string]any{
+			"stage":  textStageTarget,
+			"reason": reason,
+			"dispatch": map[string]any{
+				"focus": textDispatchNotAttempted,
+				"write": textDispatchNotAttempted,
+				"enter": textDispatchNotAttempted,
+			},
+		},
 	}
 }
 
-func textResultUncertain() *protocol.APIError {
-	return &protocol.APIError{
-		Code: protocol.CodeTextResultUnknown, Message: "文字写入结果无法确认",
-		HTTPStatus: 409, Outcome: OutcomeUncertain,
+// decorateTextRevalidateError attaches the text target/focus detail group only
+// to failures that are explicitly about this text target or its revocation.
+// Public foreground, display and hierarchy errors keep their own contract.
+func (e *Engine) decorateTextRevalidateError(op *operationState, apiErr *protocol.APIError) {
+	if apiErr == nil || apiErr.Details != nil {
+		return
 	}
+	var reason string
+	switch apiErr.Code {
+	case protocol.CodeTargetChanged:
+		reason = textReasonTargetUnconfirmed
+	case protocol.CodeStopped:
+		reason = textReasonAuthorizationRevoked
+	default:
+		return
+	}
+	stage := e.textCurrentStage(op)
+	apiErr.Details = e.textDetails(op, stage, reason, nil)
+}
+
+// textDetails builds the fixed core detail group from the frozen dispatch
+// facts without changing the error or operation state.
+func (e *Engine) textDetails(op *operationState, stage, reason string, count *int) map[string]any {
+	e.mu.Lock()
+	focus, write, enter := textStageSnapshotLocked(op)
+	e.mu.Unlock()
+	details := map[string]any{
+		"stage":  stage,
+		"reason": reason,
+		"dispatch": map[string]any{
+			"focus": focus, "write": write, "enter": enter,
+		},
+	}
+	if count != nil {
+		details["candidate_count"] = *count
+	}
+	return details
 }
 
 type textBindingMode string

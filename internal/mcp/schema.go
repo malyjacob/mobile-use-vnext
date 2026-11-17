@@ -66,10 +66,13 @@ const callerGuidance = "会话与推进：首次可直接 start({})；已有 act
 	"三类静态拒绝都不消费 O，按 recovery 用新 P 重试。" +
 	"坐标目标不传 bubble；需要只点原目标时显式 operation.bubble=false。" +
 	"一次调用只派发一个动作，不沿祖先逐层点击。\n\n" +
-	"text 默认 press_enter=true，一次调用完成自动聚焦、把目标框全文设为 text、精确读回，并在读回成功后至多发送一次 ENTER；" +
-	"普通输入无需先 tap，也无需另发 ENTER。返回的 text_input 分别报告 write 与 enter 阶段。" +
+	"text 默认 press_enter=true，一次调用完成必要聚焦（已聚焦 ref 不重复点击）、把目标框全文设为 text，并以同一次写入调用中同一节点的实际刷新值精确读回；" +
+	"读回一致后至多发送一次 ENTER，普通输入无需先 tap，也无需另发 ENTER。返回的 text_input 分别报告 write 与 enter 阶段。" +
 	"仅填字、草稿、多行编辑、逐字段填写或清空但不提交时显式 operation.press_enter=false，只写入不发送 ENTER，也不返回 text_input。" +
 	"ENTER 只证明按键原语，不证明搜索、提交或导航成功；业务结果由后观察中的页面事实确认。" +
+	"text 错误的 details 固定给出 stage、reason 与 dispatch.focus/write/enter（not_attempted/not_dispatched/dispatched/unknown），" +
+	"据此区分尚未派发、目标不唯一、读回不可用或不等、ENTER 未派发或未知；不要解析 message。" +
+	"写入或 ENTER 仍 uncertain 且原会话活动时，按 recovery 直接 observe/P 查看当前完整值，不要循环 status，也不要原样重发。" +
 	"text_input.enter=uncertain 时先观察当前页面，不要原样重发 ENTER；write=executed,enter=not_executed 且原会话仍活动时，" +
 	"可取新 O 后按需单独发送 key=ENTER，不必重新填字。\n\n" +
 	"恢复：retry/O 表示尚未派发，改正参数后用同一工具重试；结果带新 observation.id 就用它，否则用原 O。" +
@@ -237,9 +240,11 @@ var toolCatalog = []toolDefinition{
 			"scroll 用 container、direction 与可选 amount（默认 page）；swipe 用 from/to 与可选 duration_ms；key 用 key 白名单。" +
 			"tap/long_press 的 ref 目标默认 bubble=true：原目标完全没有 tap、long_press、text 任一动作时只向最近交互祖先提升一次；" +
 			"该祖先不支持本动作时不再向更远祖先查找。坐标目标不带 bubble，显式 false 只点原目标。" +
-			"text 默认 press_enter=true，已包含自动聚焦、全文写入、精确读回和至多一次 ENTER；普通输入无需先 tap 或另发 ENTER。" +
+			"text 默认 press_enter=true，已包含必要聚焦（已聚焦 ref 不重复点击）、全文写入、同节点刷新精确读回和至多一次 ENTER；普通输入无需先 tap 或另发 ENTER。" +
 			"仅写入、草稿、多行或逐字段填写时显式 press_enter=false。" +
 			"省略/true 的 text 结果固定带 text_input:{write,enter}；显式 false 不返回该对象。" +
+			"text 失败按 details.stage/reason/dispatch 区分失败环节与原语派发（not_attempted/not_dispatched/dispatched/unknown），不要解析 message；" +
+			"写入或 ENTER uncertain 时按 recovery 观察当前完整值，不原样重发。" +
 			"image=true 在动作后的同一采集中附加 ImageContent。" +
 			"滚动用 operation.type=scroll + container 表达，swipe 是原始手势，只承诺手势而不承诺滚动语义。" +
 			"树块动作列里的 `swipe` 只是节点的源能力，不是 raw swipe 授权；" +
@@ -300,7 +305,7 @@ var toolCatalog = []toolDefinition{
         },
         "press_enter": {
           "type": "boolean",
-          "description": "仅 text 适用；省略按 true 处理。true 在精确读回后至多发送一次 ENTER 并返回 text_input；false 只自动聚焦、写入并读回，不发送 ENTER，也不返回 text_input。其他动作携带即被拒绝。"
+          "description": "仅 text 适用；省略按 true 处理。true 在同节点刷新精确读回后至多发送一次 ENTER 并返回 text_input；false 只做必要聚焦、写入并读回，不发送 ENTER，也不返回 text_input。其他动作携带即被拒绝。"
         },
         "container": {
           "description": "scroll 的滚动容器选择器：ref 或 x/y 坐标，二选一。ref 必须直接指向 role=scroll 节点（不做祖先晋升）；x/y 取该点所在的滚动容器。认领后需唯一确认同一容器，轨迹按当前安全区间重验或重算。",

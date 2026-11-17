@@ -15,7 +15,7 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
   `wait_for`、`act`、`inspect`、`keepalive`、`end`、`app`、`notify`、`shell`、`diagnose`。
   不注册 `/health`、认证初始化、旧工具别名或旧协议回退。
 - 目录指纹是工具数、注册顺序、名称、描述与入参 schema 的 canonical SHA-256，当前为
-  `7efcd25506af221876900f4d8a2063f6c09e0658bcd9db350f8f8cfe75eef02e`；发布清单与探针按
+  `82da6a0ef0d577b214095d9cb22e2585812827c3ddc28ef16d453bf8ab262538`；发布清单与探针按
   它比对实际 `tools/list`，任一条描述或 schema 变化都会改变该值。工具目录指纹不覆盖
   server instructions；instructions 由探针把 `server/discover` 返回的说明与构建内的固定
   说明源逐字节比较，并附加兼容 `initialize` 检查。
@@ -59,11 +59,17 @@ Label、最近祖先关系及安全点，child 丢失或内容被替换返回 `4
 三类静态拒绝都不消费 O、结果为 `not_executed`；建议坐标不是执行授权，坐标重试须使用新 P
 并独立通过准入与重验。
 
-`text` 的 `press_enter` 省略或有效为 true 时，一次调用完成自动聚焦、将目标框全文设为 text、
-精确读回，并至多发送一次 ENTER；普通输入不需要先 tap 或另发 ENTER。显式 false 只自动聚焦、
-写入并读回，不发送 ENTER，也不返回 `text_input`。复合 text 的 `text_input` 在首次结果、
-运行中 `status(P)`、重复 P 与冻结结果中保持同一份 `{write,enter}` 快照；ENTER 只证明按键
-原语，不证明业务提交，`enter=uncertain` 时先观察而不是原样重发。字段与合法组合见
+`text` 的 `press_enter` 省略或有效为 true 时，一次调用完成必要聚焦（已聚焦 ref 不重复点击）、
+将目标框全文设为 text、以同一次写入调用中同一节点的刷新值精确读回，并至多发送一次 ENTER；
+普通输入不需要先 tap 或另发 ENTER。显式 false 只做必要聚焦、写入并读回，不发送 ENTER，也不返回
+`text_input`。复合 text 的 `text_input` 在首次结果、运行中 `status(P)`、重复 P 与冻结结果中
+保持同一份 `{write,enter}` 快照；ENTER 只证明按键原语，不证明业务提交，`enter=uncertain`
+时先观察而不是原样重发。text 失败的 `error.details` 固定给出 `stage`、`reason` 与
+`dispatch.focus/write/enter`（`not_attempted|not_dispatched|dispatched|unknown`），
+可选 `candidate_count` 保留 `0`；MCP 的 structured/text/both 三种模式都保留同一组嵌套字段，
+调用方按枚举决策而不解析 `message`。写入或 ENTER 仍 uncertain 且原会话活动时，语义恢复直接
+指向 `observe`/`P`，实时会话/耐久/设备/忙阻塞才覆盖为 `end`/`status`/`user` 并给
+`blocking_code`。字段与合法组合见
 [接口契约](interface.md) §6。
 
 公共树语法与调用规则由 server instructions 发布：`server/discover` 与兼容 `initialize`
