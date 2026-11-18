@@ -15,7 +15,7 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
   `snap`、`wait_for`、`act`、`inspect`、`keepalive`、`end`、`app`、`notify`、`shell`、
   `diagnose`。不注册 `/health`、认证初始化、旧工具别名或旧协议回退。
 - 目录指纹是工具数、注册顺序、名称、描述与入参 schema 的 canonical SHA-256。当前源码的
-  工具目录指纹为 `f00f09510ffa4129a5dfbbd88b51b3e209b2dec677a2f99dfe332ea40035f3b8`。
+  工具目录指纹为 `e25fc67773f1d744ef3dd526685d19f863f4e9d5e6f5e8ccb5548f6690eacde4`。
   探针按工具名比对实际 `tools/list` 的描述和入参 schema，并核对只读注解。传入 `-manifest`
   时，探针将清单中的工具数和目录 SHA-256 分别与源码目录的对应值比对。探针将
   `server/discover` 返回的 server instructions 与构建内的固定说明源逐字节比较，并附加兼容
@@ -70,9 +70,13 @@ Label、最近祖先关系及安全点，child 丢失或内容被替换返回 `4
 时先观察而不是原样重发。text 失败的 `error.details` 固定给出 `stage`、`reason` 与
 `dispatch.focus/write/enter`（`not_attempted|not_dispatched|dispatched|unknown`），
 可选 `candidate_count` 保留 `0`；MCP 的 structured/text/both 三种模式都保留同一组嵌套字段，
-调用方按枚举决策而不解析 `message`。写入或 ENTER 仍 uncertain 且原会话活动时，语义恢复直接
-指向 `observe`/`P`，实时会话/耐久/设备/忙阻塞才覆盖为 `end`/`status`/`user` 并给
-`blocking_code`。字段与合法组合见
+调用方按枚举决策而不解析 `message`。已认领 `text` 的整体 `outcome=uncertain`，且结果自身的
+`recovery.entry=observe`、`recovery.reference=P` 时，直接 `observe` 核对当前框值/页面。该结果
+也包括仅 `focus` 已派发而 `write`/`enter` 尚未派发的情形。这个特定恢复覆盖通用的 `uncertain`
+先 `status` 规则。其 `reference` 使用原活动会话的具体归属 P（如 `session.origin` 或已知属于
+该会话的 `operation_id`），不能把枚举值 P 当作编号。实时会话/耐久/设备/忙阻塞才覆盖为
+`end`/`status`/`user` 并给 `blocking_code`。
+字段与合法组合见
 [接口契约](interface.md) §6。
 
 公共树语法与调用规则由 server instructions 发布：`server/discover` 与兼容 `initialize`
@@ -105,12 +109,13 @@ base 且新 delta 覆盖旧 delta。树块词表本身不变：树节点行的�
 同组成员，三种结果模式都只发送一个 `ImageContent`。`isError=false` 要求完整图片实际交付；
 重复 P 的无图摘要、失败、准入或传输错误均为 `isError=true`。取消见第 6 节。
 
-`wait_for` 的 schema 以 `reference` 与 `timeout` 为必填，`query`、`absent_query`、`stable`、
-`full`、`image` 可选：`timeout` 是 1–40 的整数，`stable=true` 时至少 2；两个条件字符串各
-至多 256 个码点。该工具的说明与结果契约：到时同样按成功返回并发布一个观察
-（条件或稳态命中复用候选帧；到时或采样上限退出时，最新成功轮询帧仍在 `CaptureMaxAge=15s`
-内且之后没有失败尝试则复用该帧，否则做一次终帧采集），调用方须检查 `wait.trigger` 与
-`wait.matched`，连续 3 帧稳定由 `observation.quality.state=stable` 表达；
+`observe.wait_ms` 是单次采集前的延迟毫秒数；等待公开树条件使用 `wait_for`。`wait_for` 的
+schema 以 `reference` 与 `timeout` 为必填，`query`、`absent_query`、`stable`、`full`、`image`
+可选：`timeout` 是 1–40 的整数，`stable=true` 时至少 2；两个条件字符串各至多 256 个码点。
+成功时检查 `wait.trigger` 和 `wait.matched`，直接用返回的新 `observation.id` 继续。
+`wait.trigger=timeout` 也可以成功返回。命中条件或满足稳定状态时复用候选帧。到时或采样上限
+退出时，若最新成功轮询帧仍在 `CaptureMaxAge=15s` 内且之后没有失败尝试，则复用该帧。否则
+做一次终帧采集。连续 3 帧稳定由 `observation.quality.state=stable` 表达；
 `wait.elapsed_ms` 计自准入完成至终帧发布，验证采集整体受 35 秒固定预留约束，实际耗时可
 超过 `timeout` 至多约 35 秒；两个条件只匹配当前公开可见树且 `stable=true` 对整树计算摘要，
 页面有倒计时或实时进度变化时应保持 `stable=false`。参数在适配器侧按同一严格解码器接入，

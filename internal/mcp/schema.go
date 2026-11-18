@@ -76,7 +76,7 @@ const callerGuidance = "会话与推进：首次可直接 start({})；已有 act
 	"ENTER 只证明按键原语，不证明搜索、提交或导航成功；业务结果由后观察中的页面事实确认。" +
 	"text 错误的 details 固定给出 stage、reason 与 dispatch.focus/write/enter（not_attempted/not_dispatched/dispatched/unknown），" +
 	"据此区分尚未派发、目标不唯一、读回不可用或不等、ENTER 未派发或未知；不要解析 message。" +
-	"写入或 ENTER 仍 uncertain 且原会话活动时，按 recovery 直接 observe/P 查看当前完整值，不要循环 status，也不要原样重发。" +
+	"已认领 text 的整体 outcome=uncertain，且结果自身的 recovery.entry=observe、recovery.reference=P 时，按该结果恢复直接 observe 核对当前框值/页面。这个特定恢复覆盖通用的 uncertain 先 status 规则，不要原样重发。" +
 	"text_input.enter=uncertain 时先观察当前页面，不要原样重发 ENTER；write=executed,enter=not_executed 且原会话仍活动时，" +
 	"可取新 O 后按需单独发送 key=ENTER，不必重新填字。\n\n" +
 	"恢复：retry/O 表示尚未派发，改正参数后用同一工具重试；结果带新 observation.id 就用它，否则用原 O。" +
@@ -146,8 +146,8 @@ var toolCatalog = []toolDefinition{
 		name: "observe",
 		description: "对给定 O/P 所指原会话执行一次新采集并发布一个新观察。" +
 			"reference 必填，指向本 Agent 仍活动的原会话；full=true 强制 full；" +
-			"image=true 在同一采集中附加 ImageContent；wait_ms 是采集前等待毫秒数（0–10000，默认 0）。" +
-			"返回新 observation.id；后续动作或等待直接使用它。",
+			"image=true 在同一采集中附加 ImageContent；wait_ms 是单次采集前的延迟毫秒数（0–10000，默认 0）；等待公开树条件应选 wait_for。" +
+			"成功返回新 observation.id；后续动作或等待直接使用它。",
 		schema: json.RawMessage(`{
   "type": "object",
   "properties": {
@@ -206,11 +206,11 @@ var toolCatalog = []toolDefinition{
 	},
 	{
 		name: "wait_for",
-		description: "等待当前会话的界面条件，并在条件满足或 timeout 到时后返回一个新观察。" +
+		description: "轮询当前会话的公开树条件；wait.trigger=timeout 也可以成功返回。" +
 			"reference 与 timeout 必填；timeout 是 1..40 秒的轮询窗口（stable=true 时至少 2）。" +
 			"query/absent_query 按 label/value/hint/resource 做字面包含匹配，只覆盖当前公开可见树；" +
 			"stable=true 要求整树连续 3 帧一致，页面有倒计时或实时进度时保持 stable=false。" +
-			"到时同样是成功返回；检查 wait.trigger 与 wait.matched，并用返回的 observation.id 继续。" +
+			"成功时检查 wait.trigger 和 wait.matched，直接用返回的新 observation.id 继续。" +
 			"elapsed_ms 计自准入完成至终帧发布，实际耗时可超过 timeout 至多约 35 秒。",
 		schema: json.RawMessage(`{
   "type": "object",
@@ -271,7 +271,8 @@ var toolCatalog = []toolDefinition{
 			"仅写入、草稿、多行或逐字段填写时显式 press_enter=false。" +
 			"省略/true 的 text 结果固定带 text_input:{write,enter}；显式 false 不返回该对象。" +
 			"text 失败按 details.stage/reason/dispatch 区分失败环节与原语派发（not_attempted/not_dispatched/dispatched/unknown），不要解析 message；" +
-			"写入或 ENTER uncertain 时按 recovery 观察当前完整值，不原样重发。" +
+			"已认领 text 的整体 outcome=uncertain，且结果自身的 recovery.entry=observe、recovery.reference=P 时，直接 observe 核对当前框值/页面；" +
+			"reference 用原活动会话的具体归属 P（如 session.origin 或已知属于该会话的 operation_id），不能把枚举 P 当编号，也不要原样重发。" +
 			"image=true 在动作后的同一采集中附加 ImageContent。" +
 			"滚动用 operation.type=scroll + container 表达，swipe 是原始手势，只承诺手势而不承诺滚动语义。" +
 			"树块动作列里的 `swipe` 只是节点的源能力，不是 raw swipe 授权；" +

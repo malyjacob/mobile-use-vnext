@@ -247,6 +247,75 @@ func TestToolDescriptionsAreCallerOriented(t *testing.T) {
 	}
 }
 
+// TestLiveToolDescriptionsClarifyWaitAndTextRecovery checks the descriptions
+// and instructions actually returned by live discovery, not only the source
+// catalog.
+func TestLiveToolDescriptionsClarifyWaitAndTextRecovery(t *testing.T) {
+	fake := newTestDeviceService(t)
+	session := connectTestInMemory(t, newTestMCPServer(t, fake))
+	ctx, cancel := testCallContext(t)
+	defer cancel()
+
+	catalog, err := session.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+	descriptions := make(map[string]string, len(catalog.Tools))
+	for _, tool := range catalog.Tools {
+		descriptions[tool.Name] = tool.Description
+	}
+
+	const textRecoveryTrigger = "已认领 text 的整体 outcome=uncertain，且结果自身的 recovery.entry=observe、recovery.reference=P"
+	required := map[string][]string{
+		"observe": {
+			"wait_ms",
+			"毫秒",
+			"等待公开树条件应选 wait_for",
+		},
+		"wait_for": {
+			"轮询当前会话的公开树条件",
+			"wait.trigger=timeout 也可以成功返回",
+			"检查 wait.trigger 和 wait.matched",
+			"新 observation.id",
+		},
+		"act": {
+			textRecoveryTrigger,
+			"直接 observe 核对当前框值/页面",
+			"session.origin",
+			"已知属于该会话的 operation_id",
+			"不能把枚举 P 当编号",
+			"不要原样重发",
+		},
+	}
+	for name, fragments := range required {
+		t.Run(name, func(t *testing.T) {
+			description, ok := descriptions[name]
+			if !ok {
+				t.Fatalf("%s missing from live tools/list", name)
+			}
+			for _, fragment := range fragments {
+				if !strings.Contains(description, fragment) {
+					t.Errorf("live %s description lacks %q", name, fragment)
+				}
+			}
+		})
+	}
+
+	initialize := session.InitializeResult()
+	if initialize == nil {
+		t.Fatal("initialize result missing")
+	}
+	for _, fragment := range []string{
+		textRecoveryTrigger,
+		"直接 observe 核对当前框值/页面",
+		"覆盖通用的 uncertain 先 status 规则",
+	} {
+		if !strings.Contains(initialize.Instructions, fragment) {
+			t.Errorf("live server instructions lack %q", fragment)
+		}
+	}
+}
+
 // TestActDescriptionKeepsCallerRecovery removes the internal landing and focus
 // binding algorithm from the public text while keeping the actionable recovery
 // contract and the explicit no-ENTER boundary.
