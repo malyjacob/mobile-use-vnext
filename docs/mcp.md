@@ -414,11 +414,11 @@ device-mcp -transport http -config <private-config>
 
 `app` 整工具不是只读，七个 kind 都预分配 P，但取消策略按 kind 区分：
 
-- `find`/`list` 查询取消不调用 `end`。结果保留已预分配 `operation_id` 与 `app.kind`，没有
-  `outcome`、集合与 `recovery`。没有已知服务错误时生成 `error.code=call_cancelled`；已有
-  服务错误则保留原 code/message/details。两种情况都在 `error.details` 注入
-  `mcp.cancelled=true` 与受控文案 `mcp.cancellation="查询已取消；未发起 end"`。已知业务集合
-  不因取消删除；集合未取得时不伪造 `items`/`tasks`。
+- `find`/`list` 查询取消不调用 `end`。结果保留已预分配的 `operation_id`，省略 `outcome`
+  和 `recovery`。已取得的服务结果保留 `app.kind` 和业务集合等已有事实。未取得服务结果时，
+  仅补上 `app.kind`，省略集合字段。没有已知服务错误时生成 `error.code=call_cancelled`；
+  已有服务错误则保留原 code/message/details。两种情况都在 `error.details` 注入
+  `mcp.cancelled=true` 与受控文案 `mcp.cancellation="查询已取消；未发起 end"`。
 - 五个变更 kind（`open`/`claim`/`handoff`/`close`/`kill`）按通用步骤 2 发起有界 `end(P)`，
   保留真实的 end 文案、session/cleanup 与恢复入口；不能把查询的“未发起 end”文案复制给
   变更，也不能省略实际发起的 end。
@@ -430,8 +430,9 @@ device-mcp -transport http -config <private-config>
 取消分支也清空顶层 `image` 元数据与 `ImageContent`，返回 `call_cancelled`，不交付图片。
 原会话仍活动；读取的其余撤销与收尾由服务端 STOP/end 语义处理。
 
-`status`、`inspect`、`diagnose` 只取消本次读取，不登记 P、不调用 `end`。调用参数中的
-`reference` 是原观察/操作定位，不是本次取消的 P；不得把它当成本次调用的操作编号。
+`status`、`inspect`、`diagnose` 无本次 P，取消只中断读取，也不调用 `end`。调用参数中的
+`reference` 只定位原观察或操作。未取得服务结果的取消错误省略 `operation_id` 和
+`recovery`。已取得服务结果时，保留服务给出的原编号及恢复信息。
 
 取消结果一律 `isError=true`。适配器保留已有服务错误，缺少错误时合成 `call_cancelled`；`snap`
 是唯一例外：取消分支无条件返回 `call_cancelled`，并丢弃已取得的图片。适配器还在
@@ -441,8 +442,9 @@ device-mcp -transport http -config <private-config>
 
 漏收分两段：
 
-- 服务到适配进程的本次 HTTP 结果丢失时，MCP 持有发送前的 P；可返回带 P 的结构化错误，
-  宿主随后按 P 查询原事实。
+- 服务到适配进程的本次 HTTP 结果丢失时，有预分配 P 的调用可返回带 P 的结构化错误，
+  宿主随后按该 P 查询原事实。无本次 P 的三项查询若返回 `transport_unavailable` 且没有
+  服务结果，则省略 `operation_id` 和 `recovery`，连接恢复后可用原参数重查。
 - MCP 到宿主的整份工具结果丢失且宿主没有 P 时，不保证定位该次操作；只能用已有的 O/P 或
   `status()` 恢复自身原会话，不能用最近一次操作代替，也不把 MCP 请求 ID 当作公开恢复
   编号。

@@ -391,9 +391,10 @@ HTTP 入口的每个请求都需要 `Authorization: Bearer <MCP token>`；携带
 应断开，不提供旧协议回退。`server/discover` 与兼容 `initialize` 发布同一份 server
 instructions（完整树语法与跨工具调用规则）；工具描述只保留各自用途、参数/默认与恢复路径。
 
-取消与漏收：stdio 的 `notifications/cancelled` 与 HTTP 的请求 SSE 流关闭都映射为本次调用
-取消；有本次 P 时适配进程发起有界 `end(P)`，只读工具仅取消读取。连接断开或 `end` 发出都
-不等于手机动作已撤回或原执行链已结束；恢复仍按 `status(P)`/`status()` 与收尾事实。
+stdio 的 `notifications/cancelled` 与 HTTP 的请求 SSE 流关闭都映射为本次调用取消。
+有本次 P 且取消策略要求收尾时，适配进程发起有界 `end(P)`。`status`、`inspect`、`diagnose`
+无本次 P。`snap` 与 `app.find/list` 有本次 P，取消时仅中断读取。这些读取均不调用 `end`。
+连接断开或发起 `end` 后，仍须按 `status(P)`/`status()` 和收尾结果判断原执行链的状态。
 
 ### 10.3 结果模式
 

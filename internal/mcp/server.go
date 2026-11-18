@@ -270,7 +270,7 @@ func (a *adapter) cancelled(call *preparedCall, operationID string, done <-chan 
 	if base == nil {
 		base = &protocol.Result{}
 		if !query {
-			base.Recovery = adapterRecovery("call_cancelled")
+			base.Recovery = adapterRecovery("call_cancelled", operationID)
 		}
 	}
 	switch {
@@ -342,7 +342,7 @@ func (a *adapter) cancelled(call *preparedCall, operationID string, done <-chan 
 		}
 	}
 	if !query && base.Recovery == nil && base.Error != nil {
-		base.Recovery = adapterRecovery(base.Error.Code)
+		base.Recovery = adapterRecovery(base.Error.Code, operationID)
 	}
 	clearImageBase64(base)
 
@@ -387,7 +387,7 @@ func projectCall(response *client.Response, err error, operationID, appKind stri
 		result = &protocol.Result{
 			OperationID: operationID,
 			Error:       &protocol.Error{Code: code, Message: message},
-			Recovery:    adapterRecovery(code),
+			Recovery:    adapterRecovery(code, operationID),
 		}
 		if appKind != "" {
 			result.App = &protocol.AppView{Kind: appKind}
@@ -400,7 +400,7 @@ func projectCall(response *client.Response, err error, operationID, appKind stri
 			code, message := controlledError(err)
 			result.Error = &protocol.Error{Code: code, Message: message}
 			if result.Recovery == nil {
-				result.Recovery = adapterRecovery(code)
+				result.Recovery = adapterRecovery(code, operationID)
 			}
 		}
 	}
@@ -429,10 +429,12 @@ func pickResult(response *client.Response, err error) *protocol.Result {
 	return nil
 }
 
-// adapterRecovery is the adapter's own projection for failures that never
-// reached a tool result. A transport failure or a cancelled call has one next
-// step: poll status with the operation's P. Admission errors stay bare.
-func adapterRecovery(code string) *protocol.Recovery {
+// adapterRecovery supplies a fallback only when the adapter allocated a P
+// for this call. A query's reference may identify an older operation.
+func adapterRecovery(code, operationID string) *protocol.Recovery {
+	if operationID == "" {
+		return nil
+	}
 	switch code {
 	case "call_cancelled", client.ErrorTransport:
 		return &protocol.Recovery{

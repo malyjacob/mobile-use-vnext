@@ -1101,6 +1101,10 @@ func TestCancellationWorkToolDirect(t *testing.T) {
 	if execution.result.Error == nil || execution.result.Error.Code != "call_cancelled" {
 		t.Fatalf("cancellation error = %#v", execution.result.Error)
 	}
+	if recovery := execution.result.Recovery; recovery == nil ||
+		recovery.Entry != protocol.RecoveryEntryStatus || recovery.Reference != protocol.RecoveryReferenceP {
+		t.Fatalf("cancelled act recovery = %#v, want status/P", recovery)
+	}
 	if execution.result.Session == nil || execution.result.Session.State != "ended" {
 		t.Fatalf("end session facts were not merged: %#v", execution.result.Session)
 	}
@@ -1117,39 +1121,143 @@ func TestCancellationWorkToolDirect(t *testing.T) {
 }
 
 func TestCancellationReadOnlyDirect(t *testing.T) {
-	fake := newTestDeviceService(t)
-	fake.setHandler("status", fake.blockTestUntilStopped)
-	adapter := &adapter{
-		client: newTestDeviceClient(t, fake),
-		logger: slog.New(slog.DiscardHandler),
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	resultChannel := make(chan *execution, 1)
-	go func() {
-		resultChannel <- adapter.run(ctx, testDefinitionByName(t, "status"), []byte(`{}`))
-	}()
-	fake.waitFor(t, "status", 1, mcpTestTimeout)
-	cancel()
+	for _, test := range readOnlyRecoveryCases {
+		t.Run(test.name, func(t *testing.T) {
+			fake := newTestDeviceService(t)
+			fake.setHandler(test.tool, fake.blockTestUntilStopped)
+			adapter := &adapter{client: newTestDeviceClient(t, fake)}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			resultChannel := make(chan *execution, 1)
+			go func() {
+				resultChannel <- adapter.run(ctx, testDefinitionByName(t, test.tool), []byte(test.args))
+			}()
+			requests := fake.waitFor(t, test.tool, 1, mcpTestTimeout)
+			cancel()
 
-	var execution *execution
-	select {
-	case execution = <-resultChannel:
-	case <-time.After(mcpTestTimeout):
-		t.Fatal("cancelled status did not return")
+			var execution *execution
+			select {
+			case execution = <-resultChannel:
+			case <-time.After(mcpTestTimeout):
+				t.Fatal("cancelled query did not return")
+			}
+			if requests[0].OperationID != "" || fake.requestCount("end") != 0 {
+				t.Fatal("read-only cancellation assigned a P or issued an end")
+			}
+			requireReadOnlyFailureWithoutRecovery(t, execution, test.tool, "call_cancelled")
+		})
 	}
-	if fake.requestCount("end") != 0 {
-		t.Fatal("read-only cancellation issued an end")
+}
+
+var readOnlyRecoveryCases = []struct{ name, tool, args string }{
+	{"status_self", "status", `{}`},
+	{"status_operation", "status", `{"reference":"P7"}`},
+	{"inspect", "inspect", `{"reference":"O7"}`},
+	{"diagnose", "diagnose", `{}`},
+}
+
+func TestReadOnlyTransportFailureOmitsRecovery(t *testing.T) {
+	fake := newTestDeviceService(t)
+	adapter := &adapter{client: newTestDeviceClient(t, fake)}
+	fake.Close()
+	for _, test := range readOnlyRecoveryCases {
+		t.Run(test.name, func(t *testing.T) {
+			execution := adapter.run(context.Background(), testDefinitionByName(t, test.tool), []byte(test.args))
+			requireReadOnlyFailureWithoutRecovery(t, execution, test.tool, client.ErrorTransport)
+		})
 	}
-	if !execution.isError("status") {
-		t.Fatal("cancelled read-only without a result should be an error")
+}
+
+func TestTransportFailureKeepsAllocatedOperationRecovery(t *testing.T) {
+	fake := newTestDeviceService(t)
+	adapter := &adapter{client: newTestDeviceClient(t, fake)}
+	fake.Close()
+	for _, test := range []struct{ tool, args string }{
+		{"act", `{"reference":"O1","operation":{"type":"key","key":"BACK"}}`},
+		{"snap", `{"reference":"O1"}`},
+		{"app", `{"kind":"find"}`},
+	} {
+		t.Run(test.tool, func(t *testing.T) {
+			execution := adapter.run(context.Background(), testDefinitionByName(t, test.tool), []byte(test.args))
+			result := execution.result
+			if result.Error == nil || result.Error.Code != client.ErrorTransport || !execution.isError(test.tool) {
+				t.Fatalf("unexpected transport result: %+v", result)
+			}
+			if !strings.HasPrefix(result.OperationID, "P") {
+				t.Fatalf("transport result lost the allocated P: %q", result.OperationID)
+			}
+			if recovery := result.Recovery; recovery == nil ||
+				recovery.Entry != protocol.RecoveryEntryStatus || recovery.Reference != protocol.RecoveryReferenceP {
+				t.Fatalf("transport recovery = %#v, want status/P", recovery)
+			}
+		})
 	}
-	if execution.result.Error == nil || execution.result.Error.Code != "call_cancelled" {
-		t.Fatalf("cancellation error = %#v", execution.result.Error)
+}
+
+func TestReadOnlyServiceRecoveryIsPreserved(t *testing.T) {
+	serviceRecovery := protocol.Recovery{Entry: protocol.RecoveryEntryStatus,
+		Reference: protocol.RecoveryReferenceP, Cause: protocol.RecoveryCauseRunning}
+	known := callOutcome{response: &client.Response{Result: &protocol.Result{
+		OperationID: "P7", OperationState: "running", Recovery: &serviceRecovery,
+	}}}
+	adapter := &adapter{}
+	for _, test := range []struct {
+		name string
+		call *execution
+	}{
+		{"service_result", projectCall(known.response, nil, "", "")},
+		{"cancelled_with_service_result", adapter.cancelled(&preparedCall{readOnly: true}, "", nil, known, true)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			out := projectExecution(test.call, "status", ResultModeBoth)
+			text := testTextContent(t, out)
+			requireTestContains(t, text, "recovery.entry=status")
+			requireTestContains(t, text, "recovery.reference=P")
+			obj := testStructuredObject(t, out)
+			recovery, _ := obj["recovery"].(map[string]any)
+			if obj["operation_id"] != "P7" || recovery["entry"] != "status" || recovery["reference"] != "P" || recovery["cause"] != "running" {
+				t.Fatalf("original service recovery or operation changed: %v", obj)
+			}
+		})
 	}
-	text := testTextContent(t, projectExecution(execution, "status", ResultModeBoth))
-	requireTestContains(t, text, "\"mcp.cancelled\":true")
-	requireTestContains(t, text, "只读工具未发起 end")
+}
+
+func requireReadOnlyFailureWithoutRecovery(t *testing.T, e *execution, tool, code string) {
+	t.Helper()
+	for _, mode := range []ResultMode{ResultModeBoth, ResultModeStructured, ResultModeText} {
+		t.Run(mode.String(), func(t *testing.T) {
+			result := projectExecution(e, tool, mode)
+			if !result.IsError {
+				t.Fatal("failed query was reported as successful")
+			}
+			text := testTextContent(t, result)
+			requireTestContains(t, text, "error.code="+code)
+			requireTestNotContains(t, text, "operation_id=")
+			requireTestNotContains(t, text, "recovery.")
+			if code == "call_cancelled" {
+				requireTestContains(t, text, `"mcp.cancelled":true`)
+				requireTestContains(t, text, cancellationReadOnlyMessage)
+			}
+			if mode != ResultModeText {
+				object := testStructuredObject(t, result)
+				for _, field := range []string{"operation_id", "recovery"} {
+					if _, present := object[field]; present {
+						t.Errorf("unexpected result field %q", field)
+					}
+				}
+				err, _ := object["error"].(map[string]any)
+				if err["code"] != code {
+					t.Errorf("error.code = %v, want %q", err["code"], code)
+				}
+				if code == "call_cancelled" {
+					details, _ := err["details"].(map[string]any)
+					if details["mcp.cancelled"] != true || details["mcp.cancellation"] != cancellationReadOnlyMessage {
+						t.Error("cancellation details were not preserved")
+					}
+				}
+			}
+		})
+	}
 }
 
 func TestCancellationInMemorySDK(t *testing.T) {

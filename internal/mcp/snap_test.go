@@ -187,6 +187,10 @@ func TestSnapCancellationClearsImageAndSkipsEnd(t *testing.T) {
 	if execution.result.Error == nil || execution.result.Error.Code != "call_cancelled" {
 		t.Fatalf("cancellation error = %#v", execution.result.Error)
 	}
+	if recovery := execution.result.Recovery; recovery == nil ||
+		recovery.Entry != protocol.RecoveryEntryStatus || recovery.Reference != protocol.RecoveryReferenceP {
+		t.Fatalf("cancelled snap recovery = %#v, want status/P", recovery)
+	}
 	if execution.result.Image != nil || execution.image != nil {
 		t.Fatal("cancelled snap retained image material")
 	}
