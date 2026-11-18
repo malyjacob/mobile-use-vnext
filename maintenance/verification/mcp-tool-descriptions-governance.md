@@ -72,6 +72,69 @@
 `docs/integration.md` 复检为 CLEAN。读取两份既有清单的 `source_commit` 与目录指纹，
 均对应 `a53f95a`（`e25fc677…de4`），其目录定义与实施基线相同。候选目录指纹属于本次源码。
 
-验证覆盖 MCP 线协议、现有引擎夹具和临时适配器到手机服务的查询。发布包、
-清单核验、覆盖部署与外部宿主刷新在发布阶段执行。模型配对回放未执行，现有证据
-用于确认说明内容及调用契约，没有估算模型误用率。
+实施验证覆盖 MCP 线协议、现有引擎夹具和临时适配器到手机服务的查询。整组发布结果见 §6。
+模型配对回放未执行，现有证据用于确认说明内容及调用契约，没有估算模型误用率。
+
+## 6. 整组发布与主机替换（2026-11-19）
+
+发布源码为 `a98b4adc0db644d1a31b6ad961f253506a07b946`，构建和发布门禁在该干净提交
+执行。环境为 Windows/amd64、Go 1.27.1、Android SDK 与 JDK 17。手机为 USB 连接的
+Android ARM64，既有 chroot 在线。发行 `0.19.0`，共同契约 `19`，控制 App 版本码 `21`。
+该节随后的维护提交登记结果，发布清单继续绑定实际构建的源码提交。
+
+### 6.1 构建与门禁
+
+```powershell
+powershell -NoProfile -File scripts/build-release.ps1
+powershell -NoProfile -File scripts/verify-manifest.ps1 -Manifest build/release/manifest.json
+powershell -NoProfile -File scripts/build-host-tools.ps1
+powershell -NoProfile -File scripts/build-host-tools.ps1 -VerifyOnly
+```
+
+四项通过。手机清单核验六个产物，主机清单核验 `build/device-mcp.exe` 和
+`build/mcp-probe.exe`，两份清单具有相同源码、发行、共同契约和 13 工具目录指纹
+`99dd22d0a81280b6875eaa770b81ee0f553e8a6b9e49f4bbb0c83078f25494c8`。
+主机脚本替换了两个目标 exe。因两个原主机适配器进程仍引用旧映像，脚本将旧映像保留为
+备份。替换后两个既有进程仍在原宿主下运行。
+
+### 6.2 手机整组部署
+
+部署前 `status({})` 给出 `can_start=true`、原会话 `ended`、旧收尾 `unconfirmed`。
+沿用现有私有配对和 Origin 配置，执行如下命令。
+
+```powershell
+$phone = Get-Content -LiteralPath .state/phone-mcp-config.json -Raw | ConvertFrom-Json
+./scripts/deploy.ps1 -SkipBuild -McpAllowedOrigins @($phone.http.allowed_origins)
+```
+
+部署门禁再次通过。清单文件与生成的配置按脚本核对，APK 用 `adb install -r` 覆盖安装，
+验证包 `com.mobileuse.vnext` 的版本为 `0.19.0/21`。新设备服务和唯一手机 HTTP MCP
+进程的 `/proc/<pid>/exe` 哈希均与清单匹配。设备服务实例已变更，健康检查、App 配对、
+恢复屏障和 STOP 可用项通过。手机 HTTP MCP 经 `18883` 转发可用，脚本另观察到一个
+宿主管理的旧手机 stdio 适配器仍在运行。
+
+### 6.3 发布烟测
+
+```powershell
+./build/mcp-probe.exe -transport stdio -binary ./build/device-mcp.exe `
+  -config .state/mcp-config.json -result-mode both -suite smoke -timeout 180 `
+  -manifest build/release/manifest.json -manifest build/host-tools-manifest.json
+
+./build/mcp-probe.exe -transport http-remote -config .state/probe-phone-config.json `
+  -result-mode both -suite smoke -timeout 180 `
+  -manifest build/release/manifest.json -manifest build/host-tools-manifest.json
+```
+
+两套烟测依次运行，均返回 `RESULT PASS`。13 个工具、四项只读注解、描述和 Schema 与源码
+一致，目录指纹匹配两份清单。现代发现与兼容握手的说明均为 5,326 B，逐字节匹配。
+手机 HTTP 的鉴权和既有回环 Origin 检查通过。两次探针会话均为虚拟屏，观察、等待、取消
+和终止闭环通过。
+
+以发布版主机 exe 另做隔离断连回放，上游指向已绑定但未监听的回环端口。使用 stdio 的
+`both` 模式调用 `status({})`、`status(reference=P7)`、`inspect(reference=O7)` 和
+`diagnose({})`，均返回 `transport_unavailable` 并省略本次 P 与合成恢复。同一夹具中
+`snap(reference=O7)` 保留已分配的 P 和 `status/P`，符合第一批的边界。
+
+烟测结束后重新核验两份清单，通过。`GET /health` 返回 `ok`、发行 `0.19.0`、
+契约 `19`。`POST /api/status` 返回 `can_start=true`、会话 `ended`、本次收尾
+`complete`。宿主刷新由用户处理，烟测使用独立探针进程和刚部署的手机 HTTP 入口。
