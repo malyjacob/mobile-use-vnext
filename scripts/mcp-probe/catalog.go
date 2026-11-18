@@ -81,25 +81,12 @@ func checkLiveCatalog(tools []*sdk.Tool) *checkError {
 		if liveErr != nil || sourceErr != nil || !semanticEqual(liveSchema, sourceSchema) {
 			return failf("catalog_schema_mismatch", field("tool", wanted))
 		}
-	}
-	if failure := checkActScrollSchema(live["act"]); failure != nil {
-		return failure
-	}
-	// The deployed catalog must publish exactly one public read-only annotation:
-	// snap. Every other tool keeps its annotations empty.
-	snap := live["snap"]
-	if snap == nil || snap.Annotations == nil || !snap.Annotations.ReadOnlyHint {
-		return failf("snap_read_only_annotation_missing")
-	}
-	for name, tool := range live {
-		if name == "snap" {
-			continue
-		}
-		if tool.Annotations != nil && tool.Annotations.ReadOnlyHint {
-			return failf("unexpected_read_only_annotation", field("tool", name))
+		readOnly := tool.Annotations != nil && tool.Annotations.ReadOnlyHint
+		if readOnly != sourceTool.ReadOnlyHint {
+			return failf("read_only_annotation_mismatch", field("tool", wanted))
 		}
 	}
-	return nil
+	return checkActScrollSchema(live["act"])
 }
 
 // actSchemaProperty is the probe's explicit view of one act operation member.

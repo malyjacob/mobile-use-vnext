@@ -34,7 +34,7 @@ func snapSuccessBody(operationID string) string {
 		operationID, snapTestImageBase64)
 }
 
-func TestSnapToolPublishesOnlyReadOnlyAnnotation(t *testing.T) {
+func TestReadOnlyToolAnnotations(t *testing.T) {
 	fake := newTestDeviceService(t)
 	session := connectTestInMemory(t, newTestMCPServer(t, fake))
 	ctx, cancel := testCallContext(t)
@@ -43,21 +43,19 @@ func TestSnapToolPublishesOnlyReadOnlyAnnotation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
 	}
-	found := false
+	want := map[string]bool{"status": true, "inspect": true, "diagnose": true, "snap": true}
+	seen := 0
 	for _, tool := range list.Tools {
-		if tool.Name == "snap" {
-			found = true
-			if tool.Annotations == nil || !tool.Annotations.ReadOnlyHint {
-				t.Fatalf("snap annotations = %+v", tool.Annotations)
-			}
-			continue
+		readOnly := tool.Annotations != nil && tool.Annotations.ReadOnlyHint
+		if readOnly != want[tool.Name] {
+			t.Errorf("%s: readOnlyHint = %t, want %t", tool.Name, readOnly, want[tool.Name])
 		}
-		if tool.Annotations != nil && tool.Annotations.ReadOnlyHint {
-			t.Fatalf("%s publishes an unexpected read-only annotation", tool.Name)
+		if readOnly {
+			seen++
 		}
 	}
-	if !found {
-		t.Fatal("snap is missing from tools/list")
+	if seen != len(want) {
+		t.Errorf("received %d read-only hints, want %d", seen, len(want))
 	}
 }
 

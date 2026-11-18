@@ -154,6 +154,30 @@ func TestCheckLiveCatalog(t *testing.T) {
 	})
 }
 
+func TestCheckLiveCatalogReadOnlyHints(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		annotations *sdk.ToolAnnotations
+	}{
+		{name: "status"},
+		{name: "act", annotations: &sdk.ToolAnnotations{ReadOnlyHint: true}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tools := sourceCatalogTools(t)
+			for _, tool := range tools {
+				if tool.Name == test.name {
+					tool.Annotations = test.annotations
+				}
+			}
+			if failure := checkLiveCatalog(tools); failure == nil ||
+				failure.reason != "read_only_annotation_mismatch" ||
+				len(failure.fields) != 1 || failure.fields[0] != field("tool", test.name) {
+				t.Fatalf("failure = %v, want read-only annotation mismatch for %s", failure, test.name)
+			}
+		})
+	}
+}
+
 func actToolFrom(t *testing.T, tools []*sdk.Tool) *sdk.Tool {
 	t.Helper()
 	for _, tool := range tools {

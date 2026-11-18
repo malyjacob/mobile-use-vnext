@@ -423,7 +423,8 @@ func TestToolCatalog(t *testing.T) {
 			}
 			if tool.Name == "act" {
 				for _, description := range []string{tool.Description, reference.Description} {
-					if !strings.Contains(description, "静态拒绝不认领 O") || !strings.Contains(description, "一旦认领") {
+					if !strings.Contains(description, "静态拒绝不认领 O") ||
+						!strings.Contains(description, "消费") {
 						t.Error("act description must distinguish static rejection from consumption on claim")
 					}
 				}
@@ -552,9 +553,13 @@ func TestActScrollSchema(t *testing.T) {
 	for _, fragment := range []string{
 		"operation.type=scroll + container",
 		"swipe 是原始手势",
-		"`swipe` 只是节点的源能力，不是 raw swipe 授权",
-		"`scroll` 不承诺真实方向、触摸消费者或业务安全",
-		"`unstable`/`unknown` 质量（observation.quality）不阻止输入",
+		"树节点的 `swipe` 仅表示源能力",
+		"scroll 不承诺真实方向、触摸消费者或业务安全",
+		"按想滚动的区域选对应容器 ref",
+		"effect.state",
+		"observed/not_observed/unknown",
+		"执行事实见 outcome",
+		"observation.quality 不阻止输入",
 	} {
 		requireTestContains(t, definition.description, fragment)
 	}

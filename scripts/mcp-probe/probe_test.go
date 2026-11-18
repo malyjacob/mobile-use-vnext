@@ -1023,7 +1023,7 @@ func writeFakeDiagnosis(builder *strings.Builder, value any) {
 	writeFakeBlock(builder, block.String())
 }
 
-// startFakeAdapter serves the 12 tools over the SDK in-memory transport. It
+// startFakeAdapter serves the 13 tools over the SDK in-memory transport. It
 // publishes the source server instructions so the discovery checks exercise the
 // same text a real adapter serves.
 func startFakeAdapter(t *testing.T, adapter *fakeAdapter) *sdk.ClientSession {

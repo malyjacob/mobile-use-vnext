@@ -70,9 +70,7 @@ func NewServer(opts Options) (*sdk.Server, error) {
 			Description: definition.description,
 			InputSchema: definition.schema,
 		}
-		if definition.snap {
-			// The one image read is annotated read-only even though it carries a
-			// pre-allocated P; no other tool publishes annotations.
+		if definition.readOnlyHint() {
 			tool.Annotations = &sdk.ToolAnnotations{ReadOnlyHint: true}
 		}
 		server.AddTool(tool, func(ctx context.Context, request *sdk.CallToolRequest) (*sdk.CallToolResult, error) {

@@ -9,6 +9,8 @@ import (
 	"time"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/malyjacob/mobile-use-vnext/internal/protocol"
 )
 
 // compatibilityProtocolVersion is the newest handshake-era protocol version.
@@ -40,9 +42,8 @@ func TestTreeTextGuideStatesTriStateOmission(t *testing.T) {
 	}
 }
 
-// TestServerInstructionsCarryCrossToolRules asserts the caller-facing rules that
-// belong in exactly one place: the server instructions. It checks semantics,
-// not a frozen prose snapshot.
+// TestServerInstructionsCarryCrossToolRules checks the shared workflow and the
+// single complete tree legend.
 func TestServerInstructionsCarryCrossToolRules(t *testing.T) {
 	instructions := ServerInstructions()
 	if instructions == "" {
@@ -64,7 +65,11 @@ func TestServerInstructionsCarryCrossToolRules(t *testing.T) {
 		"wait.trigger",
 		"wait.matched",
 		"observation.quality=unstable/unknown",
-		"目标框全文",
+		"写入全文",
+		"app.list",
+		"diagnose",
+		"notify 无 reference",
+		"同一 base 的每条 delta",
 		"不发送 ENTER",
 		"press_enter",
 		"text_input",
@@ -79,8 +84,8 @@ func TestServerInstructionsCarryCrossToolRules(t *testing.T) {
 		"device_busy",
 		"pending cleanup",
 		"no_safe_point",
-		"不要向更远祖先找目标",
-		"建议坐标不是执行授权",
+		"最近交互祖先一次",
+		"session.origin",
 	} {
 		if !strings.Contains(instructions, required) {
 			t.Errorf("server instructions lack %q", required)
@@ -140,10 +145,9 @@ func TestToolDescriptionsAreCallerOriented(t *testing.T) {
 			"请求体必须是空对象",
 			"session.expires_at",
 			"重放原 start 不重新获得五分钟",
-			"宿主未提供 server instructions",
 			"可消费观察",
-			"full 是完整树",
-			"delta 只相对其 base",
+			"幂等/查询编号",
+			"base full 加本次 delta",
 		},
 		"status": {
 			"operation_state",
@@ -164,7 +168,8 @@ func TestToolDescriptionsAreCallerOriented(t *testing.T) {
 		},
 		"wait_for": {
 			"1..40",
-			"stable=true 时至少 2",
+			"stable=true",
+			"连续 3 帧",
 			"wait.trigger",
 			"wait.matched",
 			"35 秒",
@@ -184,7 +189,9 @@ func TestToolDescriptionsAreCallerOriented(t *testing.T) {
 			"target_changed",
 			"新 observation.id",
 			"uncertain",
-			"先 status 跟踪",
+			"recovery.entry=observe",
+			"operation.target={x,y}",
+			"独立通过准入和重验",
 		},
 		"inspect": {
 			"node 与 query 互斥",
@@ -207,19 +214,27 @@ func TestToolDescriptionsAreCallerOriented(t *testing.T) {
 			"recovery",
 		},
 		"app": {
-			"restore_foreground 默认 false",
-			"allow_borrowed 默认 false",
-			"allow_stop_playback 默认 false",
+			"find 无需会话",
+			"scope=primary",
+			"当前 ready O",
+			"live owned",
 			"outcome",
 		},
 		"notify": {
 			"executed 只表示消息已保存",
 			"notification.state",
+			"无需活动会话",
+			"无 reference 参数",
 		},
 		"shell": {
 			"root=true",
 			"exit_code",
 			"observe",
+			"status(P)",
+			"finished",
+			"blocking_operation_id",
+			"blocking_code",
+			"shell_pending",
 		},
 		"diagnose": {
 			"coverage=record_unavailable",
@@ -239,7 +254,7 @@ func TestToolDescriptionsAreCallerOriented(t *testing.T) {
 				t.Errorf("%s description lacks %q", definition.name, fragment)
 			}
 		}
-		for _, forbidden := range []string{"allow_ancestor_fallback"} {
+		for _, forbidden := range []string{"allow_ancestor_fallback", "server instructions", "账本"} {
 			if strings.Contains(definition.description, forbidden) {
 				t.Errorf("%s description publishes A-phase-forbidden %q", definition.name, forbidden)
 			}
@@ -265,7 +280,7 @@ func TestLiveToolDescriptionsClarifyWaitAndTextRecovery(t *testing.T) {
 		descriptions[tool.Name] = tool.Description
 	}
 
-	const textRecoveryTrigger = "已认领 text 的整体 outcome=uncertain，且结果自身的 recovery.entry=observe、recovery.reference=P"
+	const textRecoveryTrigger = "已认领 text 的整体 outcome=uncertain"
 	required := map[string][]string{
 		"observe": {
 			"wait_ms",
@@ -274,17 +289,25 @@ func TestLiveToolDescriptionsClarifyWaitAndTextRecovery(t *testing.T) {
 		},
 		"wait_for": {
 			"轮询当前会话的公开树条件",
-			"wait.trigger=timeout 也可以成功返回",
-			"检查 wait.trigger 和 wait.matched",
-			"新 observation.id",
+			"任一条件成立",
+			"stable=true",
+			"连续 3 帧",
+			"发布新 observation.id 时调用成功",
+			"wait.trigger=timeout",
+			"wait.matched 包含终帧命中的条件",
+			"超时时还包含 timeout",
+			"最终未发布新 O",
 		},
 		"act": {
 			textRecoveryTrigger,
+			"仅已派发聚焦",
+			"recovery.entry=observe",
+			"recovery.reference=P",
 			"直接 observe 核对当前框值/页面",
+			"原活动会话的具体归属 P",
 			"session.origin",
-			"已知属于该会话的 operation_id",
-			"不能把枚举 P 当编号",
-			"不要原样重发",
+			"属于该会话的 operation_id",
+			"避免原样重发",
 		},
 	}
 	for name, fragments := range required {
@@ -308,7 +331,9 @@ func TestLiveToolDescriptionsClarifyWaitAndTextRecovery(t *testing.T) {
 	for _, fragment := range []string{
 		textRecoveryTrigger,
 		"直接 observe 核对当前框值/页面",
-		"覆盖通用的 uncertain 先 status 规则",
+		"recovery.entry=observe",
+		"recovery.reference=P",
+		"通常 uncertain 先用 status",
 	} {
 		if !strings.Contains(initialize.Instructions, fragment) {
 			t.Errorf("live server instructions lack %q", fragment)
@@ -344,9 +369,9 @@ func TestActDescriptionKeepsCallerRecovery(t *testing.T) {
 		"press_enter=false",
 		"text_input",
 		"bubble=true",
-		"用该 O 加新 P 重试",
+		"用新 O 和新 P 重试",
 		"uncertain",
-		"不原样重发",
+		"避免原样重发",
 	} {
 		if !strings.Contains(description, required) {
 			t.Errorf("act description lacks caller recovery %q", required)
@@ -384,6 +409,47 @@ func TestKeepaliveDescriptionKeepsCallerContract(t *testing.T) {
 	}
 }
 
+func TestLiveQuerySchemaMinimum(t *testing.T) {
+	session := connectTestInMemory(t, newTestMCPServer(t, newTestDeviceService(t)))
+	ctx, cancel := testCallContext(t)
+	defer cancel()
+	list, err := session.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+	expected := map[string][]string{"inspect": {"query"}, "wait_for": {"query", "absent_query"}}
+	matched := 0
+	for _, tool := range list.Tools {
+		fields, ok := expected[tool.Name]
+		if !ok {
+			continue
+		}
+		var schema struct {
+			Properties map[string]struct {
+				MinLength int `json:"minLength"`
+				MaxLength int `json:"maxLength"`
+			} `json:"properties"`
+		}
+		encoded, err := json.Marshal(tool.InputSchema)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(encoded, &schema); err != nil {
+			t.Fatal(err)
+		}
+		for _, field := range fields {
+			got := schema.Properties[field]
+			if got.MinLength != 1 || got.MaxLength != protocol.MaxQueryRunes {
+				t.Errorf("%s.%s: minLength=%d maxLength=%d", tool.Name, field, got.MinLength, got.MaxLength)
+			}
+			matched++
+		}
+	}
+	if matched != 3 {
+		t.Errorf("checked %d live query fields, want 3", matched)
+	}
+}
+
 // TestDiscoveryByteBudget measures the live in-memory SDK discovery the same way
 // the baseline was measured and proves the deduplicated text stays below it.
 // Sub-items explain where the bytes went; they are not separate thresholds.
@@ -416,6 +482,9 @@ func TestDiscoveryByteBudget(t *testing.T) {
 			t.Fatalf("%s: marshal schema: %v", tool.Name, err)
 		}
 		schemas += len(encoded)
+		if tool.Name == "act" || tool.Name == "app" {
+			t.Logf("%s discovery bytes: description=%d schema=%d", tool.Name, len(tool.Description), len(encoded))
+		}
 	}
 	total := len(instructions) + len(toolsJSON)
 	t.Logf("discovery bytes: instructions=%d tools_list=%d descriptions=%d schemas=%d total=%d baseline=%d",

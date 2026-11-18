@@ -18,7 +18,7 @@ type ToolSnapshot struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
 	Schema      json.RawMessage `json:"schema"`
-	// ReadOnlyHint is the published read-only annotation. Only snap sets it.
+	// ReadOnlyHint is the published read-only annotation.
 	ReadOnlyHint bool `json:"read_only_hint"`
 }
 
@@ -30,7 +30,7 @@ func CatalogSnapshot() []ToolSnapshot {
 			Name:         definition.name,
 			Description:  definition.description,
 			Schema:       definition.schema,
-			ReadOnlyHint: definition.snap,
+			ReadOnlyHint: definition.readOnlyHint(),
 		})
 	}
 	return out

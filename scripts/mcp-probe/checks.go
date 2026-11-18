@@ -264,7 +264,7 @@ func checkInstructions(result *sdk.InitializeResult) *checkError {
 	return nil
 }
 
-// catalogCheck asserts the exact 12-tool catalog, the live/source semantic
+// catalogCheck asserts the exact 13-tool catalog, the live/source semantic
 // equality and the source fingerprint identity.
 func (p *probe) catalogCheck(ctx context.Context) bool {
 	list, err := p.session.ListTools(ctx, nil)

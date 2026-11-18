@@ -1,6 +1,6 @@
 // Command mcp-probe verifies one MCP adapter entry of the device service from
 // the outside. It reads only the private MCP configuration, connects through
-// the official MCP SDK, and checks the public 12-tool surface, one ordinary
+// the official MCP SDK, and checks the public 13-tool surface, one ordinary
 // session round trip, the unified app tool's read-only and controlled
 // lifecycle branches, cancellation cleanup and (for the HTTP entries) the
 // adapter's own authentication boundary. The http-remote transport only

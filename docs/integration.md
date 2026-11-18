@@ -181,8 +181,8 @@ Header: Authorization: Bearer <mcp_token>
 1. 完全退出并重启 MCP 客户端/宿主进程；
 2. 执行 `server/discover` 与 `tools/list`；
 3. 应看到固定 13 个工具：`start`、`status`、`observe`、`snap`、`wait_for`、`act`、`inspect`、
-   `keepalive`、`end`、`app`、`notify`、`shell`、`diagnose`；`snap` 是唯一发布
-   `annotations.readOnlyHint=true` 的工具。
+   `keepalive`、`end`、`app`、`notify`、`shell`、`diagnose`。`status`、`inspect`、
+   `diagnose` 和 `snap` 发布 `annotations.readOnlyHint=true`。
 
 MCP 的 `act` schema 含 `scroll` 分支（`container`/`direction`/`amount`）与 `swipe` 的可选
 `duration_ms`；观察质量与滚动效果的字段和投影见[接口契约](interface.md)与
@@ -191,10 +191,10 @@ MCP 的 `act` schema 含 `scroll` 分支（`container`/`direction`/`amount`）�
 只替换手机上的二进制或重启 service 进程，不会让已连接的宿主自动刷新工具；必须重启宿主进程/
 连接。MCP 适配器本身不保存会话，重启后重新发现即可。
 
-MCP 服务在 `server/discover` 与兼容 `initialize` 响应中发布 server instructions：完整树语法
-一次加跨工具调用规则（会话推进、O/P、租期、工具选择、`text` 输入与恢复）。宿主应把该说明
-提供给模型；未展示说明的宿主可从 `start` 描述取得最小提示：O 是可消费观察，P 是操作幂等/
-查询编号，full 是完整树，delta 只相对其 base 且新 delta 覆盖旧 delta。
+MCP 服务在 `server/discover` 与兼容 `initialize` 响应中发布同一份 server instructions，
+包括完整树图例及会话、O/P、引用和恢复等跨工具规则。宿主应将该说明提供给模型。各工具
+描述提供本工具的关键分流和恢复提示，`start` 也简述 O/P 与 full/delta。
+用 `base` 指向的 full 和本次 delta 重建当前树。
 
 ### 4.5 结果模式
 

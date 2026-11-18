@@ -15,7 +15,8 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
   `snap`、`wait_for`、`act`、`inspect`、`keepalive`、`end`、`app`、`notify`、`shell`、
   `diagnose`。不注册 `/health`、认证初始化、旧工具别名或旧协议回退。
 - 目录指纹是工具数、注册顺序、名称、描述与入参 schema 的 canonical SHA-256。当前源码的
-  工具目录指纹为 `e25fc67773f1d744ef3dd526685d19f863f4e9d5e6f5e8ccb5548f6690eacde4`。
+  工具目录指纹为 `99dd22d0a81280b6875eaa770b81ee0f553e8a6b9e49f4bbb0c83078f25494c8`。
+  发布清单中的指纹对应其记录的源码提交。发布时从目标提交重建并核验清单。
   探针按工具名比对实际 `tools/list` 的描述和入参 schema，并核对只读注解。传入 `-manifest`
   时，探针将清单中的工具数和目录 SHA-256 分别与源码目录的对应值比对。探针将
   `server/discover` 返回的 server instructions 与构建内的固定说明源逐字节比较，并附加兼容
@@ -34,6 +35,7 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
 `inspect` 必须指向保留中的历史 O；`app.list` 仍接受能解析到活动原会话的 P。
 `act` 与 `inspect` 的 `reference` schema 都要求以 `O` 开头。`act` 静态拒绝不认领 O，
 成功认领即消费原 O。
+`inspect.query` 的 schema 声明 1–256 个 Unicode 码点。
 `operation.bubble` 与 `operation.press_enter` 是 presence-aware 布尔，省略与显式 true
 在该适用分支等价；schema 的字段说明明确它们只对 ref tap/long_press 或 text 生效，不发布
 可能被误读为全类型生效的通用 `default`。
@@ -58,9 +60,10 @@ Label、最近祖先关系及安全点，child 丢失或内容被替换返回 `4
 `tap`/`long_press` 的 ref 静态拒绝按 code 区分：`invalid_target` 表示目标结构或几何不可用，
 `unsupported_node_action` 表示请求动作或提升前提不满足（含祖先不可用），`no_safe_point` 表示有动作但
 固定候选都无法证明。`no_safe_point` 不是向祖先继续查找目标的指令；`error.details` 的
-`reason`、有界阻塞/歧义/归属 ref 列表与可选 `suggested_point` 只描述同一 O 上可用的调用线索。
-三类静态拒绝都不消费 O、结果为 `not_executed`；建议坐标不是执行授权，坐标重试须使用新 P
-并独立通过准入与重验。
+`reason`、有界阻塞/歧义/归属 ref 列表与可选 `suggested_point` 描述同一 O 上的调用线索。
+三类静态拒绝都不认领 O，结果为 `not_executed`。结果带 `suggested_point` 且原 O 仍
+ready 时，可用同一 O 和 `operation.target={x,y}` 尝试坐标分支，省略 `bubble`。适配器
+分配新 P，该调用仍须独立通过准入与重验。
 
 `text` 的 `press_enter` 省略或有效为 true 时，一次调用完成必要聚焦（已聚焦 ref 不重复点击）、
 将目标框全文设为 text、以同一次写入调用中同一节点的刷新值精确读回，并至多发送一次 ENTER；
@@ -80,14 +83,13 @@ Label、最近祖先关系及安全点，child 丢失或内容被替换返回 `4
 [接口契约](interface.md) §6。
 
 公共树语法与调用规则由 server instructions 发布：`server/discover` 与兼容 `initialize`
-返回同一份说明，完整树块词表恰好出现一次，另含会话推进、O/P 身份、统一 `reference`、
-租期、工具选择、默认 `bubble`/`press_enter`、`text_input` 事实与恢复分类；13 个工具描述不再
-内联树引导，只保留各自用途、关键参数/默认、结果或动作边界与最少恢复路径。`start` 描述保留
-一段短兼容提示：O 是可消费观察，P 是该操作的幂等/查询编号；full 是完整树，delta 只相对其
-base 且新 delta 覆盖旧 delta。树块词表本身不变：树节点行的动作列仍只有 `tap`、`long_press`、
-`text`、`swipe`（`Node.actions` 不新增枚举）；`actions=swipe` 只是节点的源能力，不是 raw
-`swipe` 授权，滚动用 `operation.type=scroll` 与 `container` 表达。引导声明块头 `view=`、
-块头后的空行、`entries` 计数与 `chain` 行。
+返回同一份说明，包含一份完整树图例，以及会话推进、O/P、`reference`、租期和跨工具恢复。
+工具描述给出用途、关键参数分流、动作边界及独立理解该工具所需的恢复提示。
+`start` 描述简述 O/P 和 full/delta。每条 delta 都单独应用到 `base` 指向的完整树。
+图例说明节点动作列（`tap`、`long_press`、`text`、`swipe`）、块头 `view=`、块头后的空行、
+`entries` 计数与 `chain` 行。动作列的 `swipe` 表示节点的源能力，受控滚动使用
+`operation.type=scroll` 和 `container`。嵌套容器可按要滚动的区域选择 ref。
+`effect.state` 报告内容位移证据，执行事实由 `outcome` 表达。
 
 调用参数在进入客户端前由 `internal/protocol` 的严格解码器接入：未知成员、重复键、大小写
 变体、尾随第二个 JSON 值、类型混用与未声明 `null` 都被拒绝，且不产生设备调用。参数错误
@@ -100,10 +102,12 @@ base 且新 delta 覆盖旧 delta。树块词表本身不变：树节点行的�
 本次时长；start 使用五分钟租期，会话没有累计时长硬上限。调用取消仍按第 6 节撤销授权，
 长租约不覆盖取消边界。
 
-`snap` 的 schema 只有一个必填 `reference`（`O…`/`P…`，≤64），没有其他成员；它与
-`observe` 共用引用解析口径（额外拒绝本次请求 P 的自引用），但只读取一张图，不读取树、
-不发布观察。它是唯一带预分配 P 的
-读图工具：`tools/list` 只为它发布 `annotations.readOnlyHint=true`，其他工具不发布该注解。
+`tools/list` 为 `status`、`inspect`、`diagnose` 和 `snap` 发布
+`annotations.readOnlyHint=true`。前三项查询无本次 P，`snap` 仍预分配 P 并占用工作位。
+注解表达操作意图，实时查询的结果仍取自调用时的状态。
+
+`snap` 的 schema 只有一个必填 `reference`（`O…`/`P…`，≤64）。它与 `observe` 共用
+引用解析口径，额外拒绝本次请求 P 的自引用。它只读取一张图，不读取树或发布观察。
 成功时结果是顶层 `image` 元数据加一个 `ImageContent`；`result v2` 以
 `image=<紧凑 JSON>` 输出同一元数据（不含 base64），`structuredContent` 在顶层 `image` 携带
 同组成员，三种结果模式都只发送一个 `ImageContent`。`isError=false` 要求完整图片实际交付；
@@ -111,9 +115,11 @@ base 且新 delta 覆盖旧 delta。树块词表本身不变：树节点行的�
 
 `observe.wait_ms` 是单次采集前的延迟毫秒数；等待公开树条件使用 `wait_for`。`wait_for` 的
 schema 以 `reference` 与 `timeout` 为必填，`query`、`absent_query`、`stable`、`full`、`image`
-可选：`timeout` 是 1–40 的整数，`stable=true` 时至少 2；两个条件字符串各至多 256 个码点。
-成功时检查 `wait.trigger` 和 `wait.matched`，直接用返回的新 `observation.id` 继续。
-`wait.trigger=timeout` 也可以成功返回。命中条件或满足稳定状态时复用候选帧。到时或采样上限
+可选。`timeout` 是 1–40 的整数，`stable=true` 时至少 2。两个等待条件在 schema 中均为
+1–256 个码点，运行时也拒绝全空白。同时提供时任一条件命中即可满足查询条件。
+`stable=true` 时还须满足稳定判据。成功时用新 `observation.id`
+继续。超时若发布新 O，`isError=false`，`wait.matched` 含 `timeout` 及终帧命中的条件。
+命中条件或满足稳定状态时复用候选帧。到时或采样上限
 退出时，若最新成功轮询帧仍在 `CaptureMaxAge=15s` 内且之后没有失败尝试，则复用该帧。否则
 做一次终帧采集。连续 3 帧稳定由 `observation.quality.state=stable` 表达；
 `wait.elapsed_ms` 计自准入完成至终帧发布，验证采集整体受 35 秒固定预留约束，实际耗时可
@@ -142,8 +148,13 @@ kind 成员矩阵是互斥权威：
 `target` 为 `{"task_id": 正整数}` 或 `{"app": 包名}`，恰好一种；`open` 只接受 `target.app`，
 `kill` 只接受 `target.task_id`，`claim`/`handoff`/`close` 接受两者之一。顶层 `app` 只保留给
 `list` 过滤。`find`/`list` 是查询，成功与失败均无 `outcome`；结果各按 32 KiB 完整条目前缀
-返回，`total`/`truncated` 说明预算前数量与截断；其余五个 kind 消费当前 ready O，成功返回
-原会话屏的一次 full 无图观察。查询与变更的 P 绑定、IsError 与取消差异见第 3、6 节。
+返回，`total`/`truncated` 说明预算前数量与截断。其余五个 kind 认领时消费当前 ready O，
+已执行后尝试发布原会话屏的 full 无图观察。查询与变更的 P 绑定、IsError 与取消差异见第 3、6 节。
+
+`shell` 的 `status(P)` 可以在终止未确认时返回 `operation_state=finished` 与
+`outcome=uncertain`。受管命令的有限屏障仍可能让新的普通工作返回 `device_busy`。
+`status({})` 可报告 `blocking_code=shell_pending`。遇到该阻塞可短暂退避，原会话仍活动时
+再观察现状。屏障期限见 [运维说明](runbook.md#7-常见故障)。
 
 ## 3. 结果投影
 
