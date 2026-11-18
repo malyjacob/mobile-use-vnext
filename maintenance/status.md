@@ -1,6 +1,6 @@
 # 项目实施状态
 
-状态：2026-11-18，契约 18 的 text 写入确认、错误详情与恢复投影已实现、整组部署并完成有限实机验证；契约 17 静态错误分类与契约 16 联合验收记录已定稿。本页承载用户可见的阶段进度、已实现/已实测/未验证分层与未决项；
+状态：2026-11-18，契约 19 的只读截图工具 snap 已实现、整组部署并完成实机最小闭环；契约 18 的 text 写入确认、错误详情与恢复投影已完成有限实机验证。本页承载用户可见的阶段进度、已实现/已实测/未验证分层与未决项；
 `docs/` 只保留正式架构、现行契约与运维说明。
 
 ## 1. 阶段
@@ -11,7 +11,7 @@
 | P1 只读采集 | 完成 | 实机经 Go 服务完成层级采集 |
 | P2 公共模型 | 完成 | engine 状态机、observation 树/delta、store、httpapi |
 | P3 最小可写闭环 | 已收口（G3 部分证据） | start/observe/act/end、STOP、恢复；`scripts/verify-p3.ps1` 连续 PASS |
-| P4 完整工具面 | 已打通（有限缺口） | 12 个工具端点已实现并实机走通；剩余证据缺口见下 |
+| P4 完整工具面 | 已打通（有限缺口） | 13 个工具端点已实现并实机走通；剩余证据缺口见下 |
 | P5 MCP | 完成 | 图片链路、Go client、stdio/Streamable HTTP 双入口；实机验证见 P5 记录 |
 | P6 控制呈现/整组交付 | 完成（G6 证据见 P6 记录） | 完整 control_view 呈现、消息中心交付、单一版本源、整组发布、破坏性发布与重启恢复演练 |
 | S0–S10 观察连续性、结构差分与动作重验 | 已实现 / 实机有限验证 / 归档记录定稿 | `900e640`、`bb43c19`、`38f47e3`、`049583d` 完成实现；0.15.0/契约 15/versionCode 17 完整发布；用户于 2026-11-16 接受 D01–D06 证据缺口（[记录](verification/observation-continuity-and-revalidation.md)） |
@@ -31,6 +31,7 @@
 | `diagnose` | 已实现 | 已验证：无参/指定 O |
 | `shell` | 已实现 | 已验证：正常/非零/自行124/超时/输出截断/STOP/重启恢复；命令结束不发布观察、同一 O 仍可用（`shell` 后 `act` 未变屏成功、改屏 `target_changed`、过期 `observation_expired`），实机 delta 回退见[记录](verification/shell-keeps-observation.md) |
 | `observe`/`act` 的 `image=true` | 已实现（HTTP + MCP） | 已验证：JPEG 540×1200、MIME、无 base64、只读图分支由单元测试覆盖 |
+| `snap`（契约 19，第 13 个工具） | 已实现（HTTP + Go client + MCP + 控制 App 文案） | 已实测：`start → keepalive(1) → snap(O) → status(O/P) → observe(image=true) → end` 闭环 PASS；JPEG 540×1200 与元数据一致，原 O 保持 `ready`/`effective` 且 `expires_at` 不变，snap 不递增 revision，重复 P/`status(P)` 无图摘要；主机 stdio/http、手机 HTTP 远端与 text/structured 探针均 PASS。实机 STOP/取消精确竞态与截图进行中文案未构造（[记录](verification/snap.md)） |
 | MCP stdio / Streamable HTTP | 已实现（`cmd/device-mcp`） | 已验证：工具目录/schema、认证/Origin、图片、取消、P 恢复；P6 回归重新拉起实际适配进程。默认部署同时安装并启动手机 `device-mcp`（手机 `18882/mcp`，主机转发 `18883`），`verify-m6` 检查 `server/discover`；主机侧适配器仍可选 |
 | MCP 文本树块 | 已实现 | 已实测：0.4.2 手机 HTTP MCP 的 `start`/`inspect` 文本块，以及主机 stdio 探针的 `observe`/`act` 树块；外部宿主、token 对比、宿主截断与实机超预算未执行（[记录](verification/mcp-tree-text.md)） |
 | MCP 结果模式 | 已实现 | 已实测：both/text/structured 的主机 stdio 闭环、手机 HTTP 三模式各 12 工具及取消恢复；大值仅合成测试，外部宿主/截断/race 未验证（[记录](verification/mcp-result-modes.md)） |
