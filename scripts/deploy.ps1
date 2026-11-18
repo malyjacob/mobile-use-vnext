@@ -609,4 +609,4 @@ if ($SkipPhoneMcp) {
 }
 Write-Output "host verification URL: $baseUrl"
 Write-Output "tokens/config: $deployStatePath (private, gitignored)"
-Write-Output 'MCP client tools/list: NOT VERIFIED by deploy (restart the real client; verify-m6.ps1 covers server/discover)'
+Write-Output ("Restart the MCP host and confirm tools/list shows {0} tools. See docs/runbook.md section 10.4 for adapter discovery checks." -f $catalogCount)

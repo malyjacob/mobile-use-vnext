@@ -261,8 +261,8 @@ var toolCatalog = []toolDefinition{
 	},
 	{
 		name: "act",
-		description: "消费一个 ready 观察并派发 tap、long_press、text、swipe、scroll 或 key，成功后返回动作后的观察。" +
-			"reference 必填且必须是当前 ready O，调用后该 O 被消费、不再可用。" +
+		description: "基于当前 ready 观察派发 tap、long_press、text、swipe、scroll 或 key，成功后返回动作后的观察。" +
+			"reference 必填且必须是当前 ready O。静态拒绝不认领 O；一旦认领，原 O 即被消费。" +
 			"operation 只接受对应分支成员：tap/long_press 用 target；text 用 target 与 text；" +
 			"scroll 用 container、direction 与可选 amount（默认 page）；swipe 用 from/to 与可选 duration_ms；key 用 key 白名单。" +
 			"tap/long_press 的 ref 目标默认 bubble=true：原目标完全没有 tap、long_press、text 任一动作时只向最近交互祖先提升一次；" +
@@ -293,8 +293,8 @@ var toolCatalog = []toolDefinition{
       "type": "string",
       "minLength": 1,
       "maxLength": 64,
-      "pattern": "^[OP]",
-      "description": "必填的当前 ready O 编号；调用后该 O 被消费。"
+      "pattern": "^O",
+      "description": "必填的当前 ready O 编号。静态拒绝不认领 O；一旦认领，原 O 即被消费。"
     },
     "operation": {
       "type": "object",
@@ -432,7 +432,7 @@ var toolCatalog = []toolDefinition{
       "type": "string",
       "minLength": 1,
       "maxLength": 64,
-      "pattern": "^[OP]",
+      "pattern": "^O",
       "description": "必填的历史 O 编号。"
     },
     "node": {

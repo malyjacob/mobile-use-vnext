@@ -406,6 +406,29 @@ func TestToolCatalog(t *testing.T) {
 				t.Fatalf("%s: required member %q is not declared", tool.Name, name)
 			}
 		}
+		if rawReference, ok := schema.Properties["reference"]; ok {
+			var reference struct {
+				Pattern     string `json:"pattern"`
+				Description string `json:"description"`
+			}
+			if err := json.Unmarshal(rawReference, &reference); err != nil {
+				t.Fatalf("%s: reference schema: %v", tool.Name, err)
+			}
+			wantPattern := "^[OP]"
+			if tool.Name == "act" || tool.Name == "inspect" {
+				wantPattern = "^O"
+			}
+			if reference.Pattern != wantPattern {
+				t.Errorf("%s: reference pattern = %q, want %q", tool.Name, reference.Pattern, wantPattern)
+			}
+			if tool.Name == "act" {
+				for _, description := range []string{tool.Description, reference.Description} {
+					if !strings.Contains(description, "静态拒绝不认领 O") || !strings.Contains(description, "一旦认领") {
+						t.Error("act description must distinguish static rejection from consumption on claim")
+					}
+				}
+			}
+		}
 		if tool.Name == "keepalive" {
 			var duration struct {
 				Type    string `json:"type"`

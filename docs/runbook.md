@@ -192,9 +192,8 @@ curl -s -X POST http://127.0.0.1:18881/api/status \
 - `can_start=false` 时读 `blocking_code` 与 `cleanup`/`session`；
 - 端口已监听、`/health` 正常、进程存在都不能替代这个门禁。
 
-工具目录与 server instructions 由探针核对：前者按 `tools/list` 的 13 个工具与目录指纹，
-后者把 live `server/discover` 返回的说明与构建内固定说明源逐字节比较，并附加兼容
-`initialize` 检查。工具端点可用一次最小条件等待验证（`reference` 用当前 `ready` 的 O）：
+探针按 [MCP 入口契约](mcp.md#1-协议与进程边界) 核对工具目录、清单与 server instructions。
+工具端点可用一次最小条件等待验证（`reference` 用当前 `ready` 的 O）：
 
 ```bash
 curl -s -X POST http://127.0.0.1:18881/api/wait_for \
@@ -429,7 +428,7 @@ go run ./scripts/mcp-probe -config .state/mcp-config.json -binary build/device-m
 - `mcp-probe` 的 `-transport http-remote` 只连接已运行的手机适配器，不启动或停止远端进程；
   `-suite app-lifecycle` 只操作受控 test-target 包，要求原会话为 virtual，不自动切换显示模式。
 - 探针把 live `server/discover` 的 instructions 与构建内固定说明源逐字节比较，并附加兼容
-  `initialize` 检查；`tools/list` 只核对 13 个工具与目录指纹。
+  `initialize` 检查，工具目录和清单按 [MCP 入口契约](mcp.md#1-协议与进程边界) 核对。
 
 ```powershell
 ./build/mcp-probe.exe -transport stdio -binary ./build/device-mcp.exe -config .state/mcp-config.json -result-mode text

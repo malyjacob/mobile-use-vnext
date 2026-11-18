@@ -14,11 +14,12 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
 - 工具目录固定为 13 个，与 [接口契约](interface.md) 同名同义：`start`、`status`、`observe`、
   `snap`、`wait_for`、`act`、`inspect`、`keepalive`、`end`、`app`、`notify`、`shell`、
   `diagnose`。不注册 `/health`、认证初始化、旧工具别名或旧协议回退。
-- 目录指纹是工具数、注册顺序、名称、描述与入参 schema 的 canonical SHA-256，当前为
-  `91fed94c832e6b80eee98df4c6c4d0053819452ed6e630e25f8700cfb483f1c9`；发布清单与探针按
-  它比对实际 `tools/list`，任一条描述或 schema 变化都会改变该值。工具目录指纹不覆盖
-  server instructions；instructions 由探针把 `server/discover` 返回的说明与构建内的固定
-  说明源逐字节比较，并附加兼容 `initialize` 检查。
+- 目录指纹是工具数、注册顺序、名称、描述与入参 schema 的 canonical SHA-256。当前源码的
+  工具目录指纹为 `f00f09510ffa4129a5dfbbd88b51b3e209b2dec677a2f99dfe332ea40035f3b8`。
+  探针按工具名比对实际 `tools/list` 的描述和入参 schema，并核对只读注解。传入 `-manifest`
+  时，探针将清单中的工具数和目录 SHA-256 分别与源码目录的对应值比对。探针将
+  `server/discover` 返回的 server instructions 与构建内的固定说明源逐字节比较，并附加兼容
+  `initialize` 检查。
 - stdio 模式的 stdout 只承载 MCP 协议帧；日志与诊断一律写 stderr。
 - 私有配置把适配进程绑定到一个可信 Agent 的服务凭据；该凭据不是工具参数，不进入日志、
   错误、结果或 MCP 正文。
@@ -31,6 +32,8 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
 `inspect` 与 `app` 的请求引用字段统一为 `reference`；旧 `observation_id` 是未知成员，
 不提供别名。`act` 的 `reference`、`app` 的五个变更 kind 必须指向当前 ready O；
 `inspect` 必须指向保留中的历史 O；`app.list` 仍接受能解析到活动原会话的 P。
+`act` 与 `inspect` 的 `reference` schema 都要求以 `O` 开头。`act` 静态拒绝不认领 O，
+成功认领即消费原 O。
 `operation.bubble` 与 `operation.press_enter` 是 presence-aware 布尔，省略与显式 true
 在该适用分支等价；schema 的字段说明明确它们只对 ref tap/long_press 或 text 生效，不发布
 可能被误读为全类型生效的通用 `default`。
