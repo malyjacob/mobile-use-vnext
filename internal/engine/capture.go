@@ -551,8 +551,16 @@ func (e *Engine) projectCapture(work *workState, phase string, cap device.Captur
 // different surfaces.
 func (e *Engine) readImageForAcquisition(ctx context.Context, work *workState,
 	session *sessionState, phase string, sfid uint64) (*imageAttempt, *protocol.APIError) {
+	return e.readImageForAcquisitionOnDisplay(ctx, work, session.Display.ID, phase, sfid)
+}
+
+// readImageForAcquisitionOnDisplay is the same verified read bound to an
+// explicit logical display id. Snap uses the id fixed at admission instead of a
+// live session snapshot.
+func (e *Engine) readImageForAcquisitionOnDisplay(ctx context.Context, work *workState,
+	displayID int, phase string, sfid uint64) (*imageAttempt, *protocol.APIError) {
 	attempt := e.readImage(ctx, work, phase, sfid)
-	if attempt.read && !e.verifyImageTarget(ctx, session, sfid) {
+	if attempt.read && !e.verifyImageTarget(ctx, displayID, sfid) {
 		attempt.meta, attempt.data, attempt.read = nil, nil, false
 		attempt.err = protocol.NewError(503, protocol.CodeImageCapture, "截图期间目标屏幕身份已变化")
 		return attempt, protocol.NewError(503, protocol.CodeDisplayUnavailable, "目标屏幕不可用")
@@ -589,20 +597,26 @@ func (e *Engine) readImage(ctx context.Context, work *workState, phase string,
 
 // verifyImageTarget re-reads the display identity after the image read so the
 // image and the tree belong to the same target surface.
-func (e *Engine) verifyImageTarget(ctx context.Context, session *sessionState, sfid uint64) bool {
+func (e *Engine) verifyImageTarget(ctx context.Context, displayID int, sfid uint64) bool {
 	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	state, err := e.dev.ProbeDisplay(probeCtx, session.Display.ID)
+	state, err := e.dev.ProbeDisplay(probeCtx, displayID)
 	return err == nil && state.Exists && state.SFID == sfid
 }
 
 // encodeImage performs the single output encode of one attempt. It runs after
 // the tree attempt, whether that attempt succeeded or failed.
 func (e *Engine) encodeImage(attempt *imageAttempt, session *sessionState) {
+	e.encodeImageForDisplay(attempt, session.Display)
+}
+
+// encodeImageForDisplay is the same single encode bound to an explicit display
+// snapshot. Snap encodes against the geometry fixed at admission.
+func (e *Engine) encodeImageForDisplay(attempt *imageAttempt, display device.Display) {
 	if !attempt.read || attempt.err != nil {
 		return
 	}
-	meta, data, err := e.imaging.Encode(attempt.source, session.Display,
+	meta, data, err := e.imaging.Encode(attempt.source, display,
 		e.cfg.ImageMaxLongSide, e.cfg.ImageQuality, e.cfg.MaxImageBytes)
 	if err != nil {
 		attempt.err = imageEncodeError(err)

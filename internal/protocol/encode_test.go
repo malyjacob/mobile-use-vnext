@@ -52,6 +52,22 @@ func TestRequestEncodersRoundTrip(t *testing.T) {
 			t.Fatalf("image not explicit: %s", body)
 		}
 	})
+	t.Run("snap", func(t *testing.T) {
+		body, err := (&SnapRequest{Reference: "O1"}).Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(body) != `{"reference":"O1"}` {
+			t.Fatalf("snap body = %s", body)
+		}
+		req, apiErr := DecodeSnap(body)
+		if apiErr != nil || req.Reference != "O1" {
+			t.Fatalf("DecodeSnap: %v %+v", apiErr, req)
+		}
+		if _, err := (&SnapRequest{}).Encode(); err == nil {
+			t.Fatal("empty snap reference was encoded")
+		}
+	})
 	t.Run("act branches", func(t *testing.T) {
 		branches := []*Operation{
 			{Type: "tap", Target: &Target{UseRef: true, Ref: "n8"}},

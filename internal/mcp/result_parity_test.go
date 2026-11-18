@@ -482,9 +482,9 @@ func TestHTTPModesSelectProjectionPerCall(t *testing.T) {
 }
 
 func TestCatalogFingerprintBaseline(t *testing.T) {
-	// The catalog has twelve tools. This baseline covers the caller-oriented
+	// The catalog has thirteen tools. This baseline covers the caller-oriented
 	// descriptions after the tree guide moved to the server instructions.
-	const baseline = "82da6a0ef0d577b214095d9cb22e2585812827c3ddc28ef16d453bf8ab262538"
+	const baseline = "91fed94c832e6b80eee98df4c6c4d0053819452ed6e630e25f8700cfb483f1c9"
 	if got := CatalogFingerprint(); got != baseline {
 		t.Fatalf("catalog changed: %s", got)
 	}

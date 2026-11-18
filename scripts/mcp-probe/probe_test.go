@@ -409,6 +409,20 @@ func (f *fakeAdapter) imageResult(payload map[string]any) *sdk.CallToolResult {
 	return f.render(payload, false, true)
 }
 
+// snapResult is the top-level image success shape: one P, image metadata and
+// exactly one ImageContent.
+func (f *fakeAdapter) snapResult(operationID string) *sdk.CallToolResult {
+	return f.render(map[string]any{
+		"operation_id": operationID,
+		"image": map[string]any{
+			"captured_at": "2026-01-01T00:00:00Z",
+			"width":       720, "height": 1280,
+			"media_type": imageJPEG, "read_only": true,
+			"screen": map[string]any{"width": 1080, "height": 2400, "rotation": 0},
+		},
+	}, false, true)
+}
+
 func (f *fakeAdapter) errorResult(payload map[string]any) *sdk.CallToolResult {
 	return f.render(payload, true, false)
 }
@@ -498,6 +512,14 @@ func (f *fakeAdapter) handle(ctx context.Context, name string, request *sdk.Call
 			"operation_id": f.nextID("P"),
 			"observation":  f.observation(o, reference, 2, true),
 		}), nil
+	case "snap":
+		reference, _ := arguments["reference"].(string)
+		if !validReference(reference, 'P') && !validReference(reference, 'O') {
+			return f.errorResult(map[string]any{
+				"error": map[string]any{"code": "invalid_request"},
+			}), nil
+		}
+		return f.snapResult(f.nextID("P")), nil
 	case "wait_for":
 		reference, _ := arguments["reference"].(string)
 		if !validReference(reference, 'P') && !validReference(reference, 'O') {
@@ -1111,11 +1133,11 @@ func TestAdapterChecksAgainstFakeAdapter(t *testing.T) {
 				t.Fatalf("checks failed (exit %d):\n%s", code, output.String())
 			}
 			for _, want := range []string{
-				"PASS tools count=12",
-				"PASS catalog tools=12",
+				"PASS tools count=13",
+				"PASS catalog tools=13",
 				"PASS catalog_fingerprint",
 				"PASS act_scroll_schema",
-				"PASS schema objects=12",
+				"PASS schema objects=13",
 				"PASS result_error",
 				"PASS status can_start=true",
 				"PASS start",
@@ -1125,6 +1147,7 @@ func TestAdapterChecksAgainstFakeAdapter(t *testing.T) {
 				"PASS app_list_primary",
 				"PASS app_admission",
 				"PASS observe",
+				"PASS snap",
 				"PASS shell_projection",
 				"PASS timeline_projection",
 				"PASS inspect",
@@ -1375,6 +1398,8 @@ func (f *fakeRecoveryService) serve(writer http.ResponseWriter, request *http.Re
 		f.writeStart(writer, operationID)
 	case "/api/observe":
 		f.writeObserve(writer, request, operationID, body)
+	case "/api/snap":
+		f.writeSnap(writer, operationID)
 	case "/api/wait_for":
 		f.writeWait(writer, operationID, body)
 	case "/api/act":
@@ -1758,6 +1783,24 @@ func (f *fakeRecoveryService) writeEnd(writer http.ResponseWriter, operationID s
 	f.writeResult(writer, result)
 }
 
+func (f *fakeRecoveryService) writeSnap(writer http.ResponseWriter, operationID string) {
+	f.mutex.Lock()
+	defer f.mutex.Unlock()
+	f.operations[operationID] = operationFinished
+	f.writeResult(writer, &protocol.Result{
+		OperationID: operationID,
+		Image: &protocol.ImageMeta{
+			CapturedAt: time.Now().UTC().Format(time.RFC3339),
+			Width:      720,
+			Height:     1280,
+			MediaType:  imageJPEG,
+			ReadOnly:   true,
+			Screen:     &protocol.Screen{Width: 1080, Height: 2400, Rotation: 0},
+			Base64:     base64.StdEncoding.EncodeToString(f.image),
+		},
+	})
+}
+
 func (f *fakeRecoveryService) writeResult(writer http.ResponseWriter, result *protocol.Result) {
 	encoded, err := protocol.JSON(result)
 	if err != nil {
@@ -1922,7 +1965,7 @@ func TestProbeAgainstRealAdapter(t *testing.T) {
 				t.Fatalf("checks failed (exit %d):\n%s", code, output.String())
 			}
 			for _, want := range []string{
-				"PASS tools count=12",
+				"PASS tools count=13",
 				"PASS catalog",
 				"PASS catalog_fingerprint",
 				"PASS act_scroll_schema",
@@ -1935,6 +1978,7 @@ func TestProbeAgainstRealAdapter(t *testing.T) {
 				"PASS app_list_primary",
 				"PASS app_admission",
 				"PASS observe",
+				"PASS snap",
 				"PASS shell_projection",
 				"PASS timeline_projection",
 				"PASS inspect",

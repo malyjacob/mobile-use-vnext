@@ -69,6 +69,18 @@ func TestStrictAdmission(t *testing.T) {
 		{"wait_for duplicate member", `{"reference":"O1","timeout":5,"timeout":6}`, false},
 		{"wait_for case variant", `{"Reference":"O1","timeout":5}`, false},
 		{"wait_for trailing value", `{"reference":"O1","timeout":5} {}`, false},
+		{"snap ok observation", `{"reference":"O1"}`, true},
+		{"snap ok operation", `{"reference":"P2"}`, true},
+		{"snap missing reference", `{}`, false},
+		{"snap null reference", `{"reference":null}`, false},
+		{"snap empty reference", `{"reference":""}`, false},
+		{"snap bad reference kind", `{"reference":"X1"}`, false},
+		{"snap reference type mixing", `{"reference":1}`, false},
+		{"snap long reference", `{"reference":"O` + strings.Repeat("1", MaxReferenceLen) + `"}`, false},
+		{"snap unknown member", `{"reference":"O1","full":true}`, false},
+		{"snap duplicate member", `{"reference":"O1","reference":"O2"}`, false},
+		{"snap case variant", `{"Reference":"O1"}`, false},
+		{"snap trailing value", `{"reference":"O1"} {}`, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -84,6 +96,8 @@ func TestStrictAdmission(t *testing.T) {
 				_, err = DecodeEnd([]byte(tc.body))
 			case strings.HasPrefix(tc.name, "wait_for"):
 				_, err = DecodeWaitFor([]byte(tc.body))
+			case strings.HasPrefix(tc.name, "snap"):
+				_, err = DecodeSnap([]byte(tc.body))
 			default:
 				_, err = DecodeAct([]byte(tc.body))
 			}

@@ -350,6 +350,9 @@ final class ControlState {
         if ("observe".equals(work.kind)) {
             return "正在观察";
         }
+        if ("snap".equals(work.kind)) {
+            return "正在截图";
+        }
         if ("shell".equals(work.kind)) {
             return "正在执行命令";
         }
@@ -431,6 +434,14 @@ final class ControlState {
                 case "image":
                 case "project": return "验证采集";
                 case "commit": return "提交观察";
+                default: return "未知";
+            }
+        }
+        if (hasPhasePrefix(prefix, "snap")) {
+            switch (step) {
+                case "capture": return "读取屏幕";
+                case "image": return "读取截图";
+                case "commit": return "提交截图";
                 default: return "未知";
             }
         }

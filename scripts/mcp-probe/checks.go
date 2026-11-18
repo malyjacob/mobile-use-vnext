@@ -37,7 +37,7 @@ const (
 // toolNames is the complete public MCP catalog, in registration order. apps and
 // open_app were merged into app; any of the old names existing is a failure.
 var toolNames = []string{
-	"start", "status", "observe", "wait_for", "act", "inspect", "keepalive",
+	"start", "status", "observe", "snap", "wait_for", "act", "inspect", "keepalive",
 	"end", "app", "notify", "shell", "diagnose",
 }
 
@@ -120,6 +120,9 @@ func (p *probe) runChecks(ctx context.Context) bool {
 	} else {
 		observedID, ok := p.observeCheck(ctx, start.ObservationID)
 		if !ok {
+			return false
+		}
+		if _, ok := p.snapCheck(ctx, observedID); !ok {
 			return false
 		}
 		waitedID, ok := p.waitForCheck(ctx, observedID)
@@ -580,6 +583,49 @@ func (p *probe) observeCheck(ctx context.Context, reference string) (string, boo
 		field("width", strconv.Itoa(observation.Image.Width)),
 		field("height", strconv.Itoa(observation.Image.Height)))
 	return observation.ID, true
+}
+
+// snapCheck proves the one top-level image read: the tool returns a P and a
+// complete JPEG metadata object, delivers exactly one ImageContent, keeps the
+// text/structured body free of base64, and never publishes an observation or
+// an action outcome.
+func (p *probe) snapCheck(ctx context.Context, reference string) (string, bool) {
+	projected, failure := p.call(ctx, "snap", map[string]any{"reference": reference})
+	if failure != nil {
+		p.reporter.fail("snap", failure.reason, failure.fields...)
+		return "", false
+	}
+	view := projected.view
+	if projected.result.IsError {
+		p.reporter.fail("snap", "tool_is_error", field("code", codeOf(view)))
+		return "", false
+	}
+	if view.Observation != nil || view.Outcome != "" {
+		p.reporter.fail("snap", "snap_success_shape_unexpected")
+		return "", false
+	}
+	if !validReference(view.OperationID, 'P') {
+		p.reporter.fail("snap", "operation_id_invalid")
+		return "", false
+	}
+	raw, failure := snapImageBytes(projected, view.Image)
+	if failure != nil {
+		p.reporter.fail("snap", failure.reason, failure.fields...)
+		return "", false
+	}
+	if failure := checkNoImageCarrier(projected, raw); failure != nil {
+		p.reporter.fail("snap", failure.reason, failure.fields...)
+		return "", false
+	}
+	p.reporter.pass("snap",
+		field("reference", reference), field("operation_id", view.OperationID),
+		"image_mime="+imageJPEG, field("image_bytes", strconv.Itoa(len(raw))),
+		field("width", strconv.Itoa(view.Image.Width)),
+		field("height", strconv.Itoa(view.Image.Height)),
+		field("screen_width", strconv.Itoa(view.Image.Screen.Width)),
+		field("screen_height", strconv.Itoa(view.Image.Screen.Height)),
+		field("read_only", "true"))
+	return view.OperationID, true
 }
 
 // checkObservationTreeBlock asserts that the readable projection carries one

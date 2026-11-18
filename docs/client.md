@@ -19,7 +19,7 @@ instance, err := c.Discover(ctx)
 `POST /api/status {}` 取得当前准入事实（`can_start`、`blocking_code`、本 Agent 的
 `session`、`start_operation_id` 与 `cleanup`）。它不生成 P、不续租、不创建会话。
 
-当前共同契约为 `"18"`。契约版本不等时返回 `contract_mismatch`；客户端不刷新版本、不重发
+当前共同契约为 `"19"`。契约版本不等时返回 `contract_mismatch`；客户端不刷新版本、不重发
 业务动作。端口可应答、`/health` 正常都不等于 `can_start=true`。
 
 公开树与 detailed inspection 使用相同的完整节点布尔默认/unknown 规则，不携带 defaults。
@@ -29,11 +29,11 @@ delta 结果上；阅读 ref 连续性不代替服务端输入授权。格式见
 
 ## 2. 操作编号 P
 
-会改变设备/会话或发布新观察的调用在发送前生成 P：
+会改变设备/会话、发布新观察或占用普通工作位的图片读取在发送前生成 P：
 
 | 工具 | P |
 | --- | --- |
-| `start`、`observe`、`wait_for`、`act`、`keepalive`、`end`、`app`、`notify`、`shell` | 生成并放在 `X-Mobile-Use-Operation` |
+| `start`、`observe`、`snap`、`wait_for`、`act`、`keepalive`、`end`、`app`、`notify`、`shell` | 生成并放在 `X-Mobile-Use-Operation` |
 | `status`、`inspect`、`diagnose` | 不生成、不发送该头 |
 
 - 默认 P 形状为 `P` + 24 位小写十六进制；调用方可用 `client.WithOperationID` 指定一个
@@ -84,6 +84,7 @@ type Response struct {
 | `Start` | 无 | 是 |
 | `Status` | `reference`（空串表示无引用） | 否 |
 | `Observe` | `*protocol.ObserveRequest` | 是 |
+| `Snap` | `*protocol.SnapRequest` | 是 |
 | `WaitFor` | `*protocol.WaitForRequest` | 是 |
 | `Act` | `*protocol.ActRequest` | 是 |
 | `End` | `reference` | 是 |
@@ -182,3 +183,18 @@ type Error struct {
 `image.error.code` 为 `image_capture_failed`、`image_encode_failed`、`image_too_large` 或
 `image_stale`。图片成功而核心树失败时没有新 O，`image.read_only=true`，不能作为输入依据。
 客户端不缓存图片，也不提供历史图片补取。
+
+`Client.Snap(ctx, *protocol.SnapRequest, ...CallOption)` 只发一次 `POST /api/snap`，请求体
+只有 `reference`。成功响应只有一个顶层 `image`：客户端复用同一有界解码路径，把
+`image.base64` 解码到 `Response.Image` 并清空 `Result.Image.Base64`。除共用响应边界外，
+客户端还要求顶层图片满足：有效的 `captured_at`、正整数的输出 `width`/`height`、
+`media_type=image/jpeg`、`read_only=true`、合法的 `screen` 与非空 base64。以下成功形状
+按 `invalid_response` 拒绝：
+
+- 顶层 `image` 与 `observation.image` 同时出现；
+- 顶层 `image` 与 `error`、`outcome` 或 `observation` 同时出现；
+- 顶层 `image` 的任一必填元数据缺失、为 `null` 或越界（含显式 `null` 的顶层 `image`）。
+
+重复 P 与 `status(P)` 的无图摘要不是错误响应，可以正常解码；它的 `operation_state`、
+`phase` 与 `error` 按服务结果读取，`Response.Image` 与 `Result.Image` 都为空。客户端不会
+为无图摘要补图片，也不会把 `snap` 的成功形状交给观察图片路径。

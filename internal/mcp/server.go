@@ -65,11 +65,17 @@ func NewServer(opts Options) (*sdk.Server, error) {
 	adapter := &adapter{client: opts.Client, logger: logger, defaultResultMode: opts.DefaultResultMode}
 	for _, definition := range toolCatalog {
 		definition := definition
-		server.AddTool(&sdk.Tool{
+		tool := &sdk.Tool{
 			Name:        definition.name,
 			Description: definition.description,
 			InputSchema: definition.schema,
-		}, func(ctx context.Context, request *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
+		}
+		if definition.snap {
+			// The one image read is annotated read-only even though it carries a
+			// pre-allocated P; no other tool publishes annotations.
+			tool.Annotations = &sdk.ToolAnnotations{ReadOnlyHint: true}
+		}
+		server.AddTool(tool, func(ctx context.Context, request *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
 			mode := adapter.defaultResultMode
 			if request != nil && request.Extra != nil {
 				var err error
@@ -167,7 +173,10 @@ func (a *adapter) run(ctx context.Context, definition toolDefinition, arguments 
 type preparedCall struct {
 	readOnly bool
 	kind     string
-	run      func(ctx context.Context, operationID string) (*client.Response, error)
+	// snap is the one image read that receives a pre-allocated P but never
+	// issues an end on cancellation and discards its image when cancelled.
+	snap bool
+	run  func(ctx context.Context, operationID string) (*client.Response, error)
 }
 
 // appQuery reports one of the two app kinds that read without an outcome.
@@ -185,7 +194,7 @@ func (c *preparedCall) appMutation() bool {
 // five app mutation kinds and the other work tools do; app queries do not, even
 // though the app tool is not marked read-only.
 func (c *preparedCall) endsOnCancel() bool {
-	return !c.readOnly && !c.appQuery()
+	return !c.readOnly && !c.snap && !c.appQuery()
 }
 
 type callOutcome struct {
@@ -221,6 +230,7 @@ func (a *adapter) invoke(ctx context.Context, call *preparedCall, operationID st
 const (
 	cancellationReadOnlyMessage = "调用已取消；只读工具未发起 end"
 	cancellationQueryMessage    = "查询已取消；未发起 end"
+	cancellationSnapMessage     = "截图调用已取消；未发起 end，且不交付图片"
 )
 
 // cancelled builds the cancellation result. Only work calls outside the app
@@ -290,6 +300,17 @@ func (a *adapter) cancelled(call *preparedCall, operationID string, done <-chan 
 				Message: cancellationReadOnlyMessage,
 			}
 		}
+	case call.snap:
+		// A cancelled snap never delivers material it may already have read or
+		// committed: both the metadata and the transport image are cleared, and
+		// the adapter-owned cancellation code is the published failure.
+		base.OperationID = operationID
+		base.Image = nil
+		base.Observation = nil
+		base.Error = &protocol.Error{
+			Code:    "call_cancelled",
+			Message: cancellationSnapMessage,
+		}
 	default:
 		base.OperationID = operationID
 		if base.App == nil && !service && call.appMutation() {
@@ -326,13 +347,16 @@ func (a *adapter) cancelled(call *preparedCall, operationID string, done <-chan 
 	clearImageBase64(base)
 
 	cancellation := cancellationEndMessage(operationID)
-	if call.readOnly {
+	switch {
+	case call.readOnly:
 		cancellation = cancellationReadOnlyMessage
-	} else if query {
+	case call.snap:
+		cancellation = cancellationSnapMessage
+	case query:
 		cancellation = cancellationQueryMessage
 	}
 	var image *client.Image
-	if known.response != nil {
+	if known.response != nil && !call.snap {
 		image = known.response.Image
 	}
 	return &execution{
@@ -460,6 +484,11 @@ func (e *execution) isError(tool string) bool {
 		return result == nil || result.Error != nil
 	case "observe", "wait_for":
 		return result == nil || result.Observation == nil || result.Observation.ID == ""
+	case "snap":
+		// A snap success requires the complete image to be delivered: the
+		// metadata alone, a failure, or a duplicate P summary is an error.
+		return result == nil || result.Image == nil ||
+			e.image == nil || len(e.image.Data) == 0
 	case "act":
 		return result == nil || result.Outcome != "executed"
 	case "inspect":
@@ -535,7 +564,7 @@ func requestArguments(request *sdk.CallToolRequest) []byte {
 // prepareCall decodes one tool's raw arguments with the shared strict
 // decoder. No client method is selected until admission succeeds.
 func prepareCall(service *client.Client, definition toolDefinition, body []byte) (*preparedCall, *protocol.APIError) {
-	call := &preparedCall{readOnly: definition.readOnly}
+	call := &preparedCall{readOnly: definition.readOnly, snap: definition.snap}
 	switch definition.name {
 	case "start":
 		if _, apiErr := protocol.DecodeStart(body); apiErr != nil {
@@ -564,6 +593,15 @@ func prepareCall(service *client.Client, definition toolDefinition, body []byte)
 				Image:     request.Image,
 				WaitMS:    request.WaitMS,
 			}, client.WithOperationID(operationID))
+		}
+	case "snap":
+		request, apiErr := protocol.DecodeSnap(body)
+		if apiErr != nil {
+			return nil, apiErr
+		}
+		call.run = func(ctx context.Context, operationID string) (*client.Response, error) {
+			return service.Snap(ctx, &protocol.SnapRequest{Reference: request.Reference},
+				client.WithOperationID(operationID))
 		}
 	case "wait_for":
 		request, apiErr := protocol.DecodeWaitFor(body)

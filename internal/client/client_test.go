@@ -1243,6 +1243,121 @@ func TestInspectAndDiagnoseNeverAllocateOperation(t *testing.T) {
 	}
 }
 
+func TestSnapImageDecodedAndCarrierCleared(t *testing.T) {
+	imageBytes := []byte{0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46}
+	encoded := base64.StdEncoding.EncodeToString(imageBytes)
+	body := fmt.Sprintf(`{"operation_id":"Psnap","image":{"captured_at":"2026-11-18T00:00:00Z","width":540,"height":1200,"media_type":"image/jpeg","read_only":true,"screen":{"width":1080,"height":2400,"rotation":0},"base64":"%s"}}`, encoded)
+	var capture requestCapture
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		capture = captureRequest(t, request)
+		writeResponse(w, http.StatusOK, body)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	response, err := client.Snap(context.Background(), &protocol.SnapRequest{Reference: "O1"},
+		WithOperationID("Psnap"))
+	if err != nil {
+		t.Fatalf("Snap() error: %v", err)
+	}
+	assertToolRequest(t, capture, "/api/snap")
+	if capture.body != `{"reference":"O1"}` {
+		t.Fatalf("snap body = %q", capture.body)
+	}
+	if capture.headers.Get(operationHeader) != "Psnap" {
+		t.Fatal("snap did not send the pre-assigned operation ID")
+	}
+	if response.OperationID != "Psnap" || response.HTTPStatus != http.StatusOK {
+		t.Fatalf("response identity = %+v", response)
+	}
+	if response.Image == nil || !bytes.Equal(response.Image.Data, imageBytes) {
+		t.Fatal("snap image was not decoded")
+	}
+	if response.Image.MediaType != "image/jpeg" || response.Image.Width != 540 ||
+		response.Image.Height != 1200 || !response.Image.ReadOnly ||
+		response.Image.CapturedAt != "2026-11-18T00:00:00Z" ||
+		response.Image.Screen == nil || response.Image.Screen.Width != 1080 {
+		t.Fatalf("snap image metadata = %+v", response.Image)
+	}
+	if response.Result.Image == nil || response.Result.Image.Base64 != "" {
+		t.Fatal("snap metadata was not retained without the base64 carrier")
+	}
+}
+
+func TestSnapRejectsInvalidSuccessShapes(t *testing.T) {
+	baseImage := `"captured_at":"2026-11-18T00:00:00Z","width":540,"height":1200,"media_type":"image/jpeg","read_only":true,"screen":{"width":1080,"height":2400,"rotation":0},"base64":"AAAA"`
+	mutate := func(old, replacement string) string {
+		return strings.Replace(baseImage, old, replacement, 1)
+	}
+	imageBodies := []string{
+		mutate(`"base64":"AAAA"`, `"base64":""`),
+		mutate(`image/jpeg`, `image/png`),
+		mutate(`"read_only":true`, `"read_only":false`),
+		mutate(`"captured_at":"2026-11-18T00:00:00Z"`, `"captured_at":""`),
+		mutate(`"captured_at":"2026-11-18T00:00:00Z"`, `"captured_at":"yesterday"`),
+		mutate(`"width":540`, `"width":0`),
+		mutate(`"height":1200`, `"height":0`),
+		mutate(`{"width":1080,"height":2400,"rotation":0}`, `{"width":0,"height":2400,"rotation":0}`),
+		mutate(`{"width":1080,"height":2400,"rotation":0}`, `{"width":1080,"height":2400,"rotation":4}`),
+		mutate(`"screen":{"width":1080,"height":2400,"rotation":0}`, `"screen":null`),
+		mutate(`"base64":"AAAA"`, `"base64":"!!!"`),
+		mutate(`"base64":"AAAA"`, `"base64":"AAAA","error":{"code":"x","message":"y"}`),
+	}
+	bodies := make([]string, 0, len(imageBodies)+3)
+	for _, image := range imageBodies {
+		bodies = append(bodies, `{"operation_id":"P1","image":{`+image+`}}`)
+	}
+	bodies = append(bodies,
+		`{"operation_id":"P1","image":{`+baseImage+`},"observation":{"status":"complete","id":"O1"}}`,
+		`{"operation_id":"P1","image":{`+baseImage+`},"error":{"code":"x","message":"y"}}`,
+		`{"operation_id":"P1","image":{`+baseImage+`},"outcome":"executed"}`,
+	)
+	var index atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		current := int(index.Add(1)) - 1
+		if current >= len(bodies) {
+			current = len(bodies) - 1
+		}
+		writeResponse(w, http.StatusOK, bodies[current])
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	for caseIndex := range bodies {
+		response, err := client.Snap(context.Background(),
+			&protocol.SnapRequest{Reference: "O1"}, WithOperationID("Pbad"))
+		if response != nil {
+			t.Fatalf("case %d: invalid shape produced a response: %+v", caseIndex, response)
+		}
+		clientErr := requireClientError(t, err)
+		if clientErr.Code != ErrorResponse {
+			t.Fatalf("case %d: code = %q, want %q", caseIndex, clientErr.Code, ErrorResponse)
+		}
+	}
+}
+
+// TestSnapDuplicateSummaryWithoutImageDecodes pins the allowed no-image summary:
+// a duplicate P replay is a normal result, just not an MCP success.
+func TestSnapDuplicateSummaryWithoutImageDecodes(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		writeResponse(w, http.StatusOK, `{"operation_id":"P1","operation_state":"finished","phase":"finished"}`)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	response, err := client.Snap(context.Background(),
+		&protocol.SnapRequest{Reference: "O1"}, WithOperationID("P1"))
+	if err != nil {
+		t.Fatalf("Snap() error: %v", err)
+	}
+	if response.Image != nil || response.Result.Image != nil {
+		t.Fatal("duplicate summary carried an image")
+	}
+	if response.Result.OperationState != "finished" || response.Result.Phase != "finished" {
+		t.Fatalf("duplicate summary = %+v", response.Result)
+	}
+}
+
 func TestObservationImageDecodedAndCarrierCleared(t *testing.T) {
 	imageBytes := []byte{0x89, 'P', 'N', 'G', 0x00, 0x01, 0x02, 0xff}
 	encoded := base64.StdEncoding.EncodeToString(imageBytes)
@@ -1834,6 +1949,8 @@ func TestNilOrUnencodableRequestsDoNotSend(t *testing.T) {
 		retainsOperation bool
 	}{
 		{"observe-nil", func() (*Response, error) { return client.Observe(ctx, nil) }, true},
+		{"snap-nil", func() (*Response, error) { return client.Snap(ctx, nil) }, true},
+		{"snap-empty", func() (*Response, error) { return client.Snap(ctx, &protocol.SnapRequest{}) }, true},
 		{"act-nil", func() (*Response, error) { return client.Act(ctx, nil) }, true},
 		{"app-nil", func() (*Response, error) { return client.App(ctx, nil) }, true},
 		{"notify-nil", func() (*Response, error) { return client.Notify(ctx, nil) }, true},

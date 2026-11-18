@@ -149,6 +149,25 @@ func (r *WaitForRequest) Encode() ([]byte, error) {
 	})
 }
 
+// Encode writes the canonical snap(reference) body.
+func (r *SnapRequest) Encode() ([]byte, error) {
+	if r.Reference == "" {
+		return nil, errors.New("snap requires a reference")
+	}
+	return encodeRequest(func(enc *jsontext.Encoder) error {
+		if err := enc.WriteToken(jsontext.BeginObject); err != nil {
+			return err
+		}
+		if err := writeName(enc, "reference"); err != nil {
+			return err
+		}
+		if err := writeString(enc, r.Reference); err != nil {
+			return err
+		}
+		return enc.WriteToken(jsontext.EndObject)
+	})
+}
+
 // Encode writes the canonical end(reference) body.
 func (r *EndRequest) Encode() ([]byte, error) {
 	if r.Reference == "" {

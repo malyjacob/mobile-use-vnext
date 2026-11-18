@@ -330,7 +330,7 @@ func TestToolCatalog(t *testing.T) {
 		t.Fatalf("ListTools: %v", err)
 	}
 	want := []string{
-		"start", "status", "observe", "wait_for", "act", "inspect", "keepalive",
+		"start", "status", "observe", "snap", "wait_for", "act", "inspect", "keepalive",
 		"end", "app", "notify", "shell", "diagnose",
 	}
 	if len(list.Tools) != len(want) {
@@ -359,6 +359,7 @@ func TestToolCatalog(t *testing.T) {
 		"start":     {},
 		"status":    {},
 		"observe":   {"reference"},
+		"snap":      {"reference"},
 		"wait_for":  {"reference", "timeout"},
 		"act":       {"reference", "operation"},
 		"inspect":   {"reference"},

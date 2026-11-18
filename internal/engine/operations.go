@@ -45,6 +45,14 @@ func (e *Engine) registerDetachedOperation(p, agent, kind string) (*operationSta
 func (e *Engine) registerOperationBound(p, agent, kind string, bindSession bool) (*operationState, *protocol.Result, *protocol.APIError) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	return e.registerOperationLocked(p, agent, kind, bindSession)
+}
+
+// registerOperationLocked is the same admission without taking the state lock,
+// so snap can register its P, resolve the original reference and take the work
+// position in one critical section. An explicit end(P) cannot close that P
+// between registration and work binding.
+func (e *Engine) registerOperationLocked(p, agent, kind string, bindSession bool) (*operationState, *protocol.Result, *protocol.APIError) {
 	if e.shuttingDown {
 		return nil, nil, protocol.NewError(503, protocol.CodeDeviceUnavailable, "服务正在退出")
 	}
@@ -179,6 +187,16 @@ func (e *Engine) finishOperation(op *operationState, outcome, phase string, apiE
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	return e.finishOperationLocked(op, outcome, phase, apiErr)
+}
+
+// finishOperationLocked is the same terminal transition under a held state
+// lock, so one commit decision can check every gate and finish the operation
+// without an interleaving STOP. It only saves bounded operation facts.
+func (e *Engine) finishOperationLocked(op *operationState, outcome, phase string, apiErr *protocol.APIError) *protocol.Recovery {
+	if op == nil {
+		return nil
+	}
 	if op.State == OperationFinished {
 		return op.Recovery
 	}
@@ -193,6 +211,13 @@ func (e *Engine) finishOperation(op *operationState, outcome, phase string, apiE
 		if apiErr.HTTPStatus != 0 && apiErr.HTTPStatus != protocol.Status(apiErr.Code) {
 			op.HTTPStatus = apiErr.HTTPStatus
 		}
+	}
+	if op.Kind == WorkSnap {
+		// A snap terminal has no tool-level next step: the image is delivered
+		// once in the first response, and a duplicate P or status(P) replays the
+		// same bounded summary without guessing a retry.
+		op.Recovery = nil
+		return nil
 	}
 	inputState := op.InputState
 	if inputState == "" {

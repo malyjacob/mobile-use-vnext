@@ -38,6 +38,7 @@ var resultFields = func() map[string]resultFieldKind {
 	add("", "text_input", fieldObject)
 	add("text_input.", "write enter", fieldToken)
 	add("", "session cleanup error recovery observation app notification diagnosis", fieldObject)
+	add("", "image", fieldJSON)
 	add("", "inspection shell", fieldBlock)
 	add("", "wait", fieldObject)
 	add("wait.", "trigger", fieldToken)

@@ -116,12 +116,12 @@ curl.exe -s http://127.0.0.1:18881/health
 
 ### 3.1 工具目录与联合版本校验
 
-手机侧 MCP 适配器与设备服务共用同一工具目录，固定为 12 个工具：`start`、`status`、
-`observe`、`wait_for`、`act`、`inspect`、`keepalive`、`end`、`app`、`notify`、`shell`、
-`diagnose`。适配器按同一份目录投影 `tools/list`，发布清单与探针按工具目录指纹核对，描述或
+手机侧 MCP 适配器与设备服务共用同一工具目录，固定为 13 个工具：`start`、`status`、
+`observe`、`snap`、`wait_for`、`act`、`inspect`、`keepalive`、`end`、`app`、`notify`、
+`shell`、`diagnose`。适配器按同一份目录投影 `tools/list`，发布清单与探针按工具目录指纹核对，描述或
 schema 变化都会改变指纹。
 
-服务端、手机 MCP 适配器与控制 App 必须同为 `contract_version=18`，控制 App 还须与清单的
+服务端、手机 MCP 适配器与控制 App 必须同为 `contract_version=19`，控制 App 还须与清单的
 versionName/versionCode 一致：
 
 - `/health` 的 `contract_version` 与 `release_version` 必须等于清单值；
@@ -254,7 +254,7 @@ adb shell su -c 'tail -n 100 /data/data/com.mobileuse.vnext/files/diagnostics.lo
    $control = (Get-Content .state/deploy.json -Raw | ConvertFrom-Json).control_token
    Invoke-RestMethod http://127.0.0.1:18881/v1/control/stop -Method Post `
      -Headers @{ Authorization = "Bearer $control" } -ContentType 'application/json' `
-     -Body '{"contract_version":"18","app_instance_id":"<uuid>","stop_seq":1,"reason":"operator_stop"}'
+     -Body '{"contract_version":"19","app_instance_id":"<uuid>","stop_seq":1,"reason":"operator_stop"}'
    ```
 
    `accepted=true` 只表示停止边界已绑定；仍需用 App/`status.cleanup` 核验执行链、任务与

@@ -179,6 +179,10 @@ func (e *Engine) freezeWorkLocked(work *workState) {
 	work.Revoked = true
 	if op := e.operations[work.OperationID]; op != nil && op.State == OperationRunning {
 		op.State, op.FinishedAt = OperationFinished, time.Now()
+		if op.Kind == WorkSnap {
+			e.freezeSnapLocked(op, work)
+			return
+		}
 		if op.AppKind == protocol.AppKindFind || op.AppKind == protocol.AppKindList {
 			// A query never has an action outcome. A closed query is only a
 			// closed query; an expired work budget is a read failure.
@@ -212,6 +216,28 @@ func (e *Engine) freezeWorkLocked(work *workState) {
 		}
 		op.Error = &protocol.Error{Code: protocol.CodeStopped, Message: "原工作已撤销"}
 	}
+}
+
+// freezeSnapLocked records the single uncommitted snap terminal using the same
+// order as the snap commit decision: session revocation and lease first, then
+// the caller's cancellation and this tool's own deadline. It never writes an
+// action outcome and never invents a recovery step.
+func (e *Engine) freezeSnapLocked(op *operationState, work *workState) {
+	phase, apiErr := e.snapUncommittedOutcomeLocked(work, time.Now())
+	if phase == "" {
+		phase, apiErr = "revoked", protocol.NewError(409, protocol.CodeStopped, "原会话已撤销")
+	}
+	op.Outcome = ""
+	op.Phase = phase
+	op.Recovery = nil
+	if apiErr != nil {
+		op.Error = apiErr.Public()
+		if apiErr.HTTPStatus != 0 && apiErr.HTTPStatus != protocol.Status(apiErr.Code) {
+			op.HTTPStatus = apiErr.HTTPStatus
+		}
+		return
+	}
+	op.Error = nil
 }
 
 // freezeTextLocked records the frozen text facts from the last timely stage
@@ -586,6 +612,12 @@ func (e *Engine) applyFrozenResult(op *operationState, result **protocol.Result)
 	}
 	switch op.Phase {
 	case "work_deadline", "query_cancelled", "query_timeout":
+	case "cancelled", "revoked":
+		// These snap terminals are frozen facts of an uncommitted read. A late
+		// device result must replay the frozen summary and never deliver an image.
+		if op.Kind != WorkSnap {
+			return
+		}
 	default:
 		return
 	}

@@ -85,6 +85,32 @@ func testObservation() *Observation {
 	}
 }
 
+func TestDecodeSnapResultImage(t *testing.T) {
+	original := &Result{
+		OperationID: "P1",
+		Image: &ImageMeta{
+			CapturedAt: "2026-11-18T00:00:00Z",
+			Width:      540,
+			Height:     1200,
+			MediaType:  "image/jpeg",
+			ReadOnly:   true,
+			Screen:     &Screen{Width: 1080, Height: 2400, Rotation: 0},
+			Base64:     "AA==",
+		},
+	}
+	roundTripDecode(t, original)
+}
+
+// TestDecodeSnapResultRejectsExplicitNullImage pins the wire rule that the
+// top-level image member is an object when present.
+func TestDecodeSnapResultRejectsExplicitNullImage(t *testing.T) {
+	var result Result
+	err := json.Unmarshal([]byte(`{"operation_id":"P1","image":null}`), &result)
+	if err == nil {
+		t.Fatal("explicit null image was accepted")
+	}
+}
+
 func TestDecodeStartSuccess(t *testing.T) {
 	original := &Result{
 		OperationID:    "P1",

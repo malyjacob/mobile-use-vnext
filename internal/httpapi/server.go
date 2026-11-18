@@ -54,6 +54,7 @@ func New(cfg Config, eng *engine.Engine, log *eventlog.Logger) *Server {
 	mux.HandleFunc("/api/start", s.agent(s.start))
 	mux.HandleFunc("/api/status", s.agent(s.status))
 	mux.HandleFunc("/api/observe", s.agent(s.observe))
+	mux.HandleFunc("/api/snap", s.agent(s.snap))
 	mux.HandleFunc("/api/wait_for", s.agent(s.waitFor))
 	mux.HandleFunc("/api/act", s.agent(s.act))
 	mux.HandleFunc("/api/end", s.agent(s.end))
@@ -232,6 +233,29 @@ func (s *Server) observe(w http.ResponseWriter, r *http.Request, p string) {
 		defer release()
 	}
 	result, apiErr := s.engine.Observe(r.Context(), s.cfg.AgentName, p, req)
+	s.finish(w, result, apiErr)
+}
+
+// snap admits the single-image read. It always reserves the image delivery
+// budget before the engine takes the device work position.
+func (s *Server) snap(w http.ResponseWriter, r *http.Request, p string) {
+	body, ok := readBody(w, r, 8*1024)
+	if !ok {
+		return
+	}
+	req, apiErr := protocol.DecodeSnap(body)
+	if apiErr != nil {
+		writeAPIError(w, apiErr)
+		return
+	}
+	release, ok := s.delivery.acquire(deliveryReserveImage)
+	if !ok {
+		writeAPIError(w, protocol.NewError(503, protocol.CodeDeliveryUnavailable,
+			"结果交付容量不足，请在当前结果交付后再试"))
+		return
+	}
+	defer release()
+	result, apiErr := s.engine.Snap(r.Context(), s.cfg.AgentName, p, req)
 	s.finish(w, result, apiErr)
 }
 

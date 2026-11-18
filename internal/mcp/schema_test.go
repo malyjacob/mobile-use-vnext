@@ -151,6 +151,12 @@ func TestToolDescriptionsAreCallerOriented(t *testing.T) {
 			"blocking_operation_id",
 			"不续租",
 		},
+		"snap": {
+			"不读取节点树",
+			"ImageContent",
+			"不续租",
+			"无图摘要",
+		},
 		"observe": {
 			"reference 必填",
 			"0–10000",

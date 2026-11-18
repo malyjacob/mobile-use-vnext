@@ -16,7 +16,7 @@ import (
 // checkLiveCatalog proves that the live tools/list is the same catalog the
 // source tree publishes. The MCP SDK is free to return the tools in a
 // different order, so the check compares a name-keyed mapping: the name set
-// must be exactly the 12 frozen tools (and never apps/open_app), then every
+// must be exactly the 13 frozen tools (and never apps/open_app), then every
 // description and input schema is compared by meaning. The live schema has
 // already been re-serialized by the SDK, so comparing its JSON bytes with the
 // source fingerprint would be meaningless; only the source snapshot and
@@ -85,6 +85,20 @@ func checkLiveCatalog(tools []*sdk.Tool) *checkError {
 	if failure := checkActScrollSchema(live["act"]); failure != nil {
 		return failure
 	}
+	// The deployed catalog must publish exactly one public read-only annotation:
+	// snap. Every other tool keeps its annotations empty.
+	snap := live["snap"]
+	if snap == nil || snap.Annotations == nil || !snap.Annotations.ReadOnlyHint {
+		return failf("snap_read_only_annotation_missing")
+	}
+	for name, tool := range live {
+		if name == "snap" {
+			continue
+		}
+		if tool.Annotations != nil && tool.Annotations.ReadOnlyHint {
+			return failf("unexpected_read_only_annotation", field("tool", name))
+		}
+	}
 	return nil
 }
 
@@ -106,7 +120,7 @@ type actToolSchema struct {
 // checkActScrollSchema asserts the live act tool declares the contract-10
 // scroll surface: operation.type includes scroll, all four scroll members are
 // published, direction is exactly up/down/left/right and duration_ms is bounded
-// by 50/2000. The whole-schema semantic equality and the 12-tool count are
+// by 50/2000. The whole-schema semantic equality and the 13-tool count are
 // proven by the caller before this focused check runs.
 func checkActScrollSchema(tool *sdk.Tool) *checkError {
 	if tool == nil {

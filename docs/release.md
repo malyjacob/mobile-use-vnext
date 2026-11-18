@@ -32,7 +32,7 @@
 | `android_version_code` | Android versionCode，写入 `AndroidManifest.xml` 与清单 |
 | `source_commit` | 该版本号冻结时的基线提交（仅供校验）；清单记录构建时的 HEAD |
 
-当前版本源为 `release_version=0.18.0`、`contract_version=18`、`android_version_code=20`；三者
+当前版本源为 `release_version=0.19.0`、`contract_version=19`、`android_version_code=21`；三者
 只能在本文件手改，其他位置由生成脚本写入。
 
 `scripts/generate-version.ps1` 生成：
@@ -68,8 +68,8 @@ PowerShell、docs 或 Manifest 中另写一份版本号；`contract_version` 只
 {
   "format": "mobile-use-vnext-release",
   "version": 1,
-  "release_version": "0.18.0",
-  "contract_version": 18,
+  "release_version": "0.19.0",
+  "contract_version": 19,
   "source_commit": "<40 位提交>",
   "source_dirty": false,
   "built_at": "…",
@@ -77,8 +77,8 @@ PowerShell、docs 或 Manifest 中另写一份版本号；`contract_version` 只
   "go_experiment": "jsonv2",
   "build_target": {"goos": "linux", "goarch": "arm64", "cgo_enabled": false},
   "mcp": {"sdk": "github.com/modelcontextprotocol/go-sdk v1.8.0", "protocol": "2026-07-28"},
-  "android": {"package": "com.mobileuse.vnext", "version_name": "0.18.0", "version_code": 20},
-  "tool_catalog": {"count": 12, "sha256": "…"},
+  "android": {"package": "com.mobileuse.vnext", "version_name": "0.19.0", "version_code": 21},
+  "tool_catalog": {"count": 13, "sha256": "…"},
   "artifacts": [{"name": "device-service", "path": "device-service", "sha256": "…", "bytes": 0}]
 }
 ```
@@ -149,7 +149,7 @@ PowerShell、docs 或 Manifest 中另写一份版本号；`contract_version` 只
 5. 使用主机侧适配器时，先辨认实际镜像路径与承载它的宿主进程，结束旧活动调用并停止该
    精确进程，再按 `build/host-tools-manifest.json` 替换 `build/device-mcp.exe` 与
    `build/mcp-probe.exe`；不宽泛终止所有同名进程。随后重启实际 MCP 宿主进程/连接，使宿主
-   重新发现 12 个工具；不能只替换磁盘文件或依赖 `list_changed` 通知。手机适配器默认随部署
+   重新发现 13 个工具；不能只替换磁盘文件或依赖 `list_changed` 通知。手机适配器默认随部署
    安装并启动，主机自建适配器可选。
 6. 条件成立才报告完成；分别记录版本匹配、App 配对、当前恢复入口、保留的退休 cleanup 事实、
    手机与主机工具清单元数据、两个主机 exe 的哈希、MCP 宿主刷新与本次最小闭环结果，不合并成

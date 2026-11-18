@@ -21,6 +21,7 @@ var routeAdmissionBase = []struct {
 	{"start", "", map[string]any{}},
 	{"status", "reference", map[string]any{"reference": "O1"}},
 	{"observe", "reference", map[string]any{"reference": "O1"}},
+	{"snap", "reference", map[string]any{"reference": "O1"}},
 	{"wait_for", "reference", map[string]any{"reference": "O1", "timeout": 1}},
 	{"act", "reference", map[string]any{
 		"reference": "O1",

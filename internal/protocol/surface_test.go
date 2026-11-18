@@ -248,6 +248,35 @@ func TestInspectionEncoding(t *testing.T) {
 	}
 }
 
+func TestResultImageFieldOrder(t *testing.T) {
+	saved := true
+	result := &Result{
+		OperationID: "P9",
+		Saved:       &saved,
+		Image: &ImageMeta{
+			CapturedAt: "2026-11-18T00:00:00Z",
+			Width:      540, Height: 1200,
+			MediaType: "image/jpeg", ReadOnly: true,
+			Screen: &Screen{Width: 1080, Height: 2400, Rotation: 0},
+		},
+		IncludeSession: true,
+		Session:        &Session{Origin: "P9", State: "active", Mode: "virtual"},
+	}
+	got := string(marshal(t, result))
+	order := []string{`"saved"`, `"image"`, `"session"`}
+	last := -1
+	for _, key := range order {
+		index := strings.Index(got, key)
+		if index < 0 {
+			t.Fatalf("missing %s in %s", key, got)
+		}
+		if index < last {
+			t.Fatalf("%s out of order in %s", key, got)
+		}
+		last = index
+	}
+}
+
 func TestResultToolSectionOrder(t *testing.T) {
 	saved := true
 	e := &APIError{Code: CodeAppLaunchFailed, Message: "x"}

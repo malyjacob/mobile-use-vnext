@@ -215,7 +215,7 @@ try {
     $hostManifest = Get-Content -LiteralPath $hostManifestPath -Raw | ConvertFrom-Json
     $hostCatalog = Get-Field $hostManifest 'tool_catalog'
     $toolCount = [int](Get-Field $hostCatalog 'count')
-    if ($toolCount -ne 12) { throw 'host_tools_catalog_count_not_12' }
+    if ($toolCount -ne 13) { throw 'host_tools_catalog_count_not_13' }
     Write-Output ('host tools identity: PASS release=' + [string](Get-Field $hostManifest 'release_version') +
         ' contract=' + [string](Get-Field $hostManifest 'contract_version') +
         ' tool_catalog=' + [string]$toolCount)

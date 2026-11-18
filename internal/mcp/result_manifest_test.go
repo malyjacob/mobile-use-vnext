@@ -47,7 +47,7 @@ var rmfKnownExclusions = map[string]string{
 	"protocol.AppView.HasRemainingPIDs":       "presence flag",
 	"protocol.AppView.HasRestarted":           "presence flag",
 	"protocol.ImageMeta.Base64":               "transport-only",
-	"protocol.Result.HTTPStatus":               "transport-only",
+	"protocol.Result.HTTPStatus":              "transport-only",
 	"protocol.ReadTreeValue.Full":             "variant wrapper",
 	"protocol.ReadTreeValue.Delta":            "variant wrapper",
 	// A read node carries exactly one definition anchor: its own ref or the
@@ -1269,8 +1269,26 @@ func rmfResultFixtures() []rmfFixture {
 			},
 		},
 	}
+	snap := rmfFixture{
+		name: "snap_image",
+		result: protocol.Result{
+			OperationID: "P6",
+			Image: &protocol.ImageMeta{
+				CapturedAt: "2026-11-10T00:00:07Z",
+				Width:      540,
+				Height:     1200,
+				MediaType:  "image/jpeg",
+				ReadOnly:   true,
+				Screen: &protocol.Screen{
+					Width: 1080, Height: 2400, Rotation: 0,
+				},
+				Error: imageError,
+			},
+		},
+	}
+
 	return []rmfFixture{
-		full, delta, query,
+		full, delta, query, snap,
 		appFind, appList, appListUnknownForeground, appOpen, appClaim, appHandoff, appClose, appKill,
 		scrollNotObserved, scrollUnknownEffect, notSampled,
 		textInputWriteOnly, textInputNotDispatched, textInputEnterUncertain,

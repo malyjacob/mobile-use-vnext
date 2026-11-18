@@ -50,6 +50,7 @@ const (
 	WorkAppAction = "app_action"
 	WorkShell     = "shell"
 	WorkWaitFor   = "wait_for"
+	WorkSnap      = "snap"
 )
 
 // appTool is the single public tool name of every app lifecycle kind. The kind
@@ -108,6 +109,11 @@ type Config struct {
 	ImageQuality     int           // JPEG quality for the single output encode
 	MaxImageBytes    int           // encoded image byte budget
 	ImageMaxSpan     time.Duration // allowed image-read start to tree-read start span
+
+	// SnapTimeout bounds one complete snap read: display probe, source read,
+	// target re-probe, encode and commit. It is service policy, never a per-call
+	// option.
+	SnapTimeout time.Duration
 
 	// Settle policy. A post observation waits for a converged tree before it
 	// is published; the per-phase values are service policy, never per-call
@@ -211,6 +217,7 @@ func DefaultConfig(instanceID, agentName string) Config {
 		ImageQuality:                 80,
 		MaxImageBytes:                512 * 1024,
 		ImageMaxSpan:                 3 * time.Second,
+		SnapTimeout:                  25 * time.Second,
 		Settle:                       DefaultSettlePolicies(),
 		Wait:                         DefaultWaitPolicy(),
 	}
@@ -564,7 +571,14 @@ type workState struct {
 	Revoked      bool
 	Ctx          context.Context
 	Cancel       context.CancelFunc
-	ClaimedO     string
+	// Parent is the caller's request context for work that stays bound to its
+	// request (snap). It is nil for ordinary work whose context is internal.
+	Parent context.Context
+	// Display is the session-bound display snapshot fixed at snap admission. It
+	// is the geometry source of the encoded image and the commit-time binding
+	// check; zero for every other work kind.
+	Display  device.Display
+	ClaimedO string
 	// DispatchUnknown records input that may have reached Android without a
 	// confirmed completion. Session cleanup stays unconfirmed while set.
 	DispatchUnknown bool

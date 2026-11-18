@@ -41,7 +41,7 @@ adb forward          主机 18881 → 服务；主机 18883 → 手机 MCP
    `adb forward`，也不需要 Agent token。
 
 只需要直连 HTTP 的 Agent 则使用 `http://127.0.0.1:18881/api/<tool>`、`agent_token` 与
-`X-Mobile-Use-Contract: 18`。
+`X-Mobile-Use-Contract: 19`。
 
 ## 1. 默认部署后的网络与进程
 
@@ -180,8 +180,9 @@ Header: Authorization: Bearer <mcp_token>
 
 1. 完全退出并重启 MCP 客户端/宿主进程；
 2. 执行 `server/discover` 与 `tools/list`；
-3. 应看到固定 12 个工具：`start`、`status`、`observe`、`wait_for`、`act`、`inspect`、
-   `keepalive`、`end`、`app`、`notify`、`shell`、`diagnose`。
+3. 应看到固定 13 个工具：`start`、`status`、`observe`、`snap`、`wait_for`、`act`、`inspect`、
+   `keepalive`、`end`、`app`、`notify`、`shell`、`diagnose`；`snap` 是唯一发布
+   `annotations.readOnlyHint=true` 的工具。
 
 MCP 的 `act` schema 含 `scroll` 分支（`container`/`direction`/`amount`）与 `swipe` 的可选
 `duration_ms`；观察质量与滚动效果的字段和投影见[接口契约](interface.md)与
@@ -275,7 +276,7 @@ HTTP 宿主在原有 `Authorization` 头之外按需添加：
 
 ```text
 Authorization: Bearer <agent_token>
-X-Mobile-Use-Contract: 18
+X-Mobile-Use-Contract: 19
 Content-Type: application/json; charset=utf-8
 ```
 
@@ -283,7 +284,7 @@ Content-Type: application/json; charset=utf-8
 $deploy = Get-Content .state/deploy.json -Raw | ConvertFrom-Json
 $headers = @{
     Authorization           = "Bearer $($deploy.agent_token)"
-    'X-Mobile-Use-Contract' = '18'
+    'X-Mobile-Use-Contract' = '19'
 }
 Invoke-RestMethod http://127.0.0.1:18881/api/status -Method Post `
   -Headers $headers -ContentType 'application/json' -Body '{}'
@@ -374,8 +375,31 @@ $newOid = $wait.observation.id
 - 取消语义：STOP 与 `end` 会释放工作位并把 `409 control_revoked` 交付给调用方；MCP 取消与
   客户端断连同样立即关闭等待并释放工作位，但由适配器（有界 `end(P)`，`call_cancelled`）或
   传输层收尾。取消不证明设备侧已撤回，也不保证本次等待产出观察。
-- 等待期独占唯一普通工作位：同会话的 `observe`、`act`、`app`、`shell` 立即返回
+- 等待期独占唯一普通工作位：同会话的 `observe`、`snap`、`act`、`app`、`shell` 立即返回
   `409 device_busy`。已知很慢的流程用一次较长 `timeout`，不要并发试探。
+
+### 5.3 `snap` 立即看当前画面
+
+只需要确认弹窗遮挡、画布内容或页面布局时，不必为了取图先读树：
+
+```powershell
+$snap = Invoke-RestMethod http://127.0.0.1:18881/api/snap -Method Post `
+  -Headers $headers -ContentType 'application/json' -Body '{"reference":"O1"}'
+$snap.operation_id       # 本次 P
+$snap.image.width        # 输出 JPEG 像素尺寸
+$snap.image.screen       # 准入时会话绑定显示的几何快照
+[IO.File]::WriteAllBytes("snap.jpg", [Convert]::FromBase64String($snap.image.base64))
+```
+
+- `snap` 只读当前屏的一张图，不读树、不发布观察、不续租、不认领 O；原 O 仍按自己的
+  `actionable_until` 与 `act` 实时重验使用。
+- 成功结果只有 `operation_id` 与顶层 `image`；`image.base64` 是 JPEG 字节，元数据与树/图片
+  附加材料同形，并固定 `read_only=true` 与 `screen`。
+- 重复使用同一 P、或对 `snap` 的 P 调 `status(P)`，只返回无图操作摘要，不重读设备。
+- 需要同时取新树和图时仍用 `observe(image=true)`；需要在条件满足后取图时用
+  `wait_for(image=true)`。
+- 失败是顶层 `error`：`display_unavailable`、`stale_screen`、`image_capture_failed`、
+  `image_stale`、`control_revoked` 等；请求取消只结束本次读取，不撤销会话。
 
 ## 6. 路径 C：主机自建 MCP 适配器
 
@@ -451,7 +475,7 @@ $json = $config | ConvertTo-Json -Depth 5
 }
 ```
 
-宿主只引用二进制和配置路径，不把 token 写进宿主文件。重启宿主后应看到 12 个工具。
+宿主只引用二进制和配置路径，不把 token 写进宿主文件。重启宿主后应看到 13 个工具。
 stdio 宿主不写 `-result-mode` 时默认 `text`；需要结构化结果时追加
 `"-result-mode", "structured"`。结果模式不是 JSON 配置成员，选择规则见第 4.5 节。
 
@@ -507,7 +531,7 @@ Header: Authorization: Bearer <mcp_token>
 两种选择：
 
 ```text
-直连 HTTP:  http://127.0.0.1:18880/api/<tool>   + agent_token + X-Mobile-Use-Contract: 18
+直连 HTTP:  http://127.0.0.1:18880/api/<tool>   + agent_token + X-Mobile-Use-Contract: 19
 MCP HTTP:   http://127.0.0.1:18882/mcp          + mcp_token
 ```
 
@@ -692,7 +716,7 @@ GET 判断工具是否可用。
 $deploy = Get-Content .state/deploy.json -Raw | ConvertFrom-Json
 $headers = @{
     Authorization           = "Bearer $($deploy.agent_token)"
-    'X-Mobile-Use-Contract' = '18'
+    'X-Mobile-Use-Contract' = '19'
 }
 $start = Invoke-RestMethod http://127.0.0.1:18881/api/start -Method Post `
   -Headers $headers -ContentType 'application/json' -Body '{}'

@@ -21,18 +21,22 @@ func sourceCatalogTools(t *testing.T) []*sdk.Tool {
 	snapshot := mcpsource.CatalogSnapshot()
 	tools := make([]*sdk.Tool, 0, len(snapshot))
 	for _, tool := range snapshot {
-		tools = append(tools, &sdk.Tool{
+		entry := &sdk.Tool{
 			Name:        tool.Name,
 			Description: tool.Description,
 			InputSchema: jsontext.Value(bytes.Clone(tool.Schema)),
-		})
+		}
+		if tool.ReadOnlyHint {
+			entry.Annotations = &sdk.ToolAnnotations{ReadOnlyHint: true}
+		}
+		tools = append(tools, entry)
 	}
 	return tools
 }
 
-func TestSourceCatalogIsFrozenTwelve(t *testing.T) {
-	if count := mcpsource.ToolCount(); count != 12 || count != len(toolNames) {
-		t.Fatalf("tool count = %d, probe = %d, want 12", count, len(toolNames))
+func TestSourceCatalogIsFrozenThirteen(t *testing.T) {
+	if count := mcpsource.ToolCount(); count != 13 || count != len(toolNames) {
+		t.Fatalf("tool count = %d, probe = %d, want 13", count, len(toolNames))
 	}
 	snapshot := mcpsource.CatalogSnapshot()
 	if len(snapshot) != len(toolNames) {
@@ -198,9 +202,9 @@ func TestCheckActScrollSchema(t *testing.T) {
 			t.Fatalf("source act schema rejected: %s %v", failure.reason, failure.fields)
 		}
 	})
-	t.Run("tool count is frozen twelve", func(t *testing.T) {
-		if count := mcpsource.ToolCount(); count != 12 || count != len(toolNames) {
-			t.Fatalf("tool count = %d, probe = %d, want 12", count, len(toolNames))
+	t.Run("tool count is frozen thirteen", func(t *testing.T) {
+		if count := mcpsource.ToolCount(); count != 13 || count != len(toolNames) {
+			t.Fatalf("tool count = %d, probe = %d, want 13", count, len(toolNames))
 		}
 	})
 	t.Run("scroll enum missing", func(t *testing.T) {
@@ -303,7 +307,7 @@ func writeCatalogManifest(t *testing.T, count int, hash string) string {
 
 func TestCatalogManifestIdentity(t *testing.T) {
 	fingerprint := mcpsource.CatalogFingerprint()
-	good := writeCatalogManifest(t, 12, fingerprint)
+	good := writeCatalogManifest(t, 13, fingerprint)
 
 	var output bytes.Buffer
 	runner := &probe{reporter: newReporter(&output), manifests: []string{good}}
@@ -314,7 +318,7 @@ func TestCatalogManifestIdentity(t *testing.T) {
 		t.Fatalf("missing manifest pass:\n%s", output.String())
 	}
 
-	badCount := writeCatalogManifest(t, 11, fingerprint)
+	badCount := writeCatalogManifest(t, 12, fingerprint)
 	output.Reset()
 	runner = &probe{reporter: newReporter(&output), manifests: []string{badCount}}
 	if runner.catalogIdentityCheck() {
@@ -324,7 +328,7 @@ func TestCatalogManifestIdentity(t *testing.T) {
 		t.Fatalf("missing count failure:\n%s", output.String())
 	}
 
-	badHash := writeCatalogManifest(t, 12, strings.Repeat("0", 64))
+	badHash := writeCatalogManifest(t, 13, strings.Repeat("0", 64))
 	output.Reset()
 	runner = &probe{reporter: newReporter(&output), manifests: []string{badHash}}
 	if runner.catalogIdentityCheck() {

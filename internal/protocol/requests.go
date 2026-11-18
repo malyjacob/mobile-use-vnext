@@ -60,6 +60,12 @@ type WaitForRequest struct {
 	Image          bool
 }
 
+// SnapRequest is snap(reference): one read-only image read of the display bound
+// to the referenced original session.
+type SnapRequest struct {
+	Reference string
+}
+
 // EndRequest is end(reference).
 type EndRequest struct {
 	Reference string
@@ -343,6 +349,31 @@ func checkWaitQuery(name, value string) *APIError {
 		return Invalid(name + " 不能为空或全空白")
 	}
 	return nil
+}
+
+// DecodeSnap admits snap(reference). The reference is required and keeps the
+// ordinary O/P reference shape; it resolves the original session, while the
+// returned image always reads the current screen.
+func DecodeSnap(body []byte) (*SnapRequest, *APIError) {
+	var presence struct {
+		Reference jsontext.Value `json:"reference"`
+	}
+	var wire struct {
+		Reference string `json:"reference"`
+	}
+	if err := decodeStrict(body, &presence, &wire); err != nil {
+		return nil, invalidDecode(err)
+	}
+	if len(presence.Reference) == 0 {
+		return nil, Invalid("snap 需要 reference 参数")
+	}
+	if string(presence.Reference) == "null" {
+		return nil, Invalid("reference 不接受 null")
+	}
+	if err := checkReference(wire.Reference); err != nil {
+		return nil, err
+	}
+	return &SnapRequest{Reference: wire.Reference}, nil
 }
 
 // DecodeEnd admits end(reference).

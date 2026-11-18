@@ -7,18 +7,19 @@ HTTP 协议配对。
 
 - 模块：`github.com/malyjacob/mobile-use-vnext`
 - Go：1.27.1，启用 `GOEXPERIMENT=jsonv2`
-- 契约：`contract_version = "18"`，服务、HTTP 客户端、控制 App 精确相等才做普通工作
-- 发行：`0.18.0`；`release/versions.json` 是发行号、契约号与 Android versionCode（20）的唯一
+- 契约：`contract_version = "19"`，服务、HTTP 客户端、控制 App 精确相等才做普通工作
+- 发行：`0.19.0`；`release/versions.json` 是发行号、契约号与 Android versionCode（21）的唯一
   来源，构建生成 Go/Java 常量
 
 ## 能力边界
 
-- Agent 工具为 `POST /api/<tool>`，共 12 个：`start`/`status`/`observe`/`wait_for`/`act`/
-  `inspect`/`keepalive`/`end`/`app`/`notify`/`shell`/`diagnose`；`app` 以一个工具承载
+- Agent 工具为 `POST /api/<tool>`，共 13 个：`start`/`status`/`observe`/`snap`/`wait_for`/
+  `act`/`inspect`/`keepalive`/`end`/`app`/`notify`/`shell`/`diagnose`；`app` 以一个工具承载
   `find`/`list`/`open`/`claim`/`handoff`/`close`/`kill` 七个互斥 kind。逐项字段、错误码与
   空值规则见 [接口契约](docs/interface.md)。
-- `observe`/`act` 的 `image=true` 返回与本次树同次采集的一张 JPEG 图片；图片元数据在
-  `observation.image`，HTTP 载体为 `observation.image.base64`。
+- `observe`/`act`/`wait_for` 的 `image=true` 返回与本次观察同次采集的一张 JPEG 图片；图片
+  元数据在 `observation.image`，HTTP 载体为 `observation.image.base64`。`snap` 单独读取当前屏
+  的一张图片，成功只含 `operation_id` 与顶层 `image`，不读树、不发布观察。
 - 控制端为 `POST /v1/control/sync|stop`；同步下发控制视图、至多一条显示命令与未确认的 Agent
   消息，独立 STOP 只绑定停止边界，见 [控制端协议](docs/control-protocol.md)。
 - `notify` 保存的消息通过控制同步进入 App 消息中心与系统通知；`notification.state=pending`
@@ -41,7 +42,7 @@ internal/engine/        唯一业务入口：会话、O/P、工作位置、STOP�
 internal/android/       ADB、u2 RPC、制品管理与受管执行链
 internal/httpapi/       认证 HTTP 接入、/api/<tool>、控制端同步与最小 STOP
 internal/client/        强类型 HTTP 客户端（发送前 P、结构化结果、图片字节）
-internal/mcp/           12 工具注册/schema/结果投影、取消包装、HTTP 认证与 Origin
+internal/mcp/           13 工具注册/schema/结果投影、取消包装、HTTP 认证与 Origin
 internal/store/         私有恢复账本与 Agent 消息文件（原子文件、单写者）
 internal/eventlog/      有界事件/字段白名单日志
 android-control/        Java 控制 App 源码与构建入口（含 test-target 验证探针）
@@ -154,13 +155,14 @@ $env:GOEXPERIMENT = 'jsonv2'; go test ./...
 ## 接口
 
 Agent 工具（`POST /api/<tool>`，`Authorization: Bearer <agent_token>`，
-`X-Mobile-Use-Contract: 18`）：
+`X-Mobile-Use-Contract: 19`）：
 
 | 工具 | 说明 |
 | --- | --- |
 | `start` | 请求体必须为 `{}`；创建/绑定目标屏幕并发布首个 full 观察；初始化、激活与首观察成功发布使用五分钟租期 |
 | `status` | 无参数、`{"reference":"O…"}` 或 `{"reference":"P…"}`；只读查询 |
 | `observe` | `reference`（O/P）；按服务端基线返回 full 或 delta；`observe(P)` 与 `full=true` 强制 full；`image=true` 附加本次图片 |
+| `snap` | `reference`（O/P）；立即读取当前屏的一张图，不读树、不发布观察；成功只含 `operation_id` 与顶层 `image` |
 | `wait_for` | `reference` + `timeout`（必填 1～40，`stable=true` 时至少 2）+ 可选 `query`/`absent_query`/`stable`/`full`/`image`；在唯一工作位上等待后发布一个新 `O` |
 | `act` | `reference` + `operation`：`tap`、`long_press`、`swipe`（可选 `duration_ms`）、`scroll`（`container`/`direction`/`amount`）、`key`、`text`；`tap`/`long_press` 的 ref 目标默认 `bubble=true`，可向最近交互祖先提升一次；ref 静态拒绝按 `invalid_target`/`unsupported_node_action`/`no_safe_point` 分类；`text` 默认 `press_enter=true`，一次完成聚焦、写入、精确读回和至多一次 ENTER；`image=true` 为后观察附图 |
 | `inspect` | `reference` 可选 `node` 或 `query`；只读历史树 |

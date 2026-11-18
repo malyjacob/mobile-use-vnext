@@ -18,7 +18,7 @@ cmd/device-service
 
 cmd/device-mcp
   ├─ 私有配置、stdio / Streamable HTTP 传输、认证与 Origin 门禁
-  ├─ internal/mcp        12 工具注册、schema、严格接入、结果与图片投影、取消包装
+  ├─ internal/mcp        13 工具注册、schema、严格接入、结果与图片投影、取消包装
   └─ internal/client     强类型 HTTP 客户端（发送前 P、结构化结果/错误、图片字节）
 ```
 
@@ -38,7 +38,7 @@ cmd/device-mcp
 - `internal/mcp` 只依赖 `protocol` 与 `client`，不导入 `engine`、`android`、`store`，不因
   同仓而绕过认证与服务状态；`internal/client` 只依赖 `protocol`。该包以单一固定说明源生成
   server instructions（完整树语法一次加跨工具调用规则），由 `server/discover` 与兼容
-  `initialize` 发布；12 个工具描述不内联树引导。
+  `initialize` 发布；13 个工具描述不内联树引导。
 - `internal/store` 实现 `engine.Store` 与 `engine.MessageStore`，分别持久化 `engine.Ledger`
   与有界 Agent 消息。两者是不同文件、不同语义：账本只含归属与资源证据，消息文件只含待
   投递正文，正文不进入账本。
@@ -285,6 +285,26 @@ status(P)、重复 P 与冻结结果只复制最后一次已提交快照，迟�
   完成到终帧发布。
 - `wait_for` 不认领旧 `O`，只在新 `O` 发布时把上一个 `ready` `O` 置为 `retired`。
 
+### 只读截图（snap）
+
+`snap` 是普通工作（`WorkSnap`）中的单张图片读取，不读树、不派发输入、不发布 `O`：
+
+- 准入在单一状态锁内完成 P 登记或去重、原引用解析、活动会话与原租期、App/模式、设备、
+  普通屏障、请求未取消与工作位空闲检查。通过后才把 P 绑定到目标会话 origin，固定会话
+  epoch 与显示 ID/代次/几何快照，设置 `WorkSnap`；接纳拒绝的 P 不获得会话归属。
+- 工作上下文继承调用方请求，整体上限 25 秒。锁外先 `ProbeDisplay`（至多 5 秒）取得目标
+  逻辑屏的实时 SFID，按该 SFID 读取一次源图（至多 10 秒），再探同一逻辑屏确认 SFID；
+  缺失或不一致即丢图。随后做一次编码。层级 RPC、树构建与差异计算都不参与。
+- 提交是唯一发布点：短锁内重验 P 仍运行、工作位仍由该 P 持有、原会话 epoch、App/模式、
+  STOP、原租期、请求与工作期限、会话绑定显示 ID/代次与几何快照，并检查源图读取开始距提交
+  不超过 `CaptureMaxAge=15s`。STOP/撤权、断连或截止先于该判定时丢弃候选；提交先通过时 P
+  保持成功，随后断连或回包丢失只影响本次交付。
+- 成功只交付一次顶层 `image`；重复 P 与 `status(P)` 只重放有界操作摘要。`snap` 不确认基线、
+  不续租、不认领或退休 `O`，也不生成动作 `outcome`。终态省略工具级 `recovery`。
+- 请求取消只传播到本次读取，不撤销会话；STOP/`end` 先撤权、取消读取并触发独立收尾，原工作
+  的逻辑交接上限仍为 5 秒。未提交分支按会话撤权/租期、请求取消、工具截止的顺序冻结为
+  `revoked`、`cancelled` 或 `work_deadline`；晚到的读取结果只能使用冻结摘要。
+
 ## 4. full/delta 与提交条件
 
 一次采集（`captureAndPublish`）的固定步骤：
@@ -396,8 +416,9 @@ delta 的五类块：`set`（逐字段完整新值，显式保留 `false`/`0`/`"
 
 ## 5. 工作位置与并发
 
-- 设备同时只有一项当前普通工作（`start`/`observe`/`wait_for`/`act`/`app`/`shell`）。冲突立即
-  返回 `409 device_busy`，不建普通动作队列；同一 Agent 会得到 `blocking_operation_id`。
+- 设备同时只有一项当前普通工作（`start`/`observe`/`snap`/`wait_for`/`act`/`app`/`shell`）。
+  冲突立即返回 `409 device_busy`，不建普通动作队列；同一 Agent 会得到
+  `blocking_operation_id`。
 - 会话撤权后，原 work、UI 与 shell 进入独立退休记录。旧逻辑交接从撤权起最多等待 5 秒；
   原调用提前取得终结证据时提前释放。到期仍无终结证据时，engine 冻结原操作结果、取消原上下文
   并脱离当前工作位置，最多以 `device_busy` 影响新工作到该边界。
@@ -637,10 +658,10 @@ P 已无法定位时，`end(P)` 返回 `409 operation_unknown`、`phase=referenc
 ### 发布
 
 `release/versions.json` 是发行号、共同契约号与 Android versionCode 的唯一来源；当前为
-`release_version=0.18.0`、`contract_version=18`、`android_version_code=20`，构建生成
+`release_version=0.19.0`、`contract_version=19`、`android_version_code=21`，构建生成
 Go/Java 常量。`scripts/build-release.ps1` 产出整组产物与 `build/release/manifest.json`
 （源码提交、Go 版本、MCP SDK/协议、各产物 SHA-256/大小、Android 包名/版本、工具目录指纹）。
-工具目录固定为 `scripts/toolcatalog` 投影的 12 个工具，指纹是该目录注册顺序、名称、描述与
+工具目录固定为 `scripts/toolcatalog` 投影的 13 个工具，指纹是该目录注册顺序、名称、描述与
 入参 schema 的 canonical SHA-256；描述或 schema 变化都会改变指纹，因此清单必须在对应源码
 树上重建。该指纹不覆盖 server instructions；`mcp-probe` 把 live `server/discover` 返回的
 说明与构建内固定说明源逐字节比较，并附加兼容 `initialize` 检查。

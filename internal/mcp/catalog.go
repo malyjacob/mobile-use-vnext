@@ -18,6 +18,8 @@ type ToolSnapshot struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
 	Schema      json.RawMessage `json:"schema"`
+	// ReadOnlyHint is the published read-only annotation. Only snap sets it.
+	ReadOnlyHint bool `json:"read_only_hint"`
 }
 
 // CatalogSnapshot returns the ordered source catalog projection.
@@ -25,9 +27,10 @@ func CatalogSnapshot() []ToolSnapshot {
 	out := make([]ToolSnapshot, 0, len(toolCatalog))
 	for _, definition := range toolCatalog {
 		out = append(out, ToolSnapshot{
-			Name:        definition.name,
-			Description: definition.description,
-			Schema:      definition.schema,
+			Name:         definition.name,
+			Description:  definition.description,
+			Schema:       definition.schema,
+			ReadOnlyHint: definition.snap,
 		})
 	}
 	return out

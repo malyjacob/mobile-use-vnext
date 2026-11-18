@@ -505,6 +505,7 @@ func (r *Result) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 		InputState          member[string]           `json:"input_state"`
 		MessageID           member[string]           `json:"message_id"`
 		Saved               *bool                    `json:"saved"`
+		Image               member[*ImageMeta]       `json:"image"`
 		Session             nullableMember[*Session] `json:"session"`
 		Observation         *Observation             `json:"observation"`
 		Inspection          *InspectionView          `json:"inspection"`
@@ -537,6 +538,7 @@ func (r *Result) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 		InputState:          wire.InputState.Value,
 		MessageID:           wire.MessageID.Value,
 		Saved:               wire.Saved,
+		Image:               wire.Image.Value,
 		IncludeSession:      wire.Session.Present,
 		Session:             wire.Session.Value,
 		Observation:         wire.Observation,

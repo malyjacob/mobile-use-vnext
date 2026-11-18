@@ -15,9 +15,9 @@
 | 方法 | 所有业务端点只接受 `POST`；其他方法返回 `405`，错误码 `invalid_request` |
 | 认证 | `/api/*` 用 `agent_token`；`/v1/control/*` 用 `control_token`；`Authorization: Bearer <token>` |
 | 身份隔离 | agent token 不能访问 `/v1/control/*`，control token 不能访问 `/api/*`；错误为 `401 unauthorized` |
-| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 18`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
+| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 19`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
 | 预分配 P | `/api/*` 可带 `X-Mobile-Use-Operation: P…`；缺省由服务分配。`status` 不使用该头 |
-| 请求体 | 必须是一个 JSON 对象；大小上限：`start`/`status`/`end`/`wait_for` 16 KiB，`observe` 32 KiB，`act` 64 KiB，`inspect`/`keepalive`/`diagnose`/`app` 8 KiB，`notify` 16 KiB，`shell` 32 KiB，`sync` 32 KiB，`stop` 8 KiB |
+| 请求体 | 必须是一个 JSON 对象；大小上限：`start`/`status`/`end`/`wait_for` 16 KiB，`observe` 32 KiB，`snap` 8 KiB，`act` 64 KiB，`inspect`/`keepalive`/`diagnose`/`app` 8 KiB，`notify` 16 KiB，`shell` 32 KiB，`sync` 32 KiB，`stop` 8 KiB |
 | 响应 | `Content-Type: application/json; charset=utf-8`，`Cache-Control: no-store` |
 | 健康检查 | `GET /health` 无认证，见 §10 |
 
@@ -25,8 +25,8 @@
 
 - 未知成员、重复成员名、大小写变体、尾随第二个 JSON 值、类型混用 → `422 invalid_request`；
 - 必填字段必须实际出现；未声明 nullable 的字段出现显式 `null` → `422 invalid_request`
-  （`status` 的 `reference`、`observe` 的 `full`/`image`/`wait_ms`、`wait_for` 的
-  `query`/`absent_query`/`stable`/`full`/`image`、`act` 的 `image`、
+  （`status` 的 `reference`、`observe` 的 `full`/`image`/`wait_ms`、`snap` 的 `reference`、
+  `wait_for` 的 `query`/`absent_query`/`stable`/`full`/`image`、`act` 的 `image`、
   `text`/`key` 的值等）；
 - 请求体为空、只有空白或不是对象 → `422 invalid_request`；
 - 编号规则：`O…` 为观察，`P…` 为操作；引用长度 1–64，首字符必须是 `O` 或 `P`。
@@ -44,7 +44,7 @@
 `act` 的重验在派发前失败时另有一个交付观察点：重验已经读取的那一帧直接发布为新的 `ready`
 观察，随失败结果返回（见 §6）。该点不做收敛采样，也不重新采集，其质量固定为
 `unknown`/`0`/`not_sampled`。`observe` 由调用方决定节奏（`wait_ms` 与 `full`），不做收敛
-采样；`wait_for` 不在这几个采样点之列，它的观察质量来自自身的条件等待（见 §14）；
+采样；`snap` 只读一张图，不取树，也不参与这些采样点；`wait_for` 不在这几个采样点之列，它的观察质量来自自身的条件等待（见 §14）；
 `shell` 不发布观察，命令是否改变屏幕由下一次 `act` 的实时重验或一次 `observe` 回答。
 
 ## 2. 结果分层与错误
@@ -60,13 +60,14 @@
 ```text
 operation_id, operation_state, outcome, phase, effect, text_input, target_reference,
 request_closed, blocking_operation_id, can_start, blocking_code, start_operation_id,
-observation_state, input_state, message_id, saved, session, observation, inspection,
+observation_state, input_state, message_id, saved, image, session, observation, inspection,
 app, shell, wait, notification, diagnosis, cleanup, error, recovery
 ```
 
 事实互不替代：`outcome`（动作执行）、`effect`（本次受控滚动的位移观察）、
 `text_input`（复合 text 的 write/enter 原语）、
 `wait`（条件等待的退出分支、单帧匹配项与耗时）、
+`image`（`snap` 的顶层单张图片元数据）、
 `observation.status` 与 `observation.quality`（观察及其收敛质量）、`session.state`（会话）、
 `cleanup.*`（物理收尾）。`error` 只在失败时出现：
 
@@ -362,6 +363,58 @@ HTTP 状态映射（默认由 `protocol.Status` 按 code 决定；认领前的 t
 附加图片时 `actionable_until` 取源图读取开始与树采集开始中更早者加 60 秒，并受原会话到期
 时间上界约束。图片按服务固定预算做一次等比缩小（不放大）与一次 JPEG 编码；超限只报
 `image_too_large`，不改判核心树。图片缺失本身不产生 `recovery`。
+
+## 5.1 `POST /api/snap`
+
+```json
+{"reference":"O1"}
+```
+
+`snap` 在活动会话绑定的屏幕上立即读取一张图，不读取节点树、不派发输入，也不发布观察。
+`reference` 必填，沿用 `observe` 的 O/P 引用格式与原会话解析口径：保留中的 `expired`、
+`claimed` 或 `retired` O 可以定位原会话，图片始终取当前屏。引用已结束会话的 O/P、他人的
+引用、封闭 P、本次请求 P 的自引用、缺失字段、显式 `null`、重复键与未知成员按 §1 的同一规则拒绝（自引用返回 `409 operation_unknown`）。请求体上限
+8 KiB；本次请求头预分配的 P 与请求体中的引用各自独立。
+
+成功响应 HTTP 200，只含必现的 `operation_id` 与顶层 `image`：
+
+```json
+{"operation_id":"P2","image":{"captured_at":"2026-11-18T00:00:00Z",
+ "width":540,"height":1200,"media_type":"image/jpeg","read_only":true,
+ "screen":{"width":1080,"height":2400,"rotation":0},"base64":"…"}}
+```
+
+- `captured_at` 是源图读取开始的服务 UTC 时间；`width`/`height` 是输出 JPEG 的实际像素
+  尺寸；`media_type` 固定 `image/jpeg`；`read_only` 固定为 `true`；
+- `screen` 是准入时会话绑定显示的几何快照（`width`/`height`/`rotation`），用来说明缩放
+  来源，旋转值是会话记录值；
+- `base64` 是 JPEG 字节的 HTTP 载体，经同一有界解码路径进入 Go 客户端与 MCP 的
+  `ImageContent`，不进入文本、结构化结果、树历史、恢复账本、日志、探针报告或发布清单；
+- 失败使用顶层 `error`；失败、重复 P 与 `status(P)` 摘要都省略 `image`。显式 `null`
+  顶层 `image` 与不合法成功图片由客户端拒绝解码；无图的重复 P 摘要可以正常解码。
+
+`snap` 只消耗一次设备工作位：探测目标逻辑屏（至多 5 秒）、读取一次源图（至多 10 秒）、
+再次探测同一逻辑屏确认 SFID，然后做一次编码与一次提交。它不分配 O、不确认基线、不续租、
+不认领或退休 O，也不生成动作 `outcome`；既有 O 继续按自身有效期与 `act` 实时重验使用。
+工作整体上限 25 秒，常规工作相态为 `snap.capture`、`snap.image`、`snap.commit`。两次探测
+只证明探测点的表面身份一致；同尺寸旋转等像素变化由普通截图语义覆盖。
+
+| 分支 | `phase` | 结果 |
+| --- | --- | --- |
+| 成功，或成功提交后响应丢失 | `finished` | 无 `error`；只有首次响应交付图片 |
+| 引用、普通屏障、设备忙等接纳拒绝 | `admission` | 沿用既有错误族；原租期已到为 `409 session_expired`；未接纳的 P 不绑定会话 |
+| 请求取消先于提交 | `cancelled` | 无服务端 `error`；MCP 投影 `call_cancelled` |
+| 25 秒工作截止先于提交且会话仍获授权 | `work_deadline` | `503 image_capture_failed`，消息说明整次读取超时 |
+| STOP、显式 `end`、会话撤权或租期在读取中失效 | `revoked` | `409 control_revoked` |
+| 探测目标不可用或 SFID 不一致 | `failed` | `503 display_unavailable` |
+| 会话显示绑定在读取中变化 | `failed` | `409 stale_screen` |
+| 截图失败、编码失败、编码超额、图超龄 | `failed` | `503 image_capture_failed`、`image_encode_failed`、`image_too_large`、`image_stale` |
+
+提交是唯一发布点：锁内重验 P 仍在运行、工作位仍由该 P 持有、原会话 epoch、App/模式、
+STOP、原租期、请求与工作期限、会话绑定显示 ID/代次与几何快照，并检查源图读取开始距提交
+不超过 15 秒。STOP、撤权、断连或截止先于该判定时丢弃候选；提交先通过时 P 保持成功，随后
+断连或回包丢失只影响本次交付。`snap` 的终态省略工具级 `recovery`；`status(P)` 仍可投影
+原会话的收尾事实。
 
 ## 6. `POST /api/act`
 
@@ -729,7 +782,7 @@ raw `swipe` 仍不接受 `ref`。
 
 | 字段 | 必填 | 类型 | 说明 |
 | --- | --- | --- | --- |
-| `contract_version` | 是 | 字符串 | 必须为 `"18"`，否则 `409 contract_mismatch` |
+| `contract_version` | 是 | 字符串 | 必须为 `"19"`，否则 `409 contract_mismatch` |
 | `app_instance_id` | 是 | UUID | App 进程实例；变化会撤销旧归属 |
 | `app_version` | 否（App 应发送） | 字符串 | 仅发行标识 |
 | `selected_mode` | 是 | `virtual`/`primary` | 用户选择 |
@@ -756,7 +809,7 @@ raw `swipe` 仍不接受 `ref`。
 
 ```json
 {
-  "contract_version": "18",
+  "contract_version": "19",
   "service_instance_id": "…",
   "control": {
     "revision": 42,
@@ -775,7 +828,7 @@ raw `swipe` 仍不接受 `ref`。
 - `availability.state`：`ready`/`recovering`/`blocked`；非 `ready` 时可带 `reason`；
 - `session`：`null` 或 `{origin, agent?, mode, state, started_at?, expires_at?, ended_at?, reason?}`；
 - `work`：`null` 或 `{operation_id, kind, phase}`；`kind` 为
-  `start`/`observe`/`wait_for`/`act`/`app`/`shell`；
+  `start`/`observe`/`snap`/`wait_for`/`act`/`app`/`shell`；
   `kind=app` 时另带可选 `app_kind`，取 `find`/`list`/`open`/`claim`/`handoff`/`close`/`kill`；
 - `cleanup`：`null` 或 `{state, execution?, tasks?, recents?, display?}`；只与同一
   `control.session` 同属一个原会话；
@@ -792,7 +845,7 @@ raw `swipe` 仍不接受 `ref`。
 ## 9. `POST /v1/control/stop`
 
 ```json
-{"contract_version":"18","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
+{"contract_version":"19","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
 ```
 
 - **不校验普通契约**：`contract_version` 字段存在但不参与准入，服务与 App 契约版本
@@ -802,7 +855,7 @@ raw `swipe` 仍不接受 `ref`。
 - 重复或过期 `seq` 不报错，只返回 `state=duplicate`。
 
 ```json
-{"contract_version":"18","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
+{"contract_version":"19","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
 ```
 
 `accepted` 恒为 `true`；`state` 为 `revoked`（绑定时撤销了活动会话）、`recorded`
@@ -815,7 +868,7 @@ raw `swipe` 仍不接受 `ref`。
 无认证，只表示进程可应答，不代表设备就绪或资源干净：
 
 ```json
-{"status":"ok","contract_version":"18","service_instance_id":"…","release_version":"…"}
+{"status":"ok","contract_version":"19","service_instance_id":"…","release_version":"…"}
 ```
 
 ## 11. 数据对象
@@ -1002,10 +1055,14 @@ unknown；来源未知不能在构造时补成默认。五个状态的比较与�
 ```
 
 `captured_at` 是源图读取开始的服务 UTC 时间；`width`/`height` 是输出图片的实际尺寸；
-`media_type` 固定 `image/jpeg`。`read_only` 仅在没有新 O 的只读图片上出现，并附同屏
-`screen`。失败图片只带受控 `error`，不带伪造的尺寸或时间。HTTP 载体
+`media_type` 固定 `image/jpeg`。`read_only` 仅在没有新 O 的只读图片与 `snap` 顶层图片上
+出现，并附同屏 `screen`。失败图片只带受控 `error`，不带伪造的尺寸或时间。HTTP 载体
 `observation.image.base64` 是本次编码图片的 base64；MCP 入口把它投影为 `ImageContent`，
 文本与结构化内容不携带该成员。
+
+`snap` 的顶层 `image` 使用同一元数据编码顺序，但固定带 `read_only=true` 与准入显示快照
+`screen`，并携带 `base64` 载体；它是该次成功结果唯一的功能载荷，只交付一次。重复 P 与
+`status(P)` 摘要、失败结果都不含顶层 `image`。
 
 ### Session / Cleanup
 
@@ -1284,10 +1341,11 @@ task；应用在本屏前台、前台未知、前台服务或播放状态未知�
 | 端点/能力 | 契约行为 |
 | --- | --- |
 | `start`、`status`、`observe`、`end` | 见 §3、§4、§5、§7 |
+| `snap` | 定义于 §5.1；活动会话内立即读取一张图，不读取树、不发布观察 |
 | `wait_for` | 定义于 §14；条件等待与稳定门禁，发布一个新观察 |
 | `act`：`tap`、`long_press`、`swipe`、`scroll`、`key`、`text` | 定义于 §6；其他动作类型不被接受 |
 | `observe`/`act` 的 `image=true` | 见 §5 图片；图片是本次观察的附加材料，不是单独工具 |
-| 截图、图片块 | HTTP/SDK 用同一 `observation.image` 元数据与 `base64` 载体；MCP `ImageContent` 承载图片字节 |
+| 截图、图片块 | 观察图片在 `observation.image`，`snap` 顶层图片在 `image`；两者共用同一 `ImageMeta` 形状与 `base64` 载体，MCP `ImageContent` 承载图片字节 |
 | `app`、`keepalive`、`inspect`、`notify`、`diagnose` | 定义于 §12 |
 | `shell` | 定义于 §12 |
 | MCP stdio / Streamable HTTP、Go client | 由独立入口提供，见 [MCP 入口](mcp.md) 与 [Go 客户端](client.md)；不改变本页 `/api/*` 契约 |

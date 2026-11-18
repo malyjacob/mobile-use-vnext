@@ -224,6 +224,23 @@ func (c *Client) Act(ctx context.Context, request *protocol.ActRequest, opts ...
 	return c.post(ctx, "act", body, operation)
 }
 
+// Snap calls POST /api/snap. The top-level transport image is decoded into
+// Response.Image; the structured Result keeps the metadata without base64.
+func (c *Client) Snap(ctx context.Context, request *protocol.SnapRequest, opts ...CallOption) (*Response, error) {
+	operation, operationErr := c.newOperation(opts)
+	if operationErr != nil {
+		return nil, operationErr
+	}
+	if request == nil {
+		return nil, invalidRequest(operation, messageMissingRequest)
+	}
+	body, err := request.Encode()
+	if err != nil {
+		return nil, invalidRequest(operation, messageInvalidRequest)
+	}
+	return c.post(ctx, "snap", body, operation)
+}
+
 // WaitFor calls POST /api/wait_for.
 func (c *Client) WaitFor(ctx context.Context, request *protocol.WaitForRequest, opts ...CallOption) (*Response, error) {
 	operation, operationErr := c.newOperation(opts)
@@ -495,6 +512,17 @@ func (c *Client) post(ctx context.Context, tool string, body []byte, operationID
 			HTTPStatus:  response.StatusCode,
 		}
 	}
+	projected := &Response{
+		HTTPStatus:  response.StatusCode,
+		OperationID: operationID,
+		Result:      &result,
+	}
+	// A top-level image is one exclusive success shape. It never coexists with
+	// an error, an action outcome or an observation, even when the error branch
+	// below would otherwise accept the structured failure.
+	if result.Image != nil && (result.Error != nil || result.Outcome != "" || result.Observation != nil) {
+		return nil, invalidResponseError(projected)
+	}
 	if result.Error != nil {
 		// The service produced a structured failure: keep both the projection
 		// and the controlled error. HTTP status alone never overrides this.
@@ -511,39 +539,39 @@ func (c *Client) post(ctx context.Context, tool string, body []byte, operationID
 		}
 	}
 
-	projected := &Response{
-		HTTPStatus:  response.StatusCode,
-		OperationID: operationID,
-		Result:      &result,
-	}
-	if imageErr := decodeObservationImage(projected); imageErr != nil {
+	if imageErr := decodeResponseImage(projected); imageErr != nil {
 		return nil, imageErr
 	}
 	return projected, nil
 }
 
-// decodeObservationImage attaches the transport image once and removes the
-// base64 carrier from the structured result. A malformed carrier is a response
-// contract failure, not a usable image.
-func decodeObservationImage(response *Response) *Error {
-	if response == nil || response.Result == nil ||
-		response.Result.Observation == nil || response.Result.Observation.Image == nil {
+// decodeResponseImage attaches the transport image once and removes the base64
+// carrier from the structured result. A malformed carrier is a response
+// contract failure, not a usable image. The top-level snap image and an
+// observation image are mutually exclusive, and a snap success excludes every
+// error, action outcome and observation shape.
+func decodeResponseImage(response *Response) *Error {
+	if response == nil || response.Result == nil {
 		return nil
 	}
-	meta := response.Result.Observation.Image
+	result := response.Result
+	if result.Image != nil {
+		if err := decodeSnapImage(response, result.Image); err != nil {
+			return err
+		}
+		return nil
+	}
+	if result.Observation == nil || result.Observation.Image == nil {
+		return nil
+	}
+	meta := result.Observation.Image
 	if meta.Base64 == "" {
 		return nil
 	}
 	data, err := base64.StdEncoding.DecodeString(meta.Base64)
 	if err != nil || len(data) == 0 || meta.MediaType == "" || meta.Width <= 0 || meta.Height <= 0 {
 		meta.Base64 = ""
-		return &Error{
-			OperationID: response.OperationID,
-			Code:        ErrorResponse,
-			Message:     messageInvalidResponse,
-			HTTPStatus:  response.HTTPStatus,
-			Result:      response.Result,
-		}
+		return invalidResponseError(response)
 	}
 	response.Image = &Image{
 		MediaType:  meta.MediaType,
@@ -556,6 +584,55 @@ func decodeObservationImage(response *Response) *Error {
 	}
 	meta.Base64 = ""
 	return nil
+}
+
+// decodeSnapImage validates and decodes the one top-level image of a snap
+// success. Every required metadata fact is checked before the image counts as
+// delivered.
+func decodeSnapImage(response *Response, meta *protocol.ImageMeta) *Error {
+	result := response.Result
+	if result.Error != nil || result.Outcome != "" || result.Observation != nil {
+		meta.Base64 = ""
+		return invalidResponseError(response)
+	}
+	if meta.Base64 == "" || meta.MediaType != "image/jpeg" || !meta.ReadOnly ||
+		meta.Error != nil ||
+		meta.Width <= 0 || meta.Height <= 0 || meta.Screen == nil ||
+		meta.Screen.Width <= 0 || meta.Screen.Height <= 0 ||
+		meta.Screen.Rotation < 0 || meta.Screen.Rotation > 3 {
+		meta.Base64 = ""
+		return invalidResponseError(response)
+	}
+	if _, err := time.Parse(time.RFC3339, meta.CapturedAt); err != nil {
+		meta.Base64 = ""
+		return invalidResponseError(response)
+	}
+	data, err := base64.StdEncoding.DecodeString(meta.Base64)
+	if err != nil || len(data) == 0 {
+		meta.Base64 = ""
+		return invalidResponseError(response)
+	}
+	response.Image = &Image{
+		MediaType:  meta.MediaType,
+		Data:       data,
+		Width:      meta.Width,
+		Height:     meta.Height,
+		CapturedAt: meta.CapturedAt,
+		ReadOnly:   meta.ReadOnly,
+		Screen:     meta.Screen,
+	}
+	meta.Base64 = ""
+	return nil
+}
+
+func invalidResponseError(response *Response) *Error {
+	return &Error{
+		OperationID: response.OperationID,
+		Code:        ErrorResponse,
+		Message:     messageInvalidResponse,
+		HTTPStatus:  response.HTTPStatus,
+		Result:      response.Result,
+	}
 }
 
 // readBounded reads at most limit bytes plus one detection byte.

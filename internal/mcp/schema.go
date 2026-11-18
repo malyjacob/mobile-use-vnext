@@ -11,6 +11,10 @@ type toolDefinition struct {
 	description string
 	schema      json.RawMessage
 	readOnly    bool
+	// snap marks the one-tool image read that still receives a pre-allocated
+	// operation ID, never issues an end on cancellation and publishes the
+	// public read-only annotation.
+	snap bool
 }
 
 // treeTextGuide is the complete public syntax legend for readable tree blocks.
@@ -53,7 +57,7 @@ const callerGuidance = "会话与推进：首次可直接 start({})；已有 act
 	"observe、wait_for、keepalive、end、shell、status 保持各自已有的 O/P 范围。" +
 	"start 使用五分钟租期；普通活动在续期点只增不减，至少续至两分钟后；" +
 	"status、inspect、app 查询不续租。keepalive 可重设并可缩短租期，但不延长 O。\n\n" +
-	"选择工具：status 查状态；observe 新采集；wait_for 等条件；act 消费 O；inspect 查历史详细树；" +
+	"选择工具：status 查状态；observe 新采集；snap 立即看当前画面；wait_for 等条件；act 消费 O；inspect 查历史详细树；" +
 	"app 管应用生命周期；shell 执行命令且可能改屏；diagnose 查健康。" +
 	"wait_for 到时是正常返回，检查 wait.trigger、wait.matched 后用返回的 O 继续；" +
 	"observation.quality=unstable/unknown 本身不阻止输入，不要仅为追求 stable 重复 observe。\n\n" +
@@ -176,6 +180,29 @@ var toolCatalog = []toolDefinition{
   "additionalProperties": false,
   "description": "observe 需要 reference；full、image、wait_ms 均可选。"
 }`),
+	},
+	{
+		name: "snap",
+		description: "对给定 O/P 所指原会话绑定的屏幕立即读取一张图，不读取节点树，也不发布观察。" +
+			"reference 必填，指向本 Agent 仍活动的原会话；图片始终取当前屏。" +
+			"成功只返回 operation_id 与顶层 image 元数据，并以一个 ImageContent 交付 JPEG。" +
+			"snap 不分配 O、不续租、不认领观察；同一 P 重放或 status(P) 只返回无图摘要。",
+		schema: json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "reference": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[OP]",
+      "description": "必填的 O 或 P 编号，必须指向本 Agent 仍活动的原会话。"
+    }
+  },
+  "required": ["reference"],
+  "additionalProperties": false,
+  "description": "snap 需要 reference，不接受其他成员。"
+}`),
+		snap: true,
 	},
 	{
 		name: "wait_for",

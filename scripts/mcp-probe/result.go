@@ -84,14 +84,23 @@ type recoveryView struct {
 	Cause      string `json:"cause"`
 }
 
-// imageView is the observation image metadata carried by structuredContent.
+// imageView is the observation or top-level snap image metadata carried by
+// structuredContent.
 type imageView struct {
-	CapturedAt string     `json:"captured_at"`
-	Width      int        `json:"width"`
-	Height     int        `json:"height"`
-	MediaType  string     `json:"media_type"`
-	ReadOnly   bool       `json:"read_only"`
-	Error      *errorView `json:"error"`
+	CapturedAt string      `json:"captured_at"`
+	Width      int         `json:"width"`
+	Height     int         `json:"height"`
+	MediaType  string      `json:"media_type"`
+	ReadOnly   bool        `json:"read_only"`
+	Screen     *screenView `json:"screen"`
+	Error      *errorView  `json:"error"`
+}
+
+// screenView is the admission display snapshot carried by a snap image.
+type screenView struct {
+	Width    int `json:"width"`
+	Height   int `json:"height"`
+	Rotation int `json:"rotation"`
 }
 
 type shellView struct {
@@ -192,6 +201,7 @@ type resultView struct {
 	StartOperation   string           `json:"start_operation_id"`
 	ObservationState string           `json:"observation_state"`
 	Session          *sessionView     `json:"session"`
+	Image            *imageView       `json:"image"`
 	Observation      *observationView `json:"observation"`
 	Inspection       *inspectionView  `json:"inspection"`
 	App              *appView         `json:"app"`
@@ -572,6 +582,51 @@ func imageBytes(projected *callResult, observation *observationView) ([]byte, *c
 	}
 	if meta.CapturedAt == "" {
 		return nil, failf("image_metadata_missing_captured_at")
+	}
+	return raw, nil
+}
+
+// snapImageBytes returns the one decoded JPEG of a snap success after checking
+// the top-level metadata contract: exactly one ImageContent, image/jpeg, the
+// JPEG signature, a positive source size, one valid capture time, the output
+// pixel size, read_only=true and the admission display snapshot.
+func snapImageBytes(projected *callResult, meta *imageView) ([]byte, *checkError) {
+	if len(projected.images) != 1 {
+		return nil, failf("image_content_count", field("count", strconv.Itoa(len(projected.images))))
+	}
+	image := projected.images[0]
+	if image.MIMEType != imageJPEG {
+		return nil, failf("image_mime_unexpected", field("mime", image.MIMEType))
+	}
+	raw := image.Data
+	if len(raw) == 0 {
+		return nil, failf("image_data_empty")
+	}
+	if !jpegMagic(raw) {
+		return nil, failf("image_not_jpeg")
+	}
+	if len(raw) <= 1024 {
+		return nil, failf("image_too_small", field("image_bytes", strconv.Itoa(len(raw))))
+	}
+	if meta == nil {
+		return nil, failf("image_metadata_missing")
+	}
+	if meta.Width <= 0 || meta.Height <= 0 {
+		return nil, failf("image_metadata_dimensions",
+			field("width", strconv.Itoa(meta.Width)), field("height", strconv.Itoa(meta.Height)))
+	}
+	if meta.MediaType != imageJPEG {
+		return nil, failf("image_metadata_mime", field("media_type", meta.MediaType))
+	}
+	if meta.CapturedAt == "" {
+		return nil, failf("image_metadata_missing_captured_at")
+	}
+	if !meta.ReadOnly {
+		return nil, failf("image_metadata_not_read_only")
+	}
+	if meta.Screen == nil || meta.Screen.Width <= 0 || meta.Screen.Height <= 0 ||
+		meta.Screen.Rotation < 0 || meta.Screen.Rotation > 3 {
+		return nil, failf("image_metadata_screen_invalid")
 	}
 	return raw, nil
 }

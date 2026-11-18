@@ -11,11 +11,11 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
   SDK 服务只发布 `2026-07-28`。收到旧版 `initialize` 时，SDK 按生命周期规范回答
   `2025-11-25` 并期望客户端断开；该回答不是本适配器的新协议协商结果，也不对应第二套工具、
   别名或旧协议回退。
-- 工具目录固定为 12 个，与 [接口契约](interface.md) 同名同义：`start`、`status`、`observe`、
-  `wait_for`、`act`、`inspect`、`keepalive`、`end`、`app`、`notify`、`shell`、`diagnose`。
-  不注册 `/health`、认证初始化、旧工具别名或旧协议回退。
+- 工具目录固定为 13 个，与 [接口契约](interface.md) 同名同义：`start`、`status`、`observe`、
+  `snap`、`wait_for`、`act`、`inspect`、`keepalive`、`end`、`app`、`notify`、`shell`、
+  `diagnose`。不注册 `/health`、认证初始化、旧工具别名或旧协议回退。
 - 目录指纹是工具数、注册顺序、名称、描述与入参 schema 的 canonical SHA-256，当前为
-  `82da6a0ef0d577b214095d9cb22e2585812827c3ddc28ef16d453bf8ab262538`；发布清单与探针按
+  `91fed94c832e6b80eee98df4c6c4d0053819452ed6e630e25f8700cfb483f1c9`；发布清单与探针按
   它比对实际 `tools/list`，任一条描述或 schema 变化都会改变该值。工具目录指纹不覆盖
   server instructions；instructions 由探针把 `server/discover` 返回的说明与构建内的固定
   说明源逐字节比较，并附加兼容 `initialize` 检查。
@@ -74,7 +74,7 @@ Label、最近祖先关系及安全点，child 丢失或内容被替换返回 `4
 
 公共树语法与调用规则由 server instructions 发布：`server/discover` 与兼容 `initialize`
 返回同一份说明，完整树块词表恰好出现一次，另含会话推进、O/P 身份、统一 `reference`、
-租期、工具选择、默认 `bubble`/`press_enter`、`text_input` 事实与恢复分类；12 个工具描述不再
+租期、工具选择、默认 `bubble`/`press_enter`、`text_input` 事实与恢复分类；13 个工具描述不再
 内联树引导，只保留各自用途、关键参数/默认、结果或动作边界与最少恢复路径。`start` 描述保留
 一段短兼容提示：O 是可消费观察，P 是该操作的幂等/查询编号；full 是完整树，delta 只相对其
 base 且新 delta 覆盖旧 delta。树块词表本身不变：树节点行的动作列仍只有 `tap`、`long_press`、
@@ -92,6 +92,15 @@ base 且新 delta 覆盖旧 delta。树块词表本身不变：树节点行的�
 缩短，省略也重设为两分钟；普通活动在续期点取 `max(现有截止时间, now + 2 分钟)`，不继承
 本次时长；start 使用五分钟租期，会话没有累计时长硬上限。调用取消仍按第 6 节撤销授权，
 长租约不覆盖取消边界。
+
+`snap` 的 schema 只有一个必填 `reference`（`O…`/`P…`，≤64），没有其他成员；它与
+`observe` 共用引用解析口径（额外拒绝本次请求 P 的自引用），但只读取一张图，不读取树、
+不发布观察。它是唯一带预分配 P 的
+读图工具：`tools/list` 只为它发布 `annotations.readOnlyHint=true`，其他工具不发布该注解。
+成功时结果是顶层 `image` 元数据加一个 `ImageContent`；`result v2` 以
+`image=<紧凑 JSON>` 输出同一元数据（不含 base64），`structuredContent` 在顶层 `image` 携带
+同组成员，三种结果模式都只发送一个 `ImageContent`。`isError=false` 要求完整图片实际交付；
+重复 P 的无图摘要、失败、准入或传输错误均为 `isError=true`。取消见第 6 节。
 
 `wait_for` 的 schema 以 `reference` 与 `timeout` 为必填，`query`、`absent_query`、`stable`、
 `full`、`image` 可选：`timeout` 是 1–40 的整数，`stable=true` 时至少 2；两个条件字符串各
@@ -166,6 +175,11 @@ kind 成员矩阵是互斥权威：
 失败的结果按第 3 节的诊断投影透传 `wait.trigger` 与 `wait.elapsed_ms`，不输出
 `wait.matched`。
 
+`snap` 的顶层 `image` 也按同一份 `Result` 投影：`result v2` 在 `saved` 之后、`session` 之前
+输出 `image=<紧凑 JSON>`，`structuredContent` 保留同一元数据对象；两者都不包含 base64。
+图片字节只出现在唯一的 `ImageContent`。失败、重复 P 与 `status(P)` 摘要没有顶层 `image`，
+也不会被适配器补成空对象。
+
 完整文本第一行为 `result v2 is_error=<true|false>`，最后为 `end result`。已知字段按
 `Result` 的公共顺序输出，字段行和块可以交错；例如 shell 块之后仍可有错误与恢复字段。
 字段行为 `key=value`，受控 ID、枚举、时间戳、整数、布尔可用无空白、`=`、引号、反斜杠的
@@ -224,6 +238,7 @@ json v1 path="/observation/tree" value={"format":"full","scope":"","root":null}
 | 纯 `observe` 没有合法核心 O（含只有只读图） | `true` |
 | `wait_for` 发布出合法核心 O（含到期未命中） | `false`（按 `observe` 同口径） |
 | `wait_for` 没有发布新 O（含验证采集失败、只有只读图、准入或传输错误） | `true` |
+| `snap` 完整交付顶层图片与一个 `ImageContent` | `false`；失败、重复 P 无图摘要与取消为 `true` |
 | `status` 正常给出 `request_closed` 或其他查询事实 | `false` |
 | `status`/`end` 返回 `operation_unknown` | `true`；`end` 可同时封闭该 P 的未来接纳 |
 | `diagnose` 证据不足或覆盖范围有限 | `false` |
@@ -378,8 +393,8 @@ device-mcp -transport http -config <private-config>
 
 ## 6. 取消、P 与漏收边界
 
-有本次新 P 的工具调用（`start`、`observe`、`wait_for`、`act`、`keepalive`、`end`、`app`、
-`notify`、`shell`）在取消时：
+有本次新 P 的工具调用（`start`、`observe`、`snap`、`wait_for`、`act`、`keepalive`、`end`、
+`app`、`notify`、`shell`）在取消时：
 
 1. 停止等待本次调用结果；
 2. 对需要 `end` 的分支用独立的有界上下文调用 `end(P)`（上限 5 秒），不等待设备工作完成；
@@ -403,11 +418,16 @@ device-mcp -transport http -config <private-config>
 `wait_for` 不是只读工具：它按通用步骤 2 发起有界 `end(P)`，取消同时关闭等待上下文并释放
 普通工作位。取消保留取消前已取得的 `wait` 事实，也不声称新观察已发布。
 
+`snap` 预分配 P，但取消不调用 `end`：只撤销本次读取。即使适配器已经拿到成功提交结果，
+取消分支也清空顶层 `image` 元数据与 `ImageContent`，返回 `call_cancelled`，不交付图片。
+原会话仍活动；读取的其余撤销与收尾由服务端 STOP/end 语义处理。
+
 `status`、`inspect`、`diagnose` 只取消本次读取，不登记 P、不调用 `end`。调用参数中的
 `reference` 是原观察/操作定位，不是本次取消的 P；不得把它当成本次调用的操作编号。
 
-取消结果一律 `isError=true`。适配器保留已有服务错误，缺少错误时合成 `call_cancelled`，并
-在 `error.details` 注入保留键 `mcp.cancelled=true`、`mcp.cancellation=<受控说明>`，两种
+取消结果一律 `isError=true`。适配器保留已有服务错误，缺少错误时合成 `call_cancelled`；`snap`
+是唯一例外：取消分支无条件返回 `call_cancelled`，并丢弃已取得的图片。适配器还在
+`error.details` 注入保留键 `mcp.cancelled=true`、`mcp.cancellation=<受控说明>`，两种
 完整编码均包含它们。此命名空间只由 MCP 适配器使用，`/api/*` 永不产生。文本无额外顶层
 `cancelled` 行；取消不改写原 `outcome`、观察与收尾证据。
 

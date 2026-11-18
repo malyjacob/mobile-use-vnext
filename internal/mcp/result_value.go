@@ -22,6 +22,11 @@ func canonicalResult(e *execution) (json.RawMessage, error) {
 		o.Image = &i
 		r.Observation = &o
 	}
+	if r.Image != nil {
+		i := *r.Image
+		i.Base64 = ""
+		r.Image = &i
+	}
 	if e.cancelled {
 		err := protocol.Error{Code: "call_cancelled", Message: e.cancellation}
 		if r.Error != nil {

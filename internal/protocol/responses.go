@@ -752,6 +752,10 @@ type Result struct {
 	InputState          string
 	MessageID           string
 	Saved               *bool
+	// Image is the one top-level image of a snap success. It carries the same
+	// metadata shape as an observation image, with the HTTP-only base64 carrier,
+	// and is never present on a failure, a duplicate P summary or status(P).
+	Image *ImageMeta
 	// HTTPStatus is a transport-only hint for a controlled tool error whose
 	// HTTP status depends on the phase rather than the code alone (for example
 	// a pre-claim text target rejection is 422 while the same code after claim
@@ -889,6 +893,14 @@ func (r *Result) MarshalJSONTo(enc *jsontext.Encoder) error {
 			return err
 		}
 		if err := writeBool(enc, *r.Saved); err != nil {
+			return err
+		}
+	}
+	if r.Image != nil {
+		if err := writeName(enc, "image"); err != nil {
+			return err
+		}
+		if err := MarshalJSONTo(enc, r.Image); err != nil {
 			return err
 		}
 	}

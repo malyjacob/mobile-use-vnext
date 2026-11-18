@@ -76,7 +76,14 @@ type fakeDevice struct {
 	imageCalls       int
 	imageErr         error
 	imageSFID        uint64
-	shell            fakeShellHooks
+	// imageHook runs after one CaptureImage call is recorded, outside the
+	// device lock, so a test can interleave STOP, cancellation or a display
+	// report with the read.
+	imageHook func()
+	// probeSteps scripts the returned SurfaceFlinger id. The last step repeats;
+	// an empty script uses sfid.
+	probeSteps []uint64
+	shell      fakeShellHooks
 
 	// App lifecycle facts: task moves/removals, process inventories and the
 	// kill guards. Nil receipt pointers default to a terminated dispatch.
@@ -117,7 +124,14 @@ func (f *fakeDevice) ProbeDisplay(_ context.Context, id int) (device.DisplayStat
 	if id == 0 {
 		return device.DisplayState{Exists: true, SFID: 1}, nil
 	}
-	return device.DisplayState{Exists: f.displayExists, SFID: f.sfid}, nil
+	sfid := f.sfid
+	if len(f.probeSteps) > 0 {
+		sfid = f.probeSteps[0]
+		if len(f.probeSteps) > 1 {
+			f.probeSteps = f.probeSteps[1:]
+		}
+	}
+	return device.DisplayState{Exists: f.displayExists, SFID: sfid}, nil
 }
 
 // probeCount returns the number of target-display probes.
@@ -128,10 +142,21 @@ func (f *fakeDevice) probeCount() int {
 }
 func (f *fakeDevice) CaptureImage(_ context.Context, sfid uint64) (device.ImageSource, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.imageCalls++
 	f.imageSFID = sfid
 	f.trace = append(f.trace, "image")
+	hook := f.imageHook
+	source, err := f.imageSourceValueLocked()
+	f.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	return source, err
+}
+
+// imageSourceValueLocked resolves the scripted source. The caller holds the
+// device lock.
+func (f *fakeDevice) imageSourceValueLocked() (device.ImageSource, error) {
 	if f.imageErr != nil {
 		return device.ImageSource{}, f.imageErr
 	}
