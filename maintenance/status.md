@@ -1,6 +1,8 @@
 # 项目实施状态
 
-状态：2026-11-19，契约 20 的默认观察树坐标省略已实现、整组部署并完成实机最小闭环；
+状态：2026-11-20，0.21.0（契约 20）的 MCP 树文本无损简写（`tree v3`/`inspect v3`）已实现、
+整组部署并完成双入口独立探针与实机最小闭环；2026-11-19，契约 20 的默认观察树坐标省略已实现、
+整组部署并完成实机最小闭环；
 契约 19 的只读截图工具 snap 已实现、整组部署并完成实机最小闭环；契约 18 的 text 写入确认、
 错误详情与恢复投影已完成有限实机验证。本页承载用户可见的阶段进度、已实现/已实测/未验证分层与未决项；
 `docs/` 只保留正式架构、现行契约与运维说明。
@@ -36,6 +38,7 @@
 | `snap`（契约 19，第 13 个工具） | 已实现（HTTP + Go client + MCP + 控制 App 文案） | 已实测：`start → keepalive(1) → snap(O) → status(O/P) → observe(image=true) → end` 闭环 PASS；JPEG 540×1200 与元数据一致，原 O 保持 `ready`/`effective` 且 `expires_at` 不变，snap 不递增 revision，重复 P/`status(P)` 无图摘要；主机 stdio/http、手机 HTTP 远端与 text/structured 探针均 PASS。实机 STOP/取消精确竞态与截图进行中文案未构造（[记录](verification/snap.md)） |
 | MCP stdio / Streamable HTTP | 已实现（`cmd/device-mcp`） | 已验证：工具目录/schema、认证/Origin、图片、取消、P 恢复；P6 回归重新拉起实际适配进程。默认部署同时安装并启动手机 `device-mcp`（手机 `18882/mcp`，主机转发 `18883`），`verify-m6` 检查 `server/discover`；主机侧适配器仍可选 |
 | MCP 文本树块 | 已实现 | 已实测：0.4.2 手机 HTTP MCP 的 `start`/`inspect` 文本块，以及主机 stdio 探针的 `observe`/`act` 树块；外部宿主、token 对比、宿主截断与实机超预算未执行（[记录](verification/mcp-tree-text.md)） |
+| MCP 树文本无损简写（`tree v3`/`inspect v3`，0.21.0） | 已实现 / 已实测（有限） | `9009599`：省略可还原的 `view`/`text` 角色并简写匿名默认 `view` 链 `[refs]`，外层 `result v2` 与共同契约 `20` 不变；0.21.0/契约 20/versionCode 23 整组构建、双清单核验、手机覆盖部署、主机两 exe 磁盘替换及主机 `stdio`/手机 `http-remote` 独立探针均 PASS；受控 `com.mobileuse.probe` 页最小闭环 `both` 模式 0 mismatch（命中 `shorthand_view_chain`、`omitted_text`、detailed 下 `omitted_view`/`explicit_text`、`full`/`delta` 与 `inspect v3`）；依赖方托管进程由用户自行重启切换，未命中边缘分支由单测与反向对照覆盖（[记录](verification/compact-node-role-text.md)） |
 | 默认观察树坐标省略（契约 20） | 已实现 / 已实测（有限） | `6838423`：动作位置优先，无动作 `text` 与匿名节点省略矩形，重复与 1% 面积判据；0.20.0/契约 20/versionCode 22 整组构建、清单核验、覆盖部署，主机两个 exe 替换与两条独立探针 PASS。实机受控页三帧策略复算 0 mismatch、文字坐标全隐藏、`inspect` 补回原矩形、ref tap executed；三份附件回放与 85% 门槛对照未执行（[记录](verification/compact-observation-bounds.md)） |
 | MCP 结果模式 | 已实现 | 已实测：both/text/structured 的主机 stdio 闭环、手机 HTTP 三模式各 12 工具及取消恢复；大值仅合成测试，外部宿主/截断/race 未验证（[记录](verification/mcp-result-modes.md)） |
 | Go client（`internal/client`） | 已实现 | 已验证：P 保留、断线、重复 P、取消、只读取消、图片 |

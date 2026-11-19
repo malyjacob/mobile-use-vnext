@@ -1,14 +1,15 @@
 # 提案：在 MCP 树文本中省略可还原的节点类型
 
-状态：提案，未实现。
+状态：已实现（实现提交 `9009599df87ac192787e730f9e9970b42d8f97e6`，2026-11-20）。
+实现与验证记录：[compact-node-role-text.md](../../verification/compact-node-role-text.md)。
 基线提交：`a1490d3f03cd288aeffe270595c795e0acc3ad12`（分支 `master`，`2026-11-20`）。
 适用范围：MCP 的 `text` 和 `both` 中的观察与补看树块，含差分里的完整节点定义。
 影响范围：`internal/mcp`、`scripts/mcp-probe`、版本源与生成件、正式文档及发布验证。
 契约（`/api/*` 字段与 `contract_version`）：不改变。共同契约保持 `20`，HTTP 和 MCP 结构化结果沿用现行定义。MCP 树文本块使用独立的 v3 语法。
 
 函数、行号、常量和默认值以该提交为准。实现前按当时的 `HEAD` 复核
-[MCP 渲染](../../internal/mcp/tree_text.go)、[探针](../../scripts/mcp-probe/result_text.go)、
-[版本源](../../release/versions.json)及[发布规则](../../docs/release.md)。
+[MCP 渲染](../../../internal/mcp/tree_text.go)、[探针](../../../scripts/mcp-probe/result_text.go)、
+[版本源](../../../release/versions.json)及[发布规则](../../../docs/release.md)。
 
 ## 0. 摘要
 
@@ -43,13 +44,13 @@ DSH 一次 v19 私有会话含 60 条工具结果，其中 25 个整树、10 个
 
 | 已核对的行为 | 依据 |
 | --- | --- |
-| v2 输出每个完整定义的类型。整树、补看和 delta 中 add/replace 的完整定义共用写行函数 | [tree_text.go:86](../../internal/mcp/tree_text.go#L86)、[tree_text.go:115](../../internal/mcp/tree_text.go#L115)、[tree_text.go:182](../../internal/mcp/tree_text.go#L182)、[tree_text.go:403](../../internal/mcp/tree_text.go#L403) |
-| 普通 view 也能带文字或描述。`text` 同时是节点类型与输入动作词 | [build.go:361](../../internal/observation/build.go#L361)、[build.go:382](../../internal/observation/build.go#L382)、[node.go:14](../../internal/protocol/node.go#L14) |
-| 匿名链以一个定义交付多个连续 ref，孩子属于末成员 | [read.go:320](../../internal/observation/read.go#L320)、[mcp.md:311](../../docs/mcp.md#L311) |
-| 文本与结构化结果可还原为同一个 Result。无法可读渲染时走既有 canonical JSON 兜底 | [mcp.md:159](../../docs/mcp.md#L159)、[mcp.md:355](../../docs/mcp.md#L355) |
-| full/delta 按 compact JSON 字节和已确认基线选择。子文字 ref 做默认 bubble 点按时，重验绑定子节点及交互祖先 | [capture.go:254](../../internal/engine/capture.go#L254)、[interface.md:455](../../docs/interface.md#L455) |
-| 独立探针识别 v2 块头，在检查链路中直接使用该版本 | [result_text.go:115](../../scripts/mcp-probe/result_text.go#L115)、[checks.go:631](../../scripts/mcp-probe/checks.go#L631) |
-| 共同契约与 MCP 文本版本独立。探针从清单读取目录指纹 | [决策 D33](../decisions.md#d33-mcp-结果模式共享无损事实集)、[release.md:46](../../docs/release.md#L46)、[catalog.go:209](../../scripts/mcp-probe/catalog.go#L209) |
+| v2 输出每个完整定义的类型。整树、补看和 delta 中 add/replace 的完整定义共用写行函数 | [tree_text.go:86](../../../internal/mcp/tree_text.go#L86)、[tree_text.go:115](../../../internal/mcp/tree_text.go#L115)、[tree_text.go:182](../../../internal/mcp/tree_text.go#L182)、[tree_text.go:403](../../../internal/mcp/tree_text.go#L403) |
+| 普通 view 也能带文字或描述。`text` 同时是节点类型与输入动作词 | [build.go:361](../../../internal/observation/build.go#L361)、[build.go:382](../../../internal/observation/build.go#L382)、[node.go:14](../../../internal/protocol/node.go#L14) |
+| 匿名链以一个定义交付多个连续 ref，孩子属于末成员 | [read.go:320](../../../internal/observation/read.go#L320)、[mcp.md:311](../../../docs/mcp.md#L311) |
+| 文本与结构化结果可还原为同一个 Result。无法可读渲染时走既有 canonical JSON 兜底 | [mcp.md:159](../../../docs/mcp.md#L159)、[mcp.md:355](../../../docs/mcp.md#L355) |
+| full/delta 按 compact JSON 字节和已确认基线选择。子文字 ref 做默认 bubble 点按时，重验绑定子节点及交互祖先 | [capture.go:254](../../../internal/engine/capture.go#L254)、[interface.md:455](../../../docs/interface.md#L455) |
+| 独立探针识别 v2 块头，在检查链路中直接使用该版本 | [result_text.go:115](../../../scripts/mcp-probe/result_text.go#L115)、[checks.go:631](../../../scripts/mcp-probe/checks.go#L631) |
+| 共同契约与 MCP 文本版本独立。探针从清单读取目录指纹 | [决策 D33](../../decisions.md#d33-mcp-结果模式共享无损事实集)、[release.md:46](../../../docs/release.md#L46)、[catalog.go:209](../../../scripts/mcp-probe/catalog.go#L209) |
 
 ### 1.3 为什么按字面猜类型会出错
 
@@ -127,12 +128,12 @@ n1 root [0,0,1080,2400]
 
 | 文件 | 改动 |
 | --- | --- |
-| [internal/mcp/tree_text.go](../../internal/mcp/tree_text.go) | 更新树和补看块头，在共享节点写行路径实现 §4 |
-| [internal/mcp/schema.go](../../internal/mcp/schema.go) | 更新 `treeTextGuide`，与握手发现同源发布 |
-| [内部树文本用例](../../internal/mcp/tree_text_test.go)与[结果等价用例](../../internal/mcp/result_parity_test.go) | 更新金样，独立读取并逐字段验证 |
-| [scripts/mcp-probe](../../scripts/mcp-probe/) | 更新块识别、正文合法性检查及用例，smoke 核验实际 v3 出口 |
-| [release/versions.json](../../release/versions.json)与生成件 | 使用审定版本生成共同发行身份 |
-| [docs/mcp.md](../../docs/mcp.md)和版本引用文档 | 更新公开语法、示例、现行版本引用 |
+| [internal/mcp/tree_text.go](../../../internal/mcp/tree_text.go) | 更新树和补看块头，在共享节点写行路径实现 §4 |
+| [internal/mcp/schema.go](../../../internal/mcp/schema.go) | 更新 `treeTextGuide`，与握手发现同源发布 |
+| [内部树文本用例](../../../internal/mcp/tree_text_test.go)与[结果等价用例](../../../internal/mcp/result_parity_test.go) | 更新金样，独立读取并逐字段验证 |
+| [scripts/mcp-probe](../../../scripts/mcp-probe/) | 更新块识别、正文合法性检查及用例，smoke 核验实际 v3 出口 |
+| [release/versions.json](../../../release/versions.json)与生成件 | 使用审定版本生成共同发行身份 |
+| [docs/mcp.md](../../../docs/mcp.md)和版本引用文档 | 更新公开语法、示例、现行版本引用 |
 
 ### 6.2 配置与取值
 
@@ -156,8 +157,8 @@ n1 root [0,0,1080,2400]
 
 ### 6.5 契约与文档影响
 
-MCP 文本语法由块头 v3 标识。按照既有[版本边界](../decisions.md#d33-mcp-结果模式共享无损事实集)
-和[发布规则](../../docs/release.md#2-单一版本源)，共同契约保持 `20`。外部文本读取器按块版本识别
+MCP 文本语法由块头 v3 标识。按照既有[版本边界](../../decisions.md#d33-mcp-结果模式共享无损事实集)
+和[发布规则](../../../docs/release.md#2-单一版本源)，共同契约保持 `20`。外部文本读取器按块版本识别
 语法，也可选现有结构化结果模式。共同契约匹配仍允许旧适配器与服务通信，因此旧进程可能继续
 输出 v2。实际验证以新进程镜像、握手说明和 v3 树块为证。同步 MCP 说明、图例、示例、README
 和正式文档中的现行发行引用。仍发布 13 个工具，目录指纹按构建产物核验。实现提交前通过第 15 条
@@ -263,7 +264,7 @@ MCP 文本语法由块头 v3 标识。按照既有[版本边界](../decisions.md
 4. 进入手机部署窗口，暂停新普通工作。用旧版本 `end` 或 STOP 撤权，按发布规则等待最多
    5 秒逻辑交接，照实保留未确认物理事实。用 `./scripts/deploy.ps1 -SkipBuild` 及现场所需
    端口和 Origin 参数覆盖部署，保持默认手机 MCP 启动。失败按
-   [发布回退边界](../../docs/release.md#5-失败与回退)处理，保护私有 App 数据与账本。
+   [发布回退边界](../../../docs/release.md#5-失败与回退)处理，保护私有 App 数据与账本。
 5. 按 §8 验证实际部署、跑最小闭环和双入口独立探针。以下私有配置路径以当次现有配对和
    转发为准，先核对权限及 Origin。
 
@@ -275,17 +276,30 @@ MCP 文本语法由块头 v3 标识。按照既有[版本边界](../decisions.md
 6. 完成验证后写记录，按流程将提案移入 `implemented/`，补实现提交、§11 和验证记录链接，
    检查相对链接。先实现、后归档分别提交。发布结果分别注明手机、主机和依赖方责任。
 
-## 11. 实现结果（归档时补写）
+## 11. 实现结果
 
-归档时记录实现提交及验证链接。
+实现提交：`9009599df87ac192787e730f9e9970b42d8f97e6`（2026-11-20）。
+实现与验证记录：[compact-node-role-text.md](../../verification/compact-node-role-text.md)。
 
 ### 11.1 已落地
 
-归档时按代码落点登记。
+| 提案条目 | 落点 |
+| --- | --- |
+| `tree v3` / `inspect v3` 块头与普通节点可逆角色省略、匿名默认 `view` 链 `[refs]` 简写 | `internal/mcp/tree_text.go` `renderFullTreeText`/`renderDeltaTreeText`/`renderInspectionText`/`writeNodeContent`/`writeChainRefs`/`isAnonymousDefaultViewChain`/`omitsNodeRole`/`nodeFirstColumnIsRole`/`writeNodeColumns` |
+| 全局树图例与 `inspect` 工具描述同步，工具目录指纹更新 | `internal/mcp/schema.go` `treeTextGuide`、`inspect` 描述（13 工具，SHA-256 `914fc4b061e14eb42fa75288e1c695e1649e49797c662a012013abdb265d1dc5`） |
+| MCP 树文本、说明、等价与服务测试及反向对照 | `internal/mcp/tree_text_test.go`、`internal/mcp/schema_test.go`、`internal/mcp/result_text_test.go`、`internal/mcp/result_parity_test.go`、`internal/mcp/server_test.go` |
+| 探针 v3 识别、正文语法/计数检查及 v2/缺块拒绝 | `scripts/mcp-probe/result.go`、`scripts/mcp-probe/checks.go`、`scripts/mcp-probe/result_text.go`、`scripts/mcp-probe/probe_test.go`、`scripts/mcp-probe/result_modes_test.go` |
+| 版本源 `0.21.0 / 20 / 23` 与生成件 | `release/versions.json`、`internal/protocol/version_generated.go`、`android-control/app/src/main/java/com/mobileuse/vnext/GeneratedVersion.java`、`android-control/app/src/main/res/values/strings_version.xml`、`android-control/app/src/main/AndroidManifest.xml` |
+| 正式文档同步与独立只读审计 | `README.md`、`docs/mcp.md`、`docs/architecture.md`、`docs/release.md`、`docs/control-protocol.md`（独立只读文档审计 `CLEAN`） |
+| 同源整组构建/清单核验、手机覆盖部署、主机双 exe 替换、双入口独立探针与受控页最小闭环 | 详见 [compact-node-role-text.md](../../verification/compact-node-role-text.md) §4–§6 |
 
 ### 11.2 与提案不同或未执行
 
-归档时逐项登记并说明理由。
+| 项 | 情况与理由 |
+| --- | --- |
+| 依赖方宿主及托管 MCP 进程切换 | 按提案 §8.2.4 与发布边界，未停止或重启 Windows `DeepSeek Harness.exe` 托管的 `device-mcp.exe`（`PID 33184`）与手机 `dsh-mcp-connector` 托管的 `device-mcp -transport stdio`（`pid 20888`）；磁盘产物已替换，独立探针与受控页闭环已用新产物验证，依赖方切换由用户自行处理。 |
+| 实机未命中的语法边缘分支 | 受控 `com.mobileuse.probe` 页面实机命中 `shorthand_view_chain`、`omitted_text`、detailed 下 `omitted_view`/`explicit_text`、compact `full`/`delta` 与 `inspect v3`；显式 `view` 撞标签或输入动作 `text`、`group` 链、未知几何 `-`、delta 内链、`inspect query` 及同契约 v2 拒绝未单独构造实机页面，均由 §3 单元测试与反向对照覆盖。 |
+| 真实 DSH 轨迹的模型输入/计费测量与其他第三方应用分布 | 未执行：超出最小实机闭环范围；提案 §1.1 离线重放数字只作方案比选证据，未冒充实机收益。 |
 
 ## 附：本提案不改变的事项
 
