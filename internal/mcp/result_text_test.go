@@ -110,7 +110,7 @@ func decodeResultText(t *testing.T, text string) (map[string]any, bool, error) {
 			}
 			continue
 		}
-		if strings.HasPrefix(line, "tree v2 ") || strings.HasPrefix(line, "inspect v2 ") || strings.HasPrefix(line, "shell v1 ") || strings.HasPrefix(line, "timeline v1 ") {
+		if strings.HasPrefix(line, "tree v3 ") || strings.HasPrefix(line, "inspect v3 ") || strings.HasPrefix(line, "shell v1 ") || strings.HasPrefix(line, "timeline v1 ") {
 			kind := strings.Fields(line)[0]
 			end := "end " + kind
 			j := i + 1
@@ -289,7 +289,7 @@ func TestTextCodecDeliveredObservationOnError(t *testing.T) {
 		"result v2 is_error=true",
 		"observation.status=complete",
 		"observation.id=O2",
-		"tree v2 format=full id=O2",
+		"tree v3 format=full id=O2",
 		"recovery.entry=retry",
 		"recovery.reference=O",
 		"end result",
@@ -343,7 +343,7 @@ func TestTextCodecUnrepresentableTreeMetadata(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if strings.Contains(text, "\ntree v2 ") {
+			if strings.Contains(text, "\ntree v3 ") {
 				t.Fatal("unrepresentable metadata entered readable block")
 			}
 			assertResultTextParity(t, []byte(raw), false)
@@ -502,7 +502,7 @@ func TestTextCodecMetadataPaths(t *testing.T) {
 				t.Fatal(err)
 			}
 			text := assertResultTextParity(t, raw, false)
-			if strings.Contains(text, "tree v2 format=delta") && strings.Contains(text, "observation.tree.scope=") {
+			if strings.Contains(text, "tree v3 format=delta") && strings.Contains(text, "observation.tree.scope=") {
 				t.Fatal("derived delta scope became fact")
 			}
 		}

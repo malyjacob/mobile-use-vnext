@@ -9,4 +9,4 @@ const ContractVersion = "20"
 
 // ReleaseVersion identifies this build artifact. It is not a contract and does
 // not take part in capability negotiation.
-var ReleaseVersion = "0.20.0"
+var ReleaseVersion = "0.21.0"

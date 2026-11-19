@@ -576,7 +576,7 @@ func TestDecodeResultTextEmptyDeltaWithWait(t *testing.T) {
 		"observation.quality.samples=0\n" +
 		"observation.quality.stop_reason=not_sampled\n" +
 		"\n" +
-		"tree v2 format=delta id=Owait00000000000000001 " +
+		"tree v3 format=delta id=Owait00000000000000001 " +
 		"base=Owait00000000000000000 view=compact " +
 		"scope=reported_visible_with_context changes=0\n" +
 		"\n" +
@@ -600,7 +600,7 @@ func TestDecodeResultTextEmptyDeltaWithWait(t *testing.T) {
 func TestDecodeResultTextEmptyInspection(t *testing.T) {
 	text := "result v2 is_error=false\n" +
 		"\n" +
-		"inspect v2 scope=query observation=O1 revision=1 captured_at=now " +
+		"inspect v3 scope=query observation=O1 revision=1 captured_at=now " +
 		"tree_scope=reported_visible_with_context view=detailed " +
 		"matches=0 nodes=0 entries=0\n" +
 		"\n" +
@@ -631,7 +631,7 @@ func TestDecodeResultTextRejectsIncompleteProjection(t *testing.T) {
 		{
 			name: "empty delta missing tree tail",
 			text: "result v2 is_error=false\nobservation.id=O2\n\n" +
-				"tree v2 format=delta id=O2 base=O1 view=compact " +
+				"tree v3 format=delta id=O2 base=O1 view=compact " +
 				"scope=reported_visible_with_context changes=0\n\n" +
 				"end result\n",
 			reason: "text_tree_unterminated",
@@ -639,7 +639,7 @@ func TestDecodeResultTextRejectsIncompleteProjection(t *testing.T) {
 		{
 			name: "omitted tree",
 			text: "result v2 is_error=false\nobservation.id=\"O1\"\n\n" +
-				"tree v2 omitted reason=ref_format\nend result\n",
+				"tree v3 omitted reason=ref_format\nend result\n",
 			reason: "text_result_block_omitted",
 		},
 		{
@@ -651,14 +651,14 @@ func TestDecodeResultTextRejectsIncompleteProjection(t *testing.T) {
 		{
 			name: "legacy tree defaults line",
 			text: "result v2 is_error=false\nobservation.id=\"O1\"\n\n" +
-				"tree v2 format=full id=O1 scope=reported_visible_with_context view=compact nodes=1 entries=1\n" +
+				"tree v3 format=full id=O1 scope=reported_visible_with_context view=compact nodes=1 entries=1\n" +
 				"defaults {\"checked\":false}\n\nn1 root [0,0,1080,2400]\nend tree\nend result\n",
 			reason: "text_tree_separator_invalid",
 		},
 		{
 			name: "legacy inspection defaults line",
 			text: "result v2 is_error=false\n\n" +
-				"inspect v2 scope=tree observation=O1 revision=1 captured_at=now " +
+				"inspect v3 scope=tree observation=O1 revision=1 captured_at=now " +
 				"tree_scope=reported_visible_with_context view=detailed nodes=1 entries=1\n" +
 				"defaults {\"checked\":false}\n\nn1 root [0,0,1080,2400]\nend inspect\nend result\n",
 			reason: "text_inspect_separator_invalid",
@@ -666,35 +666,35 @@ func TestDecodeResultTextRejectsIncompleteProjection(t *testing.T) {
 		{
 			name: "defaults line inside tree body",
 			text: "result v2 is_error=false\nobservation.id=\"O1\"\n\n" +
-				"tree v2 format=full id=O1 scope=reported_visible_with_context view=compact nodes=1 entries=1\n\n" +
+				"tree v3 format=full id=O1 scope=reported_visible_with_context view=compact nodes=1 entries=1\n\n" +
 				"defaults {\"checked\":false}\nn1 root [0,0,1080,2400]\nend tree\nend result\n",
 			reason: "text_tree_body_invalid",
 		},
 		{
 			name: "full node writes checked default",
 			text: "result v2 is_error=false\nobservation.id=\"O1\"\n\n" +
-				"tree v2 format=full id=O1 scope=reported_visible_with_context view=compact nodes=1 entries=1\n\n" +
+				"tree v3 format=full id=O1 scope=reported_visible_with_context view=compact nodes=1 entries=1\n\n" +
 				"n1 root [0,0,1080,2400] checked=false\nend tree\nend result\n",
 			reason: "text_tree_flag_default",
 		},
 		{
 			name: "full node writes enabled default",
 			text: "result v2 is_error=false\nobservation.id=\"O1\"\n\n" +
-				"tree v2 format=full id=O1 scope=reported_visible_with_context view=compact nodes=1 entries=1\n\n" +
+				"tree v3 format=full id=O1 scope=reported_visible_with_context view=compact nodes=1 entries=1\n\n" +
 				"n1 root [0,0,1080,2400] enabled=true\nend tree\nend result\n",
 			reason: "text_tree_flag_default",
 		},
 		{
 			name: "full node writes focused default",
 			text: "result v2 is_error=false\nobservation.id=\"O1\"\n\n" +
-				"tree v2 format=full id=O1 scope=reported_visible_with_context view=compact nodes=1 entries=1\n\n" +
+				"tree v3 format=full id=O1 scope=reported_visible_with_context view=compact nodes=1 entries=1\n\n" +
 				"n1 root [0,0,1080,2400] focused=false\nend tree\nend result\n",
 			reason: "text_tree_flag_default",
 		},
 		{
 			name: "inspection node writes checked default",
 			text: "result v2 is_error=false\n\n" +
-				"inspect v2 scope=tree observation=O1 revision=1 captured_at=now " +
+				"inspect v3 scope=tree observation=O1 revision=1 captured_at=now " +
 				"tree_scope=reported_visible_with_context view=detailed nodes=1 entries=1\n\n" +
 				"n1 root [0,0,1080,2400] checked=false\nend inspect\nend result\n",
 			reason: "text_inspect_flag_default",
@@ -730,7 +730,7 @@ func TestDecodeResultTextJSONPointer(t *testing.T) {
 // set false, or a quoted label that merely looks like a state member.
 func TestDecodeResultTextAcceptsTriStateContract(t *testing.T) {
 	text := "result v2 is_error=false\nobservation.id=\"O1\"\n\n" +
-		"tree v2 format=full id=O1 scope=reported_visible_with_context view=compact nodes=3 entries=3\n\n" +
+		"tree v3 format=full id=O1 scope=reported_visible_with_context view=compact nodes=3 entries=3\n\n" +
 		"n1 root [0,0,1080,2400]\n" +
 		"  n2 text \"checked=false is a label\" value=\"x\" enabled=false focused=true selected=null protected=null checked=null\n" +
 		"  n3 button enabled=null checked=true\n" +
@@ -740,7 +740,7 @@ func TestDecodeResultTextAcceptsTriStateContract(t *testing.T) {
 	}
 
 	delta := "result v2 is_error=false\nobservation.id=\"O2\"\n\n" +
-		"tree v2 format=delta id=O2 base=O1 view=compact scope=reported_visible_with_context changes=2\n\n" +
+		"tree v3 format=delta id=O2 base=O1 view=compact scope=reported_visible_with_context changes=2\n\n" +
 		"~ n2 checked=false focused=null\n" +
 		"+ n4 text [0,0,10,10] checked=true\n" +
 		"end tree\nend result\n"
@@ -749,10 +749,336 @@ func TestDecodeResultTextAcceptsTriStateContract(t *testing.T) {
 	}
 
 	inspection := "result v2 is_error=false\n\n" +
-		"inspect v2 scope=query observation=O1 revision=1 captured_at=now " +
+		"inspect v3 scope=query observation=O1 revision=1 captured_at=now " +
 		"tree_scope=reported_visible_with_context view=detailed matches=1 total=1 truncated=false nodes=1 entries=1\n\n" +
 		"match 1/1 path=[n1 n2]\nn3 text [0,0,10,10] checked=null\nend inspect\nend result\n"
 	if _, failure := decodeResultText(inspection); failure != nil {
 		t.Fatalf("valid query inspection rejected: %s %v", failure.reason, failure.fields)
+	}
+}
+
+func TestDecodeResultTextV3Blocks(t *testing.T) {
+	full := "tree v3 format=full id=O1 scope=reported_visible_with_context view=compact nodes=11 entries=9\n\n" +
+		"n1 root [0,0,1080,2400]\n" +
+		"  n2 \"设置\"\n" +
+		"  n3 [10,20,30,40] tap\n" +
+		"  n4 view \"说明\"\n" +
+		"  n5 view text\n" +
+		"  [n10 n11]\n" +
+		"  chain [n12 n13] group [0,0,10,10] \"分组\"\n" +
+		"    n14 input [0,0,10,10] value=\"x\" hint=\"hint\" tap text " +
+		"enabled=false focused=true selected=null protected=null checked=true " +
+		"axis=y resource=\"res\" context\n" +
+		"    n15 scroll [0,0,20,20] swipe axis=both\n" +
+		"end tree\n"
+	delta := "tree v3 format=delta id=O2 base=O1 view=compact " +
+		"scope=reported_visible_with_context changes=5\n\n" +
+		"~ n2 checked=false focused=null\n" +
+		"+ n20 group\n" +
+		"  [n21 n22]\n" +
+		"  n23 text [0,0,1,1] \"标签\" value=\"\" hint=\"h\" tap enabled=false selected=null\n" +
+		"= n24 view [0,0,2,2] checked=true\n" +
+		"  chain [n25 n26] scroll [0,0,3,3]\n" +
+		"- n3\n" +
+		"children n4 = [n5 n6]\n" +
+		"end tree\n"
+	inspectTree := "inspect v3 scope=tree observation=O1 revision=1 captured_at=now " +
+		"tree_scope=reported_visible_with_context view=detailed nodes=3 entries=3\n\n" +
+		"n1 root [0,0,1080,2400]\n" +
+		"  n2 text [0,0,10,10] \"Hello\" value=\"v\"\n" +
+		"  n3 view [0,0,20,20] text\n" +
+		"end inspect\n"
+	inspectSubtree := "inspect v3 scope=subtree observation=O1 revision=1 captured_at=now " +
+		"tree_scope=reported_visible_with_context view=detailed root=n5 nodes=2 entries=2\n\n" +
+		"n5 group [0,0,10,10] \"sub\"\n" +
+		"  n6 [0,0,5,5] tap\n" +
+		"end inspect\n"
+	inspectQuery := "inspect v3 scope=query observation=O1 revision=1 captured_at=now " +
+		"tree_scope=reported_visible_with_context view=detailed " +
+		"matches=2 total=2 truncated=false nodes=3 entries=3\n\n" +
+		"match 1/2 path=[n1 n2]\n" +
+		"n2 text [0,0,10,10] \"one\"\n" +
+		"\n" +
+		"match 2/2 path=[n1 n3]\n" +
+		"n3 group [0,0,20,20]\n" +
+		"  n4 [0,0,5,5] checked=null\n" +
+		"end inspect\n"
+
+	cases := []struct {
+		name   string
+		text   string
+		format string
+		scope  string
+	}{
+		{
+			name: "full",
+			text: "result v2 is_error=false\nobservation.id=O1\n\n" + full + "end result\n",
+		},
+		{
+			name: "delta",
+			text: "result v2 is_error=false\nobservation.id=O2\n\n" + delta + "end result\n",
+		},
+		{
+			name:  "inspect tree",
+			text:  "result v2 is_error=false\n\n" + inspectTree + "end result\n",
+			scope: "tree",
+		},
+		{
+			name:  "inspect subtree",
+			text:  "result v2 is_error=false\n\n" + inspectSubtree + "end result\n",
+			scope: "subtree",
+		},
+		{
+			name:  "inspect query",
+			text:  "result v2 is_error=false\n\n" + inspectQuery + "end result\n",
+			scope: "query",
+		},
+		{
+			name: "empty delta",
+			text: "result v2 is_error=false\nobservation.id=O3\n\n" +
+				"tree v3 format=delta id=O3 base=O1 view=compact " +
+				"scope=reported_visible_with_context changes=0\n\n" +
+				"end tree\nend result\n",
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			decoded, failure := decodeResultText(testCase.text)
+			if failure != nil {
+				t.Fatalf("valid v3 block rejected: %s %v", failure.reason, failure.fields)
+			}
+			if testCase.format != "" && (decoded.view.Observation == nil ||
+				decoded.view.Observation.Tree == nil ||
+				decoded.view.Observation.Tree.Format != testCase.format) {
+				t.Fatalf("tree projection = %+v", decoded.view.Observation)
+			}
+			if testCase.scope != "" && (decoded.view.Inspection == nil ||
+				decoded.view.Inspection.Scope != testCase.scope) {
+				t.Fatalf("inspection projection = %+v", decoded.view.Inspection)
+			}
+		})
+	}
+}
+
+func TestDecodeResultTextV3RejectsLegacyAndMissingBlocks(t *testing.T) {
+	legacyTree := "result v2 is_error=false\nobservation.id=O1\n\n" +
+		"tree v2 format=full id=O1 scope=reported_visible_with_context " +
+		"view=compact nodes=1 entries=1\n\n" +
+		"n1 root [0,0,1080,2400]\nend tree\nend result\n"
+	legacyInspect := "result v2 is_error=false\n\n" +
+		"inspect v2 scope=tree observation=O1 revision=1 captured_at=now " +
+		"tree_scope=reported_visible_with_context view=detailed nodes=1 entries=1\n\n" +
+		"n1 root [0,0,1080,2400]\nend inspect\nend result\n"
+	legacyTreeWithoutSeparator := "result v2 is_error=false\nstatus=complete\n" +
+		"tree v2 format=full id=O1 scope=reported_visible_with_context " +
+		"view=compact nodes=1 entries=1\n\n" +
+		"n1 root [0,0,1080,2400]\nend tree\nend result\n"
+	for name, text := range map[string]string{
+		"tree v2 after blank":       legacyTree,
+		"tree v2 without separator": legacyTreeWithoutSeparator,
+		"inspect v2 after blank":    legacyInspect,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, failure := decodeResultText(text); failure == nil {
+				t.Fatal("legacy block was accepted")
+			}
+		})
+	}
+
+	observation := &observationView{ID: "O1", Tree: &treeView{Format: treeFull}}
+	projected := &callResult{texts: []string{legacyTree}}
+	if failure := checkObservationTreeBlock(projected, observation); failure == nil ||
+		failure.reason != "text_tree_block_missing" {
+		t.Fatalf("legacy tree block check = %v, want text_tree_block_missing", failure)
+	}
+	projected.texts = []string{"result v2 is_error=false\nobservation.id=O1\nend result\n"}
+	if failure := checkObservationTreeBlock(projected, observation); failure == nil ||
+		failure.reason != "text_tree_block_missing" {
+		t.Fatalf("missing tree block check = %v, want text_tree_block_missing", failure)
+	}
+	if _, failure := treeBlockText(&callResult{texts: []string{legacyInspect}},
+		"inspect v3 scope=tree observation=O1"); failure == nil ||
+		failure.reason != "text_inspect_block_missing" {
+		t.Fatalf("legacy inspect block check = %v, want text_inspect_block_missing", failure)
+	}
+	inspection := &inspectionView{ObservationID: "O1", Scope: "tree"}
+	if failure := checkInspectionTreeBlock(&callResult{texts: []string{legacyInspect}},
+		inspection, "O1"); failure == nil ||
+		failure.reason != "text_inspect_block_missing" {
+		t.Fatalf("legacy inspect check = %v, want text_inspect_block_missing", failure)
+	}
+	missing := "result v2 is_error=false\ninspection.observation_id=O1\nend result\n"
+	if failure := checkInspectionTreeBlock(&callResult{texts: []string{missing}},
+		inspection, "O1"); failure == nil ||
+		failure.reason != "text_inspect_block_missing" {
+		t.Fatalf("missing inspect check = %v, want text_inspect_block_missing", failure)
+	}
+}
+
+func TestV3BlockChecksRequireCompleteBlocks(t *testing.T) {
+	tree := "result v2 is_error=false\nobservation.id=O1\n\n" +
+		"tree v3 format=full id=O1 scope=reported_visible_with_context " +
+		"view=compact nodes=1 entries=1\n\n" +
+		"n1 root [0,0,1080,2400]\nend tree\nend result\n"
+	observation := &observationView{ID: "O1", Tree: &treeView{Format: treeFull}}
+	if failure := checkObservationTreeBlock(&callResult{texts: []string{tree}},
+		observation); failure != nil {
+		t.Fatalf("complete v3 tree rejected: %s %v", failure.reason, failure.fields)
+	}
+	unterminated := "result v2 is_error=false\nobservation.id=O1\n\n" +
+		"tree v3 format=full id=O1 scope=reported_visible_with_context " +
+		"view=compact nodes=1 entries=1\n\n" +
+		"n1 root [0,0,1080,2400]\nend result\n"
+	if failure := checkObservationTreeBlock(&callResult{texts: []string{unterminated}},
+		observation); failure == nil || failure.reason != "text_block_unterminated" {
+		t.Fatalf("unterminated tree check = %v, want text_block_unterminated", failure)
+	}
+
+	inspect := "result v2 is_error=false\n\n" +
+		"inspect v3 scope=tree observation=O1 revision=1 captured_at=now " +
+		"tree_scope=reported_visible_with_context view=detailed nodes=1 entries=1\n\n" +
+		"n1 root [0,0,1080,2400]\nend inspect\nend result\n"
+	inspection := &inspectionView{ObservationID: "O1", Scope: "tree"}
+	if failure := checkInspectionTreeBlock(&callResult{texts: []string{inspect}},
+		inspection, "O1"); failure != nil {
+		t.Fatalf("complete v3 inspect rejected: %s %v", failure.reason, failure.fields)
+	}
+}
+
+func TestDecodeResultTextV3RejectsInvalidBodies(t *testing.T) {
+	fullHeader := "tree v3 format=full id=O1 scope=reported_visible_with_context view=compact "
+	cases := []struct {
+		name   string
+		text   string
+		reason string
+	}{
+		{
+			name: "full nodes mismatch",
+			text: "result v2 is_error=false\nobservation.id=O1\n\n" +
+				fullHeader + "nodes=2 entries=1\n\n" +
+				"n1 root [0,0,1080,2400]\nend tree\nend result\n",
+			reason: "text_tree_count_mismatch",
+		},
+		{
+			name: "full entries mismatch",
+			text: "result v2 is_error=false\nobservation.id=O1\n\n" +
+				fullHeader + "nodes=1 entries=2\n\n" +
+				"n1 root [0,0,1080,2400]\nend tree\nend result\n",
+			reason: "text_tree_count_mismatch",
+		},
+		{
+			name: "delta changes mismatch",
+			text: "result v2 is_error=false\nobservation.id=O2\n\n" +
+				"tree v3 format=delta id=O2 base=O1 view=compact " +
+				"scope=reported_visible_with_context changes=2\n\n" +
+				"~ n2 checked=false\nend tree\nend result\n",
+			reason: "text_tree_count_mismatch",
+		},
+		{
+			name: "query matches mismatch",
+			text: "result v2 is_error=false\n\n" +
+				"inspect v3 scope=query observation=O1 revision=1 captured_at=now " +
+				"tree_scope=reported_visible_with_context view=detailed " +
+				"matches=2 total=2 truncated=false nodes=1 entries=1\n\n" +
+				"match 1/1 path=[n1]\nn2 text [0,0,10,10] \"one\"\n" +
+				"end inspect\nend result\n",
+			reason: "text_inspect_count_mismatch",
+		},
+		{
+			name: "shorthand has extra token",
+			text: "result v2 is_error=false\nobservation.id=O1\n\n" +
+				fullHeader + "nodes=3 entries=2\n\n" +
+				"n1 root [0,0,1080,2400]\n  [n10 n11] extra\nend tree\nend result\n",
+			reason: "text_tree_body_invalid",
+		},
+		{
+			name: "detailed chain",
+			text: "result v2 is_error=false\n\n" +
+				"inspect v3 scope=tree observation=O1 revision=1 captured_at=now " +
+				"tree_scope=reported_visible_with_context view=detailed nodes=2 entries=2\n\n" +
+				"n1 root [0,0,1080,2400]\n" +
+				"  chain [n2 n3] group [0,0,10,10]\nend inspect\nend result\n",
+			reason: "text_inspect_body_invalid",
+		},
+		{
+			name: "detailed omitted geometry",
+			text: "result v2 is_error=false\n\n" +
+				"inspect v3 scope=tree observation=O1 revision=1 captured_at=now " +
+				"tree_scope=reported_visible_with_context view=detailed nodes=1 entries=1\n\n" +
+				"n1 root\nend inspect\nend result\n",
+			reason: "text_inspect_body_invalid",
+		},
+		{
+			name: "full root not root",
+			text: "result v2 is_error=false\nobservation.id=O1\n\n" +
+				fullHeader + "nodes=1 entries=1\n\n" +
+				"n1 view [0,0,1080,2400]\nend tree\nend result\n",
+			reason: "text_tree_body_invalid",
+		},
+		{
+			name: "odd indentation",
+			text: "result v2 is_error=false\nobservation.id=O1\n\n" +
+				fullHeader + "nodes=2 entries=2\n\n" +
+				"n1 root [0,0,1080,2400]\n n2 \"x\"\nend tree\nend result\n",
+			reason: "text_tree_body_invalid",
+		},
+		{
+			name: "tab indentation",
+			text: "result v2 is_error=false\nobservation.id=O1\n\n" +
+				fullHeader + "nodes=2 entries=2\n\n" +
+				"n1 root [0,0,1080,2400]\n\tn2 \"x\"\nend tree\nend result\n",
+			reason: "text_tree_body_invalid",
+		},
+		{
+			name: "depth jump",
+			text: "result v2 is_error=false\nobservation.id=O1\n\n" +
+				fullHeader + "nodes=2 entries=2\n\n" +
+				"n1 root [0,0,1080,2400]\n    n2 \"x\"\nend tree\nend result\n",
+			reason: "text_tree_body_invalid",
+		},
+		{
+			name: "bad geometry",
+			text: "result v2 is_error=false\nobservation.id=O1\n\n" +
+				fullHeader + "nodes=2 entries=2\n\n" +
+				"n1 root [0,0,1080,2400]\n  n2 button [0,0,10]\nend tree\nend result\n",
+			reason: "text_tree_body_invalid",
+		},
+		{
+			name: "flag out of order",
+			text: "result v2 is_error=false\nobservation.id=O1\n\n" +
+				fullHeader + "nodes=2 entries=2\n\n" +
+				"n1 root [0,0,1080,2400]\n  n2 checked=true enabled=false\nend tree\nend result\n",
+			reason: "text_tree_body_invalid",
+		},
+		{
+			name: "unknown column",
+			text: "result v2 is_error=false\nobservation.id=O1\n\n" +
+				fullHeader + "nodes=2 entries=2\n\n" +
+				"n1 root [0,0,1080,2400]\n  n2 future=value\nend tree\nend result\n",
+			reason: "text_tree_body_invalid",
+		},
+		{
+			name: "geometry after omitted text label in compact tree",
+			text: "result v2 is_error=false\nobservation.id=O1\n\n" +
+				fullHeader + "nodes=2 entries=2\n\n" +
+				"n1 root [0,0,1080,2400]\n  n2 \"设置\" [0,0,10,10]\nend tree\nend result\n",
+			reason: "text_tree_body_invalid",
+		},
+		{
+			name: "geometry after omitted text label in detailed inspect",
+			text: "result v2 is_error=false\n\n" +
+				"inspect v3 scope=tree observation=O1 revision=1 captured_at=now " +
+				"tree_scope=reported_visible_with_context view=detailed nodes=2 entries=2\n\n" +
+				"n1 root [0,0,1080,2400]\n  n2 \"设置\" [0,0,10,10]\nend inspect\nend result\n",
+			reason: "text_inspect_body_invalid",
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if _, failure := decodeResultText(testCase.text); failure == nil ||
+				failure.reason != testCase.reason {
+				t.Fatalf("failure = %v, want %s", failure, testCase.reason)
+			}
+		})
 	}
 }

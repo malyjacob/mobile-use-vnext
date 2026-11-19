@@ -212,6 +212,12 @@ func resultModeFixtures() []resultModeFixture {
 	add := func(tool, name, raw string) {
 		fixtures = append(fixtures, resultModeFixture{tool: tool, name: name, raw: raw})
 	}
+	v3RoleTree := `{"format":"full","scope":"reported_visible_with_context","view":"compact","root":{` +
+		`"ref":"n1","role":"root","bounds":[0,0,1080,2400],"children":[` +
+		`{"ref":"n2","role":"view"},` +
+		`{"chain":["n10","n11"],"role":"view","children":[` +
+		`{"ref":"n12","role":"text","label":["child"]}]},` +
+		`{"ref":"n3","role":"view","bounds":[0,0,10,10],"actions":["tap"]}]}}`
 	add("status", "not_seen", `{"operation_state":"not_seen","can_start":true,"session":null}`)
 	add("status", "closed", `{"request_closed":true,"can_start":false,"blocking_operation_id":"P1","blocking_code":"cleanup_pending"}`)
 	add("start", "full", `{"operation_id":"P1","outcome":"executed","session":`+testActiveSessionJSON+`,"observation":{"status":"complete","id":"O1","tree":`+testFullTreeJSON+`}}`)
@@ -219,6 +225,7 @@ func resultModeFixtures() []resultModeFixture {
 	for _, tree := range []struct{ name, raw string }{{"full", testFullTreeJSON}, {"delta", testDeltaTreeJSON}} {
 		add("observe", tree.name, `{"observation":{"status":"complete","id":"O2","tree":`+tree.raw+`}}`)
 	}
+	add("observe", "v3_role_text", `{"observation":{"status":"complete","id":"O2","tree":`+v3RoleTree+`}}`)
 	add("observe", "missing", `{"observation":{"status":"partial","id":"O1","missing":["image"],"image":{"error":{"code":"image_unavailable","message":"缺图"}}}}`)
 	add("observe", "read_only_image", `{"observation":{"status":"failed","image":{"read_only":true,"width":2,"height":3,"media_type":"image/jpeg","base64":"secret"}}}`)
 	add("observe", "empty", `{}`)
@@ -250,6 +257,7 @@ func resultModeFixtures() []resultModeFixture {
 		`"recovery":{"entry":"retry","reference":"O","input_state":"effective"}}`)
 	add("act", "scroll_effect_quality", `{"operation_id":"P1","outcome":"executed","phase":"completed","effect":{"state":"observed"},"target_reference":"O1","observation":{"status":"complete","id":"O2","origin":"P1","revision":2,"quality":{"state":"unstable","samples":5,"stop_reason":"max_samples"},"tree":`+testFullTreeJSON+`}}`)
 	add("act", "scroll_effect_unknown", `{"operation_id":"P1","outcome":"uncertain","effect":{"state":"unknown"},"observation":{"status":"complete","id":"O3","quality":{"state":"unknown","samples":0,"stop_reason":"not_sampled"}},"error":{"code":"action_unknown","message":"动作结果不确定"}}`)
+	add("act", "error_image_v3_tree", `{"operation_id":"P1","outcome":"uncertain","observation":{"status":"complete","id":"O2","tree":`+v3RoleTree+`},"error":{"code":"action_unknown","message":"动作结果不确定"}}`)
 	add("act", "text_input_enter_deferred", `{"operation_id":"P1","outcome":"uncertain","text_input":{"write":"executed","enter":"not_executed"}}`)
 	add("act", "text_input_write_uncertain", `{"operation_id":"P1","outcome":"uncertain","text_input":{"write":"uncertain","enter":"not_executed"}}`)
 	add("act", "text_input_not_dispatched", `{"operation_id":"P1","outcome":"uncertain","text_input":{"write":"not_executed","enter":"not_executed"}}`)
@@ -484,7 +492,7 @@ func TestHTTPModesSelectProjectionPerCall(t *testing.T) {
 func TestCatalogFingerprintBaseline(t *testing.T) {
 	// The catalog has thirteen tools. This baseline covers the caller-oriented
 	// descriptions after the tree guide moved to the server instructions.
-	const baseline = "99dd22d0a81280b6875eaa770b81ee0f553e8a6b9e49f4bbb0c83078f25494c8"
+	const baseline = "914fc4b061e14eb42fa75288e1c695e1649e49797c662a012013abdb265d1dc5"
 	if got := CatalogFingerprint(); got != baseline {
 		t.Fatalf("catalog changed: %s", got)
 	}

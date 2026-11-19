@@ -89,7 +89,7 @@ func renderFullTreeText(id string, tree *protocol.ReadTree) (string, bool) {
 	}
 	body := treeTextBuffer{}
 	nodes, entries := writeSubtree(&body, tree.Root, "")
-	header := "tree v2 format=full id=" + id +
+	header := "tree v3 format=full id=" + id +
 		" scope=" + tree.Scope + " view=" + tree.View +
 		" nodes=" + strconv.Itoa(nodes) + " entries=" + strconv.Itoa(entries)
 	block := treeTextBlock{header: header, body: body, trailer: "end tree"}
@@ -104,7 +104,7 @@ func renderDeltaTreeText(id string, delta *protocol.ReadDelta) (string, bool) {
 		len(delta.Children) + len(delta.Replace)
 	body := treeTextBuffer{}
 	writeDeltaBody(&body, delta)
-	header := "tree v2 format=delta id=" + id +
+	header := "tree v3 format=delta id=" + id +
 		" base=" + delta.Base +
 		" view=" + delta.View +
 		" scope=" + protocol.Scope + " changes=" + strconv.Itoa(changes)
@@ -159,7 +159,7 @@ func renderInspectionText(view *protocol.InspectionView) (string, bool) {
 			entries += matchEntries
 		}
 	}
-	header := "inspect v2 scope=" + view.Scope +
+	header := "inspect v3 scope=" + view.Scope +
 		" observation=" + view.ObservationID +
 		" revision=" + strconv.Itoa(view.Revision) +
 		" captured_at=" + view.CapturedAt +
@@ -397,24 +397,92 @@ func writeIndent(body *treeTextBuffer, depth int) {
 	}
 }
 
-// writeNodeContent writes the fixed node column order: ref or chain, role,
-// bounds, labels, value, hint, actions, then flags. A hidden geometry column is
-// omitted; a missing source rectangle is written as "-".
+// writeNodeContent writes the fixed node column order: ref or chain, an
+// optional recoverable role, bounds, labels, value, hint, actions, then flags.
+// A hidden geometry column is omitted; a missing source rectangle is written as
+// "-".
 func writeNodeContent(body *treeTextBuffer, node *protocol.ReadNode) {
 	if len(node.Chain) > 0 {
-		body.write("chain [")
-		for index, ref := range node.Chain {
-			if index > 0 {
-				body.write(" ")
-			}
-			body.write(ref)
+		if isAnonymousDefaultViewChain(node) {
+			writeChainRefs(body, node.Chain)
+			body.write("\n")
+			return
 		}
-		body.write("] ")
-	} else {
-		body.write(node.Ref)
+		body.write("chain ")
+		writeChainRefs(body, node.Chain)
 		body.write(" ")
+		body.write(string(node.Role))
+		writeNodeColumns(body, node)
+		body.write("\n")
+		return
 	}
-	body.write(string(node.Role))
+	body.write(node.Ref)
+	if !omitsNodeRole(node) {
+		body.write(" ")
+		body.write(string(node.Role))
+	}
+	writeNodeColumns(body, node)
+	body.write("\n")
+}
+
+func writeChainRefs(body *treeTextBuffer, refs []string) {
+	body.write("[")
+	for index, ref := range refs {
+		if index > 0 {
+			body.write(" ")
+		}
+		body.write(ref)
+	}
+	body.write("]")
+}
+
+// isAnonymousDefaultViewChain recognizes the one chain definition whose role
+// and hidden shared columns add no information: an anonymous default view with
+// every other shared field at its complete-node default.
+func isAnonymousDefaultViewChain(node *protocol.ReadNode) bool {
+	return len(node.Chain) > 0 &&
+		node.Role == protocol.RoleView &&
+		node.Bounds.Kind == protocol.GeometryHidden &&
+		len(node.Label) == 0 &&
+		node.Value == nil &&
+		node.Hint == nil &&
+		len(node.Actions) == 0 &&
+		node.Enabled != nil && *node.Enabled &&
+		node.Focused != nil && !*node.Focused &&
+		node.Selected != nil && !*node.Selected &&
+		node.Protected != nil && !*node.Protected &&
+		node.Checked != nil && !*node.Checked &&
+		node.Axis == "" &&
+		node.Resource == nil &&
+		!node.Context
+}
+
+// omitsNodeRole applies the v3 recovery rule to an ordinary node. The first
+// surviving column determines the default role. An unquoted role word in that
+// position is always the explicit role, so it can never be omitted, while a
+// quoted label defaults to text and every other first column defaults to view.
+func omitsNodeRole(node *protocol.ReadNode) bool {
+	if nodeFirstColumnIsRole(node) {
+		return false
+	}
+	defaultRole := protocol.RoleView
+	if node.Bounds.Kind == protocol.GeometryHidden && len(node.Label) > 0 {
+		defaultRole = protocol.RoleText
+	}
+	return node.Role == defaultRole
+}
+
+func nodeFirstColumnIsRole(node *protocol.ReadNode) bool {
+	if node.Bounds.Kind != protocol.GeometryHidden || len(node.Label) > 0 ||
+		node.Value != nil || node.Hint != nil || len(node.Actions) == 0 {
+		return false
+	}
+	return protocol.Role(node.Actions[0]).Valid()
+}
+
+// writeNodeColumns writes the shared columns after the role position. Every
+// written column owns its leading space, so an omitted role leaves no gap.
+func writeNodeColumns(body *treeTextBuffer, node *protocol.ReadNode) {
 	if node.Bounds.Kind != protocol.GeometryHidden {
 		body.write(" ")
 		if node.Bounds.Kind == protocol.GeometryUnknown {
@@ -465,7 +533,6 @@ func writeNodeContent(body *treeTextBuffer, node *protocol.ReadNode) {
 	if node.Context {
 		body.write(" context")
 	}
-	body.write("\n")
 }
 
 // writeDefaultFalseFlag writes a true or null value; a known false is the

@@ -359,6 +359,8 @@ type fakeAdapter struct {
 	endCalls         int
 	resultMode       string
 	primaryCandidate bool
+	legacyInspect    bool
+	omitInspectBlock bool
 }
 
 func newFakeAdapter() *fakeAdapter {
@@ -446,6 +448,12 @@ func (f *fakeAdapter) render(payload map[string]any, isError, withImage bool) *s
 		}
 	}
 	text := fakeResultText(textPayload, isError)
+	if f.legacyInspect {
+		text = strings.ReplaceAll(text, "inspect v3 ", "inspect v2 ")
+	}
+	if f.omitInspectBlock {
+		text = omitFakeInspectBlock(text, payload)
+	}
 	content := make([]sdk.Content, 0, 2)
 	switch f.resultMode {
 	case resultModeText:
@@ -563,7 +571,7 @@ func (f *fakeAdapter) handle(ctx context.Context, name string, request *sdk.Call
 			}), nil
 		}
 		text := "inspection.observation_id=" + observationID +
-			"\n\ninspect v2 scope=tree observation=" + observationID +
+			"\n\ninspect v3 scope=tree observation=" + observationID +
 			" revision=2 captured_at=2026-01-01T00:00:00Z" +
 			" tree_scope=reported_visible_with_context view=detailed nodes=1 entries=1\n" +
 			"\n" +
@@ -853,13 +861,17 @@ func writeFakeObservation(builder *strings.Builder, value any) {
 		scope = "reported_visible_with_context"
 	}
 	base, _ := tree["base"].(string)
-	block := "tree v2 format=" + format + " id=" + id + " scope=" + scope
+	block := "tree v3 format=" + format + " id=" + id + " scope=" + scope
 	if format == treeDelta && base != "" {
 		block += " base=" + base
 	}
-	block += " view=compact nodes=1 entries=1 changes=0\n"
-	block += "\n"
-	block += "n1 root [0,0,1080,2400]\nend tree\n"
+	block += " view=compact"
+	if format == treeDelta {
+		block += " changes=0\n\n"
+	} else {
+		block += " nodes=1 entries=1\n\nn1 root [0,0,1080,2400]\n"
+	}
+	block += "end tree\n"
 	writeFakeBlock(builder, block)
 }
 
@@ -876,7 +888,7 @@ func writeFakeInspection(builder *strings.Builder, value any) {
 	scope, _ := inspection["scope"].(string)
 	revision, _ := inspection["revision"].(int)
 	capturedAt, _ := inspection["captured_at"].(string)
-	block := "inspect v2 scope=" + scope +
+	block := "inspect v3 scope=" + scope +
 		" observation=" + observationID +
 		" revision=" + strconv.Itoa(revision) +
 		" captured_at=" + capturedAt +
@@ -884,6 +896,42 @@ func writeFakeInspection(builder *strings.Builder, value any) {
 		" nodes=1 entries=1\n" +
 		"\nn1 root [0,0,1080,2400]\nend inspect\n"
 	writeFakeBlock(builder, block)
+}
+
+func omitFakeInspectBlock(text string, payload map[string]any) string {
+	inspection, _ := payload["inspection"].(map[string]any)
+	if inspection == nil {
+		return text
+	}
+	lines := strings.Split(text, "\n")
+	filtered := make([]string, 0, len(lines))
+	skipping := false
+	for _, line := range lines {
+		if strings.HasPrefix(line, "inspect v3 ") {
+			if len(filtered) > 0 && filtered[len(filtered)-1] == "" {
+				filtered = filtered[:len(filtered)-1]
+			}
+			skipping = true
+			continue
+		}
+		if skipping {
+			if line == "end inspect" {
+				skipping = false
+			}
+			continue
+		}
+		filtered = append(filtered, line)
+	}
+	text = strings.Join(filtered, "\n")
+	observationID, _ := inspection["observation_id"].(string)
+	scope, _ := inspection["scope"].(string)
+	revision, _ := inspection["revision"].(int)
+	capturedAt, _ := inspection["captured_at"].(string)
+	fields := "inspection.observation_id=" + observationID + "\n" +
+		"inspection.scope=" + scope + "\n" +
+		"inspection.revision=" + strconv.Itoa(revision) + "\n" +
+		"inspection.captured_at=" + capturedAt + "\n"
+	return strings.TrimSuffix(text, "end result\n") + fields + "end result\n"
 }
 
 // writeFakeApp renders one app result using the declared typed lines. It is a
@@ -1132,7 +1180,7 @@ func TestAdapterChecksAgainstFakeAdapter(t *testing.T) {
 			if code := reporter.finish(blocked); code != 0 {
 				t.Fatalf("checks failed (exit %d):\n%s", code, output.String())
 			}
-			for _, want := range []string{
+			wants := []string{
 				"PASS tools count=13",
 				"PASS catalog tools=13",
 				"PASS catalog_fingerprint",
@@ -1155,7 +1203,12 @@ func TestAdapterChecksAgainstFakeAdapter(t *testing.T) {
 				"PASS end",
 				"PASS cancel",
 				"RESULT PASS",
-			} {
+			}
+			if mode != resultModeStructured {
+				wants = append(wants, "PASS observe", "tree_block=v3",
+					"PASS inspect", "inspect_block=complete")
+			}
+			for _, want := range wants {
 				if !strings.Contains(output.String(), want) {
 					t.Fatalf("missing %q in:\n%s", want, output.String())
 				}
@@ -1194,6 +1247,47 @@ func TestAdapterChecksBlocked(t *testing.T) {
 	}
 	if adapter.startCalls != 0 {
 		t.Fatalf("device work started while blocked")
+	}
+}
+
+func TestInspectCheckRejectsLegacyBlock(t *testing.T) {
+	adapter := newFakeAdapter()
+	adapter.legacyInspect = true
+	session := startFakeAdapter(t, adapter)
+
+	var output bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	runner := &probe{
+		reporter: newReporter(&output), session: session,
+		resultMode: resultModeBoth,
+	}
+	if runner.inspectCheck(ctx, "O1") {
+		t.Fatalf("legacy inspect block passed:\n%s", output.String())
+	}
+	if !strings.Contains(output.String(), "FAIL inspect reason=text_result_block_unknown") {
+		t.Fatalf("legacy inspect was not attributed:\n%s", output.String())
+	}
+}
+
+func TestInspectCheckRejectsMissingBlock(t *testing.T) {
+	adapter := newFakeAdapter()
+	adapter.omitInspectBlock = true
+	adapter.resultMode = resultModeText
+	session := startFakeAdapter(t, adapter)
+
+	var output bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	runner := &probe{
+		reporter: newReporter(&output), session: session,
+		resultMode: resultModeText,
+	}
+	if runner.inspectCheck(ctx, "O1") {
+		t.Fatalf("missing inspect block passed:\n%s", output.String())
+	}
+	if !strings.Contains(output.String(), "FAIL inspect reason=text_inspect_block_missing") {
+		t.Fatalf("missing inspect block was not attributed:\n%s", output.String())
 	}
 }
 
@@ -1964,7 +2058,7 @@ func TestProbeAgainstRealAdapter(t *testing.T) {
 			if code := reporter.finish(blocked); code != 0 {
 				t.Fatalf("checks failed (exit %d):\n%s", code, output.String())
 			}
-			for _, want := range []string{
+			wants := []string{
 				"PASS tools count=13",
 				"PASS catalog",
 				"PASS catalog_fingerprint",
@@ -1985,7 +2079,12 @@ func TestProbeAgainstRealAdapter(t *testing.T) {
 				"PASS act",
 				"PASS end",
 				"PASS cancel",
-			} {
+			}
+			if mode != resultModeStructured {
+				wants = append(wants, "PASS observe", "tree_block=v3",
+					"PASS inspect", "inspect_block=complete")
+			}
+			for _, want := range wants {
 				if !strings.Contains(output.String(), want) {
 					t.Fatalf("missing %q in:\n%s", want, output.String())
 				}
@@ -2085,6 +2184,16 @@ func TestProbeAgainstRealHTTPAdapter(t *testing.T) {
 			blocked := probe.runChecks(ctx)
 			if code := reporter.finish(blocked); code != 0 {
 				t.Fatalf("checks failed (exit %d):\n%s", code, output.String())
+			}
+			if mode != resultModeStructured {
+				for _, want := range []string{
+					"PASS observe", "tree_block=v3",
+					"PASS inspect", "inspect_block=complete",
+				} {
+					if !strings.Contains(output.String(), want) {
+						t.Fatalf("missing %q in:\n%s", want, output.String())
+					}
+				}
 			}
 			fake.mutex.Lock()
 			starts, ends, shells := fake.startCount, fake.endCount, fake.shellCount

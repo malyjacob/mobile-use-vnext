@@ -43,8 +43,14 @@ func decodeResultText(text string) (*decodedTextResult, *checkError) {
 	seen := make(map[string]bool)
 	for index := 1; index < len(lines)-1; {
 		line := lines[index]
+		if isForeignTreeBlockHeader(line) {
+			return nil, failf("text_result_block_unknown")
+		}
 		if line == "" {
 			if index+1 >= len(lines)-1 || !isResultBlockHeader(lines[index+1]) {
+				if index+1 < len(lines)-1 && isForeignTreeBlockHeader(lines[index+1]) {
+					return nil, failf("text_result_block_unknown")
+				}
 				return nil, failf("text_result_blank_invalid")
 			}
 			index++
@@ -114,7 +120,7 @@ func decodeResultText(text string) (*decodedTextResult, *checkError) {
 
 func isResultBlockHeader(line string) bool {
 	for _, prefix := range []string{
-		"tree v2 ", "inspect v2 ", "shell v1 ", "timeline v1 ",
+		"tree v3 ", "inspect v3 ", "shell v1 ", "timeline v1 ",
 	} {
 		if strings.HasPrefix(line, prefix) {
 			return true
@@ -123,15 +129,25 @@ func isResultBlockHeader(line string) bool {
 	return false
 }
 
+// isForeignTreeBlockHeader rejects every tree/inspect version outside the
+// accepted v3 grammar. Without this check an old block can look like an
+// ordinary scalar line and be consumed field by field.
+func isForeignTreeBlockHeader(line string) bool {
+	if !strings.HasPrefix(line, "tree v") && !strings.HasPrefix(line, "inspect v") {
+		return false
+	}
+	return !strings.HasPrefix(line, "tree v3 ") && !strings.HasPrefix(line, "inspect v3 ")
+}
+
 func decodeResultBlock(lines []string, start int, object map[string]any,
 	seen map[string]bool) (int, *checkError) {
 	if strings.Contains(lines[start], " omitted ") {
 		return 0, failf("text_result_block_omitted")
 	}
 	switch {
-	case strings.HasPrefix(lines[start], "tree v2 "):
+	case strings.HasPrefix(lines[start], "tree v3 "):
 		return decodeTreeBlock(lines, start, object, seen)
-	case strings.HasPrefix(lines[start], "inspect v2 "):
+	case strings.HasPrefix(lines[start], "inspect v3 "):
 		return decodeInspectionBlock(lines, start, object, seen)
 	case strings.HasPrefix(lines[start], "shell v1 "):
 		return decodeShellBlock(lines, start, object, seen)
@@ -144,7 +160,7 @@ func decodeResultBlock(lines []string, start int, object map[string]any,
 
 func decodeTreeBlock(lines []string, start int, object map[string]any,
 	seen map[string]bool) (int, *checkError) {
-	fields, failure := decodeBlockHeader(lines[start], "tree v2 ")
+	fields, failure := decodeBlockHeader(lines[start], "tree v3 ")
 	if failure != nil {
 		return 0, failure
 	}
@@ -172,6 +188,20 @@ func decodeTreeBlock(lines []string, start int, object map[string]any,
 	if failure := requireBlockSeparator(lines, start, "text_tree_separator_invalid"); failure != nil {
 		return 0, failure
 	}
+	expectedNodes, expectedEntries, expectedChanges := 0, 0, 0
+	switch format {
+	case treeFull:
+		if expectedNodes, failure = treeHeaderCount(fields, "nodes", "text_tree"); failure != nil {
+			return 0, failure
+		}
+		if expectedEntries, failure = treeHeaderCount(fields, "entries", "text_tree"); failure != nil {
+			return 0, failure
+		}
+	case treeDelta:
+		if expectedChanges, failure = treeHeaderCount(fields, "changes", "text_tree"); failure != nil {
+			return 0, failure
+		}
+	}
 	if failure := setDecodedPath(object, seen, []string{"observation", "tree", "format"}, format); failure != nil {
 		return 0, failure
 	}
@@ -192,8 +222,30 @@ func decodeTreeBlock(lines []string, start int, object map[string]any,
 	if failure != nil {
 		return 0, failure
 	}
-	if failure := validateTreeBody(lines[start+2:end-1], format, "text_tree"); failure != nil {
+	rules := treeBodyRules{
+		kind:             format,
+		prefix:           "text_tree",
+		rootRoleRequired: format == treeFull,
+	}
+	stats, failure := analyzeTreeBody(lines[start+2:end-1], rules)
+	if failure != nil {
 		return 0, failure
+	}
+	switch format {
+	case treeFull:
+		if failure := compareTreeBodyCount(fields, "nodes", stats.nodes,
+			expectedNodes, "text_tree"); failure != nil {
+			return 0, failure
+		}
+		if failure := compareTreeBodyCount(fields, "entries", stats.entries,
+			expectedEntries, "text_tree"); failure != nil {
+			return 0, failure
+		}
+	case treeDelta:
+		if failure := compareTreeBodyCount(fields, "changes", stats.changes,
+			expectedChanges, "text_tree"); failure != nil {
+			return 0, failure
+		}
 	}
 	return end, nil
 }
@@ -209,7 +261,7 @@ func requireBlockSeparator(lines []string, start int, reason string) *checkError
 
 func decodeInspectionBlock(lines []string, start int, object map[string]any,
 	seen map[string]bool) (int, *checkError) {
-	fields, failure := decodeBlockHeader(lines[start], "inspect v2 ")
+	fields, failure := decodeBlockHeader(lines[start], "inspect v3 ")
 	if failure != nil {
 		return 0, failure
 	}
@@ -246,6 +298,20 @@ func decodeInspectionBlock(lines []string, start int, object map[string]any,
 	if failure := requireBlockSeparator(lines, start, "text_inspect_separator_invalid"); failure != nil {
 		return 0, failure
 	}
+	expectedNodes, failure := treeHeaderCount(fields, "nodes", "text_inspect")
+	if failure != nil {
+		return 0, failure
+	}
+	expectedEntries, failure := treeHeaderCount(fields, "entries", "text_inspect")
+	if failure != nil {
+		return 0, failure
+	}
+	expectedMatches := 0
+	if scope == "query" {
+		if expectedMatches, failure = treeHeaderCount(fields, "matches", "text_inspect"); failure != nil {
+			return 0, failure
+		}
+	}
 	// The tree scope declares view in the nested complete tree; the subtree and
 	// query scopes declare it once on the inspection envelope.
 	viewPath := []string{"inspection", "view"}
@@ -259,67 +325,593 @@ func decodeInspectionBlock(lines []string, start int, object map[string]any,
 	if failure != nil {
 		return 0, failure
 	}
-	bodyMode := scope
-	if bodyMode == "tree" || bodyMode == "subtree" {
-		// Both inspection scopes render complete detailed node definitions.
-		bodyMode = "full"
+	rules := treeBodyRules{
+		kind:               "full",
+		prefix:             "text_inspect",
+		detailed:           true,
+		rootRoleRequired:   scope == "tree",
+		expectedMatches:    expectedMatches,
+		hasExpectedMatches: scope == "query",
 	}
-	if failure := validateTreeBody(lines[start+2:end-1], bodyMode, "text_inspect"); failure != nil {
+	if scope == "query" {
+		rules.kind = "query"
+	}
+	stats, failure := analyzeTreeBody(lines[start+2:end-1], rules)
+	if failure != nil {
 		return 0, failure
+	}
+	if failure := compareTreeBodyCount(fields, "nodes", stats.nodes,
+		expectedNodes, "text_inspect"); failure != nil {
+		return 0, failure
+	}
+	if failure := compareTreeBodyCount(fields, "entries", stats.entries,
+		expectedEntries, "text_inspect"); failure != nil {
+		return 0, failure
+	}
+	if scope == "query" {
+		if failure := compareTreeBodyCount(fields, "matches", stats.matches,
+			expectedMatches, "text_inspect"); failure != nil {
+			return 0, failure
+		}
 	}
 	return end, nil
 }
 
-// validateTreeBody keeps the probe from accepting a readable block whose body
-// contradicts the complete-node state contract. Full definitions may omit only
-// the known defaults; a delta set line may explicitly carry any tri-state value.
+// validateTreeBody is the narrow helper retained for callers that only need a
+// structural verdict. Production decoding supplies the detailed/header context
+// through analyzeTreeBody so counts and the inspect view are checked together.
 func validateTreeBody(body []string, mode, prefix string) *checkError {
-	for _, rawLine := range body {
-		line := strings.TrimSpace(rawLine)
-		if line == "" {
-			continue
+	rules := treeBodyRules{kind: mode, prefix: prefix}
+	switch mode {
+	case "full":
+		rules.rootRoleRequired = true
+	case "query":
+		rules.detailed = true
+	}
+	_, failure := analyzeTreeBody(body, rules)
+	return failure
+}
+
+type treeBodyRules struct {
+	kind               string
+	prefix             string
+	detailed           bool
+	rootRoleRequired   bool
+	expectedMatches    int
+	hasExpectedMatches bool
+}
+
+type treeBodyStats struct {
+	nodes   int
+	entries int
+	changes int
+	matches int
+}
+
+type treeBodyLine struct {
+	depth int
+	text  string
+	blank bool
+}
+
+type treeNodeRules struct {
+	prefix           string
+	allowChain       bool
+	requireGeometry  bool
+	rootRoleRequired bool
+}
+
+func analyzeTreeBody(body []string, rules treeBodyRules) (treeBodyStats, *checkError) {
+	lines := make([]treeBodyLine, len(body))
+	for index, raw := range body {
+		line, failure := parseTreeBodyLine(raw, rules.prefix)
+		if failure != nil {
+			return treeBodyStats{}, failure
 		}
-		tokens, ok := treeLineTokens(line)
-		if !ok || len(tokens) == 0 {
-			return failf(prefix + "_body_invalid")
+		lines[index] = line
+	}
+	switch rules.kind {
+	case "full":
+		nodes, entries, failure := analyzeTreeDefinitionTree(lines, rules)
+		return treeBodyStats{nodes: nodes, entries: entries}, failure
+	case "delta":
+		return analyzeTreeDeltaBody(lines, rules)
+	case "query":
+		return analyzeTreeQueryBody(lines, rules)
+	default:
+		return treeBodyStats{}, failf(rules.prefix + "_body_invalid")
+	}
+}
+
+func parseTreeBodyLine(raw, prefix string) (treeBodyLine, *checkError) {
+	if strings.ContainsRune(raw, '\t') || strings.TrimRight(raw, " ") != raw {
+		return treeBodyLine{}, failf(prefix + "_body_invalid")
+	}
+	indent := 0
+	for indent < len(raw) && raw[indent] == ' ' {
+		indent++
+	}
+	if indent == len(raw) {
+		if indent != 0 {
+			return treeBodyLine{}, failf(prefix + "_body_invalid")
 		}
-		if tokens[0] == "defaults" {
-			return failf(prefix + "_body_invalid")
+		return treeBodyLine{blank: true}, nil
+	}
+	if indent%2 != 0 {
+		return treeBodyLine{}, failf(prefix + "_body_invalid")
+	}
+	return treeBodyLine{depth: indent / 2, text: raw[indent:]}, nil
+}
+
+// analyzeTreeDefinitionTree validates one full/compact or detailed subtree.
+// Only the first line is a root. Later depth-zero lines are siblings without a
+// parent and therefore invalid.
+func analyzeTreeDefinitionTree(lines []treeBodyLine,
+	rules treeBodyRules) (int, int, *checkError) {
+	if len(lines) == 0 {
+		return 0, 0, failf(rules.prefix + "_body_invalid")
+	}
+	nodes, entries := 0, 0
+	previousDepth := 0
+	for index, line := range lines {
+		if line.blank {
+			return 0, 0, failf(rules.prefix + "_body_invalid")
 		}
-		switch mode {
-		case "full":
-			if failure := validateFullNodeFlags(tokens, prefix); failure != nil {
-				return failure
+		if index == 0 {
+			if line.depth != 0 {
+				return 0, 0, failf(rules.prefix + "_body_invalid")
 			}
-		case "delta":
+		} else if line.depth == 0 || line.depth > previousDepth+1 {
+			return 0, 0, failf(rules.prefix + "_body_invalid")
+		}
+		refs, failure := validateTreeDefinition(line.text, treeNodeRules{
+			prefix:           rules.prefix,
+			allowChain:       !rules.detailed && index > 0,
+			requireGeometry:  rules.detailed,
+			rootRoleRequired: index == 0 && rules.rootRoleRequired,
+		})
+		if failure != nil {
+			return 0, 0, failure
+		}
+		nodes += refs
+		entries++
+		previousDepth = line.depth
+	}
+	return nodes, entries, nil
+}
+
+func analyzeTreeDeltaBody(lines []treeBodyLine,
+	rules treeBodyRules) (treeBodyStats, *checkError) {
+	stats := treeBodyStats{}
+	previousDepth := 0
+	subtreeOpen := false
+	for _, line := range lines {
+		if line.blank {
+			return treeBodyStats{}, failf(rules.prefix + "_body_invalid")
+		}
+		tokens, ok := treeLineTokens(line.text)
+		if !ok || len(tokens) == 0 || tokens[0] == "defaults" {
+			return treeBodyStats{}, failf(rules.prefix + "_body_invalid")
+		}
+		if line.depth == 0 {
+			stats.changes++
+			subtreeOpen = false
 			switch tokens[0] {
 			case "~":
-				if failure := validateSetNodeFlags(tokens[1:], prefix); failure != nil {
-					return failure
+				if len(tokens) < 2 || !isPublicRef(tokens[1]) {
+					return treeBodyStats{}, failf(rules.prefix + "_body_invalid")
+				}
+				if failure := validateSetNodeFlags(tokens[2:], rules.prefix); failure != nil {
+					return treeBodyStats{}, failure
 				}
 			case "+", "=":
 				if len(tokens) < 2 {
-					return failf(prefix + "_body_invalid")
+					return treeBodyStats{}, failf(rules.prefix + "_body_invalid")
 				}
-				if failure := validateFullNodeFlags(tokens[1:], prefix); failure != nil {
-					return failure
+				if _, failure := validateTreeNodeTokens(tokens[1:], treeNodeRules{
+					prefix: rules.prefix,
+				}); failure != nil {
+					return treeBodyStats{}, failure
 				}
-			case "-", "children":
+				subtreeOpen = true
+				previousDepth = 0
+			case "-":
+				if len(tokens) != 2 || !isPublicRef(tokens[1]) {
+					return treeBodyStats{}, failf(rules.prefix + "_body_invalid")
+				}
+			case "children":
+				if len(tokens) != 4 || !isPublicRef(tokens[1]) || tokens[2] != "=" ||
+					!validTreeRefListToken(tokens[3], 0) {
+					return treeBodyStats{}, failf(rules.prefix + "_body_invalid")
+				}
 			default:
-				return failf(prefix + "_body_invalid")
+				return treeBodyStats{}, failf(rules.prefix + "_body_invalid")
 			}
-		case "query":
-			if strings.HasPrefix(tokens[0], "match") {
-				continue
+			continue
+		}
+		if !subtreeOpen || line.depth > previousDepth+1 {
+			return treeBodyStats{}, failf(rules.prefix + "_body_invalid")
+		}
+		if _, failure := validateTreeDefinition(line.text, treeNodeRules{
+			prefix:     rules.prefix,
+			allowChain: true,
+		}); failure != nil {
+			return treeBodyStats{}, failure
+		}
+		previousDepth = line.depth
+	}
+	return stats, nil
+}
+
+func analyzeTreeQueryBody(lines []treeBodyLine,
+	rules treeBodyRules) (treeBodyStats, *checkError) {
+	stats := treeBodyStats{}
+	matchNumber := 0
+	declaredMatches := 0
+	for index := 0; index < len(lines); {
+		line := lines[index]
+		if line.blank || line.depth != 0 || !strings.HasPrefix(line.text, "match ") {
+			return treeBodyStats{}, failf(rules.prefix + "_body_invalid")
+		}
+		matchNumber++
+		total, failure := validateTreeMatchLine(line.text, matchNumber, rules)
+		if failure != nil {
+			return treeBodyStats{}, failure
+		}
+		if matchNumber == 1 {
+			declaredMatches = total
+		} else if declaredMatches != total {
+			return treeBodyStats{}, failf(rules.prefix + "_body_invalid")
+		}
+		index++
+		start := index
+		for index < len(lines) {
+			if lines[index].blank {
+				break
 			}
-			if failure := validateFullNodeFlags(tokens, prefix); failure != nil {
-				return failure
+			if lines[index].depth == 0 && strings.HasPrefix(lines[index].text, "match ") {
+				break
 			}
-		default:
-			return failf(prefix + "_body_invalid")
+			index++
+		}
+		if index == start {
+			return treeBodyStats{}, failf(rules.prefix + "_body_invalid")
+		}
+		nodes, entries, failure := analyzeTreeDefinitionTree(lines[start:index], treeBodyRules{
+			kind:     "full",
+			prefix:   rules.prefix,
+			detailed: true,
+		})
+		if failure != nil {
+			return treeBodyStats{}, failure
+		}
+		stats.nodes += nodes
+		stats.entries += entries
+		if index < len(lines) {
+			if !lines[index].blank {
+				return treeBodyStats{}, failf(rules.prefix + "_body_invalid")
+			}
+			index++
+			if index >= len(lines) || lines[index].blank ||
+				lines[index].depth != 0 ||
+				!strings.HasPrefix(lines[index].text, "match ") {
+				return treeBodyStats{}, failf(rules.prefix + "_body_invalid")
+			}
 		}
 	}
+	stats.matches = matchNumber
+	if declaredMatches != matchNumber {
+		return treeBodyStats{}, failf(rules.prefix+"_count_mismatch",
+			field("count", "matches"),
+			field("header", strconv.Itoa(declaredMatches)),
+			field("body", strconv.Itoa(matchNumber)))
+	}
+	expected := declaredMatches
+	if rules.hasExpectedMatches {
+		expected = rules.expectedMatches
+	}
+	if expected != matchNumber {
+		return treeBodyStats{}, failf(rules.prefix+"_count_mismatch",
+			field("count", "matches"),
+			field("header", strconv.Itoa(expected)),
+			field("body", strconv.Itoa(matchNumber)))
+	}
+	return stats, nil
+}
+
+func validateTreeMatchLine(text string, number int,
+	rules treeBodyRules) (int, *checkError) {
+	rest, found := strings.CutPrefix(text, "match ")
+	if !found {
+		return 0, failf(rules.prefix + "_body_invalid")
+	}
+	separator := strings.IndexByte(rest, ' ')
+	if separator <= 0 {
+		return 0, failf(rules.prefix + "_body_invalid")
+	}
+	position := rest[:separator]
+	rest = rest[separator+1:]
+	parts := strings.Split(position, "/")
+	if len(parts) != 2 {
+		return 0, failf(rules.prefix + "_body_invalid")
+	}
+	current, currentOK := parsePositiveDecimal(parts[0])
+	total, totalOK := parsePositiveDecimal(parts[1])
+	if !currentOK || !totalOK || current != number || total < number {
+		return 0, failf(rules.prefix + "_body_invalid")
+	}
+	path, found := strings.CutPrefix(rest, "path=[")
+	if !found || !strings.HasSuffix(path, "]") {
+		return 0, failf(rules.prefix + "_body_invalid")
+	}
+	path = strings.TrimSuffix(path, "]")
+	for _, ref := range strings.Fields(path) {
+		if !isPublicRef(ref) {
+			return 0, failf(rules.prefix + "_body_invalid")
+		}
+	}
+	return total, nil
+}
+
+func treeHeaderCount(fields map[string]string, key, prefix string) (int, *checkError) {
+	value, ok := parseNonNegativeDecimal(fields[key])
+	if !ok {
+		return 0, failf(prefix+"_count_invalid", field("count", key))
+	}
+	return value, nil
+}
+
+func compareTreeBodyCount(fields map[string]string, key string, actual,
+	expected int, prefix string) *checkError {
+	if actual == expected {
+		return nil
+	}
+	return failf(prefix+"_count_mismatch",
+		field("count", key),
+		field("header", fields[key]),
+		field("body", strconv.Itoa(actual)))
+}
+
+func parseNonNegativeDecimal(value string) (int, bool) {
+	if value == "" {
+		return 0, false
+	}
+	for index := 0; index < len(value); index++ {
+		if value[index] < '0' || value[index] > '9' {
+			return 0, false
+		}
+	}
+	parsed, err := strconv.Atoi(value)
+	return parsed, err == nil && parsed >= 0
+}
+
+func parsePositiveDecimal(value string) (int, bool) {
+	parsed, ok := parseNonNegativeDecimal(value)
+	return parsed, ok && parsed > 0
+}
+
+func validateTreeDefinition(text string, rules treeNodeRules) (int, *checkError) {
+	tokens, ok := treeLineTokens(text)
+	if !ok {
+		return 0, failf(rules.prefix + "_body_invalid")
+	}
+	return validateTreeNodeTokens(tokens, rules)
+}
+
+func validateTreeNodeTokens(tokens []string, rules treeNodeRules) (int, *checkError) {
+	if len(tokens) == 0 || tokens[0] == "defaults" {
+		return 0, failf(rules.prefix + "_body_invalid")
+	}
+	if failure := validateFullNodeFlags(tokens, rules.prefix); failure != nil {
+		return 0, failure
+	}
+	if tokens[0] == "chain" {
+		if !rules.allowChain || rules.requireGeometry || len(tokens) < 3 ||
+			!validTreeRefListToken(tokens[1], 2) || !treeRoleSet[tokens[2]] {
+			return 0, failf(rules.prefix + "_body_invalid")
+		}
+		if failure := validateTreeNodeColumns(tokens, 3, true, rules.requireGeometry,
+			rules.prefix); failure != nil {
+			return 0, failure
+		}
+		refs, _ := parseTreeRefListToken(tokens[1])
+		return len(refs), nil
+	}
+	if strings.HasPrefix(tokens[0], "[") {
+		if !rules.allowChain || rules.requireGeometry || rules.rootRoleRequired ||
+			len(tokens) != 1 || !validTreeRefListToken(tokens[0], 2) {
+			return 0, failf(rules.prefix + "_body_invalid")
+		}
+		refs, _ := parseTreeRefListToken(tokens[0])
+		return len(refs), nil
+	}
+	if !isPublicRef(tokens[0]) {
+		return 0, failf(rules.prefix + "_body_invalid")
+	}
+	role := "view"
+	columnStart := 1
+	allowGeometry := true
+	if columnStart < len(tokens) && treeRoleSet[tokens[columnStart]] {
+		role = tokens[columnStart]
+		columnStart++
+	} else if columnStart < len(tokens) && isTreeJSONString(tokens[columnStart]) {
+		role = "text"
+		allowGeometry = false
+	}
+	if rules.rootRoleRequired && role != "root" {
+		return 0, failf(rules.prefix + "_body_invalid")
+	}
+	if failure := validateTreeNodeColumns(tokens, columnStart, allowGeometry,
+		rules.requireGeometry, rules.prefix); failure != nil {
+		return 0, failure
+	}
+	return 1, nil
+}
+
+func validateTreeNodeColumns(tokens []string, start int, allowGeometry,
+	requireGeometry bool, prefix string) *checkError {
+	index := start
+	haveGeometry := false
+	if allowGeometry && index < len(tokens) &&
+		(tokens[index] == "-" || strings.HasPrefix(tokens[index], "[")) {
+		if !validTreeGeometry(tokens[index]) {
+			return failf(prefix + "_body_invalid")
+		}
+		haveGeometry = true
+		index++
+	}
+	if requireGeometry && !haveGeometry {
+		return failf(prefix + "_body_invalid")
+	}
+	for index < len(tokens) && isTreeJSONString(tokens[index]) {
+		index++
+	}
+	if index < len(tokens) && strings.HasPrefix(tokens[index], "value=") {
+		if !isTreeJSONString(strings.TrimPrefix(tokens[index], "value=")) {
+			return failf(prefix + "_body_invalid")
+		}
+		index++
+	}
+	if index < len(tokens) && strings.HasPrefix(tokens[index], "hint=") {
+		if !isTreeJSONString(strings.TrimPrefix(tokens[index], "hint=")) {
+			return failf(prefix + "_body_invalid")
+		}
+		index++
+	}
+	for index < len(tokens) && treeActionSet[tokens[index]] {
+		index++
+	}
+	lastFlag := -1
+	for index < len(tokens) {
+		name, _, found := strings.Cut(tokens[index], "=")
+		order, known := treeFullFlagOrder[name]
+		if !found || !known {
+			break
+		}
+		if order <= lastFlag {
+			return failf(prefix + "_body_invalid")
+		}
+		lastFlag = order
+		index++
+	}
+	if index < len(tokens) && strings.HasPrefix(tokens[index], "axis=") {
+		axis := strings.TrimPrefix(tokens[index], "axis=")
+		if axis != "x" && axis != "y" && axis != "both" {
+			return failf(prefix + "_body_invalid")
+		}
+		index++
+	}
+	if index < len(tokens) && strings.HasPrefix(tokens[index], "resource=") {
+		if !isTreeJSONString(strings.TrimPrefix(tokens[index], "resource=")) {
+			return failf(prefix + "_body_invalid")
+		}
+		index++
+	}
+	if index < len(tokens) && tokens[index] == "context" {
+		index++
+	}
+	if index != len(tokens) {
+		return failf(prefix + "_body_invalid")
+	}
 	return nil
+}
+
+var treeFullFlagOrder = map[string]int{
+	"enabled": 0, "focused": 1, "selected": 2, "protected": 3, "checked": 4,
+}
+
+var treeRoleSet = map[string]bool{
+	"root": true, "group": true, "text": true, "button": true,
+	"input": true, "checkbox": true, "radio": true, "switch": true,
+	"toggle": true, "scroll": true, "image": true, "view": true,
+}
+
+var treeActionSet = map[string]bool{
+	"tap": true, "long_press": true, "text": true, "swipe": true,
+}
+
+func validTreeGeometry(token string) bool {
+	if token == "-" {
+		return true
+	}
+	if len(token) < 2 || token[0] != '[' || token[len(token)-1] != ']' {
+		return false
+	}
+	parts := strings.Split(token[1:len(token)-1], ",")
+	if len(parts) != 4 {
+		return false
+	}
+	values := [4]int{}
+	for index, part := range parts {
+		value, ok := parseTreeInteger(part)
+		if !ok {
+			return false
+		}
+		values[index] = value
+	}
+	return values[2] >= values[0] && values[3] >= values[1]
+}
+
+func parseTreeInteger(value string) (int, bool) {
+	if value == "" {
+		return 0, false
+	}
+	digits := value
+	if digits[0] == '-' {
+		digits = digits[1:]
+	}
+	if digits == "" {
+		return 0, false
+	}
+	for index := 0; index < len(digits); index++ {
+		if digits[index] < '0' || digits[index] > '9' {
+			return 0, false
+		}
+	}
+	parsed, err := strconv.Atoi(value)
+	return parsed, err == nil
+}
+
+func validTreeRefListToken(token string, minimum int) bool {
+	refs, ok := parseTreeRefListToken(token)
+	return ok && len(refs) >= minimum
+}
+
+func parseTreeRefListToken(token string) ([]string, bool) {
+	if len(token) < 2 || token[0] != '[' || token[len(token)-1] != ']' {
+		return nil, false
+	}
+	refs := strings.Fields(token[1 : len(token)-1])
+	for _, ref := range refs {
+		if !isPublicRef(ref) {
+			return nil, false
+		}
+	}
+	return refs, true
+}
+
+func isPublicRef(ref string) bool {
+	if len(ref) < 2 || ref[0] != 'n' || ref[1] < '1' || ref[1] > '9' {
+		return false
+	}
+	for index := 1; index < len(ref); index++ {
+		if ref[index] < '0' || ref[index] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func isTreeJSONString(token string) bool {
+	if len(token) < 2 || token[0] != '"' || token[len(token)-1] != '"' {
+		return false
+	}
+	value, failure := decodeJSONValue(token)
+	if failure != nil {
+		return false
+	}
+	_, ok := value.(string)
+	return ok
 }
 
 // validateFullNodeFlags rejects state members whose value is the complete-node
@@ -377,31 +969,32 @@ func validateSetNodeFlags(tokens []string, prefix string) *checkError {
 func treeLineTokens(line string) ([]string, bool) {
 	var tokens []string
 	for index := 0; index < len(line); {
-		switch line[index] {
-		case ' ', '\t':
+		for index < len(line) && line[index] == ' ' {
 			index++
-			continue
-		case '"':
-			end, ok := treeJSONStringEnd(line, index)
-			if !ok {
-				return nil, false
-			}
-			tokens = append(tokens, line[index:end])
-			index = end
-		case '[':
-			end, ok := treeBracketEnd(line, index)
-			if !ok {
-				return nil, false
-			}
-			tokens = append(tokens, line[index:end])
-			index = end
-		default:
-			start := index
-			for index < len(line) && line[index] != ' ' && line[index] != '\t' {
+		}
+		if index >= len(line) {
+			break
+		}
+		start := index
+		for index < len(line) && line[index] != ' ' {
+			switch line[index] {
+			case '"':
+				end, ok := treeJSONStringEnd(line, index)
+				if !ok {
+					return nil, false
+				}
+				index = end
+			case '[':
+				end, ok := treeBracketEnd(line, index)
+				if !ok {
+					return nil, false
+				}
+				index = end
+			default:
 				index++
 			}
-			tokens = append(tokens, line[start:index])
 		}
+		tokens = append(tokens, line[start:index])
 	}
 	return tokens, true
 }

@@ -637,7 +637,7 @@ func snapImageBytes(projected *callResult, meta *imageView) ([]byte, *checkError
 func treeBlockText(projected *callResult, headerPrefix string) (string, *checkError) {
 	end := "end inspect"
 	reason := "text_inspect_block_missing"
-	if strings.HasPrefix(headerPrefix, "tree v2 ") {
+	if strings.HasPrefix(headerPrefix, "tree v3 ") {
 		end = "end tree"
 		reason = "text_tree_block_missing"
 	}

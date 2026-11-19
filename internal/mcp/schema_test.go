@@ -61,6 +61,31 @@ func TestTreeTextGuideStatesCompactGeometryPolicy(t *testing.T) {
 	}
 }
 
+func TestTreeTextGuideStatesV3RoleRecovery(t *testing.T) {
+	for _, required := range []string{
+		"tree v3 format=full",
+		"tree v3 format=delta",
+		"inspect v3 scope=",
+		"省略 `role`",
+		"隐藏几何后直接是引号标签时默认 `text`",
+		"或行尾默认 `view`",
+		"显式角色覆盖默认",
+		"`view` 必须显式写 `view`",
+		"无标签或带几何列的 `text` 必须显式写 `text`",
+		"`[n2 n3]`",
+		"`chain [n2 n3] <role> ...`",
+	} {
+		if !strings.Contains(treeTextGuide, required) {
+			t.Errorf("tree guide lacks %q", required)
+		}
+	}
+	for _, retired := range []string{"tree v2", "inspect v2"} {
+		if strings.Contains(treeTextGuide, retired) {
+			t.Errorf("tree guide retains retired version %q", retired)
+		}
+	}
+}
+
 // TestServerInstructionsCarryCrossToolRules checks the shared workflow and the
 // single complete tree legend.
 func TestServerInstructionsCarryCrossToolRules(t *testing.T) {
@@ -216,6 +241,7 @@ func TestToolDescriptionsAreCallerOriented(t *testing.T) {
 			"node 与 query 互斥",
 			"content_unavailable",
 			"inspection_too_large",
+			"inspect v3",
 		},
 		"keepalive": {
 			"1～120",

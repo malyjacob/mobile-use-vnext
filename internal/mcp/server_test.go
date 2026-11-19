@@ -768,7 +768,7 @@ func TestStartProjectionWithFullTree(t *testing.T) {
 	requireTestContains(t, text, "observation.id=O1")
 	requireTestContains(t, text, "observation.screen="+testScreenJSON)
 	requireTestContains(t, text, "observation.foreground="+testForegroundJSON)
-	requireTestContains(t, text, "\n\ntree v2 format=full id=O1 scope=reported_visible_with_context view=compact nodes=1 entries=1\n"+
+	requireTestContains(t, text, "\n\ntree v3 format=full id=O1 scope=reported_visible_with_context view=compact nodes=1 entries=1\n"+
 		"\nn1 root [0,0,1080,2400]\nend tree\n")
 	structured := testStructuredJSON(t, result)
 	requireTestContains(t, structured, fmt.Sprintf(`"operation_id":%q`, operation))
@@ -803,7 +803,7 @@ func TestObservePartialWithImage(t *testing.T) {
 	requireTestContains(t, text, "operation_id="+operation)
 	requireTestContains(t, text, "observation.status=partial")
 	requireTestContains(t, text, "observation.missing=[\"tree\"]")
-	requireTestContains(t, text, "\n\ntree v2 format=delta id=O2 base=O1 view=compact scope=reported_visible_with_context changes=0\n"+
+	requireTestContains(t, text, "\n\ntree v3 format=delta id=O2 base=O1 view=compact scope=reported_visible_with_context changes=0\n"+
 		"\nend tree\n")
 	requireTestContains(t, text, "\"media_type\":\"image/png\"")
 	requireTestContains(t, text, "\"width\":2")

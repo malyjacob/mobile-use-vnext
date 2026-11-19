@@ -576,12 +576,17 @@ func (p *probe) observeCheck(ctx context.Context, reference string) (string, boo
 			return "", false
 		}
 	}
-	p.reporter.pass("observe",
+	passFields := []string{
 		field("reference", reference), field("id", observation.ID),
 		field("status", observation.Status), field("tree_format", format),
-		"image_mime="+imageJPEG, field("image_bytes", strconv.Itoa(len(raw))),
+		"image_mime=" + imageJPEG, field("image_bytes", strconv.Itoa(len(raw))),
 		field("width", strconv.Itoa(observation.Image.Width)),
-		field("height", strconv.Itoa(observation.Image.Height)))
+		field("height", strconv.Itoa(observation.Image.Height)),
+	}
+	if p.mode() != resultModeStructured {
+		passFields = append(passFields, "tree_block=v3")
+	}
+	p.reporter.pass("observe", passFields...)
 	return observation.ID, true
 }
 
@@ -631,8 +636,11 @@ func (p *probe) snapCheck(ctx context.Context, reference string) (string, bool) 
 // checkObservationTreeBlock asserts that the readable projection carries one
 // complete observation tree block with the matching format and id.
 func checkObservationTreeBlock(projected *callResult, observation *observationView) *checkError {
+	if observation == nil {
+		return failf("text_tree_block_missing")
+	}
 	format := treeFormatOf(observation)
-	block, failure := treeBlockText(projected, "tree v2 format="+format+" id="+observation.ID)
+	block, failure := treeBlockText(projected, "tree v3 format="+format+" id="+observation.ID)
 	if failure != nil {
 		return failure
 	}
@@ -1010,6 +1018,10 @@ func (p *probe) inspectCheck(ctx context.Context, observationID string) bool {
 		return false
 	}
 	if view.Inspection == nil || view.Inspection.ObservationID != observationID {
+		if p.mode() != resultModeStructured && !hasInspectBlock(projected) {
+			p.reporter.fail("inspect", "text_inspect_block_missing")
+			return false
+		}
 		p.reporter.fail("inspect", "inspection_missing")
 		return false
 	}
@@ -1019,24 +1031,44 @@ func (p *probe) inspectCheck(ctx context.Context, observationID string) bool {
 			"structured=true")
 		return true
 	}
-	prefix := "inspect v2 scope=" + view.Inspection.Scope + " observation=" + observationID
-	block, failure := treeBlockText(projected, prefix)
-	if failure != nil {
+	if failure := checkInspectionTreeBlock(projected, view.Inspection, observationID); failure != nil {
 		p.reporter.fail("inspect", failure.reason, failure.fields...)
-		return false
-	}
-	if strings.Contains(block, " omitted ") {
-		p.reporter.fail("inspect", "inspect_block_omitted", field("scope", view.Inspection.Scope))
-		return false
-	}
-	if !strings.HasSuffix(block, "end inspect\n") {
-		p.reporter.fail("inspect", "inspect_block_unterminated", field("scope", view.Inspection.Scope))
 		return false
 	}
 	p.reporter.pass("inspect",
 		field("scope", view.Inspection.Scope), field("observation", observationID),
-		"tree_block=complete")
+		"inspect_block=complete", "tree_block=v3")
 	return true
+}
+
+func checkInspectionTreeBlock(projected *callResult, inspection *inspectionView,
+	observationID string) *checkError {
+	if inspection == nil {
+		return failf("text_inspect_block_missing")
+	}
+	prefix := "inspect v3 scope=" + inspection.Scope + " observation=" + observationID
+	block, failure := treeBlockText(projected, prefix)
+	if failure != nil {
+		return failure
+	}
+	if strings.Contains(block, " omitted ") {
+		return failf("inspect_block_omitted", field("scope", inspection.Scope))
+	}
+	if !strings.HasSuffix(block, "end inspect\n") {
+		return failf("inspect_block_unterminated", field("scope", inspection.Scope))
+	}
+	return nil
+}
+
+func hasInspectBlock(projected *callResult) bool {
+	for _, text := range projected.texts {
+		for _, line := range strings.Split(text, "\n") {
+			if strings.HasPrefix(line, "inspect v3 ") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // actCheck consumes the observed O with a key action and asserts the post

@@ -27,22 +27,29 @@ func (d toolDefinition) readOnlyHint() bool {
 const treeTextGuide = "树块：当前树由 base 指向的 full 加本次 delta 重建。同一 base 的每条 delta 单独应用到该 full。\n" +
 	"可读正文在 key=value 阶段事实之后附带一个确定性树块：" +
 	"块头后空一行进入正文。" +
-	"full 块以 `tree v2 format=full id=<O> scope=<scope> view=<compact> nodes=<n> entries=<m>` 开头，后接节点行；" +
-	"delta 块以 `tree v2 format=delta id=<O> base=<O2> view=compact scope=<scope> changes=<n>` 开头，" +
+	"full 块以 `tree v3 format=full id=<O> scope=<scope> view=<compact> nodes=<n> entries=<m>` 开头，后接节点行；" +
+	"delta 块以 `tree v3 format=delta id=<O> base=<O2> view=compact scope=<scope> changes=<n>` 开头，" +
 	"后接 `~`/`+`/`-`/`children`/`=` 变更行；两者均以 `end tree` 结尾。\n" +
-	"节点行为 `缩进 n<ref> <role> <bounds> \"label\"… value=\"…\" hint=\"…\" " +
-	"tap|long_press|text|swipe enabled=… focused=… checked=… axis=… resource=\"…\" context`；" +
+	"普通节点行为 `缩进 n<ref> [<role>] [<bounds>] \"label\"… value=\"…\" hint=\"…\" " +
+	"tap|long_press|text|swipe enabled=… focused=… selected=… protected=… checked=… axis=… resource=\"…\" context`；" +
 	"`n<ref>` 可直接用作 target.ref。" +
+	"省略 `role` 时按 ref 后首个剩余列恢复：未隐藏几何 `[l,t,r,b]` 或 `-`、`value=`、`hint=`、" +
+	"`tap`/`long_press`/`swipe`、状态、`axis=`、`resource=`、`context` 或行尾默认 `view`；" +
+	"隐藏几何后直接是引号标签时默认 `text`。仅当恢复出的角色等于原角色时才省略，其他角色始终显式；" +
+	"任何普通节点也可显式写角色，显式角色覆盖默认。" +
+	"首项为引号标签或角色词（包括输入动作 `text`）的 `view` 必须显式写 `view`；" +
+	"无标签或带几何列的 `text` 必须显式写 `text`。" +
 	"观察视图的几何列：根和有动作的节点交付已知矩形；无动作的 `text` 与匿名普通 view/group 省略矩形；" +
 	"其余展示节点与父链上最近交付的矩形四边相同、或裁剪到屏幕后小于屏幕面积 1% 时省略；" +
 	"未知几何仍写 `-`，缺失几何列表示按策略隐藏，详细补看交付原矩形；" +
-	"连续匿名单子节点写成 `chain [n2 n3] <role>`，其中每个 ref 仍是可寻址的逻辑节点。" +
+	"合法匿名默认 `view` 链在隐藏几何且其余共享字段原本无输出时写成 `[n2 n3]`；" +
+	"`group` 链和带输出字段的链仍写成 `chain [n2 n3] <role> ...`，其中每个 ref 仍是可寻址的逻辑节点。" +
 	"完整节点的状态位按已知默认省略：`enabled=true` 省略，`enabled=false`/`enabled=null` 显式；" +
 	"`focused`/`selected`/`protected`/`checked` 的已知 `false` 省略，`true` 与 `null` 显式。" +
 	"`set` 行不同：出现的状态字段一律保留显式 `false`/`true`/`null`，未出现才表示不修改。" +
 	"`nodes` 为展开后逻辑节点数，`entries` 为普通节点或 chain 定义行数。" +
 	"修改行的 `bounds=hidden` 表示按策略不交付该几何。\n" +
-	"补看块以 `inspect v2 scope=<tree|subtree|query> observation=<O> revision=<n> captured_at=<RFC3339> " +
+	"补看块以 `inspect v3 scope=<tree|subtree|query> observation=<O> revision=<n> captured_at=<RFC3339> " +
 	"tree_scope=<scope> view=detailed [root=<ref>|matches=<n> total=<n> truncated=<bool>] nodes=<n> entries=<m>` " +
 	"开头，tree/subtree 后接完整详细节点行，query 后接 `match i/N path=[…]` 与命中子树，并以 " +
 	"`end inspect` 结尾。" +
@@ -409,7 +416,7 @@ var toolCatalog = []toolDefinition{
 		name: "inspect",
 		description: "只读查看保留中的历史观察树，不采集、不续租、不确认基线、不认领 O。" +
 			"reference 必填且必须指向保留中的历史 O；node 与 query 互斥，query 按字面 Unicode 折叠子串匹配。" +
-			"返回 inspect v2 块：tree 为完整详细树，subtree 为指定 root 的子树，query 为命中节点的路径与子树。" +
+			"返回 inspect v3 块：tree 为完整详细树，subtree 为指定 root 的子树，query 为命中节点的路径与子树。" +
 			"历史树被淘汰（content_unavailable）时用 observe 取新观察；结果过大（inspection_too_large）时改用更窄的 node 或 query。",
 		schema: json.RawMessage(`{
   "type": "object",
