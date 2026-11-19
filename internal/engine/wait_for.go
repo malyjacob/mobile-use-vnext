@@ -448,10 +448,7 @@ func (e *Engine) completeWaitCapture(ctx context.Context, work *workState,
 				attempt.meta.CapturedAt = formatTime(attempt.source.CapturedAt)
 			}
 			attempt.meta.Base64 = encodeBase64(attempt.data)
-			screen := &protocol.Screen{
-				Width: session.Display.Width, Height: session.Display.Height,
-				Rotation: session.Display.Rotation,
-			}
+			screen := screenOf(session.Display)
 			publication.public = failedObservation(coreErr, attempt.meta, screen)
 			return publication, coreErr
 		}

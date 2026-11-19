@@ -149,12 +149,15 @@ func (e *Error) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 	return nil
 }
 
-// UnmarshalJSONFrom decodes the target display description.
+// UnmarshalJSONFrom decodes the target display description. display_id is
+// optional: producers before it existed omit the member, and callers must not
+// read that absence as display 0.
 func (s *Screen) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 	var wire struct {
-		Width    member[int] `json:"width"`
-		Height   member[int] `json:"height"`
-		Rotation member[int] `json:"rotation"`
+		Width     member[int] `json:"width"`
+		Height    member[int] `json:"height"`
+		Rotation  member[int] `json:"rotation"`
+		DisplayID member[int] `json:"display_id"`
 	}
 	if err := readObject(dec, "screen", &wire); err != nil {
 		return err
@@ -172,6 +175,10 @@ func (s *Screen) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 		return err
 	}
 	*s = Screen{Width: width, Height: height, Rotation: rotation}
+	if wire.DisplayID.Present {
+		id := wire.DisplayID.Value
+		s.DisplayID = &id
+	}
 	return nil
 }
 

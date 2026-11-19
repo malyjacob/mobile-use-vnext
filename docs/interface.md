@@ -185,7 +185,7 @@ HTTP 状态映射（默认由 `protocol.Status` 按 code 决定；认领前的 t
   "observation": {"status":"complete","id":"O1","origin":"P1","revision":1,
     "captured_at":"…","actionable_until":"…",
     "quality":{"state":"stable","samples":2,"stop_reason":"stable"},
-    "screen":{"width":1080,"height":2400,"rotation":0},
+    "screen":{"width":1080,"height":2400,"rotation":0,"display_id":115},
     "foreground":{"state":"present","package":"com.example.probe","task_id":12},
     "tree":{"format":"full","scope":"reported_visible_with_context","view":"compact",
       "root":{"ref":"n1","role":"root","bounds":[0,0,1080,2400]}}}
@@ -328,7 +328,7 @@ HTTP 状态映射（默认由 `protocol.Status` 按 code 决定；认领前的 t
 {"operation_id":"P2","observation":{"status":"complete","id":"O2","origin":"P1","revision":2,
  "captured_at":"…","actionable_until":"…",
  "quality":{"state":"unknown","samples":0,"stop_reason":"not_sampled"},
- "screen":{"width":1080,"height":2400,"rotation":0},
+ "screen":{"width":1080,"height":2400,"rotation":0,"display_id":115},
  "foreground":{"state":"unknown","reason":"display_section_missing"},
  "tree":{"format":"delta","base":"O1","view":"compact"}}}
 ```
@@ -381,13 +381,13 @@ HTTP 状态映射（默认由 `protocol.Status` 按 code 决定；认领前的 t
 ```json
 {"operation_id":"P2","image":{"captured_at":"2026-11-18T00:00:00Z",
  "width":540,"height":1200,"media_type":"image/jpeg","read_only":true,
- "screen":{"width":1080,"height":2400,"rotation":0},"base64":"…"}}
+ "screen":{"width":1080,"height":2400,"rotation":0,"display_id":115},"base64":"…"}}
 ```
 
 - `captured_at` 是源图读取开始的服务 UTC 时间；`width`/`height` 是输出 JPEG 的实际像素
   尺寸；`media_type` 固定 `image/jpeg`；`read_only` 固定为 `true`；
-- `screen` 是准入时会话绑定显示的几何快照（`width`/`height`/`rotation`），用来说明缩放
-  来源，旋转值是会话记录值；
+- `screen` 是准入时会话绑定显示的几何快照（`width`/`height`/`rotation`）与身份
+  （`display_id`），用来说明缩放来源与命令寻址目标，旋转值是会话记录值；
 - `base64` 是 JPEG 字节的 HTTP 载体，经同一有界解码路径进入 Go 客户端与 MCP 的
   `ImageContent`，不进入文本、结构化结果、树历史、恢复账本、日志、探针报告或发布清单；
 - 失败使用顶层 `error`；失败、重复 P 与 `status(P)` 摘要都省略 `image`。显式 `null`
@@ -876,11 +876,15 @@ raw `swipe` 仍不接受 `ref`。
 ### Screen / Foreground
 
 ```json
-"screen": {"width":1080,"height":2400,"rotation":0}
+"screen": {"width":1080,"height":2400,"rotation":0,"display_id":115}
 "foreground": {"state":"present","package":"com.example","task_id":12}
 "foreground": {"state":"unknown","reason":"display_section_missing"}
 "foreground": {"state":"none"}
 ```
+
+`screen` 的 `display_id` 是本次观察绑定的显示屏身份：虚拟屏会话为 `>0` 的会话屏，主屏会话为
+`0`。它是 `shell` 里 `input -d <display_id>` 的寻址目标，见 `POST /api/shell` 一节。该成员在
+旧服务上缺席时表示"未上报"，调用方不得把它当作 `0`（主屏）。
 
 `present` 时 `package` 可省略（未知），`task_id` 可为 `null`；`unknown` 带受控 `reason`；
 `none` 表示已确认无前台应用。
@@ -891,7 +895,7 @@ raw `swipe` 仍不接受 `ref`。
 {"status":"complete","id":"O3","origin":"P1","revision":3,"captured_at":"…",
  "actionable_until":"…",
  "quality":{"state":"unstable","samples":5,"stop_reason":"max_samples"},
- "screen":{"width":1080,"height":2400,"rotation":0},
+ "screen":{"width":1080,"height":2400,"rotation":0,"display_id":115},
  "foreground":{"state":"present","package":"com.example","task_id":12},
  "tree":{"format":"full","scope":"reported_visible_with_context","view":"compact",
    "root":{"ref":"n1","role":"root","bounds":[0,0,1080,2400]}}}
@@ -1055,7 +1059,7 @@ detailed 视图始终交付完整原矩形。
 ```json
 "image": {"captured_at":"…","width":540,"height":1200,"media_type":"image/jpeg"}
 "image": {"read_only":true,"captured_at":"…","width":540,"height":1200,
-  "media_type":"image/jpeg","screen":{"width":1080,"height":2400,"rotation":0}}
+  "media_type":"image/jpeg","screen":{"width":1080,"height":2400,"rotation":0,"display_id":115}}
 "image": {"error":{"code":"image_capture_failed","message":"未能取得本次截图"}}
 ```
 
@@ -1304,6 +1308,13 @@ task；应用在本屏前台、前台未知、前台服务或播放状态未知�
 `command` 非空、≤4096 个 Unicode 码点且不含 NUL；`root=false` 使用设备 shell 身份，
 `root=true` 明确请求 root，不自动降级/提权重试。命令在 Android shell 环境执行，不进入 chroot。
 
+受管命令**不绑定会话显示屏**。`input` 一类命令作用于默认显示（`display 0`，即手机本身），
+在虚拟屏会话里回执仍是 `outcome=executed`、`termination=exited`、`exit_code=0`，但会话屏
+不会移动。要驱动会话屏须自行带上 `-d <display_id>`，该 id 由 `observation.screen.display_id`
+（`snap` 成功时为顶层 `image.screen.display_id`）给出。带错 id 同样返回 `exit_code=0` 且没有任何
+提示，所以能否生效只能由下一次 `act` 的实时重验或一次 `observe` 回答，不能凭回执判定
+"已经滑到位"。
+
 派发前服务只置执行未知边界（命令可能已经发出，恢复与收尾按此保守处理）；当前 O 的输入授权
 与已确认基线都不改变，旧树可继续 `inspect`。受管链确认结束后不采集、不发布观察：同一个 O
 仍是 `ready`，可继续用于 `act` 或 `observe`。命令可能改变界面，屏幕是否仍与 O 一致由下一次
@@ -1409,7 +1420,7 @@ task；应用在本屏前台、前台未知、前台服务或播放状态未知�
  "observation":{"status":"complete","id":"O2","origin":"P1","revision":2,
    "captured_at":"…","actionable_until":"…",
    "quality":{"state":"stable","samples":3,"stop_reason":"stable"},
-   "screen":{"width":1080,"height":2400,"rotation":0},
+   "screen":{"width":1080,"height":2400,"rotation":0,"display_id":115},
    "tree":{"format":"full","scope":"reported_visible_with_context","view":"compact",
      "root":{"ref":"n1","role":"root","bounds":[0,0,1080,2400]}}},
  "wait":{"trigger":"query","matched":["query"],"elapsed_ms":4210}}

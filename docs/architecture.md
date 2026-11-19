@@ -664,7 +664,7 @@ P 已无法定位时，`end(P)` 返回 `409 operation_unknown`、`phase=referenc
 ### 发布
 
 `release/versions.json` 是发行号、共同契约号与 Android versionCode 的唯一来源；当前为
-`release_version=0.21.0`、`contract_version=20`、`android_version_code=23`，构建生成
+`release_version=0.22.0`、`contract_version=20`、`android_version_code=24`，构建生成
 Go/Java 常量。`scripts/build-release.ps1` 产出整组产物与 `build/release/manifest.json`
 （源码提交、Go 版本、MCP SDK/协议、各产物 SHA-256/大小、Android 包名/版本、工具目录指纹）。
 工具目录固定为 `scripts/toolcatalog` 投影的 13 个工具，指纹是该目录注册顺序、名称、描述与

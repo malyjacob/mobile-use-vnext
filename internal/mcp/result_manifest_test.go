@@ -67,7 +67,7 @@ var rmfKnownExclusions = map[string]string{
 // fieldBlock and appear in an existing fixture without review. Classification
 // still comes exclusively from resultFields; this inventory adds no codec.
 var rmfCompositeInventory = map[string]string{
-	"Screen":          "Width Height Rotation",
+	"Screen":          "Width Height Rotation DisplayID",
 	"Foreground":      "State Package TaskID HasTask Reason",
 	"ImageMeta":       "CapturedAt Width Height MediaType ReadOnly Screen Error Base64",
 	"ReadTree":        "Format Scope View Root",
@@ -865,7 +865,7 @@ func rmfResultFixtures() []rmfFixture {
 					StopReason: protocol.QualityStopStable,
 				},
 				Screen: &protocol.Screen{
-					Width: 1080, Height: 1920, Rotation: 0,
+					Width: 1080, Height: 1920, Rotation: 0, DisplayID: rmfPtr(115),
 				},
 				Foreground: &protocol.Foreground{
 					State:   "present",
@@ -884,7 +884,7 @@ func rmfResultFixtures() []rmfFixture {
 					MediaType:  "image/jpeg",
 					ReadOnly:   true,
 					Screen: &protocol.Screen{
-						Width: 1080, Height: 1920, Rotation: 0,
+						Width: 1080, Height: 1920, Rotation: 0, DisplayID: rmfPtr(115),
 					},
 					Error:  imageError,
 					Base64: "transport-only",
@@ -1280,7 +1280,7 @@ func rmfResultFixtures() []rmfFixture {
 				MediaType:  "image/jpeg",
 				ReadOnly:   true,
 				Screen: &protocol.Screen{
-					Width: 1080, Height: 2400, Rotation: 0,
+					Width: 1080, Height: 2400, Rotation: 0, DisplayID: rmfPtr(115),
 				},
 				Error: imageError,
 			},

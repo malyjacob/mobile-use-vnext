@@ -608,6 +608,9 @@ var toolCatalog = []toolDefinition{
 		name: "shell",
 		description: "在给定 O/P 原会话的 Android shell 作用域内执行一条受管命令。reference 与 command 必填。" +
 			"root=true 明确请求 root。命令不进入 chroot，可改变界面且不返回新树。" +
+			"\n受管命令不绑定会话显示屏：input 一类命令默认作用于 display 0（主屏），在虚拟屏会话里回执仍是 executed/exited、exit_code=0，但会话屏不会移动。" +
+			"要驱动会话屏须自行带 input -d <display_id>，该 id 见 observation.screen.display_id。" +
+			"带错 id 同样 exit 0 且无任何提示，唯一验证办法是 observe 对比。" +
 			"\n成功返回 shell.termination 和 exit_code，非零退出仍是完成事实；output_unavailable 只表示输出不可读。" +
 			"预期改屏时用 observe 核对。" +
 			"\n结果 uncertain 时按 recovery 查原 P。即使 status(P) 已显示 finished，命令终止未确认仍可能使普通工作返回 device_busy，同 Agent 可见 blocking_operation_id。" +

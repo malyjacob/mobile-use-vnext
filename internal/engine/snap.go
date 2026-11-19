@@ -200,9 +200,7 @@ func (e *Engine) commitSnap(work *workState, op *operationState, attempt *imageA
 		meta.CapturedAt = formatTime(attempt.source.CapturedAt)
 	}
 	meta.ReadOnly = true
-	meta.Screen = &protocol.Screen{
-		Width: work.Display.Width, Height: work.Display.Height, Rotation: work.Display.Rotation,
-	}
+	meta.Screen = screenOf(work.Display)
 	meta.Error = nil
 	meta.Base64 = base64.StdEncoding.EncodeToString(attempt.data)
 	e.finishOperationLocked(op, "", "finished", nil)

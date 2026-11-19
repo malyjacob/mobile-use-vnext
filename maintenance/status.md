@@ -1,6 +1,8 @@
 # 项目实施状态
 
-状态：2026-11-20，0.21.0（契约 20）的 MCP 树文本无损简写（`tree v3`/`inspect v3`）已实现、
+状态：2026-11-20，13 个 MCP 工具在虚拟屏模式完成一轮工具面覆盖测试，补齐 claim/handoff
+成功路径、`effect=observed`、`act` 交付 delta 与 `close`/`kill` 授权守卫的实机样本（§3）；
+0.21.0（契约 20）的 MCP 树文本无损简写（`tree v3`/`inspect v3`）已实现、
 整组部署并完成双入口独立探针与实机最小闭环；2026-11-19，契约 20 的默认观察树坐标省略已实现、
 整组部署并完成实机最小闭环；
 契约 19 的只读截图工具 snap 已实现、整组部署并完成实机最小闭环；契约 18 的 text 写入确认、
@@ -28,12 +30,13 @@
 | `act` 坐标目标的点→节点证明 | 已实现 | 已实测：正常坐标动作 8/8 成功；同包状态变化、几何变化与导航 3/3 拒绝；真实 422 歧义、无节点回退、同包浮层、WebView 未构造（[记录](verification/act-coordinate-point-proof.md)） |
 | `apps` | 已实现 | 已验证（Core 脚本） |
 | `open_app` | 已实现 | 已验证：创建/复用/未知包/end/STOP 清理 |
+| `app` 的 `claim`/`handoff`/`close`/`kill` | 已实现 | 已实测（0.21.0，virtual）：`handoff` 虚拟屏→主屏 `display_id=0`、`state_preserved=true`、`foreground_restore=confirmed`；`claim` 主屏→虚拟屏 `ownership=borrowed` 且应用内页面状态保留；`close` 默认拒绝借入窗口、显式 `allow_borrowed=true` 后 `recents_cleaned=true`；`kill` 默认拒绝播放/前台服务、显式 `allow_stop_playback=true` 后目标 PID 全终止。`kill` 后残留 2 个同包进程且结果自报 `restarted=true`，本轮只如实记录、未定性（[记录](verification/mcp-tool-surface-coverage.md) §5.2） |
 | `inspect` | 已实现 | 已验证：整树/子树/查询 |
 | `wait_for` | 已实现（契约 12，第 12 个工具） | 已实测（virtual 模式）：`query`+`stable=true` 提前命中 1651ms（`stable/3/stable`）、`absent_query` 首帧命中 469ms、纯 sleep+image 4338ms（`unknown/0/not_sampled`，图片 540×1200 complete）、等待期 `end` 撤销后约 50ms 返回 `409 control_revoked` 且无迟到 `O`；主机与手机侧探针均 `PASS`。primary 模式表征与 App STOP 按钮未执行（[记录](verification/wait-for.md)） |
 | `keepalive` | 已实现 | 已验证：续租/结束会话拒绝 |
 | `notify` | 已实现 | 已验证：保存/重复/空正文；经控制同步进入 App 消息中心、系统通知与本地已读，确认后释放服务端队列 |
 | `diagnose` | 已实现 | 已验证：无参/指定 O |
-| `shell` | 已实现 | 已验证：正常/非零/自行124/超时/输出截断/STOP/重启恢复；命令结束不发布观察、同一 O 仍可用（`shell` 后 `act` 未变屏成功、改屏 `target_changed`、过期 `observation_expired`），实机 delta 回退见[记录](verification/shell-keeps-observation.md) |
+| `shell` | 已实现 | 已验证：正常/非零/自行124/超时/输出截断/STOP/重启恢复；命令结束不发布观察、同一 O 仍可用（`shell` 后 `act` 未变屏成功、改屏 `target_changed`、过期 `observation_expired`），实机 delta 回退见[记录](verification/shell-keeps-observation.md)。受管命令不绑定会话显示屏、`input` 默认作用于 display 0，该语义与 `screen.display_id` 已写入契约与工具说明，**改动后未部署**（[记录](verification/managed-shell-display-semantics.md)） |
 | `observe`/`act` 的 `image=true` | 已实现（HTTP + MCP） | 已验证：JPEG 540×1200、MIME、无 base64、只读图分支由单元测试覆盖 |
 | `snap`（契约 19，第 13 个工具） | 已实现（HTTP + Go client + MCP + 控制 App 文案） | 已实测：`start → keepalive(1) → snap(O) → status(O/P) → observe(image=true) → end` 闭环 PASS；JPEG 540×1200 与元数据一致，原 O 保持 `ready`/`effective` 且 `expires_at` 不变，snap 不递增 revision，重复 P/`status(P)` 无图摘要；主机 stdio/http、手机 HTTP 远端与 text/structured 探针均 PASS。实机 STOP/取消精确竞态与截图进行中文案未构造（[记录](verification/snap.md)） |
 | MCP stdio / Streamable HTTP | 已实现（`cmd/device-mcp`） | 已验证：工具目录/schema、认证/Origin、图片、取消、P 恢复；P6 回归重新拉起实际适配进程。默认部署同时安装并启动手机 `device-mcp`（手机 `18882/mcp`，主机转发 `18883`），`verify-m6` 检查 `server/discover`；主机侧适配器仍可选 |
@@ -80,11 +83,12 @@
 | 通知频道关闭/权限撤销下的消息中心 | 代码路径检查；实机仅验证通知可用路径 |
 | 后观察收敛采样（`start`/`act`/`open_app`） | 已实现并由单元测试覆盖判据、预算、撤销与图片读序；实机 A/B 未执行：`target_changed` 率、按档 `samples`/`stable` 分布与 P50/P95 需真机采样后才能校准三档取值（[提案](proposals/implemented/act-post-observation-settle.md)、[记录](verification/act-post-observation-settle.md)） |
 | act 坐标目标点证明的真实歧义/无节点/同包浮层/WebView | 单元测试覆盖判据；实机未构造，原因见[记录](verification/act-coordinate-point-proof.md) §6 |
-| `act` 交付观察的 delta 分支 | `base` 规则由单元测试覆盖；实机两次场景交付均为 `full`，未取得 delta 样本 |
+| `act` 交付观察的 delta 分支 | 已验证（0.21.0，virtual）：`act`（`tap`/`text`/`long_press`/`swipe`/`key`/`scroll`）、`wait_for`、`observe(wait_ms)` 与一次 `target_changed` 拒绝的交付观察均为 `delta`，`base` 指向最近一张 `full`；取得 `~`/`+`/`-`/`children`/`=` 五类变更行，以及清空输入框后相对基准回落的 `changes=0`。强制 `full=true` 时得 `unknown/0/not_sampled`，`app` 的各 kind 交付仍为 `full`，两者作对照。0.16.0 两次场景仅得 `full` 的记录由本条取代（[记录](verification/mcp-tool-surface-coverage.md)） |
+| `screen.display_id` 与 `shell` 显示屏语义 | 已实现、已单测，未实机：契约保持 20，未构建整组产物也未部署，故线上形状与新文案未经设备验证（[记录](verification/managed-shell-display-semantics.md) §7、§8） |
 | 真实 input 回执未知的实机注入 / shell `termination=unknown` 实机样本 | 未执行：发布二进制无注入面，打断 adbd 会同时切断恢复观察；受管链在本机总能确认超时终止。两条路径均由先红复现与单元测试覆盖（[记录](verification/remove-work-ui-deadline-lockdown.md)） |
 | 实等会话累计超过一小时 | 未执行：由受控时间单测证明硬上限已删除；实机 120 分钟显式租约返回的绝对期限已超过 `started_at+1h`（[记录](verification/explicit-keepalive-duration.md)） |
 | 实机 MCP 调用带 `duration_minutes` 的 keepalive | 未单独构造：MCP 转发由单测覆盖，实机 keepalive 语义由直接 HTTP 调用验证（[记录](verification/explicit-keepalive-duration.md)） |
-| 受控 scroll/raw duration/quality/effect 的实机与跨应用证据 | 部分执行：Settings 一个应用 5 次 scroll、1 次 raw swipe 已实测；`effect=observed` 实机样本、长文/B 站/WebView/嵌套容器/overlay/STOP 时序与阈值校准未执行（[记录](verification/semantic-scroll-observation-quality.md)） |
+| 受控 scroll/raw duration/quality/effect 的实机与跨应用证据 | 部分执行：Settings 一个应用 5 次 scroll、1 次 raw swipe 已实测；0.21.0 在哔哩哔哩与网易云再取得 2 次实机 `effect=observed`（`amount=page` 与 `amount=half` 各一次），并覆盖 B 站推荐流与嵌套容器内层；同轮外层 scroll 容器以 `unsupported_node_action`（中心线轨迹不可证）、坐标容器以 `ambiguous_point` 拒绝，raw swipe 另得 2 次（列表翻页 400ms、横向切歌 200ms）。长文/WebView/overlay/STOP 时序与阈值校准仍未执行（[记录](verification/semantic-scroll-observation-quality.md)、[0.21.0 覆盖记录](verification/mcp-tool-surface-coverage.md)） |
 | 契约 11 公共树表示的整组发布与实机验收 | 已执行（部分）：0.11.0 整组构建/清单/部署与两个 MCP 入口三模式探针、契约 10 拒绝、最小 STOP、full/delta/inspect 最小闭环均已实测；`verify-m6` 由用户排除，`act` 重验失败交付的实机样本未构造（[记录](verification/compact-node-tree-presentation.md)） |
 | 真实 Capture 的新旧公共表示对比与运行成本 | 未执行：用户明确排除；原始采集与树不入库，合成高冗余 fixture 只证明 ≥25% 缩减，真实压缩比、token、耗时与进程峰值未测（[记录](verification/compact-node-tree-presentation.md)） |
 | 联动栏容器伸缩下的实机 `observed` | 未取得：X 首页复现 `2242↔2400` 容器伸缩，但其虚拟化列表让匹配集为空（`insufficient_anchors`/`container_changed`）；Settings 有 `observed` 但没有容器伸缩（[记录](verification/scroll-safe-trajectory-and-viewport-effect.md) §6.4、§7） |
@@ -97,7 +101,8 @@
 | 观察连续性 D05/D06 | D05 最新 1 pass/1 fail，旧报告保留 3 fail；STOP 注入与真实外部 MCP 宿主刷新未独立确认 |
 | 0.16.0 慢 hierarchy wait / STOP、end 迟到 O | 未执行：当前设备没有可控慢 dump 环境；终帧复用、提交门禁与撤销由 engine 测试覆盖（[记录](verification/agent-output-and-wait-acquisition.md) §8.5） |
 | 0.16.0 真实宿主/模型 #20 与 Instructions 轨迹 | 未执行：没有同宿主/模型/上下文保留策略材料；#20 继续保留 `12/70/180s`，不冒充模型行为结论（[记录](verification/agent-output-and-wait-acquisition.md) §8.5、[第二份记录](verification/agent-reference-and-action-contract.md) §8.4） |
-| 0.16.0 实机 STOP/ENTER 回执注入、claim/handoff 成功路径 | 未执行：部署无故障注入面，claim 因受控主屏任务不存在 SKIP；由合成测试覆盖，不冒充实机结论（[记录](verification/agent-reference-and-action-contract.md) §8.4） |
+| 0.16.0 实机 STOP/ENTER 回执注入 | 未执行：部署无故障注入面；由合成测试覆盖，不冒充实机结论（[记录](verification/agent-reference-and-action-contract.md) §8.4） |
+| 0.16.0 claim/handoff 成功路径 | 已验证（0.21.0，virtual）：虚拟屏↔主屏往返一次，`handoff` 得 `source_display_id=113`→`display_id=0`、`state_preserved=true`、`foreground_restore=confirmed`；`claim` 回虚拟屏得 `ownership=borrowed`、`state_preserved=true`，应用内搜索结果页状态保留。0.16.0 因受控主屏任务不存在而 SKIP 的记录由本条取代（[记录](verification/mcp-tool-surface-coverage.md)） |
 
 ## 4. 证据入口
 
@@ -121,6 +126,8 @@
 - [观察连续性、结构差分与动作重验的实现、发布、实机与归档记录](verification/observation-continuity-and-revalidation.md)
 - [S6 统一基准记录（B01–B06）](verification/observation-continuity-benchmarks.md)
 - [text 写入确认、错误详情与恢复的实现、发布与实机验证](verification/text-write-verification-and-recovery.md)
+- [MCP 工具面虚拟屏覆盖测试（0.21.0）](verification/mcp-tool-surface-coverage.md)
+- [受管 shell 的显示屏语义与 `screen.display_id`](verification/managed-shell-display-semantics.md)
 - [工程决策](decisions.md)
 - [工程流程](process.md)
 

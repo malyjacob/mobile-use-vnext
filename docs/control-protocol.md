@@ -24,7 +24,7 @@
 {
   "contract_version": "20",
   "app_instance_id": "0b0b8c0e-...",
-  "app_version": "0.21.0",
+  "app_version": "0.22.0",
   "selected_mode": "virtual",
   "mode_generation": "8f0b2e2e-...",
   "mode_ready": true,

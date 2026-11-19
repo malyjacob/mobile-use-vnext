@@ -162,10 +162,7 @@ func (e *Engine) captureAndPublish(ctx context.Context, work *workState, session
 				attempt.meta.CapturedAt = formatTime(attempt.source.CapturedAt)
 			}
 			attempt.meta.Base64 = base64.StdEncoding.EncodeToString(attempt.data)
-			screen := &protocol.Screen{
-				Width: session.Display.Width, Height: session.Display.Height,
-				Rotation: session.Display.Rotation,
-			}
+			screen := screenOf(session.Display)
 			return failedObservation(coreErr, attempt.meta, screen), nil, coreErr
 		}
 		if !wantImage {
@@ -690,6 +687,17 @@ func failedObservation(coreErr *protocol.APIError, image *protocol.ImageMeta,
 	return observation
 }
 
+// screenOf projects a device display onto the public screen description. The
+// display identity travels with the geometry so a caller can address the same
+// display from a managed shell without a second app lookup.
+func screenOf(display device.Display) *protocol.Screen {
+	id := display.ID
+	return &protocol.Screen{
+		Width: display.Width, Height: display.Height,
+		Rotation: display.Rotation, DisplayID: &id,
+	}
+}
+
 // observationPublicLocked is the single committed observation projection. The
 // status, the optional image and the settle quality are decided by the
 // acquisition; everything else keeps its fixed public meaning.
@@ -699,9 +707,7 @@ func (e *Engine) observationPublicLocked(obs *observationState, status string, f
 		Status: status, ID: obs.ID, Origin: obs.Origin, Revision: obs.Revision,
 		CapturedAt: formatTime(obs.CapturedAt), ActionableUntil: formatTime(obs.ActionableUntil),
 		Quality: quality,
-		Screen: &protocol.Screen{
-			Width: obs.Screen.Width, Height: obs.Screen.Height, Rotation: obs.Screen.Rotation,
-		},
+		Screen:  screenOf(obs.Screen),
 	}
 	foreground := &protocol.Foreground{State: obs.Foreground.State}
 	switch obs.Foreground.State {

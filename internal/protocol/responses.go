@@ -6,11 +6,17 @@ import (
 	"fmt"
 )
 
-// Screen is the target display size and Android rotation.
+// Screen is the target display identity, size and Android rotation.
+//
+// DisplayID is omitted only by producers that predate the member; the service
+// always sets it. Callers must treat a nil DisplayID as "not reported" rather
+// than as display 0, because 0 is the real primary display and addressing it
+// from a managed shell would drive the phone itself.
 type Screen struct {
-	Width    int `json:"width"`
-	Height   int `json:"height"`
-	Rotation int `json:"rotation"`
+	Width     int  `json:"width"`
+	Height    int  `json:"height"`
+	Rotation  int  `json:"rotation"`
+	DisplayID *int `json:"display_id,omitempty"`
 }
 
 // Foreground is the observed foreground record for the target display.
