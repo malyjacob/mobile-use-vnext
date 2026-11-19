@@ -1,14 +1,15 @@
 # 提案：省略默认观察树中多余的节点坐标
 
-状态：提案，未实现。
+状态：已实现（实现提交 `68384230cbb31abf226fdeb1398860d38937233c`，2026-11-19）。
+实现与验证记录：[compact-observation-bounds.md](../../verification/compact-observation-bounds.md)。
 基线提交：`697fea951153b59a2f48437d7a06951e39eb419c`（分支 `master`，2026-11-19）。
 适用范围：所有发布观察树的路径，共用 HTTP 和 MCP 的 `compact` 表示。发布包含手机整组部署和 Windows 主机工具替换。
 影响范围：`internal/observation`、`internal/mcp`、`release/versions.json` 及生成件，相关测试、README、正式文档和验证记录。
 契约（`/api/*` 字段与 `contract_version`）：改变默认观察交付已知 `bounds` 的判据。沿用现有字段和编码，采用发行 `0.20.0`、共同契约 `20`、Android 版本码 `22`。
 
 函数、行号、常量与默认值均以该基线为准。代码前进后，实施前重新核对
-[阅读投影](../../internal/observation/read.go)、[观察发布](../../internal/engine/capture.go)、
-[差分编解码](../../internal/observation/read_diff.go)、[版本源](../../release/versions.json)和[发布规范](../../docs/release.md)。
+[阅读投影](../../../internal/observation/read.go)、[观察发布](../../../internal/engine/capture.go)、
+[差分编解码](../../../internal/observation/read_diff.go)、[版本源](../../../release/versions.json)和[发布规范](../../../docs/release.md)。
 
 ## 0. 摘要
 
@@ -28,10 +29,10 @@
 
 | 现行行为 | 基线位置 |
 | --- | --- |
-| 内部树使用屏幕内的矩形。合成根给出目标屏幕的矩形 | [build.go:459](../../internal/observation/build.go#L459)、[build.go:491](../../internal/observation/build.go#L491) |
-| 默认投影当前只隐藏匿名普通节点的已知坐标。折链另有同角色、规格一致与编码收益规则 | [read.go:17](../../internal/observation/read.go#L17)、[read.go:97](../../internal/observation/read.go#L97)、[read.go:163](../../internal/observation/read.go#L163)、[read.go:210](../../internal/observation/read.go#L210) |
-| 两个隐藏坐标相等。差分要能还原逻辑树及其规范编码，且发布时严格小于整树的 70% | [read_tree.go:51](../../internal/protocol/read_tree.go#L51)、[read_diff.go:33](../../internal/observation/read_diff.go#L33)、[capture.go:270](../../internal/engine/capture.go#L270) |
-| 按点执行从完整观察树找目标。详细补看从历史完整树取内容 | [point.go:97](../../internal/engine/point.go#L97)、[inspect.go:43](../../internal/engine/inspect.go#L43)、[inspect.go:127](../../internal/engine/inspect.go#L127) |
+| 内部树使用屏幕内的矩形。合成根给出目标屏幕的矩形 | [build.go:459](../../../internal/observation/build.go#L459)、[build.go:491](../../../internal/observation/build.go#L491) |
+| 默认投影当前只隐藏匿名普通节点的已知坐标。折链另有同角色、规格一致与编码收益规则 | [read.go:17](../../../internal/observation/read.go#L17)、[read.go:97](../../../internal/observation/read.go#L97)、[read.go:163](../../../internal/observation/read.go#L163)、[read.go:210](../../../internal/observation/read.go#L210) |
+| 两个隐藏坐标相等。差分要能还原逻辑树及其规范编码，且发布时严格小于整树的 70% | [read_tree.go:51](../../../internal/protocol/read_tree.go#L51)、[read_diff.go:33](../../../internal/observation/read_diff.go#L33)、[capture.go:270](../../../internal/engine/capture.go#L270) |
+| 按点执行从完整观察树找目标。详细补看从历史完整树取内容 | [point.go:97](../../../internal/engine/point.go#L97)、[inspect.go:43](../../../internal/engine/inspect.go#L43)、[inspect.go:127](../../../internal/engine/inspect.go#L127) |
 
 把 §4 的规则离线应用到用户给出的三个当前版单帧。计量区间是 MCP 的 `tree v2` 文本块，含头尾，不含结果头、图片或外层传输。
 
@@ -70,7 +71,7 @@
 
 对组成内部公开树的候选节点，按以下顺序决定 `compact` 坐标。`detailed` 使用完整节点的坐标，未知保持未知。
 
-1. 源矩形缺失时保留未知。根节点和 `actions` 非空的节点保留已知坐标。按钮、输入框和滚动容器由源能力获得动作。角色名本身不构成额外保护，例如只报告可勾选而没有动作的节点继续按后续规则判断。参见 [build.go:341](../../internal/observation/build.go#L341) 和 [build.go:472](../../internal/observation/build.go#L472)。
+1. 源矩形缺失时保留未知。根节点和 `actions` 非空的节点保留已知坐标。按钮、输入框和滚动容器由源能力获得动作。角色名本身不构成额外保护，例如只报告可勾选而没有动作的节点继续按后续规则判断。参见 [build.go:341](../../../internal/observation/build.go#L341) 和 [build.go:472](../../../internal/observation/build.go#L472)。
 2. 现有 `AnonymousPlain` 节点沿用已知坐标省略规则，面积达到 1% 也省略。无动作的 `text` 同样省坐标。
 3. 对剩余展示节点，取父链上最近一个实际交付了矩形的节点。经过坐标隐藏或未知的层级，继续向上找。四个边都相同则省略当前节点的矩形。可见矩形不同，即使重叠很多，也进入下一条。
 4. 以合成根的矩形面积为分母，用完整树中已裁剪到目标屏幕的节点矩形计算面积。低于 1% 则省略，恰好 1% 或更大则交付。使用整数计算并防溢出。屏幕面积无法可靠计算时跳过此项，保留经过前面规则后仍可交付的坐标。
@@ -98,11 +99,11 @@
 
 | 文件 | 改动 |
 | --- | --- |
-| [internal/observation/read.go](../../internal/observation/read.go) | 让默认投影可读取目标屏幕面积并携带最近已交付矩形。复用现有 Bounds 三态、节点复制和折链 |
-| [internal/observation/read_test.go](../../internal/observation/read_test.go)、[internal/engine/tree_budget_test.go](../../internal/engine/tree_budget_test.go) | 覆盖新判据、差分重放和公共预算。原未知状态用例保留未知布尔与折链断言，坐标断言按新规则核对 |
-| [internal/mcp/schema.go](../../internal/mcp/schema.go)、[internal/mcp/schema_test.go](../../internal/mcp/schema_test.go)、[internal/mcp/tree_text_test.go](../../internal/mcp/tree_text_test.go) | 更新全局树说明与回归，在已有节点行和 set 语法上检查新省略规则 |
-| [release/versions.json](../../release/versions.json) 及生成件 | 按 §9.1 冻结四项版本字段，运行现有 [generate-version.ps1](../../scripts/generate-version.ps1)，提交 `internal/protocol/version_generated.go`、`GeneratedVersion.java`、`strings_version.xml` 和 `AndroidManifest.xml` 的生成结果 |
-| [README](../../README.md) 和 [正式文档](../../docs/) | 说明默认坐标交付、详细补看、共用契约号与发布版本 |
+| [internal/observation/read.go](../../../internal/observation/read.go) | 让默认投影可读取目标屏幕面积并携带最近已交付矩形。复用现有 Bounds 三态、节点复制和折链 |
+| [internal/observation/read_test.go](../../../internal/observation/read_test.go)、[internal/engine/tree_budget_test.go](../../../internal/engine/tree_budget_test.go) | 覆盖新判据、差分重放和公共预算。原未知状态用例保留未知布尔与折链断言，坐标断言按新规则核对 |
+| [internal/mcp/schema.go](../../../internal/mcp/schema.go)、[internal/mcp/schema_test.go](../../../internal/mcp/schema_test.go)、[internal/mcp/tree_text_test.go](../../../internal/mcp/tree_text_test.go) | 更新全局树说明与回归，在已有节点行和 set 语法上检查新省略规则 |
+| [release/versions.json](../../../release/versions.json) 及生成件 | 按 §9.1 冻结四项版本字段，运行现有 [generate-version.ps1](../../../scripts/generate-version.ps1)，提交 `internal/protocol/version_generated.go`、`GeneratedVersion.java`、`strings_version.xml` 和 `AndroidManifest.xml` 的生成结果 |
+| [README](../../../README.md) 和 [正式文档](../../../docs/) | 说明默认坐标交付、详细补看、共用契约号与发布版本 |
 
 ### 6.2 配置与取值
 
@@ -123,9 +124,9 @@
 
 ### 6.5 契约与文档影响
 
-默认输出规则变化按 [发布规范](../../docs/release.md#2-单一版本源)提升共同契约号。节点和差分字段、工具目录及树文本语法沿用现有形状。更新
-[接口](../../docs/interface.md)、[MCP](../../docs/mcp.md)、[架构](../../docs/architecture.md)及含版本号的 README、运行手册、发布、控制协议、手机操作说明等。通过源码搜索核对全部受影响的正式文档。
-全局说明从 `treeTextGuide` 发布。[目录指纹](../../internal/mcp/catalog.go#L54)只计算工具数、名称、说明和入参 schema，构建时仍以实际清单核验。
+默认输出规则变化按 [发布规范](../../../docs/release.md#2-单一版本源)提升共同契约号。节点和差分字段、工具目录及树文本语法沿用现有形状。更新
+[接口](../../../docs/interface.md)、[MCP](../../../docs/mcp.md)、[架构](../../../docs/architecture.md)及含版本号的 README、运行手册、发布、控制协议、手机操作说明等。通过源码搜索核对全部受影响的正式文档。
+全局说明从 `treeTextGuide` 发布。[目录指纹](../../../internal/mcp/catalog.go#L54)只计算工具数、名称、说明和入参 schema，构建时仍以实际清单核验。
 实现提交前，正式文档另做一次独立只读审计，修订及复检完成后在提交信息注明结论。
 
 ## 7. 预期效果与能力边界
@@ -218,25 +219,38 @@
    手机和主机清单应对应同一构建提交、共同契约、发行号及工具目录。主机脚本按文件替换
    `build/device-mcp.exe` 与 `build/mcp-probe.exe`，核对实际采用的镜像路径和两份哈希。
    只停本次维护的独立进程。依赖 Agent 及其托管进程由用户负责。若旧进程仍在执行旧映像，照实记录脚本保留旧映像的情况。用新路径启动独立探针证明新二进制可用。
-4. 进入手机部署窗口，沿用既有设备、配对、回环端口和 Origin 配置。按发布手册暂停新工作，使用旧服务结束活动会话或 STOP，等待至多 5 秒逻辑交接。随后用 `./scripts/deploy.ps1 -SkipBuild` 默认安装并启动手机 MCP，按现有部署配置传入必要参数。脚本复验清单、覆盖安装 App、保留私有数据、验证部署文件。按 §8 分别验证手机入口、主机新产物和当前恢复与收尾。失败时沿用 [发布回退边界](../../docs/release.md#5-失败与回退)。
-5. 同一构建提交上完成清单复验后归档。按模板在归档头写实际实现 hash，移动提案、重写并核对相对链接，补 §11 的落点与偏差理由。提交验证记录，有实测或未验证状态变化时一并更新 [maintenance/status.md](../status.md)，没有变化则在记录中说明。获取远端状态，按 §9.1 核对实际待推提交和目标，快进推送并确认远端包含实现及归档提交。提交用 `Refs #24` 关联，关单在下步执行。
+4. 进入手机部署窗口，沿用既有设备、配对、回环端口和 Origin 配置。按发布手册暂停新工作，使用旧服务结束活动会话或 STOP，等待至多 5 秒逻辑交接。随后用 `./scripts/deploy.ps1 -SkipBuild` 默认安装并启动手机 MCP，按现有部署配置传入必要参数。脚本复验清单、覆盖安装 App、保留私有数据、验证部署文件。按 §8 分别验证手机入口、主机新产物和当前恢复与收尾。失败时沿用 [发布回退边界](../../../docs/release.md#5-失败与回退)。
+5. 同一构建提交上完成清单复验后归档。按模板在归档头写实际实现 hash，移动提案、重写并核对相对链接，补 §11 的落点与偏差理由。提交验证记录，有实测或未验证状态变化时一并更新 [maintenance/status.md](../../status.md)，没有变化则在记录中说明。获取远端状态，按 §9.1 核对实际待推提交和目标，快进推送并确认远端包含实现及归档提交。提交用 `Refs #24` 关联，关单在下步执行。
 6. 在 GitHub #24 发布结果，包含远端提交链接、实际版本、验证摘要和发布边界。读回确认回复可见，再用 `completed` 关闭并读回核对。关闭的前提是要求的发布与验证已通过，且源码和记录已推到远端。
 
-## 11. 实现结果（归档时补写）
+## 11. 实现结果
 
-实现提交：`<归档时填写>`。实现与验证记录：归档时建立到 `../../verification/compact-observation-bounds.md` 的相对链接。
+实现提交：`68384230cbb31abf226fdeb1398860d38937233c`（2026-11-19）。
+实现与验证记录：[compact-observation-bounds.md](../../verification/compact-observation-bounds.md)。
 
 ### 11.1 已落地
 
 | 提案条目 | 落点 |
 | --- | --- |
-| 归档时填 | 归档时填 |
+| 默认投影读取目标屏幕面积并携带最近已交付矩形 | `internal/observation/read.go` `ProjectCompactTree`/`newCompactProjection`/`projectCompactNode`/`deliveredRect`/`compactRect` |
+| 动作位置优先、匿名与文字省略、重复与 1% 面积判据 | `internal/observation/read.go` `compactHidesBounds`/`belowPercent`/`boundsArea` |
+| 详细投影、三态与差分编码保持 | `internal/observation/read.go` `projectDetailedNode`；`internal/observation/read_diff.go` 未改语义 |
+| 新判据、面积边界、重复、三态差分、折链与预算回归 | `internal/observation/read_bounds_test.go`、`internal/observation/read_test.go`、`internal/engine/observation_continuity_integration_test.go` |
+| 全局树说明与 MCP 文本回归 | `internal/mcp/schema.go` `treeTextGuide`、`internal/mcp/schema_test.go`、`internal/mcp/tree_text_test.go` |
+| 版本源 `0.20.0`/契约 `20`/Android `22` 及生成件 | `release/versions.json`、`internal/protocol/version_generated.go`、`GeneratedVersion.java`、`strings_version.xml`、`AndroidManifest.xml` |
+| 正式文档同步 | `README.md`、`docs/interface.md`、`docs/mcp.md`、`docs/architecture.md`、`docs/client.md`、`docs/control-protocol.md`、`docs/phone-operations.md`、`docs/release.md`、`docs/runbook.md`、`docs/integration.md` |
+| 整组发布、手机部署、主机 exe 替换与两条独立探针 | 构建/清单与实机结果见验证记录 §4–§6 |
 
 ### 11.2 与提案不同或未执行
 
 | 项 | 结论与理由 |
 | --- | --- |
-| 归档时填 | 归档时填 |
+| 三份附件逐节点回放 | 未执行：附件原始树不在本工作区或本次可访问的私有材料中，无法复算 `37 / 34 / 44` 与 `4,229 / 7,213 / 6,951 B`；判据由合成测试与实机受控页覆盖。 |
+| 85% 差分门槛对照 | 未执行：未取得含确认基线的同段连续滚动帧；按已定结论保留 70%，未把 85% 写成实测结论。 |
+| I02 固定基线差分链夹具 | 实现偏离（仅测试）：compact full 缩短后原夹具差分越过 70% 而转 full；新增 8 个稳定文字叶并调整可选叶挂点以保持 raw preorder 单调，不放宽 70% 判据。 |
+| 手机部署 Origin 参数 | 实现记录：首次 `-SkipBuild` 部署未传既有 `-McpAllowedOrigins`，手机 HTTP 探针 `origin_allowed` 为 403；带 `http://127.0.0.1:3000` 重新部署后 PASS，未改代码。 |
+| 依赖适配器的 Agent 重连 | 未执行（责任边界）：用户自行重启宿主并刷新工具；本次未停止或重启依赖方宿主。 |
+| 实机大树/真实应用与会话中 STOP 样本 | 未执行：本次按提案 §8.2 完成受控测试页最小闭环，未扩展无关设备或应用矩阵。 |
 
 ## 附：本提案不改变的事项
 
