@@ -1,6 +1,8 @@
 # 项目实施状态
 
-状态：2026-11-20，13 个 MCP 工具在虚拟屏模式完成一轮工具面覆盖测试，补齐 claim/handoff
+状态：2026-11-20，0.22.0（契约 20）把会话显示屏身份加入 `observation.screen.display_id`，
+并把受管 shell 的显示屏语义写入契约与工具说明，整组部署后在虚拟屏会话实测（issue #11）；
+13 个 MCP 工具在虚拟屏模式完成一轮工具面覆盖测试，补齐 claim/handoff
 成功路径、`effect=observed`、`act` 交付 delta 与 `close`/`kill` 授权守卫的实机样本（§3）；
 0.21.0（契约 20）的 MCP 树文本无损简写（`tree v3`/`inspect v3`）已实现、
 整组部署并完成双入口独立探针与实机最小闭环；2026-11-19，契约 20 的默认观察树坐标省略已实现、
@@ -36,7 +38,7 @@
 | `keepalive` | 已实现 | 已验证：续租/结束会话拒绝 |
 | `notify` | 已实现 | 已验证：保存/重复/空正文；经控制同步进入 App 消息中心、系统通知与本地已读，确认后释放服务端队列 |
 | `diagnose` | 已实现 | 已验证：无参/指定 O |
-| `shell` | 已实现 | 已验证：正常/非零/自行124/超时/输出截断/STOP/重启恢复；命令结束不发布观察、同一 O 仍可用（`shell` 后 `act` 未变屏成功、改屏 `target_changed`、过期 `observation_expired`），实机 delta 回退见[记录](verification/shell-keeps-observation.md)。受管命令不绑定会话显示屏、`input` 默认作用于 display 0，该语义与 `screen.display_id` 已写入契约与工具说明，**改动后未部署**（[记录](verification/managed-shell-display-semantics.md)） |
+| `shell` | 已实现 | 已验证：正常/非零/自行124/超时/输出截断/STOP/重启恢复；命令结束不发布观察、同一 O 仍可用（`shell` 后 `act` 未变屏成功、改屏 `target_changed`、过期 `observation_expired`），实机 delta 回退见[记录](verification/shell-keeps-observation.md)。受管命令不绑定会话显示屏、`input` 默认作用于 display 0，该语义与 `screen.display_id` 已写入契约与工具说明，并在 0.22.0 上整组部署验证（[记录](verification/managed-shell-display-semantics.md)） |
 | `observe`/`act` 的 `image=true` | 已实现（HTTP + MCP） | 已验证：JPEG 540×1200、MIME、无 base64、只读图分支由单元测试覆盖 |
 | `snap`（契约 19，第 13 个工具） | 已实现（HTTP + Go client + MCP + 控制 App 文案） | 已实测：`start → keepalive(1) → snap(O) → status(O/P) → observe(image=true) → end` 闭环 PASS；JPEG 540×1200 与元数据一致，原 O 保持 `ready`/`effective` 且 `expires_at` 不变，snap 不递增 revision，重复 P/`status(P)` 无图摘要；主机 stdio/http、手机 HTTP 远端与 text/structured 探针均 PASS。实机 STOP/取消精确竞态与截图进行中文案未构造（[记录](verification/snap.md)） |
 | MCP stdio / Streamable HTTP | 已实现（`cmd/device-mcp`） | 已验证：工具目录/schema、认证/Origin、图片、取消、P 恢复；P6 回归重新拉起实际适配进程。默认部署同时安装并启动手机 `device-mcp`（手机 `18882/mcp`，主机转发 `18883`），`verify-m6` 检查 `server/discover`；主机侧适配器仍可选 |
@@ -84,7 +86,7 @@
 | 后观察收敛采样（`start`/`act`/`open_app`） | 已实现并由单元测试覆盖判据、预算、撤销与图片读序；实机 A/B 未执行：`target_changed` 率、按档 `samples`/`stable` 分布与 P50/P95 需真机采样后才能校准三档取值（[提案](proposals/implemented/act-post-observation-settle.md)、[记录](verification/act-post-observation-settle.md)） |
 | act 坐标目标点证明的真实歧义/无节点/同包浮层/WebView | 单元测试覆盖判据；实机未构造，原因见[记录](verification/act-coordinate-point-proof.md) §6 |
 | `act` 交付观察的 delta 分支 | 已验证（0.21.0，virtual）：`act`（`tap`/`text`/`long_press`/`swipe`/`key`/`scroll`）、`wait_for`、`observe(wait_ms)` 与一次 `target_changed` 拒绝的交付观察均为 `delta`，`base` 指向最近一张 `full`；取得 `~`/`+`/`-`/`children`/`=` 五类变更行，以及清空输入框后相对基准回落的 `changes=0`。强制 `full=true` 时得 `unknown/0/not_sampled`，`app` 的各 kind 交付仍为 `full`，两者作对照。0.16.0 两次场景仅得 `full` 的记录由本条取代（[记录](verification/mcp-tool-surface-coverage.md)） |
-| `screen.display_id` 与 `shell` 显示屏语义 | 已实现、已单测，未实机：契约保持 20，未构建整组产物也未部署，故线上形状与新文案未经设备验证（[记录](verification/managed-shell-display-semantics.md) §7、§8） |
+| `screen.display_id` 与 `shell` 显示屏语义 | 已实机：0.22.0/契约 20/versionCode 24 整组构建、清单核验、覆盖部署；`observation.screen`、`app.display_id`、`image.screen` 三处 `display_id` 一致（实测 119），不带 `-d` 的 shell 滑动仍静默无效、带 `-d` 生效；主机 stdio 与手机 HTTP 探针均 PASS。主屏 `display_id=0` 样本与 `-d` 的其它子命令未取证（[记录](verification/managed-shell-display-semantics.md) §7、§8） |
 | 真实 input 回执未知的实机注入 / shell `termination=unknown` 实机样本 | 未执行：发布二进制无注入面，打断 adbd 会同时切断恢复观察；受管链在本机总能确认超时终止。两条路径均由先红复现与单元测试覆盖（[记录](verification/remove-work-ui-deadline-lockdown.md)） |
 | 实等会话累计超过一小时 | 未执行：由受控时间单测证明硬上限已删除；实机 120 分钟显式租约返回的绝对期限已超过 `started_at+1h`（[记录](verification/explicit-keepalive-duration.md)） |
 | 实机 MCP 调用带 `duration_minutes` 的 keepalive | 未单独构造：MCP 转发由单测覆盖，实机 keepalive 语义由直接 HTTP 调用验证（[记录](verification/explicit-keepalive-duration.md)） |

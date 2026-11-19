@@ -97,9 +97,11 @@ input -d 999 text "x"                     →  exit 0，无任何输出与报错
   路径只取宽/高/旋转用于图片编码，不需要显示身份，未改动。
 - **issue 未覆盖的边界**已补测（§3.1）。
 
-## 7. 已实现 / 已单测 / 未实机
+## 7. 已实现 / 已单测 / 已发布 / 已实机
 
-**已实现**：§5 全部改动。
+**已实现**：§5 全部改动，实现提交 `c7c15e8100b4d6987d8f719696c0a21e5730eb26`
+（文档审计 CLEAN 后提交；审计首轮报 2 项阻塞——`docs/mcp.md` 过期指纹、shell 段
+"唯一验证办法"与 `docs/interface.md:48` 冲突——已按最小修正改毕并复检）。
 
 **已单测**（`GOEXPERIMENT=jsonv2`，`go build ./...` 退出 0）：
 
@@ -122,16 +124,53 @@ input -d 999 text "x"                     →  exit 0，无任何输出与报错
 发现面预算仍充足：`instructions=6308`、`tools_list=20672`、`total=26980`，基线 `36250`
 （`TestDiscoveryByteBudget` PASS）。改动使描述增加 384 字节。
 
-**未实机**：`screen.display_id` 的线上形状、以及 `shell` 工具说明的新文案，都**没有在设备上
-验证过**——本轮未构建整组、未部署。§3 的实机数据只证明"缺陷复现成立"，不能当作"新行为可用"。
+**已发布**：`0.22.0` / 契约 `20`（不变）/ Android `versionCode 24`，源码提交
+`c7c15e8`、`source_dirty=false`。
+
+| 门禁 | 结果 |
+| --- | --- |
+| `scripts/build-release.ps1` | 六制品齐全，`release=0.22.0 contract=20 android=24` |
+| `scripts/verify-manifest.ps1` | `PASS … artifacts=6 tool_catalog=13/bf9aecee… source_commit=c7c15e8… head=c7c15e8…` |
+| `scripts/deploy.ps1 -SkipBuild -McpAllowedOrigins http://127.0.0.1:3000` | `version match`/`App pairing`/`recovery barrier`/`STOP availability` 全 PASS；App 覆盖安装为 `versionName=0.22.0 versionCode=24`，私有数据保留 |
+| 手机侧制品 | `device-service db601ccb…`、`device-mcp 08faec74…`，以及 `u2.jar`/`applist.dex`/`service.sh`/`config.json`/`mcp-config.json` 全部 `match` |
+| `scripts/build-host-tools.ps1` 与 `-VerifyOnly` | `PASS … artifacts=2`；`device-mcp.exe 8babe20e…`、`mcp-probe.exe 42b0b9fe…` |
+
+首次部署漏传 `-McpAllowedOrigins`，手机 HTTP 探针在 `origin_allowed` 上返回 403；带上
+`http://127.0.0.1:3000` 重新部署后通过。这是部署参数问题，不是制品问题。
+
+**已实机**（0.22.0，`session.mode=virtual`；直接读服务 HTTP 的原始 JSON，绕开局中适配器的
+重序列化）：
+
+| 检查 | 实际结果 |
+| --- | --- |
+| `start` 的 `observation.screen` | `{"width":1080,"height":2400,"rotation":0,"display_id":119}` |
+| `app {kind:"open"}` 回执 `display_id` | `119`，与观察中的 `screen.display_id` 一致 |
+| `shell {command:"input swipe 540 1800 540 600 300"}` | `executed`/`exited`/`exit_code=0`；随后的 `observe(full=true)` 与前一帧**逐字节相同**（树 5104 字节） |
+| `shell {command:"input -d 119 swipe 540 1800 540 600 300"}` | 同一回执；随后的 `observe(full=true)` 与前一帧**不同** |
+| `snap` 的顶层 `image.screen` | `{"width":1080,"height":2400,"rotation":0,"display_id":119}` |
+
+即 §3 的静默失败在 0.22.0 上仍如实在存（未改 shell 执行语义），而调用方现在能直接读到寻址
+所需的显示身份，`observation.screen`、`app.display_id`、`image.screen` 三处取值一致。
+
+独立探针（新产物）：
+
+| 通道 | 结果 |
+| --- | --- |
+| 主机 `stdio`（`build/device-mcp.exe`） | `RESULT PASS`：`instructions 6308/6308 source_match=true`、`tools 13`、`catalog description=identical schema=semantic_equal`、两份清单指纹 `match`，`start`/`observe`/`snap`/`wait_for`/`shell`/`inspect`/`act`/`end`/取消恢复全 PASS |
+| 手机 `http-remote`（`127.0.0.1:18883/mcp`） | `RESULT PASS`，同样 13 工具，`catalog_fingerprint=bf9aecee…` |
+
+**依赖方切换未执行**：DSH 当前托管的是上一版适配器进程，两次部署都提示
+"restart the host MCP process to rediscover tools"。本记录的实机数据全部经服务 HTTP 直接
+取得，不依赖该进程；宿主重启后的端到端回放属用户侧动作。
 
 ## 8. 未覆盖项与原因
 
 | 项 | 原因 |
 | --- | --- |
-| `screen.display_id` 的实机取值 | 未构建、未部署整组产物。契约保持 20，部署需要新的发行号；用户当次未要求发布 |
-| `shell` 新文案经 MCP 宿主回放 | 同上：宿主加载的是磁盘上的 0.21.0 适配器 |
-| 主屏会话下 `display_id=0` 的实机样本 | 同上；且本轮按用户指定只用虚拟屏模式 |
+| 主屏会话下 `display_id=0` 的实机样本 | 本轮设备停留在虚拟屏模式，未构造主屏会话；该值由 `screenOf` 与契约同源，未单独取证 |
+| `-d` 对其它 `input` 子命令（`keyevent`/`tap` 等）的行为 | 只实测了 `swipe` 与 `text`；`text` 只验证了"不报错"，未验证是否真的注入 |
+| `-d <不存在的 id>` 的 0.22.0 复核 | §3.1 已在 0.21.0 上测过；`shell` 执行语义未改，结论沿用，未重复取证 |
+| 经 DSH 宿主的端到端回放 | 宿主仍是上一版适配器进程，需用户重启后重新发现工具 |
 | `-d` 对其它 `input` 子命令（`keyevent`/`tap` 等）的行为 | 只实测了 `swipe` 与 `text`；`text` 只验证了"不报错"，未验证是否真的注入 |
 | 旧服务（不发 `display_id`）+ 新客户端 | 由 `decode_response_test.go` 的 forward-compatibility 用例覆盖，未构造真实旧服务 |
 
