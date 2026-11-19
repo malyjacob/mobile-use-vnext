@@ -33,7 +33,9 @@ const treeTextGuide = "树块：当前树由 base 指向的 full 加本次 delta
 	"节点行为 `缩进 n<ref> <role> <bounds> \"label\"… value=\"…\" hint=\"…\" " +
 	"tap|long_press|text|swipe enabled=… focused=… checked=… axis=… resource=\"…\" context`；" +
 	"`n<ref>` 可直接用作 target.ref。" +
-	"匿名普通 view/group 的已知矩形在观察视图里省略该列，未知几何仍写 `-`；" +
+	"观察视图的几何列：根和有动作的节点交付已知矩形；无动作的 `text` 与匿名普通 view/group 省略矩形；" +
+	"其余展示节点与父链上最近交付的矩形四边相同、或裁剪到屏幕后小于屏幕面积 1% 时省略；" +
+	"未知几何仍写 `-`，缺失几何列表示按策略隐藏，详细补看交付原矩形；" +
 	"连续匿名单子节点写成 `chain [n2 n3] <role>`，其中每个 ref 仍是可寻址的逻辑节点。" +
 	"完整节点的状态位按已知默认省略：`enabled=true` 省略，`enabled=false`/`enabled=null` 显式；" +
 	"`focused`/`selected`/`protected`/`checked` 的已知 `false` 省略，`true` 与 `null` 显式。" +

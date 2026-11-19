@@ -42,6 +42,25 @@ func TestTreeTextGuideStatesTriStateOmission(t *testing.T) {
 	}
 }
 
+// TestTreeTextGuideStatesCompactGeometryPolicy pins the observation-view
+// geometry legend: action positions stay, actionless text and anonymous plain
+// rectangles are hidden, and the remaining rectangles hide only when they
+// repeat the nearest delivered ancestor or fall below one percent of the
+// screen.
+func TestTreeTextGuideStatesCompactGeometryPolicy(t *testing.T) {
+	for _, required := range []string{
+		"根和有动作的节点交付已知矩形",
+		"无动作的 `text` 与匿名普通 view/group 省略矩形",
+		"与父链上最近交付的矩形四边相同",
+		"裁剪到屏幕后小于屏幕面积 1% 时省略",
+		"详细补看交付原矩形",
+	} {
+		if !strings.Contains(treeTextGuide, required) {
+			t.Errorf("tree guide lacks %q", required)
+		}
+	}
+}
+
 // TestServerInstructionsCarryCrossToolRules checks the shared workflow and the
 // single complete tree legend.
 func TestServerInstructionsCarryCrossToolRules(t *testing.T) {

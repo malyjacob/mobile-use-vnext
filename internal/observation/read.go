@@ -1,6 +1,8 @@
 package observation
 
 import (
+	"math"
+
 	"github.com/malyjacob/mobile-use-vnext/internal/device"
 	"github.com/malyjacob/mobile-use-vnext/internal/protocol"
 )
@@ -12,8 +14,8 @@ import (
 // AnonymousPlain reports whether one read node satisfies the fixed
 // anonymous-plain predicate: an ordinary view/group with no action, no readable
 // content and only known default state. Such a node keeps its ref and its
-// position in the tree; only its known geometry may be hidden by the compact
-// view.
+// position in the tree; the compact geometry policy hides its known rectangle
+// and it is the only node kind that may join a chain.
 func AnonymousPlain(n *protocol.ReadNode) bool {
 	if n == nil || n.Context {
 		return false
@@ -39,15 +41,17 @@ func AnonymousPlain(n *protocol.ReadNode) bool {
 }
 
 // ProjectCompactTree builds the compact public reading tree: the logical read
-// tree of t with known geometry hidden for anonymous plain nodes and
-// consecutive anonymous single-child paths folded into chain definitions.
+// tree of t delivered with the fixed compact geometry policy and consecutive
+// anonymous single-child paths folded into chain definitions. The synthetic
+// root rectangle is the screen denominator of the area rule; when it is missing
+// or degenerate only the path rules apply.
 func ProjectCompactTree(t *protocol.Tree) *protocol.ReadTree {
 	if t == nil || t.Root == nil {
 		return nil
 	}
 	return PackTree(&protocol.ReadTree{
 		Format: "full", Scope: protocol.Scope, View: protocol.ViewCompact,
-		Root: projectReadNode(t.Root, true),
+		Root: projectCompactNode(t.Root, newCompactProjection(t.Root), nil),
 	})
 }
 
@@ -70,14 +74,182 @@ func ProjectDetailedNode(n *protocol.Node) *protocol.ReadNode {
 }
 
 // projectReadNode copies every public field of one internal node. In the
-// compact view a known rectangle of an anonymous plain node becomes hidden; all
-// other known rectangles are delivered and a missing source rectangle stays
-// explicitly unknown.
+// detailed view every known rectangle is delivered and a missing source
+// rectangle stays explicitly unknown. A compact projection of one standalone
+// node applies the path rules without a screen denominator.
 func projectReadNode(n *protocol.Node, compact bool) *protocol.ReadNode {
 	if n == nil {
 		return nil
 	}
-	out := &protocol.ReadNode{
+	if compact {
+		return projectCompactNode(n, compactProjection{}, nil)
+	}
+	return projectDetailedNode(n)
+}
+
+// compactProjection carries the fixed screen facts of one compact projection.
+// screenKnown is false when the synthetic root rectangle is missing or
+// degenerate, which skips only the area rule.
+type compactProjection struct {
+	screen      protocol.Bounds
+	screenKnown bool
+	screenArea  int64
+}
+
+func newCompactProjection(root *protocol.Node) compactProjection {
+	if root == nil || root.Bounds == nil {
+		return compactProjection{}
+	}
+	area, ok := boundsArea(*root.Bounds)
+	if !ok {
+		return compactProjection{}
+	}
+	return compactProjection{screen: *root.Bounds, screenKnown: true, screenArea: area}
+}
+
+// projectDetailedNode copies one internal node and every known rectangle.
+func projectDetailedNode(n *protocol.Node) *protocol.ReadNode {
+	if n == nil {
+		return nil
+	}
+	out := copyReadFields(n)
+	if n.Bounds == nil {
+		out.Bounds = protocol.UnknownBounds()
+	} else {
+		out.Bounds = protocol.KnownBounds(*n.Bounds)
+	}
+	for _, child := range n.Children {
+		if child == nil {
+			continue
+		}
+		out.Children = append(out.Children, projectDetailedNode(child))
+	}
+	return out
+}
+
+// projectCompactNode copies one internal node and decides its delivered
+// geometry in the fixed order: an action-bearing node or the root always keeps
+// its known rectangle; an anonymous plain node and an actionless text node hide
+// it; a remaining node hides a rectangle identical to the nearest delivered
+// ancestor rectangle or one smaller than one percent of the screen. A hidden or
+// unknown node passes the ancestor rectangle down unchanged.
+func projectCompactNode(n *protocol.Node, screen compactProjection, reference *protocol.Bounds) *protocol.ReadNode {
+	if n == nil {
+		return nil
+	}
+	out := copyReadFields(n)
+	switch {
+	case n.Bounds == nil:
+		out.Bounds = protocol.UnknownBounds()
+	case n.Role == protocol.RoleRoot || len(n.Actions) != 0:
+		out.Bounds = protocol.KnownBounds(*n.Bounds)
+		reference = deliveredRect(*n.Bounds, screen)
+	case compactHidesBounds(n, out, screen, reference):
+		out.Bounds = protocol.HiddenBounds()
+	default:
+		out.Bounds = protocol.KnownBounds(*n.Bounds)
+		reference = deliveredRect(*n.Bounds, screen)
+	}
+	for _, child := range n.Children {
+		if child == nil {
+			continue
+		}
+		out.Children = append(out.Children, projectCompactNode(child, screen, reference))
+	}
+	return out
+}
+
+// compactHidesBounds applies the non-action part of the compact geometry
+// policy. The caller has already delivered the root and every node with an
+// action.
+func compactHidesBounds(n *protocol.Node, out *protocol.ReadNode,
+	screen compactProjection, reference *protocol.Bounds) bool {
+	if AnonymousPlain(out) || n.Role == protocol.RoleText {
+		return true
+	}
+	rect, positive := compactRect(*n.Bounds, screen)
+	if reference != nil && rect == *reference {
+		return true
+	}
+	if !screen.screenKnown {
+		return false
+	}
+	if !positive {
+		return true
+	}
+	return belowPercent(rectArea(rect), screen.screenArea)
+}
+
+// deliveredRect is the rectangle a delivered node passes to its descendants:
+// the visible part on the target screen when the screen is known.
+func deliveredRect(rect protocol.Bounds, screen compactProjection) *protocol.Bounds {
+	clipped, _ := compactRect(rect, screen)
+	return &clipped
+}
+
+// compactRect intersects one internal rectangle with the target screen. The
+// positive result reports whether the visible part has area.
+func compactRect(rect protocol.Bounds, screen compactProjection) (protocol.Bounds, bool) {
+	if !screen.screenKnown {
+		return rect, rect.Right > rect.Left && rect.Bottom > rect.Top
+	}
+	clipped := protocol.Bounds{
+		Left:   maxInt(rect.Left, screen.screen.Left),
+		Top:    maxInt(rect.Top, screen.screen.Top),
+		Right:  minInt(rect.Right, screen.screen.Right),
+		Bottom: minInt(rect.Bottom, screen.screen.Bottom),
+	}
+	return clipped, clipped.Right > clipped.Left && clipped.Bottom > clipped.Top
+}
+
+// belowPercent reports whether area is strictly smaller than one percent of
+// screenArea. The comparison is exact for every screen area and avoids an
+// overflowing multiplication.
+func belowPercent(area, screenArea int64) bool {
+	if area <= 0 || screenArea <= 0 {
+		return area <= 0 && screenArea > 0
+	}
+	threshold := screenArea / 100
+	if area > threshold {
+		return false
+	}
+	return area*100 < screenArea
+}
+
+// boundsArea returns the positive integer area of one rectangle. It reports
+// false for an empty rectangle or when the product cannot be represented.
+func boundsArea(rect protocol.Bounds) (int64, bool) {
+	width := int64(rect.Right) - int64(rect.Left)
+	height := int64(rect.Bottom) - int64(rect.Top)
+	if width <= 0 || height <= 0 || width > math.MaxInt64/height {
+		return 0, false
+	}
+	return width * height, true
+}
+
+func rectArea(rect protocol.Bounds) int64 {
+	area, _ := boundsArea(rect)
+	return area
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// copyReadFields copies every public field of one internal node except its
+// children; each projection adds the geometry state and the children.
+func copyReadFields(n *protocol.Node) *protocol.ReadNode {
+	return &protocol.ReadNode{
 		Ref:       n.Ref,
 		Role:      n.Role,
 		Label:     append([]string{}, n.Label...),
@@ -94,21 +266,6 @@ func projectReadNode(n *protocol.Node, compact bool) *protocol.ReadNode {
 		Context:   n.Context,
 		Children:  make([]*protocol.ReadNode, 0, len(n.Children)),
 	}
-	switch {
-	case n.Bounds == nil:
-		out.Bounds = protocol.UnknownBounds()
-	case compact && AnonymousPlain(out):
-		out.Bounds = protocol.HiddenBounds()
-	default:
-		out.Bounds = protocol.KnownBounds(*n.Bounds)
-	}
-	for _, child := range n.Children {
-		if child == nil {
-			continue
-		}
-		out.Children = append(out.Children, projectReadNode(child, compact))
-	}
-	return out
 }
 
 // PackTree folds consecutive anonymous single-child paths into chain

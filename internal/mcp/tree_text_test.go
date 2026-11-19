@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/malyjacob/mobile-use-vnext/internal/observation"
 	"github.com/malyjacob/mobile-use-vnext/internal/protocol"
 )
 
@@ -1810,5 +1811,85 @@ func assertCompleteTreeText(t *testing.T, block, prefix, suffix string, minimumB
 	}
 	if len(block) < minimumBytes {
 		t.Fatalf("complete block is %d bytes, want at least %d", len(block), minimumBytes)
+	}
+}
+
+// internalTestNode builds one internal projection node for the tree-text
+// regression of the compact geometry policy.
+func internalTestNode(ref string, role protocol.Role, rect *protocol.Bounds,
+	label string, actions ...protocol.Action) *protocol.Node {
+	yes, no := true, false
+	labels := []string{}
+	if label != "" {
+		labels = append(labels, label)
+	}
+	return &protocol.Node{
+		Ref: ref, Role: role, Bounds: rect, Label: labels, Actions: actions,
+		Enabled: &yes, Focused: &no, Selected: &no, Protected: &no, Checked: &no,
+		Children: []*protocol.Node{},
+	}
+}
+
+// TestTreeTextReflectsCompactBoundsPolicy renders a real compact projection so
+// a hidden text node carries no geometry column while action and display
+// rectangles keep it, and a rectangle that crosses the one-percent threshold
+// becomes an explicit set bounds=hidden.
+func TestTreeTextReflectsCompactBoundsPolicy(t *testing.T) {
+	yes, no := true, false
+	buildTree := func(imageRight int) *protocol.Tree {
+		root := &protocol.Node{
+			Ref: "n1", Role: protocol.RoleRoot,
+			Bounds: &protocol.Bounds{Left: 0, Top: 0, Right: 1080, Bottom: 2400},
+			Label:  []string{}, Actions: []protocol.Action{},
+			Enabled: &yes, Focused: &no, Selected: &no, Protected: &no, Checked: &no,
+			Children: []*protocol.Node{
+				internalTestNode("n2", protocol.RoleButton,
+					&protocol.Bounds{Left: 10, Top: 10, Right: 50, Bottom: 50},
+					"确定", protocol.ActionTap),
+				internalTestNode("n3", protocol.RoleText,
+					&protocol.Bounds{Left: 20, Top: 60, Right: 200, Bottom: 100}, "标题"),
+				internalTestNode("n4", protocol.RoleImage,
+					&protocol.Bounds{Left: 0, Top: 500, Right: imageRight, Bottom: 700}, ""),
+			},
+		}
+		return &protocol.Tree{Format: "full", Scope: protocol.Scope, Root: root}
+	}
+	base := observation.ProjectCompactTree(buildTree(300))
+	fullBlock := mustRenderTreeText(t, &protocol.Result{
+		Observation: &protocol.Observation{
+			ID: "O1", Tree: &protocol.ReadTreeValue{Full: base},
+		},
+	})
+	lines := strings.Split(fullBlock, "\n")
+	find := func(token string) string {
+		for _, line := range lines {
+			if strings.Contains(line, token) {
+				return line
+			}
+		}
+		return ""
+	}
+	if line := find(" n2 button "); !strings.Contains(line, "[10,10,50,50]") {
+		t.Fatalf("action node lost its rectangle: %q", line)
+	}
+	if line := find(" n3 text "); line == "" || strings.Contains(line, "[") {
+		t.Fatalf("actionless text must omit the geometry column: %q", line)
+	}
+	if line := find(" n4 image "); !strings.Contains(line, "[0,500,300,700]") {
+		t.Fatalf("large display rectangle must be delivered: %q", line)
+	}
+
+	current := observation.ProjectCompactTree(buildTree(100))
+	delta, err := observation.ReadDiff("O1", base, current)
+	if err != nil {
+		t.Fatalf("ReadDiff: %v", err)
+	}
+	deltaBlock := mustRenderTreeText(t, &protocol.Result{
+		Observation: &protocol.Observation{
+			ID: "O2", Tree: &protocol.ReadTreeValue{Delta: delta},
+		},
+	})
+	if !strings.Contains(deltaBlock, "~ n4 bounds=hidden") {
+		t.Fatalf("threshold crossing must render bounds=hidden:\n%s", deltaBlock)
 	}
 }

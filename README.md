@@ -7,8 +7,8 @@ HTTP 协议配对。
 
 - 模块：`github.com/malyjacob/mobile-use-vnext`
 - Go：1.27.1，启用 `GOEXPERIMENT=jsonv2`
-- 契约：`contract_version = "19"`，服务、HTTP 客户端、控制 App 精确相等才做普通工作
-- 发行：`0.19.0`；`release/versions.json` 是发行号、契约号与 Android versionCode（21）的唯一
+- 契约：`contract_version = "20"`，服务、HTTP 客户端、控制 App 精确相等才做普通工作
+- 发行：`0.20.0`；`release/versions.json` 是发行号、契约号与 Android versionCode（22）的唯一
   来源，构建生成 Go/Java 常量
 
 ## 能力边界
@@ -20,6 +20,10 @@ HTTP 协议配对。
 - `observe`/`act`/`wait_for` 的 `image=true` 返回与本次观察同次采集的一张 JPEG 图片；图片
   元数据在 `observation.image`，HTTP 载体为 `observation.image.base64`。`snap` 单独读取当前屏
   的一张图片，成功只含 `operation_id` 与顶层 `image`，不读树、不发布观察。
+- 默认观察树（`view=compact`）按固定策略交付坐标：根与 `actions` 非空的节点保留已知矩形；
+  无动作的 `text` 与匿名普通 `view`/`group` 省略矩形；其余展示节点的矩形与父链上最近交付的
+  矩形完全相同、或裁剪到目标屏幕后小于屏幕面积 1% 时省略。`inspect` 的 `detailed` 视图
+  始终交付完整原坐标。
 - 控制端为 `POST /v1/control/sync|stop`；同步下发控制视图、至多一条显示命令与未确认的 Agent
   消息，独立 STOP 只绑定停止边界，见 [控制端协议](docs/control-protocol.md)。
 - `notify` 保存的消息通过控制同步进入 App 消息中心与系统通知；`notification.state=pending`
@@ -155,7 +159,7 @@ $env:GOEXPERIMENT = 'jsonv2'; go test ./...
 ## 接口
 
 Agent 工具（`POST /api/<tool>`，`Authorization: Bearer <agent_token>`，
-`X-Mobile-Use-Contract: 19`）：
+`X-Mobile-Use-Contract: 20`）：
 
 | 工具 | 说明 |
 | --- | --- |

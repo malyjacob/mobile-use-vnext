@@ -326,7 +326,9 @@ status(P)、重复 P 与冻结结果只复制最后一次已提交快照，迟�
 6. 虚拟屏上出现控制 App 的可见节点 → `control_ui_on_virtual_display`，采集失败；
 7. `observation.Builder` 构造完整的内部公开树（合成根、必要祖先、保守保号）；投影、折链、
    序列化与计量都在锁外完成；
-8. 从内部树生成 compact 阅读表示并按它的规范 JSON 计量：超过 `MaxFullTreeBytes=128 KiB`
+8. 从内部树生成 compact 阅读表示并按它的规范 JSON 计量：保留合成根与 `actions` 非空节点的
+   矩形，省略无动作 `text` 与匿名普通节点的矩形，其余展示节点在矩形与父链最近交付者四边
+   相同或裁剪后可见面积不足屏幕 1% 时省略；超过 `MaxFullTreeBytes=128 KiB`
    → `tree_too_large`（`details.budget=public_full`）；同一快照的内部计费对象
    （`raw_capture` + 完整内部树）超过 `MaxSnapshotCostBytes=4 MiB`
    → `tree_too_large`（`details.budget=internal_snapshot`）；
@@ -658,7 +660,7 @@ P 已无法定位时，`end(P)` 返回 `409 operation_unknown`、`phase=referenc
 ### 发布
 
 `release/versions.json` 是发行号、共同契约号与 Android versionCode 的唯一来源；当前为
-`release_version=0.19.0`、`contract_version=19`、`android_version_code=21`，构建生成
+`release_version=0.20.0`、`contract_version=20`、`android_version_code=22`，构建生成
 Go/Java 常量。`scripts/build-release.ps1` 产出整组产物与 `build/release/manifest.json`
 （源码提交、Go 版本、MCP SDK/协议、各产物 SHA-256/大小、Android 包名/版本、工具目录指纹）。
 工具目录固定为 `scripts/toolcatalog` 投影的 13 个工具，指纹是该目录注册顺序、名称、描述与

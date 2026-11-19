@@ -222,11 +222,16 @@ func TestUnknownStateNodesKeepBoundsAndStayOutOfChains(t *testing.T) {
 	if hasChain(compact.Root, []string{"n2", "n3"}) {
 		t.Fatalf("unknown-state nodes must not join a chain: %+v", compact.Root)
 	}
-	for _, ref := range []string{"n2", "n3"} {
-		node := childOf(t, compact.Root, ref)
-		if node == nil || node.Bounds.Kind != protocol.GeometryKnown {
-			t.Fatalf("unknown-state node %s must keep known geometry: %+v", ref, node)
-		}
+	// The unknown-state ancestor keeps its distinct rectangle; the descendant
+	// with the same clipped rectangle is a duplicate and hides it.
+	if node := childOf(t, compact.Root, "n2"); node == nil || node.Bounds.Kind != protocol.GeometryKnown {
+		t.Fatalf("unknown-state ancestor n2 must keep known geometry: %+v", node)
+	}
+	if node := childOf(t, compact.Root, "n3"); node == nil || node.Bounds.Kind != protocol.GeometryHidden {
+		t.Fatalf("duplicate unknown-state child n3 must hide its geometry: %+v", node)
+	}
+	if node := childOf(t, compact.Root, "n4"); node == nil || node.Bounds.Kind != protocol.GeometryHidden {
+		t.Fatalf("actionless text n4 must hide its geometry: %+v", node)
 	}
 
 	// Same packing guard applies to add/replace delta definitions.
@@ -250,6 +255,7 @@ func TestGeometryStatesAreDistinct(t *testing.T) {
 	unknown.Bounds = nil
 	anonymous := plainT("n3", protocol.RoleGroup)
 	functional := plainT("n4", protocol.RoleButton)
+	functional.Actions = []protocol.Action{protocol.ActionTap}
 	functional.Bounds = &protocol.Bounds{Left: 1, Top: 2, Right: 3, Bottom: 4}
 	tree := ProjectCompactTree(rootT(unknown, anonymous, functional))
 

@@ -15,7 +15,7 @@
 | 方法 | 所有业务端点只接受 `POST`；其他方法返回 `405`，错误码 `invalid_request` |
 | 认证 | `/api/*` 用 `agent_token`；`/v1/control/*` 用 `control_token`；`Authorization: Bearer <token>` |
 | 身份隔离 | agent token 不能访问 `/v1/control/*`，control token 不能访问 `/api/*`；错误为 `401 unauthorized` |
-| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 19`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
+| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 20`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
 | 预分配 P | `/api/*` 可带 `X-Mobile-Use-Operation: P…`；缺省由服务分配。`status` 不使用该头 |
 | 请求体 | 必须是一个 JSON 对象；大小上限：`start`/`status`/`end`/`wait_for` 16 KiB，`observe` 32 KiB，`snap` 8 KiB，`act` 64 KiB，`inspect`/`keepalive`/`diagnose`/`app` 8 KiB，`notify` 16 KiB，`shell` 32 KiB，`sync` 32 KiB，`stop` 8 KiB |
 | 响应 | `Content-Type: application/json; charset=utf-8`，`Cache-Control: no-store` |
@@ -782,7 +782,7 @@ raw `swipe` 仍不接受 `ref`。
 
 | 字段 | 必填 | 类型 | 说明 |
 | --- | --- | --- | --- |
-| `contract_version` | 是 | 字符串 | 必须为 `"19"`，否则 `409 contract_mismatch` |
+| `contract_version` | 是 | 字符串 | 必须为 `"20"`，否则 `409 contract_mismatch` |
 | `app_instance_id` | 是 | UUID | App 进程实例；变化会撤销旧归属 |
 | `app_version` | 否（App 应发送） | 字符串 | 仅发行标识 |
 | `selected_mode` | 是 | `virtual`/`primary` | 用户选择 |
@@ -809,7 +809,7 @@ raw `swipe` 仍不接受 `ref`。
 
 ```json
 {
-  "contract_version": "19",
+  "contract_version": "20",
   "service_instance_id": "…",
   "control": {
     "revision": 42,
@@ -845,7 +845,7 @@ raw `swipe` 仍不接受 `ref`。
 ## 9. `POST /v1/control/stop`
 
 ```json
-{"contract_version":"19","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
+{"contract_version":"20","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
 ```
 
 - **不校验普通契约**：`contract_version` 字段存在但不参与准入，服务与 App 契约版本
@@ -855,7 +855,7 @@ raw `swipe` 仍不接受 `ref`。
 - 重复或过期 `seq` 不报错，只返回 `state=duplicate`。
 
 ```json
-{"contract_version":"19","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
+{"contract_version":"20","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
 ```
 
 `accepted` 恒为 `true`；`state` 为 `revoked`（绑定时撤销了活动会话）、`recorded`
@@ -868,7 +868,7 @@ raw `swipe` 仍不接受 `ref`。
 无认证，只表示进程可应答，不代表设备就绪或资源干净：
 
 ```json
-{"status":"ok","contract_version":"19","service_instance_id":"…","release_version":"…"}
+{"status":"ok","contract_version":"20","service_instance_id":"…","release_version":"…"}
 ```
 
 ## 11. 数据对象
@@ -968,13 +968,13 @@ Observation 的编码顺序固定为 `status`、`id`、`origin`、`revision`、`
 ### Node
 
 公共节点是交付表示，不是服务内部完整快照。每个逻辑节点保留原 `ref`、角色、内容、源能力与
-三态事实；只有已知几何可以按固定的匿名规则不交付，连续匿名单子链可以折成一条 `chain`
-定义。逻辑节点、父子关系与顺序不因交付表示改变。
+三态事实；已知几何按固定的 compact 几何策略决定是否交付，连续匿名单子链可以折成一条
+`chain` 定义。逻辑节点、父子关系与顺序不因交付表示改变。
 
 ```json
 {"ref":"n7","role":"button","bounds":[40,300,240,380],
  "label":["确定"],"actions":["tap"],"enabled":false}
-{"chain":["n2","n3"],"role":"view","children":[{"ref":"n4","role":"text","bounds":[0,0,1080,60]}]}
+{"chain":["n2","n3"],"role":"view","children":[{"ref":"n4","role":"text","label":["设置"]}]}
 ```
 
 公开构造按值过滤空叶：默认状态、空内容、无动作的普通 View/FrameLayout 叶不发布，
@@ -990,7 +990,7 @@ Observation 的编码顺序固定为 `status`、`id`、`origin`、`revision`、`
 | --- | --- |
 | `ref`/`chain` | 二选一。普通节点写自己的 `ref`；`chain` 是至少两个、按原顺序排列的连续 ref 数组，成员除 `ref`/`children` 外公共字段完全相同且几何都隐藏 |
 | `role` | 总是出现；属于固定集合 `root`、`group`、`text`、`button`、`input`、`checkbox`、`radio`、`switch`、`toggle`、`scroll`、`image`、`view` |
-| `bounds` | 三态：四整数数组表示已知矩形；`null` 表示源未提供可用几何；compact 视图里按策略隐藏的已知矩形直接省略该成员。detailed 视图不允许隐藏，`bounds` 总是出现 |
+| `bounds` | 三态：四整数数组表示已知矩形；`null` 表示源未提供可用几何；compact 视图里按几何策略省略的已知矩形直接省略该成员。detailed 视图不允许隐藏，`bounds` 总是出现 |
 | `label`/`actions`/`children` | 空时省略；`actions` 取 `tap`、`long_press`、`text`、`swipe` |
 | `enabled` | 默认 `true`；已知 `false` 时显式 `false`；未知时显式 `null` |
 | `focused`/`selected`/`protected` | 默认 `false`；已知 `true` 时显式 `true`；未知时显式 `null` |
@@ -1008,10 +1008,15 @@ Observation 的编码顺序固定为 `status`、`id`、`origin`、`revision`、`
 unknown；来源未知不能在构造时补成默认。五个状态的比较与差分严格区分 unknown/false/true。
 `set` 的缺席表示不修改，不应用完整节点默认。树与 inspection 信封均不携带 `defaults`。
 
-匿名规则是固定的服务策略，不是请求字段：一个公开节点只有在角色为 `view`/`group`、无动作、
-无标签、无 `value`/`hint`/`resource`/`axis`、`enabled` 已知 `true` 且
-`focused`/`selected`/`protected`/`checked` 都已知 `false` 时，才允许隐藏它的已知几何或参与
-`chain` 折叠。内容、能力或特殊状态出现时，公共几何重新交付，即使内部矩形数值未变。
+compact 几何策略是固定的服务策略，不是请求字段，按以下顺序判断一个节点的已知矩形：
+源矩形缺失时保持 `null`；合成根与 `actions` 非空的节点保留已知矩形；匿名普通节点（角色为
+`view`/`group`、无动作、无标签、无 `value`/`hint`/`resource`/`axis`、`enabled` 已知 `true`
+且 `focused`/`selected`/`protected`/`checked` 都已知 `false`）和无动作的 `text` 省略已知
+矩形；其余展示节点的矩形（裁剪到目标屏幕后）若与父链上最近一个实际交付的矩形四边完全
+相同，或可见面积按合成根矩形面积计算严格小于 1%，也省略。角色名本身不构成保护：只有控件
+角色而没有动作的节点仍按重复与面积规则判断。面积使用整数计算；合成根矩形缺失或不可计算时
+跳过面积规则。只有匿名普通节点参与 `chain` 折叠，文本或图片即使省略坐标也保持独立节点。
+detailed 视图始终交付完整原矩形。
 
 ### Tree 与 Delta
 

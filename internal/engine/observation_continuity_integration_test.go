@@ -138,7 +138,7 @@ func continuationCapture(marker string, checked *bool, extraResources ...string)
 		for _, resource := range extraResources {
 			index := len(nodes)
 			nodes = append(nodes, device.RawNode{
-				Index: index, Parent: 1, Depth: 2, DisplayID: display.ID, Visible: true,
+				Index: index, Parent: 0, Depth: 1, DisplayID: display.ID, Visible: true,
 				RawBounds: device.Rect{Left: 20, Top: 360 + 80*index, Right: 600, Bottom: 420 + 80*index},
 				Bounds:    device.Rect{Left: 20, Top: 360 + 80*index, Right: 600, Bottom: 420 + 80*index},
 				Package:   "com.example", ClassName: "android.widget.TextView",
@@ -146,7 +146,9 @@ func continuationCapture(marker string, checked *bool, extraResources ...string)
 				ResourceSet: true, ResourceID: resource,
 				HasEnabled: true, Enabled: true,
 			})
-			nodes[1].Children = append(nodes[1].Children, index)
+			// Append after the context subtree so the public preorder stays
+			// monotonic in raw node order.
+			nodes[0].Children = append(nodes[0].Children, index)
 		}
 
 		// Keep the fixture's synthetic defaults explicit and mutation-safe.
@@ -711,7 +713,20 @@ func checkedState(value *bool) string {
 // the same confirmed full O, even while the caller follows a chain of deltas.
 func TestI02FixedBaselineDeltaChain(t *testing.T) {
 	h := continuationHarness(t)
-	h.device.scriptCaptures(continuationCapture("i02-base", boolAddress(false)))
+	// The compact projection withholds most display geometry, so the changing
+	// controls alone are close to the fixed 70% delta threshold. Stable labelled
+	// leaves keep this fixture focused on the fixed-baseline delta chain instead
+	// of turning it into a full-fallback sample.
+	stableResources := []string{
+		"i02_stable_00_baseline", "i02_stable_01_baseline",
+		"i02_stable_02_baseline", "i02_stable_03_baseline",
+		"i02_stable_04_baseline", "i02_stable_05_baseline",
+		"i02_stable_06_baseline", "i02_stable_07_baseline",
+	}
+	i02Capture := func(marker string, checked *bool) captureStep {
+		return continuationCapture(marker, checked, stableResources...)
+	}
+	h.device.scriptCaptures(i02Capture("i02-base", boolAddress(false)))
 	start := h.startSession()
 	startObservation := publishedObservation(t, start, "start")
 	startState := observationStateByID(t, h.engine, startObservation.ID)
@@ -743,7 +758,7 @@ func TestI02FixedBaselineDeltaChain(t *testing.T) {
 	var deltaStates []*observationState
 	for index, checked := range []*bool{nil, boolAddress(true), boolAddress(false)} {
 		marker := fmt.Sprintf("i02-delta-%d", index)
-		h.device.scriptCaptures(continuationCapture(marker, checked))
+		h.device.scriptCaptures(i02Capture(marker, checked))
 		result, apiErr := h.engine.Observe(context.Background(), "agent",
 			fmt.Sprintf("Pi02delta%d", index), &protocol.ObserveRequest{Reference: current.ID})
 		if apiErr != nil {
@@ -818,7 +833,7 @@ func TestI02FixedBaselineDeltaChain(t *testing.T) {
 
 	// Switching to a full response must retain refs and tri-state. A later
 	// observe(full O) acknowledges that full O as the next fixed base.
-	h.device.scriptCaptures(continuationCapture("i02-full", boolAddress(true)))
+	h.device.scriptCaptures(i02Capture("i02-full", boolAddress(true)))
 	fullResult, apiErr := h.engine.Observe(context.Background(), "agent", "Pi02full",
 		&protocol.ObserveRequest{Reference: current.ID, Full: true})
 	if apiErr != nil {
@@ -839,7 +854,7 @@ func TestI02FixedBaselineDeltaChain(t *testing.T) {
 		t.Fatal("delivered full tree differs from the committed compact tree")
 	}
 
-	h.device.scriptCaptures(continuationCapture("i02-after-full", boolAddress(false)))
+	h.device.scriptCaptures(i02Capture("i02-after-full", boolAddress(false)))
 	afterFullResult, apiErr := h.engine.Observe(context.Background(), "agent", "Pi02afterfull",
 		&protocol.ObserveRequest{Reference: fullObservation.ID})
 	if apiErr != nil {

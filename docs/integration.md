@@ -41,7 +41,7 @@ adb forward          主机 18881 → 服务；主机 18883 → 手机 MCP
    `adb forward`，也不需要 Agent token。
 
 只需要直连 HTTP 的 Agent 则使用 `http://127.0.0.1:18881/api/<tool>`、`agent_token` 与
-`X-Mobile-Use-Contract: 19`。
+`X-Mobile-Use-Contract: 20`。
 
 ## 1. 默认部署后的网络与进程
 
@@ -276,7 +276,7 @@ HTTP 宿主在原有 `Authorization` 头之外按需添加：
 
 ```text
 Authorization: Bearer <agent_token>
-X-Mobile-Use-Contract: 19
+X-Mobile-Use-Contract: 20
 Content-Type: application/json; charset=utf-8
 ```
 
@@ -284,7 +284,7 @@ Content-Type: application/json; charset=utf-8
 $deploy = Get-Content .state/deploy.json -Raw | ConvertFrom-Json
 $headers = @{
     Authorization           = "Bearer $($deploy.agent_token)"
-    'X-Mobile-Use-Contract' = '19'
+    'X-Mobile-Use-Contract' = '20'
 }
 Invoke-RestMethod http://127.0.0.1:18881/api/status -Method Post `
   -Headers $headers -ContentType 'application/json' -Body '{}'
@@ -531,7 +531,7 @@ Header: Authorization: Bearer <mcp_token>
 两种选择：
 
 ```text
-直连 HTTP:  http://127.0.0.1:18880/api/<tool>   + agent_token + X-Mobile-Use-Contract: 19
+直连 HTTP:  http://127.0.0.1:18880/api/<tool>   + agent_token + X-Mobile-Use-Contract: 20
 MCP HTTP:   http://127.0.0.1:18882/mcp          + mcp_token
 ```
 
@@ -716,7 +716,7 @@ GET 判断工具是否可用。
 $deploy = Get-Content .state/deploy.json -Raw | ConvertFrom-Json
 $headers = @{
     Authorization           = "Bearer $($deploy.agent_token)"
-    'X-Mobile-Use-Contract' = '19'
+    'X-Mobile-Use-Contract' = '20'
 }
 $start = Invoke-RestMethod http://127.0.0.1:18881/api/start -Method Post `
   -Headers $headers -ContentType 'application/json' -Body '{}'

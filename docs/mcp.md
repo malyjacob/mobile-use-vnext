@@ -291,7 +291,7 @@ tree v2 format=full id=O3 scope=reported_visible_with_context view=compact nodes
 n1 root [0,0,1080,2400]
   n2 group
     n3 button [24,60,144,180] "返回" tap
-    n4 text [300,80,780,160] "设置"
+    n4 text "设置"
     n6 switch [900,60,1032,180] "启用" tap checked=true
   n5 scroll [0,220,1080,2400] axis=y
     n12 group -
@@ -308,12 +308,14 @@ end tree
 `axis=x|y|both`、`resource="…"` 与 `context`。设备来源字符串按 JSON 字符串字面量转义，
 `<`、`>`、`&` 保持原样；缺省值按协议省略规则不输出。
 
-几何列与节点定义一一对应：已知矩形写 `[l,t,r,b]`，源未提供几何写 `-`；观察视图里按匿名
-规则隐藏的已知矩形直接没有该列，`-` 不表示隐藏。连续匿名单子节点折成一条
-`chain [n2 n3]`，成员共享其余列，孩子属于末成员。`nodes` 是展开后的逻辑节点数，
-`entries` 是普通节点或 `chain` 定义行数；详细补看视图里两者相同。`checked` 默认
-`false`（省略），只有 `true` 与 `null` 显式出现。完整节点的缺席布尔恢复为已知默认，
-显式 null 保持未知；set 的缺席只表示未修改。树与补看块均不输出 defaults 行。
+几何列与节点定义一一对应：已知矩形写 `[l,t,r,b]`，源未提供几何写 `-`；观察视图里按 compact
+几何策略省略的已知矩形直接没有该列，`-` 不表示隐藏。该策略保留合成根与 `actions` 非空
+节点的矩形，省略无动作 `text` 与匿名普通 `view`/`group` 的矩形，其余展示节点在裁剪到屏幕
+后的矩形与父链上最近交付者四边完全相同、或该可见面积小于屏幕面积的 1% 时省略；详细补看
+始终交付原矩形。连续匿名单子节点折成一条 `chain [n2 n3]`，成员共享其余列，孩子属于末成员。
+`nodes` 是展开后的逻辑节点数，`entries` 是普通节点或 `chain` 定义行数；详细补看视图里两者
+相同。`checked` 默认 `false`（省略），只有 `true` 与 `null` 显式出现。完整节点的缺席布尔
+恢复为已知默认，显式 null 保持未知；set 的缺席只表示未修改。树与补看块均不输出 defaults 行。
 
 delta 块头为
 `tree v2 format=delta id=<O> base=<O2> view=compact scope=<scope> changes=<n>`，正文按
