@@ -4,8 +4,8 @@ package com.mobileuse.vnext;
 
 /** 构建期单一版本源生成；不得手改。 */
 final class GeneratedVersion {
-    static final String RELEASE_VERSION = "0.23.0";
+    static final String RELEASE_VERSION = "0.24.0";
     static final String CONTRACT_VERSION = "21";
-    static final int ANDROID_VERSION_CODE = 25;
+    static final int ANDROID_VERSION_CODE = 26;
     private GeneratedVersion() {}
 }

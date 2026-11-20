@@ -471,8 +471,8 @@ func TestReadOnlyCancelWithoutError(t *testing.T) {
 		!bytes.Equal(rmfStructuredBytes(t, structuredMode.StructuredContent), canonical) {
 		t.Fatal("both/structured modes do not expose the canonical cancellation value")
 	}
-	if !strings.HasPrefix(testTextContent(t, textMode), "result v2 is_error=true\n") {
-		t.Fatal("text mode did not use result v2 cancellation override")
+	if !strings.HasPrefix(testTextContent(t, textMode), "result v3 is_error=true\n") {
+		t.Fatal("text mode did not use result v3 cancellation override")
 	}
 	if !strings.HasPrefix(testTextContent(t, structuredMode), "diagnostic v1 is_error=true\n") {
 		t.Fatal("structured mode did not use diagnostic v1 cancellation override")

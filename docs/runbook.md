@@ -382,8 +382,9 @@ MCP 客户端应使用 POST。手机内 Android 宿主直接使用 `127.0.0.1:18
 ```
 
 主机适配器的 `http.token` 是另一个独立口令；`service.agent_token` 与 `http.token` 必须
-不同，`base_url` 与 `http.listen` 必须是 loopback。主机 HTTP 入口使用主机 `18882`；手机
-适配器已转发到 `18883`，不要把手机 `18882` 再转发到主机 `18882`，否则端口冲突。
+不同，`base_url` 与 `http.listen` 必须是 loopback。主机 HTTP 入口使用主机 `18882`。
+访问手机适配器使用主机 `18883`，部署通过 `adb forward tcp:18883 tcp:18882` 将该端口
+转发到手机 `18882`。
 
 HTTP 入口的每个请求都需要 `Authorization: Bearer <MCP token>`；携带 `Origin` 时必须命中
 `allowed_origins`。缺失/错误令牌返回 `401`，不允许的 Origin 返回 `403`。MCP 会话按请求
@@ -411,11 +412,13 @@ Remove-Item Env:MOBILE_USE_MCP_RESULT_MODE
 ```
 
 优先级为显式 `-result-mode` > 环境变量 > `text`。显式空值与非法值退出 `2`，不回退。
-HTTP 进程也可用同一参数设置默认值，每请求头优先。完整文本以 `result v2 is_error=…`
-开头、`end result` 结束；错误最小诊断以 `diagnostic v1 is_error=true` 开头、
-`end diagnostic` 结束。缺尾表示对应文本被宿主截断，可改用 `structured` 或收窄 inspect。
-文本格式取代旧摘要，解析旧文本的宿主须迁移；成功的 `structured` 结果可以是 `content=[]`，
-不接受它的宿主使用 `both`/`text`。详细语法、取消保留键与图片规则见 [MCP 入口](mcp.md)。
+HTTP 进程也可用同一参数设置默认值，每请求头优先。完整文本以 `result v3 is_error=…`
+开头、`end result` 结束；观察字段位于 `observation` 组，普通树使用 `tree v4`，详细补看
+使用 `inspect v3`。错误最小诊断以 `diagnostic v1 is_error=true` 开头、
+`end diagnostic` 结束。缺少对应终止行表示文本被宿主截断，可改用 `structured`，或通过
+`inspect` 的 node/query 收窄。只解析旧文本语法的宿主须迁移；成功的 `structured` 结果可以
+是 `content=[]`，不接受它的宿主使用 `both`/`text`。详细语法、取消保留键与图片规则见
+[MCP 入口](mcp.md)。
 
 探针自身的默认检查模式是 `both`（与适配器的默认 `text` 无关）；可用
 `-result-mode text|structured` 检查其他投影，例如：

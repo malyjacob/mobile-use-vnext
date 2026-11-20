@@ -67,8 +67,8 @@ adb forward          主机 18881 → 服务；主机 18883 → 手机 MCP
 | `127.0.0.1:18882/mcp` | 主机（可选） | 主机自建 MCP 适配器时的默认监听 |
 
 - 手机侧只监听回环；不要做端口映射、反向代理或 `adb reverse` 暴露到局域网/公网。
-- 主机的 `18882` 与手机的 `18882` 是两个命名空间；手机适配器默认转发到主机 `18883`，
-  以免与主机自建适配器冲突。
+- 手机适配器监听手机 `18882`。部署通过 `adb forward tcp:18883 tcp:18882` 将主机
+  `18883` 的连接转发到手机 `18882`，避免占用主机自建适配器的端口。
 
 ## 2. 三个 token 到底分别是什么
 
@@ -203,19 +203,32 @@ MCP 适配器对每次工具调用提供 `both`、`text`、`structured` 三种�
 
 | 模式 | `content` | `structuredContent` | 适用 |
 | --- | --- | --- | --- |
-| `both` | 完整 `result v2` 文本与图片 | 完整 `Result` JSON | 显式选择；同时需要两种形式 |
-| `text`（默认） | 完整 `result v2` 文本与图片 | 不发送 | 默认模式；只读取文本通道的宿主 |
+| `both` | 完整 `result v3` 文本与图片 | 完整 `Result` JSON | 显式选择；同时需要两种形式 |
+| `text`（默认） | 完整 `result v3` 文本与图片 | 不发送 | 默认模式；只读取文本通道的宿主 |
 | `structured` | 图片；`isError=true` 时附最小 `diagnostic v1` 文本 | 完整 `Result` JSON | 会把结构化结果交给模型或程序的宿主 |
 
 - `both` 同时发送两份完整编码，传输与上下文占用更大；宿主明确只消费一种形式时使用对应
   单向模式。
-- `text` 完整文本以 `result v2 is_error=<true|false>` 开头、`end result` 结束，不产生
+- `text` 完整文本以 `result v3 is_error=<true|false>` 开头、`end result` 结束，不产生
   `omitted` 块；缺少终止行表示文本被宿主截断，应改用 `structured` 或通过 `inspect` 的
   node/query 收窄。
 - `structured` 成功且无图时 `content=[]`；不接受空 content 的宿主使用 `both` 或 `text`。
   错误附带的 `diagnostic v1` 以 `diagnostic v1 is_error=true` 开头、`end diagnostic`
   结束，只用于解释，不代表完整结果。
 - 模式不改变工具目录、入参 schema、认证、归属或 `/api/*` 契约；不发布 `outputSchema`。
+
+文本中的连续观察字段写成无缩进的 `observation` 标题加一个空格缩进的相对路径。完整 O 从
+该组的 `id` 取得，例如 `observation` 下的 ` id=Oabc_76`；结构化结果中仍是
+`observation.id`。普通观察树由 `tree v4` 标识，完整块头只写 `nodes`，差分块头写
+`base` 与 `changes`。指向同一个完整 base 的多条差分分别应用到该整树。
+`base=_72` 是文本读树简写，不能作为后续工具调用的引用。需要操作当前观察时使用组内完整 O，
+需要看历史树时使用完整历史 O。
+
+`inspect` 继续使用 `inspect v3` 的两格缩进、方括号矩形和显式动作词。`tree v4` 的默认动作、
+`@` 同矩形引用与短 base 不适用于补看块。未知或无法无损表达的观察字段继续在文本中使用
+绝对 JSON Pointer 的原值兜底。跨组重复路径及祖先与子路径冲突属于无效文本，调用方不能
+把短语法、JSON 兜底与重复路径混为一谈。只接受旧文本语法或 JSON 的消费者应迁移解析器，
+或显式选择 `structured`。
 
 选择方式：
 
@@ -493,8 +506,8 @@ Header: Authorization: Bearer <hostMcpToken>
 需要显式指定模式时，在请求头中加 `X-Mobile-Use-Result-Mode: both|text|structured`；该头
 按请求生效，不写入配置（见第 4.5 节）。
 
-主机 HTTP 适配器使用主机 `18882`；手机适配器已转发到主机 `18883`，两者不冲突。不要把
-手机 `18882` 再转发到主机 `18882`，否则主机适配器无法绑定该端口。
+主机 HTTP 适配器使用主机 `18882`，访问手机适配器使用主机 `18883`。主机 `18883`
+转发到手机 `18882`，主机 `18882` 可供本机适配器绑定。
 
 ### 6.5 与手机适配器的区别
 

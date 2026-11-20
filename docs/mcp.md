@@ -15,7 +15,7 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
   `snap`、`wait_for`、`act`、`inspect`、`keepalive`、`end`、`app`、`notify`、`shell`、
   `diagnose`。不注册 `/health`、认证初始化、旧工具别名或旧协议回退。
 - 目录指纹是工具数、注册顺序、名称、描述与入参 schema 的 canonical SHA-256。当前源码的
-  工具目录指纹为 `d9939b8f928fc282cfd118aa32ee4b4f20a5534e3ae6c4fb7d5665a0ee72e14c`。
+  工具目录指纹为 `5738c699da9c0a980e782f44943910718844447d9d00e04c0fb5a79682afc3cf`。
   发布清单中的指纹对应其记录的源码提交。发布时从目标提交重建并核验清单。
   探针按工具名比对实际 `tools/list` 的描述和入参 schema，并核对只读注解。传入 `-manifest`
   时，探针将清单中的工具数和目录 SHA-256 分别与源码目录的对应值比对。探针将
@@ -89,13 +89,15 @@ Label、最近祖先关系及安全点，child 丢失或内容被替换返回 `4
 返回同一份说明，包含一份完整树图例，以及会话推进、O/P、`reference`、租期和跨工具恢复。
 工具描述给出用途、关键参数分流、动作边界及独立理解该工具所需的恢复提示。
 `start` 描述简述 O/P 和 full/delta。每条 delta 都单独应用到 `base` 指向的完整树。
-图例以 `tree v3`、`inspect v3` 标识块语法，并说明普通节点在 `n<ref>` 后按首列恢复角色：
+图例以 `tree v4`、`inspect v3` 标识普通树与详细补看的独立语法，并说明普通节点在
+`n<ref>` 后按首列恢复角色：
 不带引号的合法角色词是显式角色，JSON 字符串字面量默认为 `text`，几何、`value=`、`hint=`、
 `tap`/`long_press`/`swipe`、状态或属性标记或行尾默认为 `view`；只有恢复结果等于原角色且
 首项不会被误读为角色词时才省略。当前 compact full 和 delta 输出普通节点定义。读取历史
 `[n2 n3]` 或 `chain [n2 n3] <role> ...` 时，按顺序展开，缩进孩子归最后一个 ref。
-图例还说明节点动作列、块头 `view=`、块头后的空行、
-`nodes`/`entries` 计数、几何省略与状态默认。动作列的 `swipe` 表示节点的源能力，受控滚动使用
+图例还说明节点动作列、块头后的空行、几何省略与状态默认。普通 `tree v4` 完整头只写
+`nodes`，差分头只写 `base` 与 `changes`；块头 `view=` 以及 `nodes`/`entries` 两项计数
+属于 `inspect v3` 补看头。动作列的 `swipe` 表示节点的源能力，受控滚动使用
 `operation.type=scroll` 和 `container`。嵌套容器可按要滚动的区域选择 ref。
 `effect.state` 报告内容位移证据，执行事实由 `outcome` 表达。
 
@@ -116,7 +118,7 @@ Label、最近祖先关系及安全点，child 丢失或内容被替换返回 `4
 
 `snap` 的 schema 只有一个必填 `reference`（`O…`/`P…`，≤64）。它与 `observe` 共用
 引用解析口径，额外拒绝本次请求 P 的自引用。它只读取一张图，不读取树或发布观察。
-成功时结果是顶层 `image` 元数据加一个 `ImageContent`；`result v2` 以
+成功时结果是顶层 `image` 元数据加一个 `ImageContent`；`result v3` 以
 `image=<紧凑 JSON>` 输出同一元数据（不含 base64），`structuredContent` 在顶层 `image` 携带
 同组成员，三种结果模式都只发送一个 `ImageContent`。`isError=false` 要求完整图片实际交付；
 重复 P 的无图摘要、失败、准入或传输错误均为 `isError=true`。取消见第 6 节。
@@ -170,8 +172,8 @@ kind 成员矩阵是互斥权威：
 
 | 模式 | `content` | `structuredContent` |
 | --- | --- | --- |
-| `both` | 完整 `result v2` 文本与图片 | 完整 `Result` JSON |
-| `text`（默认） | 完整 `result v2` 文本与图片 | 不发送 |
+| `both` | 完整 `result v3` 文本与图片 | 完整 `Result` JSON |
+| `text`（默认） | 完整 `result v3` 文本与图片 | 不发送 |
 | `structured` | 图片；`isError=true` 时附最小 `diagnostic v1` 文本 | 完整 `Result` JSON |
 
 完整结果是 `(canonical A, CallToolResult.IsError, ImageContent)`。`A` 是去除图片 base64
@@ -181,7 +183,7 @@ kind 成员矩阵是互斥权威：
 的宿主应使用 `both` 或 `text`。模式不用于脱敏或截断，不发布 `outputSchema`。
 
 `effect` 与 `observation.quality` 按同一份 `Result` 投影，三种模式承载相同字段与值：
-`result v2` 在 `phase` 之后投影 `effect.state`，在观察字段中投影
+`result v3` 在 `phase` 之后投影 `effect.state`，在观察组中投影
 `observation.quality.state`、`observation.quality.samples` 与
 `observation.quality.stop_reason`；`structured` 与 `both` 的 `structuredContent` 保留同一份
 对象，`text` 不发送结构化内容。适配器不重算或补投影这些事实；`effect` 只由 `scroll` 的
@@ -189,25 +191,25 @@ kind 成员矩阵是互斥权威：
 `unknown`/`0`/`not_sampled`），只有没有树的失败观察不携带它。两者的成员与取值见
 [接口契约](interface.md) §11。
 
-复合 `text` 的 `text_input` 也按同一份 `Result` 投影：`result v2` 在 `effect` 之后输出
+复合 `text` 的 `text_input` 也按同一份 `Result` 投影：`result v3` 在 `effect` 之后输出
 `text_input.write` 与 `text_input.enter` 两个 token（固定顺序，枚举
 `not_executed|uncertain|executed`），`structured` 与 `both` 的 `structuredContent` 保留同一
 对象；显式 `press_enter=false` 和非法组合不会产生该对象。首次结果、运行中 `status(P)`、
 重复 P 与冻结结果使用同一快照。
 
-`wait_for` 的 `wait` 对象也按同一份 `Result` 投影：`result v2` 输出 `wait.trigger`（token）、
+`wait_for` 的 `wait` 对象也按同一份 `Result` 投影：`result v3` 输出 `wait.trigger`（token）、
 `wait.matched`（紧凑 JSON 数组）与 `wait.elapsed_ms`（数字字面量），成员顺序固定为
 `trigger`、`matched`、`elapsed_ms`；`matched` 为空时服务端已省略该成员，适配器不补
 `null`、不补空数组。`structured` 与 `both` 的 `structuredContent` 保留同一份对象。验证采集
 失败的结果按第 3 节的诊断投影透传 `wait.trigger` 与 `wait.elapsed_ms`，不输出
 `wait.matched`。
 
-`snap` 的顶层 `image` 也按同一份 `Result` 投影：`result v2` 在 `saved` 之后、`session` 之前
+`snap` 的顶层 `image` 也按同一份 `Result` 投影：`result v3` 在 `saved` 之后、`session` 之前
 输出 `image=<紧凑 JSON>`，`structuredContent` 保留同一元数据对象；两者都不包含 base64。
 图片字节只出现在唯一的 `ImageContent`。失败、重复 P 与 `status(P)` 摘要没有顶层 `image`，
 也不会被适配器补成空对象。
 
-完整文本第一行为 `result v2 is_error=<true|false>`，最后为 `end result`。已知字段按
+完整文本第一行为 `result v3 is_error=<true|false>`，最后为 `end result`。已知字段按
 `Result` 的公共顺序输出，字段行和块可以交错；例如 shell 块之后仍可有错误与恢复字段。
 字段行为 `key=value`，受控 ID、枚举、时间戳、整数、布尔可用无空白、`=`、引号、反斜杠的
 ASCII token；任意文本与设备来源字符串使用 JSON 字符串，空串和非法 token 也使用 JSON
@@ -219,8 +221,32 @@ json v1 path="/observation/tree" value={"format":"full","scope":"","root":null}
 
 `path` 为 RFC 6901 JSON Pointer，`~`、`/` 分别转义为 `~0`、`~1`。每个事实路径只编码
 一次。块前恰好一个空行，块后接字段或结果终止行时没有额外空行；相邻块之间恰好一个空行。
-块头的 `nodes`、`changes`、`events`、`output_bytes` 仅为派生计数；delta 的
-`scope`、subtree/query 的 `tree_scope` 也是派生显示，不新增 `A` 的成员。
+块头的 `nodes`、`changes`、`events`、`output_bytes` 仅为派生计数。普通 full 恢复时使用
+固定 `scope=reported_visible_with_context`，该字段不写入 `tree v4` 头；delta 不携带也不
+恢复 `scope`。`inspect` 的 subtree/query 头中 `tree_scope` 仍是派生显示，不新增 `A` 的
+成员。
+
+连续的 `observation.*` 字段组成观察组。组以一行无缩进的 `observation` 开始，随后每项写
+一个 ASCII 空格和去掉 `observation.` 的相对路径，例如：
+
+```text
+observation
+ status=complete
+ id=Oabc_76
+ revision=4
+ quality.state=stable
+```
+
+顶层非观察字段、空行、可读块或 `json v1` 会结束当前组；其后仍有观察字段时另开一组。
+各组合并到同一个 `observation` 对象。跨组重复路径、重复树、祖先与子路径冲突均为无效
+文本。完整 O 从组内 `id` 取得；在 `structuredContent` 中仍是 `observation.id`。
+`observation=null` 和无法无损表示的观察复合值继续使用顶层标量或绝对 JSON Pointer 兜底。
+树仅在所属完整 O 可读且类型化往返无损时进入可读块，否则写
+`json v1 path="/observation/tree" value=…`。
+
+`start` 的首个存在观察使用组内完整 O。`observe`、`wait_for`、`act` 和变更类 `app`
+返回新观察时同样从组内取 O。看到 `base=_72` 只用于定位读树基线；需要调用时，用完整 O/P
+或当前 ready O。`inspect` 始终使用完整历史 O 和实际节点 ref。
 
 `structured` 的错误文本使用 `diagnostic v1 is_error=true` / `end diagnostic`，只包含
 操作号、操作状态、outcome、phase、目标引用、准入/消息状态、观察 status/id、会话、收尾、
@@ -247,10 +273,11 @@ json v1 path="/observation/tree" value={"format":"full","scope":"","root":null}
 元数据；不得补 `task_id`、`display_id`、PID、`ownership` 或其他设备事实，也不得声称服务已
 登记或已 finished。适配器自身的参数接入拒绝不分配 P，也不补 `app`。
 
-文本字节是稳定契约：外层仍使用 `result v2`，其成员顺序、分类与兜底规则不变；树与补看正文
-分别由块头 `tree v3`、`inspect v3` 标识独立语法，不改变 `result v2` 的字段成员、JSON 兜底
-或 `structuredContent`。取消统一标为 `isError=true`。工具名称、描述、入参 schema 与目录
-指纹随发布清单核验，描述变更会改变目录指纹，部署必须按清单重新核验。
+文本字节是稳定契约：完整结果使用 `result v3`；普通树与详细补看正文分别由块头
+`tree v4`、`inspect v3` 标识独立语法。三层版本按块头分派，不改变共享事实集、
+`structuredContent` 或绝对 JSON Pointer 兜底。取消统一标为 `isError=true`。工具名称、
+描述、入参 schema 与目录指纹随发布清单核验，描述变更会改变目录指纹，部署必须按清单
+重新核验。
 
 树、图片与 shell 输出的事实来源都是服务的同一份结果。base64 只出现在 HTTP 载体
 `observation.image.base64` 与 MCP `ImageContent.data`；可读正文与 `structuredContent`
@@ -286,84 +313,111 @@ json v1 path="/observation/tree" value={"format":"full","scope":"","root":null}
 树块只投影本次 `Result` 中已有的树或补看内容：不新增采集、不展开 delta、不缓存基线，
 也不读取请求参数、时间或随机数；同一个 `Result` 重复渲染逐字节相同。
 
-在 `result v2` 文本里（`text`/`both` 模式），错误结果同样按成员投影：`act` 重验失败交付的
+在 `result v3` 文本里（`text`/`both` 模式），错误结果同样按成员投影：`act` 重验失败交付的
 新观察会带树块，`is_error=true` 与树块可以出现在同一个结果里。交付与否不改变 `is_error` 的
 判定：`act` 看 `outcome` 是否为 `executed`，`observe` 与 `wait_for` 看是否发布出核心 O，
 其余工具按 `error` 与各自的查询事实。
 `structured` 模式的错误文本是 `diagnostic v1`，不含树块。
 
-**观察块。** 块头之后是一个空行、节点行，最后是终止行：
+**普通观察树。** 完整块只投影 compact full，差分只投影 compact delta。块头之后是一个
+空行、节点行，最后是 `end tree`：
 
 ```text
-tree v3 format=full id=O3 scope=reported_visible_with_context view=compact nodes=9 entries=9
+result v3 is_error=false
+observation
+ status=complete
+ id=Oabc_72
 
-n1 root [0,0,1080,2400]
-  n2 group
-    n3 button [24,60,144,180] "返回" tap
-    n4 "设置"
-    n6 switch [900,60,1032,180] "启用" tap checked=true
-  n5 scroll [0,220,1080,2400] axis=y
-    n12 group -
-      n13 input [48,1850,1032,1990] "搜索设置" value="" hint="输入关键词" tap text
-    n14 group -
+tree v4 full nodes=8
+
+n1 root 0,0,1080,2400
+ n2 button @ "设置"
+  n3 button 24,60,144,180 "返回"
+  n4 input 180,60,1032,180 "搜索设置" value="" hint="输入关键词"
+ n5 scroll 0,300,1080,2400 axis=y
+  n6 switch 900,300,1032,420 "启用" tap checked=true
+  n8 "网络"
+ n9 group 0,1800,1080,2400 "详情"
 end tree
+end result
 ```
 
 普通节点行固定列序为
-`缩进 n<ref> [<role>] [<bounds>] "label"… value="…" hint="…" 动作词 标志`。
+`缩进 n<ref> [<role>] [<bounds>|@] "label"… value="…" hint="…" 动作词 标志`。
 读取 `n<ref>` 后，首项为不带引号的合法角色词时使用该显式角色；首项为 JSON 字符串字面量时
-默认 `text`，该字符串是第一个 label；首项为几何（`[l,t,r,b]` 或 `-`）、`value=`、
+默认 `text`，该字符串是第一个 label；首项为几何（`l,t,r,b`、`@` 或 `-`）、`value=`、
 `hint=`、普通动作（`tap`/`long_press`/`swipe`）、状态或属性标记、或行尾时默认 `view`。
 发送端只有在省略后按上述判据恢复出原角色、且首项不会被误读为显式角色词时才省略角色：
-无几何且有 label 的 `text` 省略 `text`；无 label 或带几何列（`[l,t,r,b]`/`-`）的 `text`
+无几何且有 label 的 `text` 省略 `text`；无 label 或带几何列（`l,t,r,b`/`@`/`-`）的 `text`
 显式写 `text`；首项为几何、`value=`、`hint=`、普通动作、状态或属性标记、或行尾的 `view`
 省略 `view`，首项为 label 或角色词（包括输入动作 `text`）的 `view` 显式写 `view`；
 其他角色始终显式。引号内的角色词仍是 label。
 
-动作词为 `tap`、`long_press`、`text`、`swipe`，来自 `Node.actions` 的源能力词表；受控滚动
-不增加动作词，以 `act.operation.type=scroll` 表达。标志为 `enabled=false|null`、
+只有 `button`、`input`、`scroll` 具有对应默认动作，分别为 `tap`、`text`、`swipe`；其他
+角色没有可推断的默认动作。完整显式动作列表保留原顺序与重复项。省略默认词后，其余动作
+必须是严格源顺序 `tap → long_press → text → swipe`，再按其在该顺序中的位置插回默认动作。
+默认动作缺失时，保留其余源动作并在动作列末尾写 `!tap`、`!text` 或 `!swipe`。若其余动作
+不是严格源序，或无法按规则完整恢复，写完整显式列表。出现对应否定词时不再补回默认动作；
+同一动作不能既显式出现又被否定，其他角色的否定词无效。`!动作` 只表示源能力缺失，不授予
+动作。受控滚动不增加动作词，以 `act.operation.type=scroll` 和 `operation.container` 表达。
+
+标志为 `enabled=false|null`、
 `focused`/`selected`/`protected` 的 `true|null`、`checked=true|null`、
 `axis=x|y|both`、`resource="…"` 与 `context`。设备来源字符串按 JSON 字符串字面量转义，
 `<`、`>`、`&` 保持原样；缺省值按协议省略规则不输出。
 
-几何列与节点定义一一对应：已知矩形写 `[l,t,r,b]`，源未提供几何写 `-`；观察视图里按 compact
-几何策略省略的已知矩形直接没有该列，`-` 不表示隐藏。该策略保留合成根与 `actions` 非空
-节点的矩形，省略无动作 `text` 与匿名普通 `view`/`group` 的矩形，其余展示节点在裁剪到屏幕
-后的矩形与父链上最近交付者四边完全相同、或该可见面积小于屏幕面积的 1% 时省略。随后按
-[接口策略](interface.md#node)省略符合条件的小图，清理因此变空的匿名容器，并提升隐藏匿名容器
-的唯一孩子。text、structured 和 both 里的 compact 节点集合相同。详细补看交付完整快照的
-节点与已知原矩形。
+几何列与节点定义一一对应：已知矩形写无括号的 `l,t,r,b`，四边均为有符号十进制整数并满足
+`right>=left`、`bottom>=top`；源未提供几何写 `-`；观察视图里按 compact 几何策略隐藏的
+已知矩形直接没有该列，`-` 不表示隐藏。同一串行化定义中，普通节点的已知矩形与最近一个有
+已知矩形的严格祖先四边完全一致时写 `@`；隐藏或未知几何不会清除该祖先。每个 `+`、`=` 子树
+独立维护祖先，不从其他定义、base 或前一条结果继承；无可解析祖先时 `@` 无效。历史链定义
+仍显式写矩形，不使用 `@`。
 
-历史 `[n2 n3]` 代表匿名默认 `view` 链；历史 `chain [n2 n3] <role> ...` 写出角色和共享字段。
-列表位于定义开头。按顺序展开后，缩进的孩子归链尾，链内编号均可引用。`nodes` 计展开后
-逻辑节点数，`entries` 计定义行数。新 full 与 detailed 块的两项计数相同。
-`checked` 默认 `false`（省略），只有 `true` 与 `null` 显式出现。完整节点的缺席布尔恢复为
-已知默认，显式 null 保持未知；set 的缺席只表示未修改。树与补看块均不输出 defaults 行。
+compact 几何策略保留合成根与 `actions` 非空节点的矩形，省略无动作 `text` 与匿名普通
+`view`/`group` 的矩形，其余展示节点在裁剪到屏幕后的矩形与父链上最近交付者四边完全相同、
+或该可见面积小于屏幕面积的 1% 时省略。随后按[接口策略](interface.md#node)省略符合条件
+的小图，清理因此变空的匿名容器，并提升隐藏匿名容器的唯一孩子。text、structured 和 both
+里的 compact 节点集合相同。详细补看交付完整快照的节点与已知原矩形。
 
-delta 块头为
-`tree v3 format=delta id=<O> base=<O2> view=compact scope=<scope> changes=<n>`，正文按
-`set → add → remove → children → replace` 顺序输出。`changes` 是五个块的顶层声明条数
-之和：一个 `set` 条目即使改了多个字段也只计 1，chain 内的 ref 数也不计入。
+新 `tree v4` 只生成普通节点定义。读取端继续接受兼容历史的 `[n2 n3]` 匿名默认 `view` 链和
+`chain [n2 n3] <role> ...` 定义；按顺序展开后，缩进的孩子归链尾，链内编号均可引用。
+full 块头的 `nodes` 计展开历史链后的逻辑节点数。完整节点的缺席布尔恢复为已知默认，显式
+`null` 保持未知；`checked` 默认 `false`。set 的缺席只表示未修改。树与补看块均不输出
+defaults 行。
+
+delta 块头为 `tree v4 delta base=<O|_<序号>> changes=<n>`，正文按
+`set → add → remove → children → replace` 顺序输出。当前 O 来自同一结果的 `observation`
+组，不在块头重复。只有当前 O 与真实 base 都能在最后一个下划线处分成逐字节相同的
+`O<实例>` 前缀和规范正十进制序号时，base 才写成 `_<序号>`；否则写完整 O。短 base 只用于
+读树，不能作为调用引用。`changes` 是五个块的顶层声明条数之和：一个 `set` 条目即使改了
+多个字段也只计 1。零变化 delta 仍保留 `base` 与 `changes=0`，正文为空。
 
 ```text
-tree v3 format=delta id=O4 base=O3 view=compact scope=reported_visible_with_context changes=6
+result v3 is_error=false
+observation
+ status=complete
+ id=Oabc_76
 
-~ n7 label=["WLAN 已关闭"] actions=["tap"] bounds=[40,300,240,380]
-~ n8 checked=false
-+ n14 group
-  n15 text [48,490,700,550] "移动网络" tap
-- n16
-children n5 = [n6 n9 n14]
-= n12 group
-  n91 input [48,1850,1032,1990] "搜索设置" value="" hint="输入关键词" tap text
+tree v4 delta base=_72 changes=6
+
+~ n4 label=["无线设置"]
+~ n5 bounds=[40,300,1080,1800]
++ n11 button "返回上页" !tap
+ n12 "网络"
+- n8
+children n1 = [n2 n5 n11 n9]
+= n9 group 0,1800,1080,2400 "详情"
+ n10 input @ "备注" value="" hint="输入备注"
 end tree
+end result
 ```
 
 `~` 行只列实际变化的字段，字段值保留显式 `false`、`""`、`[]` 与 `null`；字段顺序为
 `label`、`actions`、`bounds`、`enabled`、`focused`、`selected`、`checked`、`value`、
 `hint`、`protected`、`axis`、`resource`。`bounds=hidden` 表示该几何按策略不交付，
 `bounds=null` 表示置为未知。`SetNode` 没有 `role`，`~` 行也不输出 `role`。
-`+` 与 `=` 后输出普通节点定义及其子树。读取历史 `+` 与 `=` 定义中的链时按相同规则展开。
+`+` 与 `=` 后输出普通 v4 节点定义及其子树；前缀只出现在所属定义根行，不计入缩进层级。
+`@`、无括号矩形和默认动作用于这些普通定义，不应用于 `~` 的 set 值。
 `add` / `remove` 保持结果中的顺序；`set`、`children`、`replace` 按 ref 数值升序输出。
 同一个 `base` 下的新 delta 覆盖旧 delta，不叠加；块头 `base=` 是唯一锚点。
 
@@ -372,11 +426,13 @@ end tree
 随后是一个空行与正文。
 `tree` 输出整树，`subtree` 额外带 `root=`，`query` 按命中顺序输出
 `match i/N path=[…]` 与完整命中子树，命中之间以空行分隔。`matches` 是本次返回条数，
-`total` 是预算前命中数，`truncated=true` 表示引擎只返回了完整条目前缀。`nodes` 是正文
-逻辑节点数之和；查询的嵌套命中按各自子树重复计数。`path` 是 root..parent 的 ref 序列，
+`total` 是预算前命中数，`truncated=true` 表示引擎只返回了完整条目前缀。`nodes` 计展开后的
+逻辑节点数，`entries` 计正文定义行数。查询按每个命中子树分别累加两项计数。`path` 是
+root..parent 的 ref 序列，
 不含命中节点本身。补看固定使用 detailed 视图：逐节点展开、不折 chain、不隐藏已知几何。
-其完整节点行同样适用 v3 角色规则；例如带已知几何的 `view` 节点省略 `view`，带几何的
-`text` 节点保留 `text`，未知几何仍写 `-`。
+`inspect v3` 使用两格缩进、`[l,t,r,b]` 方括号矩形和显式动作词，不使用普通 v4 的默认动作、
+`@` 或短 base。其完整节点行仍按首列恢复角色；例如带已知几何的 `view` 节点省略 `view`，
+带几何的 `text` 节点保留 `text`，未知几何仍写 `-`。
 
 **预算与完整性。** MCP 不设文本大小上限，不产生 `omitted`。可读块能无损表示时完整输出；
 非法 ref、缺少必要元数据、未知成员或其他不可表示情况以完整 `json v1` 兜底。树 ref 必须

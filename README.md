@@ -8,7 +8,7 @@ HTTP 协议配对。
 - 模块：`github.com/malyjacob/mobile-use-vnext`
 - Go：1.27.1，启用 `GOEXPERIMENT=jsonv2`
 - 契约：`contract_version = "21"`，服务、HTTP 客户端、控制 App 精确相等才做普通工作
-- 发行：`0.23.0`；`release/versions.json` 是发行号、契约号与 Android versionCode（25）的唯一
+- 发行：`0.24.0`；`release/versions.json` 是发行号、契约号与 Android versionCode（26）的唯一
   来源，构建生成 Go/Java 常量
 
 ## 能力边界
@@ -33,7 +33,9 @@ HTTP 协议配对。
   `internal/client`；默认部署会把 linux/arm64 适配器安装到 chroot 并在手机
   `127.0.0.1:18882` 启动 HTTP 入口（主机转发 `18883`），主机自建适配器仍可选。见
   [MCP 入口](docs/mcp.md)、[Agent 接入指南](docs/integration.md) 与 [Go 客户端](docs/client.md)。
-  可读树块以 `tree v3`/`inspect v3` 标识；外层 `result v2` 与 `structuredContent` 数据模型不变。
+  完整文本使用 `result v3` 并按连续观察字段分组；普通树以 `tree v4` 标识，详细补看继续使用
+  `inspect v3`。短 base、默认动作与同矩形引用只改变文本表达，`structuredContent` 保持同一
+  事实集。
 
 ## 目录
 

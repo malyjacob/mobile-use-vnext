@@ -769,7 +769,7 @@ func fakeDiagnosticText(payload map[string]any) string {
 
 func fakeResultText(payload map[string]any, isError bool) string {
 	var builder strings.Builder
-	builder.WriteString("result v2 is_error=")
+	builder.WriteString("result v3 is_error=")
 	builder.WriteString(strconv.FormatBool(isError))
 	builder.WriteByte('\n')
 	for key, value := range payload {
@@ -823,30 +823,31 @@ func writeFakeObservation(builder *strings.Builder, value any) {
 		writeFakeField(builder, "observation", value)
 		return
 	}
+	builder.WriteString("observation\n")
 	for _, key := range []string{
 		"status", "id", "origin", "revision", "captured_at",
 		"actionable_until", "screen", "foreground", "missing", "image", "error",
 	} {
 		if child, ok := observation[key]; ok {
-			writeFakeField(builder, "observation."+key, child)
+			writeFakeObservationField(builder, key, child)
 		}
 	}
 	if quality, present := observation["quality"]; present {
 		qualityObject, ok := quality.(map[string]any)
 		if !ok {
-			writeFakeField(builder, "observation.quality", quality)
+			writeFakeObservationField(builder, "quality", quality)
 		} else {
 			// The contract renders state/stop_reason as unquoted tokens and
 			// samples as a bare number; the fake must replay that shape so the
 			// probe's readable-line assertions are exercised.
 			if state, ok := qualityObject["state"].(string); ok && fakeAppToken(state) {
-				builder.WriteString("observation.quality.state=" + state + "\n")
+				builder.WriteString(" quality.state=" + state + "\n")
 			}
 			if samples, ok := qualityObject["samples"].(int); ok && samples >= 0 {
-				builder.WriteString("observation.quality.samples=" + strconv.Itoa(samples) + "\n")
+				builder.WriteString(" quality.samples=" + strconv.Itoa(samples) + "\n")
 			}
 			if stopReason, ok := qualityObject["stop_reason"].(string); ok && fakeAppToken(stopReason) {
-				builder.WriteString("observation.quality.stop_reason=" + stopReason + "\n")
+				builder.WriteString(" quality.stop_reason=" + stopReason + "\n")
 			}
 		}
 	}
@@ -855,24 +856,27 @@ func writeFakeObservation(builder *strings.Builder, value any) {
 		return
 	}
 	format, _ := tree["format"].(string)
-	id, _ := observation["id"].(string)
-	scope, _ := tree["scope"].(string)
-	if scope == "" {
-		scope = "reported_visible_with_context"
-	}
 	base, _ := tree["base"].(string)
-	block := "tree v3 format=" + format + " id=" + id + " scope=" + scope
-	if format == treeDelta && base != "" {
-		block += " base=" + base
-	}
-	block += " view=compact"
+	block := ""
 	if format == treeDelta {
-		block += " changes=0\n\n"
+		block = "tree v4 delta base=" + base + " changes=0\n\n"
 	} else {
-		block += " nodes=1 entries=1\n\nn1 root [0,0,1080,2400]\n"
+		block = "tree v4 full nodes=1\n\nn1 root 0,0,1080,2400\n"
 	}
 	block += "end tree\n"
 	writeFakeBlock(builder, block)
+}
+
+func writeFakeObservationField(builder *strings.Builder, key string, value any) {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		encoded = []byte(`null`)
+	}
+	builder.WriteByte(' ')
+	builder.WriteString(key)
+	builder.WriteByte('=')
+	builder.Write(encoded)
+	builder.WriteByte('\n')
 }
 
 func writeFakeInspection(builder *strings.Builder, value any) {
@@ -1324,7 +1328,9 @@ func TestAdapterChecksImageLeakFails(t *testing.T) {
 func TestInstructionsCheck(t *testing.T) {
 	source := mcpserver.ServerInstructions()
 	for _, required := range []string{
-		"新 compact full/delta 只交付普通节点定义",
+		"新 v4 只生成普通节点定义",
+		"tree v4 full nodes=<n>",
+		"inspect v3 一律使用两格缩进",
 		"链下缩进的孩子属于链尾",
 		"inspect({reference:原 act 的 O,node:诊断 ref})",
 		"O 过期后仍可能可读",
@@ -2253,15 +2259,11 @@ func checkScrollActResult(projected *callResult, mode string) *checkError {
 	}
 	quality := view.Observation.Quality
 	if mode != resultModeStructured {
-		for _, wanted := range []string{
-			"effect.state=" + view.Effect.State,
-			"observation.quality.state=" + quality.State,
-			"observation.quality.samples=" + strconv.Itoa(quality.Samples),
-			"observation.quality.stop_reason=" + quality.StopReason,
-		} {
-			if failure := requireTextLine(projected, wanted); failure != nil {
-				return failure
-			}
+		if failure := requireTextLine(projected, "effect.state="+view.Effect.State); failure != nil {
+			return failure
+		}
+		if failure := requireQualityTextLines(projected, quality); failure != nil {
+			return failure
 		}
 	}
 	effectState, found := lookupPath(projected.object, []string{"effect", "state"})

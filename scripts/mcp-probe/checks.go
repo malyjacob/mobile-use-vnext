@@ -651,8 +651,20 @@ func checkObservationTreeBlock(projected *callResult, observation *observationVi
 	if observation == nil {
 		return failf("text_tree_block_missing")
 	}
+	if !validTreeTextO(observation.ID) {
+		return failf("text_tree_id_missing")
+	}
 	format := treeFormatOf(observation)
-	block, failure := treeBlockText(projected, "tree v3 format="+format+" id="+observation.ID)
+	headerPrefix := ""
+	switch format {
+	case treeFull:
+		headerPrefix = "tree v4 full nodes="
+	case treeDelta:
+		headerPrefix = "tree v4 delta base="
+	default:
+		return failf("text_tree_format_invalid")
+	}
+	block, failure := treeBlockText(projected, headerPrefix)
 	if failure != nil {
 		return failure
 	}
@@ -662,16 +674,50 @@ func checkObservationTreeBlock(projected *callResult, observation *observationVi
 	if !strings.HasSuffix(block, "end tree\n") {
 		return failf("tree_block_unterminated", field("tree_format", format))
 	}
+	if format == treeDelta {
+		firstLine := block
+		if separator := strings.IndexByte(block, '\n'); separator >= 0 {
+			firstLine = block[:separator]
+		}
+		rawBase, failure := treeHeaderBase(firstLine)
+		if failure != nil {
+			return failure
+		}
+		base, failure := resolveTreeBase(observation.ID, rawBase)
+		if failure != nil {
+			return failure
+		}
+		structuredBase := ""
+		if observation.Tree != nil {
+			structuredBase = observation.Tree.Base
+		}
+		if structuredBase != base {
+			return failf("text_tree_base_mismatch",
+				field("header", base),
+				field("structured", structuredBase))
+		}
+	}
 	if containsCompactTreeChain(block) {
 		return failf("tree_chain_present", field("tree_format", format))
 	}
 	return nil
 }
 
+func treeHeaderBase(header string) (string, *checkError) {
+	rest, found := strings.CutPrefix(header, "tree v4 delta base=")
+	if !found {
+		return "", failf("text_tree_header_invalid")
+	}
+	separator := strings.LastIndex(rest, " changes=")
+	if separator <= 0 {
+		return "", failf("text_tree_header_invalid")
+	}
+	return rest[:separator], nil
+}
+
 // containsCompactTreeChain reports whether a readable compact block uses the
-// historical square-bracket or explicit chain definition. The decoder accepts
-// those forms for replay compatibility, while a live product must emit only
-// ordinary node definitions after the compact-pruning contract.
+// historical square-bracket or explicit chain definition. A live product must
+// emit only ordinary node definitions after the compact-pruning contract.
 func containsCompactTreeChain(block string) bool {
 	for _, raw := range strings.Split(block, "\n") {
 		line := strings.TrimLeft(raw, " ")
@@ -955,13 +1001,32 @@ func requireTextLine(projected *callResult, wanted string) *checkError {
 // quality members with the same values as the typed projection. samples=0 must
 // be rendered explicitly.
 func requireQualityTextLines(projected *callResult, quality *qualityView) *checkError {
-	for _, wanted := range []string{
-		"observation.quality.state=" + quality.State,
-		"observation.quality.samples=" + strconv.Itoa(quality.Samples),
-		"observation.quality.stop_reason=" + quality.StopReason,
-	} {
-		if failure := requireTextLine(projected, wanted); failure != nil {
-			return failure
+	wanted := []string{
+		" quality.state=" + quality.State,
+		" quality.samples=" + strconv.Itoa(quality.Samples),
+		" quality.stop_reason=" + quality.StopReason,
+	}
+	wantedSet := make(map[string]bool, len(wanted))
+	found := make(map[string]bool, len(wanted))
+	for _, fieldLine := range wanted {
+		wantedSet[fieldLine] = true
+	}
+	for _, text := range projected.texts {
+		lines := strings.Split(strings.TrimSuffix(text, "\n"), "\n")
+		for start, line := range lines {
+			if line != "observation" {
+				continue
+			}
+			for index := start + 1; index < len(lines) && strings.HasPrefix(lines[index], " "); index++ {
+				if wantedSet[lines[index]] {
+					found[lines[index]] = true
+				}
+			}
+		}
+	}
+	for _, fieldLine := range wanted {
+		if !found[fieldLine] {
+			return failf("text_line_missing", field("line", fieldLine))
 		}
 	}
 	return nil

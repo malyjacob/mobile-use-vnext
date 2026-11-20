@@ -599,9 +599,9 @@ func TestActScrollForwarded(t *testing.T) {
 	}
 	text := testTextContent(t, result)
 	requireTestContains(t, text, "effect.state=observed")
-	requireTestContains(t, text, "observation.quality.state=unstable")
-	requireTestContains(t, text, "observation.quality.samples=3")
-	requireTestContains(t, text, "observation.quality.stop_reason=max_samples")
+	requireTestContains(t, text, " quality.state=unstable")
+	requireTestContains(t, text, " quality.samples=3")
+	requireTestContains(t, text, " quality.stop_reason=max_samples")
 	structured := testStructuredObject(t, result)
 	effect, _ := structured["effect"].(map[string]any)
 	if effect["state"] != "observed" {
@@ -650,7 +650,7 @@ func TestStrictAdmission(t *testing.T) {
 				t.Fatalf("%s: expected IsError", testCase.name)
 			}
 			text := testTextContent(t, result)
-			requireTestContains(t, text, "result v2 is_error=true\nerror.code=invalid_request")
+			requireTestContains(t, text, "result v3 is_error=true\nerror.code=invalid_request")
 			structured := testStructuredObject(t, result)
 			errorObject, ok := structured["error"].(map[string]any)
 			if !ok || errorObject["code"] != "invalid_request" {
@@ -673,7 +673,7 @@ func TestStrictAdmission(t *testing.T) {
 		if !result.IsError {
 			t.Fatal("trailing second value was accepted")
 		}
-		requireTestContains(t, testTextContent(t, result), "result v2 is_error=true\nerror.code=invalid_request")
+		requireTestContains(t, testTextContent(t, result), "result v3 is_error=true\nerror.code=invalid_request")
 		if fake.totalRequests() != 0 {
 			t.Fatal("client was called for a trailing value")
 		}
@@ -764,12 +764,10 @@ func TestStartProjectionWithFullTree(t *testing.T) {
 	text := testTextContent(t, result)
 	requireTestContains(t, text, "operation_id="+operation)
 	requireTestContains(t, text, "outcome=executed")
-	requireTestContains(t, text, "observation.status=complete")
-	requireTestContains(t, text, "observation.id=O1")
-	requireTestContains(t, text, "observation.screen="+testScreenJSON)
-	requireTestContains(t, text, "observation.foreground="+testForegroundJSON)
-	requireTestContains(t, text, "\n\ntree v3 format=full id=O1 scope=reported_visible_with_context view=compact nodes=1 entries=1\n"+
-		"\nn1 root [0,0,1080,2400]\nend tree\n")
+	requireTestContains(t, text, "\nobservation\n status=complete\n id=O1\n")
+	requireTestContains(t, text, "\n screen="+testScreenJSON+"\n")
+	requireTestContains(t, text, "\n foreground="+testForegroundJSON+"\n")
+	requireTestContains(t, text, "\n\ntree v4 full nodes=1\n\nn1 root 0,0,1080,2400\nend tree\n")
 	structured := testStructuredJSON(t, result)
 	requireTestContains(t, structured, fmt.Sprintf(`"operation_id":%q`, operation))
 	requireTestContains(t, structured, `"format":"full"`)
@@ -801,10 +799,9 @@ func TestObservePartialWithImage(t *testing.T) {
 	operation := fake.requestsFor("observe")[0].OperationID
 	text := testTextContent(t, result)
 	requireTestContains(t, text, "operation_id="+operation)
-	requireTestContains(t, text, "observation.status=partial")
-	requireTestContains(t, text, "observation.missing=[\"tree\"]")
-	requireTestContains(t, text, "\n\ntree v3 format=delta id=O2 base=O1 view=compact scope=reported_visible_with_context changes=0\n"+
-		"\nend tree\n")
+	requireTestContains(t, text, "\nobservation\n status=partial\n")
+	requireTestContains(t, text, "\n missing=[\"tree\"]\n")
+	requireTestContains(t, text, "\n\ntree v4 delta base=O1 changes=0\n\nend tree\n")
 	requireTestContains(t, text, "\"media_type\":\"image/png\"")
 	requireTestContains(t, text, "\"width\":2")
 	requireTestContains(t, text, "\"read_only\":true")
@@ -844,7 +841,7 @@ func TestObserveFailedWithoutObservation(t *testing.T) {
 		t.Fatal("failed observation without an O should be an error")
 	}
 	text := testTextContent(t, result)
-	requireTestContains(t, text, "observation.status=failed")
+	requireTestContains(t, text, "\nobservation\n status=failed\n")
 	requireTestContains(t, text, "error.code=hierarchy_unavailable")
 }
 
@@ -870,7 +867,7 @@ func TestActOutcomes(t *testing.T) {
 		}
 		text := testTextContent(t, result)
 		requireTestContains(t, text, "outcome=executed")
-		requireTestContains(t, text, "observation.status=failed")
+		requireTestContains(t, text, "\nobservation\n status=failed\n")
 	})
 
 	t.Run("not executed", func(t *testing.T) {

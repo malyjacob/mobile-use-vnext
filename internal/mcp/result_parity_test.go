@@ -193,9 +193,9 @@ func TestEffectQualityModeParity(t *testing.T) {
 		}
 		for _, line := range []string{
 			"effect.state=unknown",
-			"observation.quality.state=unknown",
-			"observation.quality.samples=0",
-			"observation.quality.stop_reason=not_sampled",
+			" quality.state=unknown",
+			" quality.samples=0",
+			" quality.stop_reason=not_sampled",
 		} {
 			requireTestContains(t, text, "\n"+line+"\n")
 		}
@@ -499,9 +499,9 @@ func TestHTTPModesSelectProjectionPerCall(t *testing.T) {
 
 func TestCatalogFingerprintBaseline(t *testing.T) {
 	// The catalog has thirteen tools. This baseline covers the caller-oriented
-	// descriptions after the tree guide moved to the server instructions, and
-	// after the shell description gained the managed-shell display semantics.
-	const baseline = "d9939b8f928fc282cfd118aa32ee4b4f20a5534e3ae6c4fb7d5665a0ee72e14c"
+	// descriptions after result v3/tree v4 local guidance was added to start,
+	// observe, wait_for, act, app and inspect.
+	const baseline = "5738c699da9c0a980e782f44943910718844447d9d00e04c0fb5a79682afc3cf"
 	if got := CatalogFingerprint(); got != baseline {
 		t.Fatalf("catalog changed: %s", got)
 	}

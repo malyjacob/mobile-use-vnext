@@ -84,32 +84,59 @@ func (b *treeTextBlock) finish() (string, bool) {
 }
 
 func renderFullTreeText(id string, tree *protocol.ReadTree) (string, bool) {
-	if !validateTreeTextToken(id) || !validateFullTree(tree) {
+	if !validateV4ObservationToken(id) || !validateFullTree(tree) || tree.View != protocol.ViewCompact {
 		return "", false
 	}
 	body := treeTextBuffer{}
-	nodes, entries := writeSubtree(&body, tree.Root, "")
-	header := "tree v3 format=full id=" + id +
-		" scope=" + tree.Scope + " view=" + tree.View +
-		" nodes=" + strconv.Itoa(nodes) + " entries=" + strconv.Itoa(entries)
+	nodes, _ := writeV4Subtree(&body, tree.Root, "")
+	header := "tree v4 full nodes=" + strconv.Itoa(nodes)
 	block := treeTextBlock{header: header, body: body, trailer: "end tree"}
 	return block.finish()
 }
 
 func renderDeltaTreeText(id string, delta *protocol.ReadDelta) (string, bool) {
-	if !validateTreeTextToken(id) || !validateDelta(delta) {
+	if !validateV4ObservationToken(id) || !validateDelta(delta) {
 		return "", false
 	}
 	changes := len(delta.Set) + len(delta.Add) + len(delta.Remove) +
 		len(delta.Children) + len(delta.Replace)
 	body := treeTextBuffer{}
 	writeDeltaBody(&body, delta)
-	header := "tree v3 format=delta id=" + id +
-		" base=" + delta.Base +
-		" view=" + delta.View +
-		" scope=" + protocol.Scope + " changes=" + strconv.Itoa(changes)
+	header := "tree v4 delta base=" + v4ShortDeltaBase(id, delta.Base) +
+		" changes=" + strconv.Itoa(changes)
 	block := treeTextBlock{header: header, body: body, trailer: "end tree"}
 	return block.finish()
+}
+
+// v4ShortDeltaBase uses the current full O to abbreviate a historical base only
+// when both end in a canonical positive uint64 sequence and their O<instance>
+// prefixes are byte-identical. Any ambiguity keeps the real full base.
+func v4ShortDeltaBase(current, base string) string {
+	currentPrefix, _, currentOK := v4SplitObservationSequence(current)
+	basePrefix, baseSequence, baseOK := v4SplitObservationSequence(base)
+	if !currentOK || !baseOK || currentPrefix != basePrefix {
+		return base
+	}
+	return "_" + baseSequence
+}
+
+func v4SplitObservationSequence(value string) (string, string, bool) {
+	if !validateV4ObservationToken(value) {
+		return "", "", false
+	}
+	index := strings.LastIndexByte(value, '_')
+	if index <= 1 || index == len(value)-1 {
+		return "", "", false
+	}
+	sequence := value[index+1:]
+	if sequence[0] == '0' {
+		return "", "", false
+	}
+	parsed, err := strconv.ParseUint(sequence, 10, 64)
+	if err != nil || parsed == 0 {
+		return "", "", false
+	}
+	return value[:index], sequence, true
 }
 
 func renderInspectionText(view *protocol.InspectionView) (string, bool) {
@@ -187,7 +214,7 @@ func writeDeltaBody(body *treeTextBuffer, delta *protocol.ReadDelta) {
 		body.write("\n")
 	}
 	for _, node := range delta.Add {
-		writeSubtree(body, node, "+ ")
+		writeV4Subtree(body, node, "+ ")
 	}
 	for _, ref := range delta.Remove {
 		body.write("- ")
@@ -207,7 +234,7 @@ func writeDeltaBody(body *treeTextBuffer, delta *protocol.ReadDelta) {
 		body.write("]\n")
 	}
 	for _, ref := range sortedDeltaKeys(delta.Replace) {
-		writeSubtree(body, delta.Replace[ref], "= ")
+		writeV4Subtree(body, delta.Replace[ref], "= ")
 	}
 }
 
@@ -350,35 +377,72 @@ func writeBounds(body *treeTextBuffer, bounds *protocol.Bounds) {
 	body.write("]")
 }
 
-// writeSubtree writes one complete subtree in tree order with an explicit stack,
-// so a deep tree cannot overflow the Go stack. The optional prefix is used by
-// delta add (+) and replace (=) roots. It returns the expanded logical node
-// count and the number of definition lines.
+type treeTextStyle uint8
+
+const (
+	treeTextStyleInspectV3 treeTextStyle = iota
+	treeTextStyleTreeV4
+)
+
+// writeSubtree writes one explicit inspect v3 subtree. writeV4Subtree selects
+// the compact tree style, while both share the same iterative traversal and
+// node field writer.
 func writeSubtree(body *treeTextBuffer, root *protocol.ReadNode, prefix string) (int, int) {
+	return writeSubtreeStyle(body, root, prefix, treeTextStyleInspectV3)
+}
+
+// Each v4 definition owns an ancestor stack, so delta + and = roots never
+// inherit @ references from another definition or historical result. Hidden
+// and unknown geometry do not clear the nearest known ancestor.
+func writeV4Subtree(body *treeTextBuffer, root *protocol.ReadNode, prefix string) (int, int) {
+	return writeSubtreeStyle(body, root, prefix, treeTextStyleTreeV4)
+}
+
+func writeSubtreeStyle(
+	body *treeTextBuffer,
+	root *protocol.ReadNode,
+	prefix string,
+	style treeTextStyle,
+) (int, int) {
 	if root == nil {
 		return 0, 0
 	}
 	type pendingNode struct {
-		node   *protocol.ReadNode
-		depth  int
-		prefix string
+		node           *protocol.ReadNode
+		depth          int
+		prefix         string
+		ancestorKnown  bool
+		ancestorBounds protocol.Bounds
 	}
 	stack := []pendingNode{{node: root, prefix: prefix}}
 	nodes, entries := 0, 0
 	for len(stack) > 0 {
 		entry := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
-		writeIndent(body, entry.depth)
+		referenceBounds := style == treeTextStyleTreeV4 &&
+			entry.node.Bounds.Kind == protocol.GeometryKnown &&
+			!entry.node.IsChain() && entry.ancestorKnown &&
+			entry.node.Bounds.Rect == entry.ancestorBounds
+		writeTreeTextIndent(body, entry.depth, style)
 		if entry.prefix != "" {
 			body.write(entry.prefix)
 		}
-		writeNodeContent(body, entry.node)
+		writeNodeContentStyle(body, entry.node, referenceBounds, style)
 		nodes += len(entry.node.Refs())
 		entries++
+
+		childKnown := entry.ancestorKnown
+		childBounds := entry.ancestorBounds
+		if entry.node.Bounds.Kind == protocol.GeometryKnown {
+			childKnown = true
+			childBounds = entry.node.Bounds.Rect
+		}
 		for index := len(entry.node.Children) - 1; index >= 0; index-- {
 			stack = append(stack, pendingNode{
-				node:  entry.node.Children[index],
-				depth: entry.depth + 1,
+				node:           entry.node.Children[index],
+				depth:          entry.depth + 1,
+				ancestorKnown:  childKnown,
+				ancestorBounds: childBounds,
 			})
 		}
 	}
@@ -386,7 +450,14 @@ func writeSubtree(body *treeTextBuffer, root *protocol.ReadNode, prefix string) 
 }
 
 func writeIndent(body *treeTextBuffer, depth int) {
-	spaces := depth * 2
+	writeTreeTextIndent(body, depth, treeTextStyleInspectV3)
+}
+
+func writeTreeTextIndent(body *treeTextBuffer, depth int, style treeTextStyle) {
+	spaces := depth
+	if style == treeTextStyleInspectV3 {
+		spaces *= 2
+	}
 	for spaces > 0 {
 		chunk := spaces
 		if chunk > len(treeTextIndentUnit) {
@@ -397,13 +468,18 @@ func writeIndent(body *treeTextBuffer, depth int) {
 	}
 }
 
-// writeNodeContent writes the fixed node column order: ref or chain, an
-// optional recoverable role, bounds, labels, value, hint, actions, then flags.
-// A hidden geometry column is omitted; a missing source rectangle is written as
-// "-".
 func writeNodeContent(body *treeTextBuffer, node *protocol.ReadNode) {
-	if len(node.Chain) > 0 {
-		if isAnonymousDefaultViewChain(node) {
+	writeNodeContentStyle(body, node, false, treeTextStyleInspectV3)
+}
+
+func writeNodeContentStyle(
+	body *treeTextBuffer,
+	node *protocol.ReadNode,
+	referenceBounds bool,
+	style treeTextStyle,
+) {
+	if node.IsChain() {
+		if style == treeTextStyleInspectV3 && isAnonymousDefaultViewChain(node) {
 			writeChainRefs(body, node.Chain)
 			body.write("\n")
 			return
@@ -412,7 +488,7 @@ func writeNodeContent(body *treeTextBuffer, node *protocol.ReadNode) {
 		writeChainRefs(body, node.Chain)
 		body.write(" ")
 		body.write(string(node.Role))
-		writeNodeColumns(body, node)
+		writeNodeColumnsStyle(body, node, false, style, true)
 		body.write("\n")
 		return
 	}
@@ -421,7 +497,7 @@ func writeNodeContent(body *treeTextBuffer, node *protocol.ReadNode) {
 		body.write(" ")
 		body.write(string(node.Role))
 	}
-	writeNodeColumns(body, node)
+	writeNodeColumnsStyle(body, node, referenceBounds, style, false)
 	body.write("\n")
 }
 
@@ -480,17 +556,21 @@ func nodeFirstColumnIsRole(node *protocol.ReadNode) bool {
 	return protocol.Role(node.Actions[0]).Valid()
 }
 
-// writeNodeColumns writes the shared columns after the role position. Every
-// written column owns its leading space, so an omitted role leaves no gap.
+// writeNodeColumns writes the inspect v3 columns. writeNodeColumnsStyle keeps
+// the complete field sequence single-sourced and dispatches only geometry and
+// default-action rendering by style.
 func writeNodeColumns(body *treeTextBuffer, node *protocol.ReadNode) {
-	if node.Bounds.Kind != protocol.GeometryHidden {
-		body.write(" ")
-		if node.Bounds.Kind == protocol.GeometryUnknown {
-			body.write("-")
-		} else {
-			writeBounds(body, &node.Bounds.Rect)
-		}
-	}
+	writeNodeColumnsStyle(body, node, false, treeTextStyleInspectV3, true)
+}
+
+func writeNodeColumnsStyle(
+	body *treeTextBuffer,
+	node *protocol.ReadNode,
+	referenceBounds bool,
+	style treeTextStyle,
+	explicitActions bool,
+) {
+	writeNodeGeometry(body, node, referenceBounds, style)
 	for _, label := range node.Label {
 		body.write(" ")
 		writeJSONString(body, label)
@@ -503,9 +583,10 @@ func writeNodeColumns(body *treeTextBuffer, node *protocol.ReadNode) {
 		body.write(" hint=")
 		writeJSONString(body, *node.Hint)
 	}
-	for _, action := range node.Actions {
-		body.write(" ")
-		body.write(string(action))
+	if style == treeTextStyleTreeV4 && !explicitActions {
+		writeV4OrdinaryActions(body, node.Role, node.Actions)
+	} else {
+		writeExplicitActions(body, node.Actions)
 	}
 	if node.Enabled == nil {
 		body.write(" enabled=null")
@@ -533,6 +614,132 @@ func writeNodeColumns(body *treeTextBuffer, node *protocol.ReadNode) {
 	if node.Context {
 		body.write(" context")
 	}
+}
+
+func writeNodeGeometry(
+	body *treeTextBuffer,
+	node *protocol.ReadNode,
+	referenceBounds bool,
+	style treeTextStyle,
+) {
+	if node.Bounds.Kind == protocol.GeometryHidden {
+		return
+	}
+	body.write(" ")
+	if node.Bounds.Kind == protocol.GeometryUnknown {
+		body.write("-")
+		return
+	}
+	if style == treeTextStyleTreeV4 {
+		if referenceBounds {
+			body.write("@")
+		} else {
+			writeV4Rectangle(body, &node.Bounds.Rect)
+		}
+		return
+	}
+	writeBounds(body, &node.Bounds.Rect)
+}
+
+func writeExplicitActions(body *treeTextBuffer, actions []protocol.Action) {
+	for _, action := range actions {
+		body.write(" ")
+		body.write(string(action))
+	}
+}
+
+// writeV4OrdinaryActions makes one decision pass over the source list. It
+// records whether the default occurs exactly once, whether the other actions
+// are strictly ascending in source order, and where a restored default would
+// be inserted. Duplicate or reordered actions stay fully explicit.
+func writeV4OrdinaryActions(
+	body *treeTextBuffer,
+	role protocol.Role,
+	actions []protocol.Action,
+) {
+	defaultAction, hasDefault := v4DefaultRoleAction(role)
+	if !hasDefault {
+		writeExplicitActions(body, actions)
+		return
+	}
+	defaultRank := treeV4ActionRank(defaultAction)
+	defaults := 0
+	defaultPosition := -1
+	insertAt := 0
+	seenNonDefault := 0
+	lastRank := -1
+	sourceOrder := true
+	for _, action := range actions {
+		if action == defaultAction {
+			defaults++
+			if defaults == 1 {
+				defaultPosition = seenNonDefault
+			}
+			continue
+		}
+		rank := treeV4ActionRank(action)
+		if rank < 0 || rank <= lastRank {
+			sourceOrder = false
+		}
+		lastRank = rank
+		if rank < defaultRank {
+			insertAt++
+		}
+		seenNonDefault++
+	}
+	switch {
+	case defaults == 0:
+		writeExplicitActions(body, actions)
+		body.write(" !")
+		body.write(string(defaultAction))
+	case defaults == 1 && sourceOrder && defaultPosition == insertAt:
+		for _, action := range actions {
+			if action != defaultAction {
+				body.write(" ")
+				body.write(string(action))
+			}
+		}
+	default:
+		writeExplicitActions(body, actions)
+	}
+}
+
+func v4DefaultRoleAction(role protocol.Role) (protocol.Action, bool) {
+	switch role {
+	case protocol.RoleButton:
+		return protocol.ActionTap, true
+	case protocol.RoleInput:
+		return protocol.ActionText, true
+	case protocol.RoleScroll:
+		return protocol.ActionSwipe, true
+	default:
+		return "", false
+	}
+}
+
+func treeV4ActionRank(action protocol.Action) int {
+	switch action {
+	case protocol.ActionTap:
+		return 0
+	case protocol.ActionLongPress:
+		return 1
+	case protocol.ActionText:
+		return 2
+	case protocol.ActionSwipe:
+		return 3
+	default:
+		return -1
+	}
+}
+
+func writeV4Rectangle(body *treeTextBuffer, bounds *protocol.Bounds) {
+	body.writeInt(bounds.Left)
+	body.write(",")
+	body.writeInt(bounds.Top)
+	body.write(",")
+	body.writeInt(bounds.Right)
+	body.write(",")
+	body.writeInt(bounds.Bottom)
 }
 
 // writeDefaultFalseFlag writes a true or null value; a known false is the
@@ -617,14 +824,35 @@ func validateTreeTextToken(value string) bool {
 	return resultToken(value)
 }
 
+// validateV4ObservationToken is shared by result grouping and tree rendering.
+func validateV4ObservationToken(value string) bool {
+	return len(value) > 1 && len(value) <= protocol.MaxReferenceLen &&
+		value[0] == 'O' && validateTreeTextToken(value)
+}
+
 func validateBounds(bounds *protocol.Bounds) bool {
 	return bounds == nil ||
 		(bounds.Right >= bounds.Left && bounds.Bottom >= bounds.Top)
 }
 
-// validateReadNodeTree checks one definition subtree iteratively: ref shape,
-// role, geometry, actions, axis and chain length.
+// validateReadNodeTree checks one definition subtree iteratively. Full trees
+// rely on ReadTree.Validate for global ref uniqueness, and inspection keeps its
+// existing subtree semantics.
 func validateReadNodeTree(root *protocol.ReadNode, requireRoot bool) bool {
+	return validateReadNodeTreeDetails(root, requireRoot, false)
+}
+
+// v4 delta definitions are independent serialized subtrees, so duplicate refs
+// within one add or replace definition cannot be represented as a legal block.
+func validateV4DeltaNodeTree(root *protocol.ReadNode) bool {
+	return validateReadNodeTreeDetails(root, false, true)
+}
+
+func validateReadNodeTreeDetails(
+	root *protocol.ReadNode,
+	requireRoot bool,
+	checkUniqueRefs bool,
+) bool {
 	if root == nil {
 		return false
 	}
@@ -633,6 +861,10 @@ func validateReadNodeTree(root *protocol.ReadNode, requireRoot bool) bool {
 		mustBeRoot bool
 	}
 	stack := []pendingNode{{node: root, mustBeRoot: requireRoot}}
+	var seenRefs map[string]bool
+	if checkUniqueRefs {
+		seenRefs = make(map[string]bool)
+	}
 	for len(stack) > 0 {
 		entry := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
@@ -651,6 +883,14 @@ func validateReadNodeTree(root *protocol.ReadNode, requireRoot bool) bool {
 			}
 		} else if !validatePublicRef(node.Ref) {
 			return false
+		}
+		if seenRefs != nil {
+			for _, ref := range node.Refs() {
+				if seenRefs[ref] {
+					return false
+				}
+				seenRefs[ref] = true
+			}
 		}
 		if (entry.mustBeRoot && (node.IsChain() || node.Role != protocol.RoleRoot)) ||
 			!validateBoundsForState(node.Bounds) || (node.Axis != "" && !node.Axis.Valid()) {
@@ -702,8 +942,8 @@ func validateFullTree(tree *protocol.ReadTree) bool {
 }
 
 func validateDelta(delta *protocol.ReadDelta) bool {
-	if delta == nil || delta.Format != "delta" || !validateTreeTextToken(delta.Base) ||
-		delta.View != protocol.ViewCompact {
+	if delta == nil || delta.Format != "delta" || !validateV4ObservationToken(delta.Base) ||
+		delta.View != protocol.ViewCompact || delta.Validate() != nil {
 		return false
 	}
 	for ref := range delta.Set {
@@ -711,15 +951,19 @@ func validateDelta(delta *protocol.ReadDelta) bool {
 			return false
 		}
 	}
+	added := make(map[string]bool, len(delta.Add))
 	for _, node := range delta.Add {
-		if node == nil || node.IsChain() || !validateReadNodeTree(node, false) {
+		if !validateV4DeltaNodeTree(node) || added[node.Ref] {
 			return false
 		}
+		added[node.Ref] = true
 	}
+	removed := make(map[string]bool, len(delta.Remove))
 	for _, ref := range delta.Remove {
-		if !validatePublicRef(ref) {
+		if removed[ref] {
 			return false
 		}
+		removed[ref] = true
 	}
 	for ref, children := range delta.Children {
 		if !validatePublicRef(ref) {
@@ -732,7 +976,7 @@ func validateDelta(delta *protocol.ReadDelta) bool {
 		}
 	}
 	for ref, node := range delta.Replace {
-		if !validatePublicRef(ref) || !validateReadNodeTree(node, false) || node.Ref != ref {
+		if !validatePublicRef(ref) || !validateV4DeltaNodeTree(node) || node.Ref != ref {
 			return false
 		}
 	}

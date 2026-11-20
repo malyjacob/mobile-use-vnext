@@ -37,8 +37,8 @@ cmd/device-mcp
 - `internal/android` 只执行有界设备 I/O 并返回受控事实；不决定观察什么、操作什么。
 - `internal/mcp` 只依赖 `protocol` 与 `client`，不导入 `engine`、`android`、`store`，不因
   同仓而绕过认证与服务状态；`internal/client` 只依赖 `protocol`。该包以单一固定说明源生成
-  server instructions（完整 `tree v3`/`inspect v3` 树语法一次加跨工具调用规则），由
-  `server/discover` 与兼容 `initialize` 发布；13 个工具描述不内联树引导。
+  server instructions（`result v3`、`tree v4`、`inspect v3` 的完整文本语法一次加跨工具
+  调用规则），由 `server/discover` 与兼容 `initialize` 发布；13 个工具描述不内联树引导。
 - `internal/store` 实现 `engine.Store` 与 `engine.MessageStore`，分别持久化 `engine.Ledger`
   与有界 Agent 消息。两者是不同文件、不同语义：账本只含归属与资源证据，消息文件只含待
   投递正文，正文不进入账本。
@@ -355,7 +355,8 @@ status(P)、重复 P 与冻结结果只复制最后一次已提交快照，迟�
 70% 判据用有界整数关系
 `10×deltaBytes < 7×fullBytes`；等值退 full。构造器在投影阶段只产生候选，提交门禁通过后
 才推进 `prev` 与 ref 计数器；被拒绝的候选不改变下一次发布树的 ref。可读文本块使用
-`tree v3`/`inspect v3` 编码，普通角色按文本语法恢复。full/delta 的选择按 JSON 字节计量。
+`result v3` 观察组、`tree v4` 普通树和 `inspect v3` 详细补看编码，普通角色与动作按文本
+语法恢复。full/delta 的选择按 JSON 字节计量。
 
 净化仅改变公开投影：默认空叶不发布，原始事实仍供动作重验使用；非目标 display 包装层不发布，
 目标后代按最近公开祖先挂接并保持 raw 先序。Source 与 ContextSource 互斥且完整覆盖公开 ref，
@@ -664,7 +665,7 @@ P 已无法定位时，`end(P)` 返回 `409 operation_unknown`、`phase=referenc
 ### 发布
 
 `release/versions.json` 是发行号、共同契约号与 Android versionCode 的唯一来源；当前为
-`release_version=0.23.0`、`contract_version=21`、`android_version_code=25`，构建生成
+`release_version=0.24.0`、`contract_version=21`、`android_version_code=26`，构建生成
 Go/Java 常量。`scripts/build-release.ps1` 产出整组产物与 `build/release/manifest.json`
 （源码提交、Go 版本、MCP SDK/协议、各产物 SHA-256/大小、Android 包名/版本、工具目录指纹）。
 工具目录固定为 `scripts/toolcatalog` 投影的 13 个工具，指纹是该目录注册顺序、名称、描述与

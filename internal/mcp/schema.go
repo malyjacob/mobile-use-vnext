@@ -21,45 +21,70 @@ func (d toolDefinition) readOnlyHint() bool {
 	return d.readOnly || d.snap
 }
 
-// treeTextGuide is the complete public syntax legend for readable tree blocks.
+// treeTextGuide is the complete public syntax legend for readable results and
+// tree blocks.
 // It is published exactly once, at the head of the server instructions, and is
 // never repeated inside a tool description.
-const treeTextGuide = "树块：当前树由 base 指向的 full 加本次 delta 重建。同一 base 的每条 delta 单独应用到该 full。\n" +
-	"可读正文在 key=value 阶段事实之后附带一个确定性树块：" +
-	"块头后空一行进入正文。" +
-	"full 块以 `tree v3 format=full id=<O> scope=<scope> view=<compact> nodes=<n> entries=<m>` 开头，后接节点行；" +
-	"delta 块以 `tree v3 format=delta id=<O> base=<O2> view=compact scope=<scope> changes=<n>` 开头，" +
-	"后接 `~`/`+`/`-`/`children`/`=` 变更行；两者均以 `end tree` 结尾。\n" +
-	"普通节点行为 `缩进 n<ref> [<role>] [<bounds>] \"label\"… value=\"…\" hint=\"…\" " +
-	"tap|long_press|text|swipe enabled=… focused=… selected=… protected=… checked=… axis=… resource=\"…\" context`；" +
-	"`n<ref>` 可直接用作 target.ref。" +
-	"省略 `role` 时按 ref 后首个剩余列恢复：未隐藏几何 `[l,t,r,b]` 或 `-`、`value=`、`hint=`、" +
-	"`tap`/`long_press`/`swipe`、状态、`axis=`、`resource=`、`context` 或行尾默认 `view`；" +
-	"隐藏几何后直接是引号标签时默认 `text`。仅当恢复出的角色等于原角色时才省略，其他角色始终显式；" +
-	"任何普通节点也可显式写角色，显式角色覆盖默认。" +
-	"首项为引号标签或角色词（包括输入动作 `text`）的 `view` 必须显式写 `view`；" +
-	"无标签或带几何列的 `text` 必须显式写 `text`。" +
-	"观察视图的几何列：根和有动作的节点交付已知矩形；无动作的 `text` 与匿名普通 view/group 省略矩形；" +
-	"其余展示节点与父链上最近交付的矩形四边相同、或裁剪到屏幕后小于屏幕面积 1% 时省略；" +
-	"未知几何仍写 `-`，缺失几何列表示按策略隐藏，详细补看交付原矩形；" +
-	"新 compact 普通树省略小型隐藏无标注 `image`，并清理因此变空的隐藏匿名普通 view/group；" +
-	"图片须为叶、无 label/value/hint/resource/axis 或动作，enabled 已知为 true、" +
-	"focused/selected/protected/checked 已知为 false，原矩形裁屏后面积须为可计算正数且严格小于屏幕面积 1%；" +
-	"祖先动作和状态不参与。" +
-	"随后绕过仅剩一个直接孩子的隐藏匿名普通 view/group，保留原编号、字段和同级顺序。" +
-	"新 compact full/delta 只交付普通节点定义，不生成折叠链；读取端继续接受历史 `[n2 n3]` 与 " +
-	"`chain [n2 n3] <role> ...`，链下缩进的孩子属于链尾。" +
-	"完整节点的状态位按已知默认省略：`enabled=true` 省略，`enabled=false`/`enabled=null` 显式；" +
-	"`focused`/`selected`/`protected`/`checked` 的已知 `false` 省略，`true` 与 `null` 显式。" +
+const treeTextGuide = "结果文本：text/both 以 `result v3 is_error=<true|false>` 开头、`end result` 结尾。" +
+	"连续 `observation.*` 字段先写无缩进 `observation`，随后每项以单个空格缩进并写去掉 `observation.` 的相对路径。" +
+	"空行、树块或 `json v1` 结束当前组；之后再有观察字段时另开 `observation`。" +
+	"各组合并为同一观察对象，跨组重复路径或祖先与子路径冲突无效。" +
+	"完整 O 从组内 `id` 取得（structured JSON 中为 `observation.id`）。" +
+	"无法无损编码的观察字段保留 `json v1 path=\"<绝对 JSON Pointer>\" value=<原值>`。\n" +
+	"普通树：当前树由 `base` 指向的 full 加本次 delta 重建。" +
+	"full 头为 `tree v4 full nodes=<n>`；delta 头为 " +
+	"`tree v4 delta base=<O|_<序号>> changes=<n>`；头后空一行进入正文，均以 `end tree` 结尾。" +
+	"同一 base 的每条 delta 独立应用到该 full。" +
+	"当前完整 O 与真实 base 在最后一个 `_` 前同前缀且尾号为正十进制时，base 可写 `_<尾号>`；" +
+	"否则写完整 O。`base=_72` 只供读树，调用仍用完整 O/P。\n" +
+	"普通节点每层恰写一个 ASCII 空格，根深度为零；差分 `+ `、`= ` 只在所属定义根行出现，标记不计层级。" +
+	"节点行为 `n<ref> [<role>] [l,t,r,b|@] \"label\"… value=… hint=… " +
+	"tap|long_press|text|swipe enabled=… focused=… selected=… protected=… checked=… axis=… resource=… context`。" +
+	"`n<ref>` 可直接用作 target.ref；标签始终是 JSON 字符串。" +
+	"矩形四边为有符号整数且 `right>=left`、`bottom>=top`；未知几何写 `-`，缺失几何列表示按策略隐藏。" +
+	"`@` 表示与同一串行化定义中最近一个有已知矩形的严格祖先同矩形，跳过隐藏或未知几何；无此祖先无效。" +
+	"每个 `+`、`=` 子树独立判断，不继承其他定义、base 或前一结果。\n" +
+	"角色：`button` 默认 `tap`，`input` 默认 `text`，`scroll` 默认 `swipe`。" +
+	"能按源动作顺序完整恢复时省略默认词；默认动作缺失时保留其他动作并在动作列末写 `!tap`、`!text` 或 `!swipe`。" +
+	"无显式默认词或对应 `!动作` 时，其余动作须符合源顺序，再按 `tap,long_press,text,swipe` 插回默认动作；" +
+	"无法恢复时写完整显式列表。出现默认词时保留显式顺序。" +
+	"同一动作不可既显式又否定，其他角色的否定词和无可解析祖先的 `@` 均无效。" +
+	"省略 `role` 时按 ref 后首列恢复；未隐藏几何是四元组或 `@`，" +
+	"首项为引号标签时默认 `text`，其他列或行尾默认 `view`。" +
+	"显式角色覆盖默认；首项为标签或角色词的 `view`、无标签或带几何列的 `text` 必须显式写角色。\n" +
+	"complete 定义的状态位省略已知默认：`enabled=true` 省略，`enabled=false`/`enabled=null` 显式；" +
+	"`focused`/`selected`/`protected`/`checked` 的已知 `false` 省略，`true`/`null` 显式。" +
 	"`set` 行不同：出现的状态字段一律保留显式 `false`/`true`/`null`，未出现才表示不修改。" +
-	"`nodes` 为展开后逻辑节点数，`entries` 为普通节点或 chain 定义行数。" +
-	"修改行的 `bounds=hidden` 表示按策略不交付该几何。\n" +
-	"补看块以 `inspect v3 scope=<tree|subtree|query> observation=<O> revision=<n> captured_at=<RFC3339> " +
-	"tree_scope=<scope> view=detailed [root=<ref>|matches=<n> total=<n> truncated=<bool>] nodes=<n> entries=<m>` " +
-	"开头，tree/subtree 后接完整详细节点行，query 后接 `match i/N path=[…]` 与命中子树，并以 " +
-	"`end inspect` 结尾。" +
-	"滚动用 `operation.type=scroll` + `operation.container` 表达；raw `swipe` 是原始手势，不承诺滚动语义。" +
-	"树块 `tap|long_press|text|swipe` 动作列（`Node.actions`）中的 `swipe` 只是节点的源能力，不是 raw swipe 授权。" +
+	"`~` 的 set 值保持原数组、字符串、`null` 与三态；`actions=[]`、`bounds=[l,t,r,b]`、" +
+	"`bounds=null`、`bounds=hidden` 均原样表达，`@`、无括号几何和默认动作不用于 set。" +
+	"`nodes` 是展开历史链后的逻辑节点数，`changes` 是五类顶层声明的总量；零变化 delta 正文为空。\n" +
+	"compact 普通树省略小型隐藏无标注 `image`，清理因此变空的隐藏匿名 `view`/`group`，" +
+	"绕过仅剩一个直接孩子的隐藏匿名 `view`/`group`；根和有动作节点交付已知矩形，" +
+	"无动作 `text` 与匿名普通 `view`/`group` 按策略隐藏矩形，详细补看交付原矩形。" +
+	"候选 `image` 须为叶、无 label/value/hint/resource/axis 或动作，enabled 已知为 true、" +
+	"focused/selected/protected/checked 已知为 false，原矩形裁屏后面积为正且严格小于屏幕面积 1%；" +
+	"祖先动作和状态不参与。" +
+	"新 v4 只生成普通节点定义；读取端继续接受历史 `[n2 n3]` 与 " +
+	"`chain [n2 n3] <role> ...`，链下缩进的孩子属于链尾。\n" +
+	"补看使用独立语法：`inspect v3 scope=<tree|subtree|query> observation=<O> revision=<n> " +
+	"captured_at=<RFC3339> tree_scope=<scope> view=detailed [root=<ref>|matches=<n> total=<n> truncated=<bool>] " +
+	"nodes=<n> entries=<m>`，以 `end inspect` 结尾。" +
+	"`nodes` 计展开后的逻辑节点数，`entries` 计正文定义行数。查询按每个命中子树分别累加。" +
+	"inspect v3 一律使用两格缩进、`[l,t,r,b]` 矩形和显式动作词，不使用默认动作、`@` 或短 base。\n" +
+	"示例 full：\n" +
+	"`result v3 is_error=false\nobservation\n status=complete\n id=Oabc_72\n\n" +
+	"tree v4 full nodes=2\n\nn1 root 0,0,1080,2400\n n2 button @ \"设置\"\nend tree\nend result`\n" +
+	"示例 delta：\n" +
+	"`result v3 is_error=false\nobservation\n status=complete\n id=Oabc_76\n\n" +
+	"tree v4 delta base=_72 changes=3\n\n~ n2 label=[\"无线设置\"]\n" +
+	"+ n3 button \"返回\" !tap\nchildren n1 = [n2 n3]\nend tree\nend result`\n" +
+	"示例 inspect：\n" +
+	"`result v3 is_error=false\ninspection.origin=P4\n\ninspect v3 scope=subtree observation=Oabc_76 revision=4 " +
+	"captured_at=2026-11-21T01:00:00Z tree_scope=reported_visible_with_context view=detailed root=n2 nodes=1 entries=1\n\n" +
+	"n2 button [0,0,1080,2400] \"无线设置\" tap\nend inspect\nend result`\n" +
+	"`button`/`input`/`scroll` 的省略动作分别是已存在的 `tap`/`text`/`swipe` 源能力；" +
+	"`!动作` 表示该默认能力缺失，不能由调用方补授权。" +
+	"滚动用 `operation.type=scroll` + `operation.container` 表达；raw `swipe` 是原始手势。" +
 	"`scroll` 不承诺真实方向、触摸消费者或业务安全；`unstable`/`unknown` 的观察质量不阻止输入。"
 
 // callerGuidance is the cross-tool part of the server instructions. It is
@@ -68,7 +93,8 @@ const treeTextGuide = "树块：当前树由 base 指向的 full 加本次 delta
 // constraints stay in the tool descriptions.
 const callerGuidance = "会话与推进：首次可直接 start({})。已有 active 会话时沿用，只有会话状态不明才 status({})。" +
 	"active/starting 或 can_start=false 时不要 start；会话失效先按 recovery 处理。\n" +
-	"有可用 O 时直接 act；act 或 wait_for 返回新 O 时直接用该 observation.id。" +
+	"有可用 O 时直接 act；text/both 的 act 或 wait_for 返回新 O 时从 `observation` 组的 `id` 取得，" +
+	"structured JSON 中为 `observation.id`，随后直接使用完整 O。" +
 	"没有可用 O、需要查看外部变化或 recovery.entry=observe 时才 observe。\n\n" +
 	"O 与 P：O 是观察，observation.actionable_until 是其输入期限。P 是调用的幂等/查询编号，新工作另有新 P。" +
 	"app.find 与 notify 可脱离会话，notify 无 reference。请求引用统一用 reference。\n" +
@@ -86,7 +112,7 @@ const callerGuidance = "会话与推进：首次可直接 start({})。已有 act
 	"operation.bubble=false 只点原目标，坐标省略 bubble。no_safe_point 按 act 给出的点提示调整，避免继续向更远祖先找目标。" +
 	"text 默认 press_enter=true，写入全文并精确读回后至多发送一次 ENTER。仅填字时显式 operation.press_enter=false，不发送 ENTER。" +
 	"text_input 分别报告 write 与 enter，业务结果用页面事实核对。\n\n" +
-	"恢复：retry/O 表示尚未派发，用结果的新 observation.id 或仍适用的原 O 发起新调用。" +
+	"恢复：retry/O 表示尚未派发，用结果 `observation` 组内 `id` 的新完整 O 或仍适用的原 O 发起新调用。" +
 	"observe/P 用原活动会话的具体归属 P，可用 session.origin 或同会话 operation_id。请求中的 reference 使用实际编号。" +
 	"status/P 按目标取编号：当前动作用 operation_id，忙用 blocking_operation_id，" +
 	"自身恢复用 start_operation_id，收尾用 target_reference 或刚查询的 P。" +
@@ -117,9 +143,11 @@ var toolCatalog = []toolDefinition{
 		name: "start",
 		description: "建立新会话并返回第一个 full 观察。请求体必须是空对象；" +
 			"目标屏幕与模式来自控制端当前选择，不接受尺寸、模式或凭据参数。" +
-			"成功时返回 session，首采成功时给出首个 O。启动租期为五分钟，以 session.expires_at 为准；重放原 start 不重新获得五分钟。" +
+			"成功时返回 session，首采成功时从 `observation` 组的 `id` 取得首个完整 O。" +
+			"启动租期为五分钟，以 session.expires_at 为准；重放原 start 不重新获得五分钟。" +
 			"O 是可消费观察，P 是该次操作的幂等/查询编号。" +
-			"full 是完整树；用 delta 声明的 base full 加本次 delta 重建当前树。",
+			"首次返回 full；普通树头为 `tree v4 full`，delta 头为 `tree v4 delta base=… changes=…`，" +
+			"用 base 指向的 full 加本次 delta 重建当前树。",
 		schema: json.RawMessage(`{
   "type": "object",
   "properties": {},
@@ -155,7 +183,9 @@ var toolCatalog = []toolDefinition{
 		description: "对给定 O/P 所指原会话执行一次新采集并发布一个新观察。" +
 			"reference 必填，指向本 Agent 仍活动的原会话；full=true 强制 full；" +
 			"image=true 在同一采集中附加 ImageContent；wait_ms 是单次采集前的延迟毫秒数（0–10000，默认 0）；等待公开树条件应选 wait_for。" +
-			"成功返回新 observation.id；后续动作或等待直接使用它。",
+			"成功返回新观察：从 `observation` 组的 `id` 取得完整 O。" +
+			"看到 `base=_72` 时，用 `72` 替换当前 O 的末尾序号得到指定 full 的完整编号；" +
+			"同一 full 上的多个差分各自应用。缺少该 full 时，以适用的活动会话 O/P 再调用 observe 并设置 full=true。",
 		schema: json.RawMessage(`{
   "type": "object",
   "properties": {
@@ -217,7 +247,10 @@ var toolCatalog = []toolDefinition{
 		description: "轮询当前会话的公开树条件。reference 与 timeout 必填，timeout 为 1..40 秒（stable=true 时至少 2）。" +
 			"\nquery/absent_query 按 label/value/hint/resource 做字面折叠子串匹配；同时提供时任一条件成立即可满足查询条件。" +
 			"stable=true 还要求整树连续 3 帧一致。倒计时或实时进度页面可保持 stable=false。" +
-			"\n发布新 observation.id 时调用成功，包括 wait.trigger=timeout。wait.matched 包含终帧命中的条件，超时时还包含 timeout。" +
+			"\n发布新观察时调用成功，包括 wait.trigger=timeout；从 `observation` 组的 `id` 取得完整 O。" +
+			"看到 `base=_72` 时，用 `72` 替换当前 O 的末尾序号得到指定 full 的完整编号；缺少该 full 时设置 full=true 再 observe。" +
+			"同一 full 上的多个差分各自应用。" +
+			"wait.matched 包含终帧命中的条件，超时时还包含 timeout。" +
 			"最终未发布新 O 时按观察失败处理。elapsed_ms 含终帧采集，实际耗时可超过 timeout 至多约 35 秒。",
 		schema: json.RawMessage(`{
   "type": "object",
@@ -270,8 +303,11 @@ var toolCatalog = []toolDefinition{
 	},
 	{
 		name: "act",
-		description: "对当前 ready O 执行交互。reference 必填。静态拒绝不认领 O，认领即消费原 O。image=true 可随动作后观察附加 ImageContent。" +
+		description: "对当前 ready O 执行交互。reference 必填且用当前 ready O 的完整 `id`；节点目标用 `n<ref>`。" +
+			"静态拒绝不认领 O，认领即消费原 O。image=true 可随动作后观察附加 ImageContent。" +
 			"\n分支：tap/long_press 用 target；text 用 target 与 text；key 用 key 白名单。scroll 用 container/direction，可选 amount；swipe 用 from/to，可选 duration_ms。" +
+			"\n树中 `button`/`input`/`scroll` 省略的默认动作分别是既有 `tap`/`text`/`swipe`；" +
+			"`!tap`/`!text`/`!swipe` 表示该默认能力缺失。`@` 表示与最近已知祖先同矩形；需要坐标时沿该祖先读取。" +
 			"\n点按与长按：ref 默认 bubble=true。仅在原节点没有 tap、long_press、text 任一动作时，向最近的交互祖先提升一次。" +
 			"该祖先不支持本动作或无安全点时停止提升。显式 bubble=false 只点原目标，坐标目标省略 bubble。" +
 			"静态拒绝均为 not_executed：invalid_target 表示目标结构或几何不可用，unsupported_node_action 表示动作或提升前提不满足，no_safe_point 表示有动作但安全点无法证明。" +
@@ -287,7 +323,8 @@ var toolCatalog = []toolDefinition{
 			"直接 observe 核对当前框值/页面。reference 使用原活动会话的具体归属 P，如 session.origin 或属于该会话的 operation_id。避免原样重发。" +
 			"\n滚动：用 operation.type=scroll + container，嵌套时按想滚动的区域选对应容器 ref。swipe 是原始手势。树节点的 `swipe` 仅表示源能力，手势仍按当前 O 准入。" +
 			"返回的 effect.state 以 observed/not_observed/unknown 报告内容位移证据；执行事实见 outcome。scroll 不承诺真实方向、触摸消费者或业务安全。" +
-			"\n恢复：重验目标变化可返回 target_changed；若附新 observation.id，直接用新 O 和新 P 重试。unstable/unknown 的 observation.quality 不阻止输入。" +
+			"\n恢复：重验目标变化可返回 target_changed；若附新观察，从 `observation` 组的 `id` 取得完整 O，直接用新 O 和新 P 重试。" +
+			"unstable/unknown 的 observation.quality 不阻止输入（文本观察组内写 `quality`）。" +
 			"通常 uncertain 先查询原 P，再按 recovery 处理；executed 后用观察判断业务结果。",
 		schema: json.RawMessage(`{
   "type": "object",
@@ -429,6 +466,7 @@ var toolCatalog = []toolDefinition{
 			"act 静态拒绝中的诊断 ref 若不在 compact 普通树，用原 act 请求的 O 和该 ref 作 node 补看详细子树。" +
 			"补看要求同一调用方的原 O 内容仍保留，O 过期后仍可能可读。" +
 			"返回 inspect v3 块：tree 为完整详细树，subtree 为指定 root 的子树，query 为命中节点的路径与子树。" +
+			"inspect v3 始终使用两格缩进、方括号矩形和显式动作词，不使用普通树 v4 的默认动作、`@` 或短 base。" +
 			"历史树被淘汰（content_unavailable）时用 observe 取新观察；结果过大（inspection_too_large）时改用更窄的 node 或 query。",
 		schema: json.RawMessage(`{
   "type": "object",
@@ -522,7 +560,8 @@ var toolCatalog = []toolDefinition{
 			"\n- close 关闭本会话虚屏目标窗口，可显式允许关闭 borrowed。" +
 			"\n- kill 用 task_id 终止本会话 live owned 且同屏唯一可归因的应用，可显式允许停止播放。" +
 			"\nclaim/handoff/close 的 target 用 task_id 或包名二选一，仍须通过服务准入。" +
-			"变更结果按 outcome 与 recovery 处理。已执行后尝试发布原会话屏 full 无图观察。",
+			"变更结果按 outcome 与 recovery 处理。已执行后尝试发布原会话屏 full 无图观察；" +
+			"有返回的新观察时从 `observation` 组的 `id` 取得完整 O 继续操作。",
 		schema: json.RawMessage(`{
   "type": "object",
   "properties": {

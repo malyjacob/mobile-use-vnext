@@ -139,10 +139,40 @@ func pointerPart(s string) string {
 }
 func quoteResult(s string) string { b, _ := jsonv2.Marshal(s); return string(b) }
 
-type resultTextWriter struct{ strings.Builder }
+type resultTextWriter struct {
+	strings.Builder
+	groupObservation     bool
+	observationGroupOpen bool
+	observationID        string
+}
 
-func (w *resultTextWriter) line(s string) { w.WriteString(s); w.WriteByte('\n') }
+func (w *resultTextWriter) line(s string) {
+	w.closeObservationGroup()
+	w.WriteString(s)
+	w.WriteByte('\n')
+}
+func (w *resultTextWriter) field(key, value string) {
+	if w.groupObservation {
+		if relative, ok := strings.CutPrefix(key, "observation."); ok {
+			if !w.observationGroupOpen {
+				w.WriteString("observation\n")
+				w.observationGroupOpen = true
+			}
+			w.WriteByte(' ')
+			w.WriteString(relative)
+			w.WriteByte('=')
+			w.WriteString(value)
+			w.WriteByte('\n')
+			return
+		}
+	}
+	w.line(key + "=" + value)
+}
+func (w *resultTextWriter) closeObservationGroup() {
+	w.observationGroupOpen = false
+}
 func (w *resultTextWriter) block(s string) {
+	w.closeObservationGroup()
 	w.WriteByte('\n')
 	w.WriteString(s)
 	if !strings.HasSuffix(s, "\n") {
@@ -158,50 +188,59 @@ func encodeResultText(raw []byte, isError bool) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	w := &resultTextWriter{}
-	w.line("result v2 is_error=" + strconv.FormatBool(isError))
+	observationMembers, hasObservation := resultObservationObject(members)
+	w := &resultTextWriter{
+		groupObservation: true,
+		observationID:    resultObservationID(observationMembers),
+	}
+	w.line("result v3 is_error=" + strconv.FormatBool(isError))
 	for _, m := range members {
-		if err := w.member(m.name, "/"+pointerPart(m.name), m.value, nil); err != nil {
-			return "", err
+		path := "/" + pointerPart(m.name)
+		if hasObservation && m.name == "observation" {
+			w.objectMembers("observation", path, m.value, observationMembers)
+			continue
 		}
+		w.member("", m.name, path, m.value)
 	}
 	w.line("end result")
 	return w.String(), nil
 }
 
-func (w *resultTextWriter) member(key, path string, raw []byte, parent []resultMember) error {
+func (w *resultTextWriter) member(parentKey, name, path string, raw []byte) {
+	// Dots join structural levels in resultFields. A literal member whose name
+	// contains one is therefore an unknown field, not a known nested path.
+	if strings.Contains(name, ".") {
+		w.fallback(path, raw)
+		return
+	}
+	key := name
+	if parentKey != "" {
+		key = parentKey + "." + name
+	}
 	kind, known := resultFields[key]
 	if !known {
 		w.fallback(path, raw)
-		return nil
+		return
 	}
 	if kind == fieldToken && (len(raw) == 0 || raw[0] != '"') {
 		w.fallback(path, raw)
-		return nil
+		return
 	}
 	if kind == fieldObject {
 		if bytes.Equal(raw, []byte("null")) {
-			w.line(key + "=null")
-			return nil
+			w.field(key, "null")
+			return
 		}
 		members, err := resultMembers(raw)
 		if err != nil {
 			w.fallback(path, raw)
-			return nil
+			return
 		}
-		if len(members) == 0 {
-			w.fallback(path, raw)
-			return nil
-		}
-		for _, m := range members {
-			if err := w.member(key+"."+m.name, path+"/"+pointerPart(m.name), m.value, members); err != nil {
-				return err
-			}
-		}
-		return nil
+		w.objectMembers(key, path, raw, members)
+		return
 	}
 	if kind == fieldBlock {
-		if block, ok := readableResultBlock(key, raw, parent); ok {
+		if block, ok := readableResultBlock(key, raw, w.observationID); ok {
 			if key == "inspection" {
 				members, _ := resultMembers(raw)
 				for _, m := range members {
@@ -211,13 +250,50 @@ func (w *resultTextWriter) member(key, path string, raw []byte, parent []resultM
 				}
 			}
 			w.block(block)
-			return nil
+			return
 		}
 		w.fallback(path, raw)
-		return nil
+		return
 	}
-	w.line(key + "=" + resultScalar(raw, kind))
-	return nil
+	w.field(key, resultScalar(raw, kind))
+}
+
+func (w *resultTextWriter) objectMembers(
+	parentKey, path string, raw []byte, members []resultMember,
+) {
+	if len(members) == 0 {
+		w.fallback(path, raw)
+		return
+	}
+	for _, member := range members {
+		w.member(parentKey, member.name, path+"/"+pointerPart(member.name), member.value)
+	}
+}
+
+func resultObservationObject(members []resultMember) ([]resultMember, bool) {
+	for _, member := range members {
+		if member.name == "observation" {
+			observation, err := resultMembers(member.value)
+			return observation, err == nil
+		}
+	}
+	return nil, false
+}
+
+func resultObservationID(observation []resultMember) string {
+	id := ""
+	for _, member := range observation {
+		if member.name != "id" {
+			continue
+		}
+		if id != "" || json.Unmarshal(member.value, &id) != nil {
+			return ""
+		}
+	}
+	if !validateV4ObservationToken(id) {
+		return ""
+	}
+	return id
 }
 
 // Before using a typed renderer, require its wire round trip to retain every
@@ -238,20 +314,14 @@ func losslessTypedResult(raw []byte, target any) bool {
 	return err == nil && sameResultJSON(raw, b)
 }
 
-func readableResultBlock(key string, raw []byte, parent []resultMember) (string, bool) {
+func readableResultBlock(key string, raw []byte, observationID string) (string, bool) {
 	switch key {
 	case "observation.tree":
 		var tree protocol.ReadTreeValue
-		if !losslessTypedResult(raw, &tree) {
+		if !validateV4ObservationToken(observationID) || !losslessTypedResult(raw, &tree) {
 			return "", false
 		}
-		id := ""
-		for _, m := range parent {
-			if m.name == "id" {
-				_ = json.Unmarshal(m.value, &id)
-			}
-		}
-		return renderTreeText(&protocol.Result{Observation: &protocol.Observation{ID: id, Tree: &tree}})
+		return renderTreeText(&protocol.Result{Observation: &protocol.Observation{ID: observationID, Tree: &tree}})
 	case "inspection":
 		var inspection protocol.InspectionView
 		if !losslessTypedResult(raw, &inspection) {
@@ -367,7 +437,7 @@ func encodeResultDiagnostic(raw []byte) (string, error) {
 			}
 			for _, v := range parts {
 				if v.name == "kind" {
-					_ = w.member("app.kind", "/app/kind", v.value, nil)
+					w.member("app", v.name, "/app/kind", v.value)
 				}
 			}
 		case "observation":
@@ -377,7 +447,7 @@ func encodeResultDiagnostic(raw []byte) (string, error) {
 			}
 			for _, v := range parts {
 				if v.name == "status" || v.name == "id" {
-					_ = w.member("observation."+v.name, "/observation/"+v.name, v.value, parts)
+					w.member("observation", v.name, "/observation/"+v.name, v.value)
 				}
 			}
 		case "wait":
@@ -390,13 +460,11 @@ func encodeResultDiagnostic(raw []byte) (string, error) {
 			}
 			for _, v := range parts {
 				if v.name == "trigger" || v.name == "elapsed_ms" {
-					_ = w.member("wait."+v.name, "/wait/"+v.name, v.value, parts)
+					w.member("wait", v.name, "/wait/"+v.name, v.value)
 				}
 			}
 		default:
-			if err := w.member(m.name, "/"+pointerPart(m.name), m.value, nil); err != nil {
-				return "", err
-			}
+			w.member("", m.name, "/"+pointerPart(m.name), m.value)
 		}
 	}
 	w.line("end diagnostic")

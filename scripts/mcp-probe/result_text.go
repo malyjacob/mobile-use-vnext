@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// decodedTextResult is the probe-local oracle for result v2. It is deliberately
+// decodedTextResult is the probe-local oracle for result v3. It is deliberately
 // narrow: it restores the facts this external probe checks, while keeping the
 // decoded object available to prove that readable blocks preserve complete
 // item/event JSON.
@@ -17,7 +17,7 @@ type decodedTextResult struct {
 	object  map[string]any
 }
 
-// decodeResultText parses one complete result v2 projection. It rejects a
+// decodeResultText parses one complete result v3 projection. It rejects a
 // missing/repeated envelope, omitted readable blocks and duplicate paths.
 func decodeResultText(text string) (*decodedTextResult, *checkError) {
 	if strings.Contains(text, "\r") {
@@ -31,7 +31,7 @@ func decodeResultText(text string) (*decodedTextResult, *checkError) {
 	if len(lines) < 2 {
 		return nil, failf("text_result_incomplete")
 	}
-	rawError, found := strings.CutPrefix(lines[0], "result v2 is_error=")
+	rawError, found := strings.CutPrefix(lines[0], "result v3 is_error=")
 	if !found || (rawError != "true" && rawError != "false") {
 		return nil, failf("text_result_header_invalid")
 	}
@@ -41,6 +41,8 @@ func decodeResultText(text string) (*decodedTextResult, *checkError) {
 
 	object := make(map[string]any)
 	seen := make(map[string]bool)
+	groupPaths := make(map[string]bool)
+	var treeBindings []treeBaseBinding
 	for index := 1; index < len(lines)-1; {
 		line := lines[index]
 		if isForeignTreeBlockHeader(line) {
@@ -57,15 +59,29 @@ func decodeResultText(text string) (*decodedTextResult, *checkError) {
 			continue
 		}
 		if isResultBlockHeader(line) {
-			if index > 1 && lines[index-1] != "" {
+			if index == 1 || lines[index-1] != "" {
 				return nil, failf("text_result_block_separator_missing")
 			}
-			next, failure := decodeResultBlock(lines, index, object, seen)
+			next, failure := decodeResultBlock(lines, index, object, seen, &treeBindings)
 			if failure != nil {
 				return nil, failure
 			}
 			index = next
 			continue
+		}
+		if line == "observation" {
+			next, failure := decodeObservationGroup(lines, index, object, seen, groupPaths)
+			if failure != nil {
+				return nil, failure
+			}
+			index = next
+			continue
+		}
+		if strings.HasPrefix(line, "observation.") {
+			return nil, failf("text_result_observation_group_required")
+		}
+		if strings.HasPrefix(line, " ") {
+			return nil, failf("text_result_observation_group_invalid")
 		}
 		if strings.HasPrefix(line, "json v1 ") {
 			path, value, failure := decodeJSONFallback(line)
@@ -102,6 +118,9 @@ func decodeResultText(text string) (*decodedTextResult, *checkError) {
 		}
 		index++
 	}
+	if failure := resolveTreeBindings(object, seen, groupPaths, treeBindings); failure != nil {
+		return nil, failure
+	}
 
 	encoded, err := json.Marshal(object)
 	if err != nil {
@@ -118,9 +137,46 @@ func decodeResultText(text string) (*decodedTextResult, *checkError) {
 	}, nil
 }
 
+// decodeObservationGroup restores one v3 observation group. The group has a
+// bare header and at least one single-space-prefixed relative path. Global path
+// tracking catches duplicates and ancestor/child conflicts across groups.
+func decodeObservationGroup(lines []string, start int, object map[string]any,
+	seen, groupPaths map[string]bool) (int, *checkError) {
+	index := start + 1
+	fields := 0
+	for index < len(lines)-1 && strings.HasPrefix(lines[index], " ") {
+		line := lines[index]
+		if len(line) < 2 || line[1] == ' ' || line[1] == '\t' {
+			return 0, failf("text_result_observation_group_invalid")
+		}
+		key, rawValue, found := strings.Cut(line[1:], "=")
+		if !found || key == "" {
+			return 0, failf("text_result_observation_group_invalid")
+		}
+		if key == "tree" {
+			return 0, failf("text_result_observation_group_invalid")
+		}
+		value, failure := decodeTextScalar(rawValue)
+		if failure != nil {
+			return 0, failure
+		}
+		path := append([]string{"observation"}, strings.Split(key, ".")...)
+		if failure := setDecodedPath(object, seen, path, value); failure != nil {
+			return 0, failure
+		}
+		groupPaths[decodedPathPointer(path)] = true
+		fields++
+		index++
+	}
+	if fields == 0 {
+		return 0, failf("text_result_observation_group_empty")
+	}
+	return index, nil
+}
+
 func isResultBlockHeader(line string) bool {
 	for _, prefix := range []string{
-		"tree v3 ", "inspect v3 ", "shell v1 ", "timeline v1 ",
+		"tree v4 ", "inspect v3 ", "shell v1 ", "timeline v1 ",
 	} {
 		if strings.HasPrefix(line, prefix) {
 			return true
@@ -130,23 +186,24 @@ func isResultBlockHeader(line string) bool {
 }
 
 // isForeignTreeBlockHeader rejects every tree/inspect version outside the
-// accepted v3 grammar. Without this check an old block can look like an
-// ordinary scalar line and be consumed field by field.
+// accepted v4 ordinary-tree and v3 inspection grammar. Without this check an
+// old block can look like an ordinary scalar line and be consumed field by
+// field.
 func isForeignTreeBlockHeader(line string) bool {
 	if !strings.HasPrefix(line, "tree v") && !strings.HasPrefix(line, "inspect v") {
 		return false
 	}
-	return !strings.HasPrefix(line, "tree v3 ") && !strings.HasPrefix(line, "inspect v3 ")
+	return !strings.HasPrefix(line, "tree v4 ") && !strings.HasPrefix(line, "inspect v3 ")
 }
 
 func decodeResultBlock(lines []string, start int, object map[string]any,
-	seen map[string]bool) (int, *checkError) {
+	seen map[string]bool, bindings *[]treeBaseBinding) (int, *checkError) {
 	if strings.Contains(lines[start], " omitted ") {
 		return 0, failf("text_result_block_omitted")
 	}
 	switch {
-	case strings.HasPrefix(lines[start], "tree v3 "):
-		return decodeTreeBlock(lines, start, object, seen)
+	case strings.HasPrefix(lines[start], "tree v4 "):
+		return decodeTreeBlock(lines, start, object, seen, bindings)
 	case strings.HasPrefix(lines[start], "inspect v3 "):
 		return decodeInspectionBlock(lines, start, object, seen)
 	case strings.HasPrefix(lines[start], "shell v1 "):
@@ -158,63 +215,58 @@ func decodeResultBlock(lines []string, start int, object map[string]any,
 	}
 }
 
+// treeBaseBinding defers the observation-owned check until every observation
+// group has been read. A short delta base therefore resolves against the final
+// full O from the same result, even when the id field follows the tree block.
+type treeBaseBinding struct {
+	rawBase string
+}
+
 func decodeTreeBlock(lines []string, start int, object map[string]any,
-	seen map[string]bool) (int, *checkError) {
-	fields, failure := decodeBlockHeader(lines[start], "tree v3 ")
-	if failure != nil {
-		return 0, failure
-	}
-	format := fields["format"]
-	if format != treeFull && format != treeDelta {
-		return 0, failf("text_tree_format_invalid")
-	}
-	id := fields["id"]
-	if id == "" {
-		return 0, failf("text_tree_id_missing")
-	}
-	observationID, _ := lookupPath(object, []string{"observation", "id"})
-	if text, ok := observationID.(string); !ok || text != id {
-		return 0, failf("text_tree_id_mismatch")
-	}
-	if format == treeDelta && fields["base"] == "" {
-		return 0, failf("text_tree_base_missing")
-	}
-	if format == treeFull && fields["scope"] == "" {
-		return 0, failf("text_tree_scope_missing")
-	}
-	if fields["view"] != "compact" {
-		return 0, failf("text_tree_view_invalid")
-	}
+	seen map[string]bool, bindings *[]treeBaseBinding) (int, *checkError) {
 	if failure := requireBlockSeparator(lines, start, "text_tree_separator_invalid"); failure != nil {
 		return 0, failure
 	}
-	expectedNodes, expectedEntries, expectedChanges := 0, 0, 0
-	switch format {
-	case treeFull:
-		if expectedNodes, failure = treeHeaderCount(fields, "nodes", "text_tree"); failure != nil {
+	format := ""
+	rawBase := ""
+	expectedNodes := 0
+	expectedChanges := 0
+	var failure *checkError
+	switch {
+	case strings.HasPrefix(lines[start], "tree v4 full nodes="):
+		format = treeFull
+		rawNodes := strings.TrimPrefix(lines[start], "tree v4 full nodes=")
+		if expectedNodes, failure = parseCanonicalPositive(rawNodes, "text_tree_count_invalid", "nodes"); failure != nil {
 			return 0, failure
 		}
-		if expectedEntries, failure = treeHeaderCount(fields, "entries", "text_tree"); failure != nil {
+	case strings.HasPrefix(lines[start], "tree v4 delta base="):
+		format = treeDelta
+		rest := strings.TrimPrefix(lines[start], "tree v4 delta base=")
+		separator := strings.LastIndex(rest, " changes=")
+		if separator <= 0 {
+			return 0, failf("text_tree_header_invalid")
+		}
+		rawBase = rest[:separator]
+		if _, failure = parseTreeBase(rawBase); failure != nil {
 			return 0, failure
 		}
-	case treeDelta:
-		if expectedChanges, failure = treeHeaderCount(fields, "changes", "text_tree"); failure != nil {
+		if expectedChanges, failure = parseCanonicalNatural(
+			rest[separator+len(" changes="):], "text_tree_count_invalid", "changes"); failure != nil {
 			return 0, failure
 		}
+	default:
+		return 0, failf("text_tree_header_invalid")
 	}
 	if failure := setDecodedPath(object, seen, []string{"observation", "tree", "format"}, format); failure != nil {
 		return 0, failure
 	}
 	if failure := setDecodedPath(object, seen,
-		[]string{"observation", "tree", "view"}, fields["view"]); failure != nil {
+		[]string{"observation", "tree", "view"}, "compact"); failure != nil {
 		return 0, failure
 	}
-	if format == treeDelta {
-		if failure := setDecodedPath(object, seen, []string{"observation", "tree", "base"}, fields["base"]); failure != nil {
-			return 0, failure
-		}
-	} else {
-		if failure := setDecodedPath(object, seen, []string{"observation", "tree", "scope"}, fields["scope"]); failure != nil {
+	if format == treeFull {
+		if failure := setDecodedPath(object, seen,
+			[]string{"observation", "tree", "scope"}, "reported_visible_with_context"); failure != nil {
 			return 0, failure
 		}
 	}
@@ -225,6 +277,8 @@ func decodeTreeBlock(lines []string, start int, object map[string]any,
 	rules := treeBodyRules{
 		kind:             format,
 		prefix:           "text_tree",
+		indentWidth:      1,
+		v4:               true,
 		rootRoleRequired: format == treeFull,
 	}
 	stats, failure := analyzeTreeBody(lines[start+2:end-1], rules)
@@ -233,21 +287,112 @@ func decodeTreeBlock(lines []string, start int, object map[string]any,
 	}
 	switch format {
 	case treeFull:
-		if failure := compareTreeBodyCount(fields, "nodes", stats.nodes,
-			expectedNodes, "text_tree"); failure != nil {
-			return 0, failure
-		}
-		if failure := compareTreeBodyCount(fields, "entries", stats.entries,
-			expectedEntries, "text_tree"); failure != nil {
-			return 0, failure
+		if stats.nodes != expectedNodes {
+			return 0, failf("text_tree_count_mismatch",
+				field("count", "nodes"),
+				field("header", strconv.Itoa(expectedNodes)),
+				field("body", strconv.Itoa(stats.nodes)))
 		}
 	case treeDelta:
-		if failure := compareTreeBodyCount(fields, "changes", stats.changes,
-			expectedChanges, "text_tree"); failure != nil {
-			return 0, failure
+		if stats.changes != expectedChanges {
+			return 0, failf("text_tree_count_mismatch",
+				field("count", "changes"),
+				field("header", strconv.Itoa(expectedChanges)),
+				field("body", strconv.Itoa(stats.changes)))
 		}
 	}
+	*bindings = append(*bindings, treeBaseBinding{rawBase: rawBase})
 	return end, nil
+}
+
+func resolveTreeBindings(object map[string]any, seen map[string]bool,
+	groupPaths map[string]bool, bindings []treeBaseBinding) *checkError {
+	if len(bindings) == 0 {
+		return nil
+	}
+	observationID, ok := lookupPath(object, []string{"observation", "id"})
+	currentID, valid := observationID.(string)
+	if !ok || !valid || !validTreeTextO(currentID) {
+		return failf("text_tree_id_missing")
+	}
+	if !groupPaths["/observation/id"] {
+		return failf("text_tree_id_group_required")
+	}
+	for _, binding := range bindings {
+		if binding.rawBase == "" {
+			continue
+		}
+		base, failure := resolveTreeBase(currentID, binding.rawBase)
+		if failure != nil {
+			return failure
+		}
+		if failure := setDecodedPath(object, seen,
+			[]string{"observation", "tree", "base"}, base); failure != nil {
+			return failure
+		}
+	}
+	return nil
+}
+
+func parseTreeBase(value string) (string, *checkError) {
+	if strings.HasPrefix(value, "_") {
+		sequence := strings.TrimPrefix(value, "_")
+		if _, failure := parseCanonicalPositiveUint64(sequence, "text_tree_base_invalid", "base"); failure != nil {
+			return "", failure
+		}
+		return value, nil
+	}
+	if !validTreeTextO(value) {
+		return "", failf("text_tree_base_invalid")
+	}
+	return value, nil
+}
+
+func resolveTreeBase(currentID, rawBase string) (string, *checkError) {
+	if !strings.HasPrefix(rawBase, "_") {
+		if !validTreeTextO(rawBase) {
+			return "", failf("text_tree_base_invalid")
+		}
+		return rawBase, nil
+	}
+	if !validTreeTextO(currentID) {
+		return "", failf("text_tree_base_current_invalid")
+	}
+	underscore := strings.LastIndexByte(currentID, '_')
+	if underscore <= 1 || underscore == len(currentID)-1 {
+		return "", failf("text_tree_base_current_invalid")
+	}
+	if _, failure := parseCanonicalPositiveUint64(
+		currentID[underscore+1:], "text_tree_base_current_invalid", "current"); failure != nil {
+		return "", failure
+	}
+	base := currentID[:underscore+1] + strings.TrimPrefix(rawBase, "_")
+	if !validTreeTextO(base) {
+		return "", failf("text_tree_base_expanded_invalid")
+	}
+	return base, nil
+}
+
+// validTreeTextO applies the v4 full-O token grammar, not the narrower public
+// P/O argument alphabet. The first byte names an observation, the remainder is
+// one or more printable ASCII token characters and the complete value stays
+// within the public reference length limit.
+func validTreeTextO(value string) bool {
+	if len(value) < 2 || len(value) > 64 || value[0] != 'O' {
+		return false
+	}
+	for index := 1; index < len(value); index++ {
+		character := value[index]
+		switch {
+		case character == 0x21,
+			character >= 0x23 && character <= 0x3c,
+			character >= 0x3e && character <= 0x5b,
+			character >= 0x5d && character <= 0x7e:
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // requireBlockSeparator verifies the single blank line between a readable block
@@ -329,6 +474,7 @@ func decodeInspectionBlock(lines []string, start int, object map[string]any,
 		kind:               "full",
 		prefix:             "text_inspect",
 		detailed:           true,
+		indentWidth:        2,
 		rootRoleRequired:   scope == "tree",
 		expectedMatches:    expectedMatches,
 		hasExpectedMatches: scope == "query",
@@ -376,6 +522,8 @@ type treeBodyRules struct {
 	kind               string
 	prefix             string
 	detailed           bool
+	indentWidth        int
+	v4                 bool
 	rootRoleRequired   bool
 	expectedMatches    int
 	hasExpectedMatches bool
@@ -399,12 +547,22 @@ type treeNodeRules struct {
 	allowChain       bool
 	requireGeometry  bool
 	rootRoleRequired bool
+	v4               bool
+	detailed         bool
+	ancestorsKnown   []bool
+	requireRectangle bool
+	explicitActions  bool
+}
+
+type treeNodeValidation struct {
+	refs        int
+	boundsKnown bool
 }
 
 func analyzeTreeBody(body []string, rules treeBodyRules) (treeBodyStats, *checkError) {
 	lines := make([]treeBodyLine, len(body))
 	for index, raw := range body {
-		line, failure := parseTreeBodyLine(raw, rules.prefix)
+		line, failure := parseTreeBodyLine(raw, rules)
 		if failure != nil {
 			return treeBodyStats{}, failure
 		}
@@ -423,7 +581,8 @@ func analyzeTreeBody(body []string, rules treeBodyRules) (treeBodyStats, *checkE
 	}
 }
 
-func parseTreeBodyLine(raw, prefix string) (treeBodyLine, *checkError) {
+func parseTreeBodyLine(raw string, rules treeBodyRules) (treeBodyLine, *checkError) {
+	prefix := rules.prefix
 	if strings.ContainsRune(raw, '\t') || strings.TrimRight(raw, " ") != raw {
 		return treeBodyLine{}, failf(prefix + "_body_invalid")
 	}
@@ -437,10 +596,14 @@ func parseTreeBodyLine(raw, prefix string) (treeBodyLine, *checkError) {
 		}
 		return treeBodyLine{blank: true}, nil
 	}
-	if indent%2 != 0 {
+	indentWidth := rules.indentWidth
+	if indentWidth == 0 {
+		indentWidth = 2
+	}
+	if indent%indentWidth != 0 {
 		return treeBodyLine{}, failf(prefix + "_body_invalid")
 	}
-	return treeBodyLine{depth: indent / 2, text: raw[indent:]}, nil
+	return treeBodyLine{depth: indent / indentWidth, text: raw[indent:]}, nil
 }
 
 // analyzeTreeDefinitionTree validates one full/compact or detailed subtree.
@@ -453,6 +616,7 @@ func analyzeTreeDefinitionTree(lines []treeBodyLine,
 	}
 	nodes, entries := 0, 0
 	previousDepth := 0
+	ancestorsKnown := make([]bool, 0)
 	for index, line := range lines {
 		if line.blank {
 			return 0, 0, failf(rules.prefix + "_body_invalid")
@@ -464,17 +628,21 @@ func analyzeTreeDefinitionTree(lines []treeBodyLine,
 		} else if line.depth == 0 || line.depth > previousDepth+1 {
 			return 0, 0, failf(rules.prefix + "_body_invalid")
 		}
-		refs, failure := validateTreeDefinition(line.text, treeNodeRules{
+		validated, failure := validateTreeDefinition(line.text, treeNodeRules{
 			prefix:           rules.prefix,
 			allowChain:       !rules.detailed && index > 0,
 			requireGeometry:  rules.detailed,
 			rootRoleRequired: index == 0 && rules.rootRoleRequired,
+			v4:               rules.v4,
+			detailed:         rules.detailed,
+			ancestorsKnown:   ancestorsKnown[:line.depth],
 		})
 		if failure != nil {
 			return 0, 0, failure
 		}
-		nodes += refs
+		nodes += validated.refs
 		entries++
+		ancestorsKnown = append(ancestorsKnown[:line.depth], validated.boundsKnown)
 		previousDepth = line.depth
 	}
 	return nodes, entries, nil
@@ -485,6 +653,7 @@ func analyzeTreeDeltaBody(lines []treeBodyLine,
 	stats := treeBodyStats{}
 	previousDepth := 0
 	subtreeOpen := false
+	ancestorsKnown := make([]bool, 0)
 	for _, line := range lines {
 		if line.blank {
 			return treeBodyStats{}, failf(rules.prefix + "_body_invalid")
@@ -496,6 +665,7 @@ func analyzeTreeDeltaBody(lines []treeBodyLine,
 		if line.depth == 0 {
 			stats.changes++
 			subtreeOpen = false
+			ancestorsKnown = ancestorsKnown[:0]
 			switch tokens[0] {
 			case "~":
 				if len(tokens) < 2 || !isPublicRef(tokens[1]) {
@@ -508,11 +678,15 @@ func analyzeTreeDeltaBody(lines []treeBodyLine,
 				if len(tokens) < 2 {
 					return treeBodyStats{}, failf(rules.prefix + "_body_invalid")
 				}
-				if _, failure := validateTreeNodeTokens(tokens[1:], treeNodeRules{
-					prefix: rules.prefix,
-				}); failure != nil {
+				validated, failure := validateTreeNodeTokens(tokens[1:], treeNodeRules{
+					prefix:         rules.prefix,
+					v4:             rules.v4,
+					ancestorsKnown: nil,
+				})
+				if failure != nil {
 					return treeBodyStats{}, failure
 				}
+				ancestorsKnown = append(ancestorsKnown, validated.boundsKnown)
 				subtreeOpen = true
 				previousDepth = 0
 			case "-":
@@ -532,12 +706,16 @@ func analyzeTreeDeltaBody(lines []treeBodyLine,
 		if !subtreeOpen || line.depth > previousDepth+1 {
 			return treeBodyStats{}, failf(rules.prefix + "_body_invalid")
 		}
-		if _, failure := validateTreeDefinition(line.text, treeNodeRules{
-			prefix:     rules.prefix,
-			allowChain: true,
-		}); failure != nil {
+		validated, failure := validateTreeDefinition(line.text, treeNodeRules{
+			prefix:         rules.prefix,
+			allowChain:     true,
+			v4:             rules.v4,
+			ancestorsKnown: ancestorsKnown[:line.depth],
+		})
+		if failure != nil {
 			return treeBodyStats{}, failure
 		}
+		ancestorsKnown = append(ancestorsKnown[:line.depth], validated.boundsKnown)
 		previousDepth = line.depth
 	}
 	return stats, nil
@@ -661,6 +839,45 @@ func treeHeaderCount(fields map[string]string, key, prefix string) (int, *checkE
 	return value, nil
 }
 
+func parseCanonicalPositive(value, prefix, count string) (int, *checkError) {
+	if value == "" || value[0] < '1' || value[0] > '9' {
+		return 0, failf(prefix, field("count", count))
+	}
+	for index := 1; index < len(value); index++ {
+		if value[index] < '0' || value[index] > '9' {
+			return 0, failf(prefix, field("count", count))
+		}
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed <= 0 {
+		return 0, failf(prefix, field("count", count))
+	}
+	return parsed, nil
+}
+
+func parseCanonicalNatural(value, prefix, count string) (int, *checkError) {
+	if value == "0" {
+		return 0, nil
+	}
+	return parseCanonicalPositive(value, prefix, count)
+}
+
+func parseCanonicalPositiveUint64(value, prefix, count string) (uint64, *checkError) {
+	if value == "" || value[0] < '1' || value[0] > '9' {
+		return 0, failf(prefix, field("count", count))
+	}
+	for index := 1; index < len(value); index++ {
+		if value[index] < '0' || value[index] > '9' {
+			return 0, failf(prefix, field("count", count))
+		}
+	}
+	parsed, err := strconv.ParseUint(value, 10, 64)
+	if err != nil || parsed == 0 {
+		return 0, failf(prefix, field("count", count))
+	}
+	return parsed, nil
+}
+
 func compareTreeBodyCount(fields map[string]string, key string, actual,
 	expected int, prefix string) *checkError {
 	if actual == expected {
@@ -690,43 +907,48 @@ func parsePositiveDecimal(value string) (int, bool) {
 	return parsed, ok && parsed > 0
 }
 
-func validateTreeDefinition(text string, rules treeNodeRules) (int, *checkError) {
+func validateTreeDefinition(text string, rules treeNodeRules) (treeNodeValidation, *checkError) {
 	tokens, ok := treeLineTokens(text)
 	if !ok {
-		return 0, failf(rules.prefix + "_body_invalid")
+		return treeNodeValidation{}, failf(rules.prefix + "_body_invalid")
 	}
 	return validateTreeNodeTokens(tokens, rules)
 }
 
-func validateTreeNodeTokens(tokens []string, rules treeNodeRules) (int, *checkError) {
+func validateTreeNodeTokens(tokens []string, rules treeNodeRules) (treeNodeValidation, *checkError) {
 	if len(tokens) == 0 || tokens[0] == "defaults" {
-		return 0, failf(rules.prefix + "_body_invalid")
+		return treeNodeValidation{}, failf(rules.prefix + "_body_invalid")
 	}
 	if failure := validateFullNodeFlags(tokens, rules.prefix); failure != nil {
-		return 0, failure
+		return treeNodeValidation{}, failure
 	}
 	if tokens[0] == "chain" {
 		if !rules.allowChain || rules.requireGeometry || len(tokens) < 3 ||
 			!validTreeRefListToken(tokens[1], 2) || !treeRoleSet[tokens[2]] {
-			return 0, failf(rules.prefix + "_body_invalid")
+			return treeNodeValidation{}, failf(rules.prefix + "_body_invalid")
 		}
-		if failure := validateTreeNodeColumns(tokens, 3, true, rules.requireGeometry,
-			rules.prefix); failure != nil {
-			return 0, failure
+		columnRules := rules
+		columnRules.requireRectangle = rules.v4
+		columnRules.explicitActions = true
+		validated, failure := validateTreeNodeColumns(tokens, 3, true,
+			tokens[2], columnRules)
+		if failure != nil {
+			return treeNodeValidation{}, failure
 		}
 		refs, _ := parseTreeRefListToken(tokens[1])
-		return len(refs), nil
+		validated.refs = len(refs)
+		return validated, nil
 	}
 	if strings.HasPrefix(tokens[0], "[") {
-		if !rules.allowChain || rules.requireGeometry || rules.rootRoleRequired ||
+		if rules.v4 || !rules.allowChain || rules.requireGeometry || rules.rootRoleRequired ||
 			len(tokens) != 1 || !validTreeRefListToken(tokens[0], 2) {
-			return 0, failf(rules.prefix + "_body_invalid")
+			return treeNodeValidation{}, failf(rules.prefix + "_body_invalid")
 		}
 		refs, _ := parseTreeRefListToken(tokens[0])
-		return len(refs), nil
+		return treeNodeValidation{refs: len(refs)}, nil
 	}
 	if !isPublicRef(tokens[0]) {
-		return 0, failf(rules.prefix + "_body_invalid")
+		return treeNodeValidation{}, failf(rules.prefix + "_body_invalid")
 	}
 	role := "view"
 	columnStart := 1
@@ -739,47 +961,113 @@ func validateTreeNodeTokens(tokens []string, rules treeNodeRules) (int, *checkEr
 		allowGeometry = false
 	}
 	if rules.rootRoleRequired && role != "root" {
-		return 0, failf(rules.prefix + "_body_invalid")
+		return treeNodeValidation{}, failf(rules.prefix + "_body_invalid")
 	}
-	if failure := validateTreeNodeColumns(tokens, columnStart, allowGeometry,
-		rules.requireGeometry, rules.prefix); failure != nil {
-		return 0, failure
+	if rules.detailed {
+		rules.explicitActions = true
 	}
-	return 1, nil
+	validated, failure := validateTreeNodeColumns(tokens, columnStart, allowGeometry,
+		role, rules)
+	if failure != nil {
+		return treeNodeValidation{}, failure
+	}
+	validated.refs = 1
+	return validated, nil
 }
 
-func validateTreeNodeColumns(tokens []string, start int, allowGeometry,
-	requireGeometry bool, prefix string) *checkError {
+func validateTreeNodeColumns(tokens []string, start int, allowGeometry bool,
+	role string, rules treeNodeRules) (treeNodeValidation, *checkError) {
+	prefix := rules.prefix
 	index := start
+	geometryKnown := false
 	haveGeometry := false
-	if allowGeometry && index < len(tokens) &&
-		(tokens[index] == "-" || strings.HasPrefix(tokens[index], "[")) {
-		if !validTreeGeometry(tokens[index]) {
-			return failf(prefix + "_body_invalid")
+	if allowGeometry && index < len(tokens) {
+		switch {
+		case tokens[index] == "@":
+			if !rules.v4 || !nearestKnownAncestor(rules.ancestorsKnown) {
+				return treeNodeValidation{}, failf(prefix + "_body_invalid")
+			}
+			geometryKnown = true
+			haveGeometry = true
+			index++
+		case tokens[index] == "-":
+			haveGeometry = true
+			index++
+		case rules.v4 && looksLikeUnparenthesizedRectangle(tokens[index]):
+			if !validV4TreeGeometry(tokens[index]) {
+				return treeNodeValidation{}, failf(prefix + "_body_invalid")
+			}
+			geometryKnown = true
+			haveGeometry = true
+			index++
+		case !rules.v4 && strings.HasPrefix(tokens[index], "["):
+			if !validDetailedTreeGeometry(tokens[index]) {
+				return treeNodeValidation{}, failf(prefix + "_body_invalid")
+			}
+			geometryKnown = true
+			haveGeometry = true
+			index++
 		}
-		haveGeometry = true
-		index++
 	}
-	if requireGeometry && !haveGeometry {
-		return failf(prefix + "_body_invalid")
+	if rules.requireGeometry && !haveGeometry {
+		return treeNodeValidation{}, failf(prefix + "_body_invalid")
+	}
+	if rules.requireRectangle &&
+		(!haveGeometry || !geometryKnown || strings.HasPrefix(tokens[start], "@")) {
+		return treeNodeValidation{}, failf(prefix + "_body_invalid")
 	}
 	for index < len(tokens) && isTreeJSONString(tokens[index]) {
 		index++
 	}
 	if index < len(tokens) && strings.HasPrefix(tokens[index], "value=") {
 		if !isTreeJSONString(strings.TrimPrefix(tokens[index], "value=")) {
-			return failf(prefix + "_body_invalid")
+			return treeNodeValidation{}, failf(prefix + "_body_invalid")
 		}
 		index++
 	}
 	if index < len(tokens) && strings.HasPrefix(tokens[index], "hint=") {
 		if !isTreeJSONString(strings.TrimPrefix(tokens[index], "hint=")) {
-			return failf(prefix + "_body_invalid")
+			return treeNodeValidation{}, failf(prefix + "_body_invalid")
 		}
 		index++
 	}
-	for index < len(tokens) && treeActionSet[tokens[index]] {
-		index++
+	explicitActions := make(map[string]bool)
+	defaultAction := treeRoleDefaultAction[role]
+	negatedAction := ""
+	actions := make([]string, 0, len(treeActionSet))
+	for index < len(tokens) {
+		action := tokens[index]
+		if treeActionSet[action] {
+			if negatedAction != "" {
+				return treeNodeValidation{}, failf(prefix + "_body_invalid")
+			}
+			explicitActions[action] = true
+			actions = append(actions, action)
+			index++
+			continue
+		}
+		if strings.HasPrefix(action, "!") {
+			name := strings.TrimPrefix(action, "!")
+			if !rules.v4 || rules.explicitActions || name != defaultAction || negatedAction != "" ||
+				explicitActions[name] {
+				return treeNodeValidation{}, failf(prefix + "_body_invalid")
+			}
+			negatedAction = name
+			index++
+			continue
+		}
+		break
+	}
+	if rules.v4 && !rules.explicitActions && defaultAction != "" &&
+		!explicitActions[defaultAction] && negatedAction == "" {
+		lastAction := -1
+		for _, action := range actions {
+			order := treeActionOrder[action]
+			if order < lastAction {
+				return treeNodeValidation{}, failf(prefix + "_body_invalid")
+			}
+			lastAction = order
+		}
 	}
 	lastFlag := -1
 	for index < len(tokens) {
@@ -789,7 +1077,7 @@ func validateTreeNodeColumns(tokens []string, start int, allowGeometry,
 			break
 		}
 		if order <= lastFlag {
-			return failf(prefix + "_body_invalid")
+			return treeNodeValidation{}, failf(prefix + "_body_invalid")
 		}
 		lastFlag = order
 		index++
@@ -797,13 +1085,13 @@ func validateTreeNodeColumns(tokens []string, start int, allowGeometry,
 	if index < len(tokens) && strings.HasPrefix(tokens[index], "axis=") {
 		axis := strings.TrimPrefix(tokens[index], "axis=")
 		if axis != "x" && axis != "y" && axis != "both" {
-			return failf(prefix + "_body_invalid")
+			return treeNodeValidation{}, failf(prefix + "_body_invalid")
 		}
 		index++
 	}
 	if index < len(tokens) && strings.HasPrefix(tokens[index], "resource=") {
 		if !isTreeJSONString(strings.TrimPrefix(tokens[index], "resource=")) {
-			return failf(prefix + "_body_invalid")
+			return treeNodeValidation{}, failf(prefix + "_body_invalid")
 		}
 		index++
 	}
@@ -811,9 +1099,9 @@ func validateTreeNodeColumns(tokens []string, start int, allowGeometry,
 		index++
 	}
 	if index != len(tokens) {
-		return failf(prefix + "_body_invalid")
+		return treeNodeValidation{}, failf(prefix + "_body_invalid")
 	}
-	return nil
+	return treeNodeValidation{boundsKnown: geometryKnown}, nil
 }
 
 var treeFullFlagOrder = map[string]int{
@@ -830,7 +1118,46 @@ var treeActionSet = map[string]bool{
 	"tap": true, "long_press": true, "text": true, "swipe": true,
 }
 
-func validTreeGeometry(token string) bool {
+var treeActionOrder = map[string]int{
+	"tap": 0, "long_press": 1, "text": 2, "swipe": 3,
+}
+
+var treeRoleDefaultAction = map[string]string{
+	"button": "tap",
+	"input":  "text",
+	"scroll": "swipe",
+}
+
+func nearestKnownAncestor(ancestorsKnown []bool) bool {
+	for index := len(ancestorsKnown) - 1; index >= 0; index-- {
+		if ancestorsKnown[index] {
+			return true
+		}
+	}
+	return false
+}
+
+func looksLikeUnparenthesizedRectangle(token string) bool {
+	return strings.Count(token, ",") == 3
+}
+
+func validV4TreeGeometry(token string) bool {
+	parts := strings.Split(token, ",")
+	if len(parts) != 4 {
+		return false
+	}
+	values := [4]int{}
+	for index, part := range parts {
+		value, ok := parseCanonicalTreeInteger(part)
+		if !ok {
+			return false
+		}
+		values[index] = value
+	}
+	return values[2] >= values[0] && values[3] >= values[1]
+}
+
+func validDetailedTreeGeometry(token string) bool {
 	if token == "-" {
 		return true
 	}
@@ -843,7 +1170,7 @@ func validTreeGeometry(token string) bool {
 	}
 	values := [4]int{}
 	for index, part := range parts {
-		value, ok := parseTreeInteger(part)
+		value, ok := parseCanonicalTreeInteger(part)
 		if !ok {
 			return false
 		}
@@ -852,15 +1179,18 @@ func validTreeGeometry(token string) bool {
 	return values[2] >= values[0] && values[3] >= values[1]
 }
 
-func parseTreeInteger(value string) (int, bool) {
+func parseCanonicalTreeInteger(value string) (int, bool) {
 	if value == "" {
 		return 0, false
 	}
 	digits := value
+	negative := false
 	if digits[0] == '-' {
 		digits = digits[1:]
+		negative = true
 	}
-	if digits == "" {
+	if digits == "" || (negative && digits == "0") ||
+		(digits[0] == '0' && len(digits) > 1) {
 		return 0, false
 	}
 	for index := 0; index < len(digits); index++ {
@@ -1470,9 +1800,20 @@ func setDecodedPath(object map[string]any, seen map[string]bool, path []string,
 			return failf("text_result_path_invalid")
 		}
 	}
-	pointer := "/" + strings.Join(escapePointerParts(path), "/")
+	pointer := decodedPathPointer(path)
 	if seen[pointer] {
 		return failf("text_result_path_duplicate")
+	}
+	for index := 1; index < len(path); index++ {
+		if seen[decodedPathPointer(path[:index])] {
+			return failf("text_result_path_conflict")
+		}
+	}
+	descendantPrefix := pointer + "/"
+	for existing := range seen {
+		if strings.HasPrefix(existing, descendantPrefix) {
+			return failf("text_result_path_conflict")
+		}
 	}
 	_, failure := setNestedValue(object, path, value)
 	if failure != nil {
@@ -1480,6 +1821,10 @@ func setDecodedPath(object map[string]any, seen map[string]bool, path []string,
 	}
 	seen[pointer] = true
 	return nil
+}
+
+func decodedPathPointer(path []string) string {
+	return "/" + strings.Join(escapePointerParts(path), "/")
 }
 
 func setJSONPointer(object map[string]any, seen map[string]bool, pointer string,
@@ -1508,11 +1853,7 @@ func setNestedValue(current any, path []string, value any) (any, *checkError) {
 	case map[string]any:
 		child, exists := node[part]
 		if !exists && len(path) > 1 {
-			if _, numeric := parseArrayIndex(path[1]); numeric {
-				child = make([]any, 0)
-			} else {
-				child = make(map[string]any)
-			}
+			child = make(map[string]any)
 		}
 		updated, failure := setNestedValue(child, path[1:], value)
 		if failure != nil {

@@ -373,11 +373,14 @@ func comparableResultObject(object map[string]any) map[string]any {
 			observationClone[key] = value
 		}
 		if tree, ok := observation["tree"].(map[string]any); ok {
-			treeHeader := make(map[string]any, 4)
-			for _, key := range []string{"format", "base", "scope", "view"} {
-				if value, exists := tree[key]; exists {
-					treeHeader[key] = value
-				}
+			treeHeader := make(map[string]any, len(tree))
+			for key, value := range tree {
+				treeHeader[key] = value
+			}
+			for _, bodyKey := range []string{
+				"root", "set", "add", "remove", "children", "replace",
+			} {
+				delete(treeHeader, bodyKey)
 			}
 			observationClone["tree"] = treeHeader
 		}
@@ -637,7 +640,7 @@ func snapImageBytes(projected *callResult, meta *imageView) ([]byte, *checkError
 func treeBlockText(projected *callResult, headerPrefix string) (string, *checkError) {
 	end := "end inspect"
 	reason := "text_inspect_block_missing"
-	if strings.HasPrefix(headerPrefix, "tree v3 ") {
+	if strings.HasPrefix(headerPrefix, "tree v4 ") {
 		end = "end tree"
 		reason = "text_tree_block_missing"
 	}

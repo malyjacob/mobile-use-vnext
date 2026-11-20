@@ -10,6 +10,7 @@ import (
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/malyjacob/mobile-use-vnext/internal/observation"
 	"github.com/malyjacob/mobile-use-vnext/internal/protocol"
 )
 
@@ -42,18 +43,17 @@ func TestTreeTextGuideStatesTriStateOmission(t *testing.T) {
 	}
 }
 
-// TestTreeTextGuideStatesCompactGeometryPolicy pins the observation-view
-// geometry legend: action positions stay, actionless text and anonymous plain
-// rectangles are hidden, and the remaining rectangles hide only when they
-// repeat the nearest delivered ancestor or fall below one percent of the
-// screen.
+// TestTreeTextGuideStatesCompactGeometryPolicy pins the v4 geometry legend.
 func TestTreeTextGuideStatesCompactGeometryPolicy(t *testing.T) {
 	for _, required := range []string{
-		"根和有动作的节点交付已知矩形",
-		"无动作的 `text` 与匿名普通 view/group 省略矩形",
-		"与父链上最近交付的矩形四边相同",
-		"裁剪到屏幕后小于屏幕面积 1% 时省略",
-		"详细补看交付原矩形",
+		"每层恰写一个 ASCII 空格",
+		"矩形四边为有符号整数",
+		"`right>=left`",
+		"`bottom>=top`",
+		"未知几何写 `-`",
+		"缺失几何列表示按策略隐藏",
+		"`@` 表示与同一串行化定义中最近一个有已知矩形的严格祖先同矩形",
+		"每个 `+`、`=` 子树独立判断",
 	} {
 		if !strings.Contains(treeTextGuide, required) {
 			t.Errorf("tree guide lacks %q", required)
@@ -70,10 +70,10 @@ func TestTreeTextGuideStatesCompactPruningAndLegacyChains(t *testing.T) {
 		"enabled 已知为 true",
 		"focused/selected/protected/checked 已知为 false",
 		"祖先动作和状态不参与",
-		"原矩形裁屏后面积须为可计算正数且严格小于屏幕面积 1%",
-		"清理因此变空的隐藏匿名普通 view/group",
-		"仅剩一个直接孩子的隐藏匿名普通 view/group",
-		"新 compact full/delta 只交付普通节点定义，不生成折叠链",
+		"原矩形裁屏后面积为正且严格小于屏幕面积 1%",
+		"清理因此变空的隐藏匿名 `view`/`group`",
+		"仅剩一个直接孩子的隐藏匿名 `view`/`group`",
+		"新 v4 只生成普通节点定义",
 		"读取端继续接受历史 `[n2 n3]`",
 		"链下缩进的孩子属于链尾",
 	} {
@@ -86,17 +86,27 @@ func TestTreeTextGuideStatesCompactPruningAndLegacyChains(t *testing.T) {
 	}
 }
 
-func TestTreeTextGuideStatesV3RoleRecovery(t *testing.T) {
+func TestTreeTextGuideStatesResultV3AndTreeV4(t *testing.T) {
 	for _, required := range []string{
-		"tree v3 format=full",
-		"tree v3 format=delta",
+		"`result v3 is_error=<true|false>`",
+		"连续 `observation.*` 字段",
+		"完整 O 从组内 `id` 取得",
+		"`json v1 path=\"<绝对 JSON Pointer>\" value=<原值>`",
+		"tree v4 full nodes=<n>",
+		"tree v4 delta base=<O|_<序号>> changes=<n>",
 		"inspect v3 scope=",
+		"`base=_72`",
+		"每层恰写一个 ASCII 空格",
+		"`@` 表示",
+		"`!tap`、`!text` 或 `!swipe`",
+		"按 `tap,long_press,text,swipe` 插回默认动作",
+		"inspect v3 一律使用两格缩进、`[l,t,r,b]` 矩形和显式动作词",
 		"省略 `role`",
-		"隐藏几何后直接是引号标签时默认 `text`",
-		"或行尾默认 `view`",
+		"首项为引号标签时默认 `text`",
+		"其他列或行尾默认 `view`",
 		"显式角色覆盖默认",
-		"`view` 必须显式写 `view`",
-		"无标签或带几何列的 `text` 必须显式写 `text`",
+		"首项为标签或角色词的 `view`",
+		"无标签或带几何列的 `text`",
 		"`[n2 n3]`",
 		"`chain [n2 n3] <role> ...`",
 	} {
@@ -104,11 +114,59 @@ func TestTreeTextGuideStatesV3RoleRecovery(t *testing.T) {
 			t.Errorf("tree guide lacks %q", required)
 		}
 	}
-	for _, retired := range []string{"tree v2", "inspect v2"} {
+	for _, retired := range []string{"result v2", "tree v3", "tree v2", "inspect v2"} {
 		if strings.Contains(treeTextGuide, retired) {
 			t.Errorf("tree guide retains retired version %q", retired)
 		}
 	}
+}
+
+func TestDiscoveryTreeExamplesDecodeAndApply(t *testing.T) {
+	var examples []protocol.Result
+	for _, literal := range strings.Split(treeTextGuide, "`") {
+		if !strings.HasPrefix(literal, "result v3 is_error=false\n") {
+			continue
+		}
+		facts, isError, err := decodeResultText(t, literal+"\n")
+		if err != nil || isError {
+			t.Fatalf("discovery example is invalid: %v", err)
+		}
+		wire, err := json.Marshal(facts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var result protocol.Result
+		if err := protocol.Decode(wire, &result); err != nil {
+			t.Fatal(err)
+		}
+		examples = append(examples, result)
+	}
+	if len(examples) != 3 {
+		t.Fatalf("want full, delta and inspect examples, got %d", len(examples))
+	}
+	full, delta, inspection := examples[0].Observation, examples[1].Observation, examples[2].Inspection
+	if full == nil || full.Tree == nil || full.Tree.Full == nil ||
+		delta == nil || delta.Tree == nil || delta.Tree.Delta == nil ||
+		inspection == nil || inspection.Root == nil {
+		t.Fatal("example omitted its tree or inspection")
+	}
+	if delta.Tree.Delta.Base != full.ID || inspection.ObservationID != delta.ID {
+		t.Fatal("example lost its baseline or inspection observation")
+	}
+	rebuilt, err := observation.ReadApply(full.Tree.Full, delta.Tree.Delta)
+	if err != nil {
+		t.Fatalf("discovery delta cannot apply to the example full: %v", err)
+	}
+	for _, node := range rebuilt.Root.Children {
+		if node.Ref == inspection.Root.Ref {
+			if len(node.Label) != 1 || len(inspection.Root.Label) != 1 ||
+				node.Label[0] != inspection.Root.Label[0] {
+				t.Fatal("example inspection label differs from the reconstructed tree")
+			}
+			return
+		}
+	}
+	t.Fatal("inspection ref is absent after applying the example delta")
 }
 
 // TestServerInstructionsCarryCrossToolRules checks the shared workflow and the
@@ -219,7 +277,9 @@ func TestToolDescriptionsAreCallerOriented(t *testing.T) {
 			"重放原 start 不重新获得五分钟",
 			"可消费观察",
 			"幂等/查询编号",
-			"base full 加本次 delta",
+			"`observation` 组的 `id`",
+			"`tree v4 full`",
+			"base 指向的 full 加本次 delta",
 		},
 		"status": {
 			"operation_state",
@@ -236,7 +296,10 @@ func TestToolDescriptionsAreCallerOriented(t *testing.T) {
 		"observe": {
 			"reference 必填",
 			"0–10000",
-			"新 observation.id",
+			"`observation` 组的 `id`",
+			"`base=_72`",
+			"full=true",
+			"同一 full 上的多个差分各自应用",
 		},
 		"wait_for": {
 			"1..40",
@@ -245,6 +308,9 @@ func TestToolDescriptionsAreCallerOriented(t *testing.T) {
 			"wait.trigger",
 			"wait.matched",
 			"35 秒",
+			"`base=_72`",
+			"full=true",
+			"同一 full 上的多个差分各自应用",
 		},
 		"act": {
 			"reference",
@@ -262,7 +328,9 @@ func TestToolDescriptionsAreCallerOriented(t *testing.T) {
 			"inspect({reference:原 O,node:诊断 ref})",
 			"建议坐标的来源",
 			"target_changed",
-			"新 observation.id",
+			"`observation` 组的 `id`",
+			"`!tap`/`!text`/`!swipe`",
+			"`@` 表示",
 			"uncertain",
 			"recovery.entry=observe",
 			"operation.target={x,y}",
@@ -276,6 +344,8 @@ func TestToolDescriptionsAreCallerOriented(t *testing.T) {
 			"content_unavailable",
 			"inspection_too_large",
 			"inspect v3",
+			"两格缩进",
+			"不使用普通树 v4 的默认动作、`@` 或短 base",
 		},
 		"keepalive": {
 			"1～120",
@@ -298,6 +368,7 @@ func TestToolDescriptionsAreCallerOriented(t *testing.T) {
 			"当前 ready O",
 			"live owned",
 			"outcome",
+			"`observation` 组的 `id`",
 		},
 		"notify": {
 			"executed 只表示消息已保存",
@@ -365,13 +436,21 @@ func TestLiveToolDescriptionsClarifyWaitAndTextRecovery(t *testing.T) {
 			"wait_ms",
 			"毫秒",
 			"等待公开树条件应选 wait_for",
+			"`observation` 组的 `id`",
+			"`base=_72`",
+			"full=true",
+			"同一 full 上的多个差分各自应用",
 		},
 		"wait_for": {
 			"轮询当前会话的公开树条件",
 			"任一条件成立",
 			"stable=true",
 			"连续 3 帧",
-			"发布新 observation.id 时调用成功",
+			"发布新观察时调用成功",
+			"`observation` 组的 `id`",
+			"`base=_72`",
+			"full=true",
+			"同一 full 上的多个差分各自应用",
 			"wait.trigger=timeout",
 			"wait.matched 包含终帧命中的条件",
 			"超时时还包含 timeout",
@@ -387,6 +466,8 @@ func TestLiveToolDescriptionsClarifyWaitAndTextRecovery(t *testing.T) {
 			"session.origin",
 			"属于该会话的 operation_id",
 			"避免原样重发",
+			"`!tap`/`!text`/`!swipe`",
+			"`@` 表示",
 		},
 		"inspect": {
 			"原 act 请求的 O",
@@ -394,6 +475,8 @@ func TestLiveToolDescriptionsClarifyWaitAndTextRecovery(t *testing.T) {
 			"该 ref 作 node",
 			"详细子树",
 			"O 过期后仍可能可读",
+			"两格缩进",
+			"不使用普通树 v4 的默认动作、`@` 或短 base",
 		},
 	}
 	for name, fragments := range required {
@@ -423,6 +506,11 @@ func TestLiveToolDescriptionsClarifyWaitAndTextRecovery(t *testing.T) {
 		"小型隐藏无标注 `image`",
 		"inspect({reference:原 act 的 O,node:诊断 ref})",
 		"链下缩进的孩子属于链尾",
+		"`result v3 is_error=<true|false>`",
+		"tree v4 full nodes=<n>",
+		"`base=_72`",
+		"`@` 表示与同一串行化定义中最近一个有已知矩形的严格祖先同矩形",
+		"`!tap`、`!text` 或 `!swipe`",
 	} {
 		if !strings.Contains(initialize.Instructions, fragment) {
 			t.Errorf("live server instructions lack %q", fragment)

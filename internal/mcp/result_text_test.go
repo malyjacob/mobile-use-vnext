@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"reflect"
 	"strconv"
 	"strings"
@@ -16,70 +17,69 @@ func decodeResultJSON(raw []byte) (any, error) {
 	d := json.NewDecoder(bytes.NewReader(raw))
 	d.UseNumber()
 	var v any
-	err := d.Decode(&v)
-	return v, err
+	if err := d.Decode(&v); err != nil {
+		return nil, err
+	}
+	var extra any
+	if err := d.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("second JSON value")
+		}
+		return nil, fmt.Errorf("trailing JSON: %w", err)
+	}
+	return v, nil
 }
 
 // Independent, test-only oracle. It reconstructs facts from the wire syntax;
 // it never calls the encoder to recover omitted information.
 func decodeResultText(t *testing.T, text string) (map[string]any, bool, error) {
 	t.Helper()
+	if text == "" || strings.ContainsRune(text, '\r') ||
+		!strings.HasSuffix(text, "\n") || strings.HasSuffix(text, "\n\n") {
+		return nil, false, fmt.Errorf("result text must be non-empty LF text with one trailer")
+	}
 	lines := strings.Split(strings.TrimSuffix(text, "\n"), "\n")
 	bad := func() (map[string]any, bool, error) { return nil, false, fmt.Errorf("invalid result text") }
 	if len(lines) < 2 || lines[len(lines)-1] != "end result" {
 		return bad()
 	}
-	flag, ok := strings.CutPrefix(lines[0], "result v2 is_error=")
+	flag, ok := strings.CutPrefix(lines[0], "result v3 is_error=")
 	if !ok || (flag != "true" && flag != "false") {
 		return bad()
 	}
 	root := map[string]any{}
 	seen := map[string]bool{}
 	put := func(path string, v any) error {
+		parts, err := decodeJSONPointer(path)
+		if err != nil {
+			return err
+		}
 		for old := range seen {
 			if old == path || strings.HasPrefix(path, old+"/") || strings.HasPrefix(old, path+"/") {
 				return fmt.Errorf("duplicate path %s", path)
 			}
 		}
 		seen[path] = true
-		parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
-		for i, p := range parts {
-			parts[i] = strings.ReplaceAll(strings.ReplaceAll(p, "~1", "/"), "~0", "~")
-		}
 		var set func(any, []string) (any, error)
 		set = func(node any, parts []string) (any, error) {
 			if len(parts) == 0 {
 				return v, nil
 			}
 			if node == nil {
-				if _, err := strconv.Atoi(parts[0]); err == nil {
-					node = []any{}
-				} else {
-					node = map[string]any{}
-				}
+				node = map[string]any{}
 			}
-			switch n := node.(type) {
-			case map[string]any:
-				child, err := set(n[parts[0]], parts[1:])
-				if err != nil {
-					return nil, err
-				}
-				n[parts[0]] = child
-				return n, nil
-			case []any:
-				i, err := strconv.Atoi(parts[0])
-				if err != nil || i < 0 || i > len(n) {
-					return nil, fmt.Errorf("invalid array index")
-				}
-				if i == len(n) {
-					n = append(n, nil)
-				}
-				n[i], err = set(n[i], parts[1:])
-				return n, err
+			n, ok := node.(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("invalid pointer parent")
 			}
-			return nil, fmt.Errorf("invalid pointer parent")
+			child, err := set(n[parts[0]], parts[1:])
+			if err != nil {
+				return nil, err
+			}
+			n[parts[0]] = child
+			return n, nil
 		}
-		_, err := set(root, parts)
+		_, err = set(root, parts)
 		return err
 	}
 	putJSON := func(path string, raw []byte) error {
@@ -89,20 +89,89 @@ func decodeResultText(t *testing.T, text string) (map[string]any, bool, error) {
 		}
 		return put(path, v)
 	}
+	groupOpen := false
+	groupFields := 0
+	groupObservationID := ""
+	closeGroup := func() error {
+		if groupOpen && groupFields == 0 {
+			return fmt.Errorf("observation group is empty")
+		}
+		groupOpen = false
+		groupFields = 0
+		return nil
+	}
+	putObservationField := func(relative string, value any) error {
+		if relative == "" || strings.HasPrefix(relative, ".") || strings.HasSuffix(relative, ".") ||
+			strings.Contains(relative, "..") {
+			return fmt.Errorf("malformed observation subpath %q", relative)
+		}
+		path := "/observation/" + strings.ReplaceAll(relative, ".", "/")
+		if err := put(path, value); err != nil {
+			return err
+		}
+		if relative == "id" {
+			groupObservationID, _ = value.(string)
+		}
+		groupFields++
+		return nil
+	}
+	previousBlank := false
 	for i := 1; i < len(lines)-1; i++ {
 		line := lines[i]
 		if line == "" {
+			if err := closeGroup(); err != nil {
+				return nil, false, err
+			}
+			if previousBlank {
+				return nil, false, fmt.Errorf("repeated blank line")
+			}
+			previousBlank = true
+			continue
+		}
+		previousBlank = false
+		if strings.HasSuffix(line, " ") || strings.ContainsAny(line, "\t\r") {
+			return nil, false, fmt.Errorf("line has non-canonical trailing or control whitespace")
+		}
+		if strings.HasPrefix(line, " ") {
+			if !groupOpen {
+				return nil, false, fmt.Errorf("indented line outside observation group")
+			}
+			key, value, ok := strings.Cut(strings.TrimPrefix(line, " "), "=")
+			if !ok || key == "" || value == "" {
+				return nil, false, fmt.Errorf("malformed observation group field")
+			}
+			kind, known := resultFields["observation."+key]
+			if !known {
+				return nil, false, fmt.Errorf("unknown observation field %q", key)
+			}
+			decoded, err := decodeResultFieldValue(value, kind)
+			if err != nil {
+				return nil, false, err
+			}
+			if err := putObservationField(key, decoded); err != nil {
+				return nil, false, err
+			}
+			continue
+		}
+		if line == "observation" {
+			if err := closeGroup(); err != nil {
+				return nil, false, err
+			}
+			groupOpen = true
 			continue
 		}
 		if strings.HasPrefix(line, "json v1 path=") {
 			d := json.NewDecoder(strings.NewReader(strings.TrimPrefix(line, "json v1 path=")))
 			var path string
+			if err := closeGroup(); err != nil {
+				return nil, false, err
+			}
 			if d.Decode(&path) != nil || !strings.HasPrefix(path, "/") {
 				return bad()
 			}
 			rest := strings.TrimPrefix(line, "json v1 path=")[d.InputOffset():]
 			value, ok := strings.CutPrefix(rest, " value=")
-			if !ok {
+			if !ok || value == "" {
 				return bad()
 			}
 			if err := putJSON(path, []byte(value)); err != nil {
@@ -110,7 +179,11 @@ func decodeResultText(t *testing.T, text string) (map[string]any, bool, error) {
 			}
 			continue
 		}
-		if strings.HasPrefix(line, "tree v3 ") || strings.HasPrefix(line, "inspect v3 ") || strings.HasPrefix(line, "shell v1 ") || strings.HasPrefix(line, "timeline v1 ") {
+		if strings.HasPrefix(line, "tree ") || strings.HasPrefix(line, "inspect v3 ") ||
+			strings.HasPrefix(line, "shell v1 ") || strings.HasPrefix(line, "timeline v1 ") {
+			if err := closeGroup(); err != nil {
+				return nil, false, err
+			}
 			kind := strings.Fields(line)[0]
 			end := "end " + kind
 			j := i + 1
@@ -121,20 +194,30 @@ func decodeResultText(t *testing.T, text string) (map[string]any, bool, error) {
 				return bad()
 			}
 			block := strings.Join(lines[i:j+1], "\n") + "\n"
-			_, header := parseHeaderFields(t, line)
 			switch kind {
 			case "tree":
-				o, _ := root["observation"].(map[string]any)
-				if o["id"] != header["id"] {
-					return bad()
+				if !strings.HasPrefix(line, "tree v4 ") {
+					return nil, false, fmt.Errorf("ordinary tree is not tree v4")
 				}
+				if groupObservationID == "" {
+					return nil, false, fmt.Errorf("tree block has no observation group id")
+				}
+				id := groupObservationID
 				var v any
-				if header["format"] == "full" {
-					v = parseFullTreeText(t, block)
-				} else if header["format"] == "delta" {
-					v = parseDeltaText(t, block)
+				if strings.HasPrefix(line, "tree v4 full ") {
+					tree, err := parseFullTreeTextValue(block, id)
+					if err != nil {
+						return nil, false, err
+					}
+					v = tree
+				} else if strings.HasPrefix(line, "tree v4 delta ") {
+					delta, err := parseDeltaTextValue(block, id)
+					if err != nil {
+						return nil, false, err
+					}
+					v = delta
 				} else {
-					return bad()
+					return nil, false, fmt.Errorf("unknown tree v4 format")
 				}
 				raw, err := protocol.JSON(v)
 				if err != nil {
@@ -144,7 +227,10 @@ func decodeResultText(t *testing.T, text string) (map[string]any, bool, error) {
 					return nil, false, err
 				}
 			case "inspect":
-				v := parseInspectionText(t, block)
+				v, err := parseInspectionTextValue(block)
+				if err != nil {
+					return nil, false, err
+				}
 				raw, err := protocol.JSON(v)
 				if err != nil {
 					return nil, false, err
@@ -159,6 +245,13 @@ func decodeResultText(t *testing.T, text string) (map[string]any, bool, error) {
 					}
 				}
 			case "shell":
+				_, header, order, err := parseHeaderFieldsValue(line)
+				if err != nil {
+					return nil, false, err
+				}
+				if !reflect.DeepEqual(order, []string{"termination", "exit_code", "truncated", "output_bytes"}) {
+					return nil, false, fmt.Errorf("shell header fields are invalid")
+				}
 				for _, k := range []string{"termination", "exit_code", "truncated"} {
 					raw := header[k]
 					if k == "termination" {
@@ -203,6 +296,13 @@ func decodeResultText(t *testing.T, text string) (map[string]any, bool, error) {
 					}
 				}
 			case "timeline":
+				_, header, order, err := parseHeaderFieldsValue(line)
+				if err != nil {
+					return nil, false, err
+				}
+				if !reflect.DeepEqual(order, []string{"events"}) {
+					return nil, false, fmt.Errorf("timeline header fields are invalid")
+				}
 				items := []any{}
 				for _, row := range lines[i+1 : j] {
 					s, ok := strings.CutPrefix(row, "event ")
@@ -230,24 +330,99 @@ func decodeResultText(t *testing.T, text string) (map[string]any, bool, error) {
 		}
 		key, value, ok := strings.Cut(line, "=")
 		kind, known := resultFields[key]
-		if !ok || !known {
+		if !ok || !known || key == "" || value == "" {
 			return bad()
 		}
-		var v any
-		var err error
-		if kind == fieldToken && !strings.HasPrefix(value, "\"") {
-			v = value
-		} else {
-			v, err = decodeResultJSON([]byte(value))
-			if err != nil {
-				return bad()
-			}
+		if strings.HasPrefix(key, "observation.") {
+			return nil, false, fmt.Errorf("observation field outside its group")
+		}
+		if err := closeGroup(); err != nil {
+			return nil, false, err
+		}
+		v, err := decodeResultFieldValue(value, kind)
+		if err != nil {
+			return nil, false, err
 		}
 		if err := put("/"+strings.ReplaceAll(key, ".", "/"), v); err != nil {
 			return nil, false, err
 		}
 	}
+	if err := closeGroup(); err != nil {
+		return nil, false, err
+	}
 	return root, flag == "true", nil
+}
+
+func decodeJSONPointer(path string) ([]string, error) {
+	if !strings.HasPrefix(path, "/") {
+		return nil, fmt.Errorf("JSON pointer %q is not absolute", path)
+	}
+	rawParts := strings.Split(path[1:], "/")
+	parts := make([]string, len(rawParts))
+	for index, raw := range rawParts {
+		var decoded strings.Builder
+		for cursor := 0; cursor < len(raw); cursor++ {
+			if raw[cursor] != '~' {
+				decoded.WriteByte(raw[cursor])
+				continue
+			}
+			if cursor+1 >= len(raw) {
+				return nil, fmt.Errorf("JSON pointer has an incomplete escape")
+			}
+			cursor++
+			switch raw[cursor] {
+			case '0':
+				decoded.WriteByte('~')
+			case '1':
+				decoded.WriteByte('/')
+			default:
+				return nil, fmt.Errorf("JSON pointer has an invalid escape")
+			}
+		}
+		parts[index] = decoded.String()
+	}
+	return parts, nil
+}
+
+func decodeResultFieldValue(value string, kind resultFieldKind) (any, error) {
+	if kind == fieldBlock {
+		return nil, fmt.Errorf("block field cannot use a scalar line")
+	}
+	if kind == fieldToken && !strings.HasPrefix(value, "\"") {
+		if !resultToken(value) {
+			return nil, fmt.Errorf("invalid bare token %q", value)
+		}
+		return value, nil
+	}
+	v, err := decodeResultJSON([]byte(value))
+	if err != nil {
+		return nil, err
+	}
+	if kind == fieldToken {
+		if _, ok := v.(string); !ok {
+			return nil, fmt.Errorf("token field is not a JSON string")
+		}
+	}
+	if kind == fieldString {
+		if _, ok := v.(string); !ok {
+			return nil, fmt.Errorf("string field is not a JSON string")
+		}
+	}
+	if kind == fieldLiteral {
+		switch v.(type) {
+		case nil, bool, json.Number:
+		default:
+			return nil, fmt.Errorf("literal field has a non-literal JSON value")
+		}
+	}
+	if kind == fieldObject {
+		switch v.(type) {
+		case nil, map[string]any:
+		default:
+			return nil, fmt.Errorf("object field is not a JSON object or null")
+		}
+	}
+	return v, nil
 }
 
 func assertResultTextParity(t *testing.T, raw []byte, isError bool) string {
@@ -274,6 +449,271 @@ func assertResultTextParity(t *testing.T, raw []byte, isError bool) string {
 	return text
 }
 
+func TestResultDecoderV3V4Fixture(t *testing.T) {
+	text := `result v3 is_error=false
+operation_id=P1
+observation
+ status=complete
+ id=Oabc_72
+ origin=P1
+ revision=2
+ quality.state=stable
+ quality.samples=3
+ quality.stop_reason=stable
+
+tree v4 full nodes=2
+
+n1 root 0,0,1080,2400
+ n2 button @ "确定"
+end tree
+end result
+`
+	decoded, isError, err := decodeResultText(t, text)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if isError {
+		t.Fatal("is_error decoded as true")
+	}
+	want, err := decodeResultJSON([]byte(`{
+		"operation_id":"P1",
+		"observation":{
+			"status":"complete",
+			"id":"Oabc_72",
+			"origin":"P1",
+			"revision":2,
+			"quality":{"state":"stable","samples":3,"stop_reason":"stable"},
+			"tree":{
+				"format":"full",
+				"scope":"reported_visible_with_context",
+				"view":"compact",
+				"root":{
+					"ref":"n1","role":"root","bounds":[0,0,1080,2400],
+					"children":[{
+						"ref":"n2","role":"button","bounds":[0,0,1080,2400],
+						"label":["确定"],"actions":["tap"]
+					}]
+				}
+			}
+		}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(want, decoded) {
+		t.Fatalf("decoded facts mismatch\nwant=%#v\ngot=%#v", want, decoded)
+	}
+	deltaText := `result v3 is_error=false
+observation
+ id=Oabc_76
+
+tree v4 delta base=_72 changes=0
+
+end tree
+end result
+`
+	delta, _, err := decodeResultText(t, deltaText)
+	if err != nil {
+		t.Fatalf("decode delta baseline: %v", err)
+	}
+	mutations := []struct {
+		name     string
+		before   string
+		after    string
+		baseline map[string]any
+	}{
+		{
+			name: "label", before: ` n2 button @ "确定"`,
+			after: ` n2 button @ "取消"`, baseline: want.(map[string]any),
+		},
+		{
+			name: "default-action", before: ` n2 button @ "确定"`,
+			after: ` n2 button @ "确定" !tap`, baseline: want.(map[string]any),
+		},
+		{
+			name: "rectangle", before: ` n2 button @ "确定"`,
+			after: ` n2 button 0,0,1,1 "确定"`, baseline: want.(map[string]any),
+		},
+		{
+			name: "short-base", before: `base=_72`, after: `base=_73`,
+			baseline: delta,
+		},
+	}
+	for _, mutation := range mutations {
+		t.Run("detect-"+mutation.name, func(t *testing.T) {
+			source := text
+			if mutation.name == "short-base" {
+				source = deltaText
+			}
+			if strings.Count(source, mutation.before) != 1 {
+				t.Fatalf("fixture must contain exactly one mutation point %q", mutation.before)
+			}
+			changedText := strings.Replace(source, mutation.before, mutation.after, 1)
+			changed, _, err := decodeResultText(t, changedText)
+			if err != nil {
+				t.Fatalf("legal mutation was not decoded: %v", err)
+			}
+			if reflect.DeepEqual(mutation.baseline, changed) {
+				t.Fatalf("complete fact comparison missed %s mutation", mutation.name)
+			}
+		})
+	}
+}
+
+func TestResultDecoderV3ObservationGroupsAndTreeBinding(t *testing.T) {
+	text := `result v3 is_error=true
+observation
+ status=partial
+ id=Oabc_76
+ quality.state=unknown
+operation_id=P9
+observation
+ quality.samples=0
+ quality.stop_reason=not_sampled
+
+tree v4 delta base=_72 changes=1
+
+~ n2 label=["late"]
+end tree
+end result
+`
+	decoded, isError, err := decodeResultText(t, text)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !isError {
+		t.Fatal("is_error decoded as false")
+	}
+	observation := decoded["observation"].(map[string]any)
+	quality := observation["quality"].(map[string]any)
+	if observation["status"] != "partial" || observation["id"] != "Oabc_76" {
+		t.Fatalf("observation group facts = %#v", observation)
+	}
+	if quality["state"] != "unknown" || quality["samples"] != json.Number("0") ||
+		quality["stop_reason"] != "not_sampled" {
+		t.Fatalf("quality group facts = %#v", quality)
+	}
+	tree := observation["tree"].(map[string]any)
+	if tree["format"] != "delta" || tree["base"] != "Oabc_72" || tree["view"] != "compact" {
+		t.Fatalf("tree header facts = %#v", tree)
+	}
+}
+
+func TestResultDecoderV3RejectsAmbiguousOrMalformedText(t *testing.T) {
+	cases := []struct {
+		name string
+		text string
+	}{
+		{"old-version", "result v2 is_error=false\nend result\n"},
+		{"crlf", "result v3 is_error=false\r\nend result\r\n"},
+		{"missing-final-lf", "result v3 is_error=false\nend result"},
+		{"extra-final-lf", "result v3 is_error=false\nend result\n\n"},
+		{"empty-group", "result v3 is_error=false\nobservation\nend result\n"},
+		{"old-flat-observation", "result v3 is_error=false\nobservation.id=O1\nend result\n"},
+		{"bare-token-with-space", "result v3 is_error=false\noperation_id=P 1\nend result\n"},
+		{"line-trailing-space", "result v3 is_error=false\noperation_id=P1 \nend result\n"},
+		{"unknown-group-field", "result v3 is_error=false\nobservation\n future=true\nend result\n"},
+		{"duplicate-group-field", "result v3 is_error=false\nobservation\n id=O1\n id=O2\nend result\n"},
+		{"group-ancestor-conflict", "result v3 is_error=false\nobservation\n quality={\"state\":\"stable\"}\n quality.state=stable\nend result\n"},
+		{"cross-group-conflict", "result v3 is_error=false\nobservation\n quality.state=stable\noperation_id=P1\nobservation\n quality.state=unstable\nend result\n"},
+		{"group-trailing-json-bytes", "result v3 is_error=false\nobservation\n revision=2x\nend result\n"},
+		{"tree-without-group-id", "result v3 is_error=false\nobservation\n status=complete\n\ntree v4 full nodes=1\n\nn1 root 0,0,1,1\nend tree\nend result\n"},
+		{"tree-with-non-observation-id", "result v3 is_error=false\nobservation\n id=abc\n\ntree v4 full nodes=1\n\nn1 root 0,0,1,1\nend tree\nend result\n"},
+		{"v3-ordinary-tree", "result v3 is_error=false\nobservation\n id=O1\n\ntree v3 format=full id=O1\nend tree\nend result\n"},
+		{"duplicate-tree", "result v3 is_error=false\nobservation\n id=O1\n\ntree v4 full nodes=1\n\nn1 root 0,0,1,1\nend tree\ntree v4 full nodes=1\n\nn1 root 0,0,1,1\nend tree\nend result\n"},
+		{"bad-pointer-escape", "result v3 is_error=false\njson v1 path=\"/future~2key\" value=1\nend result\n"},
+		{"pointer-ancestor-conflict", "result v3 is_error=false\njson v1 path=\"/future\" value={}\njson v1 path=\"/future/key\" value=1\nend result\n"},
+		{"second-json-value", "result v3 is_error=false\njson v1 path=\"/future\" value=1 2\nend result\n"},
+		{"pointer-trailing-json-bytes", "result v3 is_error=false\njson v1 path=\"/future\" value=1x\nend result\n"},
+		{"repeated-blank", "result v3 is_error=false\n\n\noperation_id=P1\nend result\n"},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if _, _, err := decodeResultText(t, testCase.text); err == nil {
+				t.Fatalf("malformed text was accepted:\n%s", testCase.text)
+			}
+		})
+	}
+}
+
+func TestResultDecoderExpandsAndValidatesShortBase(t *testing.T) {
+	valid := func(id, base string) string {
+		return "result v3 is_error=false\nobservation\n id=" + id +
+			"\n\ntree v4 delta base=" + base + " changes=0\n\nend tree\nend result\n"
+	}
+	decoded, _, err := decodeResultText(t, valid("Oabc_76", "_72"))
+	if err != nil {
+		t.Fatalf("valid short base: %v", err)
+	}
+	tree := decoded["observation"].(map[string]any)["tree"].(map[string]any)
+	if tree["base"] != "Oabc_72" {
+		t.Fatalf("short base expanded to %#v", tree["base"])
+	}
+	decoded, _, err = decodeResultText(t, valid("Oabc_76", "Odef_72"))
+	if err != nil {
+		t.Fatalf("valid foreign full base: %v", err)
+	}
+	tree = decoded["observation"].(map[string]any)["tree"].(map[string]any)
+	if tree["base"] != "Odef_72" {
+		t.Fatalf("full base changed to %#v", tree["base"])
+	}
+	const maxUint64 = "18446744073709551615"
+	decoded, _, err = decodeResultText(t, valid("Oabc_76", "_"+maxUint64))
+	if err != nil {
+		t.Fatalf("max uint64 short base: %v", err)
+	}
+	tree = decoded["observation"].(map[string]any)["tree"].(map[string]any)
+	if tree["base"] != "Oabc_"+maxUint64 {
+		t.Fatalf("max uint64 base expanded to %#v", tree["base"])
+	}
+	if _, _, err := decodeResultText(t, valid("Oabc_"+maxUint64, "_1")); err != nil {
+		t.Fatalf("max uint64 current sequence: %v", err)
+	}
+	for _, base := range []string{
+		"_0",
+		"_072",
+		"_",
+		"_x",
+		"_18446744073709551616",
+		"base=bad",
+	} {
+		t.Run(base, func(t *testing.T) {
+			if _, _, err := decodeResultText(t, valid("Oabc_76", base)); err == nil {
+				t.Fatalf("short base %q was accepted", base)
+			}
+		})
+	}
+	for _, id := range []string{"O_76", "Oabc76", "Oabc_18446744073709551616", "中文_76"} {
+		t.Run(id, func(t *testing.T) {
+			if _, _, err := decodeResultText(t, valid(id, "_72")); err == nil {
+				t.Fatalf("short base with current id %q was accepted", id)
+			}
+		})
+	}
+}
+
+func TestResultDecoderKeepsNumericFallbackKeyAsObject(t *testing.T) {
+	text := `result v3 is_error=false
+json v1 path="/observation/quality/0" value=1
+end result
+`
+	decoded, _, err := decodeResultText(t, text)
+	if err != nil {
+		t.Fatalf("decode numeric fallback key: %v", err)
+	}
+	observation, ok := decoded["observation"].(map[string]any)
+	if !ok {
+		t.Fatalf("observation is not an object: %#v", decoded["observation"])
+	}
+	quality, ok := observation["quality"].(map[string]any)
+	if !ok {
+		t.Fatalf("quality is not an object: %#v", observation["quality"])
+	}
+	if quality["0"] != json.Number("1") {
+		t.Fatalf("numeric path key was not retained as an object key: %#v", quality)
+	}
+}
+
 // TestTextCodecDeliveredObservationOnError pins the contract-6 combination: an
 // error result may carry the observation a rejected act delivered, and the tree
 // block is projected together with is_error=true.
@@ -286,10 +726,9 @@ func TestTextCodecDeliveredObservationOnError(t *testing.T) {
 		`"recovery":{"entry":"retry","reference":"O","input_state":"effective"}}`)
 	text := assertResultTextParity(t, raw, true)
 	for _, want := range []string{
-		"result v2 is_error=true",
-		"observation.status=complete",
-		"observation.id=O2",
-		"tree v3 format=full id=O2",
+		"result v3 is_error=true",
+		"\nobservation\n status=complete\n id=O2\n",
+		"tree v4 full nodes=1",
 		"recovery.entry=retry",
 		"recovery.reference=O",
 		"end result",
@@ -303,7 +742,7 @@ func TestTextCodecDeliveredObservationOnError(t *testing.T) {
 func TestTextCodecGolden(t *testing.T) {
 	raw := []byte(`{"operation_id":"P1","outcome":"executed","shell":{"termination":"exited","exit_code":0,"output":"hello\r\n世界\n","truncated":false},"error":{"code":"example","message":"a=b\n\"quoted\""}}`)
 	text := assertResultTextParity(t, raw, false)
-	want := "result v2 is_error=false\noperation_id=P1\noutcome=executed\n\nshell v1 termination=exited exit_code=0 truncated=false output_bytes=14\noutput \"hello\\r\\n\"\noutput \"世界\\n\"\nend shell\nerror.code=example\nerror.message=\"a=b\\n\\\"quoted\\\"\"\nend result\n"
+	want := "result v3 is_error=false\noperation_id=P1\noutcome=executed\n\nshell v1 termination=exited exit_code=0 truncated=false output_bytes=14\noutput \"hello\\r\\n\"\noutput \"世界\\n\"\nend shell\nerror.code=example\nerror.message=\"a=b\\n\\\"quoted\\\"\"\nend result\n"
 	if text != want {
 		t.Fatalf("golden mismatch\n%s", text)
 	}
@@ -343,7 +782,7 @@ func TestTextCodecUnrepresentableTreeMetadata(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if strings.Contains(text, "\ntree v3 ") {
+			if strings.Contains(text, "\ntree v4 ") {
 				t.Fatal("unrepresentable metadata entered readable block")
 			}
 			assertResultTextParity(t, []byte(raw), false)
@@ -375,22 +814,22 @@ func TestTextCodecEffectAndQuality(t *testing.T) {
 		`"view":"compact",` +
 		`"root":{"ref":"n1","role":"root","bounds":[0,0,1080,2400]}}}}`)
 	text := assertResultTextParity(t, raw, false)
+	requireTestContains(t, text, "\neffect.state=unknown\n")
 	for _, line := range []string{
-		"effect.state=unknown",
-		"observation.quality.state=unknown",
-		"observation.quality.samples=0",
-		"observation.quality.stop_reason=not_sampled",
+		"quality.state=unknown",
+		"quality.samples=0",
+		"quality.stop_reason=not_sampled",
 	} {
-		requireTestContains(t, text, "\n"+line+"\n")
+		requireTestContains(t, text, "\n "+line+"\n")
 	}
 	ordered := []string{
 		"\nphase=completed\n",
 		"\neffect.state=unknown\n",
 		"\ntarget_reference=O1\n",
-		"\nobservation.actionable_until=2026-11-10T00:01:00Z\n",
-		"\nobservation.quality.state=unknown\n",
-		"\nobservation.quality.stop_reason=not_sampled\n",
-		"\nobservation.screen=",
+		"\n actionable_until=2026-11-10T00:01:00Z\n",
+		"\n quality.state=unknown\n",
+		"\n quality.stop_reason=not_sampled\n",
+		"\n screen=",
 	}
 	last := -1
 	for _, fragment := range ordered {
@@ -420,9 +859,9 @@ func TestTextCodecQualityAndEffectStates(t *testing.T) {
 				`"state":%q,"samples":%d,"stop_reason":%q}}}`,
 			quality.state, quality.samples, quality.stop))
 		text := assertResultTextParity(t, raw, false)
-		requireTestContains(t, text, "observation.quality.state="+quality.state+"\n")
-		requireTestContains(t, text, fmt.Sprintf("observation.quality.samples=%d\n", quality.samples))
-		requireTestContains(t, text, "observation.quality.stop_reason="+quality.stop+"\n")
+		requireTestContains(t, text, " quality.state="+quality.state+"\n")
+		requireTestContains(t, text, fmt.Sprintf(" quality.samples=%d\n", quality.samples))
+		requireTestContains(t, text, " quality.stop_reason="+quality.stop+"\n")
 	}
 	for _, state := range []string{protocol.EffectObserved, protocol.EffectNotObserved, protocol.EffectUnknown} {
 		raw := []byte(fmt.Sprintf(`{"effect":{"state":%q}}`, state))
@@ -452,7 +891,7 @@ func TestDiagnosticDoesNotProjectQuality(t *testing.T) {
 }
 
 func TestTextCodecTrailer(t *testing.T) {
-	for _, text := range []string{"result v2 is_error=false\n", "result v2 is_error=false\noperation_id=P1\noperation_id=P2\nend result\n", "result v2 is_error=false\nresult v2 is_error=false\nend result\n", "diagnostic v1 is_error=true\nend diagnostic\n"} {
+	for _, text := range []string{"result v3 is_error=false\n", "result v3 is_error=false\noperation_id=P1\noperation_id=P2\nend result\n", "result v3 is_error=false\nresult v3 is_error=false\nend result\n", "diagnostic v1 is_error=true\nend diagnostic\n"} {
 		if _, _, err := decodeResultText(t, text); err == nil {
 			t.Fatalf("accepted malformed %q", text)
 		}
@@ -502,7 +941,7 @@ func TestTextCodecMetadataPaths(t *testing.T) {
 				t.Fatal(err)
 			}
 			text := assertResultTextParity(t, raw, false)
-			if strings.Contains(text, "tree v3 format=delta") && strings.Contains(text, "observation.tree.scope=") {
+			if strings.Contains(text, "tree v4 delta ") && strings.Contains(text, "observation.tree.scope=") {
 				t.Fatal("derived delta scope became fact")
 			}
 		}
