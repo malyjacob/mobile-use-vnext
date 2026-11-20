@@ -130,6 +130,7 @@
 - [S6 统一基准记录（B01–B06）](verification/observation-continuity-benchmarks.md)
 - [text 写入确认、错误详情与恢复的实现、发布与实机验证](verification/text-write-verification-and-recovery.md)
 - [MCP 工具面虚拟屏覆盖测试（0.21.0）](verification/mcp-tool-surface-coverage.md)
+- [MCP 工具面虚拟屏覆盖测试（0.23.0 补充）](verification/mcp-tool-surface-coverage-0.23.0.md)
 - [受管 shell 的显示屏语义与 `screen.display_id`](verification/managed-shell-display-semantics.md)
 - [工程决策](decisions.md)
 - [工程流程](process.md)
