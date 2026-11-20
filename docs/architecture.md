@@ -324,11 +324,12 @@ status(P)、重复 P 与冻结结果只复制最后一次已提交快照，迟�
    `unknown`/`0`/`not_sampled`。质量是观察材料事实，不改变 O 状态、输入授权与提交门禁；
 5. 采集龄超过 `CaptureMaxAge=15s` → `stale_screen`；
 6. 虚拟屏上出现控制 App 的可见节点 → `control_ui_on_virtual_display`，采集失败；
-7. `observation.Builder` 构造完整的内部公开树（合成根、必要祖先、保守保号）；投影、折链、
-   序列化与计量都在锁外完成；
-8. 从内部树生成 compact 阅读表示并按它的规范 JSON 计量：保留合成根与 `actions` 非空节点的
-   矩形，省略无动作 `text` 与匿名普通节点的矩形，其余展示节点在矩形与父链最近交付者四边
-   相同或裁剪后可见面积不足屏幕 1% 时省略；超过 `MaxFullTreeBytes=128 KiB`
+7. `observation.Builder` 构造完整的内部公开树（合成根、必要祖先、保守保号）。动作规划、
+   重验与详细补看读取完整快照。compact 投影、序列化与计量都在锁外完成；
+8. compact 投影先按[几何策略](interface.md#node)决定每个节点的交付几何，再省略符合条件
+   的小型无标注图片，清理因此变空的匿名容器，并绕过裁剪后恰有一个孩子的隐藏匿名容器。
+   留存节点沿用裁剪前的公开几何。输出普通节点定义并按规范 JSON 计量，
+   超过 `MaxFullTreeBytes=128 KiB`
    → `tree_too_large`（`details.budget=public_full`）；同一快照的内部计费对象
    （`raw_capture` + 完整内部树）超过 `MaxSnapshotCostBytes=4 MiB`
    → `tree_too_large`（`details.budget=internal_snapshot`）；
@@ -349,12 +350,12 @@ status(P)、重复 P 与冻结结果只复制最后一次已提交快照，迟�
 且之后没有失败，复用该帧，否则只读一次终帧。它的 `observation.quality` 由等待比较得出
 （见 §3 条件等待）。
 
-公开 delta 相对已确认基线的同一 compact 阅读表示计算：先展开双方 chain，按原 ref 比较逻辑
-节点，再把 `add`/`replace` 定义折回 chain 并校验 `Apply` 守恒。70% 判据用有界整数关系
+公开 delta 相对已确认的 compact full 计算。规划先展开任何兼容输入中的历史链，再按原 ref
+比较节点。输出普通 `add`/`replace` 定义，并校验重建树的逻辑相等与规范 JSON 字节相等。
+70% 判据用有界整数关系
 `10×deltaBytes < 7×fullBytes`；等值退 full。构造器在投影阶段只产生候选，提交门禁通过后
 才推进 `prev` 与 ref 计数器；被拒绝的候选不改变下一次发布树的 ref。可读文本块使用
-`tree v3`/`inspect v3` 编码，普通角色省略和匿名 `view` 链简写只属于文本投影，不改变 JSON
-full/delta、70% 判据或 `base` 语义。
+`tree v3`/`inspect v3` 编码，普通角色按文本语法恢复。full/delta 的选择按 JSON 字节计量。
 
 净化仅改变公开投影：默认空叶不发布，原始事实仍供动作重验使用；非目标 display 包装层不发布，
 目标后代按最近公开祖先挂接并保持 raw 先序。Source 与 ContextSource 互斥且完整覆盖公开 ref，
@@ -415,10 +416,9 @@ delta 的五类块：`set`（逐字段完整新值，显式保留 `false`/`0`/`"
 最终子列表；存续节点跨父迁移必须消除旧父 claim。remove 根必须消失，其基线后代可经最终
 可达边存活；不可达残余只允许来自删除/替换旧区域。Replace 根可迁移，其内部存续后代保持
 基线父关系。双父、循环、孤儿及不可达显式声明整体拒绝。Node/Read 共用规划与应用器，Read
-额外展开/打包 chain 并校验规范编码。五个布尔严格比较 unknown/false/true，完整节点省略
-已知默认，set 保留显式 null/false；阅读树、inspect 与文本块不携带 defaults 声明。
-`tree v3`/`inspect v3` 的普通角色省略和匿名 `view` 链简写只改变可读行，不改变 Read 树的
-ref、chain、几何、状态、父子顺序或计数。
+应用时先展开基线和 `add`/`replace` 定义中的历史链，按最终图重建普通节点 full。五个布尔
+严格比较 unknown/false/true，完整节点省略已知默认，set 保留显式 null/false。阅读树、
+inspect 与文本块不携带 defaults 声明。
 
 ## 5. 工作位置与并发
 
@@ -664,7 +664,7 @@ P 已无法定位时，`end(P)` 返回 `409 operation_unknown`、`phase=referenc
 ### 发布
 
 `release/versions.json` 是发行号、共同契约号与 Android versionCode 的唯一来源；当前为
-`release_version=0.22.0`、`contract_version=20`、`android_version_code=24`，构建生成
+`release_version=0.23.0`、`contract_version=21`、`android_version_code=25`，构建生成
 Go/Java 常量。`scripts/build-release.ps1` 产出整组产物与 `build/release/manifest.json`
 （源码提交、Go 版本、MCP SDK/协议、各产物 SHA-256/大小、Android 包名/版本、工具目录指纹）。
 工具目录固定为 `scripts/toolcatalog` 投影的 13 个工具，指纹是该目录注册顺序、名称、描述与

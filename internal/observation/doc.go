@@ -23,8 +23,12 @@
 // Published descendants attach to the nearest published ancestor in source
 // preorder, even across wrappers from another display. Source and ContextSource
 // form a disjoint, complete public-ref index; raw facts remain unchanged.
-// Compact reading may hide known geometry and pack anonymous single-child
-// chains without changing logical nodes, ordering or refs.
+// Compact reading may hide known geometry, omit tiny unlabeled image leaves,
+// remove anonymous containers left empty by those omissions, and bypass hidden
+// anonymous singleton wrappers. Retained nodes keep their logical fields,
+// ordering and refs. New compact output uses ordinary definitions only. Readers
+// continue to expand historical chain definitions, assigning indented children
+// to the chain tail.
 //
 // # Refs and continuity
 //
@@ -75,7 +79,8 @@
 // may move, but surviving descendants inside closed definitions keep baseline
 // parents. Cycles, duplicate parents, orphaned nodes, unreachable declarations,
 // changed roots and surviving role changes are rejected. Node and Read share
-// the planner and applier; Read additionally expands/packs chains and checks
-// canonical wire equality. All five bools retain strict tri-state equality;
-// set preserves explicit null and default values.
+// the planner and applier; Read additionally expands historical chains, emits
+// ordinary definitions, and checks canonical wire equality. All five bools
+// retain strict tri-state equality; set preserves explicit null and default
+// values.
 package observation

@@ -860,6 +860,43 @@ func TestDecodeResultTextV3Blocks(t *testing.T) {
 	}
 }
 
+// TestCompactTreeCheckRejectsOnlyNewChainOutput keeps historical chain parsing
+// available while making a current observation fail if it still emits a folded
+// chain. Labels that merely contain the word "chain" are ordinary text.
+func TestCompactTreeCheckRejectsOnlyNewChainOutput(t *testing.T) {
+	text := "result v2 is_error=false\nobservation.id=O1\n\n" +
+		"tree v3 format=full id=O1 scope=reported_visible_with_context view=compact nodes=3 entries=2\n\n" +
+		"n1 root [0,0,1080,2400]\n" +
+		"  [n2 n3]\n" +
+		"end tree\nend result\n"
+	observation := &observationView{ID: "O1", Tree: &treeView{Format: treeFull}}
+	if _, failure := decodeResultText(text); failure != nil {
+		t.Fatalf("historical chain parser rejected: %s %v", failure.reason, failure.fields)
+	}
+	if failure := checkObservationTreeBlock(&callResult{texts: []string{text}},
+		observation); failure == nil || failure.reason != "tree_chain_present" {
+		t.Fatalf("new chain output check = %v, want tree_chain_present", failure)
+	}
+
+	ordinary := "result v2 is_error=false\nobservation.id=O2\n\n" +
+		"tree v3 format=full id=O2 scope=reported_visible_with_context view=compact nodes=2 entries=2\n\n" +
+		"n1 root [0,0,1080,2400]\n" +
+		"  n2 text \"chain [not a definition]\"\n" +
+		"end tree\nend result\n"
+	if containsCompactTreeChain(ordinary) {
+		t.Fatal("quoted label was mistaken for a chain definition")
+	}
+
+	fallback := "result v2 is_error=false\nobservation.id=O3\n" +
+		"json v1 path=\"/observation/tree\" value={\"format\":\"full\",\"scope\":\"reported_visible_with_context\",\"view\":\"compact\",\"root\":{\"ref\":\"n1\",\"role\":\"root\",\"bounds\":[0,0,1080,2400]}}\n" +
+		"end result\n"
+	fallbackObservation := &observationView{ID: "O3", Tree: &treeView{Format: treeFull}}
+	if failure := checkObservationTreeBlock(&callResult{texts: []string{fallback}},
+		fallbackObservation); failure == nil || failure.reason != "text_tree_block_missing" {
+		t.Fatalf("fallback tree projection = %v, want text_tree_block_missing", failure)
+	}
+}
+
 func TestDecodeResultTextV3RejectsLegacyAndMissingBlocks(t *testing.T) {
 	legacyTree := "result v2 is_error=false\nobservation.id=O1\n\n" +
 		"tree v2 format=full id=O1 scope=reported_visible_with_context " +

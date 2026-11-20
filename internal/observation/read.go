@@ -13,9 +13,9 @@ import (
 
 // AnonymousPlain reports whether one read node satisfies the fixed
 // anonymous-plain predicate: an ordinary view/group with no action, no readable
-// content and only known default state. Such a node keeps its ref and its
-// position in the tree; the compact geometry policy hides its known rectangle
-// and it is the only node kind that may join a chain.
+// content and only known default state. The compact geometry policy hides its
+// known rectangle and uses this predicate when pruning empty containers and
+// bypassing single-child wrappers.
 func AnonymousPlain(n *protocol.ReadNode) bool {
 	if n == nil || n.Context {
 		return false
@@ -23,12 +23,20 @@ func AnonymousPlain(n *protocol.ReadNode) bool {
 	if n.Role != protocol.RoleView && n.Role != protocol.RoleGroup {
 		return false
 	}
+	return compactNoReadableContent(n) && compactKnownDefaultState(n)
+}
+
+func compactNoReadableContent(n *protocol.ReadNode) bool {
 	if len(n.Label) != 0 || len(n.Actions) != 0 {
 		return false
 	}
 	if n.Value != nil || n.Hint != nil || n.Resource != nil || n.Axis != "" {
 		return false
 	}
+	return true
+}
+
+func compactKnownDefaultState(n *protocol.ReadNode) bool {
 	if n.Enabled == nil || !*n.Enabled {
 		return false
 	}
@@ -40,24 +48,26 @@ func AnonymousPlain(n *protocol.ReadNode) bool {
 	return true
 }
 
-// ProjectCompactTree builds the compact public reading tree: the logical read
-// tree of t delivered with the fixed compact geometry policy and consecutive
-// anonymous single-child paths folded into chain definitions. The synthetic
-// root rectangle is the screen denominator of the area rule; when it is missing
-// or degenerate only the path rules apply.
+// ProjectCompactTree builds the compact public reading tree from the complete
+// internal tree. One recursive traversal decides geometry before descending,
+// then prunes on return by removing tiny unlabeled image leaves and anonymous
+// containers made empty by those removals before bypassing hidden anonymous
+// singleton wrappers. The result contains only ordinary node definitions. The
+// synthetic root rectangle is the screen denominator of the image-area rule;
+// when it is missing or degenerate, images remain present.
 func ProjectCompactTree(t *protocol.Tree) *protocol.ReadTree {
 	if t == nil || t.Root == nil {
 		return nil
 	}
-	return PackTree(&protocol.ReadTree{
+	return &protocol.ReadTree{
 		Format: "full", Scope: protocol.Scope, View: protocol.ViewCompact,
 		Root: projectCompactNode(t.Root, newCompactProjection(t.Root), nil),
-	})
+	}
 }
 
-// ProjectDetailedTree builds the detailed public reading tree: every logical
-// node keeps its known geometry and no chain is folded. It is the fixed inspect
-// view and never hides source geometry.
+// ProjectDetailedTree builds the detailed public reading tree. Every logical
+// node keeps its known geometry. The fixed inspect view applies no compact
+// pruning and emits no chain definitions.
 func ProjectDetailedTree(t *protocol.Tree) *protocol.ReadTree {
 	if t == nil || t.Root == nil {
 		return nil
@@ -76,7 +86,7 @@ func ProjectDetailedNode(n *protocol.Node) *protocol.ReadNode {
 // projectReadNode copies every public field of one internal node. In the
 // detailed view every known rectangle is delivered and a missing source
 // rectangle stays explicitly unknown. A compact projection of one standalone
-// node applies the path rules without a screen denominator.
+// node applies the geometry and wrapper rules without a screen denominator.
 func projectReadNode(n *protocol.Node, compact bool) *protocol.ReadNode {
 	if n == nil {
 		return nil
@@ -127,12 +137,11 @@ func projectDetailedNode(n *protocol.Node) *protocol.ReadNode {
 	return out
 }
 
-// projectCompactNode copies one internal node and decides its delivered
-// geometry in the fixed order: an action-bearing node or the root always keeps
-// its known rectangle; an anonymous plain node and an actionless text node hide
-// it; a remaining node hides a rectangle identical to the nearest delivered
-// ancestor rectangle or one smaller than one percent of the screen. A hidden or
-// unknown node passes the ancestor rectangle down unchanged.
+// projectCompactNode copies one internal node, decides its delivered geometry
+// from its original rectangle, and processes children before applying T2a and
+// T2b. This preserves the nearest-delivered-ancestor rule while letting a tiny
+// image and then its newly empty anonymous wrappers disappear bottom-up. An
+// image is a T2a leaf only when the original logical node has no non-nil child.
 func projectCompactNode(n *protocol.Node, screen compactProjection, reference *protocol.Bounds) *protocol.ReadNode {
 	if n == nil {
 		return nil
@@ -150,13 +159,50 @@ func projectCompactNode(n *protocol.Node, screen compactProjection, reference *p
 		out.Bounds = protocol.KnownBounds(*n.Bounds)
 		reference = deliveredRect(*n.Bounds, screen)
 	}
+	originalHasChildren := false
 	for _, child := range n.Children {
 		if child == nil {
 			continue
 		}
-		out.Children = append(out.Children, projectCompactNode(child, screen, reference))
+		originalHasChildren = true
+		projected := projectCompactNode(child, screen, reference)
+		if projected != nil {
+			out.Children = append(out.Children, projected)
+		}
+	}
+	if !originalHasChildren && compactImageCanPrune(out, n.Bounds, screen) {
+		return nil
+	}
+	if originalHasChildren && len(out.Children) == 0 &&
+		out.Bounds.Kind == protocol.GeometryHidden && AnonymousPlain(out) {
+		return nil
+	}
+	if out.Bounds.Kind == protocol.GeometryHidden && AnonymousPlain(out) && len(out.Children) == 1 {
+		return out.Children[0]
 	}
 	return out
+}
+
+// compactImageCanPrune applies the T2a public-field predicate. Empty string
+// pointers are explicit values and therefore keep the image.
+func compactImageCanPrune(n *protocol.ReadNode, source *protocol.Bounds,
+	screen compactProjection) bool {
+	if n == nil || n.Context || n.Role != protocol.RoleImage || source == nil {
+		return false
+	}
+	if n.Bounds.Kind != protocol.GeometryHidden ||
+		!compactNoReadableContent(n) || !compactKnownDefaultState(n) {
+		return false
+	}
+	if !screen.screenKnown {
+		return false
+	}
+	clipped, positive := compactRect(*source, screen)
+	if !positive {
+		return false
+	}
+	area, ok := boundsArea(clipped)
+	return ok && belowPercent(area, screen.screenArea)
 }
 
 // compactHidesBounds applies the non-action part of the compact geometry
@@ -266,137 +312,6 @@ func copyReadFields(n *protocol.Node) *protocol.ReadNode {
 		Context:   n.Context,
 		Children:  make([]*protocol.ReadNode, 0, len(n.Children)),
 	}
-}
-
-// PackTree folds consecutive anonymous single-child paths into chain
-// definitions. The tree root stays one ordinary definition anchor; only its
-// descendants are folded. The function is pure and deterministic: the same
-// logical tree always produces the same grouping and bytes.
-func PackTree(t *protocol.ReadTree) *protocol.ReadTree {
-	if t == nil || t.Root == nil {
-		return nil
-	}
-	return &protocol.ReadTree{
-		Format: t.Format, Scope: t.Scope, View: t.View,
-		Root: packDefinitionRoot(t.Root),
-	}
-}
-
-// PackDelta folds chains inside every add and replace definition. A definition
-// root always stays an ordinary ref anchor.
-func PackDelta(d *protocol.ReadDelta) *protocol.ReadDelta {
-	if d == nil {
-		return nil
-	}
-	out := *d
-	if len(d.Add) > 0 {
-		out.Add = make([]*protocol.ReadNode, len(d.Add))
-		for i, node := range d.Add {
-			out.Add[i] = packDefinitionRoot(node)
-		}
-	}
-	if len(d.Replace) > 0 {
-		out.Replace = make(map[string]*protocol.ReadNode, len(d.Replace))
-		for ref, node := range d.Replace {
-			out.Replace[ref] = packDefinitionRoot(node)
-		}
-	}
-	return &out
-}
-
-// packDefinitionRoot packs one complete definition whose root must keep its
-// ordinary ref.
-func packDefinitionRoot(n *protocol.ReadNode) *protocol.ReadNode {
-	if n == nil {
-		return nil
-	}
-	out := cloneReadNodeFields(n)
-	out.Children = packChildren(n.Children)
-	return out
-}
-
-// packSubtree packs one non-definition node, folding the longest legal
-// consecutive chain that starts at it.
-func packSubtree(n *protocol.ReadNode) *protocol.ReadNode {
-	if n == nil {
-		return nil
-	}
-	if !chainable(n) {
-		out := cloneReadNodeFields(n)
-		out.Children = packChildren(n.Children)
-		return out
-	}
-	members := []*protocol.ReadNode{n}
-	last := n
-	for len(last.Children) == 1 {
-		next := last.Children[0]
-		if next == nil || !chainable(next) || next.Role != n.Role {
-			break
-		}
-		members = append(members, next)
-		last = next
-	}
-	if len(members) >= 2 && chainShorterThanOrdinary(members) {
-		out := cloneReadNodeFields(last)
-		out.Ref = ""
-		out.Chain = make([]string, len(members))
-		for i, member := range members {
-			out.Chain[i] = member.Ref
-		}
-		out.Children = packChildren(last.Children)
-		return out
-	}
-	out := cloneReadNodeFields(n)
-	out.Children = packChildren(n.Children)
-	return out
-}
-
-func packChildren(children []*protocol.ReadNode) []*protocol.ReadNode {
-	if len(children) == 0 {
-		return nil
-	}
-	out := make([]*protocol.ReadNode, 0, len(children))
-	for _, child := range children {
-		out = append(out, packSubtree(child))
-	}
-	return out
-}
-
-// chainable reports whether one node may be a chain member: it is anonymous
-// plain and its public geometry is hidden.
-func chainable(n *protocol.ReadNode) bool {
-	return n != nil && n.Bounds.Kind == protocol.GeometryHidden && AnonymousPlain(n)
-}
-
-// chainShorterThanOrdinary reports whether the chain encoding of these members
-// is strictly shorter than the ordinary single-node encoding of the same spine.
-// The children of the last member are identical in both forms and are excluded.
-func chainShorterThanOrdinary(members []*protocol.ReadNode) bool {
-	ordinary := 0
-	for i := range members {
-		ordinary += len(mustJSON(spineNode(members[i], members[i].Ref, nil)))
-		if i+1 < len(members) {
-			// ,"children":[ <next> ]
-			ordinary += len(`,"children":[`) + len("]")
-		}
-	}
-	last := members[len(members)-1]
-	refs := make([]string, len(members))
-	for i, member := range members {
-		refs[i] = member.Ref
-	}
-	chained := len(mustJSON(spineNode(last, "", refs)))
-	return chained < ordinary
-}
-
-// spineNode returns a childless copy of n with either its own ref or a chain
-// definition.
-func spineNode(n *protocol.ReadNode, ref string, chain []string) *protocol.ReadNode {
-	out := cloneReadNodeFields(n)
-	out.Children = nil
-	out.Ref = ref
-	out.Chain = chain
-	return out
 }
 
 // UnpackTree expands every chain definition into its consecutive logical nodes.

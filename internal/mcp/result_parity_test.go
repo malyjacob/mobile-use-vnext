@@ -218,6 +218,13 @@ func resultModeFixtures() []resultModeFixture {
 		`{"chain":["n10","n11"],"role":"view","children":[` +
 		`{"ref":"n12","role":"text","label":["child"]}]},` +
 		`{"ref":"n3","role":"view","bounds":[0,0,10,10],"actions":["tap"]}]}}`
+	legacyChainDelta := `{"format":"delta","base":"O1","view":"compact",` +
+		`"add":[{"ref":"n20","role":"view","children":[` +
+		`{"chain":["n21","n22"],"role":"view","children":[` +
+		`{"ref":"n23","role":"button","label":["增加"],"actions":["tap"]}]}]}],` +
+		`"replace":{"n30":{"ref":"n30","role":"group","children":[` +
+		`{"chain":["n31","n32"],"role":"group","children":[` +
+		`{"ref":"n33","role":"text","label":["替换"]}]}]}}}`
 	add("status", "not_seen", `{"operation_state":"not_seen","can_start":true,"session":null}`)
 	add("status", "closed", `{"request_closed":true,"can_start":false,"blocking_operation_id":"P1","blocking_code":"cleanup_pending"}`)
 	add("start", "full", `{"operation_id":"P1","outcome":"executed","session":`+testActiveSessionJSON+`,"observation":{"status":"complete","id":"O1","tree":`+testFullTreeJSON+`}}`)
@@ -226,6 +233,7 @@ func resultModeFixtures() []resultModeFixture {
 		add("observe", tree.name, `{"observation":{"status":"complete","id":"O2","tree":`+tree.raw+`}}`)
 	}
 	add("observe", "v3_role_text", `{"observation":{"status":"complete","id":"O2","tree":`+v3RoleTree+`}}`)
+	add("observe", "legacy_v3_chain_delta", `{"observation":{"status":"complete","id":"O4","tree":`+legacyChainDelta+`}}`)
 	add("observe", "missing", `{"observation":{"status":"partial","id":"O1","missing":["image"],"image":{"error":{"code":"image_unavailable","message":"缺图"}}}}`)
 	add("observe", "read_only_image", `{"observation":{"status":"failed","image":{"read_only":true,"width":2,"height":3,"media_type":"image/jpeg","base64":"secret"}}}`)
 	add("observe", "empty", `{}`)
@@ -493,7 +501,7 @@ func TestCatalogFingerprintBaseline(t *testing.T) {
 	// The catalog has thirteen tools. This baseline covers the caller-oriented
 	// descriptions after the tree guide moved to the server instructions, and
 	// after the shell description gained the managed-shell display semantics.
-	const baseline = "bf9aecee9fe31c1545670ec32d34f7b55d3a7649ee77a1f5715893e3e67378ec"
+	const baseline = "d9939b8f928fc282cfd118aa32ee4b4f20a5534e3ae6c4fb7d5665a0ee72e14c"
 	if got := CatalogFingerprint(); got != baseline {
 		t.Fatalf("catalog changed: %s", got)
 	}

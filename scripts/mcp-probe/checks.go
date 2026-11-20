@@ -499,9 +499,21 @@ func (p *probe) startCheck(ctx context.Context) (startSummary, bool) {
 			field("tree_format", format), field("observation_status", view.Observation.Status))
 		return startSummary{}, false
 	}
-	p.reporter.pass("start",
+	if p.mode() != resultModeStructured {
+		if failure := checkObservationTreeBlock(projected, view.Observation); failure != nil {
+			p.reporter.fail("start", failure.reason, failure.fields...)
+			return startSummary{}, false
+		}
+	}
+	passFields := []string{
 		field("P", view.OperationID), field("O1", view.Observation.ID),
-		"session=active", field("session_mode", view.Session.Mode), "tree=full")
+		"session=active", field("session_mode", view.Session.Mode), "tree=full",
+	}
+	if p.mode() != resultModeStructured {
+		passFields = append(passFields, "tree_block=v3")
+	}
+	p.reporter.pass("start",
+		passFields...)
 	return startSummary{
 		OperationID:   view.OperationID,
 		ObservationID: view.Observation.ID,
@@ -650,7 +662,28 @@ func checkObservationTreeBlock(projected *callResult, observation *observationVi
 	if !strings.HasSuffix(block, "end tree\n") {
 		return failf("tree_block_unterminated", field("tree_format", format))
 	}
+	if containsCompactTreeChain(block) {
+		return failf("tree_chain_present", field("tree_format", format))
+	}
 	return nil
+}
+
+// containsCompactTreeChain reports whether a readable compact block uses the
+// historical square-bracket or explicit chain definition. The decoder accepts
+// those forms for replay compatibility, while a live product must emit only
+// ordinary node definitions after the compact-pruning contract.
+func containsCompactTreeChain(block string) bool {
+	for _, raw := range strings.Split(block, "\n") {
+		line := strings.TrimLeft(raw, " ")
+		tokens, ok := treeLineTokens(line)
+		if !ok || len(tokens) == 0 {
+			continue
+		}
+		if tokens[0] == "chain" || strings.HasPrefix(tokens[0], "[") {
+			return true
+		}
+	}
+	return false
 }
 
 // appQueryChecks covers the read-only app kinds on a live adapter. These calls

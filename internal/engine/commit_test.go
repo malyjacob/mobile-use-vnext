@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/malyjacob/mobile-use-vnext/internal/device"
+	"github.com/malyjacob/mobile-use-vnext/internal/observation"
 	"github.com/malyjacob/mobile-use-vnext/internal/protocol"
 )
 
@@ -213,6 +214,203 @@ func TestObserveFullFlagAndDeltaCostGate(t *testing.T) {
 	if err != nil || cost.Observation == nil || cost.Observation.Tree == nil ||
 		cost.Observation.Tree.Full == nil || cost.Observation.Tree.Delta != nil {
 		t.Fatalf("expensive delta was not replaced by full: %+v %v", cost, err)
+	}
+}
+
+type fixedReadDiffer struct {
+	delta *protocol.ReadDelta
+}
+
+func (d fixedReadDiffer) Diff(string, *protocol.ReadTree, *protocol.ReadTree) (*protocol.ReadDelta, error) {
+	return d.delta, nil
+}
+
+func thresholdReadTree(changedBytes, stableBytes int) *protocol.ReadTree {
+	changedLabel := []string{}
+	if changedBytes > 0 {
+		changedLabel = []string{strings.Repeat("x", changedBytes)}
+	}
+	stableLabel := []string{}
+	if stableBytes > 0 {
+		stableLabel = []string{strings.Repeat("s", stableBytes)}
+	}
+	changed := &protocol.ReadNode{
+		Ref: "n2", Role: protocol.RoleButton, Bounds: protocol.HiddenBounds(),
+		Label: changedLabel, Actions: []protocol.Action{protocol.ActionTap},
+	}
+	stable := &protocol.ReadNode{
+		Ref: "n3", Role: protocol.RoleText, Bounds: protocol.HiddenBounds(),
+		Label: stableLabel, Actions: []protocol.Action{},
+	}
+	return &protocol.ReadTree{
+		Format: "full", Scope: protocol.Scope, View: protocol.ViewCompact,
+		Root: &protocol.ReadNode{
+			Ref: "n1", Role: protocol.RoleRoot, Bounds: protocol.HiddenBounds(),
+			Label: []string{}, Actions: []protocol.Action{},
+			Children: []*protocol.ReadNode{changed, stable},
+		},
+	}
+}
+
+// thresholdDeltaFixture uses two independent label lengths. The changed label
+// contributes to both the delta and full encodings. The unchanged public label
+// contributes only to the full, which makes an exact 70% boundary constructible
+// without padding or changing topology.
+func thresholdDeltaFixture(t *testing.T) (
+	base, belowTree, equalTree *protocol.ReadTree,
+	belowDelta, equalDelta *protocol.ReadDelta) {
+	t.Helper()
+	for stableBytes := 0; stableBytes <= 256; stableBytes++ {
+		base = thresholdReadTree(1, stableBytes)
+		probe := thresholdReadTree(2, stableBytes)
+		probeDelta, err := observation.ReadDiff("Osynthetic", base, probe)
+		if err != nil {
+			t.Fatalf("probe threshold delta: %v", err)
+		}
+		probeFull, err := protocol.JSON(probe)
+		if err != nil {
+			t.Fatal(err)
+		}
+		probeDeltaBytes, err := protocol.JSON(probeDelta)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Increasing the changed label by one byte raises 10*delta by ten and
+		// 7*full by seven, closing this gap by three.
+		gap := 7*len(probeFull) - 10*len(probeDeltaBytes)
+		if gap < 0 || gap%3 != 0 {
+			continue
+		}
+		changedBytes := 2 + gap/3
+		belowTree = thresholdReadTree(changedBytes-1, stableBytes)
+		equalTree = thresholdReadTree(changedBytes, stableBytes)
+		belowDelta, err = observation.ReadDiff("Osynthetic", base, belowTree)
+		if err != nil {
+			t.Fatalf("build below-boundary delta: %v", err)
+		}
+		equalDelta, err = observation.ReadDiff("Osynthetic", base, equalTree)
+		if err != nil {
+			t.Fatalf("build equal-boundary delta: %v", err)
+		}
+		belowFull, err := protocol.JSON(belowTree)
+		if err != nil {
+			t.Fatal(err)
+		}
+		belowBytes, err := protocol.JSON(belowDelta)
+		if err != nil {
+			t.Fatal(err)
+		}
+		equalFull, err := protocol.JSON(equalTree)
+		if err != nil {
+			t.Fatal(err)
+		}
+		equalBytes, err := protocol.JSON(equalDelta)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if 10*len(belowBytes) >= 7*len(belowFull) ||
+			10*len(equalBytes) != 7*len(equalFull) {
+			continue
+		}
+		return base, belowTree, equalTree, belowDelta, equalDelta
+	}
+	t.Fatal("could not construct exact 70% delta/full boundary")
+	return nil, nil, nil, nil, nil
+}
+
+func publishThresholdCandidate(t *testing.T, h *harness, base *protocol.ReadTree,
+	current *protocol.ReadTree, delta *protocol.ReadDelta, operationID string) *protocol.Observation {
+	t.Helper()
+	h.engine.mu.Lock()
+	if h.engine.session == nil {
+		h.engine.mu.Unlock()
+		t.Fatal("threshold fixture has no active session")
+	}
+	h.engine.baseline = &baselineState{
+		ObservationID: "Osynthetic", Origin: h.engine.session.Origin,
+		Revision: h.engine.session.Revision, CapturedAt: time.Now(), Tree: base,
+	}
+	h.engine.mu.Unlock()
+	h.engine.differ = fixedReadDiffer{delta: delta}
+
+	op, duplicate, apiErr := h.engine.registerOperation(operationID, "agent", "observe")
+	if apiErr != nil {
+		t.Fatalf("register threshold operation: %v", apiErr)
+	}
+	if duplicate != nil || op == nil {
+		t.Fatalf("threshold operation was not admitted: op=%+v duplicate=%+v", op, duplicate)
+	}
+	work, apiErr := h.engine.acquireWork(op, WorkObserve)
+	if apiErr != nil {
+		t.Fatalf("acquire threshold work: %v", apiErr)
+	}
+	defer h.engine.releaseWork(work)
+	session := h.engine.sessionForWork(work)
+	if session == nil {
+		t.Fatal("threshold work has no authorized session")
+	}
+
+	compactBytes, err := protocol.JSON(current)
+	if err != nil {
+		t.Fatalf("encode threshold full: %v", err)
+	}
+	capture := *h.engine.current.Projection.Capture
+	capture.CapturedAt = time.Now()
+	attempt := &treeAttempt{
+		capture:      capture,
+		projection:   h.engine.current.Projection,
+		compact:      current,
+		compactBytes: compactBytes,
+		cost:         1,
+		commit:       func() {},
+	}
+	published, _, apiErr := h.engine.publishTreeAttempt(work, session, "test.boundary", attempt,
+		time.Now(), false, ObservationReady, nil, nil)
+	if apiErr != nil {
+		t.Fatalf("publish threshold candidate: %v", apiErr)
+	}
+	if published == nil || published.Tree == nil {
+		t.Fatalf("threshold candidate published no observation: %+v", published)
+	}
+	return published
+}
+
+func TestDeltaCostGateIsStrictlyBelowSeventyPercent(t *testing.T) {
+	base, belowTree, equalTree, belowDelta, equalDelta := thresholdDeltaFixture(t)
+	for _, test := range []struct {
+		name     string
+		tree     *protocol.ReadTree
+		delta    *protocol.ReadDelta
+		wantFull bool
+	}{
+		{name: "below", tree: belowTree, delta: belowDelta},
+		{name: "equal", tree: equalTree, delta: equalDelta, wantFull: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.startSession()
+			published := publishThresholdCandidate(t, h, base, test.tree, test.delta,
+				"PdeltaBoundary"+test.name)
+			if test.wantFull {
+				if published.Tree.Delta != nil || published.Tree.Full == nil {
+					t.Fatalf("equal-cost delta was not rejected: %+v", published.Tree)
+				}
+				if !observation.ReadEqual(published.Tree.Full, test.tree) {
+					t.Fatal("full fallback changed the current compact tree")
+				}
+				return
+			}
+			if published.Tree.Delta == nil || published.Tree.Full != nil {
+				t.Fatalf("strictly smaller delta was not selected: %+v", published.Tree)
+			}
+			applied, err := observation.ReadApply(base, published.Tree.Delta)
+			if err != nil {
+				t.Fatalf("apply selected delta: %v", err)
+			}
+			if !observation.ReadEqual(applied, test.tree) {
+				t.Fatal("selected delta did not reconstruct the current compact tree")
+			}
+		})
 	}
 }
 

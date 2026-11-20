@@ -61,6 +61,31 @@ func TestTreeTextGuideStatesCompactGeometryPolicy(t *testing.T) {
 	}
 }
 
+// TestTreeTextGuideStatesCompactPruningAndLegacyChains separates the new
+// ordinary compact output from the historical chain syntax that readers must
+// continue to accept.
+func TestTreeTextGuideStatesCompactPruningAndLegacyChains(t *testing.T) {
+	for _, required := range []string{
+		"小型隐藏无标注 `image`",
+		"enabled 已知为 true",
+		"focused/selected/protected/checked 已知为 false",
+		"祖先动作和状态不参与",
+		"原矩形裁屏后面积须为可计算正数且严格小于屏幕面积 1%",
+		"清理因此变空的隐藏匿名普通 view/group",
+		"仅剩一个直接孩子的隐藏匿名普通 view/group",
+		"新 compact full/delta 只交付普通节点定义，不生成折叠链",
+		"读取端继续接受历史 `[n2 n3]`",
+		"链下缩进的孩子属于链尾",
+	} {
+		if !strings.Contains(treeTextGuide, required) {
+			t.Errorf("tree guide lacks %q", required)
+		}
+	}
+	if strings.Contains(treeTextGuide, "节点未出现在普通树，不代表详细快照中不存在") {
+		t.Error("tree guide repeats the removed compact omission explanation")
+	}
+}
+
 func TestTreeTextGuideStatesV3RoleRecovery(t *testing.T) {
 	for _, required := range []string{
 		"tree v3 format=full",
@@ -130,6 +155,9 @@ func TestServerInstructionsCarryCrossToolRules(t *testing.T) {
 		"no_safe_point",
 		"最近交互祖先一次",
 		"session.origin",
+		"小型隐藏无标注 `image`",
+		"inspect({reference:原 act 的 O,node:诊断 ref})",
+		"O 过期后仍可能可读",
 	} {
 		if !strings.Contains(instructions, required) {
 			t.Errorf("server instructions lack %q", required)
@@ -229,7 +257,10 @@ func TestToolDescriptionsAreCallerOriented(t *testing.T) {
 			"no_safe_point",
 			"reason",
 			"nearest_actionable_ref",
+			"suggested_carrier_ref",
 			"safe_point",
+			"inspect({reference:原 O,node:诊断 ref})",
+			"建议坐标的来源",
 			"target_changed",
 			"新 observation.id",
 			"uncertain",
@@ -239,6 +270,9 @@ func TestToolDescriptionsAreCallerOriented(t *testing.T) {
 		},
 		"inspect": {
 			"node 与 query 互斥",
+			"原 act 请求的 O",
+			"该 ref 作 node",
+			"O 过期后仍可能可读",
 			"content_unavailable",
 			"inspection_too_large",
 			"inspect v3",
@@ -354,6 +388,13 @@ func TestLiveToolDescriptionsClarifyWaitAndTextRecovery(t *testing.T) {
 			"属于该会话的 operation_id",
 			"避免原样重发",
 		},
+		"inspect": {
+			"原 act 请求的 O",
+			"诊断 ref",
+			"该 ref 作 node",
+			"详细子树",
+			"O 过期后仍可能可读",
+		},
 	}
 	for name, fragments := range required {
 		t.Run(name, func(t *testing.T) {
@@ -379,6 +420,9 @@ func TestLiveToolDescriptionsClarifyWaitAndTextRecovery(t *testing.T) {
 		"recovery.entry=observe",
 		"recovery.reference=P",
 		"通常 uncertain 先用 status",
+		"小型隐藏无标注 `image`",
+		"inspect({reference:原 act 的 O,node:诊断 ref})",
+		"链下缩进的孩子属于链尾",
 	} {
 		if !strings.Contains(initialize.Instructions, fragment) {
 			t.Errorf("live server instructions lack %q", fragment)

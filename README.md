@@ -7,8 +7,8 @@ HTTP 协议配对。
 
 - 模块：`github.com/malyjacob/mobile-use-vnext`
 - Go：1.27.1，启用 `GOEXPERIMENT=jsonv2`
-- 契约：`contract_version = "20"`，服务、HTTP 客户端、控制 App 精确相等才做普通工作
-- 发行：`0.21.0`；`release/versions.json` 是发行号、契约号与 Android versionCode（23）的唯一
+- 契约：`contract_version = "21"`，服务、HTTP 客户端、控制 App 精确相等才做普通工作
+- 发行：`0.23.0`；`release/versions.json` 是发行号、契约号与 Android versionCode（25）的唯一
   来源，构建生成 Go/Java 常量
 
 ## 能力边界
@@ -22,8 +22,9 @@ HTTP 协议配对。
   的一张图片，成功只含 `operation_id` 与顶层 `image`，不读树、不发布观察。
 - 默认观察树（`view=compact`）按固定策略交付坐标：根与 `actions` 非空的节点保留已知矩形；
   无动作的 `text` 与匿名普通 `view`/`group` 省略矩形；其余展示节点的矩形与父链上最近交付的
-  矩形完全相同、或裁剪到目标屏幕后小于屏幕面积 1% 时省略。`inspect` 的 `detailed` 视图
-  始终交付完整原坐标。
+  矩形完全相同、或裁剪到目标屏幕后小于屏幕面积 1% 时省略。普通树还会省略符合条件的小型
+  无标注图片，清理因此变空的匿名容器，并提升隐藏匿名容器的唯一孩子。`inspect` 的
+  `detailed` 视图交付保留快照的全部节点与已知原坐标。
 - 控制端为 `POST /v1/control/sync|stop`；同步下发控制视图、至多一条显示命令与未确认的 Agent
   消息，独立 STOP 只绑定停止边界，见 [控制端协议](docs/control-protocol.md)。
 - `notify` 保存的消息通过控制同步进入 App 消息中心与系统通知；`notification.state=pending`
@@ -160,7 +161,7 @@ $env:GOEXPERIMENT = 'jsonv2'; go test ./...
 ## 接口
 
 Agent 工具（`POST /api/<tool>`，`Authorization: Bearer <agent_token>`，
-`X-Mobile-Use-Contract: 20`）：
+`X-Mobile-Use-Contract: 21`）：
 
 | 工具 | 说明 |
 | --- | --- |

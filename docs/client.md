@@ -19,7 +19,7 @@ instance, err := c.Discover(ctx)
 `POST /api/status {}` 取得当前准入事实（`can_start`、`blocking_code`、本 Agent 的
 `session`、`start_operation_id` 与 `cleanup`）。它不生成 P、不续租、不创建会话。
 
-当前共同契约为 `"20"`。契约版本不等时返回 `contract_mismatch`；客户端不刷新版本、不重发
+当前共同契约为 `"21"`。契约版本不等时返回 `contract_mismatch`；客户端不刷新版本、不重发
 业务动作。端口可应答、`/health` 正常都不等于 `can_start=true`。
 
 公开树与 detailed inspection 使用相同的完整节点布尔默认/unknown 规则，不携带 defaults。
@@ -72,6 +72,12 @@ type Response struct {
 `observation.quality` 对象出现时 `state`/`samples`/`stop_reason` 三个成员都必填，显式
 `null`、未知枚举或负 `samples` 使整次响应按 `invalid_response` 拒绝。`samples=0` 是合法
 值；对象缺失只表示本次结果没有该事实，不能当作 `not_observed` 或 `unknown` 的替代来源。
+
+`Result.Observation.Tree` 携带 compact full 或 delta，节点集合随服务的[裁剪策略](interface.md#node)
+确定。留存节点使用原编号，匿名包装省略后孩子可能换父。调用方留存已确认的 full，按每条
+`delta.base` 独立应用差分。使用 `observation.ReadApply` 时，历史 full 与 `add`/`replace` 定义中的
+折叠链会展开，重建结果以普通节点定义交付。只读 `Client.Inspect` 返回 detailed 视图。
+诊断中的节点编号可能缺席于 compact。同一调用方的原 O 仍在服务端留存时，按该 O 和编号补看。
 
 失败结果可以携带 `observation`：`act` 的重验在派发前失败且已发布新帧时，`not_executed` 结果带
 一个新 O 与 `recovery`（`entry=retry`、`reference=O`、`input_state=effective`）。客户端必须在

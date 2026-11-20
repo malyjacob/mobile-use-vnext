@@ -15,7 +15,7 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
   `snap`、`wait_for`、`act`、`inspect`、`keepalive`、`end`、`app`、`notify`、`shell`、
   `diagnose`。不注册 `/health`、认证初始化、旧工具别名或旧协议回退。
 - 目录指纹是工具数、注册顺序、名称、描述与入参 schema 的 canonical SHA-256。当前源码的
-  工具目录指纹为 `bf9aecee9fe31c1545670ec32d34f7b55d3a7649ee77a1f5715893e3e67378ec`。
+  工具目录指纹为 `d9939b8f928fc282cfd118aa32ee4b4f20a5534e3ae6c4fb7d5665a0ee72e14c`。
   发布清单中的指纹对应其记录的源码提交。发布时从目标提交重建并核验清单。
   探针按工具名比对实际 `tools/list` 的描述和入参 schema，并核对只读注解。传入 `-manifest`
   时，探针将清单中的工具数和目录 SHA-256 分别与源码目录的对应值比对。探针将
@@ -61,9 +61,12 @@ Label、最近祖先关系及安全点，child 丢失或内容被替换返回 `4
 `unsupported_node_action` 表示请求动作或提升前提不满足（含祖先不可用），`no_safe_point` 表示有动作但
 固定候选都无法证明。`no_safe_point` 不是向祖先继续查找目标的指令；`error.details` 的
 `reason`、有界阻塞/歧义/归属 ref 列表与可选 `suggested_point` 描述同一 O 上的调用线索。
-三类静态拒绝都不认领 O，结果为 `not_executed`。结果带 `suggested_point` 且原 O 仍
-ready 时，可用同一 O 和 `operation.target={x,y}` 尝试坐标分支，省略 `bubble`。适配器
-分配新 P，该调用仍须独立通过准入与重验。
+三类静态拒绝都不认领 O，结果为 `not_executed`。诊断 ref 可能只出现在原 O 的完整快照中。
+`suggested_carrier_ref` 指出建议坐标的承载节点。原快照仍保留时，用
+`inspect({reference: 原 act 的 O, node: 诊断 ref})` 查看该子树，O 过期后仍可能可读。
+子树超出补看预算时服务返回 `inspection_too_large`。原 O 仍 ready 且得到
+`suggested_point` 时，可用同一 O 和 `operation.target={x,y}` 尝试坐标分支，省略 `bubble`。
+适配器分配新 P，该调用独立通过准入与重验。
 
 `text` 的 `press_enter` 省略或有效为 true 时，一次调用完成必要聚焦（已聚焦 ref 不重复点击）、
 将目标框全文设为 text、以同一次写入调用中同一节点的刷新值精确读回，并至多发送一次 ENTER；
@@ -89,8 +92,9 @@ ready 时，可用同一 O 和 `operation.target={x,y}` 尝试坐标分支，省
 图例以 `tree v3`、`inspect v3` 标识块语法，并说明普通节点在 `n<ref>` 后按首列恢复角色：
 不带引号的合法角色词是显式角色，JSON 字符串字面量默认为 `text`，几何、`value=`、`hint=`、
 `tap`/`long_press`/`swipe`、状态或属性标记或行尾默认为 `view`；只有恢复结果等于原角色且
-首项不会被误读为角色词时才省略。合法匿名默认 `view` 链写 `[n2 n3]`，`group` 链或带输出
-字段的链写 `chain [n2 n3] <role> ...`。图例还说明节点动作列、块头 `view=`、块头后的空行、
+首项不会被误读为角色词时才省略。当前 compact full 和 delta 输出普通节点定义。读取历史
+`[n2 n3]` 或 `chain [n2 n3] <role> ...` 时，按顺序展开，缩进孩子归最后一个 ref。
+图例还说明节点动作列、块头 `view=`、块头后的空行、
 `nodes`/`entries` 计数、几何省略与状态默认。动作列的 `swipe` 表示节点的源能力，受控滚动使用
 `operation.type=scroll` 和 `container`。嵌套容器可按要滚动的区域选择 ref。
 `effect.state` 报告内容位移证据，执行事实由 `outcome` 表达。
@@ -325,12 +329,14 @@ end tree
 几何列与节点定义一一对应：已知矩形写 `[l,t,r,b]`，源未提供几何写 `-`；观察视图里按 compact
 几何策略省略的已知矩形直接没有该列，`-` 不表示隐藏。该策略保留合成根与 `actions` 非空
 节点的矩形，省略无动作 `text` 与匿名普通 `view`/`group` 的矩形，其余展示节点在裁剪到屏幕
-后的矩形与父链上最近交付者四边完全相同、或该可见面积小于屏幕面积的 1% 时省略；详细补看
-始终交付原矩形。连续匿名单子节点按链规则折叠：合法匿名默认 `view` 链在几何已隐藏且其余
-共享字段均处于完整节点默认（无输出）时写成 `[n2 n3]`；`group` 链及带任意输出字段的链写成
-`chain [n2 n3] <role> ...`。列表位于定义开头，与普通 `n<ref>` 后的几何列不同；成员共享
-其余列，孩子属于末成员，成员顺序与 `nodes`/`entries` 计数沿用同一展开规则。`nodes` 是
-展开后的逻辑节点数，`entries` 是普通节点或 chain 定义行数；详细补看视图里两者相同。
+后的矩形与父链上最近交付者四边完全相同、或该可见面积小于屏幕面积的 1% 时省略。随后按
+[接口策略](interface.md#node)省略符合条件的小图，清理因此变空的匿名容器，并提升隐藏匿名容器
+的唯一孩子。text、structured 和 both 里的 compact 节点集合相同。详细补看交付完整快照的
+节点与已知原矩形。
+
+历史 `[n2 n3]` 代表匿名默认 `view` 链；历史 `chain [n2 n3] <role> ...` 写出角色和共享字段。
+列表位于定义开头。按顺序展开后，缩进的孩子归链尾，链内编号均可引用。`nodes` 计展开后
+逻辑节点数，`entries` 计定义行数。新 full 与 detailed 块的两项计数相同。
 `checked` 默认 `false`（省略），只有 `true` 与 `null` 显式出现。完整节点的缺席布尔恢复为
 已知默认，显式 null 保持未知；set 的缺席只表示未修改。树与补看块均不输出 defaults 行。
 
@@ -357,7 +363,7 @@ end tree
 `label`、`actions`、`bounds`、`enabled`、`focused`、`selected`、`checked`、`value`、
 `hint`、`protected`、`axis`、`resource`。`bounds=hidden` 表示该几何按策略不交付，
 `bounds=null` 表示置为未知。`SetNode` 没有 `role`，`~` 行也不输出 `role`。
-`+` 与 `=` 后的完整定义及其子树使用本节 v3 节点规则；`~`、`children`、`-` 保持原语法。
+`+` 与 `=` 后输出普通节点定义及其子树。读取历史 `+` 与 `=` 定义中的链时按相同规则展开。
 `add` / `remove` 保持结果中的顺序；`set`、`children`、`replace` 按 ref 数值升序输出。
 同一个 `base` 下的新 delta 覆盖旧 delta，不叠加；块头 `base=` 是唯一锚点。
 

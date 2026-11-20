@@ -511,6 +511,188 @@ func tapCarrierSuggestionStep() captureStep {
 			"android.widget.ImageButton", "blocker", true, true))
 }
 
+func pruningImageRaw(resource string, bounds device.Rect) device.RawNode {
+	raw := tapRawNode(0, 0, 0, 0, bounds,
+		"android.widget.ImageView", "", false, false)
+	raw.ResourceSet, raw.ResourceID = true, resource
+	raw.HasFocused, raw.Focused = true, false
+	raw.HasSelected, raw.Selected = true, false
+	raw.HasPassword, raw.Password = true, false
+	raw.HasChecked, raw.Checked = true, false
+	return raw
+}
+
+func pruningCarrierStep() captureStep {
+	return tapCardWithChildrenStep(
+		device.Rect{Left: 0, Top: 300, Right: 1000, Bottom: 1100},
+		pruningImageRaw("app:id/pruning_carrier",
+			device.Rect{Left: 495, Top: 300, Right: 505, Bottom: 1100}))
+}
+
+func pruningCarrierSuggestionStep() captureStep {
+	return tapCardWithChildrenStep(device.Rect{Left: 0, Top: 0, Right: 1000, Bottom: 1000},
+		tapRawNode(0, 0, 0, 0, device.Rect{Left: 400, Top: 0, Right: 600, Bottom: 1000},
+			"android.widget.ImageButton", "vertical", true, true),
+		tapRawNode(0, 0, 0, 0, device.Rect{Left: 0, Top: 400, Right: 1000, Bottom: 600},
+			"android.widget.ImageButton", "horizontal", true, true),
+		pruningImageRaw("app:id/pruning_suggested_carrier",
+			device.Rect{Left: 100, Top: 100, Right: 199, Bottom: 199}),
+		tapRawNode(0, 0, 0, 0, device.Rect{Left: 140, Top: 140, Right: 160, Bottom: 160},
+			"android.widget.ImageButton", "blocker", true, true))
+}
+
+func pruningAmbiguousStep() captureStep {
+	return tapCardWithChildrenStep(device.Rect{Left: 0, Top: 0, Right: 1000, Bottom: 1000},
+		pruningImageRaw("app:id/pruning_ambiguous_left",
+			device.Rect{Left: 490, Top: 490, Right: 510, Bottom: 510}),
+		pruningImageRaw("app:id/pruning_ambiguous_right",
+			device.Rect{Left: 490, Top: 490, Right: 510, Bottom: 510}))
+}
+
+func requirePrunedRefInspectable(t *testing.T, h *harness, observation *protocol.Observation,
+	ref string, role protocol.Role) {
+	t.Helper()
+	if observation == nil || observation.Tree == nil || observation.Tree.Full == nil {
+		t.Fatalf("fixture did not publish a compact full: %+v", observation)
+	}
+	if readNodeByRef(observation.Tree.Full.Root, ref) != nil {
+		t.Fatalf("pruned ref %q remained in compact full", ref)
+	}
+	result, apiErr := h.engine.Inspect("agent", &protocol.InspectRequest{
+		Reference: observation.ID, Node: ref, HasNode: true,
+	})
+	if apiErr != nil {
+		t.Fatalf("inspect pruned ref %q from original O %q: %v", ref, observation.ID, apiErr)
+	}
+	if result == nil || result.Inspection == nil ||
+		result.Inspection.ObservationID != observation.ID ||
+		result.Inspection.Scope != "subtree" ||
+		result.Inspection.View != protocol.ViewDetailed ||
+		result.Inspection.Tree != nil ||
+		result.Inspection.Root == nil ||
+		result.Inspection.Root.Ref != ref ||
+		result.Inspection.Root.Role != role ||
+		result.Inspection.Root.Bounds.Kind != protocol.GeometryKnown {
+		t.Fatalf("detailed inspection for pruned ref %q: %+v", ref, result)
+	}
+}
+
+// TestActPrunedImageCarrierEvidence covers both input actions on the same
+// complete-tree carrier. Compact omits the image, while the original O keeps it
+// available for action evidence and historical inspection.
+func TestActPrunedImageCarrierEvidence(t *testing.T) {
+	for _, operation := range []string{"tap", "long_press"} {
+		t.Run(operation, func(t *testing.T) {
+			h := newTapScopeHarness(t)
+			h.device.scriptCaptures(pruningCarrierStep())
+			start := h.startSession()
+			state := observationStateByID(t, h.engine, start.Observation.ID)
+			imageRef, ok := sourceRefForResource(state.Projection, "app:id/pruning_carrier")
+			if !ok {
+				t.Fatal("fixture has no mapped pruning carrier")
+			}
+			sourceImage := nodeByRef(state.tree().Root, imageRef)
+			if sourceImage == nil || sourceImage.Bounds == nil ||
+				!sourceImage.Bounds.Contains(500, 700) {
+				t.Fatalf("source image %q does not own the card center: %+v", imageRef, sourceImage)
+			}
+			if readNodeByRef(start.Observation.Tree.Full.Root, imageRef) != nil {
+				t.Fatalf("small anonymous image %q was not pruned", imageRef)
+			}
+			card := tapPublicBoundsNode(state.tree().Root,
+				device.Rect{Left: 0, Top: 300, Right: 1000, Bottom: 1100})
+			if card == nil {
+				t.Fatal("composite card not found")
+			}
+			request := tapRefRequest(start.Observation.ID, card.Ref)
+			if operation == "long_press" {
+				request = longPressRefRequest(start.Observation.ID, card.Ref)
+			}
+
+			result := h.actWith(t, "Ppruned"+operation, request)
+			if result.Outcome != OutcomeExecuted {
+				t.Fatalf("%s outcome=%q error=%+v", operation, result.Outcome, result.Error)
+			}
+			requireTapPoint(t, h, [2]int{500, 700})
+			requirePrunedRefInspectable(t, h, start.Observation, imageRef, protocol.RoleImage)
+		})
+	}
+}
+
+func TestActStaticPrunedCarrierRemainsInspectable(t *testing.T) {
+	h := newTapScopeHarness(t)
+	h.device.scriptCaptures(pruningCarrierSuggestionStep())
+	start := h.startSession()
+	state := observationStateByID(t, h.engine, start.Observation.ID)
+	carrierRef, ok := sourceRefForResource(state.Projection, "app:id/pruning_suggested_carrier")
+	if !ok {
+		t.Fatal("fixture has no mapped suggested carrier")
+	}
+	sourceCarrier := nodeByRef(state.tree().Root, carrierRef)
+	if sourceCarrier == nil || sourceCarrier.Bounds == nil ||
+		!sourceCarrier.Bounds.Contains(166, 166) {
+		t.Fatalf("source carrier %q does not own the suggested point: %+v", carrierRef, sourceCarrier)
+	}
+	card := tapPublicBoundsNode(state.tree().Root,
+		device.Rect{Left: 0, Top: 0, Right: 1000, Bottom: 1000})
+	if card == nil {
+		t.Fatal("suggestion card not found")
+	}
+	probes, captures := h.device.probeCount(), h.device.captureCount()
+
+	result := h.actWith(t, "Pprunedsuggest",
+		tapRefRequest(start.Observation.ID, card.Ref))
+	details := requireStaticRejection(t, result, "no_safe_point", "blocked")
+	requireSuggestedPoint(t, details, 166, 166)
+	requireDetailString(t, details, "suggested_carrier_ref", carrierRef)
+	if len(h.device.taps) != 0 {
+		t.Fatalf("static suggestion dispatched input: %v", h.device.taps)
+	}
+	if delta := h.device.probeCount() - probes; delta != 0 {
+		t.Fatalf("static suggestion probe delta=%d, want zero", delta)
+	}
+	if delta := h.device.captureCount() - captures; delta != 0 {
+		t.Fatalf("static suggestion capture delta=%d, want zero", delta)
+	}
+	requireReadyObservation(t, h, start.Observation.ID)
+	requirePrunedRefInspectable(t, h, start.Observation, carrierRef, protocol.RoleImage)
+}
+
+func TestActStaticPrunedAmbiguityRemainsInspectable(t *testing.T) {
+	h := newTapScopeHarness(t)
+	h.device.scriptCaptures(pruningAmbiguousStep())
+	start := h.startSession()
+	state := observationStateByID(t, h.engine, start.Observation.ID)
+	leftRef, leftOK := sourceRefForResource(state.Projection, "app:id/pruning_ambiguous_left")
+	rightRef, rightOK := sourceRefForResource(state.Projection, "app:id/pruning_ambiguous_right")
+	if !leftOK || !rightOK {
+		t.Fatalf("fixture refs: left=%q/%t right=%q/%t", leftRef, leftOK, rightRef, rightOK)
+	}
+	card := tapPublicBoundsNode(state.tree().Root,
+		device.Rect{Left: 0, Top: 0, Right: 1000, Bottom: 1000})
+	if card == nil {
+		t.Fatal("ambiguous card not found")
+	}
+	probes, captures := h.device.probeCount(), h.device.captureCount()
+
+	result := h.actWith(t, "Pprunedambiguous",
+		tapRefRequest(start.Observation.ID, card.Ref))
+	details := requireStaticRejection(t, result, "no_safe_point", "ambiguous")
+	requireDetailStringSlice(t, details, "ambiguous_refs", leftRef, rightRef)
+	if len(h.device.taps) != 0 {
+		t.Fatalf("static ambiguity dispatched input: %v", h.device.taps)
+	}
+	if delta := h.device.probeCount() - probes; delta != 0 {
+		t.Fatalf("static ambiguity probe delta=%d, want zero", delta)
+	}
+	if delta := h.device.captureCount() - captures; delta != 0 {
+		t.Fatalf("static ambiguity capture delta=%d, want zero", delta)
+	}
+	requireReadyObservation(t, h, start.Observation.ID)
+	requirePrunedRefInspectable(t, h, start.Observation, leftRef, protocol.RoleImage)
+	requirePrunedRefInspectable(t, h, start.Observation, rightRef, protocol.RoleImage)
+}
+
 func TestActTapSuggestionReportsCarrierRef(t *testing.T) {
 	h := newTapScopeHarness(t)
 	h.device.scriptCaptures(tapCarrierSuggestionStep())

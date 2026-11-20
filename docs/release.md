@@ -32,8 +32,8 @@
 | `android_version_code` | Android versionCode，写入 `AndroidManifest.xml` 与清单 |
 | `source_commit` | 该版本号冻结时的基线提交（仅供校验）；清单记录构建时的 HEAD |
 
-当前版本源为 `release_version=0.22.0`、`contract_version=20`、`android_version_code=24`；三者
-只能在本文件手改，其他位置由生成脚本写入。
+当前版本源为 `release_version=0.23.0`、`contract_version=21`、`android_version_code=25`；三者
+在 `release/versions.json` 中手改，Go、Java 和 XML 构建常量由生成脚本写入。
 
 `scripts/generate-version.ps1` 生成：
 
@@ -42,9 +42,9 @@
 - `android-control/app/src/main/res/values/strings_version.xml`（`app_version`）；
 - 同步 `AndroidManifest.xml` 的 `android:versionCode`。
 
-生成文件随源码提交，构建入口在编译前重新生成或使用 `-Check` 校验。不得在 Go、Java、
-PowerShell、docs 或 Manifest 中另写一份版本号；`contract_version` 只在改变普通请求/响应
-必需形状、默认行为、核心枚举或执行语义时前进。
+生成文件随源码提交，构建入口在编译前重新生成或使用 `-Check` 校验。构建以版本源及生成值
+为准，文档示例随版本源更新。`contract_version` 只在改变普通请求/响应必需形状、默认行为、
+核心枚举或执行语义时前进。
 
 ## 3. 构建与清单
 
@@ -68,8 +68,8 @@ PowerShell、docs 或 Manifest 中另写一份版本号；`contract_version` 只
 {
   "format": "mobile-use-vnext-release",
   "version": 1,
-  "release_version": "0.22.0",
-  "contract_version": 20,
+  "release_version": "0.23.0",
+  "contract_version": 21,
   "source_commit": "<40 位提交>",
   "source_dirty": false,
   "built_at": "…",
@@ -77,7 +77,7 @@ PowerShell、docs 或 Manifest 中另写一份版本号；`contract_version` 只
   "go_experiment": "jsonv2",
   "build_target": {"goos": "linux", "goarch": "arm64", "cgo_enabled": false},
   "mcp": {"sdk": "github.com/modelcontextprotocol/go-sdk v1.8.0", "protocol": "2026-07-28"},
-  "android": {"package": "com.mobileuse.vnext", "version_name": "0.22.0", "version_code": 24},
+  "android": {"package": "com.mobileuse.vnext", "version_name": "0.23.0", "version_code": 25},
   "tool_catalog": {"count": 13, "sha256": "…"},
   "artifacts": [{"name": "device-service", "path": "device-service", "sha256": "…", "bytes": 0}]
 }

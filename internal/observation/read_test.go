@@ -12,7 +12,7 @@ import (
 
 // The read-layer tests use synthetic trees only. They prove the fixed public
 // projection rules: the checked default, the three geometry states, the
-// anonymous-plain predicate, chain folding and the public delta round trip.
+// anonymous-plain predicate, ordinary compact output and public delta replay.
 
 func readBool(value bool) *bool { return &value }
 
@@ -208,7 +208,7 @@ func TestReadDeltaCombinedSetAndEmptyOmitDefaults(t *testing.T) {
 	}
 }
 
-func TestUnknownStateNodesKeepBoundsAndStayOutOfChains(t *testing.T) {
+func TestUnknownStateNodesKeepBoundsAndStayOutsideCompactPruning(t *testing.T) {
 	unknownChild := plainT("n3", protocol.RoleView)
 	unknownChild.Selected = nil
 	unknownParent := plainT("n2", protocol.RoleView)
@@ -219,9 +219,7 @@ func TestUnknownStateNodesKeepBoundsAndStayOutOfChains(t *testing.T) {
 	unknownChild.Children = []*protocol.Node{leaf}
 
 	compact := ProjectCompactTree(rootT(unknownParent))
-	if hasChain(compact.Root, []string{"n2", "n3"}) {
-		t.Fatalf("unknown-state nodes must not join a chain: %+v", compact.Root)
-	}
+	requireNoReadChains(t, compact.Root)
 	// The unknown-state ancestor keeps its distinct rectangle; the descendant
 	// with the same clipped rectangle is a duplicate and hides it.
 	if node := childOf(t, compact.Root, "n2"); node == nil || node.Bounds.Kind != protocol.GeometryKnown {
@@ -234,7 +232,7 @@ func TestUnknownStateNodesKeepBoundsAndStayOutOfChains(t *testing.T) {
 		t.Fatalf("actionless text n4 must hide its geometry: %+v", node)
 	}
 
-	// Same packing guard applies to add/replace delta definitions.
+	// The historical fixture packer must apply the same anonymous-state guard.
 	delta := PackDelta(&protocol.ReadDelta{
 		Format: "delta", Base: "O1", View: protocol.ViewCompact,
 		Add: []*protocol.ReadNode{projectRead(unknownParent)},
@@ -322,7 +320,7 @@ func projectRead(node *protocol.Node) *protocol.ReadNode {
 	return projectReadNode(node, true)
 }
 
-func TestPackFoldsOnlyLegalChains(t *testing.T) {
+func TestLegacyPackFoldsOnlyLegalChains(t *testing.T) {
 	// n2 -> n3 -> n4 is an anonymous single-child path; n5 is a sibling and
 	// n6 splits the path by carrying an action.
 	leaf := plainT("n4", protocol.RoleView)
@@ -337,7 +335,11 @@ func TestPackFoldsOnlyLegalChains(t *testing.T) {
 	deep := plainT("n7", protocol.RoleGroup) // child of the action node
 	action.Children = []*protocol.Node{deep}
 	root := rootT(head, sibling, action)
-	compact := ProjectCompactTree(root)
+	logical := &protocol.ReadTree{
+		Format: "full", Scope: protocol.Scope, View: protocol.ViewCompact,
+		Root: projectLegacyCompactNode(root.Root, newCompactProjection(root.Root), nil),
+	}
+	compact := PackTree(logical)
 
 	if !hasChain(compact.Root, []string{"n2", "n3", "n4"}) {
 		t.Fatalf("expected the anonymous single-child path to fold: %+v", compact.Root)
@@ -355,14 +357,13 @@ func TestPackFoldsOnlyLegalChains(t *testing.T) {
 	if strings.Join(refs, ",") != strings.Join(want, ",") {
 		t.Fatalf("packing changed the logical refs: got %v want %v", refs, want)
 	}
-	// Unpacking restores the exact logical tree.
-	logical := UnpackTree(compact)
-	if !ReadEqual(logical, UnpackTree(ProjectCompactTree(root))) {
+	// Unpacking restores the exact historical logical tree.
+	if !ReadEqual(UnpackTree(compact), logical) {
 		t.Fatal("unpack is not the inverse of pack")
 	}
 }
 
-func TestPackIsDeterministic(t *testing.T) {
+func TestCompactProjectionIsDeterministic(t *testing.T) {
 	build := func() *protocol.Tree {
 		leaf := plainT("n4", protocol.RoleView)
 		mid := plainT("n3", protocol.RoleView)
@@ -382,9 +383,11 @@ func TestPackIsDeterministic(t *testing.T) {
 	if string(first) != string(second) {
 		t.Fatalf("projection is not deterministic:\n%s\n%s", first, second)
 	}
+	firstTree := ProjectCompactTree(build())
+	requireNoReadChains(t, firstTree.Root)
 }
 
-func TestChainMembersWithDifferentInternalRects(t *testing.T) {
+func TestCompactWrapperBypassKeepsDistinctDetailedRects(t *testing.T) {
 	leaf := plainT("n4", protocol.RoleView)
 	leaf.Bounds = &protocol.Bounds{Left: 10, Top: 10, Right: 90, Bottom: 90}
 	mid := plainT("n3", protocol.RoleView)
@@ -394,8 +397,10 @@ func TestChainMembersWithDifferentInternalRects(t *testing.T) {
 	head.Bounds = &protocol.Bounds{Left: 0, Top: 0, Right: 100, Bottom: 100}
 	head.Children = []*protocol.Node{mid}
 	compact := ProjectCompactTree(rootT(head))
-	if !hasChain(compact.Root, []string{"n2", "n3", "n4"}) {
-		t.Fatal("nodes whose public geometry is hidden may share a chain")
+	requireNoReadChains(t, compact.Root)
+	requireImmediateRefs(t, compact.Root, "n4")
+	if childOf(t, compact.Root, "n2") != nil || childOf(t, compact.Root, "n3") != nil {
+		t.Fatal("hidden anonymous wrappers must be bypassed")
 	}
 	detailed := ProjectDetailedTree(rootT(head))
 	if node := childOf(t, detailed.Root, "n3"); node == nil ||
@@ -443,14 +448,14 @@ func TestReadDeltaFollowsDisplayStateChanges(t *testing.T) {
 	}
 }
 
-func TestReadDeltaChildrenReferenceChainMember(t *testing.T) {
+func TestReadDeltaChildrenReferenceWrapperChild(t *testing.T) {
 	first := plainT("n2", protocol.RoleView)
 	first.Children = []*protocol.Node{plainT("n3", protocol.RoleView)}
 	sibling := plainT("n4", protocol.RoleView)
 	base := ProjectCompactTree(rootT(first, sibling))
 
-	// Move n3 from beneath n2 to the root child list. The ref belongs to a chain
-	// member in the baseline; the delta must address it by its original ref.
+	// Move n3 from beneath n2 to the root child list. The compact projection
+	// promotes it to a root child by wrapper pruning.
 	moved := plainT("n3", protocol.RoleView)
 	reordered := rootT(plainT("n2", protocol.RoleView), moved, sibling)
 	current := ProjectCompactTree(reordered)
@@ -765,14 +770,14 @@ func TestReadDeltaWrapperAddAndUnwrap(t *testing.T) {
 	mustReadApplyEqual(t, base, delta, current)
 }
 
-func TestReadDeltaChainBoundaryWithAssemblyRoot(t *testing.T) {
+func TestReadDeltaLegacyChainBoundaryWithAssemblyRoot(t *testing.T) {
 	leafNode := plainT("n4", protocol.RoleText)
 	leafNode.Label = []string{"kept"}
 	mid := plainT("n3", protocol.RoleView)
 	mid.Children = []*protocol.Node{leafNode}
 	head := plainT("n2", protocol.RoleView)
 	head.Children = []*protocol.Node{mid}
-	base := ProjectCompactTree(rootT(head))
+	base := legacyPackedCompactTree(rootT(head))
 	if !hasChain(base.Root, []string{"n2", "n3"}) {
 		t.Fatalf("fixture did not produce a baseline chain: %+v", base.Root)
 	}
@@ -793,7 +798,7 @@ func TestReadDeltaChainBoundaryWithAssemblyRoot(t *testing.T) {
 		t.Fatalf("chain boundary add roots = %s, want [n90]", got)
 	}
 	requireReadChildBlock(t, delta, "n1", "n90")
-	requireReadChildBlock(t, delta, "n90", "n2")
+	requireReadChildBlock(t, delta, "n90", "n4")
 	mustReadApplyEqual(t, base, delta, current)
 }
 

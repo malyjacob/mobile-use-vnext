@@ -1322,6 +1322,17 @@ func TestAdapterChecksImageLeakFails(t *testing.T) {
 // TestInstructionsCheck proves the mandatory discovery check compares the live
 // instructions with the source accessor and rejects a missing payload.
 func TestInstructionsCheck(t *testing.T) {
+	source := mcpserver.ServerInstructions()
+	for _, required := range []string{
+		"新 compact full/delta 只交付普通节点定义",
+		"链下缩进的孩子属于链尾",
+		"inspect({reference:原 act 的 O,node:诊断 ref})",
+		"O 过期后仍可能可读",
+	} {
+		if !strings.Contains(source, required) {
+			t.Fatalf("source instructions lack %q", required)
+		}
+	}
 	session := startFakeAdapter(t, newFakeAdapter())
 	var output bytes.Buffer
 	runner := &probe{reporter: newReporter(&output), session: session}

@@ -42,8 +42,13 @@ const treeTextGuide = "树块：当前树由 base 指向的 full 加本次 delta
 	"观察视图的几何列：根和有动作的节点交付已知矩形；无动作的 `text` 与匿名普通 view/group 省略矩形；" +
 	"其余展示节点与父链上最近交付的矩形四边相同、或裁剪到屏幕后小于屏幕面积 1% 时省略；" +
 	"未知几何仍写 `-`，缺失几何列表示按策略隐藏，详细补看交付原矩形；" +
-	"合法匿名默认 `view` 链在隐藏几何且其余共享字段原本无输出时写成 `[n2 n3]`；" +
-	"`group` 链和带输出字段的链仍写成 `chain [n2 n3] <role> ...`，其中每个 ref 仍是可寻址的逻辑节点。" +
+	"新 compact 普通树省略小型隐藏无标注 `image`，并清理因此变空的隐藏匿名普通 view/group；" +
+	"图片须为叶、无 label/value/hint/resource/axis 或动作，enabled 已知为 true、" +
+	"focused/selected/protected/checked 已知为 false，原矩形裁屏后面积须为可计算正数且严格小于屏幕面积 1%；" +
+	"祖先动作和状态不参与。" +
+	"随后绕过仅剩一个直接孩子的隐藏匿名普通 view/group，保留原编号、字段和同级顺序。" +
+	"新 compact full/delta 只交付普通节点定义，不生成折叠链；读取端继续接受历史 `[n2 n3]` 与 " +
+	"`chain [n2 n3] <role> ...`，链下缩进的孩子属于链尾。" +
 	"完整节点的状态位按已知默认省略：`enabled=true` 省略，`enabled=false`/`enabled=null` 显式；" +
 	"`focused`/`selected`/`protected`/`checked` 的已知 `false` 省略，`true` 与 `null` 显式。" +
 	"`set` 行不同：出现的状态字段一律保留显式 `false`/`true`/`null`，未出现才表示不修改。" +
@@ -70,6 +75,8 @@ const callerGuidance = "会话与推进：首次可直接 start({})。已有 act
 	"- 当前 ready O：act、app 的五个变更 kind。保留中的历史 O：inspect。\n" +
 	"- 活动原会话的 O/P：observe、snap、wait_for、keepalive、shell。app.list 接受 ready O 或可定位活动原会话的 P。\n" +
 	"- end 的 O/P 定位原会话。status、diagnose 可用 O/P 查原事实，省略时查自身。\n" +
+	"- act 静态拒绝引用的诊断节点若不在 compact，原 O 内容仍保留时用 " +
+	"inspect({reference:原 act 的 O,node:诊断 ref}) 补看；O 过期后仍可能可读。\n" +
 	"start 租期五分钟；普通活动在续期点只增不减，至少续至两分钟后。" +
 	"status、inspect、diagnose、snap、app 查询不续租。keepalive 可重设并缩短租期，不延长 O。\n\n" +
 	"选择工具：observe 单次采集，snap 只看画面，wait_for 等公开树条件，inspect 补看历史树，diagnose 查健康。" +
@@ -268,7 +275,10 @@ var toolCatalog = []toolDefinition{
 			"\n点按与长按：ref 默认 bubble=true。仅在原节点没有 tap、long_press、text 任一动作时，向最近的交互祖先提升一次。" +
 			"该祖先不支持本动作或无安全点时停止提升。显式 bubble=false 只点原目标，坐标目标省略 bubble。" +
 			"静态拒绝均为 not_executed：invalid_target 表示目标结构或几何不可用，unsupported_node_action 表示动作或提升前提不满足，no_safe_point 表示有动作但安全点无法证明。" +
-			"详情可给 reason、阻塞或歧义 refs、nearest_actionable_ref 与 safe_point。no_safe_point 带 error.details.suggested_point 且原 O 仍 ready 时，" +
+			"详情可给 reason、阻塞或歧义 refs、nearest_actionable_ref、suggested_carrier_ref 与 safe_point。" +
+			"诊断 ref 可能因 compact 裁剪不在普通树中；原 O 内容仍保留时用 " +
+			"inspect({reference:原 O,node:诊断 ref}) 补看详细子树。suggested_carrier_ref 说明建议坐标的来源。" +
+			"no_safe_point 带 error.details.suggested_point 且原 O 仍 ready 时，" +
 			"用同一 O、新 P 与 operation.target={x,y} 尝试坐标分支，省略 bubble，并独立通过准入和重验。" +
 			"\n文本：默认 press_enter=true。必要聚焦（已聚焦 ref 跳过）、全文写入、同节点刷新精确读回，随后至多一次 ENTER。" +
 			"普通输入无需先 tap 或另发 ENTER。仅填字、草稿、多行、清空或逐字段编辑时显式 press_enter=false，只写入并读回。默认分支返回 text_input:{write,enter}，false 时省略。" +
@@ -416,6 +426,8 @@ var toolCatalog = []toolDefinition{
 		name: "inspect",
 		description: "只读查看保留中的历史观察树，不采集、不续租、不确认基线、不认领 O。" +
 			"reference 必填且必须指向保留中的历史 O；node 与 query 互斥，query 按字面 Unicode 折叠子串匹配。" +
+			"act 静态拒绝中的诊断 ref 若不在 compact 普通树，用原 act 请求的 O 和该 ref 作 node 补看详细子树。" +
+			"补看要求同一调用方的原 O 内容仍保留，O 过期后仍可能可读。" +
 			"返回 inspect v3 块：tree 为完整详细树，subtree 为指定 root 的子树，query 为命中节点的路径与子树。" +
 			"历史树被淘汰（content_unavailable）时用 observe 取新观察；结果过大（inspection_too_large）时改用更窄的 node 或 query。",
 		schema: json.RawMessage(`{

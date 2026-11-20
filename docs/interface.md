@@ -15,7 +15,7 @@
 | 方法 | 所有业务端点只接受 `POST`；其他方法返回 `405`，错误码 `invalid_request` |
 | 认证 | `/api/*` 用 `agent_token`；`/v1/control/*` 用 `control_token`；`Authorization: Bearer <token>` |
 | 身份隔离 | agent token 不能访问 `/v1/control/*`，control token 不能访问 `/api/*`；错误为 `401 unauthorized` |
-| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 20`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
+| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 21`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
 | 预分配 P | `/api/*` 可带 `X-Mobile-Use-Operation: P…`；缺省由服务分配。`status` 不使用该头 |
 | 请求体 | 必须是一个 JSON 对象；大小上限：`start`/`status`/`end`/`wait_for` 16 KiB，`observe` 32 KiB，`snap` 8 KiB，`act` 64 KiB，`inspect`/`keepalive`/`diagnose`/`app` 8 KiB，`notify` 16 KiB，`shell` 32 KiB，`sync` 32 KiB，`stop` 8 KiB |
 | 响应 | `Content-Type: application/json; charset=utf-8`，`Cache-Control: no-store` |
@@ -782,7 +782,7 @@ raw `swipe` 仍不接受 `ref`。
 
 | 字段 | 必填 | 类型 | 说明 |
 | --- | --- | --- | --- |
-| `contract_version` | 是 | 字符串 | 必须为 `"20"`，否则 `409 contract_mismatch` |
+| `contract_version` | 是 | 字符串 | 必须为 `"21"`，否则 `409 contract_mismatch` |
 | `app_instance_id` | 是 | UUID | App 进程实例；变化会撤销旧归属 |
 | `app_version` | 否（App 应发送） | 字符串 | 仅发行标识 |
 | `selected_mode` | 是 | `virtual`/`primary` | 用户选择 |
@@ -809,7 +809,7 @@ raw `swipe` 仍不接受 `ref`。
 
 ```json
 {
-  "contract_version": "20",
+  "contract_version": "21",
   "service_instance_id": "…",
   "control": {
     "revision": 42,
@@ -845,7 +845,7 @@ raw `swipe` 仍不接受 `ref`。
 ## 9. `POST /v1/control/stop`
 
 ```json
-{"contract_version":"20","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
+{"contract_version":"21","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
 ```
 
 - **不校验普通契约**：`contract_version` 字段存在但不参与准入，服务与 App 契约版本
@@ -855,7 +855,7 @@ raw `swipe` 仍不接受 `ref`。
 - 重复或过期 `seq` 不报错，只返回 `state=duplicate`。
 
 ```json
-{"contract_version":"20","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
+{"contract_version":"21","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
 ```
 
 `accepted` 恒为 `true`；`state` 为 `revoked`（绑定时撤销了活动会话）、`recorded`
@@ -868,7 +868,7 @@ raw `swipe` 仍不接受 `ref`。
 无认证，只表示进程可应答，不代表设备就绪或资源干净：
 
 ```json
-{"status":"ok","contract_version":"20","service_instance_id":"…","release_version":"…"}
+{"status":"ok","contract_version":"21","service_instance_id":"…","release_version":"…"}
 ```
 
 ## 11. 数据对象
@@ -971,14 +971,12 @@ Observation 的编码顺序固定为 `status`、`id`、`origin`、`revision`、`
 
 ### Node
 
-公共节点是交付表示，不是服务内部完整快照。每个逻辑节点保留原 `ref`、角色、内容、源能力与
-三态事实；已知几何按固定的 compact 几何策略决定是否交付，连续匿名单子链可以折成一条
-`chain` 定义。逻辑节点、父子关系与顺序不因交付表示改变。
+普通观察树按固定策略投影完整快照。留存节点沿用原 `ref`、角色、内容、源能力、三态事实
+和同级顺序。省略匿名包装时，唯一孩子提升到包装在父节点下的位置。
 
 ```json
 {"ref":"n7","role":"button","bounds":[40,300,240,380],
  "label":["确定"],"actions":["tap"],"enabled":false}
-{"chain":["n2","n3"],"role":"view","children":[{"ref":"n4","role":"text","label":["设置"]}]}
 ```
 
 公开构造按值过滤空叶：默认状态、空内容、无动作的普通 View/FrameLayout 叶不发布，
@@ -988,11 +986,11 @@ Observation 的编码顺序固定为 `status`、`id`、`origin`、`revision`、`
 
 普通节点的字段全集：`ref`、`role`、`bounds`、`label`、`actions`、`enabled`、`focused`、
 `selected`、`checked`、`value`、`hint`、`protected`、`axis`、`resource`、`context`、
-`children`。`chain` 定义以 `chain` 取代 `ref`，携带成员的共享字段与末成员的孩子。
+`children`。历史 `chain` 定义以 `chain` 取代 `ref`，携带成员的共享字段与末成员的孩子。
 
 | 字段 | 编码规则 |
 | --- | --- |
-| `ref`/`chain` | 二选一。普通节点写自己的 `ref`；`chain` 是至少两个、按原顺序排列的连续 ref 数组，成员除 `ref`/`children` 外公共字段完全相同且几何都隐藏 |
+| `ref`/`chain` | 二选一。普通定义写节点自己的 `ref`。历史 `chain` 读取为至少两个按数组顺序相连的 ref，成员共享公共字段且几何都隐藏，孩子挂在末成员下 |
 | `role` | 总是出现；属于固定集合 `root`、`group`、`text`、`button`、`input`、`checkbox`、`radio`、`switch`、`toggle`、`scroll`、`image`、`view` |
 | `bounds` | 三态：四整数数组表示已知矩形；`null` 表示源未提供可用几何；compact 视图里按几何策略省略的已知矩形直接省略该成员。detailed 视图不允许隐藏，`bounds` 总是出现 |
 | `label`/`actions`/`children` | 空时省略；`actions` 取 `tap`、`long_press`、`text`、`swipe` |
@@ -1019,8 +1017,19 @@ compact 几何策略是固定的服务策略，不是请求字段，按以下顺
 矩形；其余展示节点的矩形（裁剪到目标屏幕后）若与父链上最近一个实际交付的矩形四边完全
 相同，或可见面积按合成根矩形面积计算严格小于 1%，也省略。角色名本身不构成保护：只有控件
 角色而没有动作的节点仍按重复与面积规则判断。面积使用整数计算；合成根矩形缺失或不可计算时
-跳过面积规则。只有匿名普通节点参与 `chain` 折叠，文本或图片即使省略坐标也保持独立节点。
-detailed 视图始终交付完整原矩形。
+跳过面积规则。detailed 视图交付完整快照中的全部节点与已知原矩形。
+
+服务按上述规则先决定几何，再精简 compact 逻辑树。
+
+1. 省略几何为 hidden 的普通 `image` 叶。该叶须无标签、无动作、无公开的 `value`/`hint`/
+   `resource`/`axis`，且五个布尔状态均为已知默认。用隐藏前的矩形裁到合成根的屏幕矩形，
+   裁后面积须为可计算的正数且严格小于屏幕面积的 1%。设备源字段只有公开为 `resource` 后才参与
+   判定。面积等于 1%、裁后为空、屏幕或面积无法计算的图片继续交付。
+2. 逐层清理因图片省略而变空的匿名普通容器，条件为几何 hidden、原先有孩子且现在没有孩子。
+   原有空叶继续交付。
+3. 绕过几何 hidden 且此时恰好有一个直接孩子的匿名普通容器。几何在所留节点上沿用裁剪前
+   的结果，两个或更多孩子的分支继续交付。合成根、`context`、动作节点、有可读内容或有
+   未知状态或几何的节点继续交付。
 
 ### Tree 与 Delta
 
@@ -1047,9 +1056,10 @@ detailed 视图始终交付完整原矩形。
 - `remove` 的根必须消失，其基线后代可通过最终图逃逸并继续存活；只删除最终不可达且属于
   删除/替换旧区域的残余。显式声明的 set 目标、children 父子与完整定义都必须从原根可达；
 - `replace` 是封闭区域完整定义，区域根可由最终父列表迁移，内部存续后代保持基线父关系。
-  `add`/`replace` 定义根使用普通 `ref`，只有后代可折成 `chain`；
-- 最终图必须单父、无环且全部可达；根变化或同 ref 角色变化退 full。仅跨父移动、增删包装层
-  或 chain 分组变化不强制 full；只有合法 delta 且 `10×deltaBytes < 7×fullBytes` 才发送 delta；
+  新的 full 与 delta 的 `add`/`replace` 只含普通节点定义。读取历史 full、`add` 或
+  `replace` 时，先展开其中的历史 `chain`，链内 ref 可作差分引用，应用结果为展开的 full；
+- 最终图必须单父、无环且全部可达；根变化或同 ref 角色变化退 full。仅跨父移动或增删包装层
+  不强制 full；只有合法 delta 且 `10×deltaBytes < 7×fullBytes` 才发送 delta；
 - 公共 full 超过 128 KiB、单个内部快照超过 4 MiB，或该快照连同受保护历史仍超过 32 MiB 的
   留存额度时，服务返回 `503 tree_too_large`，`details.budget` 分别取 `public_full`、
   `internal_snapshot`、`retained_snapshots`，`details.limit` 为对应字节上限；错误不携带
@@ -1112,7 +1122,9 @@ detailed 视图始终交付完整原矩形。
 
 `node` 与 `query` 互斥。`inspect` 只读保留中的历史树，不采集、不续租、不确认基线、
 不认领 O，也不需要 O 仍可输入。`reference` 必须解析为保留中的历史 O；P 仍不可用，
-旧 `observation_id` 按未知成员拒绝。
+旧 `observation_id` 按未知成员拒绝。动作诊断中的节点编号可能只出现在完整快照中。
+例如 `error.details.suggested_carrier_ref` 指出建议坐标的承载节点，调用方可传入原 act
+请求的 O 作为 `reference`，并用该诊断编号作为 `node` 查看子树。
 
 - 补看固定使用 `view=detailed`：逐节点展开、不折 `chain`、不隐藏已知几何；`tree` 作用域的
   `view` 在嵌套完整树里声明，`subtree`/`query` 在 inspection 信封声明一次；

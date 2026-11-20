@@ -6,10 +6,10 @@ import (
 	"github.com/malyjacob/mobile-use-vnext/internal/protocol"
 )
 
-// ReadDiff computes the public delta of two compact read trees. Chains are
-// expanded before planning, while Add/Replace definitions are packed again.
-// The packed delta is applied and compared by both logical equality and
-// canonical wire bytes before it is returned.
+// ReadDiff computes the public delta of two compact read trees. Legacy chains
+// are expanded before planning and Add/Replace definitions remain ordinary.
+// The delta is applied and compared with the expanded current tree by both
+// logical equality and canonical wire bytes before it is returned.
 func ReadDiff(baseID string, base, current *protocol.ReadTree) (*protocol.ReadDelta, error) {
 	if baseID == "" {
 		return nil, notRepresentable("delta base id is empty")
@@ -30,21 +30,20 @@ func ReadDiff(baseID string, base, current *protocol.ReadTree) (*protocol.ReadDe
 		Set: plan.Set, Add: plan.Add, Remove: plan.Remove,
 		Children: plan.Children, Replace: plan.Replace,
 	}
-	packed := PackDelta(delta)
-	if err := packed.Validate(); err != nil {
-		return nil, notRepresentable("packed delta is invalid: %v", err)
+	if err := delta.Validate(); err != nil {
+		return nil, notRepresentable("delta is invalid: %v", err)
 	}
-	applied, err := ReadApply(base, packed)
+	applied, err := ReadApply(base, delta)
 	if err != nil {
 		return nil, notRepresentable("delta does not apply: %v", err)
 	}
-	if !ReadEqual(applied, current) {
+	if !ReadEqual(applied, logicalCurrent) {
 		return nil, notRepresentable("delta does not reconstruct the current read tree")
 	}
-	if !bytes.Equal(mustJSON(applied), mustJSON(current)) {
+	if !bytes.Equal(mustJSON(applied), mustJSON(logicalCurrent)) {
 		return nil, notRepresentable("delta does not reconstruct the canonical current encoding")
 	}
-	return packed, nil
+	return delta, nil
 }
 
 func planReadStructuralDelta(base, current *protocol.ReadTree) (*structuralDelta[*protocol.ReadNode, protocol.ReadSetNode], error) {
@@ -60,8 +59,9 @@ func planReadStructuralDelta(base, current *protocol.ReadTree) (*structuralDelta
 	return planStructuralDelta(baseIndex, currentIndex, adapter)
 }
 
-// ReadApply reconstructs a compact read tree. Chains in the baseline and in
-// Add/Replace definitions are expanded before the shared final-graph applier.
+// ReadApply reconstructs a compact read tree. Legacy chains in the baseline and
+// in Add/Replace definitions are expanded before the shared final-graph applier.
+// The returned full tree always contains ordinary node definitions.
 func ReadApply(base *protocol.ReadTree, delta *protocol.ReadDelta) (*protocol.ReadTree, error) {
 	if base == nil || base.Root == nil {
 		return nil, notRepresentable("baseline read tree is missing")
@@ -86,10 +86,10 @@ func ReadApply(base *protocol.ReadTree, delta *protocol.ReadDelta) (*protocol.Re
 	if err != nil {
 		return nil, err
 	}
-	return PackTree(&protocol.ReadTree{
+	return &protocol.ReadTree{
 		Format: logicalBase.Format, Scope: logicalBase.Scope,
 		View: logicalBase.View, Root: root,
-	}), nil
+	}, nil
 }
 
 func expandReadDelta(delta *protocol.ReadDelta) structuralDelta[*protocol.ReadNode, protocol.ReadSetNode] {

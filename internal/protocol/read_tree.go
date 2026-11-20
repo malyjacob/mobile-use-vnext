@@ -8,10 +8,9 @@ import (
 
 // The read representation is the public delivery model of a tree. It is
 // derived from the complete internal projection; the internal model is never
-// published. Every logical node keeps its original ref, role, content,
-// capabilities and tri-state facts; only known geometry may be withheld by the
-// fixed compact geometry policy and consecutive anonymous single-child nodes may
-// be folded into one chain definition.
+// published. The compact view can omit geometry and nodes. Retained nodes keep
+// their original ref, role, content, capabilities and tri-state facts. Readers
+// also accept historical chain definitions with consecutive logical refs.
 
 // Public read views.
 const (

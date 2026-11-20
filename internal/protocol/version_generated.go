@@ -5,8 +5,8 @@ package protocol
 // ContractVersion is the single ordinary-contract version shared by the device
 // service, the SDK/MCP and the paired control App. Ordinary work requires exact
 // equality; the minimal STOP carrier does not use it.
-const ContractVersion = "20"
+const ContractVersion = "21"
 
 // ReleaseVersion identifies this build artifact. It is not a contract and does
 // not take part in capability negotiation.
-var ReleaseVersion = "0.22.0"
+var ReleaseVersion = "0.23.0"

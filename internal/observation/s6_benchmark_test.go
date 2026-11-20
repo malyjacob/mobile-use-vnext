@@ -674,16 +674,17 @@ func BenchmarkS6B06Boundaries(b *testing.B) {
 		b.ReportMetric(textBytes, "text_bytes/op")
 	})
 
-	b.Run("chain_512", func(b *testing.B) {
+	b.Run("wrapper_pruning_512", func(b *testing.B) {
 		const chainDepth = 512
 		capture := s6ChainCapture(chainDepth)
 		builder := NewBuilder()
 		measured := s6BuildSnapshot(b, builder, capture, "B06 chain")
 		read := ProjectCompactTree(measured.Tree)
 		chainDefinitions, chainRefs := s6ChainDefinitionMetrics(read.Root)
-		if chainDefinitions == 0 || chainRefs < chainDepth {
-			b.Fatalf("chain fixture did not pack depth %d: definitions=%d refs=%d",
-				chainDepth, chainDefinitions, chainRefs)
+		compactNodes := s6ReadNodeCount(read.Root)
+		if chainDefinitions != 0 || chainRefs != 0 || compactNodes >= chainDepth {
+			b.Fatalf("wrapper fixture did not prune depth %d: definitions=%d refs=%d nodes=%d",
+				chainDepth, chainDefinitions, chainRefs, compactNodes)
 		}
 
 		b.ReportAllocs()
@@ -696,6 +697,8 @@ func BenchmarkS6B06Boundaries(b *testing.B) {
 		s6ReportSnapshotMetrics(b, builder, nil, measured)
 		b.ReportMetric(float64(chainDefinitions), "chain_definitions/op")
 		b.ReportMetric(float64(chainRefs), "chain_refs/op")
+		b.ReportMetric(float64(compactNodes), "compact_nodes/op")
+		b.ReportMetric(float64(chainDepth), "wrapper_nodes_pruned/op")
 	})
 
 	b.Run("budget_cutoff", func(b *testing.B) {
@@ -756,7 +759,10 @@ func BenchmarkS6B06Boundaries(b *testing.B) {
 		}
 		baseCost := s6SnapshotCost(b, baseSnapshot)
 		currentCost := s6SnapshotCost(b, currentSnapshot)
-		chainDefinitions, chainRefs := s6ChainDefinitionMetrics(currentRead.Root)
+		chainDefinitions, _ := s6ChainDefinitionMetrics(currentRead.Root)
+		if chainDefinitions != 0 {
+			b.Fatalf("new compact output contains chain definitions")
+		}
 		unknownNodes := s6CountNodesWithFiveUnknownBooleans(currentSnapshot.Tree.Root)
 		_ = delta
 
@@ -778,7 +784,7 @@ func BenchmarkS6B06Boundaries(b *testing.B) {
 		b.ReportMetric(float64(len(fullJSON)), "read_full_bytes/op")
 		b.ReportMetric(float64(len(deltaJSON)), "read_delta_bytes/op")
 		b.ReportMetric(float64(chainDefinitions), "chain_definitions/op")
-		b.ReportMetric(float64(chainRefs), "chain_refs/op")
+		b.ReportMetric(float64(s6ReadNodeCount(currentRead.Root)), "compact_nodes/op")
 		b.ReportMetric(float64(unknownNodes*5), "unknown_booleans/op")
 		b.ReportMetric(4096, "text_bytes/op")
 		if len(fullJSON) > 0 {
@@ -819,6 +825,17 @@ func s6ChainDefinitionMetrics(node *protocol.ReadNode) (definitions, refs int) {
 		refs += childRefs
 	}
 	return definitions, refs
+}
+
+func s6ReadNodeCount(node *protocol.ReadNode) int {
+	if node == nil {
+		return 0
+	}
+	count := len(node.Refs())
+	for _, child := range node.Children {
+		count += s6ReadNodeCount(child)
+	}
+	return count
 }
 
 func s6PrepareEndToEnd(tb testing.TB, baseCapture, currentCapture *device.Capture) (

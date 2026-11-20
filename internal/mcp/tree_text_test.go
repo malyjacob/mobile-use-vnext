@@ -372,6 +372,60 @@ func TestTreeTextChainDefinition(t *testing.T) {
 	}
 }
 
+// TestTreeTextLegacyChainTailInDeltaAddAndReplace keeps the historical v3
+// input grammar readable after new compact output stops producing chains. The
+// indented child belongs to the last ref in each chain, including inside add
+// and replace definitions.
+func TestTreeTextLegacyChainTailInDeltaAddAndReplace(t *testing.T) {
+	addedButton := testNode("n23", protocol.RoleButton, testBounds(0, 0, 20, 20))
+	addedButton.Label = []string{"增加"}
+	addedButton.Actions = []protocol.Action{protocol.ActionTap}
+	addedChain := testNode("", protocol.RoleView, protocol.HiddenBounds())
+	addedChain.Chain = []string{"n21", "n22"}
+	addedChain.Children = []*protocol.ReadNode{addedButton}
+	addedRoot := testNode("n20", protocol.RoleView, protocol.HiddenBounds())
+	addedRoot.Children = []*protocol.ReadNode{addedChain}
+
+	replacedText := testNode("n33", protocol.RoleText, testBounds(0, 0, 40, 20))
+	replacedText.Label = []string{"替换"}
+	replacedChain := testNode("", protocol.RoleGroup, protocol.HiddenBounds())
+	replacedChain.Chain = []string{"n31", "n32"}
+	replacedChain.Children = []*protocol.ReadNode{replacedText}
+	replacedRoot := testNode("n30", protocol.RoleGroup, protocol.HiddenBounds())
+	replacedRoot.Children = []*protocol.ReadNode{replacedChain}
+
+	delta := &protocol.ReadDelta{
+		Format: "delta", Base: "O1", View: protocol.ViewCompact,
+		Add:     []*protocol.ReadNode{addedRoot},
+		Replace: map[string]*protocol.ReadNode{"n30": replacedRoot},
+	}
+	block := mustRenderTreeText(t, &protocol.Result{Observation: &protocol.Observation{
+		ID: "O2", Tree: &protocol.ReadTreeValue{Delta: delta},
+	}})
+	for _, wanted := range []string{
+		"+ n20\n  [n21 n22]\n    n23 button [0,0,20,20] \"增加\" tap\n",
+		"= n30 group\n  chain [n31 n32] group\n    n33 text [0,0,40,20] \"替换\"\n",
+	} {
+		if !strings.Contains(block, wanted) {
+			t.Fatalf("legacy chain delta lacks %q:\n%s", wanted, block)
+		}
+	}
+	parsed := parseDeltaText(t, block)
+	if got, want := mustJSON(t, parsed), mustJSON(t, delta); got != want {
+		t.Fatalf("legacy chain delta did not round-trip:\n got %s\nwant %s", got, want)
+	}
+	if len(parsed.Add) != 1 || len(parsed.Add[0].Children) != 1 ||
+		len(parsed.Add[0].Children[0].Chain) != 2 ||
+		len(parsed.Add[0].Children[0].Children) != 1 {
+		t.Fatalf("add chain tail children were not preserved: %#v", parsed.Add)
+	}
+	if replaced := parsed.Replace["n30"]; replaced == nil ||
+		len(replaced.Children) != 1 || len(replaced.Children[0].Chain) != 2 ||
+		len(replaced.Children[0].Children) != 1 {
+		t.Fatalf("replace chain tail children were not preserved: %#v", replaced)
+	}
+}
+
 func TestTreeTextV3OmitsViewRoles(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -2437,6 +2491,11 @@ func internalTestNode(ref string, role protocol.Role, rect *protocol.Bounds,
 func TestTreeTextReflectsCompactBoundsPolicy(t *testing.T) {
 	yes, no := true, false
 	buildTree := func(imageRight int) *protocol.Tree {
+		// Keep the image outside the T2a pruning predicate so this fixture
+		// isolates the compact geometry threshold.
+		thresholdImage := internalTestNode("n4", protocol.RoleImage,
+			&protocol.Bounds{Left: 0, Top: 500, Right: imageRight, Bottom: 700}, "缩略图")
+		thresholdImage.Enabled = &no
 		root := &protocol.Node{
 			Ref: "n1", Role: protocol.RoleRoot,
 			Bounds: &protocol.Bounds{Left: 0, Top: 0, Right: 1080, Bottom: 2400},
@@ -2448,8 +2507,7 @@ func TestTreeTextReflectsCompactBoundsPolicy(t *testing.T) {
 					"确定", protocol.ActionTap),
 				internalTestNode("n3", protocol.RoleText,
 					&protocol.Bounds{Left: 20, Top: 60, Right: 200, Bottom: 100}, "标题"),
-				internalTestNode("n4", protocol.RoleImage,
-					&protocol.Bounds{Left: 0, Top: 500, Right: imageRight, Bottom: 700}, ""),
+				thresholdImage,
 			},
 		}
 		return &protocol.Tree{Format: "full", Scope: protocol.Scope, Root: root}
@@ -2475,8 +2533,9 @@ func TestTreeTextReflectsCompactBoundsPolicy(t *testing.T) {
 	if line := find(" n3 "); line != `  n3 "标题"` {
 		t.Fatalf("actionless text must omit both role and geometry: %q", line)
 	}
-	if line := find(" n4 image "); !strings.Contains(line, "[0,500,300,700]") {
-		t.Fatalf("large display rectangle must be delivered: %q", line)
+	if line := find(" n4 image "); !strings.Contains(line, "[0,500,300,700]") ||
+		!strings.Contains(line, `"缩略图"`) || !strings.Contains(line, "enabled=false") {
+		t.Fatalf("retained threshold fixture must carry its public fields and rectangle: %q", line)
 	}
 
 	current := observation.ProjectCompactTree(buildTree(100))

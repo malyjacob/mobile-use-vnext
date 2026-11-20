@@ -7,11 +7,12 @@ import (
 	"github.com/malyjacob/mobile-use-vnext/internal/protocol"
 )
 
-// The compact geometry tests cover the fixed delivery policy: action
-// positions are kept, actionless text and anonymous plain nodes hide their
-// known rectangles, a rectangle identical to the nearest delivered ancestor is
-// hidden, and the remaining rectangles below one percent of the screen are
-// hidden. Detailed inspection always reveals the original rectangle.
+// The compact geometry tests cover the fixed delivery policy: action positions
+// are kept, actionless text and anonymous plain nodes hide their known
+// rectangles, a rectangle identical to the nearest delivered ancestor is
+// hidden, and remaining rectangles below one percent of the screen are hidden.
+// Tiny unlabeled images are omitted with their now-empty anonymous wrappers.
+// Detailed inspection always reveals the original rectangles.
 
 func rectT(left, top, right, bottom int) *protocol.Bounds {
 	return &protocol.Bounds{Left: left, Top: top, Right: right, Bottom: bottom}
@@ -64,7 +65,9 @@ func TestCompactGeometryProtectsActionPositions(t *testing.T) {
 	requireBoundsKind(t, tree.Root, "n6", protocol.GeometryHidden)
 	// Missing source geometry stays explicitly unknown.
 	requireBoundsKind(t, tree.Root, "n7", protocol.GeometryUnknown)
-	requireBoundsKind(t, tree.Root, "n8", protocol.GeometryHidden)
+	if node := childOf(t, tree.Root, "n8"); node != nil {
+		t.Fatalf("the tiny unlabeled image must be pruned: %+v", node)
+	}
 	requireBoundsKind(t, tree.Root, "n9", protocol.GeometryKnown)
 
 	detailed := ProjectDetailedTree(rootT(smallButton, smallView, checkbox, bigText,
@@ -93,18 +96,23 @@ func TestCompactGeometryAreaBoundary(t *testing.T) {
 	}
 	compact := ProjectCompactTree(root(1000, 1000))
 	requireBoundsKind(t, compact.Root, "n2", protocol.GeometryKnown)
-	requireBoundsKind(t, compact.Root, "n3", protocol.GeometryHidden)
+	if node := childOf(t, compact.Root, "n3"); node != nil {
+		t.Fatalf("below-threshold image must be pruned: %+v", node)
+	}
 	requireBoundsKind(t, compact.Root, "n4", protocol.GeometryKnown)
 	requireBoundsKind(t, compact.Root, "n5", protocol.GeometryKnown)
-	requireBoundsKind(t, compact.Root, "n6", protocol.GeometryHidden)
+	if node := childOf(t, compact.Root, "n6"); node != nil {
+		t.Fatalf("clipped below-threshold image must be pruned: %+v", node)
+	}
 	if node := childOf(t, compact.Root, "n5"); node.Bounds.Rect.Right != 1200 {
 		t.Fatalf("delivered bounds must stay the internal rectangle: %+v", node.Bounds)
 	}
 
 	// The same rectangles on a larger screen fall below the new threshold.
 	resized := ProjectCompactTree(root(2000, 2000))
-	requireBoundsKind(t, resized.Root, "n2", protocol.GeometryHidden)
-	requireBoundsKind(t, resized.Root, "n4", protocol.GeometryHidden)
+	if childOf(t, resized.Root, "n2") != nil || childOf(t, resized.Root, "n4") != nil {
+		t.Fatal("images that fall below the threshold on resize must be pruned")
+	}
 
 	// The duplicate rule compares the clipped rectangles: the child below the
 	// delivered parent has the same visible rectangle and hides it.
@@ -138,7 +146,7 @@ func TestCompactProjectionLeavesInternalTreeUnchanged(t *testing.T) {
 		t.Fatal("detailed projection mutated the internal tree")
 	}
 	// The detailed view restores the very rectangles the compact view hid.
-	for _, ref := range []string{"n2", "n3"} {
+	for _, ref := range []string{"n2"} {
 		hidden := childOf(t, compact.Root, ref)
 		revealed := childOf(t, detailed.Root, ref)
 		if hidden == nil || revealed == nil ||
@@ -147,6 +155,13 @@ func TestCompactProjectionLeavesInternalTreeUnchanged(t *testing.T) {
 			t.Fatalf("geometry state mismatch for %s: compact=%+v detailed=%+v",
 				ref, hidden, revealed)
 		}
+	}
+	if childOf(t, compact.Root, "n3") != nil {
+		t.Fatal("the tiny image must be absent from compact delivery")
+	}
+	if revealed := childOf(t, detailed.Root, "n3"); revealed == nil ||
+		revealed.Bounds.Kind != protocol.GeometryKnown {
+		t.Fatalf("detailed view must restore the pruned image: %+v", revealed)
 	}
 	if node := childOf(t, compact.Root, "n4"); node == nil ||
 		node.Bounds.Kind != protocol.GeometryKnown || node.Bounds.Rect.Left != 10 {
@@ -164,7 +179,8 @@ func TestCompactGeometryDuplicateRules(t *testing.T) {
 	card := nodeT("n4", protocol.RoleImage, rectT(10, 10, 390, 790))
 	card.Children = []*protocol.Node{nodeT("n5", protocol.RoleImage, rectT(10, 10, 390, 790))}
 	wrapper := nodeT("n3", protocol.RoleGroup, rectT(10, 10, 390, 790))
-	wrapper.Children = []*protocol.Node{card}
+	branch := nodeT("n12", protocol.RoleImage, rectT(50, 50, 150, 150), "branch")
+	wrapper.Children = []*protocol.Node{card, branch}
 
 	// An unknown-geometry layer passes the root rectangle down.
 	unknownWrapper := nodeT("n6", protocol.RoleImage, nil)
@@ -192,6 +208,7 @@ func TestCompactGeometryDuplicateRules(t *testing.T) {
 	requireBoundsKind(t, tree.Root, "n9", protocol.GeometryKnown)
 	requireBoundsKind(t, tree.Root, "n10", protocol.GeometryKnown)
 	requireBoundsKind(t, tree.Root, "n11", protocol.GeometryKnown)
+	requireBoundsKind(t, tree.Root, "n12", protocol.GeometryKnown)
 }
 
 func TestCompactGeometryUnknownScreenSkipsAreaRule(t *testing.T) {
@@ -221,18 +238,18 @@ func TestCompactGeometryDeltaTriStates(t *testing.T) {
 		nodeT("n2", protocol.RoleImage, rectT(10, 10, 110, 110)),
 		nodeT("n3", protocol.RoleImage, nil),
 		nodeT("n4", protocol.RoleText, rectT(0, 0, 100, 50), "同一文字"),
-		nodeT("n5", protocol.RoleImage, rectT(0, 0, 100, 100)),
-		nodeT("n6", protocol.RoleImage, rectT(0, 0, 50, 50)),
-		nodeT("n7", protocol.RoleImage, nil),
+		nodeT("n5", protocol.RoleCheckbox, rectT(0, 0, 100, 100)),
+		nodeT("n6", protocol.RoleCheckbox, rectT(0, 0, 50, 50)),
+		nodeT("n7", protocol.RoleCheckbox, nil),
 		nodeT("n8", protocol.RoleImage, rectT(0, 0, 1000, 1000)),
 	))
 	current := ProjectCompactTree(baseRoot(
 		nodeT("n2", protocol.RoleImage, nil),
 		nodeT("n3", protocol.RoleImage, rectT(120, 120, 220, 220)),
 		nodeT("n4", protocol.RoleText, rectT(0, 100, 100, 150), "同一文字"),
-		nodeT("n5", protocol.RoleImage, rectT(0, 0, 99, 100)),
-		nodeT("n6", protocol.RoleImage, nil),
-		nodeT("n7", protocol.RoleImage, rectT(0, 0, 50, 50)),
+		nodeT("n5", protocol.RoleCheckbox, rectT(0, 0, 99, 100)),
+		nodeT("n6", protocol.RoleCheckbox, nil),
+		nodeT("n7", protocol.RoleCheckbox, rectT(0, 0, 50, 50)),
 		nodeT("n8", protocol.RoleImage, rectT(200, 200, 300, 300)),
 	))
 
@@ -272,10 +289,10 @@ func TestCompactGeometryDeltaTriStates(t *testing.T) {
 	mustReadApplyEqual(t, base, delta, current)
 
 	// Detailed projection of the current frame restores the hidden text and
-	// image rectangles.
+	// threshold-hidden control rectangles.
 	detailed := ProjectDetailedTree(baseRoot(
 		nodeT("n4", protocol.RoleText, rectT(0, 100, 100, 150), "同一文字"),
-		nodeT("n5", protocol.RoleImage, rectT(0, 0, 99, 100)),
+		nodeT("n5", protocol.RoleCheckbox, rectT(0, 0, 99, 100)),
 	))
 	if node := childOf(t, detailed.Root, "n4"); node == nil ||
 		node.Bounds.Kind != protocol.GeometryKnown || node.Bounds.Rect.Top != 100 {
@@ -283,16 +300,16 @@ func TestCompactGeometryDeltaTriStates(t *testing.T) {
 	}
 	if node := childOf(t, detailed.Root, "n5"); node == nil ||
 		node.Bounds.Kind != protocol.GeometryKnown || node.Bounds.Rect.Right != 99 {
-		t.Fatalf("detailed view must restore the image rectangle: %+v", node)
+		t.Fatalf("detailed view must restore the control rectangle: %+v", node)
 	}
 }
 
-func TestCompactGeometryDoesNotChainHiddenTextOrImage(t *testing.T) {
+func TestCompactGeometryUsesOrdinaryDefinitionsAndWrapperPruning(t *testing.T) {
 	text := nodeT("n2", protocol.RoleText, rectT(0, 0, 100, 50), "文字")
 	text.Children = []*protocol.Node{plainT("n3", protocol.RoleView)}
 	image := nodeT("n4", protocol.RoleImage, rectT(0, 60, 20, 80))
 	image.Children = []*protocol.Node{plainT("n5", protocol.RoleView)}
-	// A legal anonymous single-child path still folds.
+	// The anonymous singleton path is bypassed, not folded.
 	leaf := plainT("n8", protocol.RoleView)
 	mid := plainT("n7", protocol.RoleView)
 	mid.Children = []*protocol.Node{leaf}
@@ -300,16 +317,16 @@ func TestCompactGeometryDoesNotChainHiddenTextOrImage(t *testing.T) {
 	head.Children = []*protocol.Node{mid}
 
 	compact := ProjectCompactTree(rootT(text, image, head))
-	if hasChain(compact.Root, []string{"n2", "n3"}) || hasChain(compact.Root, []string{"n4", "n5"}) {
-		t.Fatalf("hidden text or image nodes must stay independent: %+v", compact.Root)
-	}
-	if !hasChain(compact.Root, []string{"n6", "n7", "n8"}) {
-		t.Fatalf("the legal anonymous chain must still fold: %+v", compact.Root)
-	}
-	logical := UnpackTree(compact)
+	requireNoReadChains(t, compact.Root)
 	for _, ref := range []string{"n2", "n3", "n4", "n5"} {
-		if node := childOf(t, logical.Root, ref); node == nil {
-			t.Fatalf("logical node %s is missing after packing", ref)
+		if node := childOf(t, compact.Root, ref); node == nil {
+			t.Fatalf("retained logical node %s is missing", ref)
 		}
+	}
+	if childOf(t, compact.Root, "n6") != nil || childOf(t, compact.Root, "n7") != nil {
+		t.Fatal("singleton anonymous wrappers must be bypassed")
+	}
+	if childOf(t, compact.Root, "n8") == nil {
+		t.Fatal("the promoted leaf must remain in its original position")
 	}
 }

@@ -166,6 +166,130 @@ func continuationCapture(marker string, checked *bool, extraResources ...string)
 	}
 }
 
+// compactCycleCapture exercises the actual Builder, purification and compact
+// projection path. One stable image moves between two anonymous parents and
+// crosses the one-percent pruning boundary while the input value changes from
+// absent to an explicit empty string.
+func compactCycleCapture(largeImage, imageInSecondParent, explicitEmptyValue,
+	includeLateImage bool) captureStep {
+	return func(_ *fakeDevice, display device.Display) (device.Capture, error) {
+		screen := display.Bounds()
+		width, height := screen.Width(), screen.Height()
+		half := height / 2
+		firstParent := device.Rect{Left: 0, Top: 0, Right: width, Bottom: half}
+		secondParent := device.Rect{Left: 0, Top: half, Right: width, Bottom: height}
+
+		imageParent := 1
+		imageParentBounds := firstParent
+		if imageInSecondParent {
+			imageParent = 2
+			imageParentBounds = secondParent
+		}
+		imageSide := 40
+		if largeImage {
+			imageSide = 200
+		}
+		imageBounds := device.Rect{
+			Left:   100,
+			Top:    imageParentBounds.Top + 300,
+			Right:  100 + imageSide,
+			Bottom: imageParentBounds.Top + 300 + imageSide,
+		}
+		image := device.RawNode{
+			Index: 6, Parent: imageParent, Depth: 2, DisplayID: display.ID,
+			Visible: true, RawBounds: imageBounds, Bounds: imageBounds,
+			Package: "com.example", ClassName: "android.widget.ImageView",
+			ResourceSet: true, ResourceID: "compact_cycle_image",
+			HasEnabled: true, Enabled: true,
+			HasFocused: true, Focused: false,
+			HasSelected: true, Selected: false,
+			HasPassword: true, Password: false,
+			HasChecked: true, Checked: false,
+			HasClickable: true, Clickable: false,
+		}
+
+		firstChildren := []int{4}
+		secondChildren := []int{5}
+		if imageInSecondParent {
+			secondChildren = append(secondChildren, image.Index)
+		} else {
+			firstChildren = append(firstChildren, image.Index)
+		}
+		anonymousParent := func(index int, bounds device.Rect, children []int) device.RawNode {
+			return device.RawNode{
+				Index: index, Parent: 0, Children: children, Depth: 1, DisplayID: display.ID,
+				Visible: true, RawBounds: bounds, Bounds: bounds,
+				Package: "com.example", ClassName: "android.widget.FrameLayout",
+				HasEnabled: true, Enabled: true,
+				HasFocused: true, Focused: false,
+				HasSelected: true, Selected: false,
+				HasPassword: true, Password: false,
+				HasChecked: true, Checked: false,
+				HasClickable: true, Clickable: false,
+			}
+		}
+		anchor := func(index, parent int, bounds device.Rect, label string) device.RawNode {
+			return device.RawNode{
+				Index: index, Parent: parent, Depth: 2, DisplayID: display.ID,
+				Visible: true, RawBounds: bounds, Bounds: bounds,
+				Package: "com.example", ClassName: "android.widget.TextView",
+				Text: label, TextSet: true,
+				HasEnabled: true, Enabled: true,
+			}
+		}
+		input := device.RawNode{
+			Index: 3, Parent: 0, Depth: 1, DisplayID: display.ID, Visible: true,
+			RawBounds: device.Rect{Left: 100, Top: height - 220, Right: width - 100, Bottom: height - 120},
+			Bounds:    device.Rect{Left: 100, Top: height - 220, Right: width - 100, Bottom: height - 120},
+			Package:   "com.example", ClassName: "android.widget.EditText",
+			Text: "", TextSet: explicitEmptyValue,
+			ResourceSet: true, ResourceID: "compact_cycle_input",
+			HasClickable: true, Clickable: true, Editable: true,
+			HasEnabled: true, Enabled: true,
+		}
+
+		nodes := []device.RawNode{
+			{
+				Index: 0, Parent: -1, Children: []int{1, 2, 3}, Depth: 0,
+				DisplayID: display.ID, Visible: true, RawBounds: screen, Bounds: screen,
+				Package: "com.example", ClassName: "android.widget.FrameLayout",
+				HasEnabled: true, Enabled: true,
+			},
+			anonymousParent(1, firstParent, firstChildren),
+			anonymousParent(2, secondParent, secondChildren),
+			input,
+			anchor(4, 1, device.Rect{
+				Left: 20, Top: 20, Right: width - 20, Bottom: 100,
+			}, "cycle-first"),
+			anchor(5, 2, device.Rect{
+				Left: 20, Top: half + 20, Right: width - 20, Bottom: half + 100,
+			}, "cycle-second"),
+			image,
+		}
+		if includeLateImage {
+			lateBounds := device.Rect{Left: 350, Top: 300, Right: 550, Bottom: 500}
+			lateImage := image
+			lateImage.Index = 7
+			lateImage.Parent = 1
+			lateImage.RawBounds = lateBounds
+			lateImage.Bounds = lateBounds
+			lateImage.ResourceID = "compact_late_image"
+			nodes = append(nodes, lateImage)
+			nodes[1].Children = append(nodes[1].Children, lateImage.Index)
+		}
+
+		return device.Capture{
+			Display: display,
+			Root:    0,
+			Nodes:   nodes,
+			Foreground: device.Foreground{
+				State: device.ForegroundPresent, Package: "com.example", TaskID: intPtr(42),
+			},
+			CapturedAt: time.Now(),
+		}, nil
+	}
+}
+
 func boolAddress(value bool) *bool {
 	return &value
 }
@@ -204,9 +328,10 @@ func sameOptionalString(left, right *string) bool {
 	return *left == *right
 }
 
-// assertReadContentConsistent compares the logical content emitted by compact
-// and detailed views. Geometry is intentionally excluded: compact may mark an
-// anonymous node's known rectangle hidden while detailed reveals it.
+// assertReadContentConsistent checks that every node delivered by compact also
+// exists in detailed with the same public content. Compact may omit a pruned
+// subtree and may hide a retained node's known rectangle, so this is a
+// projection-subset check rather than a pairwise tree comparison.
 func assertReadContentConsistent(t *testing.T, compact, detailed *protocol.ReadTree) {
 	t.Helper()
 	compact = observation.UnpackTree(compact)
@@ -214,36 +339,76 @@ func assertReadContentConsistent(t *testing.T, compact, detailed *protocol.ReadT
 	if compact == nil || detailed == nil {
 		t.Fatalf("missing compact/detailed tree: %+v %+v", compact, detailed)
 	}
-	var walk func(*protocol.ReadNode, *protocol.ReadNode)
-	walk = func(left, right *protocol.ReadNode) {
-		t.Helper()
-		if left == nil || right == nil {
-			if left != right {
-				t.Fatalf("compact/detailed nil mismatch: %+v %+v", left, right)
-			}
+	detailedByRef := make(map[string]*protocol.ReadNode)
+	var indexDetailed func(*protocol.ReadNode)
+	indexDetailed = func(node *protocol.ReadNode) {
+		if node == nil {
 			return
 		}
-		if left.Ref != right.Ref || left.Role != right.Role || left.Context != right.Context ||
-			left.Axis != right.Axis ||
-			!slices.Equal(left.Label, right.Label) ||
-			!slices.Equal(left.Actions, right.Actions) ||
-			!sameOptionalBool(left.Enabled, right.Enabled) ||
-			!sameOptionalBool(left.Focused, right.Focused) ||
-			!sameOptionalBool(left.Selected, right.Selected) ||
-			!sameOptionalBool(left.Protected, right.Protected) ||
-			!sameOptionalBool(left.Checked, right.Checked) ||
-			!sameOptionalString(left.Value, right.Value) ||
-			!sameOptionalString(left.Hint, right.Hint) ||
-			!sameOptionalString(left.Resource, right.Resource) ||
-			len(left.Children) != len(right.Children) {
-			t.Fatalf("compact/detailed content mismatch at %q:\ncompact=%+v\ndetailed=%+v",
-				left.Ref, left, right)
+		if node.Ref == "" {
+			t.Fatalf("detailed tree contains a chain instead of an ordinary node: %+v", node)
 		}
-		for index := range left.Children {
-			walk(left.Children[index], right.Children[index])
+		if detailedByRef[node.Ref] != nil {
+			t.Fatalf("detailed tree repeats ref %q", node.Ref)
+		}
+		detailedByRef[node.Ref] = node
+		for _, child := range node.Children {
+			indexDetailed(child)
 		}
 	}
-	walk(compact.Root, detailed.Root)
+	indexDetailed(detailed.Root)
+
+	var walkCompact func(*protocol.ReadNode)
+	walkCompact = func(node *protocol.ReadNode) {
+		t.Helper()
+		if node == nil {
+			return
+		}
+		if node.Ref == "" {
+			t.Fatalf("compact tree contains a chain instead of an ordinary node: %+v", node)
+		}
+		expected := detailedByRef[node.Ref]
+		if expected == nil {
+			t.Fatalf("compact ref %q is absent from detailed tree", node.Ref)
+		}
+		if node.Role != expected.Role || node.Context != expected.Context ||
+			node.Axis != expected.Axis ||
+			!slices.Equal(node.Label, expected.Label) ||
+			!slices.Equal(node.Actions, expected.Actions) ||
+			!sameOptionalBool(node.Enabled, expected.Enabled) ||
+			!sameOptionalBool(node.Focused, expected.Focused) ||
+			!sameOptionalBool(node.Selected, expected.Selected) ||
+			!sameOptionalBool(node.Protected, expected.Protected) ||
+			!sameOptionalBool(node.Checked, expected.Checked) ||
+			!sameOptionalString(node.Value, expected.Value) ||
+			!sameOptionalString(node.Hint, expected.Hint) ||
+			!sameOptionalString(node.Resource, expected.Resource) {
+			t.Fatalf("compact/detailed content mismatch at %q:\ncompact=%+v\ndetailed=%+v",
+				node.Ref, node, expected)
+		}
+		switch node.Bounds.Kind {
+		case protocol.GeometryKnown:
+			if expected.Bounds.Kind != protocol.GeometryKnown ||
+				node.Bounds.Rect != expected.Bounds.Rect {
+				t.Fatalf("known compact geometry differs at %q: compact=%+v detailed=%+v",
+					node.Ref, node.Bounds, expected.Bounds)
+			}
+		case protocol.GeometryUnknown:
+			if expected.Bounds.Kind != protocol.GeometryUnknown {
+				t.Fatalf("unknown compact geometry differs at %q: compact=%+v detailed=%+v",
+					node.Ref, node.Bounds, expected.Bounds)
+			}
+		case protocol.GeometryHidden:
+			if expected.Bounds.Kind != protocol.GeometryKnown {
+				t.Fatalf("hidden compact geometry has no known detailed source at %q: %+v",
+					node.Ref, expected.Bounds)
+			}
+		}
+		for _, child := range node.Children {
+			walkCompact(child)
+		}
+	}
+	walkCompact(compact.Root)
 }
 
 func assertSourceMapping(t *testing.T, state *observationState) {
@@ -407,6 +572,52 @@ func sourceRefForResource(projection *Projection, resource string) (string, bool
 		}
 	}
 	return "", false
+}
+
+func readParentOf(root, child *protocol.ReadNode) *protocol.ReadNode {
+	if root == nil || child == nil {
+		return nil
+	}
+	for _, candidate := range root.Children {
+		if candidate == child {
+			return root
+		}
+		if parent := readParentOf(candidate, child); parent != nil {
+			return parent
+		}
+	}
+	return nil
+}
+
+func requireOrdinaryReadDefinitions(t *testing.T, root *protocol.ReadNode) {
+	t.Helper()
+	var walk func(*protocol.ReadNode)
+	walk = func(node *protocol.ReadNode) {
+		t.Helper()
+		if node == nil {
+			t.Fatalf("read definition contains a nil node")
+		}
+		if node.Ref == "" || node.IsChain() {
+			t.Fatalf("new compact output contains a non-ordinary definition: %+v", node)
+		}
+		for _, child := range node.Children {
+			walk(child)
+		}
+	}
+	walk(root)
+}
+
+func requireOrdinaryReadDelta(t *testing.T, delta *protocol.ReadDelta) {
+	t.Helper()
+	for _, node := range delta.Add {
+		requireOrdinaryReadDefinitions(t, node)
+	}
+	for ref, node := range delta.Replace {
+		if node == nil || node.Ref != ref {
+			t.Fatalf("replace %q is not rooted at its ordinary ref: %+v", ref, node)
+		}
+		requireOrdinaryReadDefinitions(t, node)
+	}
 }
 
 func refByResource(t *testing.T, state *observationState, resource string) string {
@@ -864,6 +1075,261 @@ func TestI02FixedBaselineDeltaChain(t *testing.T) {
 	assertDeliveredDelta(t, afterFullResult,
 		observationStateByID(t, h.engine, afterFullObservation.ID),
 		fullState.Compact, fullObservation.ID)
+}
+
+// TestI04ActualProjectionPruningDeltaTopology uses Engine with the real
+// observation.Builder rather than synthetic read trees. It proves that one
+// image ref survives pruning, reappearance and reparenting while every later
+// delta remains relative to the acknowledged initial full.
+func TestI04ActualProjectionPruningDeltaTopology(t *testing.T) {
+	h := continuationHarness(t)
+	h.device.scriptCaptures(compactCycleCapture(true, false, false, false))
+	start := h.startSession()
+	startObservation := publishedObservation(t, start, "start")
+	startState := observationStateByID(t, h.engine, startObservation.ID)
+	base := startState.Compact
+	if base == nil || base.Root == nil || base.View != protocol.ViewCompact {
+		t.Fatalf("start did not publish a compact full: %+v", base)
+	}
+	requireOrdinaryReadDefinitions(t, base.Root)
+	imageRef, ok := sourceRefForResource(startState.Projection, "compact_cycle_image")
+	if !ok {
+		t.Fatal("start projection has no image ref")
+	}
+	initialImage := readNodeByRef(base.Root, imageRef)
+	if initialImage == nil || initialImage.Bounds.Kind != protocol.GeometryKnown {
+		t.Fatalf("initial full did not contain the enlarged image %q: %+v", imageRef, initialImage)
+	}
+
+	ackResult, apiErr := h.engine.Observe(context.Background(), "agent", "Pi04ack",
+		&protocol.ObserveRequest{Reference: startObservation.ID})
+	if apiErr != nil {
+		t.Fatalf("acknowledge initial full: %v", apiErr)
+	}
+	current := publishedObservation(t, ackResult, "baseline acknowledgement")
+	ackState := observationStateByID(t, h.engine, current.ID)
+	if ackResult.Observation.Tree.Delta == nil ||
+		ackResult.Observation.Tree.Delta.Base != startObservation.ID ||
+		!ackResult.Observation.Tree.Delta.IsEmpty() {
+		t.Fatalf("acknowledgement did not return the empty delta: %+v", ackResult.Observation.Tree)
+	}
+	assertDeliveredDelta(t, ackResult, ackState, base, startObservation.ID)
+
+	type frameExpectation struct {
+		name               string
+		capture            captureStep
+		imagePresent       bool
+		imageParent        string
+		wantLateImageAdded bool
+		wantRemoved        bool
+		inputEmpty         bool
+	}
+	frames := []frameExpectation{
+		{
+			name:        "pruned_in_first_parent",
+			capture:     compactCycleCapture(false, false, true, false),
+			wantRemoved: true,
+			inputEmpty:  true,
+		},
+		{
+			name:         "reappeared_and_moved_to_second_parent",
+			capture:      compactCycleCapture(true, true, true, false),
+			imagePresent: true, imageParent: "cycle-second",
+			inputEmpty: true,
+		},
+		{
+			name:               "replaced_cycle_with_new_image",
+			capture:            compactCycleCapture(false, true, true, true),
+			wantRemoved:        true,
+			wantLateImageAdded: true,
+			inputEmpty:         true,
+		},
+	}
+	baseBytes, err := protocol.JSON(base)
+	if err != nil {
+		t.Fatalf("encode initial full: %v", err)
+	}
+	for _, frame := range frames {
+		h.device.scriptCaptures(frame.capture)
+		result, apiErr := h.engine.Observe(context.Background(), "agent",
+			"Pi04"+strings.ReplaceAll(frame.name, "_", ""),
+			&protocol.ObserveRequest{Reference: current.ID})
+		if apiErr != nil {
+			t.Fatalf("%s: %v", frame.name, apiErr)
+		}
+		current = publishedObservation(t, result, frame.name)
+		if current.Tree.Delta == nil || current.Tree.Delta.Base != startObservation.ID {
+			t.Fatalf("%s returned a non-fixed-base delta: %+v", frame.name, current.Tree)
+		}
+		state := observationStateByID(t, h.engine, current.ID)
+		if !observation.ReadEqual(state.Compact, observation.UnpackTree(state.Compact)) {
+			t.Fatalf("%s committed a read tree containing legacy chains", frame.name)
+		}
+		requireOrdinaryReadDefinitions(t, state.Compact.Root)
+
+		gotImageRef, mapped := sourceRefForResource(state.Projection, "compact_cycle_image")
+		if !mapped || gotImageRef != imageRef {
+			t.Fatalf("%s image ref=%q/%t, want stable %q", frame.name, gotImageRef, mapped, imageRef)
+		}
+		image := readNodeByRef(state.Compact.Root, imageRef)
+		if frame.imagePresent {
+			if image == nil {
+				t.Fatalf("%s did not publish the enlarged image %q", frame.name, imageRef)
+			}
+			parent := readParentOf(state.Compact.Root, image)
+			if parent == nil || !tapNodeHasLabel(parent, frame.imageParent) {
+				t.Fatalf("%s image parent=%+v, want anchor %q",
+					frame.name, parent, frame.imageParent)
+			}
+			if image.Bounds.Kind != protocol.GeometryKnown ||
+				image.Label == nil || len(image.Label) != 0 ||
+				image.Actions == nil || len(image.Actions) != 0 ||
+				image.Value != nil || image.Hint != nil || image.Resource != nil {
+				t.Fatalf("%s compact image fields changed: %+v", frame.name, image)
+			}
+		} else if image != nil {
+			t.Fatalf("%s kept pruned image %q: %+v", frame.name, imageRef, image)
+		}
+
+		delta := stateDeltaFromObserve(t, result, state, base)
+		requireOrdinaryReadDelta(t, delta)
+		if frame.wantLateImageAdded && len(delta.Add) == 0 {
+			t.Fatalf("%s did not exercise an ordinary add definition: %+v", frame.name, delta)
+		}
+		if frame.wantRemoved {
+			if len(delta.Remove) == 0 && len(delta.Replace) == 0 {
+				t.Fatalf("%s pruning emitted no structural removal: %+v", frame.name, delta)
+			}
+		}
+		if frame.wantLateImageAdded {
+			lateImageRef, mapped := sourceRefForResource(state.Projection, "compact_late_image")
+			if !mapped {
+				t.Fatalf("%s has no mapped late image ref", frame.name)
+			}
+			lateDefinition := readNodeInDefinitions(delta.Add, lateImageRef)
+			if lateDefinition == nil || lateDefinition.Bounds.Kind != protocol.GeometryKnown {
+				t.Fatalf("%s add definitions lack late image %q: %+v",
+					frame.name, lateImageRef, delta.Add)
+			}
+			if readNodeByRef(state.Compact.Root, lateImageRef) == nil {
+				t.Fatalf("%s current full omitted the late image %q", frame.name, lateImageRef)
+			}
+		}
+
+		encodedDelta, err := protocol.JSON(delta)
+		if err != nil {
+			t.Fatalf("%s encode delta: %v", frame.name, err)
+		}
+		var strictDelta protocol.ReadDelta
+		if err := protocol.Decode(encodedDelta, &strictDelta); err != nil {
+			t.Fatalf("%s strict decode delta: %v", frame.name, err)
+		}
+		applied, err := observation.ReadApply(base, &strictDelta)
+		if err != nil {
+			t.Fatalf("%s apply strictly decoded delta: %v", frame.name, err)
+		}
+		currentBytes, err := protocol.JSON(state.Compact)
+		if err != nil {
+			t.Fatalf("%s encode current full: %v", frame.name, err)
+		}
+		var strictCurrent protocol.ReadTree
+		if err := protocol.Decode(currentBytes, &strictCurrent); err != nil {
+			t.Fatalf("%s strict decode current full: %v", frame.name, err)
+		}
+		if !observation.ReadEqual(applied, &strictCurrent) {
+			t.Fatalf("%s applied delta differs logically from the current full", frame.name)
+		}
+		appliedBytes, err := protocol.JSON(applied)
+		if err != nil {
+			t.Fatalf("%s encode applied delta: %v", frame.name, err)
+		}
+		if !bytes.Equal(appliedBytes, currentBytes) {
+			t.Fatalf("%s applied delta canonical bytes differ from the current full", frame.name)
+		}
+
+		inputRef, mapped := sourceRefForResource(state.Projection, "compact_cycle_input")
+		if !mapped {
+			t.Fatalf("%s has no mapped input ref", frame.name)
+		}
+		if frame.inputEmpty {
+			set, exists := delta.Set[inputRef]
+			if !exists || !set.Value.Set || set.Value.Value == nil || *set.Value.Value != "" {
+				t.Fatalf("%s delta did not explicitly preserve an empty input value: %+v",
+					frame.name, delta.Set)
+			}
+		}
+		appliedInput := readNodeByRef(applied.Root, inputRef)
+		if frame.inputEmpty {
+			if appliedInput == nil || appliedInput.Value == nil || *appliedInput.Value != "" {
+				t.Fatalf("%s explicit empty input value was not preserved: %+v", frame.name, appliedInput)
+			}
+			if appliedInput.Hint != nil || appliedInput.Label == nil ||
+				appliedInput.Actions == nil {
+				t.Fatalf("%s default empty fields were not preserved: %+v", frame.name, appliedInput)
+			}
+		}
+
+		h.engine.mu.Lock()
+		baselineID := ""
+		if h.engine.baseline != nil {
+			baselineID = h.engine.baseline.ObservationID
+		}
+		h.engine.mu.Unlock()
+		if baselineID != startObservation.ID {
+			t.Fatalf("%s switched baseline to %q", frame.name, baselineID)
+		}
+	}
+	afterBaseBytes, err := protocol.JSON(base)
+	if err != nil {
+		t.Fatalf("re-encode initial full: %v", err)
+	}
+	if !bytes.Equal(baseBytes, afterBaseBytes) {
+		t.Fatal("delta replay mutated the confirmed initial full")
+	}
+}
+
+func tapNodeHasLabel(node *protocol.ReadNode, want string) bool {
+	if node == nil {
+		return false
+	}
+	for _, label := range node.Label {
+		if label == want {
+			return true
+		}
+	}
+	for _, child := range node.Children {
+		if tapNodeHasLabel(child, want) {
+			return true
+		}
+	}
+	return false
+}
+
+func readNodeInDefinitions(nodes []*protocol.ReadNode, ref string) *protocol.ReadNode {
+	for _, node := range nodes {
+		if found := readNodeByRef(node, ref); found != nil {
+			return found
+		}
+	}
+	return nil
+}
+
+func stateDeltaFromObserve(t *testing.T, result *protocol.Result,
+	state *observationState, base *protocol.ReadTree) *protocol.ReadDelta {
+	t.Helper()
+	if result == nil || result.Observation == nil || result.Observation.Tree == nil ||
+		result.Observation.Tree.Delta == nil || result.Observation.Tree.Full != nil {
+		t.Fatalf("observe did not return a delta: %+v", result)
+	}
+	delta := result.Observation.Tree.Delta
+	unpacked, err := observation.ReadApply(base, delta)
+	if err != nil {
+		t.Fatalf("apply delivered delta: %v", err)
+	}
+	if !observation.ReadEqual(unpacked, state.Compact) {
+		t.Fatalf("delivered delta does not reconstruct observation %q", state.ID)
+	}
+	return delta
 }
 
 type observationGateProjector struct {
