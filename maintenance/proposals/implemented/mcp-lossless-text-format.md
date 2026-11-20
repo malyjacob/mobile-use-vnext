@@ -1,6 +1,7 @@
 # 提案：升级 MCP 无损结果与树文本
 
-状态：提案，未实现。
+状态：已实现（实现提交 `fb51419bdf28eacc886d3c809879e8db3ea15fe7`，2026-11-21）。
+实现包括 `40551f5` 与 `fb51419`，构建与实机结果见[验证记录](../../verification/mcp-lossless-text-format.md)。
 基线提交：`79e06582f6b542516ae8e9bdb478de499f18dcc8`（分支 `master`，2026-11-21）。
 适用范围：MCP `text` / `both` 的完整结果文本及其中的普通观察树，覆盖 stdio 与 Streamable HTTP。
 影响范围：`internal/mcp`、发现说明与工具描述、`scripts/mcp-probe`、等价性验证、正式文档与 README、发行制品。
@@ -18,18 +19,18 @@
 
 分诊为格式取舍。0.23.0 的实机轨迹中，220 份 mobile-use 返回有 560,170 个 UTF-8 字节和 186,456 个 `o200k_base` 代理 token。161 棵普通树消耗 142,511 个代理 token，其中 114 棵整树消耗 128,652。矩形占整树代理 token 的 30.7%。旧文本在每行观察字段重复前缀，并在普通树头重复当前 O。
 
-0.23.0 已在普通树中省略符合条件的小型无标注图片和单子匿名容器。新数据使用裁剪后的节点集合，本文数字衡量在其上的文本简化。原始轨迹、清洗索引和复算脚本保留在本地 `.state/dsh-session-a0d6ab77/research/`。[实机轨迹来源](../verification/mcp-tool-surface-coverage-0.23.0.md) · [0.23.0 裁剪归档](implemented/compact-observation-pruning.md)
+0.23.0 已在普通树中省略符合条件的小型无标注图片和单子匿名容器。新数据使用裁剪后的节点集合，本文数字衡量在其上的文本简化。原始轨迹、清洗索引和复算脚本保留在本地 `.state/dsh-session-a0d6ab77/research/`。[实机轨迹来源](../../verification/mcp-tool-surface-coverage-0.23.0.md) · [0.23.0 裁剪归档](compact-observation-pruning.md)
 
 ### 1.2 证据链
 
 | 现行行为 | 依据 |
 | --- | --- |
-| `text` 和 `both` 共用完整文本投影。观察对象同时携带 O 和树 | [result_projection.go](../../internal/mcp/result_projection.go#L9) · [responses.go](../../internal/protocol/responses.go#L329) |
-| 外层按成员顺序写 `key=value`，未知或不可表示的成员使用 JSON Pointer 兜底 | [result_text.go](../../internal/mcp/result_text.go#L156) · [类型化往返保护](../../internal/mcp/result_text.go#L226) |
-| 两种普通树头重复当前 O。普通树与详细补看共用节点输出，差分 set 单独写值 | [普通树头](../../internal/mcp/tree_text.go#L86) · [set 值](../../internal/mcp/tree_text.go#L217) · [节点定义](../../internal/mcp/tree_text.go#L485) |
-| 动作来源按 `tap`、`long_press`、`text`、`swipe` 顺序产生，真实 O 是带服务实例前缀的递增编号 | [源动作](../../internal/observation/build.go#L474) · [O 生成](../../internal/engine/engine.go#L982) |
-| 引擎在文本投影前选择 full/delta 并确认基线 | [发布与 JSON 门槛](../../internal/engine/capture.go#L237) · [基线确认](../../internal/engine/capture.go#L775) |
-| 完整图例由发现说明共享，现有探针检查可读块的头和形状，完整测试解码器能检查正文 | [共享说明](../../internal/mcp/schema.go#L27) · [工具说明来源](../../internal/mcp/catalog.go#L22) · [探针比较](../../scripts/mcp-probe/result.go#L317) · [完整测试解码器](../../internal/mcp/tree_text_test.go#L1648) |
+| `text` 和 `both` 共用完整文本投影。观察对象同时携带 O 和树 | [result_projection.go](../../../internal/mcp/result_projection.go#L9) · [responses.go](../../../internal/protocol/responses.go#L329) |
+| 外层按成员顺序写 `key=value`，未知或不可表示的成员使用 JSON Pointer 兜底 | [result_text.go](../../../internal/mcp/result_text.go#L156) · [类型化往返保护](../../../internal/mcp/result_text.go#L226) |
+| 两种普通树头重复当前 O。普通树与详细补看共用节点输出，差分 set 单独写值 | [普通树头](../../../internal/mcp/tree_text.go#L86) · [set 值](../../../internal/mcp/tree_text.go#L217) · [节点定义](../../../internal/mcp/tree_text.go#L485) |
+| 动作来源按 `tap`、`long_press`、`text`、`swipe` 顺序产生，真实 O 是带服务实例前缀的递增编号 | [源动作](../../../internal/observation/build.go#L474) · [O 生成](../../../internal/engine/engine.go#L982) |
+| 引擎在文本投影前选择 full/delta 并确认基线 | [发布与 JSON 门槛](../../../internal/engine/capture.go#L237) · [基线确认](../../../internal/engine/capture.go#L775) |
+| 完整图例由发现说明共享，现有探针检查可读块的头和形状，完整测试解码器能检查正文 | [共享说明](../../../internal/mcp/schema.go#L27) · [工具说明来源](../../../internal/mcp/catalog.go#L22) · [探针比较](../../../scripts/mcp-probe/result.go#L317) · [完整测试解码器](../../../internal/mcp/tree_text_test.go#L1648) |
 
 ### 1.3 节省字节与节省 token 的差异
 
@@ -173,7 +174,7 @@ end result
 
 ### 6.2 配置与取值
 
-拟发行 `0.24.0`、共同契约 `21`、Android versionCode `26`。从同一版本源生成各制品常量，将 `source_commit` 写为实施时确认的冻结基线，当前预期为提案头部提交。清单的实际源码提交取干净实现头。一个新发行使用 v3/v4，输出模式继续沿用 `text`、`both`、`structured`。[版本源](../../release/versions.json)
+拟发行 `0.24.0`、共同契约 `21`、Android versionCode `26`。从同一版本源生成各制品常量，将 `source_commit` 写为实施时确认的冻结基线，当前预期为提案头部提交。清单的实际源码提交取干净实现头。一个新发行使用 v3/v4，输出模式继续沿用 `text`、`both`、`structured`。[版本源](../../../release/versions.json)
 
 ### 6.3 日志与可观测性
 
@@ -190,15 +191,15 @@ end result
 
 ### 6.5 契约与文档影响
 
-本次更改两个独立的 MCP 文本契约。完整文本从 `result v2` 升到 v3，普通树从 `tree v3` 升到 v4。两层按块头分派，现行探针在新产物上以新格式为验收预期。原有 `structured` 可供只接受 JSON 的消费者选择。MCP 入参 schema、`/api/*` 和 `structuredContent` 的共享事实集沿用共同契约 21。工具描述变更纳入工具目录指纹重新生成和核验。[D33](../decisions.md#d33-mcp-结果模式共享无损事实集) · [版本策略](../../docs/release.md#2-单一版本源)
+本次更改两个独立的 MCP 文本契约。完整文本从 `result v2` 升到 v3，普通树从 `tree v3` 升到 v4。两层按块头分派，现行探针在新产物上以新格式为验收预期。原有 `structured` 可供只接受 JSON 的消费者选择。MCP 入参 schema、`/api/*` 和 `structuredContent` 的共享事实集沿用共同契约 21。工具描述变更纳入工具目录指纹重新生成和核验。[D33](../../decisions.md#d33-mcp-结果模式共享无损事实集) · [版本策略](../../../docs/release.md#2-单一版本源)
 
 | 文件 | 实施时同步的正式内容 |
 | --- | --- |
-| [docs/mcp.md](../../docs/mcp.md) | 结果模式、v3 分组及绝对路径兜底、截断识别。替换普通树图例，说明六项树规则、工具说明和错误结果附树。保留详细补看 v3、诊断 v1 和图片语义。 |
-| [docs/integration.md](../../docs/integration.md) | 更新文本模式表、版头和迁移说明。区分文本分组中的短字段与 JSON 里的 `observation.id`，说明完整 O 的回传和短 base 的使用。 |
-| [docs/runbook.md](../../docs/runbook.md) | 更新运维示例、模式识别和截断判定中的完整结果版头。 |
-| [docs/architecture.md](../../docs/architecture.md) 和 [README.md](../../README.md) | 同步两层文本版本、详细补看版号、解释框架及当前发行号。 |
-| [docs/release.md](../../docs/release.md)、[docs/control-protocol.md](../../docs/control-protocol.md) | 更新发行、Android 版本和清单示例。说明文本版号与共同契约的边界，并核对生成值与清单。 |
+| [docs/mcp.md](../../../docs/mcp.md) | 结果模式、v3 分组及绝对路径兜底、截断识别。替换普通树图例，说明六项树规则、工具说明和错误结果附树。保留详细补看 v3、诊断 v1 和图片语义。 |
+| [docs/integration.md](../../../docs/integration.md) | 更新文本模式表、版头和迁移说明。区分文本分组中的短字段与 JSON 里的 `observation.id`，说明完整 O 的回传和短 base 的使用。 |
+| [docs/runbook.md](../../../docs/runbook.md) | 更新运维示例、模式识别和截断判定中的完整结果版头。 |
+| [docs/architecture.md](../../../docs/architecture.md) 和 [README.md](../../../README.md) | 同步两层文本版本、详细补看版号、解释框架及当前发行号。 |
+| [docs/release.md](../../../docs/release.md)、[docs/control-protocol.md](../../../docs/control-protocol.md) | 更新发行、Android 版本和清单示例。说明文本版号与共同契约的边界，并核对生成值与清单。 |
 
 实施期同步上述 `docs/` 文件，最终提交前按仓库正式文档审计门禁处理。
 
@@ -244,7 +245,7 @@ end result
 4. 在两个入口分别用 `both` 跑最小受控页闭环。取得一个整树与非空差分，执行一次节点引用动作，补看详情并正常结束。夹具至少命中默认动作和同矩形，取得一对同前缀的 O/base 并验证简写。完整解码私有捕获的文本，对比结构化字段。按同一个完整 base 应用两侧差分，重建后的树逐字段相等。确认完整 O 可以正常用于后续调用。
 5. 分别记录手机覆盖、主机磁盘替换、独立进程验证和依赖方切换。依赖 Agent 的托管进程重启、重连与工具重新发现由用户处理。
 
-部署和探针沿用现有构建/核验脚本，私有配置使用当时环境。[0.23.0 实机与独立探针记录](../verification/compact-observation-pruning.md#5-独立-mcp-探针)
+部署和探针沿用现有构建/核验脚本，私有配置使用当时环境。[0.23.0 实机与独立探针记录](../../verification/compact-observation-pruning.md#5-独立-mcp-探针)
 
 ### 8.3 记录
 
@@ -273,11 +274,24 @@ end result
 3. 从同一实现提交构建并核验两组发布制品。覆盖部署手机整组，替换并核验 Windows 两个文件，用新探针和完整解码完成两个入口的实机闭环。
 4. 落盘验证记录。归档提案并补 §11，重写相对链接，再单独提交归档。
 
-## 11. 实现结果（归档时补写）
+## 11. 实现结果
 
 ### 11.1 已落地
 
+| 提案条目 | 实现落点 |
+| --- | --- |
+| result v3、观察分组、完整 O、绝对 JSON Pointer 兜底 | [result_text.go](../../../internal/mcp/result_text.go) 的 `encodeResultText`、`resultTextWriter.field`、`readableResultBlock`。 |
+| 普通 tree v4 的 rect、@、默认动作、短 base 与一格缩进 | [tree_text.go](../../../internal/mcp/tree_text.go) 的 `renderFullTreeText`、`renderDeltaTreeText`、`v4ShortDeltaBase`、`writeSubtreeStyle`、`writeV4OrdinaryActions`。详细补看和差分 set 保持各自格式。 |
+| 共享图例、局部工具提示与目录核验 | [schema.go](../../../internal/mcp/schema.go) 的 `treeTextGuide` 和各工具注册说明。共享图例的 full、delta、inspect 示例经过完整解码，示例 delta 可独立应用到 full。 |
+| 两通道逐字段对照、语法探针与日志 | [result_text_test.go](../../../internal/mcp/result_text_test.go) 的 `decodeResultText` 与 [tree_text_test.go](../../../internal/mcp/tree_text_test.go) 的 v4 测试解码。独立探针的 [result_text.go](../../../scripts/mcp-probe/result_text.go) 与 [checks.go](../../../scripts/mcp-probe/checks.go) 验证格式及树头。 |
+| 正式文档、构建与实机交付 | `40551f5` 落地契约、发现说明、实现、测试和版本源，`fb51419` 修正探针普通树成功行的版本标记。两组制品均从后一份干净实现提交构建，手机覆盖与独立双入口实机闭环完成。 |
+
 ### 11.2 与提案不同或未执行
+
+| 条目 | 结果与理由 |
+| --- | --- |
+| 提案选定的 R4 与公开判据 | 全部交付。最终实现复算的 220 份结果、161 棵树和 47 个已确认基线均通过，字节和代理 token 节省与提案一致。 |
+| 依赖 Agent 的托管进程切换 | 未执行。按提案由用户负责宿主重启和工具重新发现。交付证据覆盖 Windows 磁盘替换、独立 stdio 子进程与手机运行中的 HTTP MCP。 |
 
 ## 附：本提案不改变的事项
 
