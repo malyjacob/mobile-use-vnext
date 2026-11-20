@@ -1,6 +1,7 @@
 # 项目实施状态
 
-状态：2026-11-20，0.22.0（契约 20）把会话显示屏身份加入 `observation.screen.display_id`，
+状态：2026-11-20，0.23.0（契约 21）普通观察树裁剪完成整组发布、虚拟屏受控闭环与双入口独立探针（[记录](verification/compact-observation-pruning.md)）。
+0.22.0（契约 20）把会话显示屏身份加入 `observation.screen.display_id`，
 并把受管 shell 的显示屏语义写入契约与工具说明，整组部署后在虚拟屏会话实测（issue #11）；
 13 个 MCP 工具在虚拟屏模式完成一轮工具面覆盖测试，补齐 claim/handoff
 成功路径、`effect=observed`、`act` 交付 delta 与 `close`/`kill` 授权守卫的实机样本（§3）；

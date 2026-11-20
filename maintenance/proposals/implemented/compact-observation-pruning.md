@@ -1,12 +1,13 @@
 # 提案：省略普通观察树中的小型无标注图片与单子匿名容器
 
-状态：提案，未实现。\
+状态：已实现（实现提交 `2d6c389457748667771973f6021f3a18ba9cfcf3`，2026-11-20）。\
+实现与验证记录：[compact-observation-pruning.md](../../verification/compact-observation-pruning.md)。\
 基线提交：`a6b653d86e8af600ec3395876b5bd81c8bff14f9`（分支 `master`，`2026-11-20`）。\
 适用范围：普通观察的 compact full/delta、MCP 调用方说明、配套发行与实机验收。\
 影响范围：`internal/observation`、`internal/mcp`、受影响的引擎测试、正式接口及客户端文档、版本生成与发布。\
 契约（`/api/*` 字段与 `contract_version`）：改变普通观察的节点成员、父子关系与链输出策略，沿用字段形状和现有解析语法，共同契约升级。
 
-本文行号与行为以基线提交为准。实现前按当时的 HEAD 复核[普通树投影](../../internal/observation/read.go)、[差分](../../internal/observation/read_diff.go)、[落点](../../internal/engine/tap_scope.go)、[MCP 说明](../../internal/mcp/schema.go)和[版本源](../../release/versions.json)。
+本文行号与行为以基线提交为准。实现前按当时的 HEAD 复核[普通树投影](../../../internal/observation/read.go)、[差分](../../../internal/observation/read_diff.go)、[落点](../../../internal/engine/tap_scope.go)、[MCP 说明](../../../internal/mcp/schema.go)和[版本源](../../../release/versions.json)。
 
 ## 0. 摘要
 
@@ -26,12 +27,12 @@ T2b 按 T2a 之后的直接孩子数绕过单子匿名容器。交互节点、�
 
 | 环节 | 基线证据 |
 | --- | --- |
-| 对外投影 | 完整快照构造 compact 候选，验证后按 compact JSON 计预算。内部快照另有预算。[capture.go:515](../../internal/engine/capture.go#L515) |
-| 匿名与几何判据 | `AnonymousPlain` 识别无动作、无内容且状态已知为默认的 `view`/`group`。几何投影区分隐藏与未知，按裁到屏幕内的矩形面积判断是否严格小于 1%。与最近交付的祖先矩形相等也会触发隐藏。[read.go:19](../../internal/observation/read.go#L19) · [read.go:136](../../internal/observation/read.go#L136) · [read.go:192](../../internal/observation/read.go#L192) |
-| 链与差分 | 链从隐藏几何的匿名单子节点开始，链尾拥有缩进的孩子。`ReadDiff` 展开双方后计算差分，再打包 `add`/`replace` 并验证重建结果。`ReadApply` 应用后也会打包。[read.go:320](../../internal/observation/read.go#L320) · [read_diff.go:13](../../internal/observation/read_diff.go#L13) · [read_diff.go:65](../../internal/observation/read_diff.go#L65) |
-| 服务端落点 | 点按按完整树及源节点构造作用域，点解析和滚动也读取完整树与几何。[tap_scope.go:258](../../internal/engine/tap_scope.go#L258) · [point.go:97](../../internal/engine/point.go#L97) · [scroll.go:452](../../internal/engine/scroll.go#L452) |
-| 诊断与补看 | 静态诊断可返回完整树中的承载节点。`inspect` 读取调用方保留的原观察，支持按编号补看。[tap_scope.go:1332](../../internal/engine/tap_scope.go#L1332) · [inspect.go:86](../../internal/engine/inspect.go#L86) |
-| 调用方说明 | 服务说明公布树语法，`act` 说明建议坐标的重试条件，`inspect` 说明历史观察补看。[服务说明](../../internal/mcp/schema.go#L27) · [act](../../internal/mcp/schema.go#L266) · [inspect](../../internal/mcp/schema.go#L417) |
+| 对外投影 | 完整快照构造 compact 候选，验证后按 compact JSON 计预算。内部快照另有预算。[capture.go:515](../../../internal/engine/capture.go#L515) |
+| 匿名与几何判据 | `AnonymousPlain` 识别无动作、无内容且状态已知为默认的 `view`/`group`。几何投影区分隐藏与未知，按裁到屏幕内的矩形面积判断是否严格小于 1%。与最近交付的祖先矩形相等也会触发隐藏。[read.go:19](../../../internal/observation/read.go#L19) · [read.go:136](../../../internal/observation/read.go#L136) · [read.go:192](../../../internal/observation/read.go#L192) |
+| 链与差分 | 链从隐藏几何的匿名单子节点开始，链尾拥有缩进的孩子。`ReadDiff` 展开双方后计算差分，再打包 `add`/`replace` 并验证重建结果。`ReadApply` 应用后也会打包。[read.go:320](../../../internal/observation/read.go#L320) · [read_diff.go:13](../../../internal/observation/read_diff.go#L13) · [read_diff.go:65](../../../internal/observation/read_diff.go#L65) |
+| 服务端落点 | 点按按完整树及源节点构造作用域，点解析和滚动也读取完整树与几何。[tap_scope.go:258](../../../internal/engine/tap_scope.go#L258) · [point.go:97](../../../internal/engine/point.go#L97) · [scroll.go:452](../../../internal/engine/scroll.go#L452) |
+| 诊断与补看 | 静态诊断可返回完整树中的承载节点。`inspect` 读取调用方保留的原观察，支持按编号补看。[tap_scope.go:1332](../../../internal/engine/tap_scope.go#L1332) · [inspect.go:86](../../../internal/engine/inspect.go#L86) |
+| 调用方说明 | 服务说明公布树语法，`act` 说明建议坐标的重试条件，`inspect` 说明历史观察补看。[服务说明](../../../internal/mcp/schema.go#L27) · [act](../../../internal/mcp/schema.go#L266) · [inspect](../../../internal/mcp/schema.go#L417) |
 
 ### 1.3 为什么直觉会出错
 
@@ -86,10 +87,10 @@ T2b 按 T2a 之后的直接孩子数绕过单子匿名容器。交互节点、�
 
 | 文件 | 改动 |
 | --- | --- |
-| [internal/observation/read.go](../../internal/observation/read.go) | 将两项裁剪用于普通 compact 投影，复用现有面积与匿名判据，取消 compact full 的链打包。详细投影继续交付完整逻辑节点及已知几何。 |
-| [internal/observation/read_diff.go](../../internal/observation/read_diff.go) | 差分规划仍比较展开后的树，输出普通 `add`/`replace` 定义。应用器仍接受旧链输入，返回展开的 full。保留逻辑相等和规范 JSON 字节两项校验。 |
-| [internal/mcp/schema.go](../../internal/mcp/schema.go) | 在工具注册和握手说明里写清普通树省略规则、按原 O 补看方法及历史 `[n1 n2 …]` 的链尾语义。 |
-| [internal/observation](../../internal/observation)、[internal/engine](../../internal/engine)、[internal/mcp](../../internal/mcp) 测试 | 覆盖判据、差分重建、动作证据、历史链读取和实际交付的工具说明，更新工具目录指纹基准测试。 |
+| [internal/observation/read.go](../../../internal/observation/read.go) | 将两项裁剪用于普通 compact 投影，复用现有面积与匿名判据，取消 compact full 的链打包。详细投影继续交付完整逻辑节点及已知几何。 |
+| [internal/observation/read_diff.go](../../../internal/observation/read_diff.go) | 差分规划仍比较展开后的树，输出普通 `add`/`replace` 定义。应用器仍接受旧链输入，返回展开的 full。保留逻辑相等和规范 JSON 字节两项校验。 |
+| [internal/mcp/schema.go](../../../internal/mcp/schema.go) | 在工具注册和握手说明里写清普通树省略规则、按原 O 补看方法及历史 `[n1 n2 …]` 的链尾语义。 |
+| [internal/observation](../../../internal/observation)、[internal/engine](../../../internal/engine)、[internal/mcp](../../../internal/mcp) 测试 | 覆盖判据、差分重建、动作证据、历史链读取和实际交付的工具说明，更新工具目录指纹基准测试。 |
 
 `ReadDiff` 先展开 base 与 current，再构造和验证普通节点 delta。应用通过后，将展开结果和展开后的 current 做逻辑比较及规范 JSON 字节比较。对新产物，这组字节就是当前 compact full 的规范 JSON。`ReadApply` 继续验证输入并展开 base 和 `add`/`replace` 中的历史链，然后用结构差分重建普通节点 full。应用阶段只按差分重建树，保留其中的逻辑节点。回放旧数据保证节点、字段、顺序和父子关系可还原，重建结果统一为展开格式，旧折叠字节序列随之改变。链内编号继续可作合法差分引用，旧链下面缩进的孩子归链尾。
 
@@ -99,7 +100,7 @@ T2b 按 T2a 之后的直接孩子数绕过单子匿名容器。交互节点、�
 
 ### 6.2 配置与取值
 
-服务端固定采用 1% 屏幕面积阈值。冻结版本为 0.23.0、共同契约 21、Android versionCode 25，冻结基线为本文头部的提交。发行号、共同契约号、Android versionCode 只手改 [release/versions.json](../../release/versions.json)，其余版本常量走生成。
+服务端固定采用 1% 屏幕面积阈值。冻结版本为 0.23.0、共同契约 21、Android versionCode 25，冻结基线为本文头部的提交。发行号、共同契约号、Android versionCode 只手改 [release/versions.json](../../../release/versions.json)，其余版本常量走生成。
 
 ### 6.3 日志与可观测性
 
@@ -115,7 +116,7 @@ T2b 按 T2a 之后的直接孩子数绕过单子匿名容器。交互节点、�
 
 ### 6.5 契约与文档影响
 
-同步[接口契约](../../docs/interface.md)的观察与补看、[架构](../../docs/architecture.md)的投影顺序、[MCP](../../docs/mcp.md)的图例与诊断指引、[Go 客户端](../../docs/client.md)的视图与差分说明。更新 [MCP 目录指纹基准测试](../../internal/mcp/result_parity_test.go)及正式文档中的对应指纹。版本同步覆盖[发布](../../docs/release.md)、[运行手册](../../docs/runbook.md)、[控制协议](../../docs/control-protocol.md)、[手机运维](../../docs/phone-operations.md)和[接入示例](../../docs/integration.md)等使用现行版本的章节，纳入同一次正式文档审计。MCP 的 text、structured 与 both 三种结果模式使用同一份 compact 节点集合。
+同步[接口契约](../../../docs/interface.md)的观察与补看、[架构](../../../docs/architecture.md)的投影顺序、[MCP](../../../docs/mcp.md)的图例与诊断指引、[Go 客户端](../../../docs/client.md)的视图与差分说明。更新 [MCP 目录指纹基准测试](../../../internal/mcp/result_parity_test.go)及正式文档中的对应指纹。版本同步覆盖[发布](../../../docs/release.md)、[运行手册](../../../docs/runbook.md)、[控制协议](../../../docs/control-protocol.md)、[手机运维](../../../docs/phone-operations.md)和[接入示例](../../../docs/integration.md)等使用现行版本的章节，纳入同一次正式文档审计。MCP 的 text、structured 与 both 三种结果模式使用同一份 compact 节点集合。
 
 ## 7. 预期效果与能力边界
 
@@ -186,14 +187,29 @@ T2b 按 T2a 之后的直接孩子数绕过单子匿名容器。交互节点、�
 2. 实现 compact 投影、差分处理与工具说明，执行单元、反向对照、离线回放及受影响的回归。
 3. 同步正式文档，完成独立只读文档审计并提交实现。同一提交跟踪本提案原稿，保留 `提案，未实现` 状态，发布构建前核对工作树干净。
 4. 用同一干净实现提交执行 `scripts/build-release.ps1`、`scripts/verify-manifest.ps1 -Manifest build/release/manifest.json`、`scripts/build-host-tools.ps1` 和 `scripts/build-host-tools.ps1 -VerifyOnly`，检查两份清单及 Windows 两个目标文件。
-5. 核验后按[发布规范](../../docs/release.md)执行 `scripts/deploy.ps1 -SkipBuild` 整组覆盖，保留私有数据。通过 `-McpAllowedOrigins` 保留现场已配置且与手机探针匹配的 Origin。在实机跑 §8.2 闭环，用新探针分别跑 `-transport stdio` 与 `-transport http-remote` 并带两份清单。
+5. 核验后按[发布规范](../../../docs/release.md)执行 `scripts/deploy.ps1 -SkipBuild` 整组覆盖，保留私有数据。通过 `-McpAllowedOrigins` 保留现场已配置且与手机探针匹配的 Origin。在实机跑 §8.2 闭环，用新探针分别跑 `-transport stdio` 与 `-transport http-remote` 并带两份清单。
 6. 落实验证记录，补 §11，实现提交之后单独提交归档，并检查归档相对链接。
 
-## 11. 实现结果（归档时补写）
+## 11. 实现结果
 
 ### 11.1 已落地
 
+| 提案条目 | 落点 |
+| --- | --- |
+| T2a 小图与连续空容器裁剪、T2b 单子包装提升 | [read.go](../../../internal/observation/read.go) 的 `ProjectCompactTree`、`projectCompactNode`、`compactImageCanPrune`。同一遍历完成两步的等价结果 |
+| 普通 full 与普通 delta 定义、历史链回放 | [read_diff.go](../../../internal/observation/read_diff.go) 的 `ReadDiff`、`ReadApply`。输出拓扑及规范 JSON 校验保留 |
+| 同一捕获的动作证据、原 O 及诊断 ref 补看 | [引擎定向用例](../../../internal/engine/tap_static_error_test.go)覆盖 tap、long_press、静态提示与歧义，[真实投影用例](../../../internal/engine/observation_continuity_integration_test.go)覆盖固定基线和换父 |
+| MCP 图例、目录、历史链解析、三模式结果与探针 | [schema.go](../../../internal/mcp/schema.go) 的 `treeTextGuide`、`act` 和 `inspect` 描述，[探针](../../../scripts/mcp-probe/checks.go)核对实际目录与 v3 观察块 |
+| 正式文档与版本 | [接口契约](../../../docs/interface.md)、[架构](../../../docs/architecture.md)、[MCP](../../../docs/mcp.md)、[Go 客户端](../../../docs/client.md)及运维文档。独立只读文档审计复检 CLEAN。[版本源](../../../release/versions.json)为 0.23.0 / 21 / 25 |
+| 发布、主机替换与验证 | 同一干净实现提交构建，双清单核验，手机整组覆盖，主机两个 exe 替换，受控页闭环与同帧回放，主机 stdio 与手机 HTTP 独立探针均通过。详见[验证记录](../../verification/compact-observation-pruning.md) |
+
 ### 11.2 与提案不同或未执行
+
+| 项 | 结论与理由 |
+| --- | --- |
+| 实机夹具首个 full 的取得 | 通过 `start` 建立虚拟屏，再在该显示启动夹具并 `observe(full=true)`。确认与动作后观察使用同一个夹具 full 基线。保留手机既有虚拟屏模式 |
+| 原 45 帧的精确复放 | 未执行，原样本缺少同帧详细几何。以受控页面的 3 帧实时详细树完成旧新投影、差分重建和计量 |
+| 依赖方托管进程切换 | 由用户处理。部署报告一个仍在运行的旧手机 stdio 进程。已用当前产物分别验证主机独立 stdio 与手机 HTTP 入口 |
 
 ## 附：本提案不改变的事项
 
