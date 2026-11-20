@@ -1209,8 +1209,8 @@ func TestAdapterChecksAgainstFakeAdapter(t *testing.T) {
 				"RESULT PASS",
 			}
 			if mode != resultModeStructured {
-				wants = append(wants, "PASS observe", "tree_block=v3",
-					"PASS inspect", "inspect_block=complete")
+				wants = append(wants, "PASS observe", "tree_block=v4",
+					"PASS inspect", "inspect_block=complete tree_block=v3")
 			}
 			for _, want := range wants {
 				if !strings.Contains(output.String(), want) {
@@ -2098,8 +2098,8 @@ func TestProbeAgainstRealAdapter(t *testing.T) {
 				"PASS cancel",
 			}
 			if mode != resultModeStructured {
-				wants = append(wants, "PASS observe", "tree_block=v3",
-					"PASS inspect", "inspect_block=complete")
+				wants = append(wants, "PASS observe", "tree_block=v4",
+					"PASS inspect", "inspect_block=complete tree_block=v3")
 			}
 			for _, want := range wants {
 				if !strings.Contains(output.String(), want) {
@@ -2204,8 +2204,8 @@ func TestProbeAgainstRealHTTPAdapter(t *testing.T) {
 			}
 			if mode != resultModeStructured {
 				for _, want := range []string{
-					"PASS observe", "tree_block=v3",
-					"PASS inspect", "inspect_block=complete",
+					"PASS observe", "tree_block=v4",
+					"PASS inspect", "inspect_block=complete tree_block=v3",
 				} {
 					if !strings.Contains(output.String(), want) {
 						t.Fatalf("missing %q in:\n%s", want, output.String())

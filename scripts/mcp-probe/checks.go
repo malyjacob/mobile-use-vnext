@@ -510,7 +510,7 @@ func (p *probe) startCheck(ctx context.Context) (startSummary, bool) {
 		"session=active", field("session_mode", view.Session.Mode), "tree=full",
 	}
 	if p.mode() != resultModeStructured {
-		passFields = append(passFields, "tree_block=v3")
+		passFields = append(passFields, "tree_block=v4")
 	}
 	p.reporter.pass("start",
 		passFields...)
@@ -596,7 +596,7 @@ func (p *probe) observeCheck(ctx context.Context, reference string) (string, boo
 		field("height", strconv.Itoa(observation.Image.Height)),
 	}
 	if p.mode() != resultModeStructured {
-		passFields = append(passFields, "tree_block=v3")
+		passFields = append(passFields, "tree_block=v4")
 	}
 	p.reporter.pass("observe", passFields...)
 	return observation.ID, true
