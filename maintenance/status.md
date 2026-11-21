@@ -1,6 +1,7 @@
 # 项目实施状态
 
-状态：2026-11-21，0.24.0（契约 21）MCP 无损结果与树文本完成整组发布、虚拟屏双入口逐字段对照和独立探针验证（[记录](verification/mcp-lossless-text-format.md)）。
+状态：2026-11-22，0.25.0（契约 21）完成 `result v4` 紧凑结果外壳、短 `O`/`P` 标识、精确 `recovery` 引用与 1024 截屏长边上限；手机整组覆盖部署（保留 App 私有数据）、Windows 主机两件产物磁盘替换、双入口独立探针与虚拟屏实机 `result v4` 文本闭环均 PASS（[记录](verification/compact-result-envelope-and-image-sizing.md)）。
+2026-11-21，0.24.0（契约 21）MCP 无损结果与树文本完成整组发布、虚拟屏双入口逐字段对照和独立探针验证（[记录](verification/mcp-lossless-text-format.md)）。
 0.22.0（契约 20）把会话显示屏身份加入 `observation.screen.display_id`，
 并把受管 shell 的显示屏语义写入契约与工具说明，整组部署后在虚拟屏会话实测（issue #11）；
 13 个 MCP 工具在虚拟屏模式完成一轮工具面覆盖测试，补齐 claim/handoff
@@ -40,13 +41,14 @@
 | `notify` | 已实现 | 已验证：保存/重复/空正文；经控制同步进入 App 消息中心、系统通知与本地已读，确认后释放服务端队列 |
 | `diagnose` | 已实现 | 已验证：无参/指定 O |
 | `shell` | 已实现 | 已验证：正常/非零/自行124/超时/输出截断/STOP/重启恢复；命令结束不发布观察、同一 O 仍可用（`shell` 后 `act` 未变屏成功、改屏 `target_changed`、过期 `observation_expired`），实机 delta 回退见[记录](verification/shell-keeps-observation.md)。受管命令不绑定会话显示屏、`input` 默认作用于 display 0，该语义与 `screen.display_id` 已写入契约与工具说明，并在 0.22.0 上整组部署验证（[记录](verification/managed-shell-display-semantics.md)） |
-| `observe`/`act` 的 `image=true` | 已实现（HTTP + MCP） | 已验证：JPEG 540×1200、MIME、无 base64、只读图分支由单元测试覆盖 |
-| `snap`（契约 19，第 13 个工具） | 已实现（HTTP + Go client + MCP + 控制 App 文案） | 已实测：`start → keepalive(1) → snap(O) → status(O/P) → observe(image=true) → end` 闭环 PASS；JPEG 540×1200 与元数据一致，原 O 保持 `ready`/`effective` 且 `expires_at` 不变，snap 不递增 revision，重复 P/`status(P)` 无图摘要；主机 stdio/http、手机 HTTP 远端与 text/structured 探针均 PASS。实机 STOP/取消精确竞态与截图进行中文案未构造（[记录](verification/snap.md)） |
+| `observe`/`act` 的 `image=true` | 已实现（HTTP + MCP） | 已验证：JPEG（0.25.0 起长边上限 1024，`1080×2400` 实机为 `461×1024`；此前记录为 `540×1200`）、MIME、无 base64、只读图分支由单元测试覆盖 |
+| `snap`（契约 19，第 13 个工具） | 已实现（HTTP + Go client + MCP + 控制 App 文案） | 已实测：`start → keepalive(1) → snap(O) → status(O/P) → observe(image=true) → end` 闭环 PASS；JPEG 540×1200（0.25.0 起长边上限 1024，实机为 `461×1024`）与元数据一致，原 O 保持 `ready`/`effective` 且 `expires_at` 不变，snap 不递增 revision，重复 P/`status(P)` 无图摘要；主机 stdio/http、手机 HTTP 远端与 text/structured 探针均 PASS。实机 STOP/取消精确竞态与截图进行中文案未构造（[记录](verification/snap.md)） |
 | MCP stdio / Streamable HTTP | 已实现（`cmd/device-mcp`） | 已验证：工具目录/schema、认证/Origin、图片、取消、P 恢复；P6 回归重新拉起实际适配进程。默认部署同时安装并启动手机 `device-mcp`（手机 `18882/mcp`，主机转发 `18883`），`verify-m6` 检查 `server/discover`；主机侧适配器仍可选 |
 | MCP 文本树块 | 已实现 | 已实测：0.4.2 手机 HTTP MCP 的 `start`/`inspect` 文本块，以及主机 stdio 探针的 `observe`/`act` 树块；外部宿主、token 对比、宿主截断与实机超预算未执行（[记录](verification/mcp-tree-text.md)） |
 | MCP 树文本无损简写（`tree v3`/`inspect v3`，0.21.0） | 已实现 / 已实测（有限） | `9009599`：省略可还原的 `view`/`text` 角色并简写匿名默认 `view` 链 `[refs]`，外层 `result v2` 与共同契约 `20` 不变；0.21.0/契约 20/versionCode 23 整组构建、双清单核验、手机覆盖部署、主机两 exe 磁盘替换及主机 `stdio`/手机 `http-remote` 独立探针均 PASS；受控 `com.mobileuse.probe` 页最小闭环 `both` 模式 0 mismatch（命中 `shorthand_view_chain`、`omitted_text`、detailed 下 `omitted_view`/`explicit_text`、`full`/`delta` 与 `inspect v3`）；依赖方托管进程由用户自行重启切换，未命中边缘分支由单测与反向对照覆盖（[记录](verification/compact-node-role-text.md)） |
 | 默认观察树坐标省略（契约 20） | 已实现 / 已实测（有限） | `6838423`：动作位置优先，无动作 `text` 与匿名节点省略矩形，重复与 1% 面积判据；0.20.0/契约 20/versionCode 22 整组构建、清单核验、覆盖部署，主机两个 exe 替换与两条独立探针 PASS。实机受控页三帧策略复算 0 mismatch、文字坐标全隐藏、`inspect` 补回原矩形、ref tap executed；三份附件回放与 85% 门槛对照未执行（[记录](verification/compact-observation-bounds.md)） |
 | MCP 结果模式 | 已实现 | 已实测：both/text/structured 的主机 stdio 闭环、手机 HTTP 三模式各 12 工具及取消恢复；大值仅合成测试，外部宿主/截断/race 未验证（[记录](verification/mcp-result-modes.md)） |
+| MCP `result v4` 紧凑外壳、短 `O`/`P` 与精确恢复引用（0.25.0） | 已实现 / 已实测（有限） | `fcf6ca2`：`text`/`both` 改为 `result v4` 的一到两行外壳，观察、会话与集合行紧凑化，`text` 正式与 `structured` 分层；真实 `O`/`P` 改为 4 位实例标签加序号（实机 `O2137_1`/`P4434_1`），`recovery` 按路线 R1 解析为可直接回传的真实编号并在四条红线回退抽象 `P`；截屏长边上限 `1200→1024`（`1080×2400` 得 `461×1024`）。0.25.0/契约 21/versionCode 27 整组构建、双清单核验（13 工具、指纹 `e42f9adb…`）、手机覆盖部署、主机两件产物替换、主机 stdio 与手机 HTTP 独立探针、虚拟屏实机最小 `v4` 文本闭环均 PASS；`docs/` 独立审计 6 项修正后 CLEAN；宿主重连与主屏/其他机型重演未执行（[记录](verification/compact-result-envelope-and-image-sizing.md)） |
 | Go client（`internal/client`） | 已实现 | 已验证：P 保留、断线、重复 P、取消、只读取消、图片 |
 | 控制同步消息投递 | 已实现 | 已验证：App 私存、系统通知、消息中心列表/详情、本地已读、确认释放、跨服务重启保留 |
 | 完整 control_view 呈现 | 已实现 | 已验证：Activity/通知/悬浮同源、失鲜、停止优先级、清理/权限/模式详情、主屏确认 |
@@ -106,6 +108,7 @@
 | 0.16.0 真实宿主/模型 #20 与 Instructions 轨迹 | 未执行：没有同宿主/模型/上下文保留策略材料；#20 继续保留 `12/70/180s`，不冒充模型行为结论（[记录](verification/agent-output-and-wait-acquisition.md) §8.5、[第二份记录](verification/agent-reference-and-action-contract.md) §8.4） |
 | 0.16.0 实机 STOP/ENTER 回执注入 | 未执行：部署无故障注入面；由合成测试覆盖，不冒充实机结论（[记录](verification/agent-reference-and-action-contract.md) §8.4） |
 | 0.16.0 claim/handoff 成功路径 | 已验证（0.21.0，virtual）：虚拟屏↔主屏往返一次，`handoff` 得 `source_display_id=113`→`display_id=0`、`state_preserved=true`、`foreground_restore=confirmed`；`claim` 回虚拟屏得 `ownership=borrowed`、`state_preserved=true`，应用内搜索结果页状态保留。0.16.0 因受控主屏任务不存在而 SKIP 的记录由本条取代（[记录](verification/mcp-tool-surface-coverage.md)） |
+| 0.25.0 主屏模式、其他机型与跨重启账本标签避让的实机重演 | 未执行：跨重启标签避让、主屏/非零旋转与 4 条恢复红线由 Go 单元测试覆盖，本次实机范围聚焦虚拟屏最小闭环与双入口探针；宿主重连由用户处理（[记录](verification/compact-result-envelope-and-image-sizing.md) §7） |
 
 ## 4. 证据入口
 
@@ -132,6 +135,7 @@
 - [MCP 工具面虚拟屏覆盖测试（0.21.0）](verification/mcp-tool-surface-coverage.md)
 - [MCP 工具面虚拟屏覆盖测试（0.23.0 补充）](verification/mcp-tool-surface-coverage-0.23.0.md)
 - [受管 shell 的显示屏语义与 `screen.display_id`](verification/managed-shell-display-semantics.md)
+- [MCP `result v4` 紧凑外壳、短 `O`/`P` 与 1024 截屏的实现、0.25.0 整组发布与双入口验证](verification/compact-result-envelope-and-image-sizing.md)
 - [工程决策](decisions.md)
 - [工程流程](process.md)
 

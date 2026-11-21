@@ -1,6 +1,7 @@
 # 提案：压缩 MCP 结果外壳、缩短 O/P 标识、解析精确恢复引用并调整截图长边至 1024
 
-状态：提案，未实现。
+状态：已实现（实现提交 `fcf6ca2430ab885c7e4513b300a6b0de11885ea9`，2026-11-22）。
+构建、实机与双入口探针结果见[验证记录](../../verification/compact-result-envelope-and-image-sizing.md)。
 基线提交：`6fe8d8bd1b408a5e7bb045d2d3394e7b8b67c994`（分支 `master`，`2026-11-22`）。
 适用范围：MCP `text` / `both` 结果文本投影（stdio 与 Streamable HTTP）、服务与客户端生成的真实 `O`/`P` 标识、MCP 发现说明与工具描述、所有截屏输出（`start`/`observe`/`wait_for`/`act`/`snap` 附图）。
 影响范围：`internal/engine`、`internal/client`、`internal/imaging`、`internal/mcp`、`scripts/mcp-probe`、`release/versions.json`、正式文档 `docs/` 及发布产物。
@@ -546,9 +547,38 @@ end result
 
 ---
 
-## 9. 实现结果（归档时补写）
+## 9. 实现结果
 
-待实施完成后按 `AGENTS.md` #16 补写实现提交 hash、验证记录链接、已落地项及与提案差异项，并移入 `maintenance/proposals/implemented/`。
+实现提交 `fcf6ca2430ab885c7e4513b300a6b0de11885ea9`（`2026-11-22`）一次落盘代码、单测、探针、
+版本源与正式文档同步。发行 `0.25.0`，共同契约保持 `21`，Android versionCode `27`。
+§4 的判据与 §5.1 的文件改动清单均已落地，无部分实现缺口。
+
+### 9.1 已落地
+
+| 提案条目 | 实现落点 |
+| --- | --- |
+| §4.1 短真实 `O`/`P` | [engine.go](../../../internal/engine/engine.go) 的 `deriveShortInstanceTag`、`instanceTagLocked`、`nextObservationIDLocked`、`nextOperationIDLocked` 与 `shortInstanceTagMin`/`Max`/`Span`。`Config.ServiceInstanceID`、控制同步、STOP、`/health` 与账本 `service_instance_id` 仍取完整 36 字符 UUID（`NewUUID`、`ValidateUUID` 未改）。 |
+| §4.1 账本重启标签避让 | [control.go](../../../internal/engine/control.go) 的 `avoidLedgerInstanceTagsLocked` 与 `shortTagFromOperationReference`，在 `StartRecovery` 载入临界区内、`restoreRecoveryLocked` 之前调用；空账本或已分配过身份时直接跳过，运行期前缀不再变动。 |
+| §4.1 客户端短 `P` | [client.go](../../../internal/client/client.go) 的 `NewOperationID` 与 `operationIDPrefix`：进程级惰性 4 位标签加 `atomic.Uint64` 单调序号，随机源失败返回错误而不静默降级。 |
+| §4.2 `result v4` 紧凑外壳 | [result_text.go](../../../internal/mcp/result_text.go) 的 `encodeResultText`、`resultV4Writer`（`line`/`block`/`fallback`）、`resultMembers`/`compactResultJSON`（`json v1` 兜底）、`resultV4Time`、`compactScreenV4`、`compactForegroundV4`、`compactQualityV4`，以及 `renderNotifyV4`、`renderImageV4`、`renderSessionV4`、`renderObservationV4`、`renderAppV4`/`renderAppItemsV4`/`renderAppTasksV4`、`renderWaitV4`、`renderDiagnosisV4`、`renderCleanupV4`、`renderErrorV4`、`renderRecoveryV4`。 |
+| §4.3 `recovery` 精确 `ref`（路线 R1） | [result_text.go](../../../internal/mcp/result_text.go) 的 `resolveRecoveryReference` 与 `resolveStatusRecoveryP`、`resolveObserveRecoveryP`、`resolveEndRecoveryP`，配套 `isObsID`/`isOpID`、`resultErrCode`、`resultErrorDetailsStartOperation`。`structured` 与 `/api/*` 的 `recovery.reference` 保持 `O`/`P`/`none`。 |
+| §4.3 单次调用 `requestRef` 透传 | [server.go](../../../internal/mcp/server.go) 的 `preparedCall.requestRef` 与 `execution.requestRef`（`prepareCall` 从已解码请求取 `reference`）；[result_projection.go](../../../internal/mcp/result_projection.go) 的 `projectExecution` 只把它交给文本编码器，不写回结构化结果。 |
+| §4.4 发现说明与工具描述 | [schema.go](../../../internal/mcp/schema.go) 的 `treeTextGuide`、`callerGuidance`、`serverInstructions` 及受影响的 13 个工具描述（含 `snap` 的 `image` 行与 `shell` 的 `display_id` 取得方式）；[catalog.go](../../../internal/mcp/catalog.go) 的 `CatalogFingerprint` 随描述重算。 |
+| §4.5 截图长边 `1200 → 1024` | [imaging.go](../../../internal/imaging/imaging.go) 的 `defaultMaxLongSide = 1024` 与 [engine.go](../../../internal/engine/engine.go) `DefaultConfig` 的 `ImageMaxLongSide: 1024`；等比缩小且永不放大，`1080×2400` 得 `461×1024`。 |
+| §5.1 探针升级 | [result_v4.go](../../../scripts/mcp-probe/result_v4.go) 的 `decodeResultText`、`parseResultHeader` 与 `v4Parser`（`decodeBlock`/`decodeLine`）；[result_semantics.go](../../../scripts/mcp-probe/result_semantics.go) 的语义一致性与显式省略边界；[checks.go](../../../scripts/mcp-probe/checks.go) 的版本、附图、恢复与取消检查。 |
+| §7.1 单测门禁 | [result_manifest_test.go](../../../internal/mcp/result_manifest_test.go) 的 `TestResultFieldManifest`/`TestResultV4ManifestReverseControl`、[result_recovery_test.go](../../../internal/mcp/result_recovery_test.go) 的 `TestRecoveryExactReferenceMatrix` 与结构化不变式、[result_text_v4_test.go](../../../internal/mcp/result_text_v4_test.go) 的 `TestResultV4DefensiveFallbackNoDropAndNoBareObs`、[schema_test.go](../../../internal/mcp/schema_test.go) 的 `TestDiscoveryDropsResultV3AndObservationScreenPath`、[retirement_isolation_test.go](../../../internal/engine/retirement_isolation_test.go) 的 `TestGeneratedReferencesUseShortInstanceTag`/`TestRestartAvoidsCollidingInstanceTag`、[imaging_test.go](../../../internal/imaging/imaging_test.go) 的 `TestEncodeDefaultLongSideIs1024`。 |
+| §5.1 版本源与正式文档 | [release/versions.json](../../../release/versions.json) 手改为 `0.25.0`/`21`/`27`（`source_commit` 保留基线 `6fe8d8b`），其余常量由 `scripts/generate-version.ps1` 生成；[docs/mcp.md](../../../docs/mcp.md)、[docs/integration.md](../../../docs/integration.md)、[docs/architecture.md](../../../docs/architecture.md)、[docs/client.md](../../../docs/client.md)、[docs/interface.md](../../../docs/interface.md)、[docs/runbook.md](../../../docs/runbook.md)、[docs/release.md](../../../docs/release.md)、[docs/control-protocol.md](../../../docs/control-protocol.md) 与 [README.md](../../../README.md) 同步。 |
+| §7.2 发布交付三项 | 构建与双清单核验、手机整组覆盖部署、Windows 两件产物磁盘替换、双入口独立探针与实机 `result v4` 最小闭环均已完成，命令、哈希与实机事实见[验证记录](../../verification/compact-result-envelope-and-image-sizing.md)。 |
+
+### 9.2 与提案不同或未执行
+
+| 条目 | 结果与理由 |
+| --- | --- |
+| `result_text.go` 的两处防御性兜底 | 审计中发现并补修。`app_items v1 kind=list` 的 `origin_display` 为非整数时不再静默跳过，改走 `json v1 path="/app/items/<i>"` 兜底；成员已走成员级 `json v1` 兜底且 `parts` 为空的合成异常态（如 `{"observation":{"status":123}}`）移除裸 `obs` 分支（改为仅在 `len(parts) > 0` 时输出 `obs …`），不再产出裸 `obs` 行。新增回归单测 `TestResultV4DefensiveFallbackNoDropAndNoBareObs`，让 §4.2.2 的“除显式省略外不得静默丢弃”与 §4.2.3 的“禁止裸 `obs` 行”由测试固定。 |
+| `snap` 附图行补 `[at=<HH:MM:SS>]` | 审计中发现并补修。[schema.go](../../../internal/mcp/schema.go) 的 `snap` 描述与 `docs/mcp.md` 的 `image` 行最初漏写该可选项，`docs/integration.md` 有同类缺口，与已实现的 `renderImageV4` 不一致；补齐后目录指纹按新描述重算，双清单与探针同步。 |
+| 正式文档的 `observation.screen` 省略条件 | 审计初审指出 `docs/mcp.md` 把该条件写反。实现与 §4.2.2、§4.2.3 一致，按“顶层有非空 `session` 或 `observation.tree == nil` 时输出 `screen=`”保留，只修正文档措辞。 |
+| 依赖 Agent 的宿主重连与工具重新发现 | 未执行。按 `AGENTS.md` #19 与 §7.2 由用户处理；交付证据只覆盖 Windows 磁盘替换、独立 stdio 子进程与本机手机 HTTP MCP 进程。 |
+| 主屏模式、其他机型与跨重启账本标签避让的实机重演 | 未执行。跨重启避让由 `TestRestartAvoidsCollidingInstanceTag` 覆盖（刻意构造同一 4 位派生标签后经 `StartRecovery` 确定性避让）；本次实机范围按 §7.2 聚焦虚拟屏最小闭环与双入口探针。 |
 
 ---
 
