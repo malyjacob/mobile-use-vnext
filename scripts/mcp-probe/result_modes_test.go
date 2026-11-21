@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"io"
 	"net/http"
@@ -79,10 +80,10 @@ func TestHTTPResultModeHeader(t *testing.T) {
 
 func TestProjectResultModes(t *testing.T) {
 	payload := map[string]any{
-		"operation_id": "P1",
+		"operation_id": "P7391_1",
 		"outcome":      outcomeExecuted,
 		"session": map[string]any{
-			"origin": "P1", "state": sessionActive, "mode": "virtual",
+			"origin": "P7391_1", "state": sessionActive, "mode": "virtual",
 		},
 	}
 	text := fakeResultText(payload, false)
@@ -99,7 +100,7 @@ func TestProjectResultModes(t *testing.T) {
 		if failure != nil {
 			t.Fatalf("project: %v", failure.reason)
 		}
-		if projected.view.OperationID != "P1" || len(projected.images) != 1 {
+		if projected.view.OperationID != "P7391_1" || len(projected.images) != 1 {
 			t.Fatalf("unexpected projection: %+v", projected.view)
 		}
 	})
@@ -114,8 +115,8 @@ func TestProjectResultModes(t *testing.T) {
 		if failure != nil {
 			t.Fatalf("project: %v", failure.reason)
 		}
-		if projected.view.OperationID != "P1" || len(projected.structured) != 0 ||
-			len(projected.images) != 1 {
+		if projected.view.OperationID != "P7391_1" || len(projected.structured) != 0 ||
+			len(projected.images) != 1 || !projected.textOnly {
 			t.Fatalf("unexpected projection: %+v", projected)
 		}
 	})
@@ -128,7 +129,7 @@ func TestProjectResultModes(t *testing.T) {
 		if failure != nil {
 			t.Fatalf("project: %v", failure.reason)
 		}
-		if projected.view.OperationID != "P1" || len(projected.texts) != 0 {
+		if projected.view.OperationID != "P7391_1" || len(projected.texts) != 0 {
 			t.Fatalf("unexpected projection: %+v", projected)
 		}
 	})
@@ -253,39 +254,75 @@ func TestCheckObservationQuality(t *testing.T) {
 			t.Fatalf("failure = %v", failure)
 		}
 	})
+	t.Run("text default omission", func(t *testing.T) {
+		projected := &callResult{
+			textOnly: true,
+			texts:    []string{"result v4 ok\nobs O7391_1 at=22:08:55\nend result\n"},
+			object: map[string]any{
+				"observation": map[string]any{
+					"status": observationComplete, "id": "O7391_1",
+				},
+			},
+			view: resultView{Observation: &observationView{
+				Status: observationComplete, ID: "O7391_1",
+			}},
+		}
+		if failure := checkObservationQuality(projected, projected.view.Observation); failure != nil {
+			t.Fatalf("default omission rejected: %s", failure.reason)
+		}
+	})
 }
 
-// TestRequireQualityTextLines proves the readable-line assertion accepts the
-// explicit samples=0 fact and still rejects a missing member.
-func TestRequireQualityTextLines(t *testing.T) {
-	quality := &qualityView{State: "unknown", Samples: 0, StopReason: "not_sampled"}
-	projected := &callResult{texts: []string{
-		"result v3 is_error=false\n" +
-			"observation\n" +
-			" quality.state=unknown\n" +
-			" quality.samples=0\n" +
-			" quality.stop_reason=not_sampled\n" +
-			"end result\n",
-	}}
-	if failure := requireQualityTextLines(projected, quality); failure != nil {
-		t.Fatalf("samples=0 lines rejected: %s", failure.reason)
+// TestCheckQualityTextLine proves the v4 quality contract: the default pair is
+// omitted and a non-default quality is rendered once as state(stop_reason).
+func TestCheckQualityTextLine(t *testing.T) {
+	defaultProjected := &callResult{
+		textOnly: true,
+		texts: []string{
+			"result v4 ok\nobs O7391_1 at=22:08:55\nend result\n",
+		},
+		view: resultView{Observation: &observationView{ID: "O7391_1"}},
 	}
-	projected.texts = []string{
-		"result v3 is_error=false\n" +
-			"observation\n" +
-			" quality.state=unknown\n" +
-			"json v1 path=\"/observation/quality/unknown\" value=\"kept\"\n" +
-			"observation\n" +
-			" quality.samples=0\n" +
-			" quality.stop_reason=not_sampled\n" +
-			"end result\n",
+	if failure := checkQualityTextLine(defaultProjected); failure != nil {
+		t.Fatalf("default quality omission rejected: %s", failure.reason)
 	}
-	if failure := requireQualityTextLines(projected, quality); failure != nil {
-		t.Fatalf("quality lines split across groups rejected: %s", failure.reason)
+	nonDefault := &callResult{
+		textOnly: true,
+		texts: []string{
+			"result v4 ok\nobs O7391_1 quality=unstable(max_samples)\nend result\n",
+		},
+		view: resultView{Observation: &observationView{
+			ID:      "O7391_1",
+			Quality: &qualityView{State: "unstable", StopReason: "max_samples"},
+		}},
 	}
-	projected.texts = []string{"observation\n quality.state=unknown\n quality.samples=0\n"}
-	if failure := requireQualityTextLines(projected, quality); failure == nil {
-		t.Fatal("missing stop_reason line accepted")
+	if failure := checkQualityTextLine(nonDefault); failure != nil {
+		t.Fatalf("non-default quality rejected: %s", failure.reason)
+	}
+	unexpected := &callResult{
+		textOnly: true,
+		texts: []string{
+			"result v4 ok\nobs O7391_1 quality=stable(stable)\nend result\n",
+		},
+		view: resultView{Observation: &observationView{ID: "O7391_1"}},
+	}
+	if failure := checkQualityTextLine(unexpected); failure == nil ||
+		failure.reason != "text_line_unexpected" {
+		t.Fatalf("default quality token = %v, want text_line_unexpected", failure)
+	}
+	missing := &callResult{
+		textOnly: true,
+		texts: []string{
+			"result v4 ok\nobs O7391_1 at=22:08:55\nend result\n",
+		},
+		view: resultView{Observation: &observationView{
+			ID:      "O7391_1",
+			Quality: &qualityView{State: "unstable", StopReason: "max_samples"},
+		}},
+	}
+	if failure := checkQualityTextLine(missing); failure == nil ||
+		failure.reason != "text_line_missing" {
+		t.Fatalf("missing non-default quality = %v, want text_line_missing", failure)
 	}
 }
 
@@ -333,19 +370,10 @@ func TestCheckScrollEffect(t *testing.T) {
 	}
 }
 
-// TestDecodeResultTextQualityAndEffect pins the generic oracle: effect remains a
-// dotted path while observation quality is relative to its v3 group header.
 func TestDecodeResultTextQualityAndEffect(t *testing.T) {
-	text := "result v3 is_error=false\n" +
-		"operation_id=Pscroll000000000000000001\n" +
-		"outcome=executed\n" +
-		"effect.state=observed\n" +
-		"observation\n" +
-		" status=complete\n" +
-		" id=Oscroll00000000000000001\n" +
-		" quality.state=unstable\n" +
-		" quality.samples=5\n" +
-		" quality.stop_reason=max_samples\n" +
+	text := "result v4 ok op=P7391_12\n" +
+		"effect=observed\n" +
+		"obs O4821_85 at=22:08:55 quality=unstable(max_samples)\n" +
 		"end result\n"
 	decoded, failure := decodeResultText(text)
 	if failure != nil {
@@ -359,28 +387,19 @@ func TestDecodeResultTextQualityAndEffect(t *testing.T) {
 		t.Fatal("observation quality missing")
 	}
 	quality := view.Observation.Quality
-	if quality.State != "unstable" || quality.Samples != 5 || quality.StopReason != "max_samples" {
+	if quality.State != "unstable" || quality.StopReason != "max_samples" {
 		t.Fatalf("quality = %+v", quality)
 	}
 	state, found := lookupPath(decoded.object, []string{"effect", "state"})
 	if !found || state != "observed" {
 		t.Fatalf("effect object = %#v, %v", state, found)
 	}
-	samples, found := lookupPath(decoded.object,
-		[]string{"observation", "quality", "samples"})
-	number, integer := exactInteger(samples)
-	if !found || !integer || number != 5 {
-		t.Fatalf("samples object = %#v, %v", samples, found)
-	}
 }
 
-// TestProjectQualityAndEffectChannels proves text and structuredContent carry
-// the same effect/quality facts in every result mode, and that a channel that
-// drops one of them is rejected.
 func TestProjectQualityAndEffectChannels(t *testing.T) {
 	observation := map[string]any{
 		"status": observationComplete,
-		"id":     "Oscroll00000000000000001",
+		"id":     "O4821_85",
 		"quality": map[string]any{
 			"state": "stable", "samples": 2, "stop_reason": "stable",
 		},
@@ -390,7 +409,7 @@ func TestProjectQualityAndEffectChannels(t *testing.T) {
 		},
 	}
 	payload := map[string]any{
-		"operation_id": "Pscroll000000000000000001",
+		"operation_id": "P7391_12",
 		"outcome":      outcomeExecuted,
 		"effect":       map[string]any{"state": "observed"},
 		"observation":  observation,
@@ -417,11 +436,19 @@ func TestProjectQualityAndEffectChannels(t *testing.T) {
 			if projected.view.Effect == nil || projected.view.Effect.State != "observed" {
 				t.Fatalf("effect = %+v", projected.view.Effect)
 			}
-			if projected.view.Observation == nil || projected.view.Observation.Quality == nil {
-				t.Fatal("observation quality missing")
+			if mode == resultModeText {
+				// The stable quality is the default omission; text mode must not
+				// invent a quality object.
+				if projected.view.Observation.Quality != nil {
+					t.Fatalf("text default quality = %+v", projected.view.Observation.Quality)
+				}
+				if failure := checkObservationQualityOmitted(projected); failure != nil {
+					t.Fatalf("default quality token: %s", failure.reason)
+				}
+				return
 			}
 			quality := projected.view.Observation.Quality
-			if quality.State != "stable" || quality.Samples != 2 ||
+			if quality == nil || quality.State != "stable" || quality.Samples != 2 ||
 				quality.StopReason != "stable" {
 				t.Fatalf("quality = %+v", quality)
 			}
@@ -444,7 +471,20 @@ func TestProjectQualityAndEffectChannels(t *testing.T) {
 		}
 	})
 
-	t.Run("both mode rejects text without quality", func(t *testing.T) {
+	t.Run("both mode rejects missing non-default quality", func(t *testing.T) {
+		nonDefault := map[string]any{
+			"operation_id": payload["operation_id"],
+			"outcome":      outcomeExecuted,
+			"effect":       payload["effect"],
+			"observation": map[string]any{
+				"status": observationComplete,
+				"id":     observation["id"],
+				"quality": map[string]any{
+					"state": "unstable", "samples": 5, "stop_reason": "max_samples",
+				},
+				"tree": observation["tree"],
+			},
+		}
 		withoutQuality := map[string]any{
 			"operation_id": payload["operation_id"],
 			"outcome":      outcomeExecuted,
@@ -457,17 +497,17 @@ func TestProjectQualityAndEffectChannels(t *testing.T) {
 		}
 		result := &sdk.CallToolResult{
 			Content:           []sdk.Content{&sdk.TextContent{Text: fakeResultText(withoutQuality, false)}},
-			StructuredContent: payload,
+			StructuredContent: nonDefault,
 		}
 		if _, failure := project(result, resultModeBoth); failure == nil ||
-			failure.reason != "both_mode_object_mismatch" {
-			t.Fatalf("failure = %v, want both_mode_object_mismatch", failure)
+			failure.reason != "both_mode_quality_missing" {
+			t.Fatalf("failure = %v, want both_mode_quality_missing", failure)
 		}
 	})
 }
 
 func TestProjectResultModeViolations(t *testing.T) {
-	payload := map[string]any{"operation_id": "P1"}
+	payload := map[string]any{"operation_id": "P7391_1"}
 	text := fakeResultText(payload, false)
 	cases := []struct {
 		name   string
@@ -534,10 +574,10 @@ func TestProjectResultModeViolations(t *testing.T) {
 
 func TestProjectBothPreservesTreeMetadata(t *testing.T) {
 	fullPayload := map[string]any{
-		"operation_id": "Ptree0000000000000000001",
+		"operation_id": "P4821_1",
 		"observation": map[string]any{
 			"status": observationComplete,
-			"id":     "Otest_1",
+			"id":     "O4821_1",
 			"tree": map[string]any{
 				"format": treeFull,
 				"scope":  "reported_visible_with_context",
@@ -545,22 +585,21 @@ func TestProjectBothPreservesTreeMetadata(t *testing.T) {
 			},
 		},
 	}
-	fullText := "result v3 is_error=false\noperation_id=Ptree0000000000000000001\n" +
-		"observation\n status=complete\n id=Otest_1\n\n" +
+	fullText := "result v4 ok op=P4821_1\nobs O4821_1\n\n" +
 		"tree v4 full nodes=1\n\nn1 root 0,0,1080,2400\nend tree\nend result\n"
 	fullResult := &sdk.CallToolResult{
 		Content:           []sdk.Content{&sdk.TextContent{Text: fullText}},
 		StructuredContent: fullPayload,
 	}
 	if _, failure := project(fullResult, resultModeBoth); failure != nil {
-		t.Fatalf("matching full metadata rejected: %s", failure.reason)
+		t.Fatalf("matching full metadata rejected: %s %v", failure.reason, failure.fields)
 	}
 
 	extraMetadata := map[string]any{
 		"operation_id": fullPayload["operation_id"],
 		"observation": map[string]any{
 			"status": observationComplete,
-			"id":     "Otest_1",
+			"id":     "O4821_1",
 			"tree": map[string]any{
 				"format": treeFull,
 				"scope":  "reported_visible_with_context",
@@ -576,29 +615,28 @@ func TestProjectBothPreservesTreeMetadata(t *testing.T) {
 	}
 
 	deltaPayload := map[string]any{
-		"operation_id": "Ptree0000000000000000002",
+		"operation_id": "P4821_2",
 		"observation": map[string]any{
 			"status": observationComplete,
-			"id":     "Otest_2",
+			"id":     "O4821_2",
 			"tree": map[string]any{
 				"format": treeDelta,
-				"base":   "Otest_1",
+				"base":   "O4821_1",
 				"view":   "compact",
 			},
 		},
 	}
-	deltaText := "result v3 is_error=false\noperation_id=Ptree0000000000000000002\n" +
-		"observation\n status=complete\n id=Otest_2\n\n" +
+	deltaText := "result v4 ok op=P4821_2\nobs O4821_2\n\n" +
 		"tree v4 delta base=_1 changes=0\n\nend tree\nend result\n"
 	deltaResult := &sdk.CallToolResult{
 		Content:           []sdk.Content{&sdk.TextContent{Text: deltaText}},
 		StructuredContent: deltaPayload,
 	}
 	if _, failure := project(deltaResult, resultModeBoth); failure != nil {
-		t.Fatalf("matching expanded base rejected: %s", failure.reason)
+		t.Fatalf("matching expanded base rejected: %s %v", failure.reason, failure.fields)
 	}
 
-	deltaPayload["observation"].(map[string]any)["tree"].(map[string]any)["base"] = "Otest_9"
+	deltaPayload["observation"].(map[string]any)["tree"].(map[string]any)["base"] = "O4821_9"
 	if _, failure := project(deltaResult, resultModeBoth); failure == nil ||
 		failure.reason != "both_mode_object_mismatch" {
 		t.Fatalf("base metadata mismatch = %v, want both_mode_object_mismatch", failure)
@@ -613,6 +651,7 @@ func TestDecodeResultTextContentBlocks(t *testing.T) {
 				"name": "设置", "package": "com.android.settings", "future": true,
 			}},
 			"total": 1, "truncated": false, "captured_at": "2026-01-01T00:00:00Z",
+			"future": "kept",
 		},
 		"shell": map[string]any{
 			"termination": "exited",
@@ -631,7 +670,7 @@ func TestDecodeResultTextContentBlocks(t *testing.T) {
 	}
 	decoded, failure := decodeResultText(fakeResultText(payload, false))
 	if failure != nil {
-		t.Fatalf("decodeResultText: %v", failure.reason)
+		t.Fatalf("decodeResultText: %v %v", failure.reason, failure.fields)
 	}
 	if decoded.view.App == nil || decoded.view.App.Kind != "find" ||
 		!decoded.view.App.HasItems || len(decoded.view.App.Items) != 1 ||
@@ -652,25 +691,19 @@ func TestDecodeResultTextContentBlocks(t *testing.T) {
 	if appObject["future"] != true || eventObject["future"] != true {
 		t.Fatal("complete item/event JSON was not preserved")
 	}
+	if value, ok := lookupPath(decoded.object, []string{"app", "future"}); !ok || value != "kept" {
+		t.Fatalf("unknown app member = %#v, %v", value, ok)
+	}
 }
 
 func TestDecodeResultTextEmptyDeltaWithWait(t *testing.T) {
-	text := "result v3 is_error=false\n" +
-		"operation_id=Pwait000000000000000001\n" +
-		"phase=finished\n" +
-		"observation\n" +
-		" status=complete\n" +
-		" id=Owait00000000000000001\n" +
-		" quality.state=unknown\n" +
-		" quality.samples=0\n" +
-		" quality.stop_reason=not_sampled\n" +
+	text := "result v4 ok op=P7391_3 phase=finished\n" +
+		"obs O4821_9 at=22:08:55\n" +
 		"\n" +
-		"tree v4 delta base=Owait00000000000000000 changes=0\n" +
+		"tree v4 delta base=_8 changes=0\n" +
 		"\n" +
 		"end tree\n" +
-		"wait.trigger=timeout\n" +
-		"wait.matched=[\"timeout\"]\n" +
-		"wait.elapsed_ms=1000\n" +
+		"wait trigger=timeout matched=timeout elapsed=1000ms\n" +
 		"end result\n"
 	decoded, failure := decodeResultText(text)
 	if failure != nil {
@@ -685,9 +718,9 @@ func TestDecodeResultTextEmptyDeltaWithWait(t *testing.T) {
 }
 
 func TestDecodeResultTextEmptyInspection(t *testing.T) {
-	text := "result v3 is_error=false\n" +
+	text := "result v4 ok\n" +
 		"\n" +
-		"inspect v3 scope=query observation=O1 revision=1 captured_at=now " +
+		"inspect v3 scope=query observation=O1 revision=1 captured_at=22:00:00 " +
 		"tree_scope=reported_visible_with_context view=detailed " +
 		"matches=0 nodes=0 entries=0\n" +
 		"\n" +
@@ -704,6 +737,161 @@ func TestDecodeResultTextEmptyInspection(t *testing.T) {
 	}
 }
 
+// TestDecodeResultTextHeaderGrammar pins the complete v4 header grammar and its
+// rejection cases.
+func TestDecodeResultTextHeaderGrammar(t *testing.T) {
+	accepted := []struct {
+		text   string
+		header resultHeader
+	}{
+		{
+			text:   "result v4 ok\nend result\n",
+			header: resultHeader{Ok: true},
+		},
+		{
+			text: "result v4 ok op=P7391_1 state=running outcome=executed phase=post_observation_failed\nend result\n",
+			header: resultHeader{
+				Ok: true, OperationID: "P7391_1", State: "running", Outcome: "executed",
+				HasOutcome: true, Phase: "post_observation_failed",
+			},
+		},
+		{
+			text:   "result v4 err outcome=not_executed phase=admission\nend result\n",
+			header: resultHeader{Outcome: "not_executed", HasOutcome: true, Phase: "admission"},
+		},
+		{
+			// An error result always keeps its outcome explicit, even for the
+			// conventionally successful value.
+			text:   "result v4 err outcome=executed\nend result\n",
+			header: resultHeader{Outcome: "executed", HasOutcome: true},
+		},
+	}
+	for _, testCase := range accepted {
+		decoded, failure := decodeResultText(testCase.text)
+		if failure != nil {
+			t.Fatalf("valid header rejected: %s %v", failure.reason, failure.fields)
+		}
+		if decoded.header != testCase.header {
+			t.Fatalf("header = %+v, want %+v", decoded.header, testCase.header)
+		}
+	}
+	rejected := []struct {
+		name   string
+		text   string
+		reason string
+	}{
+		{"v3 header", "result v3 is_error=false\nend result\n", "text_result_header_invalid"},
+		{"missing status", "result v4\nend result\n", "text_result_header_invalid"},
+		{"unknown status", "result v4 maybe\nend result\n", "text_result_header_invalid"},
+		{"duplicate op", "result v4 ok op=P1 op=P2\nend result\n", "text_result_header_field_invalid"},
+		{"out of order", "result v4 ok outcome=uncertain op=P1\nend result\n", "text_result_header_field_invalid"},
+		{"empty value", "result v4 ok op=\nend result\n", "text_result_header_field_invalid"},
+		{"explicit executed", "result v4 ok outcome=executed\nend result\n", "text_result_outcome_redundant"},
+		{"double space", "result v4  ok\nend result\n", "text_result_header_invalid"},
+		{"bare cr", "result v4 ok\r\nend result\n", "text_result_naked_cr"},
+		{"extra blank", "result v4 ok\n\n\nend result\n", "text_result_blank_invalid"},
+	}
+	for _, testCase := range rejected {
+		t.Run(testCase.name, func(t *testing.T) {
+			if _, failure := decodeResultText(testCase.text); failure == nil ||
+				failure.reason != testCase.reason {
+				t.Fatalf("failure = %v, want %s", failure, testCase.reason)
+			}
+		})
+	}
+}
+
+// TestDecodeResultTextObsLine pins the obs line grammar, including the empty
+// line ban and the conditional screen/rotation rules.
+func TestDecodeResultTextObsLine(t *testing.T) {
+	accepted := []struct {
+		name     string
+		text     string
+		status   string
+		id       string
+		rotation int
+	}{
+		{
+			name:   "minimal with id",
+			text:   "result v4 ok\nobs O4821_85\nend result\n",
+			status: observationComplete,
+			id:     "O4821_85",
+		},
+		{
+			name:   "explicit complete without id",
+			text:   "result v4 ok\nobs status=complete\nend result\n",
+			status: observationComplete,
+		},
+		{
+			name:   "failed without id",
+			text:   "result v4 ok\nobs status=failed missing=tree\nend result\n",
+			status: "failed",
+		},
+		{
+			name:     "rotation without screen",
+			text:     "result v4 ok\nobs O4821_85 rot=2\nend result\n",
+			status:   observationComplete,
+			id:       "O4821_85",
+			rotation: 2,
+		},
+		{
+			name: "full fields",
+			text: "result v4 ok\n" +
+				"obs O4821_85 fg=tv.danmaku.bili#177 at=22:08:55 quality=unstable(max_samples) rot=1 missing=tree,image\n" +
+				"end result\n",
+			status:   observationComplete,
+			id:       "O4821_85",
+			rotation: 1,
+		},
+	}
+	for _, testCase := range accepted {
+		t.Run(testCase.name, func(t *testing.T) {
+			decoded, failure := decodeResultText(testCase.text)
+			if failure != nil {
+				t.Fatalf("valid obs rejected: %s %v", failure.reason, failure.fields)
+			}
+			if decoded.view.Observation == nil || decoded.view.Observation.Status != testCase.status ||
+				decoded.view.Observation.ID != testCase.id {
+				t.Fatalf("observation = %+v", decoded.view.Observation)
+			}
+			if testCase.rotation != 0 {
+				if decoded.view.Observation.Screen == nil ||
+					decoded.view.Observation.Screen.Rotation != testCase.rotation {
+					t.Fatalf("screen = %+v", decoded.view.Observation.Screen)
+				}
+			}
+		})
+	}
+	rejected := []struct {
+		name   string
+		text   string
+		reason string
+	}{
+		{"bare obs", "result v4 ok\nobs\nend result\n", "text_result_obs_empty"},
+		{"complete with id", "result v4 ok\nobs O4821_85 status=complete\nend result\n", "text_result_obs_status_redundant"},
+		{"default quality", "result v4 ok\nobs O4821_85 quality=stable(stable)\nend result\n", "text_result_obs_quality_redundant"},
+		{"not sampled quality", "result v4 ok\nobs O4821_85 quality=unknown(not_sampled)\nend result\n", "text_result_obs_quality_redundant"},
+		{"bad rotation", "result v4 ok\nobs O4821_85 rot=4\nend result\n", "text_result_rotation_invalid"},
+		{"bad time", "result v4 ok\nobs O4821_85 at=bad=time\nend result\n", "text_result_obs_invalid"},
+		{"out of order", "result v4 ok\nobs O4821_85 at=22:08:55 fg=none\nend result\n", "text_result_obs_invalid"},
+		{"duplicate obs", "result v4 ok\nobs O4821_85\nobs O4821_86\nend result\n", "text_result_path_duplicate"},
+		{
+			name: "screen with tree but no session",
+			text: "result v4 ok\nobs O4821_85 screen=1080x2400@148\n\n" +
+				"tree v4 full nodes=1\n\nn1 root 0,0,1080,2400\nend tree\nend result\n",
+			reason: "text_result_obs_screen_redundant",
+		},
+	}
+	for _, testCase := range rejected {
+		t.Run(testCase.name, func(t *testing.T) {
+			if _, failure := decodeResultText(testCase.text); failure == nil ||
+				failure.reason != testCase.reason {
+				t.Fatalf("failure = %v, want %s", failure, testCase.reason)
+			}
+		})
+	}
+}
+
 func TestDecodeResultTextRejectsIncompleteProjection(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -712,75 +900,78 @@ func TestDecodeResultTextRejectsIncompleteProjection(t *testing.T) {
 	}{
 		{
 			name:   "missing tail",
-			text:   "result v3 is_error=false\nstatus=not_seen\n",
+			text:   "result v4 ok\nblocking_code=not_seen\n",
 			reason: "text_result_unterminated",
 		},
 		{
 			name: "empty delta missing tree tail",
-			text: "result v3 is_error=false\nobservation\n id=O2\n\n" +
-				"tree v4 delta base=O1 changes=0\n\n" +
+			text: "result v4 ok\nobs O4821_2\n\n" +
+				"tree v4 delta base=O4821_1 changes=0\n\n" +
 				"end result\n",
 			reason: "text_tree_unterminated",
 		},
 		{
 			name: "omitted tree",
-			text: "result v3 is_error=false\nobservation\n id=\"O1\"\n\n" +
+			text: "result v4 ok\nobs O4821_1\n\n" +
 				"tree v4 omitted reason=ref_format\nend result\n",
 			reason: "text_result_block_omitted",
 		},
 		{
 			name: "duplicate path",
-			text: "result v3 is_error=false\njson v1 path=\"/status\" value=\"a\"\n" +
-				"json v1 path=\"/status\" value=\"b\"\nend result\n",
+			text: "result v4 ok\njson v1 path=\"/blocking_code\" value=\"a\"\n" +
+				"json v1 path=\"/blocking_code\" value=\"b\"\nend result\n",
 			reason: "text_result_path_duplicate",
 		},
 		{
+			name:   "duplicate scalar",
+			text:   "result v4 ok\ncan_start=true\ncan_start=false\nend result\n",
+			reason: "text_result_path_duplicate",
+		},
+		{
+			name:   "illegal boolean token",
+			text:   "result v4 ok\ncan_start=1\nend result\n",
+			reason: "text_result_value_invalid",
+		},
+		{
 			name: "legacy tree defaults line",
-			text: "result v3 is_error=false\nobservation\n id=\"O1\"\n\n" +
+			text: "result v4 ok\nobs O4821_1\n\n" +
 				"tree v4 full nodes=1\n" +
 				"defaults {\"checked\":false}\n\nn1 root 0,0,1080,2400\nend tree\nend result\n",
 			reason: "text_tree_separator_invalid",
 		},
 		{
 			name: "legacy inspection defaults line",
-			text: "result v3 is_error=false\n\n" +
-				"inspect v3 scope=tree observation=O1 revision=1 captured_at=now " +
+			text: "result v4 ok\n\n" +
+				"inspect v3 scope=tree observation=O1 revision=1 captured_at=22:00:00 " +
 				"tree_scope=reported_visible_with_context view=detailed nodes=1 entries=1\n" +
 				"defaults {\"checked\":false}\n\nn1 root [0,0,1080,2400]\nend inspect\nend result\n",
 			reason: "text_inspect_separator_invalid",
 		},
 		{
 			name: "defaults line inside tree body",
-			text: "result v3 is_error=false\nobservation\n id=\"O1\"\n\n" +
+			text: "result v4 ok\nobs O4821_1\n\n" +
 				"tree v4 full nodes=1\n\n" +
 				"defaults {\"checked\":false}\nn1 root 0,0,1080,2400\nend tree\nend result\n",
 			reason: "text_tree_body_invalid",
 		},
 		{
 			name: "full node writes checked default",
-			text: "result v3 is_error=false\nobservation\n id=\"O1\"\n\n" +
+			text: "result v4 ok\nobs O4821_1\n\n" +
 				"tree v4 full nodes=1\n\n" +
 				"n1 root 0,0,1080,2400 checked=false\nend tree\nend result\n",
 			reason: "text_tree_flag_default",
 		},
 		{
 			name: "full node writes enabled default",
-			text: "result v3 is_error=false\nobservation\n id=\"O1\"\n\n" +
+			text: "result v4 ok\nobs O4821_1\n\n" +
 				"tree v4 full nodes=1\n\n" +
 				"n1 root 0,0,1080,2400 enabled=true\nend tree\nend result\n",
 			reason: "text_tree_flag_default",
 		},
 		{
-			name: "full node writes focused default",
-			text: "result v3 is_error=false\nobservation\n id=\"O1\"\n\n" +
-				"tree v4 full nodes=1\n\n" +
-				"n1 root 0,0,1080,2400 focused=false\nend tree\nend result\n",
-			reason: "text_tree_flag_default",
-		},
-		{
 			name: "inspection node writes checked default",
-			text: "result v3 is_error=false\n\n" +
-				"inspect v3 scope=tree observation=O1 revision=1 captured_at=now " +
+			text: "result v4 ok\n\n" +
+				"inspect v3 scope=tree observation=O1 revision=1 captured_at=22:00:00 " +
 				"tree_scope=reported_visible_with_context view=detailed nodes=1 entries=1\n\n" +
 				"n1 root [0,0,1080,2400] checked=false\nend inspect\nend result\n",
 			reason: "text_inspect_flag_default",
@@ -797,12 +988,12 @@ func TestDecodeResultTextRejectsIncompleteProjection(t *testing.T) {
 }
 
 func TestDecodeResultTextJSONPointer(t *testing.T) {
-	text := "result v3 is_error=false\n" +
+	text := "result v4 ok\n" +
 		"json v1 path=\"/future/a~1b~0c\" value={\"value\":1}\n" +
 		"end result\n"
 	decoded, failure := decodeResultText(text)
 	if failure != nil {
-		t.Fatalf("decodeResultText: %v", failure.reason)
+		t.Fatalf("decodeResultText: %s", failure.reason)
 	}
 	value, ok := lookupPath(decoded.object, []string{"future", "a/b~c", "value"})
 	number, integer := valueInteger(value)
@@ -812,19 +1003,18 @@ func TestDecodeResultTextJSONPointer(t *testing.T) {
 }
 
 func TestDecodeResultTextJSONFallbackNumericObjectKey(t *testing.T) {
-	text := "result v3 is_error=false\n" +
-		"json v1 path=\"/observation/quality/0\" value=\"unknown\"\n" +
-		"observation\n" +
-		" quality.state=good\n" +
+	text := "result v4 ok\n" +
+		"json v1 path=\"/future/0\" value=\"unknown\"\n" +
+		"json v1 path=\"/future/name\" value=\"kept\"\n" +
 		"end result\n"
 	decoded, failure := decodeResultText(text)
 	if failure != nil {
 		t.Fatalf("decodeResultText: %s %v", failure.reason, failure.fields)
 	}
-	quality, ok := lookupPath(decoded.object, []string{"observation", "quality"})
-	qualityObject, object := quality.(map[string]any)
-	if !ok || !object || qualityObject["0"] != "unknown" || qualityObject["state"] != "good" {
-		t.Fatalf("quality object = %#v", quality)
+	future, ok := lookupPath(decoded.object, []string{"future"})
+	futureObject, object := future.(map[string]any)
+	if !ok || !object || futureObject["0"] != "unknown" || futureObject["name"] != "kept" {
+		t.Fatalf("future object = %#v", future)
 	}
 
 	root := map[string]any{
@@ -844,7 +1034,7 @@ func TestDecodeResultTextJSONFallbackNumericObjectKey(t *testing.T) {
 // not reject explicit unknown values, explicit non-default known values, delta
 // set false, or a quoted label that merely looks like a state member.
 func TestDecodeResultTextAcceptsTriStateContract(t *testing.T) {
-	text := "result v3 is_error=false\nobservation\n id=\"O1\"\n\n" +
+	text := "result v4 ok\nobs O4821_1\n\n" +
 		"tree v4 full nodes=3\n\n" +
 		"n1 root 0,0,1080,2400\n" +
 		" n2 text \"checked=false is a label\" value=\"x\" enabled=false focused=true selected=null protected=null checked=null\n" +
@@ -854,8 +1044,8 @@ func TestDecodeResultTextAcceptsTriStateContract(t *testing.T) {
 		t.Fatalf("valid tri-state full tree rejected: %s %v", failure.reason, failure.fields)
 	}
 
-	delta := "result v3 is_error=false\nobservation\n id=\"O2\"\n\n" +
-		"tree v4 delta base=O1 changes=2\n\n" +
+	delta := "result v4 ok\nobs O4821_2\n\n" +
+		"tree v4 delta base=O4821_1 changes=2\n\n" +
 		"~ n2 checked=false focused=null\n" +
 		"+ n4 text 0,0,10,10 checked=true\n" +
 		"end tree\nend result\n"
@@ -863,8 +1053,8 @@ func TestDecodeResultTextAcceptsTriStateContract(t *testing.T) {
 		t.Fatalf("valid delta set rejected: %s %v", failure.reason, failure.fields)
 	}
 
-	inspection := "result v3 is_error=false\n\n" +
-		"inspect v3 scope=query observation=O1 revision=1 captured_at=now " +
+	inspection := "result v4 ok\n\n" +
+		"inspect v3 scope=query observation=O1 revision=1 captured_at=22:00:00 " +
 		"tree_scope=reported_visible_with_context view=detailed matches=1 total=1 truncated=false nodes=1 entries=1\n\n" +
 		"match 1/1 path=[n1 n2]\nn3 text [0,0,10,10] checked=null\nend inspect\nend result\n"
 	if _, failure := decodeResultText(inspection); failure != nil {
@@ -896,18 +1086,18 @@ func TestDecodeResultTextV4Blocks(t *testing.T) {
 		"- n3\n" +
 		"children n4 = [n5 n6]\n" +
 		"end tree\n"
-	inspectTree := "inspect v3 scope=tree observation=O1 revision=1 captured_at=now " +
+	inspectTree := "inspect v3 scope=tree observation=O1 revision=1 captured_at=22:00:00 " +
 		"tree_scope=reported_visible_with_context view=detailed nodes=3 entries=3\n\n" +
 		"n1 root [0,0,1080,2400]\n" +
 		"  n2 text [0,0,10,10] \"Hello\" value=\"v\"\n" +
 		"  n3 view [0,0,20,20] text\n" +
 		"end inspect\n"
-	inspectSubtree := "inspect v3 scope=subtree observation=O1 revision=1 captured_at=now " +
+	inspectSubtree := "inspect v3 scope=subtree observation=O1 revision=1 captured_at=22:00:00 " +
 		"tree_scope=reported_visible_with_context view=detailed root=n5 nodes=2 entries=2\n\n" +
 		"n5 group [0,0,10,10] \"sub\"\n" +
 		"  n6 [0,0,5,5] tap\n" +
 		"end inspect\n"
-	inspectQuery := "inspect v3 scope=query observation=O1 revision=1 captured_at=now " +
+	inspectQuery := "inspect v3 scope=query observation=O1 revision=1 captured_at=22:00:00 " +
 		"tree_scope=reported_visible_with_context view=detailed " +
 		"matches=2 total=2 truncated=false nodes=3 entries=3\n\n" +
 		"match 1/2 path=[n1 n2]\n" +
@@ -926,30 +1116,30 @@ func TestDecodeResultTextV4Blocks(t *testing.T) {
 	}{
 		{
 			name: "full",
-			text: "result v3 is_error=false\nobservation\n id=Otest_1\n\n" + full + "end result\n",
+			text: "result v4 ok\nobs Otest_1\n\n" + full + "end result\n",
 		},
 		{
 			name: "delta",
-			text: "result v3 is_error=false\nobservation\n id=Otest_2\n\n" + delta + "end result\n",
+			text: "result v4 ok\nobs Otest_2\n\n" + delta + "end result\n",
 		},
 		{
 			name:  "inspect tree",
-			text:  "result v3 is_error=false\n\n" + inspectTree + "end result\n",
+			text:  "result v4 ok\n\n" + inspectTree + "end result\n",
 			scope: "tree",
 		},
 		{
 			name:  "inspect subtree",
-			text:  "result v3 is_error=false\n\n" + inspectSubtree + "end result\n",
+			text:  "result v4 ok\n\n" + inspectSubtree + "end result\n",
 			scope: "subtree",
 		},
 		{
 			name:  "inspect query",
-			text:  "result v3 is_error=false\n\n" + inspectQuery + "end result\n",
+			text:  "result v4 ok\n\n" + inspectQuery + "end result\n",
 			scope: "query",
 		},
 		{
 			name: "empty delta",
-			text: "result v3 is_error=false\nobservation\n id=Otest_3\n\n" +
+			text: "result v4 ok\nobs Otest_3\n\n" +
 				"tree v4 delta base=_1 changes=0\n\n" +
 				"end tree\nend result\n",
 		},
@@ -973,90 +1163,8 @@ func TestDecodeResultTextV4Blocks(t *testing.T) {
 	}
 }
 
-func TestDecodeResultTextV3ObservationGroups(t *testing.T) {
-	lateTree := "result v3 is_error=false\n\n" +
-		"tree v4 full nodes=1\n\n" +
-		"n1 root 0,0,1080,2400\n" +
-		"end tree\n" +
-		"observation\n id=Olate_1\n status=complete\n" +
-		"end result\n"
-	decoded, failure := decodeResultText(lateTree)
-	if failure != nil {
-		t.Fatalf("late observation id rejected: %s %v", failure.reason, failure.fields)
-	}
-	if decoded.view.Observation == nil || decoded.view.Observation.ID != "Olate_1" ||
-		decoded.view.Observation.Status != observationComplete {
-		t.Fatalf("late observation group = %+v", decoded.view.Observation)
-	}
-
-	rootNull := "result v3 is_error=false\nobservation=null\nend result\n"
-	decoded, failure = decodeResultText(rootNull)
-	if failure != nil || decoded.object["observation"] != nil {
-		t.Fatalf("root observation null = %+v, %v", decoded, failure)
-	}
-
-	cases := []struct {
-		name   string
-		text   string
-		reason string
-	}{
-		{
-			name:   "direct path",
-			text:   "result v3 is_error=false\nobservation.id=O1\nend result\n",
-			reason: "text_result_observation_group_required",
-		},
-		{
-			name: "empty group",
-			text: "result v3 is_error=false\nobservation\n\n" +
-				"inspect v3 scope=query observation=O1 revision=1 captured_at=now " +
-				"tree_scope=reported_visible_with_context view=detailed matches=0 nodes=0 entries=0\n\n" +
-				"end inspect\nend result\n",
-			reason: "text_result_observation_group_empty",
-		},
-		{
-			name:   "double space field",
-			text:   "result v3 is_error=false\nobservation\n  id=O1\nend result\n",
-			reason: "text_result_observation_group_invalid",
-		},
-		{
-			name: "duplicate across groups",
-			text: "result v3 is_error=false\nobservation\n id=O1\n" +
-				"observation\n id=O1\nend result\n",
-			reason: "text_result_path_duplicate",
-		},
-		{
-			name: "ancestor child conflict across groups",
-			text: "result v3 is_error=false\nobservation\n quality=null\n" +
-				"observation\n quality.state=stable\nend result\n",
-			reason: "text_result_path_conflict",
-		},
-		{
-			name: "child ancestor conflict across groups",
-			text: "result v3 is_error=false\nobservation\n quality.state=stable\n" +
-				"observation\n quality=null\nend result\n",
-			reason: "text_result_path_conflict",
-		},
-		{
-			name: "tree owner id from fallback",
-			text: "result v3 is_error=false\n" +
-				"json v1 path=\"/observation/id\" value=\"O1\"\n\n" +
-				"tree v4 full nodes=1\n\nn1 root 0,0,1080,2400\nend tree\nend result\n",
-			reason: "text_tree_id_group_required",
-		},
-	}
-	for _, testCase := range cases {
-		t.Run(testCase.name, func(t *testing.T) {
-			if _, failure := decodeResultText(testCase.text); failure == nil ||
-				failure.reason != testCase.reason {
-				t.Fatalf("failure = %v, want %s", failure, testCase.reason)
-			}
-		})
-	}
-}
-
 func TestShortTreeBaseUsesUint64Sequence(t *testing.T) {
-	text := "result v3 is_error=false\nobservation\n" +
-		" id=Otest_18446744073709551615\n\n" +
+	text := "result v4 ok\nobs Otest_18446744073709551615\n\n" +
 		"tree v4 delta base=_18446744073709551615 changes=0\n\n" +
 		"end tree\nend result\n"
 	decoded, failure := decodeResultText(text)
@@ -1083,12 +1191,12 @@ func TestTreeTextOUsesV4TokenGrammar(t *testing.T) {
 		}
 	}
 
-	full := "result v3 is_error=false\nobservation\n id=Oabc+foo_2\n\n" +
+	full := "result v4 ok\nobs Oabc+foo_2\n\n" +
 		"tree v4 full nodes=1\n\nn1 root 0,0,1080,2400\nend tree\nend result\n"
 	if _, failure := decodeResultText(full); failure != nil {
 		t.Fatalf("full v4 O rejected: %s %v", failure.reason, failure.fields)
 	}
-	fullMaxO := "result v3 is_error=false\nobservation\n id=" + maxO + "\n\n" +
+	fullMaxO := "result v4 ok\nobs " + maxO + "\n\n" +
 		"tree v4 full nodes=1\n\nn1 root 0,0,1080,2400\nend tree\nend result\n"
 	if _, failure := decodeResultText(fullMaxO); failure != nil {
 		t.Fatalf("64-byte v4 O rejected: %s %v", failure.reason, failure.fields)
@@ -1098,544 +1206,189 @@ func TestTreeTextOUsesV4TokenGrammar(t *testing.T) {
 		observation); failure != nil {
 		t.Fatalf("64-byte tree block O rejected: %s %v", failure.reason, failure.fields)
 	}
-
-	delta := "result v3 is_error=false\nobservation\n id=Oabc+foo_2\n\n" +
-		"tree v4 delta base=_1 changes=0\n\nend tree\nend result\n"
-	decoded, failure := decodeResultText(delta)
-	if failure != nil {
-		t.Fatalf("short v4 O base rejected: %s %v", failure.reason, failure.fields)
-	}
-	base, ok := lookupPath(decoded.object, []string{"observation", "tree", "base"})
-	if !ok || base != "Oabc+foo_1" {
-		t.Fatalf("punctuated base = %#v, %v", base, ok)
-	}
-
-	maxCurrent := "Oabc+" + strings.Repeat("x", 57) + "_7"
-	if len(maxCurrent) != 64 {
-		t.Fatalf("test O length = %d", len(maxCurrent))
-	}
-	lateDelta := "result v3 is_error=false\n\n" +
-		"tree v4 delta base=_6 changes=0\n\nend tree\n" +
-		"observation\n id=" + maxCurrent + "\n" +
-		"end result\n"
-	decoded, failure = decodeResultText(lateDelta)
-	if failure != nil {
-		t.Fatalf("late 64-byte current O rejected: %s %v", failure.reason, failure.fields)
-	}
-	base, ok = lookupPath(decoded.object, []string{"observation", "tree", "base"})
-	if !ok || base != maxCurrent[:len(maxCurrent)-1]+"6" {
-		t.Fatalf("late max O base = %#v, %v", base, ok)
-	}
-
-	overflow := "result v3 is_error=false\nobservation\n id=" + maxCurrent + "\n\n" +
-		"tree v4 delta base=_12 changes=0\n\nend tree\nend result\n"
-	if _, failure := decodeResultText(overflow); failure == nil ||
-		failure.reason != "text_tree_base_expanded_invalid" {
-		t.Fatalf("expanded 65-byte base = %v", failure)
-	}
 }
 
 func TestDecodeResultTextActionReconstructionSyntax(t *testing.T) {
-	valid := []struct {
-		name string
-		text string
-	}{
-		{
-			name: "explicit default permits full source list order",
-			text: "result v3 is_error=false\nobservation\n id=O1\n\n" +
-				"tree v4 full nodes=2\n\n" +
-				"n1 root 0,0,1080,2400\n" +
-				" n2 button 0,0,10,10 swipe long_press tap\nend tree\nend result\n",
-		},
-		{
-			name: "negated default preserves full source list order",
-			text: "result v3 is_error=false\nobservation\n id=O1\n\n" +
-				"tree v4 full nodes=2\n\n" +
-				"n1 root 0,0,1080,2400\n" +
-				" n2 button 0,0,10,10 swipe long_press !tap\nend tree\nend result\n",
-		},
-		{
-			name: "explicit default preserves duplicate actions",
-			text: "result v3 is_error=false\nobservation\n id=O1\n\n" +
-				"tree v4 full nodes=2\n\n" +
-				"n1 root 0,0,1080,2400\n" +
-				" n2 button 0,0,10,10 tap swipe tap tap\nend tree\nend result\n",
-		},
-		{
-			name: "negated default preserves duplicate actions",
-			text: "result v3 is_error=false\nobservation\n id=O1\n\n" +
-				"tree v4 full nodes=2\n\n" +
-				"n1 root 0,0,1080,2400\n" +
-				" n2 button 0,0,10,10 swipe long_press long_press !tap\nend tree\nend result\n",
-		},
-		{
-			name: "inferred source order permits repeated non-default actions",
-			text: "result v3 is_error=false\nobservation\n id=O1\n\n" +
-				"tree v4 full nodes=2\n\n" +
-				"n1 root 0,0,1080,2400\n" +
-				" n2 button 0,0,10,10 long_press long_press swipe\nend tree\nend result\n",
-		},
-		{
-			name: "inspect explicit actions retain wire order",
-			text: "result v3 is_error=false\n\n" +
-				"inspect v3 scope=tree observation=O1 revision=1 captured_at=now " +
-				"tree_scope=reported_visible_with_context view=detailed nodes=2 entries=2\n\n" +
-				"n1 root [0,0,1080,2400]\n" +
-				"  n2 button [0,0,10,10] swipe tap tap long_press\nend inspect\nend result\n",
-		},
-		{
-			name: "inspect empty action list stays empty",
-			text: "result v3 is_error=false\n\n" +
-				"inspect v3 scope=tree observation=O1 revision=1 captured_at=now " +
-				"tree_scope=reported_visible_with_context view=detailed nodes=2 entries=2\n\n" +
-				"n1 root [0,0,1080,2400]\n" +
-				"  n2 button [0,0,10,10] checked=null\nend inspect\nend result\n",
-		},
+	valid := []string{
+		"result v4 ok\nobs O4821_1\n\n" +
+			"tree v4 full nodes=1\n\nn1 root 0,0,1080,2400\nend tree\nend result\n",
+		"result v4 ok\nobs O4821_1\n\n" +
+			"tree v4 full nodes=2\n\nn1 root 0,0,1080,2400\n n2 button 0,0,1,1\nend tree\nend result\n",
+		"result v4 ok\nobs O4821_1\n\n" +
+			"tree v4 full nodes=2\n\nn1 root 0,0,1080,2400\n n2 button 0,0,1,1 tap\nend tree\nend result\n",
+		"result v4 ok\nobs O4821_1\n\n" +
+			"tree v4 full nodes=2\n\nn1 root 0,0,1080,2400\n n2 button 0,0,1,1 tap long_press\nend tree\nend result\n",
+		"result v4 ok\nobs O4821_1\n\n" +
+			"tree v4 full nodes=2\n\nn1 root 0,0,1080,2400\n n2 button 0,0,1,1 tap long_press text swipe\nend tree\nend result\n",
 	}
-	for _, testCase := range valid {
-		t.Run(testCase.name, func(t *testing.T) {
-			if _, failure := decodeResultText(testCase.text); failure != nil {
-				t.Fatalf("valid action list rejected: %s %v", failure.reason, failure.fields)
-			}
-		})
+	for _, text := range valid {
+		if _, failure := decodeResultText(text); failure != nil {
+			t.Fatalf("valid action reconstruction rejected: %s %v", failure.reason, failure.fields)
+		}
 	}
-
-	invalid := []struct {
-		name   string
-		text   string
-		reason string
-	}{
-		{
-			name: "omitted default requires remaining source order",
-			text: "result v3 is_error=false\nobservation\n id=O1\n\n" +
-				"tree v4 full nodes=2\n\n" +
-				"n1 root 0,0,1080,2400\n" +
-				" n2 button 0,0,10,10 swipe long_press\nend tree\nend result\n",
-			reason: "text_tree_body_invalid",
-		},
-		{
-			name: "input omitted default requires remaining source order",
-			text: "result v3 is_error=false\nobservation\n id=O1\n\n" +
-				"tree v4 full nodes=2\n\n" +
-				"n1 root 0,0,1080,2400\n" +
-				" n2 input 0,0,10,10 swipe tap\nend tree\nend result\n",
-			reason: "text_tree_body_invalid",
-		},
-		{
-			name: "inspect rejects v4 action negation",
-			text: "result v3 is_error=false\n\n" +
-				"inspect v3 scope=tree observation=O1 revision=1 captured_at=now " +
-				"tree_scope=reported_visible_with_context view=detailed nodes=2 entries=2\n\n" +
-				"n1 root [0,0,1080,2400]\n" +
-				"  n2 button [0,0,10,10] long_press !tap\nend inspect\nend result\n",
-			reason: "text_inspect_body_invalid",
-		},
+	invalid := []string{
+		"result v4 ok\nobs O4821_1\n\n" +
+			"tree v4 full nodes=2\n\nn1 root 0,0,1080,2400\n n2 button 0,0,1,1 !tap tap\nend tree\nend result\n",
+		"result v4 ok\nobs O4821_1\n\n" +
+			"tree v4 full nodes=2\n\nn1 root 0,0,1080,2400\n n2 view 0,0,1,1 !tap\nend tree\nend result\n",
+		"result v4 ok\nobs O4821_1\n\n" +
+			"tree v4 full nodes=2\n\nn1 root 0,0,1080,2400\n n2 button 0,0,1,1 tap swipe tap\nend tree\nend result\n",
 	}
-	for _, testCase := range invalid {
-		t.Run(testCase.name, func(t *testing.T) {
-			if _, failure := decodeResultText(testCase.text); failure == nil ||
-				failure.reason != testCase.reason {
-				t.Fatalf("failure = %v, want %s", failure, testCase.reason)
-			}
-		})
-	}
-}
-
-// TestCompactTreeCheckRejectsOnlyNewChainOutput keeps historical chain parsing
-// available while making a current observation fail if it still emits a folded
-// chain. Labels that merely contain the word "chain" are ordinary text.
-func TestCompactTreeCheckRejectsOnlyNewChainOutput(t *testing.T) {
-	text := "result v3 is_error=false\nobservation\n id=O1\n\n" +
-		"tree v4 full nodes=3\n\n" +
-		"n1 root 0,0,1080,2400\n" +
-		" chain [n2 n3] group 0,0,10,10\n" +
-		"end tree\nend result\n"
-	observation := &observationView{ID: "O1", Tree: &treeView{Format: treeFull}}
-	if _, failure := decodeResultText(text); failure != nil {
-		t.Fatalf("historical chain parser rejected: %s %v", failure.reason, failure.fields)
-	}
-	if failure := checkObservationTreeBlock(&callResult{texts: []string{text}},
-		observation); failure == nil || failure.reason != "tree_chain_present" {
-		t.Fatalf("new chain output check = %v, want tree_chain_present", failure)
-	}
-
-	ordinary := "result v3 is_error=false\nobservation\n id=O2\n\n" +
-		"tree v4 full nodes=2\n\n" +
-		"n1 root 0,0,1080,2400\n" +
-		" n2 text \"chain [not a definition]\"\n" +
-		"end tree\nend result\n"
-	if containsCompactTreeChain(ordinary) {
-		t.Fatal("quoted label was mistaken for a chain definition")
-	}
-
-	fallback := "result v3 is_error=false\nobservation\n id=O3\n" +
-		"json v1 path=\"/observation/tree\" value={\"format\":\"full\",\"scope\":\"reported_visible_with_context\",\"view\":\"compact\",\"root\":{\"ref\":\"n1\",\"role\":\"root\",\"bounds\":[0,0,1080,2400]}}\n" +
-		"end result\n"
-	fallbackObservation := &observationView{ID: "O3", Tree: &treeView{Format: treeFull}}
-	if failure := checkObservationTreeBlock(&callResult{texts: []string{fallback}},
-		fallbackObservation); failure == nil || failure.reason != "text_tree_block_missing" {
-		t.Fatalf("fallback tree projection = %v, want text_tree_block_missing", failure)
+	for _, text := range invalid {
+		if _, failure := decodeResultText(text); failure == nil {
+			t.Fatalf("invalid action reconstruction accepted")
+		}
 	}
 }
 
 func TestDecodeResultTextRejectsLegacyAndMissingBlocks(t *testing.T) {
-	legacyResult := "result v2 is_error=false\nstatus=complete\nend result\n"
+	legacyResult := "result v2 is_error=false\nblocking_code=complete\nend result\n"
 	if _, failure := decodeResultText(legacyResult); failure == nil ||
 		failure.reason != "text_result_header_invalid" {
-		t.Fatalf("legacy result header = %v, want text_result_header_invalid", failure)
+		t.Fatalf("legacy result = %v", failure)
 	}
-	legacyTree := "result v3 is_error=false\nobservation\n id=O1\n\n" +
-		"tree v3 format=full id=O1 scope=reported_visible_with_context " +
-		"view=compact nodes=1 entries=1\n\n" +
-		"n1 root [0,0,1080,2400]\nend tree\nend result\n"
-	legacyInspect := "result v3 is_error=false\n\n" +
-		"inspect v2 scope=tree observation=O1 revision=1 captured_at=now " +
+	legacyV3 := "result v3 is_error=false\nend result\n"
+	if _, failure := decodeResultText(legacyV3); failure == nil ||
+		failure.reason != "text_result_header_invalid" {
+		t.Fatalf("result v3 accepted: %v", failure)
+	}
+	legacyTree := "result v4 ok\nobs O4821_1\n\n" +
+		"tree v3 full nodes=1\n\nn1 root 0,0,1080,2400\nend tree\nend result\n"
+	legacyInspect := "result v4 ok\n\n" +
+		"inspect v2 scope=tree observation=O1 revision=1 captured_at=22:00:00 " +
 		"tree_scope=reported_visible_with_context view=detailed nodes=1 entries=1\n\n" +
 		"n1 root [0,0,1080,2400]\nend inspect\nend result\n"
-	legacyTreeWithoutSeparator := "result v3 is_error=false\nstatus=complete\n" +
-		"tree v3 format=full id=O1 scope=reported_visible_with_context " +
-		"view=compact nodes=1 entries=1\n\n" +
-		"n1 root [0,0,1080,2400]\nend tree\nend result\n"
+	legacyTreeWithoutSeparator := "result v4 ok\nblocking_code=complete\n" +
+		"tree v4 full nodes=1\n\nn1 root 0,0,1080,2400\nend tree\nend result\n"
 	for name, text := range map[string]string{
-		"tree v3 after blank":       legacyTree,
-		"tree v3 without separator": legacyTreeWithoutSeparator,
-		"inspect v2 after blank":    legacyInspect,
+		"legacy tree":                   legacyTree,
+		"legacy inspect":                legacyInspect,
+		"legacy tree without separator": legacyTreeWithoutSeparator,
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, failure := decodeResultText(text); failure == nil {
-				t.Fatal("legacy block was accepted")
+			if _, failure := decodeResultText(text); failure == nil ||
+				failure.reason != "text_result_block_unknown" && failure.reason != "text_result_block_separator_missing" {
+				t.Fatalf("failure = %v", failure)
 			}
 		})
-	}
-
-	observation := &observationView{ID: "O1", Tree: &treeView{Format: treeFull}}
-	projected := &callResult{texts: []string{legacyTree}}
-	if failure := checkObservationTreeBlock(projected, observation); failure == nil ||
-		failure.reason != "text_tree_block_missing" {
-		t.Fatalf("legacy tree block check = %v, want text_tree_block_missing", failure)
-	}
-	projected.texts = []string{"result v3 is_error=false\nobservation\n id=O1\nend result\n"}
-	if failure := checkObservationTreeBlock(projected, observation); failure == nil ||
-		failure.reason != "text_tree_block_missing" {
-		t.Fatalf("missing tree block check = %v, want text_tree_block_missing", failure)
-	}
-	if _, failure := treeBlockText(&callResult{texts: []string{legacyInspect}},
-		"inspect v3 scope=tree observation=O1"); failure == nil ||
-		failure.reason != "text_inspect_block_missing" {
-		t.Fatalf("legacy inspect block check = %v, want text_inspect_block_missing", failure)
-	}
-	inspection := &inspectionView{ObservationID: "O1", Scope: "tree"}
-	if failure := checkInspectionTreeBlock(&callResult{texts: []string{legacyInspect}},
-		inspection, "O1"); failure == nil ||
-		failure.reason != "text_inspect_block_missing" {
-		t.Fatalf("legacy inspect check = %v, want text_inspect_block_missing", failure)
-	}
-	missing := "result v3 is_error=false\ninspection.observation_id=O1\nend result\n"
-	if failure := checkInspectionTreeBlock(&callResult{texts: []string{missing}},
-		inspection, "O1"); failure == nil ||
-		failure.reason != "text_inspect_block_missing" {
-		t.Fatalf("missing inspect check = %v, want text_inspect_block_missing", failure)
 	}
 }
 
 func TestV4BlockChecksRequireCompleteBlocks(t *testing.T) {
-	tree := "result v3 is_error=false\nobservation\n id=O1\n\n" +
-		"tree v4 full nodes=1\n\n" +
-		"n1 root 0,0,1080,2400\nend tree\nend result\n"
-	observation := &observationView{ID: "O1", Tree: &treeView{Format: treeFull}}
-	if failure := checkObservationTreeBlock(&callResult{texts: []string{tree}},
-		observation); failure != nil {
-		t.Fatalf("complete v4 tree rejected: %s %v", failure.reason, failure.fields)
+	projected := &callResult{texts: []string{
+		"result v4 ok\nobs O4821_1\n\n" +
+			"tree v4 full nodes=1\n\nn1 root 0,0,1080,2400\nend tree\nend result\n",
+	}}
+	block, failure := treeBlockText(projected, "tree v4 full nodes=")
+	if failure != nil {
+		t.Fatalf("complete tree block rejected: %s", failure.reason)
 	}
-	unterminated := "result v3 is_error=false\nobservation\n id=O1\n\n" +
-		"tree v4 full nodes=1\n\n" +
-		"n1 root 0,0,1080,2400\nend result\n"
-	if failure := checkObservationTreeBlock(&callResult{texts: []string{unterminated}},
-		observation); failure == nil || failure.reason != "text_block_unterminated" {
-		t.Fatalf("unterminated tree check = %v, want text_block_unterminated", failure)
+	if !strings.HasSuffix(block, "end tree\n") {
+		t.Fatalf("tree block = %q", block)
 	}
 
-	delta := "result v3 is_error=false\nobservation\n id=Otest_2\n\n" +
-		"tree v4 delta base=_1 changes=0\n\nend tree\nend result\n"
-	deltaObservation := &observationView{
-		ID:   "Otest_2",
-		Tree: &treeView{Format: treeDelta, Base: "Otest_1"},
-	}
-	if failure := checkObservationTreeBlock(&callResult{texts: []string{delta}},
-		deltaObservation); failure != nil {
-		t.Fatalf("expanded short base rejected: %s %v", failure.reason, failure.fields)
-	}
-	deltaObservation.Tree.Base = "Otest_9"
-	if failure := checkObservationTreeBlock(&callResult{texts: []string{delta}},
-		deltaObservation); failure == nil || failure.reason != "text_tree_base_mismatch" {
-		t.Fatalf("base mismatch check = %v", failure)
+	missing := "result v4 ok\nobs O4821_1\n\n" +
+		"tree v4 full nodes=1\n\nn1 root 0,0,1080,2400\nend result\n"
+	if _, failure := decodeResultText(missing); failure == nil ||
+		failure.reason != "text_tree_unterminated" {
+		t.Fatalf("unterminated tree = %v", failure)
 	}
 
-	unknownInspect := "result v3 is_error=false\n\n" +
-		"inspect v3 scope=tree observation=O1 revision=1 captured_at=now " +
-		"tree_scope=reported_visible_with_context view=detailed nodes=1 entries=1\n\n" +
-		"n1 root -\nend inspect\nend result\n"
-	if _, failure := decodeResultText(unknownInspect); failure != nil {
-		t.Fatalf("inspect unknown geometry rejected: %s %v", failure.reason, failure.fields)
-	}
-
-	inspect := "result v3 is_error=false\n\n" +
-		"inspect v3 scope=tree observation=O1 revision=1 captured_at=now " +
-		"tree_scope=reported_visible_with_context view=detailed nodes=1 entries=1\n\n" +
-		"n1 root [0,0,1080,2400]\nend inspect\nend result\n"
-	inspection := &inspectionView{ObservationID: "O1", Scope: "tree"}
-	if failure := checkInspectionTreeBlock(&callResult{texts: []string{inspect}},
-		inspection, "O1"); failure != nil {
-		t.Fatalf("complete v3 inspect rejected: %s %v", failure.reason, failure.fields)
+	projected.texts = []string{"result v4 ok\nobs O4821_1\nend result\n"}
+	if _, failure := treeBlockText(projected, "tree v4 full nodes="); failure == nil ||
+		failure.reason != "text_tree_block_missing" {
+		t.Fatalf("missing tree block = %v", failure)
 	}
 }
 
 func TestDecodeResultTextV4RejectsInvalidBodies(t *testing.T) {
-	fullHeader := "tree v4 full nodes="
 	cases := []struct {
 		name   string
 		text   string
 		reason string
 	}{
 		{
-			name: "full nodes mismatch",
-			text: "result v3 is_error=false\nobservation\n id=O1\n\n" +
-				fullHeader + "2\n\n" +
-				"n1 root 0,0,1080,2400\nend tree\nend result\n",
-			reason: "text_tree_count_mismatch",
-		},
-		{
-			name: "full count not canonical",
-			text: "result v3 is_error=false\nobservation\n id=O1\n\n" +
-				fullHeader + "01\n\n" +
-				"n1 root 0,0,1080,2400\nend tree\nend result\n",
+			name: "tree full count invalid",
+			text: "result v4 ok\nobs O4821_1\n\n" +
+				"tree v4 full nodes=0\n\nend tree\nend result\n",
 			reason: "text_tree_count_invalid",
 		},
 		{
-			name: "full count overflow",
-			text: "result v3 is_error=false\nobservation\n id=O1\n\n" +
-				fullHeader + "999999999999999999999999999\n\n" +
-				"n1 root 0,0,1080,2400\nend tree\nend result\n",
-			reason: "text_tree_count_invalid",
+			name: "tree full count mismatch",
+			text: "result v4 ok\nobs O4821_1\n\n" +
+				"tree v4 full nodes=2\n\nn1 root 0,0,1080,2400\nend tree\nend result\n",
+			reason: "text_tree_count_mismatch",
+		}, {
+			name: "tree delta base invalid",
+			text: "result v4 ok\nobs O4821_1\n\n" +
+				"tree v4 delta base=_0 changes=0\n\nend tree\nend result\n",
+			reason: "text_tree_base_invalid",
 		},
 		{
-			name: "delta changes mismatch",
-			text: "result v3 is_error=false\nobservation\n id=O2\n\n" +
-				"tree v4 delta base=O1 changes=2\n\n" +
-				"~ n2 checked=false\nend tree\nend result\n",
+			name: "tree missing observation id",
+			text: "result v4 ok\n\n" +
+				"tree v4 delta base=O4821_1 changes=0\n\nend tree\nend result\n",
+			reason: "text_tree_id_missing",
+		},
+		{
+			name: "tree id outside obs line",
+			text: "result v4 ok\njson v1 path=\"/observation/id\" value=\"O4821_1\"\n\n" +
+				"tree v4 delta base=O4821_1 changes=0\n\nend tree\nend result\n",
+			reason: "text_tree_id_group_required",
+		},
+		{
+			name: "tree count mismatch",
+			text: "result v4 ok\nobs O4821_1\n\n" +
+				"tree v4 delta base=_1 changes=3\n\n~ n2 checked=false\nend tree\nend result\n",
 			reason: "text_tree_count_mismatch",
 		},
 		{
-			name: "short base zero",
-			text: "result v3 is_error=false\nobservation\n id=Otest_2\n\n" +
-				"tree v4 delta base=_0 changes=0\n\n" +
-				"end tree\nend result\n",
-			reason: "text_tree_base_invalid",
+			name: "inspect unknown scope",
+			text: "result v4 ok\n\n" +
+				"inspect v3 scope=page observation=O1 revision=1 captured_at=22:00:00 " +
+				"tree_scope=reported_visible_with_context view=detailed nodes=1 entries=1\n\n" +
+				"n1 root [0,0,1080,2400]\nend inspect\nend result\n",
+			reason: "text_inspect_scope_invalid",
 		},
 		{
-			name: "short base current has no suffix",
-			text: "result v3 is_error=false\nobservation\n id=Otest\n\n" +
-				"tree v4 delta base=_2 changes=0\n\n" +
-				"end tree\nend result\n",
-			reason: "text_tree_base_current_invalid",
+			name: "inspect revision invalid",
+			text: "result v4 ok\n\n" +
+				"inspect v3 scope=tree observation=O1 revision=x captured_at=22:00:00 " +
+				"tree_scope=reported_visible_with_context view=detailed nodes=1 entries=1\n\n" +
+				"n1 root [0,0,1080,2400]\nend inspect\nend result\n",
+			reason: "text_inspect_revision_invalid",
 		},
 		{
-			name: "short base uint64 overflow",
-			text: "result v3 is_error=false\nobservation\n id=Otest_2\n\n" +
-				"tree v4 delta base=_18446744073709551616 changes=0\n\n" +
-				"end tree\nend result\n",
-			reason: "text_tree_base_invalid",
-		},
-		{
-			name: "query matches mismatch",
-			text: "result v3 is_error=false\n\n" +
-				"inspect v3 scope=query observation=O1 revision=1 captured_at=now " +
-				"tree_scope=reported_visible_with_context view=detailed " +
-				"matches=2 total=2 truncated=false nodes=1 entries=1\n\n" +
-				"match 1/1 path=[n1]\nn2 text [0,0,10,10] \"one\"\n" +
-				"end inspect\nend result\n",
+			name: "inspect nodes mismatch",
+			text: "result v4 ok\n\n" +
+				"inspect v3 scope=tree observation=O1 revision=1 captured_at=22:00:00 " +
+				"tree_scope=reported_visible_with_context view=detailed nodes=2 entries=1\n\n" +
+				"n1 root [0,0,1080,2400]\nend inspect\nend result\n",
 			reason: "text_inspect_count_mismatch",
 		},
 		{
-			name: "folded chain rejected",
-			text: "result v3 is_error=false\nobservation\n id=O1\n\n" +
-				fullHeader + "3\n\n" +
-				"n1 root 0,0,1080,2400\n [n10 n11]\nend tree\nend result\n",
-			reason: "text_tree_body_invalid",
-		},
-		{
-			name: "detailed chain",
-			text: "result v3 is_error=false\n\n" +
-				"inspect v3 scope=tree observation=O1 revision=1 captured_at=now " +
-				"tree_scope=reported_visible_with_context view=detailed nodes=2 entries=2\n\n" +
-				"n1 root [0,0,1080,2400]\n" +
-				"  chain [n2 n3] group [0,0,10,10]\nend inspect\nend result\n",
-			reason: "text_inspect_body_invalid",
-		},
-		{
-			name: "detailed omitted geometry",
-			text: "result v3 is_error=false\n\n" +
-				"inspect v3 scope=tree observation=O1 revision=1 captured_at=now " +
+			name: "inspect missing observation",
+			text: "result v4 ok\n\n" +
+				"inspect v3 scope=tree revision=1 captured_at=22:00:00 " +
 				"tree_scope=reported_visible_with_context view=detailed nodes=1 entries=1\n\n" +
-				"n1 root\nend inspect\nend result\n",
-			reason: "text_inspect_body_invalid",
+				"n1 root [0,0,1080,2400]\nend inspect\nend result\n",
+			reason: "text_inspect_observation_missing",
 		},
 		{
-			name: "full root not root",
-			text: "result v3 is_error=false\nobservation\n id=O1\n\n" +
-				fullHeader + "1\n\n" +
-				"n1 view 0,0,1080,2400\nend tree\nend result\n",
-			reason: "text_tree_body_invalid",
+			name: "inspect bad view",
+			text: "result v4 ok\n\n" +
+				"inspect v3 scope=tree observation=O1 revision=1 captured_at=22:00:00 " +
+				"tree_scope=reported_visible_with_context view=compact nodes=1 entries=1\n\n" +
+				"n1 root [0,0,1080,2400]\nend inspect\nend result\n",
+			reason: "text_inspect_view_invalid",
 		},
 		{
-			name: "two-space child indentation",
-			text: "result v3 is_error=false\nobservation\n id=O1\n\n" +
-				fullHeader + "2\n\n" +
-				"n1 root 0,0,1080,2400\n  n2 \"x\"\nend tree\nend result\n",
-			reason: "text_tree_body_invalid",
-		},
-		{
-			name: "tab indentation",
-			text: "result v3 is_error=false\nobservation\n id=O1\n\n" +
-				fullHeader + "2\n\n" +
-				"n1 root 0,0,1080,2400\n\tn2 \"x\"\nend tree\nend result\n",
-			reason: "text_tree_body_invalid",
-		},
-		{
-			name: "depth jump",
-			text: "result v3 is_error=false\nobservation\n id=O1\n\n" +
-				fullHeader + "2\n\n" +
-				"n1 root 0,0,1080,2400\n    n2 \"x\"\nend tree\nend result\n",
-			reason: "text_tree_body_invalid",
-		},
-		{
-			name: "bad geometry",
-			text: "result v3 is_error=false\nobservation\n id=O1\n\n" +
-				fullHeader + "2\n\n" +
-				"n1 root 0,0,1080,2400\n n2 button 0,0,10\nend tree\nend result\n",
-			reason: "text_tree_body_invalid",
-		},
-		{
-			name: "bracketed geometry in v4",
-			text: "result v3 is_error=false\nobservation\n id=O1\n\n" +
-				fullHeader + "2\n\n" +
-				"n1 root 0,0,1080,2400\n n2 button [0,0,10,10]\nend tree\nend result\n",
-			reason: "text_tree_body_invalid",
-		},
-		{
-			name: "coordinate leading zero",
-			text: "result v3 is_error=false\nobservation\n id=O1\n\n" +
-				fullHeader + "2\n\n" +
-				"n1 root 0,0,1080,2400\n n2 button 00,0,10,10\nend tree\nend result\n",
-			reason: "text_tree_body_invalid",
-		},
-		{
-			name: "negative zero coordinate",
-			text: "result v3 is_error=false\nobservation\n id=O1\n\n" +
-				fullHeader + "2\n\n" +
-				"n1 root 0,0,1080,2400\n n2 button -0,0,10,10\nend tree\nend result\n",
-			reason: "text_tree_body_invalid",
-		},
-		{
-			name: "flag out of order",
-			text: "result v3 is_error=false\nobservation\n id=O1\n\n" +
-				fullHeader + "2\n\n" +
-				"n1 root 0,0,1080,2400\n n2 checked=true enabled=false\nend tree\nend result\n",
-			reason: "text_tree_body_invalid",
-		},
-		{
-			name: "unknown column",
-			text: "result v3 is_error=false\nobservation\n id=O1\n\n" +
-				fullHeader + "2\n\n" +
-				"n1 root 0,0,1080,2400\n n2 future=value\nend tree\nend result\n",
-			reason: "text_tree_body_invalid",
-		},
-		{
-			name: "invalid enabled flag value",
-			text: "result v3 is_error=false\nobservation\n id=O1\n\n" +
-				fullHeader + "2\n\n" +
-				"n1 root 0,0,1080,2400\n n2 button 0,0,10,10 enabled=maybe\nend tree\nend result\n",
-			reason: "text_tree_flag_invalid",
-		},
-		{
-			name: "invalid checked flag value",
-			text: "result v3 is_error=false\nobservation\n id=O1\n\n" +
-				fullHeader + "2\n\n" +
-				"n1 root 0,0,1080,2400\n n2 checked=0\nend tree\nend result\n",
-			reason: "text_tree_flag_invalid",
-		},
-		{
-			name: "invalid inspect flag value",
-			text: "result v3 is_error=false\n\n" +
-				"inspect v3 scope=tree observation=O1 revision=1 captured_at=now " +
-				"tree_scope=reported_visible_with_context view=detailed nodes=1 entries=1\n\n" +
-				"n1 root [0,0,1080,2400] focused=yes\nend inspect\nend result\n",
-			reason: "text_inspect_flag_invalid",
-		},
-		{
-			name: "geometry after omitted text label in compact tree",
-			text: "result v3 is_error=false\nobservation\n id=O1\n\n" +
-				fullHeader + "2\n\n" +
-				"n1 root 0,0,1080,2400\n n2 \"设置\" 0,0,10,10\nend tree\nend result\n",
-			reason: "text_tree_body_invalid",
-		},
-		{
-			name: "geometry after omitted text label in detailed inspect",
-			text: "result v3 is_error=false\n\n" +
-				"inspect v3 scope=tree observation=O1 revision=1 captured_at=now " +
-				"tree_scope=reported_visible_with_context view=detailed nodes=2 entries=2\n\n" +
-				"n1 root [0,0,1080,2400]\n  n2 \"设置\" [0,0,10,10]\nend inspect\nend result\n",
-			reason: "text_inspect_body_invalid",
-		},
-		{
-			name: "at without known ancestor",
-			text: "result v3 is_error=false\nobservation\n id=O1\n\n" +
-				fullHeader + "2\n\n" +
-				"n1 root -\n n2 button @\nend tree\nend result\n",
-			reason: "text_tree_body_invalid",
-		},
-		{
-			name: "at does not borrow known sibling ancestor",
-			text: "result v3 is_error=false\nobservation\n id=O1\n\n" +
-				fullHeader + "3\n\n" +
-				"n1 root -\n" +
-				" n2 button 0,0,10,10\n" +
-				" n3 button @\n" +
-				"end tree\nend result\n",
-			reason: "text_tree_body_invalid",
-		},
-		{
-			name: "delta at does not borrow known sibling ancestor",
-			text: "result v3 is_error=false\nobservation\n id=O2\n\n" +
-				"tree v4 delta base=O1 changes=1\n\n" +
-				"+ n1 group -\n" +
-				" n2 button 0,0,10,10\n" +
-				" n3 button @\n" +
-				"end tree\nend result\n",
-			reason: "text_tree_body_invalid",
-		},
-		{
-			name: "at does not cross delta subtrees",
-			text: "result v3 is_error=false\nobservation\n id=O2\n\n" +
-				"tree v4 delta base=O1 changes=2\n\n" +
-				"+ n1 group 0,0,10,10\n" +
-				"= n2 button @\n" +
-				"end tree\nend result\n",
-			reason: "text_tree_body_invalid",
-		},
-		{
-			name: "wrong role negation",
-			text: "result v3 is_error=false\nobservation\n id=O1\n\n" +
-				fullHeader + "1\n\n" +
-				"n1 root 0,0,1080,2400 !tap\nend tree\nend result\n",
-			reason: "text_tree_body_invalid",
-		},
-		{
-			name: "default action both explicit and negated",
-			text: "result v3 is_error=false\nobservation\n id=O1\n\n" +
-				fullHeader + "2\n\n" +
-				"n1 root 0,0,1080,2400\n n2 button 0,0,10,10 tap !tap\nend tree\nend result\n",
-			reason: "text_tree_body_invalid",
+			name: "inspect query matches mismatch",
+			text: "result v4 ok\n\n" +
+				"inspect v3 scope=query observation=O1 revision=1 captured_at=22:00:00 " +
+				"tree_scope=reported_visible_with_context view=detailed matches=2 total=2 truncated=false nodes=1 entries=1\n\n" +
+				"match 1/2 path=[n1]\nn2 text [0,0,1,1]\nend inspect\nend result\n",
+			reason: "text_inspect_count_mismatch",
 		},
 	}
 	for _, testCase := range cases {
@@ -1645,5 +1398,484 @@ func TestDecodeResultTextV4RejectsInvalidBodies(t *testing.T) {
 				t.Fatalf("failure = %v, want %s", failure, testCase.reason)
 			}
 		})
+	}
+}
+
+// TestDecodeResultTextAppBlocks pins the two formal app collection blocks,
+// including the count=0 edge that distinguishes "empty result" from "not
+// obtained".
+func TestDecodeResultTextAppBlocks(t *testing.T) {
+	find := "result v4 ok op=P7391_3\n" +
+		"app find total=0 truncated=false at=22:05:20\n" +
+		"\n" +
+		"app_items v1 kind=find count=0\n" +
+		"end app_items\n" +
+		"end result\n"
+	decoded, failure := decodeResultText(find)
+	if failure != nil {
+		t.Fatalf("empty find rejected: %s %v", failure.reason, failure.fields)
+	}
+	if decoded.view.App == nil || !decoded.view.App.HasItems || len(decoded.view.App.Items) != 0 ||
+		!decoded.view.App.HasTotal || decoded.view.App.Total != 0 {
+		t.Fatalf("empty find facts = %+v", decoded.view.App)
+	}
+
+	list := "result v4 ok op=P7391_4\n" +
+		"app list display=0 total=1 truncated=false fg=none at=22:05:21\n" +
+		"\n" +
+		"app_items v1 kind=list count=1\n" +
+		"#42 com.example.probe owned origin_display=0\n" +
+		"end app_items\n" +
+		"end result\n"
+	decoded, failure = decodeResultText(list)
+	if failure != nil {
+		t.Fatalf("list rejected: %s %v", failure.reason, failure.fields)
+	}
+	if decoded.view.App == nil || len(decoded.view.App.TaskItems) != 1 ||
+		decoded.view.App.TaskItems[0].TaskID != 42 ||
+		!decoded.view.App.TaskItems[0].HasOriginDisplay {
+		t.Fatalf("list facts = %+v", decoded.view.App)
+	}
+
+	closeText := "result v4 err op=P7391_5 outcome=uncertain\n" +
+		"app close display=12 complete=false\n" +
+		"\n" +
+		"app_tasks v1 count=0\n" +
+		"end app_tasks\n" +
+		"end result\n"
+	decoded, failure = decodeResultText(closeText)
+	if failure != nil {
+		t.Fatalf("empty close rejected: %s %v", failure.reason, failure.fields)
+	}
+	if decoded.view.App == nil || !decoded.view.App.HasTasks || len(decoded.view.App.Tasks) != 0 {
+		t.Fatalf("empty close facts = %+v", decoded.view.App)
+	}
+
+	mismatch := "result v4 ok op=P7391_6\n" +
+		"app find total=1 truncated=false at=22:05:20\n" +
+		"\n" +
+		"app_items v1 kind=find count=2\n" +
+		"com.example.probe \"Probe\"\n" +
+		"end app_items\n" +
+		"end result\n"
+	if _, failure := decodeResultText(mismatch); failure == nil ||
+		failure.reason != "text_result_app_items_count_mismatch" {
+		t.Fatalf("count mismatch = %v", failure)
+	}
+}
+
+// TestDecodeResultTextNotifySessionAndImages pins the notify aggregate line,
+// session=null and the standalone/observation image lines including non-JPEG
+// media.
+func TestDecodeResultTextNotifySessionAndImages(t *testing.T) {
+	notify := "result v4 ok\n" +
+		"notify id=msg_1 saved=true state=pending\n" +
+		"notify.error delivery_unavailable \"控制端未连接\"\n" +
+		"notify.error.details={\"retryable\":true}\n" +
+		"end result\n"
+	decoded, failure := decodeResultText(notify)
+	if failure != nil {
+		t.Fatalf("notify rejected: %s %v", failure.reason, failure.fields)
+	}
+	if decoded.view.MessageID != "msg_1" || decoded.view.Saved == nil || !*decoded.view.Saved ||
+		decoded.view.Notification == nil || decoded.view.Notification.State != "pending" ||
+		decoded.view.Notification.Error == nil ||
+		decoded.view.Notification.Error.Code != "delivery_unavailable" {
+		t.Fatalf("notify projection = %+v", decoded.view.Notification)
+	}
+
+	sessionNull := "result v4 ok\nsession=null\nend result\n"
+	decoded, failure = decodeResultText(sessionNull)
+	if failure != nil {
+		t.Fatalf("session null rejected: %s", failure.reason)
+	}
+	if decoded.view.Session != nil {
+		t.Fatalf("session null = %+v", decoded.view.Session)
+	}
+
+	image := "result v4 ok\n" +
+		"image 100x200 read_only media=image/png screen=1080x2400@0 rot=1 at=now\n" +
+		"image.error snap_failed \"截图失败\"\n" +
+		"image.error.details={\"retryable\":true}\n" +
+		"obs O4821_1\n" +
+		"obs.image 461x1024 media=image/webp screen=720x1280 rot=3 at=22:00:00\n" +
+		"obs.image.error decode_failed \"图像解码失败\"\n" +
+		"obs.image.error.details={\"width\":461}\n" +
+		"end result\n"
+	decoded, failure = decodeResultText(image)
+	if failure != nil {
+		t.Fatalf("images rejected: %s %v", failure.reason, failure.fields)
+	}
+	if decoded.view.Image == nil || decoded.view.Image.Width != 100 || decoded.view.Image.Height != 200 ||
+		decoded.view.Image.MediaType != "image/png" || !decoded.view.Image.ReadOnly ||
+		decoded.view.Image.Screen == nil || decoded.view.Image.Screen.Rotation != 1 ||
+		decoded.view.Image.Error == nil || decoded.view.Image.Error.Code != "snap_failed" {
+		t.Fatalf("top image = %+v", decoded.view.Image)
+	}
+	if decoded.view.Observation == nil || decoded.view.Observation.Image == nil ||
+		decoded.view.Observation.Image.Width != 461 ||
+		decoded.view.Observation.Image.Error == nil ||
+		decoded.view.Observation.Image.Error.Code != "decode_failed" {
+		t.Fatalf("observation image = %+v", decoded.view.Observation)
+	}
+}
+
+// TestDecodeResultTextCleanupAndAppTaskError pins the two error sub-lines that
+// carry command-specific failure facts.
+func TestDecodeResultTextCleanupAndAppTaskError(t *testing.T) {
+	cleanup := "result v4 err\n" +
+		"cleanup unconfirmed exec=failed\n" +
+		"cleanup.error display_release_failed \"显示释放失败\"\n" +
+		"cleanup.error.details={\"display_id\":0}\n" +
+		"end result\n"
+	decoded, failure := decodeResultText(cleanup)
+	if failure != nil {
+		t.Fatalf("cleanup rejected: %s %v", failure.reason, failure.fields)
+	}
+	if decoded.view.Cleanup == nil || decoded.view.Cleanup.State != "unconfirmed" ||
+		decoded.view.Cleanup.Execution != "failed" || decoded.view.Cleanup.Error == nil ||
+		decoded.view.Cleanup.Error.Code != "display_release_failed" {
+		t.Fatalf("cleanup = %+v", decoded.view.Cleanup)
+	}
+
+	tasks := "result v4 err\n" +
+		"app close display=12 complete=false\n" +
+		"\n" +
+		"app_tasks v1 count=1\n" +
+		"#42 uncertain recents_cleaned=null error=task_remove_unconfirmed \"未确认\" details={\"code\":1}\n" +
+		"end app_tasks\n" +
+		"end result\n"
+	decoded, failure = decodeResultText(tasks)
+	if failure != nil {
+		t.Fatalf("app tasks rejected: %s %v", failure.reason, failure.fields)
+	}
+	task := decoded.view.App.Tasks[0]
+	if task.Error == nil || task.Error.Code != "task_remove_unconfirmed" ||
+		task.RecentsCleaned != nil || !task.HasRecentsCleaned {
+		t.Fatalf("app task = %+v", task)
+	}
+}
+
+// TestDecodeResultTextDiagnosis pins the diagnosis head plus its two JSON
+// sub-lines and the timeline block.
+func TestDecodeResultTextDiagnosis(t *testing.T) {
+	text := "result v4 ok\n" +
+		"diagnosis summary=\"probe diagnosis\" coverage=original_record truncated=true op=P7391_1 outcome=uncertain\n" +
+		"diagnosis.issues=[{\"phase\":\"session\",\"code\":\"drift\"}]\n" +
+		"diagnosis.timing_ms={\"total\":12}\n" +
+		"\n" +
+		"timeline v1 events=1\n" +
+		"event {\"at\":\"22:00:00\",\"phase\":\"session\",\"code\":\"drift\"}\n" +
+		"end timeline\n" +
+		"end result\n"
+	decoded, failure := decodeResultText(text)
+	if failure != nil {
+		t.Fatalf("diagnosis rejected: %s %v", failure.reason, failure.fields)
+	}
+	if decoded.view.Diagnosis == nil || len(decoded.view.Diagnosis.Timeline) != 1 {
+		t.Fatalf("timeline = %+v", decoded.view.Diagnosis)
+	}
+	issues, found := lookupPath(decoded.object, []string{"diagnosis", "issues"})
+	items, ok := issues.([]any)
+	if !found || !ok || len(items) != 1 {
+		t.Fatalf("issues = %#v", issues)
+	}
+	timing, found := lookupPath(decoded.object, []string{"diagnosis", "timing_ms"})
+	timingObject, ok := timing.(map[string]any)
+	if !found || !ok || len(timingObject) != 1 {
+		t.Fatalf("timing = %#v", timing)
+	}
+}
+
+// TestDecodeResultTextRecoveryExactRef pins the recovery line grammar including
+// both the abstract kind and a resolved exact ID.
+func TestDecodeResultTextRecoveryExactRef(t *testing.T) {
+	for _, reference := range []string{"none", "O", "P", "O4821_85", "P7391_12"} {
+		text := "result v4 err\nrecovery entry=observe ref=" + reference +
+			" input=retired cause=cleanup_pending\nend result\n"
+		decoded, failure := decodeResultText(text)
+		if failure != nil {
+			t.Fatalf("recovery ref %q rejected: %s", reference, failure.reason)
+		}
+		if decoded.view.Recovery == nil || decoded.view.Recovery.Reference != reference {
+			t.Fatalf("recovery = %+v", decoded.view.Recovery)
+		}
+	}
+	bad := "result v4 err\nrecovery entry=observe ref=bad!=value\nend result\n"
+	if _, failure := decodeResultText(bad); failure == nil ||
+		failure.reason != "text_result_recovery_invalid" {
+		t.Fatalf("bad ref = %v", failure)
+	}
+}
+
+// TestCompareResultTextToStructuredOmissions covers the explicitly declared
+// omitted fields and proves that each omission is conditional.
+func TestCompareResultTextToStructuredOmissions(t *testing.T) {
+	structured := map[string]any{
+		"operation_id": "P7391_12",
+		"outcome":      outcomeExecuted,
+		"session": map[string]any{
+			"origin": "P7391_12", "state": sessionActive, "mode": "virtual",
+			"agent": "local-agent", "started_at": "2026-11-21T22:05:10.123456789Z",
+			"expires_at": "2026-11-21T22:10:10.123456789Z",
+		},
+		"observation": map[string]any{
+			"status": observationComplete, "id": "O4821_85",
+			"origin": "P7391_12", "revision": 85,
+			"captured_at":      "2026-11-21T22:08:55.867164298Z",
+			"actionable_until": "2026-11-21T22:09:55.867164298Z",
+			"quality": map[string]any{
+				"state": "stable", "samples": 2, "stop_reason": "stable",
+			},
+			"screen": map[string]any{"width": 1080, "height": 2400, "rotation": 0, "display_id": 148},
+			"tree":   map[string]any{"format": treeFull, "scope": "reported_visible_with_context", "view": "compact"},
+		},
+	}
+	text := "result v4 ok op=P7391_12\n" +
+		"session active mode=virtual origin=P7391_12 started=22:05:10 expires=22:10:10\n" +
+		"obs O4821_85 fg=none at=22:08:55 screen=1080x2400@148\n" +
+		"\n" +
+		"tree v4 full nodes=1\n\nn1 root 0,0,1080,2400\nend tree\nend result\n"
+	decoded, failure := decodeResultText(text)
+	if failure != nil {
+		t.Fatalf("decode omitted frame: %s %v", failure.reason, failure.fields)
+	}
+	// The fixture has no foreground member; fg=none adds one. Drop it from both
+	// sides before the consistency gate so only omission behavior is measured.
+	delete(structured["observation"].(map[string]any), "foreground")
+	observation := decoded.object["observation"].(map[string]any)
+	delete(observation, "foreground")
+	var structuredView resultView
+	encoded, _ := json.Marshal(structured)
+	if err := json.Unmarshal(encoded, &structuredView); err != nil {
+		t.Fatal(err)
+	}
+	if failure := compareResultTextToStructured(decoded, structured, structuredView, ""); failure != nil {
+		t.Fatalf("declared omissions rejected: %s %v", failure.reason, failure.fields)
+	}
+
+	t.Run("non-default quality must appear", func(t *testing.T) {
+		structuredBad := deepCloneObject(structured)
+		structuredBad["observation"].(map[string]any)["quality"] = map[string]any{
+			"state": "unstable", "samples": 5, "stop_reason": "max_samples",
+		}
+		decodedBad := &decodedTextResult{object: deepCloneObject(decoded.object), isError: false,
+			header: decoded.header, view: decoded.view}
+		if failure := compareResultTextToStructured(decodedBad, structuredBad, structuredView, ""); failure == nil ||
+			failure.reason != "both_mode_quality_missing" {
+			t.Fatalf("missing non-default quality = %v", failure)
+		}
+	})
+
+	t.Run("nonzero rotation must appear", func(t *testing.T) {
+		structuredBad := deepCloneObject(structured)
+		structuredBad["observation"].(map[string]any)["screen"] = map[string]any{
+			"width": 1080, "height": 2400, "rotation": 2, "display_id": 148,
+		}
+		decodedBad := &decodedTextResult{object: deepCloneObject(decoded.object), isError: false,
+			header: decoded.header, view: decoded.view}
+		if failure := compareResultTextToStructured(decodedBad, structuredBad, structuredView, ""); failure == nil ||
+			failure.reason != "both_mode_screen_rotation_mismatch" {
+			t.Fatalf("missing rotation = %v", failure)
+		}
+	})
+
+	t.Run("unknown field must be projected", func(t *testing.T) {
+		structuredBad := deepCloneObject(structured)
+		structuredBad["future"] = "must-survive"
+		decodedBad := &decodedTextResult{object: deepCloneObject(decoded.object), isError: false,
+			header: decoded.header, view: decoded.view}
+		if failure := compareResultTextToStructured(decodedBad, structuredBad, structuredView, ""); failure == nil ||
+			failure.reason != "both_mode_object_mismatch" {
+			t.Fatalf("unknown field = %v", failure)
+		}
+	})
+}
+
+// TestResolveRecoveryReference pins every branch of the documented R1 rules,
+// including the four safety red lines.
+func TestResolveRecoveryReference(t *testing.T) {
+	cases := []struct {
+		name       string
+		view       resultView
+		requestRef string
+		want       string
+	}{
+		{
+			name: "none",
+			view: resultView{Recovery: &recoveryView{Entry: "retry", Reference: "none"}},
+			want: "none",
+		},
+		{
+			name: "retry O from observation",
+			view: resultView{
+				Observation: &observationView{ID: "O4821_9"},
+				Recovery:    &recoveryView{Entry: "retry", Reference: "O"},
+			},
+			want: "O4821_9",
+		},
+		{
+			name:       "retry O from request",
+			view:       resultView{Recovery: &recoveryView{Entry: "retry", Reference: "O"}},
+			requestRef: "O4821_3",
+			want:       "O4821_3",
+		},
+		{
+			name: "status O from target",
+			view: resultView{
+				TargetReference: "O4821_4",
+				Recovery:        &recoveryView{Entry: "status", Reference: "O"},
+			},
+			want: "O4821_4",
+		},
+		{
+			name: "device busy exact",
+			view: resultView{
+				BlockingOperationID: "P7391_88",
+				Error:               &errorView{Code: "device_busy"},
+				Recovery:            &recoveryView{Entry: "status", Reference: "P"},
+			},
+			want: "P7391_88",
+		},
+		{
+			name: "device busy redline falls back",
+			view: resultView{
+				OperationID: "P7391_1",
+				Error:       &errorView{Code: "device_busy"},
+				Session:     &sessionView{Origin: "P7391_1"},
+				Recovery:    &recoveryView{Entry: "status", Reference: "P"},
+			},
+			want: "P",
+		},
+		{
+			name: "reference has no session",
+			view: resultView{
+				TargetReference: "P7391_old",
+				OperationID:     "P7391_new",
+				Error:           &errorView{Code: "reference_has_no_session"},
+				Recovery:        &recoveryView{Entry: "status", Reference: "P"},
+			},
+			want: "P7391_old",
+		},
+		{
+			name: "running op wins over session origin",
+			view: resultView{
+				OperationID:    "P7391_pending",
+				OperationState: operationRunning,
+				Session:        &sessionView{Origin: "P7391_origin"},
+				Recovery:       &recoveryView{Entry: "status", Reference: "P"},
+			},
+			want: "P7391_pending",
+		},
+		{
+			name: "start operation",
+			view: resultView{
+				StartOperation: "P7391_start",
+				Recovery:       &recoveryView{Entry: "status", Reference: "P"},
+			},
+			want: "P7391_start",
+		},
+		{
+			name: "observe P from session",
+			view: resultView{
+				Session:  &sessionView{Origin: "P7391_origin"},
+				Recovery: &recoveryView{Entry: "observe", Reference: "P"},
+			},
+			want: "P7391_origin",
+		},
+		{
+			name: "observe P from request",
+			view: resultView{
+				Recovery: &recoveryView{Entry: "observe", Reference: "P"},
+			},
+			requestRef: "P7391_origin",
+			want:       "P7391_origin",
+		},
+		{
+			name: "observe P redline observation not found",
+			view: resultView{
+				OperationID: "P7391_own",
+				Error:       &errorView{Code: "observation_not_found"},
+				Recovery:    &recoveryView{Entry: "observe", Reference: "P"},
+			},
+			want: "P",
+		},
+		{
+			name: "end P from session origin",
+			view: resultView{
+				Session:  &sessionView{Origin: "P7391_origin"},
+				Recovery: &recoveryView{Entry: "end", Reference: "P"},
+			},
+			want: "P7391_origin",
+		},
+		{
+			name: "end P redline without session",
+			view: resultView{
+				OperationID: "P7391_own",
+				Error:       &errorView{Code: "session_ended"},
+				Recovery:    &recoveryView{Entry: "end", Reference: "P"},
+			},
+			want: "P",
+		},
+		{
+			name: "end P from error details",
+			view: resultView{
+				Error: &errorView{Code: "session_exists", Details: map[string]jsontext.Value{
+					"start_operation_id": jsontext.Value(`"P7391_existing"`),
+				}},
+				Recovery: &recoveryView{Entry: "end", Reference: "P"},
+			},
+			want: "P7391_existing",
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if actual := resolveRecoveryReference(testCase.view, testCase.requestRef); actual != testCase.want {
+				t.Fatalf("ref = %q, want %q", actual, testCase.want)
+			}
+		})
+	}
+}
+
+// TestBothModeRecoveryExactRef accepts a grounded exact ref and rejects one
+// that the same-call facts cannot prove.
+func TestBothModeRecoveryExactRef(t *testing.T) {
+	payload := map[string]any{
+		"operation_id":          "P7391_5",
+		"blocking_operation_id": "P7391_9",
+		"error": map[string]any{
+			"code": "device_busy", "message": "设备忙",
+		},
+		"recovery": map[string]any{"entry": "status", "reference": "P"},
+	}
+	goodText := fakeResultText(map[string]any{
+		"operation_id":          payload["operation_id"],
+		"blocking_operation_id": payload["blocking_operation_id"],
+		"error":                 payload["error"],
+		"recovery":              map[string]any{"entry": "status", "reference": "P7391_9"},
+	}, true)
+	result := &sdk.CallToolResult{
+		Content:           []sdk.Content{&sdk.TextContent{Text: goodText}},
+		StructuredContent: payload,
+		IsError:           true,
+	}
+	if _, failure := project(result, resultModeBoth, ""); failure != nil {
+		t.Fatalf("grounded exact ref rejected: %s %v", failure.reason, failure.fields)
+	}
+
+	badText := fakeResultText(map[string]any{
+		"operation_id":          payload["operation_id"],
+		"blocking_operation_id": payload["blocking_operation_id"],
+		"error":                 payload["error"],
+		"recovery":              map[string]any{"entry": "status", "reference": "P7391_5"},
+	}, true)
+	badResult := &sdk.CallToolResult{
+		Content:           []sdk.Content{&sdk.TextContent{Text: badText}},
+		StructuredContent: payload,
+		IsError:           true,
+	}
+	if _, failure := project(badResult, resultModeBoth, ""); failure == nil ||
+		failure.reason != "both_mode_recovery_ref_mismatch" {
+		t.Fatalf("ungrounded exact ref = %v", failure)
 	}
 }

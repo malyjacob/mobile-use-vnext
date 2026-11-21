@@ -25,12 +25,28 @@ func (d toolDefinition) readOnlyHint() bool {
 // tree blocks.
 // It is published exactly once, at the head of the server instructions, and is
 // never repeated inside a tool description.
-const treeTextGuide = "结果文本：text/both 以 `result v3 is_error=<true|false>` 开头、`end result` 结尾。" +
-	"连续 `observation.*` 字段先写无缩进 `observation`，随后每项以单个空格缩进并写去掉 `observation.` 的相对路径。" +
-	"空行、树块或 `json v1` 结束当前组；之后再有观察字段时另开 `observation`。" +
-	"各组合并为同一观察对象，跨组重复路径或祖先与子路径冲突无效。" +
-	"完整 O 从组内 `id` 取得（structured JSON 中为 `observation.id`）。" +
-	"无法无损编码的观察字段保留 `json v1 path=\"<绝对 JSON Pointer>\" value=<原值>`。\n" +
+const treeTextGuide = "结果文本：text/both 以 `result v4 <ok|err> [op=…] [state=…] [outcome=…] [phase=…]` 开头、`end result` 结尾。" +
+	"常规成功（`ok` 且无 `state=`）省略 `outcome=executed`；非 `executed`、错误结果与带 `state=` 的重放摘要一律显式输出 `outcome=…`。" +
+	"`op=` 只是本次调用编号参考、`at=` 只是 UTC 秒级时序提示，均不替代引擎对会话归属、显示代次与期限的权威校验。" +
+	"`text`/`both` 是面向调用的紧凑投影；`structured` 保留完整审计字段与全部三态、空集合语义。\n" +
+	"观察为单行 `obs [<O>] [status=…] [fg=…] [at=HH:MM:SS] [quality=…] [screen=<W>x<H>[@<display_id>]] [rot=<1|2|3>] [missing=…]`：" +
+	"`obs ` 后首个不含 `=` 的字段是完整 O；`status=complete` 省略，`partial`/`failed` 显式；" +
+	"`quality` 只写非默认的 `quality=<state>(<stop_reason>)`；" +
+	"`fg` 写 `<包名>#<task_id>`、`<包名>`、`#<task_id>`、`present`、`none` 或 `unknown(<reason>)`；" +
+	"`screen` 仅在带 `session` 或无树帧输出；" +
+	"`rot` 在非零旋转时始终输出；所有 `HH:MM:SS` 均为 UTC 秒级时间；" +
+	"`origin`/`revision`/`actionable_until` 与默认 `quality` 只在 `structured` JSON 中保留。" +
+	"`obs.image` 与顶层 `image` 同字段同顺序（仅前缀不同）；" +
+	"`obs.error <code> \"<message>\"` 子行只在对应字段存在时紧跟。\n" +
+	"其他块：单行 `image [<W>x<H>] [read_only] [media=<非 jpeg>] [screen=<W>x<H>[@<display_id>]] [rot=<1|2|3>] [at=HH:MM:SS]`、" +
+	"`session <state> mode=… origin=… [started=…] [expires=…] [ended=…] [reason=…]`、" +
+	"`wait trigger=… elapsed=<ms>ms`、`cleanup …`、`error <code> \"<message>\"`、" +
+	"`recovery entry=<entry> ref=<精确 O/P 编号|O|P|none> [input=…] [cause=…]`（ref 已把可判定的抽象词解析为精确编号）。" +
+	"`app.items` 以 `app_items v1 kind=find|list count=<n>` … `end app_items` 交付：" +
+	"`kind=find` 行写 `<package> \"<name>\"`，`kind=list` 行写 `#<task_id> <package> <ownership>[ origin_display=<显示号>]`。" +
+	"`app.tasks` 以 `app_tasks v1 count=<n>` … `end app_tasks` 交付，行写 " +
+	"`#<task_id> <outcome>[ recents_cleaned=…][ error=<code> \"<message>\"[ details=<JSON>]]`。" +
+	"无法无损编码的字段保留 `json v1 path=\"<绝对 JSON Pointer>\" value=<原值>`。\n" +
 	"普通树：当前树由 `base` 指向的 full 加本次 delta 重建。" +
 	"full 头为 `tree v4 full nodes=<n>`；delta 头为 " +
 	"`tree v4 delta base=<O|_<序号>> changes=<n>`；头后空一行进入正文，均以 `end tree` 结尾。" +
@@ -72,14 +88,14 @@ const treeTextGuide = "结果文本：text/both 以 `result v3 is_error=<true|fa
 	"`nodes` 计展开后的逻辑节点数，`entries` 计正文定义行数。查询按每个命中子树分别累加。" +
 	"inspect v3 一律使用两格缩进、`[l,t,r,b]` 矩形和显式动作词，不使用默认动作、`@` 或短 base。\n" +
 	"示例 full：\n" +
-	"`result v3 is_error=false\nobservation\n status=complete\n id=Oabc_72\n\n" +
+	"`result v4 ok op=P7391_4\nobs O4821_72 fg=none at=22:05:11\n\n" +
 	"tree v4 full nodes=2\n\nn1 root 0,0,1080,2400\n n2 button @ \"设置\"\nend tree\nend result`\n" +
 	"示例 delta：\n" +
-	"`result v3 is_error=false\nobservation\n status=complete\n id=Oabc_76\n\n" +
+	"`result v4 ok op=P7391_5\nobs O4821_76 fg=com.android.settings#177 at=22:05:12\n\n" +
 	"tree v4 delta base=_72 changes=3\n\n~ n2 label=[\"无线设置\"]\n" +
 	"+ n3 button \"返回\" !tap\nchildren n1 = [n2 n3]\nend tree\nend result`\n" +
 	"示例 inspect：\n" +
-	"`result v3 is_error=false\ninspection.origin=P4\n\ninspect v3 scope=subtree observation=Oabc_76 revision=4 " +
+	"`result v4 ok op=P7391_6\n\ninspect v3 scope=subtree observation=O4821_76 revision=4 " +
 	"captured_at=2026-11-21T01:00:00Z tree_scope=reported_visible_with_context view=detailed root=n2 nodes=1 entries=1\n\n" +
 	"n2 button [0,0,1080,2400] \"无线设置\" tap\nend inspect\nend result`\n" +
 	"`button`/`input`/`scroll` 的省略动作分别是已存在的 `tap`/`text`/`swipe` 源能力；" +
@@ -93,10 +109,11 @@ const treeTextGuide = "结果文本：text/both 以 `result v3 is_error=<true|fa
 // constraints stay in the tool descriptions.
 const callerGuidance = "会话与推进：首次可直接 start({})。已有 active 会话时沿用，只有会话状态不明才 status({})。" +
 	"active/starting 或 can_start=false 时不要 start；会话失效先按 recovery 处理。\n" +
-	"有可用 O 时直接 act；text/both 的 act 或 wait_for 返回新 O 时从 `observation` 组的 `id` 取得，" +
-	"structured JSON 中为 `observation.id`，随后直接使用完整 O。" +
-	"没有可用 O、需要查看外部变化或 recovery.entry=observe 时才 observe。\n\n" +
-	"O 与 P：O 是观察，observation.actionable_until 是其输入期限。P 是调用的幂等/查询编号，新工作另有新 P。" +
+	"有可用 O 时直接 act；text/both 的 act 或 wait_for 返回新 O 时从 `obs` 行的完整 `O` 取得，" +
+	"structured JSON 中为 `observation.id`，随后直接使用该 O。" +
+	"没有可用 O、需要查看外部变化或 `recovery entry=observe` 时才 observe。\n\n" +
+	"O 与 P：O 是观察，默认约 60 秒输入期限（以会话租期截断），文本省略该字段，" +
+	"精确截止时间见 structured JSON 或以服务端过期反馈为准。P 是调用的幂等/查询编号，新工作另有新 P。" +
 	"app.find 与 notify 可脱离会话，notify 无 reference。请求引用统一用 reference。\n" +
 	"- 当前 ready O：act、app 的五个变更 kind。保留中的历史 O：inspect。\n" +
 	"- 活动原会话的 O/P：observe、snap、wait_for、keepalive、shell。app.list 接受 ready O 或可定位活动原会话的 P。\n" +
@@ -107,17 +124,19 @@ const callerGuidance = "会话与推进：首次可直接 start({})。已有 act
 	"status、inspect、diagnose、snap、app 查询不续租。keepalive 可重设并缩短租期，不延长 O。\n\n" +
 	"选择工具：observe 单次采集，snap 只看画面，wait_for 等公开树条件，inspect 补看历史树，diagnose 查健康。" +
 	"wait_for 以 wait.trigger 说明退出分支，以 wait.matched 说明终帧命中项；有新 O 就用它继续。" +
-	"observation.quality=unstable/unknown 本身不阻止输入。\n\n" +
+	"`quality=unstable/unknown` 本身不阻止输入。\n\n" +
 	"输入：act 认领 ready O 才消费。ref 点按/长按默认 bubble=true，最多提升到最近交互祖先一次；" +
 	"operation.bubble=false 只点原目标，坐标省略 bubble。no_safe_point 按 act 给出的点提示调整，避免继续向更远祖先找目标。" +
 	"text 默认 press_enter=true，写入全文并精确读回后至多发送一次 ENTER。仅填字时显式 operation.press_enter=false，不发送 ENTER。" +
 	"text_input 分别报告 write 与 enter，业务结果用页面事实核对。\n\n" +
-	"恢复：retry/O 表示尚未派发，用结果 `observation` 组内 `id` 的新完整 O 或仍适用的原 O 发起新调用。" +
+	"恢复：优先直接使用 `recovery` 行给出的精确 `ref=` 编号调用对应 `entry`；" +
+	"当 `ref=` 是抽象词 `O`/`P` 时，再按场景取观察 `O`、`op`、`blocking_operation_id`、`start_operation_id` 或 `session.origin`。" +
+	"retry/O 表示尚未派发，用新观察的完整 O 或仍适用的原 O 发起新调用。" +
 	"observe/P 用原活动会话的具体归属 P，可用 session.origin 或同会话 operation_id。请求中的 reference 使用实际编号。" +
 	"status/P 按目标取编号：当前动作用 operation_id，忙用 blocking_operation_id，" +
 	"自身恢复用 start_operation_id，收尾用 target_reference 或刚查询的 P。" +
 	"status(O) 撤销时对同一 O 调 end；end/reference=P 用原会话的归属 P。user 处理阻塞，update 配套升级，两者均不传引用。\n" +
-	"已认领 text 的整体 outcome=uncertain，且结果给出 recovery.entry=observe、recovery.reference=P 时，直接 observe 核对当前框值/页面。" +
+	"已认领 text 的整体 outcome=uncertain，且结果给出 `recovery entry=observe ref=<P>` 时，直接 observe 核对当前框值/页面。" +
 	"text_input.enter=uncertain 时先观察；write=executed、enter=not_executed 且原会话活动时，取新 O 后可按需单发 ENTER。\n" +
 	"通常 uncertain 先用 status 跟踪原 P，running 时继续跟踪，finished 且会话活动时再 observe。避免原样重发或自动 end/restart。" +
 	"not_executed 表示未派发；executed 后如仅观察、图片或清理失败，保留执行事实。device_busy 时跟随阻塞 P 串行。" +
@@ -143,8 +162,8 @@ var toolCatalog = []toolDefinition{
 		name: "start",
 		description: "建立新会话并返回第一个 full 观察。请求体必须是空对象；" +
 			"目标屏幕与模式来自控制端当前选择，不接受尺寸、模式或凭据参数。" +
-			"成功时返回 session，首采成功时从 `observation` 组的 `id` 取得首个完整 O。" +
-			"启动租期为五分钟，以 session.expires_at 为准；重放原 start 不重新获得五分钟。" +
+			"成功时返回 session；首采成功时从 `obs` 行取得首个完整 `O` 与会话屏 " +
+			"`screen=<W>x<H>@<display_id>`，租期以 `session` 行的 `expires` 为准；重放原 start 不重新获得五分钟。" +
 			"O 是可消费观察，P 是该次操作的幂等/查询编号。" +
 			"首次返回 full；普通树头为 `tree v4 full`，delta 头为 `tree v4 delta base=… changes=…`，" +
 			"用 base 指向的 full 加本次 delta 重建当前树。",
@@ -160,7 +179,8 @@ var toolCatalog = []toolDefinition{
 		name: "status",
 		description: "只读查询自身准入状态、给定 O 的状态或给定 P 的操作状态，不访问设备、不续租、不认领观察。" +
 			"reference 省略时查询自身；带 O 可确认该观察是否仍可用，带 P 可查该操作的事实或清理进度。" +
-			"按返回的 operation_state、can_start、blocking_operation_id 与 recovery 决定下一步。",
+			"按返回头行的 `state=`、`can_start=`、`blocking_operation_id=` 与 `recovery ref=` 决定下一步" +
+			"（structured 中为 operation_state、can_start、blocking_operation_id 与 recovery.reference）。",
 		schema: json.RawMessage(`{
   "type": "object",
   "properties": {
@@ -183,7 +203,8 @@ var toolCatalog = []toolDefinition{
 		description: "对给定 O/P 所指原会话执行一次新采集并发布一个新观察。" +
 			"reference 必填，指向本 Agent 仍活动的原会话；full=true 强制 full；" +
 			"image=true 在同一采集中附加 ImageContent；wait_ms 是单次采集前的延迟毫秒数（0–10000，默认 0）；等待公开树条件应选 wait_for。" +
-			"成功返回新观察：从 `observation` 组的 `id` 取得完整 O。" +
+			"成功返回新观察：从 `obs` 行取得完整 O；采集失败按 `recovery entry=observe ref=<P>` 恢复" +
+			"（structured 中为 recovery.entry 与 recovery.reference）。" +
 			"看到 `base=_72` 时，用 `72` 替换当前 O 的末尾序号得到指定 full 的完整编号；" +
 			"同一 full 上的多个差分各自应用。缺少该 full 时，以适用的活动会话 O/P 再调用 observe 并设置 full=true。",
 		schema: json.RawMessage(`{
@@ -223,7 +244,8 @@ var toolCatalog = []toolDefinition{
 		name: "snap",
 		description: "对给定 O/P 所指原会话绑定的屏幕立即读取一张图，不读取节点树，也不发布观察。" +
 			"reference 必填，指向本 Agent 仍活动的原会话；图片始终取当前屏。" +
-			"成功只返回 operation_id 与顶层 image 元数据，并以一个 ImageContent 交付 JPEG。" +
+			"成功只返回 operation_id 与单行 `image <W>x<H> read_only screen=<W>x<H>[@<display_id>] [at=<HH:MM:SS>]` 元数据，" +
+			"并以一个 ImageContent 交付 JPEG。" +
 			"snap 不分配 O、不续租、不认领观察；同一 P 重放或 status(P) 只返回无图摘要。",
 		schema: json.RawMessage(`{
   "type": "object",
@@ -247,11 +269,12 @@ var toolCatalog = []toolDefinition{
 		description: "轮询当前会话的公开树条件。reference 与 timeout 必填，timeout 为 1..40 秒（stable=true 时至少 2）。" +
 			"\nquery/absent_query 按 label/value/hint/resource 做字面折叠子串匹配；同时提供时任一条件成立即可满足查询条件。" +
 			"stable=true 还要求整树连续 3 帧一致。倒计时或实时进度页面可保持 stable=false。" +
-			"\n发布新观察时调用成功，包括 wait.trigger=timeout；从 `observation` 组的 `id` 取得完整 O。" +
+			"\n发布新观察时调用成功，包括 wait.trigger=timeout；从 `obs` 行取得完整 O。" +
 			"看到 `base=_72` 时，用 `72` 替换当前 O 的末尾序号得到指定 full 的完整编号；缺少该 full 时设置 full=true 再 observe。" +
 			"同一 full 上的多个差分各自应用。" +
 			"wait.matched 包含终帧命中的条件，超时时还包含 timeout。" +
-			"最终未发布新 O 时按观察失败处理。elapsed_ms 含终帧采集，实际耗时可超过 timeout 至多约 35 秒。",
+			"最终未发布新 O 时按观察失败处理，并按 `recovery entry=… ref=…` 恢复（structured 中为 recovery.entry 与 recovery.reference）。" +
+			"elapsed_ms 含终帧采集，实际耗时可超过 timeout 至多约 35 秒。",
 		schema: json.RawMessage(`{
   "type": "object",
   "properties": {
@@ -303,7 +326,7 @@ var toolCatalog = []toolDefinition{
 	},
 	{
 		name: "act",
-		description: "对当前 ready O 执行交互。reference 必填且用当前 ready O 的完整 `id`；节点目标用 `n<ref>`。" +
+		description: "对当前 ready O 执行交互。reference 必填且用当前 ready O 的完整 `O`；节点目标用 `n<ref>`。" +
 			"静态拒绝不认领 O，认领即消费原 O。image=true 可随动作后观察附加 ImageContent。" +
 			"\n分支：tap/long_press 用 target；text 用 target 与 text；key 用 key 白名单。scroll 用 container/direction，可选 amount；swipe 用 from/to，可选 duration_ms。" +
 			"\n树中 `button`/`input`/`scroll` 省略的默认动作分别是既有 `tap`/`text`/`swipe`；" +
@@ -319,12 +342,12 @@ var toolCatalog = []toolDefinition{
 			"\n文本：默认 press_enter=true。必要聚焦（已聚焦 ref 跳过）、全文写入、同节点刷新精确读回，随后至多一次 ENTER。" +
 			"普通输入无需先 tap 或另发 ENTER。仅填字、草稿、多行、清空或逐字段编辑时显式 press_enter=false，只写入并读回。默认分支返回 text_input:{write,enter}，false 时省略。" +
 			"文本错误看 details.stage/reason/dispatch，区分 not_attempted/not_dispatched/dispatched/unknown。" +
-			"已认领 text 的整体 outcome=uncertain（也可能仅已派发聚焦），且实际结果给出 recovery.entry=observe、recovery.reference=P 时，" +
+			"已认领 text 的整体 outcome=uncertain（也可能仅已派发聚焦），且实际结果给出 `recovery entry=observe ref=<P>` 时，" +
 			"直接 observe 核对当前框值/页面。reference 使用原活动会话的具体归属 P，如 session.origin 或属于该会话的 operation_id。避免原样重发。" +
 			"\n滚动：用 operation.type=scroll + container，嵌套时按想滚动的区域选对应容器 ref。swipe 是原始手势。树节点的 `swipe` 仅表示源能力，手势仍按当前 O 准入。" +
 			"返回的 effect.state 以 observed/not_observed/unknown 报告内容位移证据；执行事实见 outcome。scroll 不承诺真实方向、触摸消费者或业务安全。" +
-			"\n恢复：重验目标变化可返回 target_changed；若附新观察，从 `observation` 组的 `id` 取得完整 O，直接用新 O 和新 P 重试。" +
-			"unstable/unknown 的 observation.quality 不阻止输入（文本观察组内写 `quality`）。" +
+			"\n恢复：重验目标变化可返回 target_changed；若附新观察，从 `obs` 行取得完整 O，直接用新 O 和新 P 重试。" +
+			"unstable/unknown 的 observation.quality 不阻止输入（文本 `obs` 行写作 `quality=`）。" +
 			"通常 uncertain 先查询原 P，再按 recovery 处理；executed 后用观察判断业务结果。",
 		schema: json.RawMessage(`{
   "type": "object",
@@ -499,7 +522,7 @@ var toolCatalog = []toolDefinition{
 	},
 	{
 		name: "keepalive",
-		description: "重设给定 O/P 所指当前活动会话的租约截止时间，不延长 O 的 actionable_until 或工作期限。" +
+		description: "重设给定 O/P 所指当前活动会话的租约截止时间，不延长 O 的输入期限（60 秒）或工作期限。" +
 			"reference 必填，须仍能定位当前活动且未到期的原会话；duration_minutes 为 1～120 的整数，默认 2。" +
 			"显式续期会覆盖原截止时间，较小的值或省略参数可缩短已有长租约。" +
 			"已结束或已到期不可恢复：ended 返回 session_ended，starting 返回 reference_has_no_session，" +
@@ -530,8 +553,8 @@ var toolCatalog = []toolDefinition{
 	{
 		name: "end",
 		description: "结束给定 O/P 的原会话：先撤权并封闭派发，再启动独立收尾。" +
-			"reference 必填，语义是该引用所属的原会话；返回 session.state=ended 与 cleanup。" +
-			"cleanup 通常先 pending，已派发的 Android 命令不保证撤回；未完成时按 recovery 查询。",
+			"reference 必填，语义是该引用所属的原会话；返回 `session ended …` 与 `cleanup …` 行。" +
+			"cleanup 通常先 pending，已派发的 Android 命令不保证撤回；未完成时按 `recovery` 行查询。",
 		schema: json.RawMessage(`{
   "type": "object",
   "properties": {
@@ -560,8 +583,9 @@ var toolCatalog = []toolDefinition{
 			"\n- close 关闭本会话虚屏目标窗口，可显式允许关闭 borrowed。" +
 			"\n- kill 用 task_id 终止本会话 live owned 且同屏唯一可归因的应用，可显式允许停止播放。" +
 			"\nclaim/handoff/close 的 target 用 task_id 或包名二选一，仍须通过服务准入。" +
+			"find/list 的 items 以 `app_items v1` 块、close 的 tasks 以 `app_tasks v1` 块交付，空集合输出 count=0，与未获得集合区分。" +
 			"变更结果按 outcome 与 recovery 处理。已执行后尝试发布原会话屏 full 无图观察；" +
-			"有返回的新观察时从 `observation` 组的 `id` 取得完整 O 继续操作。",
+			"有返回的新观察时从 `obs` 行取得完整 O 继续操作。",
 		schema: json.RawMessage(`{
   "type": "object",
   "properties": {
@@ -638,8 +662,9 @@ var toolCatalog = []toolDefinition{
 	{
 		name: "notify",
 		description: "保存一条消息并交给控制端显示。无需活动会话，无 reference 参数。text 必填、非空、最多 4096 码点。" +
+			"结果合并为单行 `notify [id=…] [saved=…] [state=pending]`。" +
 			"executed 只表示消息已保存并进入控制同步队列，不表示已显示或已读；" +
-			"notification.state 固定为 pending，不需要重发。",
+			"notification.state 固定为 pending（文本写作 state=pending），不需要重发。",
 		schema: json.RawMessage(`{
   "type": "object",
   "properties": {
@@ -660,7 +685,8 @@ var toolCatalog = []toolDefinition{
 		description: "在给定 O/P 原会话的 Android shell 作用域内执行一条受管命令。reference 与 command 必填。" +
 			"root=true 明确请求 root。命令不进入 chroot，可改变界面且不返回新树。" +
 			"\n受管命令不绑定会话显示屏：input 一类命令默认作用于 display 0（主屏），在虚拟屏会话里回执仍是 executed/exited、exit_code=0，但会话屏不会移动。" +
-			"要驱动会话屏须自行带 input -d <display_id>，该 id 见 observation.screen.display_id。" +
+			"要驱动会话屏须自行带 input -d <display_id>，该 `display_id` 见 `start` 首帧 `obs` 行的 " +
+			"`screen=<W>x<H>@<display_id>`（也可从 `snap` 的 `image` 或 `app(list)` 的 `display=` 取得）。" +
 			"带错 id 同样 exit 0 且无任何提示，唯一验证办法是 observe 对比。" +
 			"\n成功返回 shell.termination 和 exit_code，非零退出仍是完成事实；output_unavailable 只表示输出不可读。" +
 			"预期改屏时用 observe 核对。" +

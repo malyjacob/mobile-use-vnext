@@ -90,16 +90,39 @@ var rmfCompositeInventory = map[string]string{
 	"WaitResult":      "Trigger Matched ElapsedMS",
 }
 
+// TestResultFieldManifest is the completeness gate required by the proposal:
+// every reflected protocol.Result wire member must be either explicitly
+// projected by result v4 (v4ResultFields) or explicitly declared omitted
+// (v4OmittedResultFields). A newly added field that is not classified makes
+// this test fail; TestResultV4ManifestReverseControl proves the negative case.
 func TestResultFieldManifest(t *testing.T) {
-	manifest := rmfAnalyzeManifest()
+	manifest := v4AnalyzeManifest()
 	if len(manifest.problems) != 0 {
 		sort.Strings(manifest.problems)
-		t.Fatalf("result field manifest failed:\n%s", strings.Join(manifest.problems, "\n"))
+		t.Fatalf("result v4 field manifest failed:\n%s", strings.Join(manifest.problems, "\n"))
 	}
 
-	for key := range resultFields {
+	for key, kind := range v4ResultFields {
+		if kind == v4Omitted {
+			if _, declared := v4OmittedResultFields[key]; !declared {
+				t.Errorf("v4ResultFields marks %q omitted without an omission declaration", key)
+			}
+			continue
+		}
 		if _, ok := manifest.classPaths[key]; !ok {
-			t.Errorf("resultFields contains %q without a reflected wire field", key)
+			// Members inside an opaque block are validated by the block
+			// renderer's typed round trip and the composite inventory.
+			if !rmfUnderOpaqueBlock(key) {
+				t.Errorf("v4ResultFields contains %q without a reflected wire field", key)
+			}
+		}
+	}
+	for key, reason := range v4OmittedResultFields {
+		if _, declared := v4ResultFields[key]; !declared {
+			t.Errorf("omitted field %q is not classified in v4ResultFields", key)
+		}
+		if reason == "" {
+			t.Errorf("omitted field %q has no reason", key)
 		}
 	}
 
@@ -153,6 +176,32 @@ func TestResultFieldManifest(t *testing.T) {
 			t.Errorf("Bounds field %d = %s, want %s", index, got, name)
 		}
 	}
+}
+
+// TestResultV4ManifestReverseControl proves the completeness gate fails when a
+// new wire member is added without classifying it.
+func TestResultV4ManifestReverseControl(t *testing.T) {
+	type probe struct {
+		Known string
+		Added string
+	}
+	problems := v4ManifestProblems(reflect.TypeOf(probe{}), map[string]resultV4FieldKind{
+		"known": v4Token,
+	})
+	if len(problems) == 0 || !strings.Contains(strings.Join(problems, "\n"), "Added") {
+		t.Fatalf("reverse control did not detect the unclassified field: %v", problems)
+	}
+}
+
+// rmfUnderOpaqueBlock reports whether a declared v4 member lives inside one of
+// the pre-existing typed blocks whose internal syntax is unchanged.
+func rmfUnderOpaqueBlock(path string) bool {
+	for _, prefix := range []string{"inspection.", "shell.", "observation.tree.", "diagnosis.timeline.", "app.items.", "app.tasks."} {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestCanonicalJSONCoversManifest(t *testing.T) {
@@ -471,8 +520,8 @@ func TestReadOnlyCancelWithoutError(t *testing.T) {
 		!bytes.Equal(rmfStructuredBytes(t, structuredMode.StructuredContent), canonical) {
 		t.Fatal("both/structured modes do not expose the canonical cancellation value")
 	}
-	if !strings.HasPrefix(testTextContent(t, textMode), "result v3 is_error=true\n") {
-		t.Fatal("text mode did not use result v3 cancellation override")
+	if !strings.HasPrefix(testTextContent(t, textMode), "result v4 err") {
+		t.Fatal("text mode did not use result v4 cancellation override")
 	}
 	if !strings.HasPrefix(testTextContent(t, structuredMode), "diagnostic v1 is_error=true\n") {
 		t.Fatal("structured mode did not use diagnostic v1 cancellation override")
@@ -1275,8 +1324,8 @@ func rmfResultFixtures() []rmfFixture {
 			OperationID: "P6",
 			Image: &protocol.ImageMeta{
 				CapturedAt: "2026-11-10T00:00:07Z",
-				Width:      540,
-				Height:     1200,
+				Width:      461,
+				Height:     1024,
 				MediaType:  "image/jpeg",
 				ReadOnly:   true,
 				Screen: &protocol.Screen{
@@ -1537,4 +1586,201 @@ func rmfPathSegmentsMatch(pattern, actual []string) bool {
 		return false
 	}
 	return len(actual) == 0
+}
+
+// v4AnalyzeManifest reflects protocol.Result and verifies that every delivered
+// wire member is classified either as a v4 projection or as an explicit
+// omission. Composite inventories close the manual-marshaler loophole.
+func v4AnalyzeManifest() rmfManifest {
+	manifest := rmfManifest{
+		classPaths: make(map[string]struct{}),
+		exclusions: make(map[string]string),
+	}
+	scan := v4ManifestProblemsInto(&manifest)
+	scan()
+	sort.Slice(manifest.fields, func(i, j int) bool {
+		if manifest.fields[i].goPath == manifest.fields[j].goPath {
+			return manifest.fields[i].wirePath < manifest.fields[j].wirePath
+		}
+		return manifest.fields[i].goPath < manifest.fields[j].goPath
+	})
+	for exclusion := range rmfKnownExclusions {
+		if _, observed := manifest.exclusions[exclusion]; !observed {
+			manifest.problems = append(manifest.problems, fmt.Sprintf("declared exclusion %s was not reflected", exclusion))
+		}
+	}
+	for exclusion, reason := range manifest.exclusions {
+		want, declared := rmfKnownExclusions[exclusion]
+		if !declared {
+			manifest.problems = append(manifest.problems, fmt.Sprintf("new reflected wrapper/flag %s (%s) is not declared", exclusion, reason))
+			continue
+		}
+		if reason != want {
+			manifest.problems = append(manifest.problems, fmt.Sprintf("%s exclusion reason = %q, want %q", exclusion, reason, want))
+		}
+	}
+	return manifest
+}
+
+func v4ManifestProblems(valueType reflect.Type, table map[string]resultV4FieldKind) []string {
+	manifest := rmfManifest{
+		classPaths: make(map[string]struct{}),
+		exclusions: make(map[string]string),
+	}
+	problems := v4ScanType(valueType, "", "", make(map[reflect.Type]bool), table, &manifest)
+	problems = append(problems, manifest.problems...)
+	return problems
+}
+
+// v4ManifestProblemsInto returns a closure that scans protocol.Result and
+// records any unclassified member into manifest.problems.
+func v4ManifestProblemsInto(manifest *rmfManifest) func() {
+	return func() {
+		problems := v4ScanType(reflect.TypeOf(protocol.Result{}), "", "", make(map[reflect.Type]bool), v4ResultFields, manifest)
+		manifest.problems = append(manifest.problems, problems...)
+	}
+}
+
+func v4ScanType(valueType reflect.Type, wirePath, coveredBy string, stack map[reflect.Type]bool, table map[string]resultV4FieldKind, manifest *rmfManifest) []string {
+	var problems []string
+	valueType = rmfIndirectType(valueType)
+	if valueType == nil {
+		return nil
+	}
+	if valueType.PkgPath() == reflect.TypeOf(protocol.Result{}).PkgPath() &&
+		strings.HasPrefix(valueType.Name(), "Field[") {
+		rmfRecordExclusion(manifest, "protocol.Field.Set")
+		rmfRecordExclusion(manifest, "protocol.Field.Value")
+		if valueType.NumField() != 2 || valueType.Field(0).Name != "Set" || valueType.Field(1).Name != "Value" {
+			return []string{"generic protocol.Field wrapper shape changed"}
+		}
+		return v4ScanType(valueType.Field(1).Type, wirePath, coveredBy, stack, table, manifest)
+	}
+	if valueType.PkgPath() == reflect.TypeOf(protocol.Result{}).PkgPath() && valueType.Name() == "ReadTreeValue" {
+		rmfRecordExclusion(manifest, "protocol.ReadTreeValue.Full")
+		rmfRecordExclusion(manifest, "protocol.ReadTreeValue.Delta")
+		if valueType.NumField() != 2 || valueType.Field(0).Name != "Full" || valueType.Field(1).Name != "Delta" {
+			return []string{"ReadTreeValue variant wrapper shape changed"}
+		}
+		problems = append(problems, v4ScanType(valueType.Field(0).Type, wirePath, coveredBy, stack, table, manifest)...)
+		problems = append(problems, v4ScanType(valueType.Field(1).Type, wirePath, coveredBy, stack, table, manifest)...)
+		return problems
+	}
+	if valueType == reflect.TypeOf(protocol.ReadBounds{}) {
+		rmfRecordExclusion(manifest, "protocol.ReadBounds.Kind")
+		if valueType.NumField() != 2 || valueType.Field(0).Name != "Kind" || valueType.Field(1).Name != "Rect" {
+			return []string{"ReadBounds public geometry shape changed"}
+		}
+		return v4ScanType(valueType.Field(1).Type, wirePath, coveredBy, stack, table, manifest)
+	}
+	if valueType == reflect.TypeOf(protocol.Bounds{}) {
+		for index := 0; index < valueType.NumField(); index++ {
+			field := valueType.Field(index)
+			manifest.fields = append(manifest.fields, rmfWireField{
+				goPath: "protocol.Bounds." + field.Name, wirePath: wirePath + "[*]", coveredBy: coveredBy, tuple: true,
+			})
+		}
+		return nil
+	}
+	switch valueType.Kind() {
+	case reflect.Slice, reflect.Array, reflect.Map:
+		return v4ScanType(valueType.Elem(), wirePath+"[*]", coveredBy, stack, table, manifest)
+	case reflect.Struct:
+		if stack[valueType] {
+			return nil
+		}
+		stack[valueType] = true
+		defer delete(stack, valueType)
+		if coveredBy != "" {
+			inventory, ok := rmfCompositeInventory[valueType.Name()]
+			var names []string
+			for i := 0; i < valueType.NumField(); i++ {
+				if valueType.Field(i).PkgPath == "" {
+					names = append(names, valueType.Field(i).Name)
+				}
+			}
+			if !ok || strings.Join(names, " ") != inventory {
+				problems = append(problems, fmt.Sprintf("%s composite inventory changed; classify and fixture every field: %s", valueType, strings.Join(names, " ")))
+			}
+		}
+		for index := 0; index < valueType.NumField(); index++ {
+			field := valueType.Field(index)
+			if field.PkgPath != "" {
+				continue
+			}
+			fieldWireName, ok := rmfFieldWireName(valueType, field)
+			if !ok {
+				continue
+			}
+			goPath := rmfTypePath(valueType) + "." + field.Name
+			fieldPath := rmfJoinPath(wirePath, fieldWireName)
+			if _, excluded := rmfKnownExclusions[goPath]; excluded {
+				rmfRecordExclusion(manifest, goPath)
+				continue
+			}
+			kind, classified := table[fieldPath]
+			if classified {
+				manifest.classPaths[fieldPath] = struct{}{}
+				if problem := v4ClassificationTypeProblem(field.Type, kind); problem != "" {
+					problems = append(problems, fmt.Sprintf("%s at %s: %s", goPath, fieldPath, problem))
+				}
+			} else if coveredBy == "" {
+				problems = append(problems, fmt.Sprintf("%s has no result v4 projection or omission declaration at %s", goPath, fieldPath))
+			}
+			childCoveredBy := coveredBy
+			if classified && (kind == v4JSON || kind == v4Block) {
+				childCoveredBy = fieldPath
+			}
+			manifest.fields = append(manifest.fields, rmfWireField{
+				goPath: goPath, wirePath: fieldPath, classification: resultFieldKind(kind), coveredBy: childCoveredBy,
+			})
+			problems = append(problems, v4ScanType(field.Type, fieldPath, childCoveredBy, stack, table, manifest)...)
+		}
+	}
+	return problems
+}
+
+func v4ClassificationTypeProblem(fieldType reflect.Type, kind resultV4FieldKind) string {
+	if kind == v4Omitted || kind == v4JSON || kind == v4Object || kind == v4Block {
+		return ""
+	}
+	fieldType = rmfIndirectType(fieldType)
+	if fieldType == nil {
+		return ""
+	}
+	switch fieldType.Kind() {
+	case reflect.String:
+		if kind != v4Token && kind != v4String {
+			return fmt.Sprintf("string field uses %s, want v4Token or v4String", v4KindName(kind))
+		}
+	case reflect.Bool,
+		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+		reflect.Float32, reflect.Float64:
+		if kind != v4Literal {
+			return fmt.Sprintf("boolean/numeric field uses %s, want v4Literal", v4KindName(kind))
+		}
+	}
+	return ""
+}
+
+func v4KindName(kind resultV4FieldKind) string {
+	switch kind {
+	case v4Token:
+		return "v4Token"
+	case v4String:
+		return "v4String"
+	case v4JSON:
+		return "v4JSON"
+	case v4Object:
+		return "v4Object"
+	case v4Block:
+		return "v4Block"
+	case v4Literal:
+		return "v4Literal"
+	case v4Omitted:
+		return "v4Omitted"
+	default:
+		return fmt.Sprintf("resultV4FieldKind(%d)", kind)
+	}
 }

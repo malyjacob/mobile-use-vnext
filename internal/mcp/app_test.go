@@ -277,11 +277,8 @@ func appModeFixtures() []appModeFixture {
 				`"items":[{"name":"设置","package":"com.android.settings"}],` +
 				`"total":1,"truncated":false,"captured_at":"2026-11-12T03:00:00+08:00"}}`,
 			typed: []string{
-				"app.kind=find",
-				`app.items=[{"name":"设置","package":"com.android.settings"}]`,
-				"app.total=1",
-				"app.truncated=false",
-				"app.captured_at=2026-11-12T03:00:00+08:00",
+				"app find total=1 truncated=false at=19:00:00",
+				"app_items v1 kind=find count=1",
 			},
 		},
 		{
@@ -293,10 +290,8 @@ func appModeFixtures() []appModeFixture {
 				`"total":1,"truncated":false,"captured_at":"2026-11-12T03:00:01+08:00",` +
 				`"foreground":{"state":"present","package":"com.example","task_id":42}}}`,
 			typed: []string{
-				"app.kind=list",
-				"app.display_id=12",
-				`app.items=[{"task_id":42,"package":"com.example","ownership":"borrowed","origin_display":0}]`,
-				`app.foreground={"state":"present","package":"com.example","task_id":42}`,
+				"app list display=12 total=1 truncated=false fg=com.example#42 at=19:00:01",
+				"app_items v1 kind=list count=1",
 			},
 		},
 		{
@@ -306,9 +301,7 @@ func appModeFixtures() []appModeFixture {
 				`"package":"com.example","task_id":42,"display_id":12,"ownership":"owned",` +
 				`"reused":false,"state_preserved":false}}`,
 			typed: []string{
-				"app.kind=open", `app.package="com.example"`, "app.task_id=42",
-				"app.display_id=12", "app.ownership=owned", "app.reused=false",
-				"app.state_preserved=false",
+				"app open pkg=com.example task=42 display=12 ownership=owned reused=false state_preserved=false",
 			},
 		},
 		{
@@ -318,8 +311,7 @@ func appModeFixtures() []appModeFixture {
 				`"package":"com.example","task_id":43,"source_display_id":0,"display_id":12,` +
 				`"ownership":"borrowed","state_preserved":true}}`,
 			typed: []string{
-				"app.kind=claim", "app.source_display_id=0",
-				"app.display_id=12", "app.ownership=borrowed", "app.state_preserved=true",
+				"app claim pkg=com.example task=43 src_display=0 display=12 ownership=borrowed state_preserved=true",
 			},
 		},
 		{
@@ -329,9 +321,7 @@ func appModeFixtures() []appModeFixture {
 				`"package":"com.example","task_id":43,"source_display_id":12,"display_id":0,` +
 				`"ownership":"shared","state_preserved":null,"foreground_restore":"not_requested"}}`,
 			typed: []string{
-				"app.kind=handoff", "app.source_display_id=12", "app.display_id=0",
-				"app.ownership=shared", "app.state_preserved=null",
-				"app.foreground_restore=not_requested",
+				"app handoff pkg=com.example task=43 src_display=12 display=0 ownership=shared state_preserved=null fg_restore=not_requested",
 			},
 		},
 		{
@@ -341,9 +331,8 @@ func appModeFixtures() []appModeFixture {
 				`"tasks":[{"task_id":42,"outcome":"executed","recents_cleaned":true},` +
 				`{"task_id":43,"outcome":"executed","recents_cleaned":false}],"complete":false}}`,
 			typed: []string{
-				"app.kind=close", "app.display_id=12",
-				`app.tasks=[{"task_id":42,"outcome":"executed","recents_cleaned":true},{"task_id":43,"outcome":"executed","recents_cleaned":false}]`,
-				"app.complete=false",
+				"app close display=12 complete=false",
+				"app_tasks v1 count=2",
 			},
 		},
 		{
@@ -354,9 +343,7 @@ func appModeFixtures() []appModeFixture {
 				`"target_pids":[1234,1235],"killed_pids":[1234,1235],` +
 				`"remaining_pids":[],"restarted":null}}`,
 			typed: []string{
-				"app.kind=kill", "app.source_task_id=42", "app.display_id=12",
-				"app.target_pids=[1234,1235]", "app.killed_pids=[1234,1235]",
-				"app.remaining_pids=[]", "app.restarted=null",
+				"app kill pkg=com.example src_task=42 display=12 target_pids=[1234,1235] killed_pids=[1234,1235] remaining_pids=[] restarted=null",
 			},
 		},
 		{
@@ -367,7 +354,7 @@ func appModeFixtures() []appModeFixture {
 				`"target_pids":[1234],"killed_pids":[1234],"restarted":null},` +
 				`"error":{"code":"kill_unconfirmed","message":"进程终止未确认"}}`,
 			isError: true,
-			typed:   []string{"app.kind=kill", "app.restarted=null"},
+			typed:   []string{"app kill pkg=com.example src_task=42 display=12 target_pids=[1234] killed_pids=[1234] restarted=null"},
 		},
 		{
 			name:      "claim not executed",
@@ -376,7 +363,7 @@ func appModeFixtures() []appModeFixture {
 				`"package":"com.example","task_id":43,"source_display_id":0},` +
 				`"error":{"code":"window_action_not_supported_on_primary_display","message":"主屏不支持该操作"}}`,
 			isError: true,
-			typed:   []string{"app.kind=claim", "app.source_display_id=0", "outcome=not_executed"},
+			typed:   []string{"app claim pkg=com.example task=43 src_display=0", "outcome=not_executed"},
 		},
 		{
 			name:      "find read failure",
@@ -385,7 +372,7 @@ func appModeFixtures() []appModeFixture {
 			service: `{"operation_id":%q,"app":{"kind":"find","items":[],"total":0},` +
 				`"error":{"code":"device_unavailable","message":"应用清单读取失败"}}`,
 			isError: true,
-			typed:   []string{"app.kind=find"},
+			typed:   []string{"app find total=0"},
 		},
 		{
 			name:      "close partial",
@@ -397,8 +384,8 @@ func appModeFixtures() []appModeFixture {
 				`"error":{"code":"task_remove_unconfirmed","message":"部分任务的关闭结果未确认"}}`,
 			isError: true,
 			typed: []string{
-				`app.tasks=[{"task_id":42,"outcome":"executed","recents_cleaned":true},{"task_id":43,"outcome":"uncertain","recents_cleaned":false,"error":{"code":"task_remove_unconfirmed","message":"关闭未确认"}}]`,
-				"app.complete=false",
+				"app close display=12 complete=false",
+				"app_tasks v1 count=2",
 			},
 		},
 	}
@@ -433,6 +420,7 @@ func TestAppResultParityAcrossModes(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
+					expectedText := expectedResultV4(t, expectedRaw, fixture.isError)
 					if out.IsError != fixture.isError {
 						t.Fatalf("IsError = %v, want %v\n%s", out.IsError, fixture.isError, testTextContent(t, out))
 					}
@@ -444,9 +432,9 @@ func TestAppResultParityAcrossModes(t *testing.T) {
 						if err != nil {
 							t.Fatalf("decode text: %v\n%s", err, testTextContent(t, out))
 						}
-						if flag != fixture.isError || !reflect.DeepEqual(decoded, expected) {
+						if flag != fixture.isError || !sameJSONValue(decoded, expectedText) {
 							t.Fatalf("text facts differ from the hand-written expectation\nwant=%#v\ngot=%#v\n%s",
-								expected, decoded, testTextContent(t, out))
+								expectedText, decoded, testTextContent(t, out))
 						}
 						if fixture.query {
 							if _, ok := decoded["outcome"]; ok {
@@ -469,9 +457,9 @@ func TestAppResultParityAcrossModes(t *testing.T) {
 						}
 						if mode == ResultModeBoth {
 							decoded, flag, err := decodeResultText(t, testTextContent(t, out))
-							if err != nil || flag != fixture.isError || !reflect.DeepEqual(decoded, expected) {
+							if err != nil || flag != fixture.isError || !sameJSONValue(decoded, expectedText) {
 								t.Fatalf("both-mode text differs from structuredContent err=%v\nwant=%#v\ngot=%#v",
-									err, expected, decoded)
+									err, expectedText, decoded)
 							}
 						}
 					}
@@ -602,15 +590,15 @@ func TestCancellationAppQueryDoesNotEnd(t *testing.T) {
 	}
 	text := testTextContent(t, projectExecution(execution, "app", ResultModeBoth))
 	for _, want := range []string{
-		"app.kind=find",
-		"error.code=call_cancelled",
+		"app find",
+		"error call_cancelled",
 		"查询已取消；未发起 end",
 		`"mcp.cancelled":true`,
 		`"mcp.cancellation":"查询已取消；未发起 end"`,
 	} {
 		requireTestContains(t, text, want)
 	}
-	for _, unwanted := range []string{"outcome=", "recovery.entry=", "app.items", "app.total"} {
+	for _, unwanted := range []string{"outcome=", "recovery ", "app_items", "total="} {
 		requireTestNotContains(t, text, unwanted)
 	}
 }
@@ -752,7 +740,7 @@ func TestCancellationAppMutationKeepsBoundedEnd(t *testing.T) {
 		t.Fatalf("end cleanup facts were not merged: %#v", execution.result.Cleanup)
 	}
 	text := testTextContent(t, projectExecution(execution, "app", ResultModeBoth))
-	for _, want := range []string{"app.kind=close", "有界 end", "不证明", `"mcp.cancelled":true`} {
+	for _, want := range []string{"app close", "有界 end", "不证明", `"mcp.cancelled":true`} {
 		requireTestContains(t, text, want)
 	}
 	requireTestNotContains(t, text, cancellationQueryMessage)
@@ -825,7 +813,7 @@ func TestAppQuerySummaryKeepsKindWithoutOutcome(t *testing.T) {
 		}
 		if mode != ResultModeStructured {
 			text := testTextContent(t, out)
-			for _, want := range []string{"operation_state=finished", "phase=query_cancelled", "app.kind=list"} {
+			for _, want := range []string{"state=finished", "phase=query_cancelled", "app list"} {
 				requireTestContains(t, text, want)
 			}
 			for _, unwanted := range []string{"outcome=", "app.items", "app.total"} {
@@ -847,65 +835,65 @@ func TestAppQuerySummaryKeepsKindWithoutOutcome(t *testing.T) {
 
 // ---------------------------------------------------------------- text classification
 
-func appExpectedFieldKinds() map[string]resultFieldKind {
-	return map[string]resultFieldKind{
-		"app.kind":               fieldToken,
-		"app.ownership":          fieldToken,
-		"app.foreground_restore": fieldToken,
-		"app.captured_at":        fieldToken,
-		"app.package":            fieldString,
-		"app.task_id":            fieldLiteral,
-		"app.source_task_id":     fieldLiteral,
-		"app.display_id":         fieldLiteral,
-		"app.source_display_id":  fieldLiteral,
-		"app.total":              fieldLiteral,
-		"app.reused":             fieldLiteral,
-		"app.state_preserved":    fieldLiteral,
-		"app.complete":           fieldLiteral,
-		"app.truncated":          fieldLiteral,
-		"app.restarted":          fieldLiteral,
-		"app.items":              fieldJSON,
-		"app.tasks":              fieldJSON,
-		"app.foreground":         fieldJSON,
-		"app.target_pids":        fieldJSON,
-		"app.killed_pids":        fieldJSON,
-		"app.remaining_pids":     fieldJSON,
+func appExpectedFieldKinds() map[string]resultV4FieldKind {
+	return map[string]resultV4FieldKind{
+		"app.kind":               v4Token,
+		"app.ownership":          v4Token,
+		"app.foreground_restore": v4Token,
+		"app.captured_at":        v4Token,
+		"app.package":            v4String,
+		"app.task_id":            v4Literal,
+		"app.source_task_id":     v4Literal,
+		"app.display_id":         v4Literal,
+		"app.source_display_id":  v4Literal,
+		"app.total":              v4Literal,
+		"app.reused":             v4Literal,
+		"app.state_preserved":    v4Literal,
+		"app.complete":           v4Literal,
+		"app.truncated":          v4Literal,
+		"app.restarted":          v4Literal,
+		"app.items":              v4Block,
+		"app.tasks":              v4Block,
+		"app.foreground":         v4Object,
+		"app.target_pids":        v4JSON,
+		"app.killed_pids":        v4JSON,
+		"app.remaining_pids":     v4JSON,
 	}
 }
 
 // appFieldClassificationProblem is the known-field gate: every declared app
-// path must exist with its exact classification. The reverse-control test
-// removes app.tasks and expects this gate to fail.
-func appFieldClassificationProblem(table map[string]resultFieldKind) string {
+// path must exist with its exact result v4 classification. The reverse-control
+// test removes app.tasks and expects this gate to fail.
+func appFieldClassificationProblem(table map[string]resultV4FieldKind) string {
 	for path, want := range appExpectedFieldKinds() {
 		got, ok := table[path]
 		if !ok {
 			return path + " is not classified"
 		}
 		if got != want {
-			return fmt.Sprintf("%s is %s, want %s", path, rmfFieldKindName(got), rmfFieldKindName(want))
+			return fmt.Sprintf("%s is %s, want %s", path, v4KindName(got), v4KindName(want))
 		}
 	}
 	return ""
 }
 
 func TestAppFieldClassification(t *testing.T) {
-	if problem := appFieldClassificationProblem(resultFields); problem != "" {
+	if problem := appFieldClassificationProblem(v4ResultFields); problem != "" {
 		t.Fatalf("app field classification: %s", problem)
 	}
 	text, err := encodeResultText([]byte(`{"app":{"kind":"close","display_id":12,`+
-		`"tasks":[{"task_id":42,"outcome":"executed","recents_cleaned":true}],"complete":false}}`), false)
+		`"tasks":[{"task_id":42,"outcome":"executed","recents_cleaned":true}],"complete":false}}`), false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	requireTestContains(t, text, `app.tasks=[{"task_id":42,"outcome":"executed","recents_cleaned":true}]`)
+	requireTestContains(t, text, "app_tasks v1 count=1\n#42 executed recents_cleaned=true\nend app_tasks\n")
 	requireTestNotContains(t, text, `json v1 path="/app/tasks"`)
 
-	// Reverse control: deleting the fieldJSON classification must break the
+	// Reverse control: deleting the block classification must break the
 	// known-field gate rather than silently falling back to json v1.
 	if problem := func() string {
-		table := make(map[string]resultFieldKind, len(resultFields))
-		for path, kind := range resultFields {
+		table := make(map[string]resultV4FieldKind, len(v4ResultFields))
+		for path, kind := range v4ResultFields {
 			table[path] = kind
 		}
 		delete(table, "app.tasks")

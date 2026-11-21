@@ -192,8 +192,9 @@ MCP 的 `act` schema 含 `scroll` 分支（`container`/`direction`/`amount`）�
 连接。MCP 适配器本身不保存会话，重启后重新发现即可。
 
 MCP 服务在 `server/discover` 与兼容 `initialize` 响应中发布同一份 server instructions，
-包括完整树图例及会话、O/P、引用和恢复等跨工具规则。宿主应将该说明提供给模型。各工具
-描述提供本工具的关键分流和恢复提示，`start` 也简述 O/P 与 full/delta。
+包括完整树图例及会话、O/P、引用和恢复等跨工具规则。宿主应将该说明提供给模型。说明同时
+给出 `result v4` 外壳、`obs` 单行、`app_items`/`app_tasks` 块与 `recovery ref=`
+的语法。各工具描述提供本工具的关键分流和恢复提示，`start` 也简述 O/P 与 full/delta。
 用 `base` 指向的 full 和本次 delta 重建当前树。
 
 ### 4.5 结果模式
@@ -203,32 +204,52 @@ MCP 适配器对每次工具调用提供 `both`、`text`、`structured` 三种�
 
 | 模式 | `content` | `structuredContent` | 适用 |
 | --- | --- | --- | --- |
-| `both` | 完整 `result v3` 文本与图片 | 完整 `Result` JSON | 显式选择；同时需要两种形式 |
-| `text`（默认） | 完整 `result v3` 文本与图片 | 不发送 | 默认模式；只读取文本通道的宿主 |
+| `both` | 紧凑 `result v4` 文本与图片 | 完整 `Result` JSON | 显式选择；同时需要两种形式 |
+| `text`（默认） | 紧凑 `result v4` 文本与图片 | 不发送 | 默认模式；只读取文本通道的宿主 |
 | `structured` | 图片；`isError=true` 时附最小 `diagnostic v1` 文本 | 完整 `Result` JSON | 会把结构化结果交给模型或程序的宿主 |
 
-- `both` 同时发送两份完整编码，传输与上下文占用更大；宿主明确只消费一种形式时使用对应
-  单向模式。
-- `text` 完整文本以 `result v3 is_error=<true|false>` 开头、`end result` 结束，不产生
-  `omitted` 块；缺少终止行表示文本被宿主截断，应改用 `structured` 或通过 `inspect` 的
-  node/query 收窄。
+`text`/`both` 的文本是面向调用方的紧凑投影：固定或冗余元信息（`observation.origin`、
+`observation.revision`、`observation.actionable_until`、默认 `observation.quality` 与
+`samples`、`session.agent`、`inspection.origin`、默认 JPEG `media_type`、日期与纳秒部分）
+被省略，不承诺与结构化 JSON 逐字段互相还原；`/api/*` 与 `both`/`structured` 的
+`structuredContent` 完整无损保留 `Result` JSON，含全部审计字段、三态与空集合语义。需要
+精确机器字段时使用 `structured` 或 `both`，逐项规则见 [MCP 入口](mcp.md)。
+
+- `both` 同时发送文本与结构化两种表示，传输与上下文占用更大；宿主明确只消费一种形式时使用
+  对应单向模式。
+- `text` 文本以 `result v4 <ok|err> [op=<P>] [state=…] [outcome=…] [phase=…]` 开头、
+  `end result` 结束；常规成功省略 `outcome=executed`，错误结果、`not_executed`、
+  `uncertain` 与带 `state=` 的重放摘要显式输出 `outcome=…`。缺少终止行表示文本被宿主
+  截断，应改用 `structured` 或通过 `inspect` 的 node/query 收窄。
 - `structured` 成功且无图时 `content=[]`；不接受空 content 的宿主使用 `both` 或 `text`。
   错误附带的 `diagnostic v1` 以 `diagnostic v1 is_error=true` 开头、`end diagnostic`
   结束，只用于解释，不代表完整结果。
 - 模式不改变工具目录、入参 schema、认证、归属或 `/api/*` 契约；不发布 `outputSchema`。
 
-文本中的连续观察字段写成无缩进的 `observation` 标题加一个空格缩进的相对路径。完整 O 从
-该组的 `id` 取得，例如 `observation` 下的 ` id=Oabc_76`；结构化结果中仍是
-`observation.id`。普通观察树由 `tree v4` 标识，完整块头只写 `nodes`，差分块头写
-`base` 与 `changes`。指向同一个完整 base 的多条差分分别应用到该整树。
-`base=_72` 是文本读树简写，不能作为后续工具调用的引用。需要操作当前观察时使用组内完整 O，
-需要看历史树时使用完整历史 O。
+`text` 中每次观察写成单行，`obs ` 之后首个不含 `=` 的字段是完整 `O`：
+
+```text
+obs [<O>] [status=…] [fg=…] [at=HH:MM:SS] [quality=…] [screen=<W>x<H>[@<display_id>]] [rot=…] [missing=…]
+```
+
+结构化结果中该编号仍是 `observation.id`。可见 O/P 形如 `O4821_72` 与 `P7391_12`：
+`O`/`P` 后接 4 位十进制实例标签（`1000`–`9999`，无前导零）、`_` 与单调序号，与 `/api/*`
+使用同一编号。`start` 首帧的会话屏 `display_id` 从 `obs` 行的
+`screen=<W>x<H>@<display_id>` 读取；`snap` 的 `image` 与 `app(list)` 的 `display=` 也给出
+同一编号。O 的输入期限默认约 60 秒并受会话租期截断，文本省略该字段；精确截止时间见
+`structured`，过期以服务端反馈为准。
+
+`recovery` 行写作 `recovery entry=<entry> ref=<精确 O/P|O|P|none> [input=…] [cause=…]`：
+能确定性证明时 `ref=` 直接给出可抄用的真实编号，抽象词 `O`/`P` 只在无法证明安全时出现；
+`structured` 中的 `recovery.reference` 仍是 `"O"`/`"P"`/`"none"`。
+
+普通观察树由 `tree v4` 标识，完整块头只写 `nodes`，差分块头写 `base` 与 `changes`。指向
+同一个完整 base 的多条差分分别应用到该整树。`base=_72` 是文本读树简写，不能作为后续工具
+调用的引用。需要操作当前观察时使用 `obs` 行的完整 O，需要看历史树时使用完整历史 O。
 
 `inspect` 继续使用 `inspect v3` 的两格缩进、方括号矩形和显式动作词。`tree v4` 的默认动作、
-`@` 同矩形引用与短 base 不适用于补看块。未知或无法无损表达的观察字段继续在文本中使用
-绝对 JSON Pointer 的原值兜底。跨组重复路径及祖先与子路径冲突属于无效文本，调用方不能
-把短语法、JSON 兜底与重复路径混为一谈。只接受旧文本语法或 JSON 的消费者应迁移解析器，
-或显式选择 `structured`。
+`@` 同矩形引用与短 base 不适用于补看块。未知或无法无损表达的字段继续在文本中使用绝对
+JSON Pointer 的原值兜底；解析时按块头 `tree v4`、`inspect v3` 分派，不要混用两种语法。
 
 选择方式：
 
@@ -316,13 +337,13 @@ Invoke-RestMethod http://127.0.0.1:18881/api/status -Method Post `
 
 ```json
 {"kind":"find","query":"设置"}
-{"kind":"list","reference":"O1"}
-{"kind":"list","reference":"P1","scope":"primary","app":"com.example.target"}
-{"kind":"open","reference":"O1","target":{"app":"com.example.target"}}
-{"kind":"claim","reference":"O1","target":{"task_id":42}}
-{"kind":"handoff","reference":"O1","target":{"task_id":42},"restore_foreground":true}
-{"kind":"close","reference":"O1","target":{"app":"com.example.target"}}
-{"kind":"kill","reference":"O1","target":{"task_id":42}}
+{"kind":"list","reference":"O4821_72"}
+{"kind":"list","reference":"P7391_12","scope":"primary","app":"com.example.target"}
+{"kind":"open","reference":"O4821_72","target":{"app":"com.example.target"}}
+{"kind":"claim","reference":"O4821_72","target":{"task_id":42}}
+{"kind":"handoff","reference":"O4821_72","target":{"task_id":42},"restore_foreground":true}
+{"kind":"close","reference":"O4821_72","target":{"app":"com.example.target"}}
+{"kind":"kill","reference":"O4821_72","target":{"task_id":42}}
 ```
 
 `target` 的 `task_id` 与 `app` 互斥；`open` 只接受 `target.app`，`kill` 只接受 `task_id`，
@@ -334,11 +355,11 @@ Invoke-RestMethod http://127.0.0.1:18881/api/status -Method Post `
 `act` 的常见省略形式与显式关闭：
 
 ```json
-{"reference":"O1","operation":{"type":"tap","target":{"ref":"n1"}}}
-{"reference":"O1","operation":{"type":"text","target":{"ref":"n1"},"text":"查询"}}
-{"reference":"O1","operation":{"type":"tap","target":{"x":100,"y":200}}}
-{"reference":"O1","operation":{"type":"tap","target":{"ref":"n1"},"bubble":false}}
-{"reference":"O1","operation":{"type":"text","target":{"ref":"n1"},"text":"草稿","press_enter":false}}
+{"reference":"O4821_72","operation":{"type":"tap","target":{"ref":"n1"}}}
+{"reference":"O4821_72","operation":{"type":"text","target":{"ref":"n1"},"text":"查询"}}
+{"reference":"O4821_72","operation":{"type":"tap","target":{"x":100,"y":200}}}
+{"reference":"O4821_72","operation":{"type":"tap","target":{"ref":"n1"},"bubble":false}}
+{"reference":"O4821_72","operation":{"type":"text","target":{"ref":"n1"},"text":"草稿","press_enter":false}}
 ```
 
 ref 点按/长按默认 `bubble=true`，原目标完全没有 `tap`/`long_press`/`text` 任一动作时只向最近
@@ -347,12 +368,12 @@ ref 点按/长按默认 `bubble=true`，原目标完全没有 `tap`/`long_press`
 或另发 ENTER；草稿、多行、逐字段填写或清空但不提交时显式 `press_enter=false`。复合 text
 结果携带 `text_input.write/enter`；`enter=uncertain` 先观察页面，不原样重发。text 失败时
 读取 `error.details.stage/reason/dispatch` 区分未派发、目标不唯一、读回不等与 ENTER 问题，
-不要解析 `message`；写入或 ENTER 仍 uncertain 且会话活动时按 `recovery.entry=observe` 用
-新 P 获取现场，而不是循环 `status(P)`。
+不要解析 `message`；写入或 ENTER 仍 uncertain 且会话活动时按 `recovery entry=observe
+ref=<P>`（`structured` 中为 `recovery.entry`）用新 P 获取现场，而不是循环 `status(P)`。
 
-P 的两种用法：`observe({"reference":"P9"})` 的 `reference` 引用本 Agent 已有的 P9 原操作，
-不是本次 `observe` 的请求体 P；本次调用仍使用自己的新 P。`status(P9)` 只返回操作摘要，
-不重新采集，也不补回业务集合。
+P 的两种用法：`observe({"reference":"P7391_4"})` 的 `reference` 引用本 Agent 已有的
+`P7391_4` 原操作，不是本次 `observe` 的请求体 P；本次调用仍使用自己的新 P。
+`status(P7391_4)` 只返回操作摘要，不重新采集，也不补回业务集合。
 
 ### 5.2 `wait_for` 条件等待示例
 
@@ -360,15 +381,15 @@ P 的两种用法：`observe({"reference":"P9"})` 的 `reference` 引用本 Agen
 时，改用一次服务端条件等待：
 
 ```json
-{"reference":"O1","absent_query":"加载中","timeout":15}
-{"reference":"O1","query":"完成","stable":true,"timeout":20}
-{"reference":"O1","timeout":5,"image":true}
+{"reference":"O4821_72","absent_query":"加载中","timeout":15}
+{"reference":"O4821_72","query":"完成","stable":true,"timeout":20}
+{"reference":"O4821_72","timeout":5,"image":true}
 ```
 
 ```powershell
 $wait = Invoke-RestMethod http://127.0.0.1:18881/api/wait_for -Method Post `
   -Headers $headers -ContentType 'application/json' `
-  -Body '{"reference":"O1","query":"完成","timeout":20}'
+  -Body '{"reference":"O4821_72","query":"完成","timeout":20}'
 $wait.wait.trigger      # query / absent_query / stable / timeout
 $wait.wait.matched      # ["query"]；没有可判定项时该成员缺失
 $wait.wait.elapsed_ms   # 自准入完成到终帧发布的耗时
@@ -397,7 +418,7 @@ $newOid = $wait.observation.id
 
 ```powershell
 $snap = Invoke-RestMethod http://127.0.0.1:18881/api/snap -Method Post `
-  -Headers $headers -ContentType 'application/json' -Body '{"reference":"O1"}'
+  -Headers $headers -ContentType 'application/json' -Body '{"reference":"O4821_72"}'
 $snap.operation_id       # 本次 P
 $snap.image.width        # 输出 JPEG 像素尺寸
 $snap.image.screen       # 准入时会话绑定显示的几何快照
@@ -405,7 +426,8 @@ $snap.image.screen       # 准入时会话绑定显示的几何快照
 ```
 
 - `snap` 只读当前屏的一张图，不读树、不发布观察、不续租、不认领 O；原 O 仍按自己的
-  `actionable_until` 与 `act` 实时重验使用。
+  `actionable_until` 与 `act` 实时重验使用。MCP `text` 通道把这次结果写作单行
+  `image <W>x<H> read_only screen=<W>x<H>[@<display_id>] [at=<HH:MM:SS>]`，`display_id` 即当前会话屏。
 - 成功结果只有 `operation_id` 与顶层 `image`；`image.base64` 是 JPEG 字节，元数据与树/图片
   附加材料同形，并固定 `read_only=true` 与 `screen`。
 - 重复使用同一 P、或对 `snap` 的 P 调 `status(P)`，只返回无图操作摘要，不重读设备。
@@ -690,9 +712,10 @@ GET 判断工具是否可用。
 `.state/mcp-config.json` 的 `http.token` 并重启适配器/客户端。旧 token 不会继续有效。
 
 **Q：为什么 `text` 模式没有 `structuredContent`，或 `structured` 模式没有文本？**
-这是模式定义，不是缺少字段。`text` 只发送完整文本与图片；`structured` 发送完整结构化结果
-与图片，成功且无图时 `content=[]`，错误时只附最小诊断文本。两种模式承载同一份事实；需要
-同时取得两份完整编码时使用 `both`。
+这是模式定义，不是缺少字段。`text` 只发送紧凑文本与图片；`structured` 发送完整结构化结果
+与图片，成功且无图时 `content=[]`，错误时只附最小诊断文本。两者承载同一份事实，文本省略
+的固定元信息（如 `observation.origin`、`observation.actionable_until`）仍保留在
+`structuredContent`；需要同时取得两种形式时使用 `both`。
 
 ## 12. 错误与恢复映射
 

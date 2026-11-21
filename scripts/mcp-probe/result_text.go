@@ -7,212 +7,15 @@ import (
 	"strings"
 )
 
-// decodedTextResult is the probe-local oracle for result v3. It is deliberately
+// decodedTextResult is the probe-local oracle for result v4. It is deliberately
 // narrow: it restores the facts this external probe checks, while keeping the
-// decoded object available to prove that readable blocks preserve complete
-// item/event JSON.
+// decoded object available to prove that the readable projection preserves
+// every non-omitted member.
 type decodedTextResult struct {
 	view    resultView
 	isError bool
 	object  map[string]any
-}
-
-// decodeResultText parses one complete result v3 projection. It rejects a
-// missing/repeated envelope, omitted readable blocks and duplicate paths.
-func decodeResultText(text string) (*decodedTextResult, *checkError) {
-	if strings.Contains(text, "\r") {
-		return nil, failf("text_result_naked_cr")
-	}
-	text = strings.TrimSuffix(text, "\n")
-	if text == "" || strings.HasSuffix(text, "\n") {
-		return nil, failf("text_result_trailing_blank")
-	}
-	lines := strings.Split(text, "\n")
-	if len(lines) < 2 {
-		return nil, failf("text_result_incomplete")
-	}
-	rawError, found := strings.CutPrefix(lines[0], "result v3 is_error=")
-	if !found || (rawError != "true" && rawError != "false") {
-		return nil, failf("text_result_header_invalid")
-	}
-	if lines[len(lines)-1] != "end result" {
-		return nil, failf("text_result_unterminated")
-	}
-
-	object := make(map[string]any)
-	seen := make(map[string]bool)
-	groupPaths := make(map[string]bool)
-	var treeBindings []treeBaseBinding
-	for index := 1; index < len(lines)-1; {
-		line := lines[index]
-		if isForeignTreeBlockHeader(line) {
-			return nil, failf("text_result_block_unknown")
-		}
-		if line == "" {
-			if index+1 >= len(lines)-1 || !isResultBlockHeader(lines[index+1]) {
-				if index+1 < len(lines)-1 && isForeignTreeBlockHeader(lines[index+1]) {
-					return nil, failf("text_result_block_unknown")
-				}
-				return nil, failf("text_result_blank_invalid")
-			}
-			index++
-			continue
-		}
-		if isResultBlockHeader(line) {
-			if index == 1 || lines[index-1] != "" {
-				return nil, failf("text_result_block_separator_missing")
-			}
-			next, failure := decodeResultBlock(lines, index, object, seen, &treeBindings)
-			if failure != nil {
-				return nil, failure
-			}
-			index = next
-			continue
-		}
-		if line == "observation" {
-			next, failure := decodeObservationGroup(lines, index, object, seen, groupPaths)
-			if failure != nil {
-				return nil, failure
-			}
-			index = next
-			continue
-		}
-		if strings.HasPrefix(line, "observation.") {
-			return nil, failf("text_result_observation_group_required")
-		}
-		if strings.HasPrefix(line, " ") {
-			return nil, failf("text_result_observation_group_invalid")
-		}
-		if strings.HasPrefix(line, "json v1 ") {
-			path, value, failure := decodeJSONFallback(line)
-			if failure != nil {
-				return nil, failure
-			}
-			if isTypedAppPath(path) {
-				return nil, failf("text_result_app_field_typed_required")
-			}
-			if failure := setJSONPointer(object, seen, path, value); failure != nil {
-				return nil, failure
-			}
-			index++
-			continue
-		}
-		key, rawValue, found := strings.Cut(line, "=")
-		if !found || key == "" {
-			return nil, failf("text_result_item_invalid")
-		}
-		if strings.HasPrefix(key, "app.") {
-			if failure := applyAppTextField(object, seen, key, rawValue); failure != nil {
-				return nil, failure
-			}
-			index++
-			continue
-		}
-		value, failure := decodeTextScalar(rawValue)
-		if failure != nil {
-			return nil, failure
-		}
-		path := strings.Split(key, ".")
-		if failure := setDecodedPath(object, seen, path, value); failure != nil {
-			return nil, failure
-		}
-		index++
-	}
-	if failure := resolveTreeBindings(object, seen, groupPaths, treeBindings); failure != nil {
-		return nil, failure
-	}
-
-	encoded, err := json.Marshal(object)
-	if err != nil {
-		return nil, failf("text_result_unusable")
-	}
-	var view resultView
-	if err := json.Unmarshal(encoded, &view); err != nil {
-		return nil, failf("text_result_unusable")
-	}
-	return &decodedTextResult{
-		view:    view,
-		isError: rawError == "true",
-		object:  object,
-	}, nil
-}
-
-// decodeObservationGroup restores one v3 observation group. The group has a
-// bare header and at least one single-space-prefixed relative path. Global path
-// tracking catches duplicates and ancestor/child conflicts across groups.
-func decodeObservationGroup(lines []string, start int, object map[string]any,
-	seen, groupPaths map[string]bool) (int, *checkError) {
-	index := start + 1
-	fields := 0
-	for index < len(lines)-1 && strings.HasPrefix(lines[index], " ") {
-		line := lines[index]
-		if len(line) < 2 || line[1] == ' ' || line[1] == '\t' {
-			return 0, failf("text_result_observation_group_invalid")
-		}
-		key, rawValue, found := strings.Cut(line[1:], "=")
-		if !found || key == "" {
-			return 0, failf("text_result_observation_group_invalid")
-		}
-		if key == "tree" {
-			return 0, failf("text_result_observation_group_invalid")
-		}
-		value, failure := decodeTextScalar(rawValue)
-		if failure != nil {
-			return 0, failure
-		}
-		path := append([]string{"observation"}, strings.Split(key, ".")...)
-		if failure := setDecodedPath(object, seen, path, value); failure != nil {
-			return 0, failure
-		}
-		groupPaths[decodedPathPointer(path)] = true
-		fields++
-		index++
-	}
-	if fields == 0 {
-		return 0, failf("text_result_observation_group_empty")
-	}
-	return index, nil
-}
-
-func isResultBlockHeader(line string) bool {
-	for _, prefix := range []string{
-		"tree v4 ", "inspect v3 ", "shell v1 ", "timeline v1 ",
-	} {
-		if strings.HasPrefix(line, prefix) {
-			return true
-		}
-	}
-	return false
-}
-
-// isForeignTreeBlockHeader rejects every tree/inspect version outside the
-// accepted v4 ordinary-tree and v3 inspection grammar. Without this check an
-// old block can look like an ordinary scalar line and be consumed field by
-// field.
-func isForeignTreeBlockHeader(line string) bool {
-	if !strings.HasPrefix(line, "tree v") && !strings.HasPrefix(line, "inspect v") {
-		return false
-	}
-	return !strings.HasPrefix(line, "tree v4 ") && !strings.HasPrefix(line, "inspect v3 ")
-}
-
-func decodeResultBlock(lines []string, start int, object map[string]any,
-	seen map[string]bool, bindings *[]treeBaseBinding) (int, *checkError) {
-	if strings.Contains(lines[start], " omitted ") {
-		return 0, failf("text_result_block_omitted")
-	}
-	switch {
-	case strings.HasPrefix(lines[start], "tree v4 "):
-		return decodeTreeBlock(lines, start, object, seen, bindings)
-	case strings.HasPrefix(lines[start], "inspect v3 "):
-		return decodeInspectionBlock(lines, start, object, seen)
-	case strings.HasPrefix(lines[start], "shell v1 "):
-		return decodeShellBlock(lines, start, object, seen)
-	case strings.HasPrefix(lines[start], "timeline v1 "):
-		return decodeTimelineBlock(lines, start, object, seen)
-	default:
-		return 0, failf("text_result_block_unknown")
-	}
+	header  resultHeader
 }
 
 // treeBaseBinding defers the observation-owned check until every observation
@@ -306,7 +109,7 @@ func decodeTreeBlock(lines []string, start int, object map[string]any,
 }
 
 func resolveTreeBindings(object map[string]any, seen map[string]bool,
-	groupPaths map[string]bool, bindings []treeBaseBinding) *checkError {
+	observationIDPresent bool, bindings []treeBaseBinding) *checkError {
 	if len(bindings) == 0 {
 		return nil
 	}
@@ -315,7 +118,7 @@ func resolveTreeBindings(object map[string]any, seen map[string]bool,
 	if !ok || !valid || !validTreeTextO(currentID) {
 		return failf("text_tree_id_missing")
 	}
-	if !groupPaths["/observation/id"] {
+	if !observationIDPresent {
 		return failf("text_tree_id_group_required")
 	}
 	for _, binding := range bindings {
@@ -1058,8 +861,7 @@ func validateTreeNodeColumns(tokens []string, start int, allowGeometry bool,
 		}
 		break
 	}
-	if rules.v4 && !rules.explicitActions && defaultAction != "" &&
-		!explicitActions[defaultAction] && negatedAction == "" {
+	if rules.v4 && negatedAction == "" {
 		lastAction := -1
 		for _, action := range actions {
 			order := treeActionOrder[action]
@@ -1586,6 +1388,11 @@ func isTypedAppPath(pointer string) bool {
 	if len(parts) == 2 {
 		return true
 	}
+	// A collection block owns the array; an unknown member of one concrete
+	// element is legitimately carried by a json v1 fallback.
+	if len(parts) >= 4 && (parts[2] == "items" || parts[2] == "tasks") {
+		return false
+	}
 	_, known := appTextFields[parts[2]]
 	return known
 }
@@ -1805,9 +1612,19 @@ func setDecodedPath(object map[string]any, seen map[string]bool, path []string,
 		return failf("text_result_path_duplicate")
 	}
 	for index := 1; index < len(path); index++ {
-		if seen[decodedPathPointer(path[:index])] {
-			return failf("text_result_path_conflict")
+		ancestor := decodedPathPointer(path[:index])
+		if !seen[ancestor] {
+			continue
 		}
+		// A collection block legitimately owns its array while later fallback
+		// lines may add one unknown member under a concrete element. Extending a
+		// fully decoded object is still a conflict.
+		if value, found := lookupPath(object, path[:index]); found {
+			if _, isArray := value.([]any); isArray {
+				continue
+			}
+		}
+		return failf("text_result_path_conflict")
 	}
 	descendantPrefix := pointer + "/"
 	for existing := range seen {

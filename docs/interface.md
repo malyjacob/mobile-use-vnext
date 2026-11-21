@@ -30,8 +30,9 @@
   `text`/`key` 的值等）；
 - 请求体为空、只有空白或不是对象 → `422 invalid_request`；
 - 编号规则：`O…` 为观察，`P…` 为操作；引用长度 1–64，首字符必须是 `O` 或 `P`。
-  客户端预分配的 P 至少 2 个字符。编号是不透明句柄，
-  服务生成的编号含服务实例前缀，调用方不得解析其中数值，也不得跨服务实例复用；客户端预分配的
+  客户端预分配的 P 至少 2 个字符。服务生成的编号为 `O<4位>_<seq>` / `P<4位>_<seq>`：4 位
+  无前导零数字的实例标签加该实例内的单调序号；`service_instance_id` 始终保持完整 36 字符
+  UUID。编号是不透明句柄，调用方不得解析其中数值，也不得跨服务实例复用；客户端预分配的
   P 按原值登记，不由服务改写。
 
 会话内做收敛采样的自动观察点——`start` 的首个观察、`act` 的后观察与 `app` 五个变更 kind 的
@@ -361,8 +362,8 @@ HTTP 状态映射（默认由 `protocol.Status` 按 code 决定；认领前的 t
 - 未请求图片：整份 `image`/`missing` 省略；服务不截图、不编码，也不返回上一次图片。
 
 附加图片时 `actionable_until` 取源图读取开始与树采集开始中更早者加 60 秒，并受原会话到期
-时间上界约束。图片按服务固定预算做一次等比缩小（不放大）与一次 JPEG 编码；超限只报
-`image_too_large`，不改判核心树。图片缺失本身不产生 `recovery`。
+时间上界约束。图片按服务固定预算做一次等比缩小（不放大）与一次 JPEG 编码，输出长边上限为
+1024 像素；源图或编码结果超出预算只报 `image_too_large`，不改判核心树。图片缺失本身不产生 `recovery`。
 
 ## 5.1 `POST /api/snap`
 
@@ -380,7 +381,7 @@ HTTP 状态映射（默认由 `protocol.Status` 按 code 决定；认领前的 t
 
 ```json
 {"operation_id":"P2","image":{"captured_at":"2026-11-18T00:00:00Z",
- "width":540,"height":1200,"media_type":"image/jpeg","read_only":true,
+ "width":461,"height":1024,"media_type":"image/jpeg","read_only":true,
  "screen":{"width":1080,"height":2400,"rotation":0,"display_id":115},"base64":"…"}}
 ```
 
@@ -1067,8 +1068,8 @@ compact 几何策略是固定的服务策略，不是请求字段，按以下顺
 ### Image
 
 ```json
-"image": {"captured_at":"…","width":540,"height":1200,"media_type":"image/jpeg"}
-"image": {"read_only":true,"captured_at":"…","width":540,"height":1200,
+"image": {"captured_at":"…","width":461,"height":1024,"media_type":"image/jpeg"}
+"image": {"read_only":true,"captured_at":"…","width":461,"height":1024,
   "media_type":"image/jpeg","screen":{"width":1080,"height":2400,"rotation":0,"display_id":115}}
 "image": {"error":{"code":"image_capture_failed","message":"未能取得本次截图"}}
 ```

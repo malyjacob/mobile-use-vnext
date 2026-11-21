@@ -2,8 +2,8 @@
 
 本页定义手机内控制 App 与设备服务之间的最小配对协议：模式、显示资源、命令回执、最低控制
 视图、消息中心投递与独立 STOP。Agent 工具接口见 [接口契约](interface.md)。本协议与普通业务
-契约共用一个 `contract_version`；STOP 载体独立于普通契约。MCP 的 `result v3`、`tree v4`
-与 `inspect v3` 只描述 Agent 结果文本，不进入控制同步，也不改变 App 的工具结果处理边界。
+契约共用一个 `contract_version`；STOP 载体独立于普通契约。MCP 的 `result v4`（`text`/`both`）、
+`tree v4` 与 `inspect v3` 只描述 Agent 结果文本，不进入控制同步，也不改变 App 的工具结果处理边界。
 
 ## 1. 传输与身份
 
@@ -25,7 +25,7 @@
 {
   "contract_version": "21",
   "app_instance_id": "0b0b8c0e-...",
-  "app_version": "0.24.0",
+  "app_version": "0.25.0",
   "selected_mode": "virtual",
   "mode_generation": "8f0b2e2e-...",
   "mode_ready": true,
@@ -94,6 +94,8 @@
 }
 ```
 
+- `service_instance_id` 是服务实例的 36 字符 UUID，App 按 UUID 严格解析；它不随 Agent 可见的
+  `O`/`P` 短标签变化。
 - `control.revision` 在同一 `service_instance_id` 下单调递增；只有实际控制事实变化才递增。
 - `availability.state` 为 `ready` / `recovering` / `blocked`，`reason` 为受控短码。
 - `session` 为 `null` 或 {origin, agent, mode, state, started_at, expires_at/ended_at, reason}。

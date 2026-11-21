@@ -32,10 +32,10 @@ func (p *probe) appLifecycleChecks(ctx context.Context, start startSummary) bool
 		p.reporter.fail("app_open", failure.reason, failure.fields...)
 		return false
 	}
-	if open.result.IsError || open.view.Outcome != outcomeExecuted ||
+	if open.result.IsError || resultOutcome(open) != outcomeExecuted ||
 		open.view.App == nil || open.view.App.Kind != "open" {
 		p.reporter.fail("app_open", "open_not_executed",
-			field("outcome", open.view.Outcome), field("code", codeOf(open.view)))
+			field("outcome", resultOutcome(open)), field("code", codeOf(open.view)))
 		return false
 	}
 	openApp := open.view.App
@@ -93,7 +93,7 @@ func (p *probe) appLifecycleChecks(ctx context.Context, start startSummary) bool
 	}
 	if kill.result.IsError {
 		code := codeOf(kill.view)
-		if kill.view.Outcome == outcomeExecuted {
+		if resultOutcome(kill) == outcomeExecuted {
 			p.reporter.fail("app_kill_refused", "executed_result_marked_error")
 			return false
 		}
@@ -113,13 +113,13 @@ func (p *probe) appLifecycleChecks(ctx context.Context, start startSummary) bool
 		}
 		p.reporter.pass("app_kill_refused",
 			field("task_id", strconv.Itoa(taskID)), field("code", code),
-			"outcome="+outcomeOrNone(kill.view.Outcome))
+			"outcome="+outcomeOrNone(resultOutcome(kill)))
 	} else {
-		if kill.view.Outcome != outcomeExecuted || kill.view.App == nil ||
+		if resultOutcome(kill) != outcomeExecuted || kill.view.App == nil ||
 			kill.view.App.Kind != "kill" || kill.view.App.SourceTaskID == nil ||
 			*kill.view.App.SourceTaskID != taskID {
 			p.reporter.fail("app_kill", "kill_facts_unexpected",
-				field("outcome", kill.view.Outcome), field("code", codeOf(kill.view)))
+				field("outcome", resultOutcome(kill)), field("code", codeOf(kill.view)))
 			return false
 		}
 		if failure := checkKillFacts(kill.view.App); failure != nil {
@@ -154,7 +154,7 @@ func (p *probe) appLifecycleChecks(ctx context.Context, start startSummary) bool
 			p.reporter.fail("app_close", failure.reason, failure.fields...)
 			return false
 		}
-		if closed.view.Outcome == outcomeExecuted {
+		if resultOutcome(closed) == outcomeExecuted {
 			updated, failure := appPostObservation(closed.view)
 			if failure != nil {
 				p.reporter.fail("app_close", failure.reason, failure.fields...)
@@ -164,7 +164,7 @@ func (p *probe) appLifecycleChecks(ctx context.Context, start startSummary) bool
 		}
 		p.reporter.pass("app_close",
 			field("task_id", strconv.Itoa(taskID)),
-			field("outcome", closed.view.Outcome),
+			field("outcome", resultOutcome(closed)),
 			field("tasks", strconv.Itoa(len(closed.view.App.Tasks))),
 			"is_error="+strconv.FormatBool(closed.result.IsError))
 	}
@@ -199,14 +199,14 @@ func (p *probe) appLifecycleChecks(ctx context.Context, start startSummary) bool
 		p.reporter.fail("app_claim", failure.reason, failure.fields...)
 		return false
 	}
-	if claim.result.IsError || claim.view.Outcome != outcomeExecuted ||
+	if claim.result.IsError || resultOutcome(claim) != outcomeExecuted ||
 		claim.view.App == nil || claim.view.App.Kind != "claim" ||
 		claim.view.App.Ownership != "borrowed" || claim.view.App.SourceDisplayID == nil ||
 		*claim.view.App.SourceDisplayID != 0 || claim.view.App.TaskID == nil ||
 		*claim.view.App.TaskID != claimTask || claim.view.App.DisplayID == nil ||
 		*claim.view.App.DisplayID != displayID || !claim.view.App.HasStatePreserved {
 		p.reporter.fail("app_claim", "claim_facts_unexpected",
-			field("outcome", claim.view.Outcome), field("code", codeOf(claim.view)))
+			field("outcome", resultOutcome(claim)), field("code", codeOf(claim.view)))
 		return false
 	}
 	p.reporter.pass("app_claim",
@@ -275,9 +275,9 @@ func checkCloseResult(closed *callResult, taskID int) *checkError {
 	if app.DisplayID == nil || !app.HasTasks || len(app.Tasks) == 0 || app.Complete == nil {
 		return failf("close_facts_missing")
 	}
-	executed := closed.view.Outcome == outcomeExecuted
+	executed := resultOutcome(closed) == outcomeExecuted
 	if closed.result.IsError == executed {
-		return failf("close_is_error_mismatch", field("outcome", outcomeOrNone(closed.view.Outcome)))
+		return failf("close_is_error_mismatch", field("outcome", outcomeOrNone(resultOutcome(closed))))
 	}
 	found := false
 	allExecuted := true

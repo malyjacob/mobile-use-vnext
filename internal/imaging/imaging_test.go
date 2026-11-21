@@ -38,8 +38,8 @@ func TestEncodeDownscalesAndMetadata(t *testing.T) {
 	if meta == nil {
 		t.Fatal("Encode returned nil metadata")
 	}
-	if meta.Width != 540 || meta.Height != 1200 {
-		t.Fatalf("metadata size = %dx%d, want 540x1200", meta.Width, meta.Height)
+	if meta.Width != 461 || meta.Height != 1024 {
+		t.Fatalf("metadata size = %dx%d, want 461x1024", meta.Width, meta.Height)
 	}
 	if meta.MediaType != imaging.MediaTypeJPEG {
 		t.Fatalf("media type = %q, want %q", meta.MediaType, imaging.MediaTypeJPEG)
@@ -70,8 +70,45 @@ func TestEncodeDownscalesAndMetadata(t *testing.T) {
 	if !parsed.Equal(capturedAt) {
 		t.Fatalf("captured_at instant = %v, want %v", parsed, capturedAt)
 	}
-	if got := decodeJPEG(t, data).Bounds(); got.Dx() != 540 || got.Dy() != 1200 {
-		t.Fatalf("decoded JPEG = %dx%d, want 540x1200", got.Dx(), got.Dy())
+	if got := decodeJPEG(t, data).Bounds(); got.Dx() != 461 || got.Dy() != 1024 {
+		t.Fatalf("decoded JPEG = %dx%d, want 461x1024", got.Dx(), got.Dy())
+	}
+}
+
+// TestEncodeDefaultLongSideIs1024 pins the documented default long-side budget:
+// a 1080x2400 portrait screen becomes 461x1024, the landscape mirror becomes
+// 1024x461, and a source already inside the budget is never upscaled.
+func TestEncodeDefaultLongSideIs1024(t *testing.T) {
+	tests := []struct {
+		name             string
+		sourceW, sourceH int
+		wantW, wantH     int
+	}{
+		{name: "portrait phone", sourceW: 1080, sourceH: 2400, wantW: 461, wantH: 1024},
+		{name: "landscape phone", sourceW: 2400, sourceH: 1080, wantW: 1024, wantH: 461},
+		{name: "below budget is never upscaled", sourceW: 800, sourceH: 600, wantW: 800, wantH: 600},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			source := device.ImageSource{
+				Data:       pngBytes(t, tc.sourceW, tc.sourceH),
+				CapturedAt: capturedAt,
+			}
+			display := device.Display{Width: tc.sourceW, Height: tc.sourceH}
+			meta, data, err := imaging.Encode(source, display, imaging.Policy{})
+			if err != nil {
+				t.Fatalf("Encode: %v", err)
+			}
+			if meta.Width != tc.wantW || meta.Height != tc.wantH {
+				t.Fatalf("metadata size = %dx%d, want %dx%d", meta.Width, meta.Height, tc.wantW, tc.wantH)
+			}
+			if got := decodeJPEG(t, data).Bounds(); got.Dx() != tc.wantW || got.Dy() != tc.wantH {
+				t.Fatalf("decoded JPEG = %dx%d, want %dx%d", got.Dx(), got.Dy(), tc.wantW, tc.wantH)
+			}
+			if longest := max(meta.Width, meta.Height); longest > 1024 {
+				t.Fatalf("longest edge = %d, want <= 1024", longest)
+			}
+		})
 	}
 }
 
@@ -81,7 +118,7 @@ func TestEncodeNeverUpscales(t *testing.T) {
 		Data:       pngBytes(t, sourceW, sourceH),
 		CapturedAt: capturedAt,
 	}
-	meta, data, err := imaging.Encode(source, device.Display{Width: sourceW, Height: sourceH}, imaging.Policy{MaxLongSide: 1200})
+	meta, data, err := imaging.Encode(source, device.Display{Width: sourceW, Height: sourceH}, imaging.Policy{MaxLongSide: 1024})
 	if err != nil {
 		t.Fatalf("Encode: %v", err)
 	}

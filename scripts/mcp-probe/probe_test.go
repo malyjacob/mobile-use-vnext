@@ -191,12 +191,12 @@ func testJPEG(size int) []byte {
 func testObservationWithImage() *observationView {
 	return &observationView{
 		Status: observationComplete,
-		ID:     "O000000000000000000000001",
+		ID:     "O4821_85",
 		Tree:   &treeView{Format: treeFull},
 		Image: &imageView{
 			CapturedAt: "2026-01-01T00:00:00Z",
-			Width:      720,
-			Height:     1280,
+			Width:      461,
+			Height:     1024,
 			MediaType:  imageJPEG,
 		},
 	}
@@ -257,6 +257,35 @@ func TestImageChecks(t *testing.T) {
 			t.Fatalf("failure = %v", failure)
 		}
 	})
+	t.Run("461x1024 observation image accepted", func(t *testing.T) {
+		observation := testObservationWithImage()
+		if failure := checkImageLongSide(observation.Image); failure != nil {
+			t.Fatalf("461x1024 rejected: %s", failure.reason)
+		}
+	})
+	t.Run("retired 1200 long side rejected", func(t *testing.T) {
+		observation := testObservationWithImage()
+		observation.Image.Width = 540
+		observation.Image.Height = 1200
+		if failure := checkImageLongSide(observation.Image); failure == nil ||
+			failure.reason != "image_long_side_exceeds_limit" {
+			t.Fatalf("540x1200 = %v", failure)
+		}
+	})
+	t.Run("snap scaling 1080x2400 to 461x1024", func(t *testing.T) {
+		width, height := expectedImageSize(1080, 2400, imageMaxLongSide)
+		if width != 461 || height != 1024 {
+			t.Fatalf("expectedImageSize = %dx%d, want 461x1024", width, height)
+		}
+		width, height = expectedImageSize(2400, 1080, imageMaxLongSide)
+		if width != 1024 || height != 461 {
+			t.Fatalf("landscape expectedImageSize = %dx%d, want 1024x461", width, height)
+		}
+		width, height = expectedImageSize(800, 600, imageMaxLongSide)
+		if width != 800 || height != 600 {
+			t.Fatalf("small image upscaled to %dx%d", width, height)
+		}
+	})
 }
 
 func TestValidReference(t *testing.T) {
@@ -265,6 +294,8 @@ func TestValidReference(t *testing.T) {
 		prefix byte
 		want   bool
 	}{
+		{"P7391_12", 'P', true},
+		{"O4821_85", 'O', true},
 		{"P0123456789abcdef01234567", 'P', true},
 		{"O1", 'O', true},
 		{"P1", 'O', false},
@@ -374,7 +405,7 @@ func newFakeAdapter() *fakeAdapter {
 
 func (f *fakeAdapter) nextID(prefix string) string {
 	f.counter++
-	return fmt.Sprintf("%s%024x", prefix, f.counter)
+	return fmt.Sprintf("%s7391_%d", prefix, f.counter)
 }
 
 func (f *fakeAdapter) observation(id, origin string, revision int, withImage bool) map[string]any {
@@ -394,8 +425,8 @@ func (f *fakeAdapter) observation(id, origin string, revision int, withImage boo
 	if withImage {
 		observation["image"] = map[string]any{
 			"captured_at": "2026-01-01T00:00:00Z",
-			"width":       720,
-			"height":      1280,
+			"width":       461,
+			"height":      1024,
 			"media_type":  imageJPEG,
 		}
 	}
@@ -418,7 +449,7 @@ func (f *fakeAdapter) snapResult(operationID string) *sdk.CallToolResult {
 		"operation_id": operationID,
 		"image": map[string]any{
 			"captured_at": "2026-01-01T00:00:00Z",
-			"width":       720, "height": 1280,
+			"width":       461, "height": 1024,
 			"media_type": imageJPEG, "read_only": true,
 			"screen": map[string]any{"width": 1080, "height": 2400, "rotation": 0},
 		},
@@ -767,37 +798,327 @@ func fakeDiagnosticText(payload map[string]any) string {
 	return "diagnostic v1 is_error=true\nerror.code=\"" + code + "\"\nend diagnostic\n"
 }
 
+// fakeResultText emits one result v4 projection from the same payload object a
+// fake adapter publishes as structuredContent. It mirrors the documented fixed
+// order and the explicit omission rules so mode comparisons exercise the real
+// decoder contract instead of a second ad-hoc shape.
 func fakeResultText(payload map[string]any, isError bool) string {
 	var builder strings.Builder
-	builder.WriteString("result v3 is_error=")
-	builder.WriteString(strconv.FormatBool(isError))
+	builder.WriteString("result v4 ")
+	if isError {
+		builder.WriteString("err")
+	} else {
+		builder.WriteString("ok")
+	}
+	if operationID, ok := payload["operation_id"].(string); ok && operationID != "" {
+		builder.WriteString(" op=" + operationID)
+	}
+	state, _ := payload["operation_state"].(string)
+	if state != "" {
+		builder.WriteString(" state=" + state)
+	}
+	outcome, _ := payload["outcome"].(string)
+	omitOutcome := !isError && outcome == outcomeExecuted && state == ""
+	if outcome != "" && !omitOutcome {
+		builder.WriteString(" outcome=" + outcome)
+	}
+	if phase, ok := payload["phase"].(string); ok && phase != "" {
+		builder.WriteString(" phase=" + phase)
+	}
 	builder.WriteByte('\n')
-	for key, value := range payload {
-		switch key {
-		case "session", "cleanup", "error", "recovery", "effect":
-			if object, ok := value.(map[string]any); ok {
-				for childKey, childValue := range object {
-					writeFakeField(&builder, key+"."+childKey, childValue)
-				}
-			} else {
-				writeFakeField(&builder, key, value)
-			}
-		case "observation":
-			writeFakeObservation(&builder, value)
-		case "inspection":
-			writeFakeInspection(&builder, value)
-		case "app":
-			writeFakeApp(&builder, value)
-		case "shell":
-			writeFakeShell(&builder, value)
-		case "diagnosis":
-			writeFakeDiagnosis(&builder, value)
-		default:
-			writeFakeField(&builder, key, value)
+
+	if effect, ok := payload["effect"].(map[string]any); ok {
+		if state, ok := effect["state"].(string); ok {
+			builder.WriteString("effect=" + state + "\n")
 		}
+	}
+	if input, ok := payload["text_input"].(map[string]any); ok {
+		builder.WriteString("text_input write=" + input["write"].(string) +
+			" enter=" + input["enter"].(string) + "\n")
+	}
+	for _, scalar := range []string{"target_reference", "blocking_operation_id", "blocking_code", "start_operation_id", "observation_state", "input_state"} {
+		if value, ok := payload[scalar].(string); ok && value != "" {
+			builder.WriteString(scalar + "=" + value + "\n")
+		}
+	}
+	for _, boolean := range []string{"request_closed", "can_start"} {
+		if value, ok := payload[boolean].(bool); ok {
+			builder.WriteString(boolean + "=" + strconv.FormatBool(value) + "\n")
+		}
+	}
+	writeFakeNotify(&builder, payload)
+	if image, ok := payload["image"].(map[string]any); ok {
+		writeFakeImageLine(&builder, "image", image)
+	}
+	if value, present := payload["session"]; present {
+		if value == nil {
+			builder.WriteString("session=null\n")
+		} else if session, ok := value.(map[string]any); ok {
+			writeFakeSession(&builder, session)
+		}
+	}
+	if observation, ok := payload["observation"].(map[string]any); ok {
+		writeFakeObservation(&builder, observation, payload["session"] != nil)
+	}
+	if inspection, ok := payload["inspection"].(map[string]any); ok {
+		writeFakeInspection(&builder, inspection)
+	}
+	if app, ok := payload["app"].(map[string]any); ok {
+		writeFakeApp(&builder, app)
+	}
+	if shell, ok := payload["shell"].(map[string]any); ok {
+		writeFakeShell(&builder, shell)
+	}
+	if wait, ok := payload["wait"].(map[string]any); ok {
+		writeFakeWait(&builder, wait)
+	}
+	if diagnosis, ok := payload["diagnosis"].(map[string]any); ok {
+		writeFakeDiagnosis(&builder, diagnosis)
+	}
+	if cleanup, ok := payload["cleanup"].(map[string]any); ok {
+		writeFakeCleanup(&builder, cleanup)
+	}
+	if errorObject, ok := payload["error"].(map[string]any); ok {
+		writeFakeError(&builder, "error", errorObject)
+	}
+	if recovery, ok := payload["recovery"].(map[string]any); ok {
+		builder.WriteString("recovery entry=" + recovery["entry"].(string) +
+			" ref=" + recovery["reference"].(string))
+		if value, ok := recovery["input_state"].(string); ok && value != "" {
+			builder.WriteString(" input=" + value)
+		}
+		if value, ok := recovery["cause"].(string); ok && value != "" {
+			builder.WriteString(" cause=" + value)
+		}
+		builder.WriteByte('\n')
+	}
+	// Any member the fake emitter does not classify travels through the same
+	// json v1 fallback a future encoder must use.
+	known := map[string]bool{
+		"operation_id": true, "operation_state": true, "outcome": true, "phase": true,
+		"effect": true, "text_input": true, "target_reference": true,
+		"request_closed": true, "blocking_operation_id": true, "can_start": true,
+		"blocking_code": true, "start_operation_id": true, "observation_state": true,
+		"input_state": true, "message_id": true, "saved": true, "image": true,
+		"session": true, "observation": true, "inspection": true, "app": true,
+		"shell": true, "wait": true, "notification": true, "diagnosis": true,
+		"cleanup": true, "error": true, "recovery": true,
+	}
+	for key, value := range payload {
+		if known[key] {
+			continue
+		}
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			encoded = []byte("null")
+		}
+		builder.WriteString("json v1 path=" + strconv.Quote("/"+key) + " value=" + string(encoded) + "\n")
 	}
 	builder.WriteString("end result\n")
 	return builder.String()
+}
+
+func writeFakeNotify(builder *strings.Builder, payload map[string]any) {
+	messageID, hasMessage := payload["message_id"].(string)
+	saved, hasSaved := payload["saved"].(bool)
+	var notification map[string]any
+	if value, ok := payload["notification"].(map[string]any); ok {
+		notification = value
+	}
+	if !hasMessage && !hasSaved && notification == nil {
+		return
+	}
+	builder.WriteString("notify")
+	if hasMessage && messageID != "" {
+		builder.WriteString(" id=" + messageID)
+	}
+	if hasSaved {
+		builder.WriteString(" saved=" + strconv.FormatBool(saved))
+	}
+	if state, ok := notification["state"].(string); ok && state != "" {
+		builder.WriteString(" state=" + state)
+	}
+	builder.WriteByte('\n')
+	if errorObject, ok := notification["error"].(map[string]any); ok {
+		writeFakeError(builder, "notify.error", errorObject)
+	}
+}
+
+// writeFakeImageLine renders the shared image metadata line. The media type is
+// omitted for JPEG; the geometry, read_only flag, screen and capture time are
+// only written when the corresponding structured member exists.
+func writeFakeImageLine(builder *strings.Builder, prefix string, image map[string]any) {
+	builder.WriteString(prefix)
+	if width, ok := image["width"].(int); ok && width > 0 {
+		if height, ok := image["height"].(int); ok && height > 0 {
+			builder.WriteString(" " + strconv.Itoa(width) + "x" + strconv.Itoa(height))
+		}
+	}
+	if readOnly, ok := image["read_only"].(bool); ok && readOnly {
+		builder.WriteString(" read_only")
+	}
+	if media, ok := image["media_type"].(string); ok && media != "" && media != imageJPEG {
+		builder.WriteString(" media=" + media)
+	}
+	screen, _ := image["screen"].(map[string]any)
+	width, _ := screen["width"].(int)
+	height, _ := screen["height"].(int)
+	if width > 0 && height > 0 {
+		builder.WriteString(" screen=" + strconv.Itoa(width) + "x" + strconv.Itoa(height))
+		if display, ok := screen["display_id"].(int); ok {
+			builder.WriteString("@" + strconv.Itoa(display))
+		}
+	}
+	if rotation, ok := screen["rotation"].(int); ok && rotation != 0 {
+		builder.WriteString(" rot=" + strconv.Itoa(rotation))
+	}
+	if capturedAt, ok := image["captured_at"].(string); ok && capturedAt != "" {
+		builder.WriteString(" at=" + fakeClock(capturedAt))
+	}
+	builder.WriteByte('\n')
+	if errorObject, ok := image["error"].(map[string]any); ok {
+		writeFakeError(builder, prefix+".error", errorObject)
+	}
+	if base64, ok := image["base64"].(string); ok && base64 != "" {
+		builder.WriteString("json v1 path=" + strconv.Quote("/"+strings.ReplaceAll(prefix, ".", "/")+"/base64") +
+			" value=" + strconv.Quote(base64) + "\n")
+	}
+}
+
+func writeFakeSession(builder *strings.Builder, session map[string]any) {
+	state, _ := session["state"].(string)
+	mode, _ := session["mode"].(string)
+	origin, _ := session["origin"].(string)
+	builder.WriteString("session " + state + " mode=" + mode + " origin=" + origin)
+	for _, field := range []struct{ key, label string }{
+		{"started_at", "started"}, {"expires_at", "expires"},
+		{"ended_at", "ended"}, {"reason", "reason"},
+	} {
+		value, _ := session[field.key].(string)
+		if value == "" {
+			continue
+		}
+		if field.key == "reason" {
+			builder.WriteString(" reason=" + value)
+		} else {
+			builder.WriteString(" " + field.label + "=" + fakeClock(value))
+		}
+	}
+	builder.WriteByte('\n')
+}
+
+func writeFakeObservation(builder *strings.Builder, observation map[string]any, sessionPresent bool) {
+	builder.WriteString("obs")
+	if id, ok := observation["id"].(string); ok && id != "" {
+		builder.WriteString(" " + id)
+	}
+	status, _ := observation["status"].(string)
+	if status != "" && status != observationComplete {
+		builder.WriteString(" status=" + status)
+	}
+	if foreground, ok := observation["foreground"].(map[string]any); ok {
+		builder.WriteString(" fg=" + fakeForegroundToken(foreground))
+	}
+	if capturedAt, ok := observation["captured_at"].(string); ok && capturedAt != "" {
+		builder.WriteString(" at=" + fakeClock(capturedAt))
+	}
+	if quality, ok := observation["quality"].(map[string]any); ok {
+		state, _ := quality["state"].(string)
+		stopReason, _ := quality["stop_reason"].(string)
+		if state != "" && !(state == "stable" ||
+			(state == qualityUnknown && stopReason == qualityStopNotSampled)) {
+			builder.WriteString(" quality=" + state + "(" + stopReason + ")")
+		}
+	}
+	tree, hasTree := observation["tree"].(map[string]any)
+	screen, hasScreen := observation["screen"].(map[string]any)
+	if hasScreen && (sessionPresent || !hasTree) {
+		width, _ := screen["width"].(int)
+		height, _ := screen["height"].(int)
+		if width > 0 && height > 0 {
+			builder.WriteString(" screen=" + strconv.Itoa(width) + "x" + strconv.Itoa(height))
+			if display, ok := screen["display_id"].(int); ok {
+				builder.WriteString("@" + strconv.Itoa(display))
+			}
+		}
+	}
+	if hasScreen {
+		if rotation, ok := screen["rotation"].(int); ok && rotation != 0 {
+			builder.WriteString(" rot=" + strconv.Itoa(rotation))
+		}
+	}
+	if missing, ok := observation["missing"].([]any); ok && len(missing) > 0 {
+		parts := make([]string, 0, len(missing))
+		for _, item := range missing {
+			parts = append(parts, item.(string))
+		}
+		builder.WriteString(" missing=" + strings.Join(parts, ","))
+	}
+	builder.WriteByte('\n')
+	if image, ok := observation["image"].(map[string]any); ok {
+		writeFakeImageLine(builder, "obs.image", image)
+	}
+	if errorObject, ok := observation["error"].(map[string]any); ok {
+		writeFakeError(builder, "obs.error", errorObject)
+	}
+	if !hasTree {
+		for _, key := range []string{"origin", "revision", "actionable_until", "screen", "foreground", "quality", "status", "id", "captured_at", "missing", "image", "error"} {
+			_ = key
+		}
+		return
+	}
+	format, _ := tree["format"].(string)
+	base, _ := tree["base"].(string)
+	block := ""
+	if format == treeDelta {
+		block = "tree v4 delta base=" + base + " changes=0\n\n"
+	} else {
+		block = "tree v4 full nodes=1\n\nn1 root 0,0,1080,2400\n"
+	}
+	block += "end tree\n"
+	writeFakeBlock(builder, block)
+}
+
+func fakeAppToken(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, character := range value {
+		if character <= ' ' || character >= 127 || character == '=' ||
+			character == '"' || character == '\\' {
+			return false
+		}
+	}
+	return true
+}
+
+func fakeForegroundToken(foreground map[string]any) string {
+	state, _ := foreground["state"].(string)
+	switch state {
+	case "none":
+		return "none"
+	case "unknown":
+		reason, _ := foreground["reason"].(string)
+		if reason != "" && fakeAppToken(reason) {
+			return "unknown(" + reason + ")"
+		}
+		return "unknown"
+	case "present":
+		pkg, _ := foreground["package"].(string)
+		taskID, hasTask := foreground["task_id"].(int)
+		switch {
+		case pkg != "" && hasTask:
+			return pkg + "#" + strconv.Itoa(taskID)
+		case pkg != "":
+			return pkg
+		case hasTask:
+			return "#" + strconv.Itoa(taskID)
+		default:
+			return "present"
+		}
+	default:
+		return "unknown"
+	}
 }
 
 func writeFakeField(builder *strings.Builder, key string, value any) {
@@ -817,76 +1138,11 @@ func writeFakeBlock(builder *strings.Builder, block string) {
 	builder.WriteByte('\n')
 }
 
-func writeFakeObservation(builder *strings.Builder, value any) {
-	observation, _ := value.(map[string]any)
-	if observation == nil {
-		writeFakeField(builder, "observation", value)
-		return
-	}
-	builder.WriteString("observation\n")
-	for _, key := range []string{
-		"status", "id", "origin", "revision", "captured_at",
-		"actionable_until", "screen", "foreground", "missing", "image", "error",
-	} {
-		if child, ok := observation[key]; ok {
-			writeFakeObservationField(builder, key, child)
-		}
-	}
-	if quality, present := observation["quality"]; present {
-		qualityObject, ok := quality.(map[string]any)
-		if !ok {
-			writeFakeObservationField(builder, "quality", quality)
-		} else {
-			// The contract renders state/stop_reason as unquoted tokens and
-			// samples as a bare number; the fake must replay that shape so the
-			// probe's readable-line assertions are exercised.
-			if state, ok := qualityObject["state"].(string); ok && fakeAppToken(state) {
-				builder.WriteString(" quality.state=" + state + "\n")
-			}
-			if samples, ok := qualityObject["samples"].(int); ok && samples >= 0 {
-				builder.WriteString(" quality.samples=" + strconv.Itoa(samples) + "\n")
-			}
-			if stopReason, ok := qualityObject["stop_reason"].(string); ok && fakeAppToken(stopReason) {
-				builder.WriteString(" quality.stop_reason=" + stopReason + "\n")
-			}
-		}
-	}
-	tree, _ := observation["tree"].(map[string]any)
-	if tree == nil {
-		return
-	}
-	format, _ := tree["format"].(string)
-	base, _ := tree["base"].(string)
-	block := ""
-	if format == treeDelta {
-		block = "tree v4 delta base=" + base + " changes=0\n\n"
-	} else {
-		block = "tree v4 full nodes=1\n\nn1 root 0,0,1080,2400\n"
-	}
-	block += "end tree\n"
-	writeFakeBlock(builder, block)
-}
-
-func writeFakeObservationField(builder *strings.Builder, key string, value any) {
-	encoded, err := json.Marshal(value)
-	if err != nil {
-		encoded = []byte(`null`)
-	}
-	builder.WriteByte(' ')
-	builder.WriteString(key)
-	builder.WriteByte('=')
-	builder.Write(encoded)
-	builder.WriteByte('\n')
-}
-
 func writeFakeInspection(builder *strings.Builder, value any) {
 	inspection, _ := value.(map[string]any)
 	if inspection == nil {
 		writeFakeField(builder, "inspection", value)
 		return
-	}
-	if origin, ok := inspection["origin"]; ok {
-		writeFakeField(builder, "inspection.origin", origin)
 	}
 	observationID, _ := inspection["observation_id"].(string)
 	scope, _ := inspection["scope"].(string)
@@ -926,68 +1182,188 @@ func omitFakeInspectBlock(text string, payload map[string]any) string {
 		}
 		filtered = append(filtered, line)
 	}
-	text = strings.Join(filtered, "\n")
-	observationID, _ := inspection["observation_id"].(string)
-	scope, _ := inspection["scope"].(string)
-	revision, _ := inspection["revision"].(int)
-	capturedAt, _ := inspection["captured_at"].(string)
-	fields := "inspection.observation_id=" + observationID + "\n" +
-		"inspection.scope=" + scope + "\n" +
-		"inspection.revision=" + strconv.Itoa(revision) + "\n" +
-		"inspection.captured_at=" + capturedAt + "\n"
-	return strings.TrimSuffix(text, "end result\n") + fields + "end result\n"
+	return strings.Join(filtered, "\n")
 }
 
-// writeFakeApp renders one app result using the declared typed lines. It is a
-// test-side emitter only; the probe decoder is exercised against hand-written
-// golden text in app_matrix_test.go.
-func writeFakeApp(builder *strings.Builder, value any) {
-	app, _ := value.(map[string]any)
-	if app == nil {
-		writeFakeField(builder, "app", value)
-		return
+// fakeClock truncates one timestamp to the v4 UTC HH:MM:SS form. A value that is
+// not RFC3339 is kept literally, mirroring the encoder fallback.
+func fakeClock(value string) string {
+	if len(value) == 8 {
+		return value
 	}
-	for _, key := range []string{
-		"kind", "items", "tasks", "foreground", "target_pids", "killed_pids",
-		"remaining_pids", "package", "task_id", "source_task_id", "display_id",
-		"source_display_id", "total", "reused", "state_preserved", "complete",
-		"truncated", "restarted", "captured_at", "ownership", "foreground_restore",
+	if parsed, err := time.Parse(time.RFC3339Nano, value); err == nil {
+		return parsed.UTC().Format("15:04:05")
+	}
+	return value
+}
+
+// writeFakeApp renders one app result as the v4 single-line head plus the two
+// formal collection blocks.
+func writeFakeApp(builder *strings.Builder, app map[string]any) {
+	kind, _ := app["kind"].(string)
+	builder.WriteString("app " + kind)
+	if value, ok := app["package"].(string); ok && value != "" {
+		encoded, _ := json.Marshal(value)
+		builder.WriteString(" pkg=" + string(encoded))
+	}
+	for _, field := range []struct{ key, label string }{
+		{"task_id", "task"}, {"source_task_id", "src_task"},
+		{"source_display_id", "src_display"}, {"display_id", "display"},
 	} {
-		child, present := app[key]
-		if !present {
-			continue
+		if value, ok := app[field.key].(int); ok {
+			builder.WriteString(" " + field.label + "=" + strconv.Itoa(value))
 		}
-		builder.WriteString("app.")
-		builder.WriteString(key)
-		builder.WriteByte('=')
-		switch key {
-		case "kind", "ownership", "captured_at", "foreground_restore":
-			if text, ok := child.(string); ok && fakeAppToken(text) {
-				builder.WriteString(text)
+	}
+	if value, ok := app["ownership"].(string); ok && value != "" {
+		builder.WriteString(" ownership=" + value)
+	}
+	if value, ok := app["reused"].(bool); ok {
+		builder.WriteString(" reused=" + strconv.FormatBool(value))
+	}
+	if value, present := app["state_preserved"]; present {
+		if value == nil {
+			builder.WriteString(" state_preserved=null")
+		} else if boolean, ok := value.(bool); ok {
+			builder.WriteString(" state_preserved=" + strconv.FormatBool(boolean))
+		}
+	}
+	if value, ok := app["foreground_restore"].(string); ok && value != "" {
+		builder.WriteString(" fg_restore=" + value)
+	}
+	if value, ok := app["complete"].(bool); ok {
+		builder.WriteString(" complete=" + strconv.FormatBool(value))
+	}
+	for _, key := range []string{"target_pids", "killed_pids", "remaining_pids"} {
+		if value, present := app[key]; present {
+			encoded, _ := json.Marshal(value)
+			builder.WriteString(" " + key + "=" + string(encoded))
+		}
+	}
+	if value, present := app["restarted"]; present {
+		if value == nil {
+			builder.WriteString(" restarted=null")
+		} else if boolean, ok := value.(bool); ok {
+			builder.WriteString(" restarted=" + strconv.FormatBool(boolean))
+		}
+	}
+	if value, ok := app["total"].(int); ok {
+		builder.WriteString(" total=" + strconv.Itoa(value))
+	}
+	if value, ok := app["truncated"].(bool); ok {
+		builder.WriteString(" truncated=" + strconv.FormatBool(value))
+	}
+	if foreground, ok := app["foreground"].(map[string]any); ok {
+		builder.WriteString(" fg=" + fakeForegroundToken(foreground))
+	}
+	if capturedAt, ok := app["captured_at"].(string); ok && capturedAt != "" {
+		builder.WriteString(" at=" + fakeClock(capturedAt))
+	}
+	builder.WriteByte('\n')
+
+	if items, present := app["items"].([]any); present {
+		builder.WriteByte('\n')
+		builder.WriteString("app_items v1 kind=" + kind + " count=" + strconv.Itoa(len(items)) + "\n")
+		for _, item := range items {
+			object, _ := item.(map[string]any)
+			switch kind {
+			case "find":
+				name, _ := object["name"].(string)
+				pkg, _ := object["package"].(string)
+				encoded, _ := json.Marshal(name)
+				builder.WriteString(pkg + " " + string(encoded) + "\n")
+			case "list":
+				taskID, _ := object["task_id"].(int)
+				pkg, _ := object["package"].(string)
+				ownership, _ := object["ownership"].(string)
+				builder.WriteString("#" + strconv.Itoa(taskID) + " " + pkg + " " + ownership)
+				if display, ok := object["origin_display"].(int); ok {
+					builder.WriteString(" origin_display=" + strconv.Itoa(display))
+				}
 				builder.WriteByte('\n')
-				continue
 			}
 		}
-		encoded, err := json.Marshal(child)
-		if err != nil {
-			encoded = []byte("null")
-		}
-		builder.Write(encoded)
-		builder.WriteByte('\n')
+		builder.WriteString("end app_items\n")
 	}
+	if tasks, present := app["tasks"].([]any); present {
+		builder.WriteByte('\n')
+		builder.WriteString("app_tasks v1 count=" + strconv.Itoa(len(tasks)) + "\n")
+		for _, task := range tasks {
+			object, _ := task.(map[string]any)
+			taskID, _ := object["task_id"].(int)
+			outcome, _ := object["outcome"].(string)
+			builder.WriteString("#" + strconv.Itoa(taskID) + " " + outcome)
+			if value, present := object["recents_cleaned"]; present {
+				if value == nil {
+					builder.WriteString(" recents_cleaned=null")
+				} else if boolean, ok := value.(bool); ok {
+					builder.WriteString(" recents_cleaned=" + strconv.FormatBool(boolean))
+				}
+			}
+			if errorObject, ok := object["error"].(map[string]any); ok {
+				code, _ := errorObject["code"].(string)
+				message, _ := errorObject["message"].(string)
+				encoded, _ := json.Marshal(message)
+				builder.WriteString(" error=" + code + " " + string(encoded))
+				if details, present := errorObject["details"]; present {
+					encodedDetails, _ := json.Marshal(details)
+					builder.WriteString(" details=" + string(encodedDetails))
+				}
+			}
+			builder.WriteByte('\n')
+		}
+		builder.WriteString("end app_tasks\n")
+	}
+	writeFakeAppFallbacks(builder, app)
 }
 
-func fakeAppToken(value string) bool {
-	if value == "" {
-		return false
+// writeFakeAppFallbacks emits unknown app members, including unknown fields of
+// one collection item, through json v1. A future field must survive the text
+// projection instead of being silently dropped by the fake emitter.
+func writeFakeAppFallbacks(builder *strings.Builder, app map[string]any) {
+	known := map[string]bool{
+		"kind": true, "package": true, "task_id": true, "source_task_id": true,
+		"source_display_id": true, "display_id": true, "ownership": true,
+		"reused": true, "state_preserved": true, "foreground_restore": true,
+		"complete": true, "target_pids": true, "killed_pids": true,
+		"remaining_pids": true, "restarted": true, "total": true,
+		"truncated": true, "foreground": true, "captured_at": true,
+		"items": true, "tasks": true,
 	}
-	for _, character := range value {
-		if character <= ' ' || character >= 127 || character == '=' ||
-			character == '"' || character == '\\' {
-			return false
+	for key, value := range app {
+		if known[key] {
+			continue
+		}
+		encoded, _ := json.Marshal(value)
+		builder.WriteString("json v1 path=" + strconv.Quote("/app/"+key) + " value=" + string(encoded) + "\n")
+	}
+	if items, present := app["items"].([]any); present {
+		for index, item := range items {
+			object, _ := item.(map[string]any)
+			for key, value := range object {
+				switch key {
+				case "name", "package", "task_id", "ownership", "origin_display":
+					continue
+				}
+				encoded, _ := json.Marshal(value)
+				builder.WriteString("json v1 path=" + strconv.Quote("/app/items/"+strconv.Itoa(index)+"/"+key) +
+					" value=" + string(encoded) + "\n")
+			}
 		}
 	}
-	return true
+	if tasks, present := app["tasks"].([]any); present {
+		for index, task := range tasks {
+			object, _ := task.(map[string]any)
+			for key, value := range object {
+				switch key {
+				case "task_id", "outcome", "recents_cleaned", "error":
+					continue
+				}
+				encoded, _ := json.Marshal(value)
+				builder.WriteString("json v1 path=" + strconv.Quote("/app/tasks/"+strconv.Itoa(index)+"/"+key) +
+					" value=" + string(encoded) + "\n")
+			}
+		}
+	}
 }
 
 func writeFakeShell(builder *strings.Builder, value any) {
@@ -1044,18 +1420,45 @@ func writeFakeShell(builder *strings.Builder, value any) {
 	writeFakeBlock(builder, block.String())
 }
 
-func writeFakeDiagnosis(builder *strings.Builder, value any) {
-	diagnosis, _ := value.(map[string]any)
-	if diagnosis == nil {
-		writeFakeField(builder, "diagnosis", value)
-		return
-	}
-	for _, key := range []string{
-		"summary", "issues", "timing_ms", "coverage", "truncated", "operation_id", "outcome",
-	} {
-		if child, ok := diagnosis[key]; ok {
-			writeFakeField(builder, "diagnosis."+key, child)
+func writeFakeWait(builder *strings.Builder, wait map[string]any) {
+	trigger, _ := wait["trigger"].(string)
+	builder.WriteString("wait trigger=" + trigger)
+	if matched, ok := wait["matched"].([]any); ok && len(matched) > 0 {
+		parts := make([]string, 0, len(matched))
+		for _, item := range matched {
+			parts = append(parts, item.(string))
 		}
+		builder.WriteString(" matched=" + strings.Join(parts, ","))
+	}
+	if elapsed, ok := wait["elapsed_ms"].(int64); ok {
+		builder.WriteString(" elapsed=" + strconv.FormatInt(elapsed, 10) + "ms")
+	} else if elapsed, ok := wait["elapsed_ms"].(int); ok {
+		builder.WriteString(" elapsed=" + strconv.Itoa(elapsed) + "ms")
+	}
+	builder.WriteByte('\n')
+}
+
+func writeFakeDiagnosis(builder *strings.Builder, diagnosis map[string]any) {
+	summary, _ := diagnosis["summary"].(string)
+	coverage, _ := diagnosis["coverage"].(string)
+	truncated, _ := diagnosis["truncated"].(bool)
+	encodedSummary, _ := json.Marshal(summary)
+	builder.WriteString("diagnosis summary=" + string(encodedSummary) +
+		" coverage=" + coverage + " truncated=" + strconv.FormatBool(truncated))
+	if operation, ok := diagnosis["operation_id"].(string); ok && operation != "" {
+		builder.WriteString(" op=" + operation)
+	}
+	if outcome, ok := diagnosis["outcome"].(string); ok && outcome != "" {
+		builder.WriteString(" outcome=" + outcome)
+	}
+	builder.WriteByte('\n')
+	if issues, present := diagnosis["issues"]; present {
+		encoded, _ := json.Marshal(issues)
+		builder.WriteString("diagnosis.issues=" + string(encoded) + "\n")
+	}
+	if timing, present := diagnosis["timing_ms"]; present {
+		encoded, _ := json.Marshal(timing)
+		builder.WriteString("diagnosis.timing_ms=" + string(encoded) + "\n")
 	}
 	events, _ := diagnosis["timeline"].([]any)
 	if len(events) == 0 {
@@ -1073,6 +1476,33 @@ func writeFakeDiagnosis(builder *strings.Builder, value any) {
 	}
 	block.WriteString("end timeline\n")
 	writeFakeBlock(builder, block.String())
+}
+
+func writeFakeCleanup(builder *strings.Builder, cleanup map[string]any) {
+	state, _ := cleanup["state"].(string)
+	builder.WriteString("cleanup " + state)
+	for _, field := range []struct{ key, label string }{
+		{"execution", "exec"}, {"tasks", "tasks"}, {"recents", "recents"}, {"display", "display"},
+	} {
+		if value, ok := cleanup[field.key].(string); ok && value != "" {
+			builder.WriteString(" " + field.label + "=" + value)
+		}
+	}
+	builder.WriteByte('\n')
+	if errorObject, ok := cleanup["error"].(map[string]any); ok {
+		writeFakeError(builder, "cleanup.error", errorObject)
+	}
+}
+
+func writeFakeError(builder *strings.Builder, prefix string, errorObject map[string]any) {
+	code, _ := errorObject["code"].(string)
+	message, _ := errorObject["message"].(string)
+	encodedMessage, _ := json.Marshal(message)
+	builder.WriteString(prefix + " " + code + " " + string(encodedMessage) + "\n")
+	if details, present := errorObject["details"]; present {
+		encodedDetails, _ := json.Marshal(details)
+		builder.WriteString(prefix + ".details=" + string(encodedDetails) + "\n")
+	}
 }
 
 // startFakeAdapter serves the 13 tools over the SDK in-memory transport. It
@@ -1743,6 +2173,9 @@ func (f *fakeRecoveryService) writeApp(writer http.ResponseWriter, operationID s
 	f.operations[operationID] = operationFinished
 	f.outcomes[operationID] = outcomeExecuted
 	var view *protocol.AppView
+	var observation *protocol.Observation
+	var resultError *protocol.Error
+	outcome := ""
 	switch appBody.Kind {
 	case protocol.AppKindFind:
 		items := []protocol.AppItem{{Name: "Probe App", Package: "com.example.probe"}}
@@ -1763,13 +2196,58 @@ func (f *fakeRecoveryService) writeApp(writer http.ResponseWriter, operationID s
 			displayID = 0
 		}
 		truncated := false
+		items := []protocol.AppTaskItem{}
+		total := 0
+		if appBody.App != "" && appBody.Scope != protocol.AppScopePrimary {
+			items = []protocol.AppTaskItem{{
+				TaskID: 42, Package: appBody.App, Ownership: "owned",
+			}}
+			total = 1
+		}
 		view = &protocol.AppView{
 			Kind: protocol.AppKindList, DisplayID: &displayID,
-			TaskItems: []protocol.AppTaskItem{}, HasItems: true,
-			Total: 0, HasTotal: true, Truncated: &truncated,
+			TaskItems: items, HasItems: true,
+			Total: total, HasTotal: true, Truncated: &truncated,
 			CapturedAt: time.Now().UTC().Format(time.RFC3339Nano),
 			Foreground: &protocol.Foreground{State: "unknown", Reason: "foreground_unavailable"},
 		}
+	case protocol.AppKindOpen:
+		taskID := 42
+		displayID := 12
+		reused := false
+		statePreserved := false
+		outcome = outcomeExecuted
+		view = &protocol.AppView{
+			Kind: protocol.AppKindOpen, Package: appBody.Target.App, TaskID: &taskID,
+			DisplayID: &displayID, Ownership: "owned", Reused: &reused,
+			StatePreserved: &statePreserved, HasStatePreserved: true,
+		}
+		f.revision++
+		observation = f.observationLocked(false, stableTestQuality())
+	case protocol.AppKindClose:
+		displayID := 12
+		recents := true
+		complete := true
+		outcome = outcomeExecuted
+		view = &protocol.AppView{
+			Kind: protocol.AppKindClose, DisplayID: &displayID, Complete: &complete,
+			Tasks: []protocol.AppCloseTask{{
+				TaskID: 42, Outcome: outcomeExecuted,
+				RecentsCleaned: &recents, HasRecentsCleaned: true,
+			}},
+			HasTasks: true,
+		}
+		f.revision++
+		observation = f.observationLocked(false, stableTestQuality())
+	case protocol.AppKindKill:
+		sourceTaskID := 42
+		displayID := 12
+		outcome = "not_executed"
+		view = &protocol.AppView{
+			Kind: protocol.AppKindKill, Package: controlledAppPackage,
+			SourceTaskID: &sourceTaskID, DisplayID: &displayID,
+		}
+		resultError = &protocol.Error{Code: "kill_refused_foreground", Message: "前台任务不可终止"}
 	default:
 		f.mutex.Unlock()
 		f.writeResult(writer, &protocol.Result{
@@ -1779,7 +2257,11 @@ func (f *fakeRecoveryService) writeApp(writer http.ResponseWriter, operationID s
 		})
 		return
 	}
-	result := &protocol.Result{OperationID: operationID, App: view}
+	f.outcomes[operationID] = outcome
+	result := &protocol.Result{
+		OperationID: operationID, Outcome: outcome, App: view,
+		Observation: observation, Error: resultError,
+	}
 	f.mutex.Unlock()
 	f.writeResult(writer, result)
 }
@@ -1862,8 +2344,8 @@ func (f *fakeRecoveryService) observationLocked(withImage bool, quality *protoco
 	if withImage {
 		observation.Image = &protocol.ImageMeta{
 			CapturedAt: time.Now().UTC().Format(time.RFC3339Nano),
-			Width:      720,
-			Height:     1280,
+			Width:      461,
+			Height:     1024,
 			MediaType:  imageJPEG,
 			Base64:     base64.StdEncoding.EncodeToString(f.image),
 		}
@@ -1902,8 +2384,8 @@ func (f *fakeRecoveryService) writeSnap(writer http.ResponseWriter, operationID 
 		OperationID: operationID,
 		Image: &protocol.ImageMeta{
 			CapturedAt: time.Now().UTC().Format(time.RFC3339),
-			Width:      720,
-			Height:     1280,
+			Width:      461,
+			Height:     1024,
 			MediaType:  imageJPEG,
 			ReadOnly:   true,
 			Screen:     &protocol.Screen{Width: 1080, Height: 2400, Rotation: 0},
@@ -2122,6 +2604,42 @@ func TestProbeAgainstRealAdapter(t *testing.T) {
 	}
 }
 
+// TestAppLifecycleAgainstRealAdapter drives the real result v4 encoder through
+// the controlled app lifecycle so the probe's app head and collection blocks
+// are compared against real encoder output, not only the test-side emitter.
+func TestAppLifecycleAgainstRealAdapter(t *testing.T) {
+	for _, mode := range []string{resultModeBoth, resultModeText, resultModeStructured} {
+		t.Run(mode, func(t *testing.T) {
+			fake := startFakeRecoveryService(t)
+			session, service := newRealAdapterSession(t, fake, mode)
+
+			var output bytes.Buffer
+			reporter := newReporter(&output)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			runner := &probe{
+				reporter: reporter, session: session, service: service,
+				resultMode: mode, suite: suiteAppLifecycle, appTarget: controlledAppPackage,
+			}
+			if code := reporter.finish(runner.runChecks(ctx)); code != 0 {
+				t.Fatalf("app lifecycle suite failed (exit %d):\n%s", code, output.String())
+			}
+			for _, want := range []string{
+				"PASS app_open",
+				"PASS app_list_controlled",
+				"PASS app_kill_refused",
+				"PASS app_close",
+				"SKIP app_claim reason=controlled_primary_task_absent",
+				"PASS end",
+			} {
+				if !strings.Contains(output.String(), want) {
+					t.Fatalf("missing %q in:\n%s", want, output.String())
+				}
+			}
+		})
+	}
+}
+
 func TestRunChecksEndsOwnSessionAfterLateFailure(t *testing.T) {
 	fake := startFakeRecoveryService(t)
 	fake.omitActQuality = true
@@ -2248,8 +2766,8 @@ func checkScrollActResult(projected *callResult, mode string) *checkError {
 	if projected.result.IsError {
 		return failf("scroll_act_is_error", field("code", codeOf(view)))
 	}
-	if view.Outcome != outcomeExecuted {
-		return failf("scroll_act_not_executed", field("outcome", view.Outcome))
+	if resultOutcome(projected) != outcomeExecuted {
+		return failf("scroll_act_not_executed", field("outcome", resultOutcome(projected)))
 	}
 	if failure := checkScrollEffect(view, projected.object, true); failure != nil {
 		return failure
@@ -2259,16 +2777,21 @@ func checkScrollActResult(projected *callResult, mode string) *checkError {
 	}
 	quality := view.Observation.Quality
 	if mode != resultModeStructured {
-		if failure := requireTextLine(projected, "effect.state="+view.Effect.State); failure != nil {
+		if failure := requireTextLine(projected, "effect="+view.Effect.State); failure != nil {
 			return failure
 		}
-		if failure := requireQualityTextLines(projected, quality); failure != nil {
+		if failure := checkQualityTextLine(projected); failure != nil {
 			return failure
 		}
 	}
 	effectState, found := lookupPath(projected.object, []string{"effect", "state"})
 	if !found || effectState != view.Effect.State {
 		return failf("effect_object_mismatch")
+	}
+	if mode == resultModeText {
+		// The v4 text channel never renders the audit-only sample count; the
+		// default stable quality is proven by omission.
+		return nil
 	}
 	samples, found := lookupPath(projected.object,
 		[]string{"observation", "quality", "samples"})
@@ -2306,7 +2829,11 @@ func TestActScrollResultProjection(t *testing.T) {
 				t.Fatalf("effect = %+v, want observed", projected.view.Effect)
 			}
 			quality := projected.view.Observation.Quality
-			if quality.State != "stable" || quality.Samples != 2 ||
+			if mode == resultModeText {
+				if quality != nil {
+					t.Fatalf("text default quality = %+v", quality)
+				}
+			} else if quality.State != "stable" || quality.Samples != 2 ||
 				quality.StopReason != "stable" {
 				t.Fatalf("quality = %+v", quality)
 			}
@@ -2330,7 +2857,7 @@ func TestActScrollResultProjection(t *testing.T) {
 			if mode != resultModeStructured {
 				for _, text := range key.texts {
 					for _, line := range strings.Split(text, "\n") {
-						if strings.HasPrefix(line, "effect.") {
+						if strings.HasPrefix(line, "effect=") || strings.HasPrefix(line, "effect.") {
 							t.Fatal("key result carries a readable effect line")
 						}
 					}

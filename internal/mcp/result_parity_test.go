@@ -59,10 +59,7 @@ func TestHTTPNestedErrorDetailsAcrossModes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("canonicalResult: %v", err)
 	}
-	want, err := decodeResultJSON(canonical)
-	if err != nil {
-		t.Fatalf("decode canonical: %v", err)
-	}
+	want := expectedResultV4(t, canonical, true, execution.requestRef)
 	for _, mode := range []ResultMode{ResultModeBoth, ResultModeText, ResultModeStructured} {
 		out := projectExecution(execution, "act", mode)
 		if !out.IsError {
@@ -78,7 +75,7 @@ func TestHTTPNestedErrorDetailsAcrossModes(t *testing.T) {
 			continue
 		}
 		decoded, flag, err := decodeResultText(t, testTextContent(t, out))
-		if err != nil || !flag || !reflect.DeepEqual(want, decoded) {
+		if err != nil || !flag || !sameJSONValue(want, decoded) {
 			t.Fatalf("mode %v text parity error=%v flag=%t", mode, err, flag)
 		}
 	}
@@ -118,9 +115,10 @@ func TestAgentResultLosslessParity(t *testing.T) {
 					t.Fatal("envelope parity")
 				}
 				if mode != ResultModeStructured {
+					wantText := expectedResultV4(t, a, out.IsError)
 					decoded, flag, err := decodeResultText(t, testTextContent(t, out))
-					if err != nil || !reflect.DeepEqual(want, decoded) || flag != out.IsError {
-						t.Fatalf("text parity mode=%v err=%v\nwant=%#v\ngot=%#v\n%s", mode, err, want, decoded, testTextContent(t, out))
+					if err != nil || !sameJSONValue(wantText, decoded) || flag != out.IsError {
+						t.Fatalf("text parity mode=%v err=%v\nwant=%#v\ngot=%#v\n%s", mode, err, wantText, decoded, testTextContent(t, out))
 					}
 				}
 				if mode == ResultModeText {
@@ -187,18 +185,13 @@ func TestEffectQualityModeParity(t *testing.T) {
 			continue
 		}
 		text := testTextContent(t, out)
+		wantText := expectedResultV4(t, canonical, false)
 		decoded, flag, err := decodeResultText(t, text)
-		if err != nil || flag || !reflect.DeepEqual(want, decoded) {
+		if err != nil || flag || !sameJSONValue(wantText, decoded) {
 			t.Fatalf("text parity mode=%v err=%v", mode, err)
 		}
-		for _, line := range []string{
-			"effect.state=unknown",
-			" quality.state=unknown",
-			" quality.samples=0",
-			" quality.stop_reason=not_sampled",
-		} {
-			requireTestContains(t, text, "\n"+line+"\n")
-		}
+		requireTestContains(t, text, "\neffect=unknown\n")
+		requireTestNotContains(t, text, "quality=")
 	}
 }
 
@@ -343,11 +336,6 @@ func TestNestedErrorDetailsModeParity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("canonicalResult: %v", err)
 	}
-	want, err := decodeResultJSON(canonical)
-	if err != nil {
-		t.Fatalf("decode canonical: %v", err)
-	}
-
 	for _, mode := range []ResultMode{ResultModeBoth, ResultModeText, ResultModeStructured} {
 		out := projectExecution(e, "act", mode)
 		if !out.IsError {
@@ -369,10 +357,11 @@ func TestNestedErrorDetailsModeParity(t *testing.T) {
 			requireTestNotContains(t, text, "occluding_ref")
 			continue
 		}
+		wantText := expectedResultV4(t, canonical, true)
 		decoded, flag, err := decodeResultText(t, text)
-		if err != nil || !flag || !reflect.DeepEqual(want, decoded) {
+		if err != nil || !flag || !sameJSONValue(wantText, decoded) {
 			t.Fatalf("mode %v text parity error=%v flag=%t\nwant=%#v\ngot=%#v\n%s",
-				mode, err, flag, want, decoded, text)
+				mode, err, flag, wantText, decoded, text)
 		}
 		requireTestContains(t, text, `"safe_point":{"x":0,"y":0}`)
 		requireTestNotContains(t, text, "occluding_ref")
@@ -412,7 +401,11 @@ func TestAdmissionParity(t *testing.T) {
 			if !out.IsError || fake.totalRequests() != 0 {
 				t.Fatal("admission invoked service")
 			}
-			requireTestContains(t, testTextContent(t, out), "error.code=invalid_request")
+			if mode == ResultModeStructured {
+				requireTestContains(t, testTextContent(t, out), "error.code=invalid_request")
+			} else {
+				requireTestContains(t, testTextContent(t, out), "error invalid_request")
+			}
 		}
 	}
 }
@@ -499,9 +492,9 @@ func TestHTTPModesSelectProjectionPerCall(t *testing.T) {
 
 func TestCatalogFingerprintBaseline(t *testing.T) {
 	// The catalog has thirteen tools. This baseline covers the caller-oriented
-	// descriptions after result v3/tree v4 local guidance was added to start,
+	// descriptions after result v4/tree v4 local guidance was added to start,
 	// observe, wait_for, act, app and inspect.
-	const baseline = "5738c699da9c0a980e782f44943910718844447d9d00e04c0fb5a79682afc3cf"
+	const baseline = "e42f9adb7e416e1962cbb43397f12407bb3d7f4d28d02396e32ab3c317427ba1"
 	if got := CatalogFingerprint(); got != baseline {
 		t.Fatalf("catalog changed: %s", got)
 	}
@@ -600,10 +593,7 @@ func TestHTTPTextErrorDetailsAcrossModes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("canonicalResult: %v", err)
 	}
-	want, err := decodeResultJSON(canonical)
-	if err != nil {
-		t.Fatalf("decode canonical: %v", err)
-	}
+	want := expectedResultV4(t, canonical, true, execution.requestRef)
 	for _, mode := range []ResultMode{ResultModeBoth, ResultModeText, ResultModeStructured} {
 		out := projectExecution(execution, "act", mode)
 		if !out.IsError {
@@ -619,7 +609,7 @@ func TestHTTPTextErrorDetailsAcrossModes(t *testing.T) {
 			continue
 		}
 		decoded, flag, err := decodeResultText(t, testTextContent(t, out))
-		if err != nil || !flag || !reflect.DeepEqual(want, decoded) {
+		if err != nil || !flag || !sameJSONValue(want, decoded) {
 			t.Fatalf("mode %v text parity error=%v flag=%t", mode, err, flag)
 		}
 	}

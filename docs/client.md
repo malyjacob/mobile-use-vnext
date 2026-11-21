@@ -36,7 +36,9 @@ delta 结果上；阅读 ref 连续性不代替服务端输入授权。格式见
 | `start`、`observe`、`snap`、`wait_for`、`act`、`keepalive`、`end`、`app`、`notify`、`shell` | 生成并放在 `X-Mobile-Use-Operation` |
 | `status`、`inspect`、`diagnose` | 不生成、不发送该头 |
 
-- 默认 P 形状为 `P` + 24 位小写十六进制；调用方可用 `client.WithOperationID` 指定一个
+- `NewOperationID()` 生成进程级 `P<4位>_<seq>`：首次调用选取 4 位无前导零数字前缀
+  （1000–9999）并在进程生命周期内固定，之后每次以原子递增序号生成（如 `P7391_12`）。
+  随机源读取失败时返回错误，不静默降级。调用方可用 `client.WithOperationID` 指定一个
   已持有的 P（恢复、验证或接入层预分配），非法编号在发送前被拒。
 - 同一 P 不自动重发。服务对重复 P 只返回原操作视图，不再次派发。
 - 普通业务 HTTP 传输失败（拨号、写入、读取、超时、取消）返回结构化 `*client.Error`，

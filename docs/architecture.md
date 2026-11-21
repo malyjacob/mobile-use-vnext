@@ -37,8 +37,9 @@ cmd/device-mcp
 - `internal/android` 只执行有界设备 I/O 并返回受控事实；不决定观察什么、操作什么。
 - `internal/mcp` 只依赖 `protocol` 与 `client`，不导入 `engine`、`android`、`store`，不因
   同仓而绕过认证与服务状态；`internal/client` 只依赖 `protocol`。该包以单一固定说明源生成
-  server instructions（`result v3`、`tree v4`、`inspect v3` 的完整文本语法一次加跨工具
-  调用规则），由 `server/discover` 与兼容 `initialize` 发布；13 个工具描述不内联树引导。
+  server instructions（`text`/`both` 的 `result v4` 紧凑文本、`tree v4` 与 `inspect v3` 的完整
+  文法一次加跨工具调用规则；`both`/`structured` 的 `structuredContent` 保持完整 `Result` JSON），
+  由 `server/discover` 与兼容 `initialize` 发布；13 个工具描述不内联树引导。
 - `internal/store` 实现 `engine.Store` 与 `engine.MessageStore`，分别持久化 `engine.Ledger`
   与有界 Agent 消息。两者是不同文件、不同语义：账本只含归属与资源证据，消息文件只含待
   投递正文，正文不进入账本。
@@ -108,7 +109,7 @@ engine 的状态锁只做有限内存检查与转换：锁内不等待 ADB、u2 
 - `act` 在静态检查通过、取得工作位置后把 O 从 `ready` 单向改为 `claimed`。认领后即使未派发
   任何输入也不归还；静态拒绝发生在认领之前。
 - 过期由时钟（每秒）与请求时的惰性检查共同处理；有效期
-  `min(captured_at + 60s, session.expires_at)`。
+  `min(本次采集最早读取起点 + 60s, session.expires_at)`。
 - 保留上限 `MaxObservations=32`；会话的 O、基线 O、已认领 O 受保护，其余按采集时间淘汰。
 
 ### P（操作）
@@ -117,8 +118,9 @@ engine 的状态锁只做有限内存检查与转换：锁内不等待 ADB、u2 
 
 - 每个工具在任何设备副作用之前登记 P
   （`registerOperation`），可用 `X-Mobile-Use-Operation` 预分配；客户端传入的 P 按原值登记。
-  缺省时服务生成带当前服务实例前缀的不透明 `P…`。格式为 `P` + 字母/数字/`-`/`_`，总长 ≤64；
-  调用方不得解析编号中的数值，也不得跨服务实例复用编号。
+  缺省时服务生成 `P<4位>_<seq>`：4 位无前导零数字的实例标签加实例内单调序号（如
+  `P4821_12`）。格式为 `P` + 字母/数字/`-`/`_`，总长 ≤64；调用方不得解析编号中的数值，
+  也不得跨服务实例复用编号。
 - 同一 P 重复到达只返回原操作的公开视图，不再次派发（包括已失败的操作）。
 - 已完成操作的公开视图（重复 P、`status(P)` 与冻结结果）不带 `observation`；原操作交付过新
   观察时，视图中的 `recovery` 退化为 `observe`/`P`，不指向该视图无法定位的 O。
@@ -127,8 +129,9 @@ engine 的状态锁只做有限内存检查与转换：锁内不等待 ADB、u2 
   有“未接纳”正面证据时返回 `request_closed=true`、`outcome=not_executed`；记录淘汰后只剩
   “未来接纳已封闭”证据时，`end(P)` 返回 `409 operation_unknown`、`phase=reference_unknown`、
   `outcome=uncertain` 与 `request_closed=true`，不声称原动作未执行，也不结束其它会话。
-- 服务生成的观察与 P 编号包含当前服务实例前缀，并在该实例内单调分配；会话自身有 `epoch`，
-  提交与恢复都用它识别“原会话”。
+- 服务生成的观察编号为 `O<4位>_<seq>`，与 `P` 共用同一实例标签；两者都在该实例内单调分配，
+  `service_instance_id` 始终保持完整 36 字符 UUID。会话自身有 `epoch`，提交与恢复都用它
+  识别“原会话”。
 
 ### app（统一应用生命周期）
 
@@ -355,8 +358,8 @@ status(P)、重复 P 与冻结结果只复制最后一次已提交快照，迟�
 70% 判据用有界整数关系
 `10×deltaBytes < 7×fullBytes`；等值退 full。构造器在投影阶段只产生候选，提交门禁通过后
 才推进 `prev` 与 ref 计数器；被拒绝的候选不改变下一次发布树的 ref。可读文本块使用
-`result v3` 观察组、`tree v4` 普通树和 `inspect v3` 详细补看编码，普通角色与动作按文本
-语法恢复。full/delta 的选择按 JSON 字节计量。
+`result v4` 的 `obs` 观察行、`tree v4` 普通树和 `inspect v3` 详细补看编码；`both`/`structured`
+的 JSON 保持完整 `Result`。普通角色与动作按文本语法恢复。full/delta 的选择按 JSON 字节计量。
 
 净化仅改变公开投影：默认空叶不发布，原始事实仍供动作重验使用；非目标 display 包装层不发布，
 目标后代按最近公开祖先挂接并保持 raw 先序。Source 与 ContextSource 互斥且完整覆盖公开 ref，
@@ -564,6 +567,9 @@ P 已无法定位时，`end(P)` 返回 `409 operation_unknown`、`phase=referenc
 - 读取版本 1–5。版本 1–4 的记录按原格式升级到 v5；版本 3/4/5 中已发出预算且仍为 `pending`
   的退休记录，启动时先持久化为 `unconfirmed`，不授予第二次补偿预算。current 或旧格式记录
   转成退休记录时获得一次新预算；迁移快照必须先保存，再允许任何补偿派发。
+- 载入旧账本后、解除恢复屏障前，服务收集旧主记录与全部退休记录的服务实例标签，以及会话
+  `origin` 中的 `P<4位>_...` 标签；本次进程的 4 位 O/P 标签若与之重合，按固定顺序避让到第一
+  个未占用值。标签只在此时可能调整，开始分配 O/P 后固定不变。
 - boot 变化可作为对应终结证据；跨 boot 的物理清理保持只读，不按旧裸 ID 删除可能属于新资源
   的对象。旧 shell runner 只在完整身份匹配时探测或终止，不重放命令。
 - 旧 `may_dispatch` UI/legacy checkpoint 保留为 `execution=unconfirmed` 的原归属证据；
@@ -665,7 +671,7 @@ P 已无法定位时，`end(P)` 返回 `409 operation_unknown`、`phase=referenc
 ### 发布
 
 `release/versions.json` 是发行号、共同契约号与 Android versionCode 的唯一来源；当前为
-`release_version=0.24.0`、`contract_version=21`、`android_version_code=26`，构建生成
+`release_version=0.25.0`、`contract_version=21`、`android_version_code=27`，构建生成
 Go/Java 常量。`scripts/build-release.ps1` 产出整组产物与 `build/release/manifest.json`
 （源码提交、Go 版本、MCP SDK/协议、各产物 SHA-256/大小、Android 包名/版本、工具目录指纹）。
 工具目录固定为 `scripts/toolcatalog` 投影的 13 个工具，指纹是该目录注册顺序、名称、描述与

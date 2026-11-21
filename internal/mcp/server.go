@@ -96,7 +96,9 @@ type adapter struct {
 	defaultResultMode ResultMode
 }
 
-// execution is one fully projected tool call.
+// execution is one fully projected tool call. requestRef lives only inside
+// this one call; it is never stored across calls and never mutates the
+// structured result's recovery.reference.
 type execution struct {
 	result       *protocol.Result
 	image        *client.Image
@@ -106,6 +108,7 @@ type execution struct {
 	cancellation string
 	code         string
 	appKind      string
+	requestRef   string
 }
 
 func (a *adapter) handle(ctx context.Context, definition toolDefinition, arguments []byte, modes ...ResultMode) *sdk.CallToolResult {
@@ -174,7 +177,10 @@ type preparedCall struct {
 	// snap is the one image read that receives a pre-allocated P but never
 	// issues an end on cancellation and discards its image when cancelled.
 	snap bool
-	run  func(ctx context.Context, operationID string) (*client.Response, error)
+	// requestRef is the decoded request reference of this call only. It feeds
+	// result v4 recovery resolution and is never retained.
+	requestRef string
+	run        func(ctx context.Context, operationID string) (*client.Response, error)
 }
 
 // appQuery reports one of the two app kinds that read without an outcome.
@@ -214,7 +220,9 @@ func (a *adapter) invoke(ctx context.Context, call *preparedCall, operationID st
 		if ctx.Err() != nil {
 			return a.cancelled(call, operationID, done, outcome, true)
 		}
-		return projectCall(outcome.response, outcome.err, operationID, call.kind)
+		execution := projectCall(outcome.response, outcome.err, operationID, call.kind)
+		execution.requestRef = call.requestRef
+		return execution
 	case <-ctx.Done():
 		select {
 		case outcome := <-done:
@@ -365,6 +373,7 @@ func (a *adapter) cancelled(call *preparedCall, operationID string, done <-chan 
 		cancellation: cancellation,
 		code:         logCode(base),
 		appKind:      call.kind,
+		requestRef:   call.requestRef,
 	}
 }
 
@@ -578,6 +587,7 @@ func prepareCall(service *client.Client, definition toolDefinition, body []byte)
 		if apiErr != nil {
 			return nil, apiErr
 		}
+		call.requestRef = request.Reference
 		call.run = func(ctx context.Context, _ string) (*client.Response, error) {
 			return service.Status(ctx, request.Reference)
 		}
@@ -586,6 +596,7 @@ func prepareCall(service *client.Client, definition toolDefinition, body []byte)
 		if apiErr != nil {
 			return nil, apiErr
 		}
+		call.requestRef = request.Reference
 		call.run = func(ctx context.Context, operationID string) (*client.Response, error) {
 			return service.Observe(ctx, &protocol.ObserveRequest{
 				Reference: request.Reference,
@@ -599,6 +610,7 @@ func prepareCall(service *client.Client, definition toolDefinition, body []byte)
 		if apiErr != nil {
 			return nil, apiErr
 		}
+		call.requestRef = request.Reference
 		call.run = func(ctx context.Context, operationID string) (*client.Response, error) {
 			return service.Snap(ctx, &protocol.SnapRequest{Reference: request.Reference},
 				client.WithOperationID(operationID))
@@ -608,6 +620,7 @@ func prepareCall(service *client.Client, definition toolDefinition, body []byte)
 		if apiErr != nil {
 			return nil, apiErr
 		}
+		call.requestRef = request.Reference
 		call.run = func(ctx context.Context, operationID string) (*client.Response, error) {
 			return service.WaitFor(ctx, &protocol.WaitForRequest{
 				Reference:      request.Reference,
@@ -626,6 +639,7 @@ func prepareCall(service *client.Client, definition toolDefinition, body []byte)
 		if apiErr != nil {
 			return nil, apiErr
 		}
+		call.requestRef = request.Reference
 		call.run = func(ctx context.Context, operationID string) (*client.Response, error) {
 			return service.Act(ctx, &protocol.ActRequest{
 				Reference: request.Reference,
@@ -638,6 +652,7 @@ func prepareCall(service *client.Client, definition toolDefinition, body []byte)
 		if apiErr != nil {
 			return nil, apiErr
 		}
+		call.requestRef = request.Reference
 		call.run = func(ctx context.Context, _ string) (*client.Response, error) {
 			return service.Inspect(ctx, &protocol.InspectRequest{
 				Reference: request.Reference,
@@ -652,6 +667,7 @@ func prepareCall(service *client.Client, definition toolDefinition, body []byte)
 		if apiErr != nil {
 			return nil, apiErr
 		}
+		call.requestRef = request.Reference
 		call.run = func(ctx context.Context, operationID string) (*client.Response, error) {
 			if request.HasDurationMinutes {
 				return service.KeepaliveWithDuration(ctx, request.Reference, request.DurationMinutes, client.WithOperationID(operationID))
@@ -663,6 +679,7 @@ func prepareCall(service *client.Client, definition toolDefinition, body []byte)
 		if apiErr != nil {
 			return nil, apiErr
 		}
+		call.requestRef = request.Reference
 		call.run = func(ctx context.Context, operationID string) (*client.Response, error) {
 			return service.End(ctx, request.Reference, client.WithOperationID(operationID))
 		}
@@ -671,6 +688,7 @@ func prepareCall(service *client.Client, definition toolDefinition, body []byte)
 		if apiErr != nil {
 			return nil, apiErr
 		}
+		call.requestRef = request.Reference
 		call.kind = request.Kind
 		call.run = func(ctx context.Context, operationID string) (*client.Response, error) {
 			return service.App(ctx, request, client.WithOperationID(operationID))
@@ -689,6 +707,7 @@ func prepareCall(service *client.Client, definition toolDefinition, body []byte)
 		if apiErr != nil {
 			return nil, apiErr
 		}
+		call.requestRef = request.Reference
 		call.run = func(ctx context.Context, operationID string) (*client.Response, error) {
 			return service.Shell(ctx, &protocol.ShellRequest{
 				Reference: request.Reference,
@@ -701,6 +720,7 @@ func prepareCall(service *client.Client, definition toolDefinition, body []byte)
 		if apiErr != nil {
 			return nil, apiErr
 		}
+		call.requestRef = request.Reference
 		call.run = func(ctx context.Context, _ string) (*client.Response, error) {
 			return service.Diagnose(ctx, &protocol.DiagnoseRequest{
 				Reference: request.Reference,

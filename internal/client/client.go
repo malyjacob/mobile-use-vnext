@@ -10,13 +10,16 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
-	"encoding/hex"
+	"encoding/binary"
 	"encoding/json/v2"
 	"errors"
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/malyjacob/mobile-use-vnext/internal/protocol"
@@ -672,18 +675,52 @@ func (c *Client) newOperation(opts []CallOption) (string, *Error) {
 	return operation, nil
 }
 
-// NewOperationID allocates one cryptographically random operation ID of the
-// form P plus 24 lowercase hexadecimal characters. Callers that must be able
-// to recover an in-flight call (for example an MCP cancellation path that
-// issues End for the same P) allocate it first and pass it with
-// WithOperationID; the default allocation inside each work-tool call uses the
-// same form.
+// Operation identity policy. One P identity is a 4-digit decimal process tag
+// plus a process-wide monotonic sequence, for example P7391_12: the tag stays
+// short, the sequence keeps every call of this process collision-free, and the
+// visible shape is the same one the device service generates for its own O/P.
+const (
+	operationTagMin  = 1000
+	operationTagMax  = 9999
+	operationTagSpan = operationTagMax - operationTagMin + 1
+)
+
+var (
+	operationPrefixMu sync.Mutex
+	operationPrefix   string
+	operationSequence atomic.Uint64
+)
+
+// NewOperationID allocates one operation ID of the form P plus a 4-digit
+// process tag, an underscore and a process-wide monotonic sequence. Callers
+// that must be able to recover an in-flight call (for example an MCP
+// cancellation path that issues End for the same P) allocate it first and pass
+// it with WithOperationID; the default allocation inside each work-tool call
+// uses the same form.
 func NewOperationID() (string, error) {
-	var entropy [12]byte
+	prefix, err := operationIDPrefix()
+	if err != nil {
+		return "", err
+	}
+	return "P" + prefix + "_" + strconv.FormatUint(operationSequence.Add(1), 10), nil
+}
+
+// operationIDPrefix lazily draws the 4-digit tag this process keeps for its
+// whole lifetime. A failed random read reports the error and caches nothing, so
+// a later call can still succeed rather than reusing a half-built identity. The
+// 64-bit modulo of the 9,000-value range is off uniform by less than 10^-15.
+func operationIDPrefix() (string, error) {
+	operationPrefixMu.Lock()
+	defer operationPrefixMu.Unlock()
+	if operationPrefix != "" {
+		return operationPrefix, nil
+	}
+	var entropy [8]byte
 	if _, err := rand.Read(entropy[:]); err != nil {
 		return "", err
 	}
-	return "P" + hex.EncodeToString(entropy[:]), nil
+	operationPrefix = strconv.Itoa(int(binary.BigEndian.Uint64(entropy[:])%operationTagSpan) + operationTagMin)
+	return operationPrefix, nil
 }
 
 // validOperationID accepts 2..64 characters: a leading P followed by ASCII

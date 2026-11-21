@@ -8,14 +8,14 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
 ## 1. 协议与进程边界
 
 - 使用 MCP `2026-07-28` 的新协议路径：客户端以 `server/discover` 取得服务能力并协商版本；
-  SDK 服务只发布 `2026-07-28`。收到旧版 `initialize` 时，SDK 按生命周期规范回答
-  `2025-11-25` 并期望客户端断开；该回答不是本适配器的新协议协商结果，也不对应第二套工具、
-  别名或旧协议回退。
+  SDK 服务只发布 `2026-07-28`。收到 `2025-11-25` 的 `initialize` 时，SDK 按生命周期规范回答
+  同一版本并期望客户端断开；该回答不是本适配器的新协议协商结果，也不对应第二套工具、
+  别名或低版本协议回退。
 - 工具目录固定为 13 个，与 [接口契约](interface.md) 同名同义：`start`、`status`、`observe`、
   `snap`、`wait_for`、`act`、`inspect`、`keepalive`、`end`、`app`、`notify`、`shell`、
   `diagnose`。不注册 `/health`、认证初始化、旧工具别名或旧协议回退。
 - 目录指纹是工具数、注册顺序、名称、描述与入参 schema 的 canonical SHA-256。当前源码的
-  工具目录指纹为 `5738c699da9c0a980e782f44943910718844447d9d00e04c0fb5a79682afc3cf`。
+  工具目录指纹为 `e42f9adb7e416e1962cbb43397f12407bb3d7f4d28d02396e32ab3c317427ba1`。
   发布清单中的指纹对应其记录的源码提交。发布时从目标提交重建并核验清单。
   探针按工具名比对实际 `tools/list` 的描述和入参 schema，并核对只读注解。传入 `-manifest`
   时，探针将清单中的工具数和目录 SHA-256 分别与源码目录的对应值比对。探针将
@@ -75,13 +75,14 @@ Label、最近祖先关系及安全点，child 丢失或内容被替换返回 `4
 保持同一份 `{write,enter}` 快照；ENTER 只证明按键原语，不证明业务提交，`enter=uncertain`
 时先观察而不是原样重发。text 失败的 `error.details` 固定给出 `stage`、`reason` 与
 `dispatch.focus/write/enter`（`not_attempted|not_dispatched|dispatched|unknown`），
-可选 `candidate_count` 保留 `0`；MCP 的 structured/text/both 三种模式都保留同一组嵌套字段，
-调用方按枚举决策而不解析 `message`。已认领 `text` 的整体 `outcome=uncertain`，且结果自身的
-`recovery.entry=observe`、`recovery.reference=P` 时，直接 `observe` 核对当前框值/页面。该结果
+可选 `candidate_count` 保留 `0`；MCP 的 structured/text/both 三种模式都保留同一组嵌套字段
+（文本写作 `error.details=<紧凑 JSON>`），调用方按枚举决策而不解析 `message`。已认领 `text`
+的整体 `outcome=uncertain`，且结果给出 `recovery entry=observe ref=<P>`（`structured` 中为
+`recovery.entry` 与 `recovery.reference`）时，直接 `observe` 核对当前框值/页面。该结果
 也包括仅 `focus` 已派发而 `write`/`enter` 尚未派发的情形。这个特定恢复覆盖通用的 `uncertain`
-先 `status` 规则。其 `reference` 使用原活动会话的具体归属 P（如 `session.origin` 或已知属于
-该会话的 `operation_id`），不能把枚举值 P 当作编号。实时会话/耐久/设备/忙阻塞才覆盖为
-`end`/`status`/`user` 并给 `blocking_code`。
+先 `status` 规则。当 `ref=` 是抽象词 `P` 而不是具体编号时，使用原活动会话的具体归属 P
+（如 `session.origin` 或已知属于该会话的 `operation_id`），不能把枚举值 P 当作编号。
+实时会话/耐久/设备/忙阻塞才覆盖为 `end`/`status`/`user` 并给 `blocking_code`。
 字段与合法组合见
 [接口契约](interface.md) §6。
 
@@ -118,22 +119,24 @@ Label、最近祖先关系及安全点，child 丢失或内容被替换返回 `4
 
 `snap` 的 schema 只有一个必填 `reference`（`O…`/`P…`，≤64）。它与 `observe` 共用
 引用解析口径，额外拒绝本次请求 P 的自引用。它只读取一张图，不读取树或发布观察。
-成功时结果是顶层 `image` 元数据加一个 `ImageContent`；`result v3` 以
-`image=<紧凑 JSON>` 输出同一元数据（不含 base64），`structuredContent` 在顶层 `image` 携带
-同组成员，三种结果模式都只发送一个 `ImageContent`。`isError=false` 要求完整图片实际交付；
+成功时结果是顶层 `image` 元数据加一个 `ImageContent`；`result v4` 以单行
+`image <W>x<H> read_only screen=<W>x<H>[@<display_id>] [at=<HH:MM:SS>]` 输出同一元数据（不含 base64），
+`structuredContent` 在顶层 `image` 携带同组成员，三种结果模式都只发送一个 `ImageContent`。
+`isError=false` 要求完整图片实际交付；
 重复 P 的无图摘要、失败、准入或传输错误均为 `isError=true`。取消见第 6 节。
 
 `observe.wait_ms` 是单次采集前的延迟毫秒数；等待公开树条件使用 `wait_for`。`wait_for` 的
 schema 以 `reference` 与 `timeout` 为必填，`query`、`absent_query`、`stable`、`full`、`image`
 可选。`timeout` 是 1–40 的整数，`stable=true` 时至少 2。两个等待条件在 schema 中均为
 1–256 个码点，运行时也拒绝全空白。同时提供时任一条件命中即可满足查询条件。
-`stable=true` 时还须满足稳定判据。成功时用新 `observation.id`
-继续。超时若发布新 O，`isError=false`，`wait.matched` 含 `timeout` 及终帧命中的条件。
-命中条件或满足稳定状态时复用候选帧。到时或采样上限
+`stable=true` 时还须满足稳定判据。成功时用新 `obs` 行的完整 `O` 继续（`structured` 中为
+`observation.id`）。超时若发布新 O，`isError=false`，`wait.matched` 含 `timeout` 及终帧
+命中的条件（文本写作 `matched=`）。命中条件或满足稳定状态时复用候选帧。到时或采样上限
 退出时，若最新成功轮询帧仍在 `CaptureMaxAge=15s` 内且之后没有失败尝试，则复用该帧。否则
-做一次终帧采集。连续 3 帧稳定由 `observation.quality.state=stable` 表达；
-`wait.elapsed_ms` 计自准入完成至终帧发布，验证采集整体受 35 秒固定预留约束，实际耗时可
-超过 `timeout` 至多约 35 秒；两个条件只匹配当前公开可见树且 `stable=true` 对整树计算摘要，
+做一次终帧采集。连续 3 帧稳定由 `observation.quality.state=stable` 表达，文本省略该默认
+质量项；`wait.elapsed_ms` 计自准入完成至终帧发布（文本写作 `elapsed=<ms>ms`），验证采集
+整体受 35 秒固定预留约束，实际耗时可超过 `timeout` 至多约 35 秒；两个条件只匹配当前公开
+可见树且 `stable=true` 对整树计算摘要，
 页面有倒计时或实时进度变化时应保持 `stable=false`。参数在适配器侧按同一严格解码器接入，
 解码器可判定的非法组合在发出 HTTP 请求前被拒；两个条件折叠后相同由引擎准入在请求发出后
 拒绝，不接触设备。
@@ -165,6 +168,10 @@ kind 成员矩阵是互斥权威：
 `outcome=uncertain`。受管命令的有限屏障仍可能让新的普通工作返回 `device_busy`。
 `status({})` 可报告 `blocking_code=shell_pending`。遇到该阻塞可短暂退避，原会话仍活动时
 再观察现状。屏障期限见 [运维说明](runbook.md#7-常见故障)。
+受管命令不绑定会话显示屏：`input` 一类命令默认作用于 display 0（主屏），要驱动会话屏须
+自带 `input -d <display_id>`。该 `display_id` 取自 `start` 首帧 `obs` 行的
+`screen=<W>x<H>@<display_id>`；`snap` 的 `image` 与 `app(list)` 的 `display=` 给出同一
+编号。
 
 ## 3. 结果投影
 
@@ -172,112 +179,44 @@ kind 成员矩阵是互斥权威：
 
 | 模式 | `content` | `structuredContent` |
 | --- | --- | --- |
-| `both` | 完整 `result v3` 文本与图片 | 完整 `Result` JSON |
-| `text`（默认） | 完整 `result v3` 文本与图片 | 不发送 |
+| `both` | 紧凑 `result v4` 文本与图片 | 完整 `Result` JSON |
+| `text`（默认） | 紧凑 `result v4` 文本与图片 | 不发送 |
 | `structured` | 图片；`isError=true` 时附最小 `diagnostic v1` 文本 | 完整 `Result` JSON |
 
+文本与结构化两种表示正式分层：`text`/`both` 的 `result v4` 是按 3.1 的投影顺序与省略清单
+呈现的紧凑投影，面向调用方阅读与上下文效率，不承诺与结构化 JSON 逐字段互相还原；
+`/api/*` 与 `both`/`structured` 的 `structuredContent` 完整无损保留 `Result` JSON，含全部
+审计字段、三态与空集合语义。完整时间戳、`observation.origin`、`observation.revision`、
+`observation.actionable_until`、`observation.quality.samples`、`session.agent` 与
+`inspection.origin` 只在 `structured`/`both` 的 JSON 中保留。
+
 完整结果是 `(canonical A, CallToolResult.IsError, ImageContent)`。`A` 是去除图片 base64
-载体后的确定性 `Result` JSON；取消时还包含本节规定的 `error.details.mcp.*`。文本和结构化
-编码必须无损还原同一结果：缺失、`null`、`false`、`0`、`""`、`[]` 与数组顺序均保留。
-图片只在 `ImageContent` 中发送。`structured` 成功且无图时 `content=[]`；不接受空 content
-的宿主应使用 `both` 或 `text`。模式不用于脱敏或截断，不发布 `outputSchema`。
+载体后的确定性 `Result` JSON；取消时还包含本节规定的 `error.details.mcp.*`。`result v4`
+与 `structuredContent` 都取自同一份 `A`：结构化编码保留每个成员与三态，文本投影只按 3.1 的
+显式清单省略固定或冗余元信息，其余成员一律显式投影或按 `json v1` 兜底。图片只在
+`ImageContent` 中发送。`structured` 成功且无图时 `content=[]`；不接受空 content 的宿主
+应使用 `both` 或 `text`。模式不用于脱敏或截断，不发布 `outputSchema`。
 
-`effect` 与 `observation.quality` 按同一份 `Result` 投影，三种模式承载相同字段与值：
-`result v3` 在 `phase` 之后投影 `effect.state`，在观察组中投影
-`observation.quality.state`、`observation.quality.samples` 与
-`observation.quality.stop_reason`；`structured` 与 `both` 的 `structuredContent` 保留同一份
-对象，`text` 不发送结构化内容。适配器不重算或补投影这些事实；`effect` 只由 `scroll` 的
-操作结果与保留的 P 视图携带，带树的观察都携带 `observation.quality`（未采样或重验交付为
-`unknown`/`0`/`not_sampled`），只有没有树的失败观察不携带它。两者的成员与取值见
-[接口契约](interface.md) §11。
+`effect` 与 `observation.quality` 取自同一份 `Result`，适配器不重算或补投影这些事实：
+`effect` 只由 `scroll` 的操作结果与保留的 P 视图携带，带树的观察都携带
+`observation.quality`（未采样或重验交付为 `unknown`/`0`/`not_sampled`），只有没有树的失败
+观察不携带它。`structured`/`both` 的 `structuredContent` 携带完整对象，文本按 3.2 输出
+非默认质量的 `quality=` 项。两者的成员与取值见 [接口契约](interface.md) §11。
 
-复合 `text` 的 `text_input` 也按同一份 `Result` 投影：`result v3` 在 `effect` 之后输出
-`text_input.write` 与 `text_input.enter` 两个 token（固定顺序，枚举
-`not_executed|uncertain|executed`），`structured` 与 `both` 的 `structuredContent` 保留同一
-对象；显式 `press_enter=false` 和非法组合不会产生该对象。首次结果、运行中 `status(P)`、
-重复 P 与冻结结果使用同一快照。
-
-`wait_for` 的 `wait` 对象也按同一份 `Result` 投影：`result v3` 输出 `wait.trigger`（token）、
-`wait.matched`（紧凑 JSON 数组）与 `wait.elapsed_ms`（数字字面量），成员顺序固定为
-`trigger`、`matched`、`elapsed_ms`；`matched` 为空时服务端已省略该成员，适配器不补
-`null`、不补空数组。`structured` 与 `both` 的 `structuredContent` 保留同一份对象。验证采集
-失败的结果按第 3 节的诊断投影透传 `wait.trigger` 与 `wait.elapsed_ms`，不输出
-`wait.matched`。
-
-`snap` 的顶层 `image` 也按同一份 `Result` 投影：`result v3` 在 `saved` 之后、`session` 之前
-输出 `image=<紧凑 JSON>`，`structuredContent` 保留同一元数据对象；两者都不包含 base64。
-图片字节只出现在唯一的 `ImageContent`。失败、重复 P 与 `status(P)` 摘要没有顶层 `image`，
-也不会被适配器补成空对象。
-
-完整文本第一行为 `result v3 is_error=<true|false>`，最后为 `end result`。已知字段按
-`Result` 的公共顺序输出，字段行和块可以交错；例如 shell 块之后仍可有错误与恢复字段。
-字段行为 `key=value`，受控 ID、枚举、时间戳、整数、布尔可用无空白、`=`、引号、反斜杠的
-ASCII token；任意文本与设备来源字符串使用 JSON 字符串，空串和非法 token 也使用 JSON
-字符串；复合值使用紧凑 JSON。未知成员或不可表示的复合值使用完整兜底：
-
-```text
-json v1 path="/observation/tree" value={"format":"full","scope":"","root":null}
-```
-
-`path` 为 RFC 6901 JSON Pointer，`~`、`/` 分别转义为 `~0`、`~1`。每个事实路径只编码
-一次。块前恰好一个空行，块后接字段或结果终止行时没有额外空行；相邻块之间恰好一个空行。
-块头的 `nodes`、`changes`、`events`、`output_bytes` 仅为派生计数。普通 full 恢复时使用
-固定 `scope=reported_visible_with_context`，该字段不写入 `tree v4` 头；delta 不携带也不
-恢复 `scope`。`inspect` 的 subtree/query 头中 `tree_scope` 仍是派生显示，不新增 `A` 的
-成员。
-
-连续的 `observation.*` 字段组成观察组。组以一行无缩进的 `observation` 开始，随后每项写
-一个 ASCII 空格和去掉 `observation.` 的相对路径，例如：
-
-```text
-observation
- status=complete
- id=Oabc_76
- revision=4
- quality.state=stable
-```
-
-顶层非观察字段、空行、可读块或 `json v1` 会结束当前组；其后仍有观察字段时另开一组。
-各组合并到同一个 `observation` 对象。跨组重复路径、重复树、祖先与子路径冲突均为无效
-文本。完整 O 从组内 `id` 取得；在 `structuredContent` 中仍是 `observation.id`。
-`observation=null` 和无法无损表示的观察复合值继续使用顶层标量或绝对 JSON Pointer 兜底。
-树仅在所属完整 O 可读且类型化往返无损时进入可读块，否则写
-`json v1 path="/observation/tree" value=…`。
-
-`start` 的首个存在观察使用组内完整 O。`observe`、`wait_for`、`act` 和变更类 `app`
-返回新观察时同样从组内取 O。看到 `base=_72` 只用于定位读树基线；需要调用时，用完整 O/P
-或当前 ready O。`inspect` 始终使用完整历史 O 和实际节点 ref。
+复合 `text` 的 `text_input`、`wait_for` 的 `wait`、`snap` 的顶层 `image` 与 `app` 结果同样
+取自这一份 `Result`；文本行与块语法见 3.2。显式 `press_enter=false` 和非法组合不会产生
+`text_input` 对象，首次结果、运行中 `status(P)`、重复 P 与冻结结果使用同一快照。
+`wait.matched` 为空时服务端已省略该成员，适配器不补 `null`、不补空数组；验证采集失败时仍
+保留 `wait.trigger` 与 `wait.elapsed_ms`，不输出 `wait.matched`。失败、重复 P 与
+`status(P)` 摘要没有顶层 `image`，也不会被适配器补成空对象。
 
 `structured` 的错误文本使用 `diagnostic v1 is_error=true` / `end diagnostic`，只包含
-操作号、操作状态、outcome、phase、目标引用、准入/消息状态、观察 status/id、会话、收尾、
-条件等待的 `wait.trigger` 与 `wait.elapsed_ms`、错误与恢复等存在的解释字段；它不代表
-完整 `A`。所有字段均从同一份 `A` 生成。`app` 只在 diagnostic 中补充 `app.kind`，不展开
-`items`、`tasks`、PID 或其他业务事实；`wait.matched` 不进入 diagnostic：失败结果没有可判定
-那一帧的已发布观察。
-
-`app` 结果字段在完整文本中的分类固定如下；复合字段使用紧凑完整 JSON，保留嵌套成员、
-数组顺序、显式 `null` 与 `[]`：
-
-| `app` 路径 | 文本编码 |
-| --- | --- |
-| `kind`、`ownership`、`foreground_restore`、`captured_at` | token |
-| `package` | JSON 字符串 |
-| `task_id`、`source_task_id`、`display_id`、`source_display_id`、`total` | 数字字面量 |
-| `reused`、`state_preserved`、`complete`、`truncated`、`restarted` | true/false/null 字面量 |
-| `items`、`tasks`、`foreground`、`target_pids`、`killed_pids`、`remaining_pids` | 紧凑 JSON |
-
-`state_preserved:null`、`restarted:null`、`recents_cleaned:null` 与空数组都必须保留；未知或
-不可表示的字段仍走整值 `json v1 path=... value=...` 兜底，不能只发计数或丢成员。
-
-适配器严格解码成功并预分配 P、但服务结果未知时，只能从已接纳的请求补 `app.kind` 作为调用
-元数据；不得补 `task_id`、`display_id`、PID、`ownership` 或其他设备事实，也不得声称服务已
-登记或已 finished。适配器自身的参数接入拒绝不分配 P，也不补 `app`。
-
-文本字节是稳定契约：完整结果使用 `result v3`；普通树与详细补看正文分别由块头
-`tree v4`、`inspect v3` 标识独立语法。三层版本按块头分派，不改变共享事实集、
-`structuredContent` 或绝对 JSON Pointer 兜底。取消统一标为 `isError=true`。工具名称、
-描述、入参 schema 与目录指纹随发布清单核验，描述变更会改变目录指纹，部署必须按清单
-重新核验。
+操作号、操作状态、outcome、phase、目标引用、准入与消息状态、`effect.state`、
+`text_input.write`/`text_input.enter`、观察 status/id、会话、收尾、条件等待的
+`wait.trigger` 与 `wait.elapsed_ms`、错误与恢复等存在的解释字段；它不代表完整 `A`。
+所有字段均从同一份 `A` 生成。`app` 只在 diagnostic 中补充 `app.kind`，不展开 `items`、
+`tasks`、PID 或其他业务事实；`wait.matched` 不进入 diagnostic：失败结果没有可判定那一帧
+的已发布观察。
 
 树、图片与 shell 输出的事实来源都是服务的同一份结果。base64 只出现在 HTTP 载体
 `observation.image.base64` 与 MCP `ImageContent.data`；可读正文与 `structuredContent`
@@ -308,13 +247,328 @@ observation
 `status(P)` 的 `query_cancelled` 摘要在没有 `error` 时 `IsError=false`，只表示摘要已提供，
 不代表原查询成功或包含集合；查询调用本身的取消仍按上一行记为 `true`。
 
-### 3.1 树块
+### 3.1 `result v4` 外壳、投影顺序与省略清单
+
+`text`/`both` 的文本以头行开始、以 `end result` 结束，行尾统一 `\n`，不写裸 `\r` 与多余
+空行：
+
+```text
+result v4 <ok|err> [op=<P>] [state=<operation_state>] [outcome=<outcome>] [phase=<phase>]
+...
+end result
+```
+
+- `<ok|err>`：`isError=false` 写 `ok`，`isError=true` 写 `err`。
+- `op=<P>`：`operation_id` 非空时一律输出，不省略。
+- `state=<operation_state>`：非空时输出，例如 `running`、`finished`。
+- `outcome=<outcome>`：仅当结果为 `ok`、值为 `executed` 且头行没有 `state=` 时省略；
+  错误结果、`not_executed`、`uncertain` 与带 `state=` 的 `status(P)`/幂等重放摘要一律显式。
+- `phase=<phase>`：非空时输出。
+- 头行取值不是合法 token 时，改在头行之后按实际成员名兜底，例如
+  `json v1 path="/operation_state" value=…`。
+- `op=` 只是本次调用编号参考、`at=` 只是 UTC 秒级时序提示；两者都不替代或放宽
+  `internal/engine` 对会话归属、显示代次与期限的权威校验。
+
+可见标识形如 `O4821_85` 与 `P7391_12`：`O`/`P` 后接 4 位十进制实例标签（`1000`–`9999`，
+无前导零）、`_` 与单调序号。`/api/*`、`structuredContent` 与文本使用同一编号，适配器不维护
+别名或第二套映射。
+
+成员按下列固定顺序投影，各自仅在该成员存在时出现，字段行与块按此顺序交错：
+
+1. 动作与状态控制标量：`effect=<state>`、`text_input write=<write> enter=<enter>`、
+   `target_reference=<ref>`、`request_closed=<true|false>`（永不省略）、
+   `blocking_operation_id=<P>`、`can_start=<true|false>`、`blocking_code=<code>`、
+   `start_operation_id=<P>`、`observation_state=<state>`、`input_state=<state>`。
+2. `notify` 聚合行及其错误子行。
+3. 顶层 `image` 行及其错误子行。
+4. `session` 行。
+5. `obs` 行、其 `obs.image`/`obs.error` 子行与普通树块。
+6. `inspection` 补看块。
+7. `app` 行与 `app_items v1`、`app_tasks v1` 块。
+8. `shell v1` 块。
+9. `wait` 行。
+10. `diagnosis` 行、`diagnosis.issues`/`diagnosis.timing_ms` 行与 `timeline v1` 块。
+11. `cleanup` 行及其错误子行。
+12. `error` 行。
+13. `recovery` 行。
+14. 其余未登记成员逐个按 `json v1` 兜底。
+
+块之后仍可有后续行，例如 `shell` 块之后仍有 `wait`、`cleanup`、`error` 与 `recovery` 行。
+
+显式省略清单如下；被省略的值仍完整保留在 `/api/*` 与 `structuredContent`：
+
+| `Result` 路径 | 文本处理 | 条件与理由 |
+| --- | --- | --- |
+| `outcome` | 省略 | 仅 `ok`、`executed` 且头行无 `state=`；头行 `ok` 已唯一确定常规执行成功 |
+| `observation.status` | 省略 | 仅 `complete`；`partial`、`failed` 与其他值一律显式 |
+| `observation.origin` | 始终省略 | 同会话恒等于 `start` 时的 `session.origin`，避免每帧重复 |
+| `observation.revision` | 始终省略 | 内部递增版本号，操作与恢复都不依赖 |
+| `observation.actionable_until` | 始终省略 | 由本次采集的最早读取时刻加 60 秒输入期限推导，并受会话租期截断；截止由服务端精确裁定 |
+| `observation.quality` | 省略整对象 | 仅 `state=stable`，或 `state=unknown` 且 `stop_reason=not_sampled` |
+| `observation.quality.samples` | 始终省略 | 非默认质量只写 `quality=<state>(<stop_reason>)`；采样次数仅供审计 |
+| `observation.screen` | 条件省略 | 仅当顶层 `session` 为空或缺席且观察带树；`screen` 存在且 `rotation != 0` 时 `rot=<1\|2\|3>` 恒输出 |
+| `image.media_type`、`observation.image.media_type` | 省略 | 仅 `image/jpeg`；非 JPEG 写 `media=<type>` |
+| `session.agent` | 始终省略 | 单一固定 Agent 名称，无决策价值 |
+| `inspection.origin` | 始终省略 | 补看头已带 `observation=<O>` |
+| 所有时间戳的日期与纳秒部分 | 截断为 UTC `HH:MM:SS` | 秒级时序足够；非合法 RFC3339 值原样保留，非法 token 走 `json v1` |
+
+除上表列出的成员外，`Result` 的其余成员都在 `result v4` 中显式投影，不静默丢弃：
+`request_closed` 永不省略；`target_reference`、`blocking_operation_id`、`can_start`、
+`blocking_code`、`start_operation_id`、`observation_state`、`input_state`、`effect`、
+`text_input`、`wait`、`cleanup`、`error`、`recovery` 与 `app` 的全部三态、缺席和空集合语义
+100% 保留。
+
+词法与转义规则：
+
+- 不带引号的 token（`<code>`、`<state>`、`<pkg>`、`<O>`、`<P>` 等）须非空且不含
+  `<= U+0020` 的字符、`=`、`"`、`\`、`U+007F` 或非 ASCII 字符；不合法时该成员回退
+  `json v1 path="…" value=…`。
+- 双引号文本负载（`error` 与各 `*.error` 的 `<message>`、`diagnosis` 的 `summary`、
+  `app_items` 的 `<name>`）使用单行 JSON 字符串：严格转义 `\n`、`\r`、`"`、`\` 与控制字符，
+  允许空串 `""`，不拆行、不伪造成其他键。
+- 除 `session=null` 与 `state_preserved`/`restarted`/`recents_cleaned` 的可空三态外，意外
+  `null`、类型不匹配或未登记成员都回退到 `json v1`，不静默丢弃。
+- 无法无损编码或无法安全词法化的值使用
+  `json v1 path="<绝对 RFC 6901 JSON Pointer>" value=<紧凑 JSON>`；`~`、`/` 分别转义为
+  `~0`、`~1`，每个事实路径只编码一次，例如：
+
+  ```text
+  json v1 path="/observation/tree" value={"format":"full","scope":"","root":null}
+  ```
+
+- 块前恰好一个空行；块后接行时没有额外空行，相邻块之间恰好一个空行。
+- 块头的 `nodes`、`changes`、`events`、`output_bytes` 仅为派生计数。普通 full 恢复时使用
+  固定 `scope=reported_visible_with_context`，该字段不写入 `tree v4` 头；delta 不携带也不
+  恢复 `scope`。`inspect` 的 subtree/query 头中 `tree_scope` 仍是派生显示，不新增 `A` 的
+  成员。
+
+`result v4` 的文法稳定；普通树与详细补看正文分别由块头 `tree v4`、`inspect v3`
+标识独立语法。三层版本按块头分派，`structuredContent` 保持同一份事实集，未知成员一律走
+绝对 JSON Pointer 兜底。取消统一标为 `isError=true`。工具名称、描述、入参 schema 与目录
+指纹随发布清单核验，描述变更会改变目录指纹，部署必须按清单重新核验。
+
+### 3.2 对象行
+
+**`notify`。** `message_id`、`saved` 与 `notification.state` 至少存在其一时合并为一行，
+`notification.error` 存在时紧跟错误子行：
+
+```text
+notify [id=<message_id>] [saved=<true|false>] [state=<notification.state>]
+notify.error <code> "<message>"
+notify.error.details=<紧凑 JSON>
+```
+
+`notification` 为 `null` 或空对象时按 `json v1 path="/notification"` 兜底；其余成员分别按
+`/message_id`、`/saved`、`/notification/state`、`/notification/<name>` 兜底，
+`notification.error` 不可表示时按 `/notification/error` 兜底。
+
+**顶层 `image` 与 `obs.image`。** 两者共用同一渲染器，只在前缀不同；各成员按存在性输出：
+
+```text
+image [<W>x<H>] [read_only] [media=<非 jpeg>] [screen=<W>x<H>[@<display_id>]] [rot=<1|2|3>] [at=HH:MM:SS]
+image.error <code> "<message>"
+image.error.details=<紧凑 JSON>
+```
+
+`display_id` 缺失时不写 `@<display_id>`，绝不把缺失当 `0`；`read_only=false` 不输出标记；
+`media_type` 为 `image/jpeg` 时不输出 `media=`；`base64` 从不进入文本。`width`/`height`
+是输出 JPEG 的像素尺寸：图片等比缩小且永不放大，长边不超过 `1024`（`1080×2400` 输出
+`461×1024`）。宽高不是整数、只给出一侧非零值、`read_only`/`media_type` 类型不符、
+`rotation` 超出 `0..3`、或时间值不可表示时，整对象按 `json v1 path="/image"`（`obs` 内为
+`/observation/image`）兜底；未知成员按 `/image/<name>` 或 `/observation/image/<name>`
+兜底。`obs` 内的图片写 `obs.image …` 与 `obs.image.error …`。
+
+**`session`。** 显式 `null` 写 `session=null`；非空对象写：
+
+```text
+session <state> mode=<mode> origin=<origin> [started=HH:MM:SS] [expires=HH:MM:SS] [ended=HH:MM:SS] [reason=<reason>]
+```
+
+`agent` 始终省略，空字符串时间与空 `reason` 不输出。`state`、`mode`、`origin` 不是合法
+token，或时间值既非合法 RFC3339 也不是安全 token 时，整对象按 `json v1 path="/session"`
+兜底；未知成员按 `/session/<name>` 兜底。
+
+**观察行。** 单行摘要，`obs ` 之后首个不含 `=` 的字段是完整 `O`：
+
+```text
+obs [<O>] [status=<partial|failed|…>] [fg=<前景>] [at=HH:MM:SS] [quality=<state>(<stop_reason>)] [screen=<W>x<H>[@<display_id>]] [rot=<1|2|3>] [missing=<a,b>]
+```
+
+- `status=complete` 通常省略；整行没有其他字段时写 `obs status=complete`，不产出裸 `obs`
+  行。`partial`、`failed` 与其他值一律显式输出；采集失败且没有观察编号时仍有
+  `obs status=failed missing=tree` 之类的摘要。
+- `fg` 按 `foreground.state` 编码：`package` 与 `task_id` 都有写 `<package>#<task_id>`，
+  只有 `package` 写 `<package>`，只有 `task_id` 写 `#<task_id>`，都没有写 `present`；
+  `none` 写 `none`；`unknown` 写 `unknown(<reason>)`，`reason` 为空时写 `unknown`。
+- `quality` 只写非默认值 `quality=<state>(<stop_reason>)`，没有 `stop_reason` 时写
+  `quality=<state>`；默认质量整项省略，`samples` 从不出现。
+- `screen` 仅在顶层 `session` 非空或观察没有树时输出；`screen` 存在时，无论 `screen=` 是否
+  省略，`rotation != 0` 都一律输出 `rot=<rotation>`。
+- `missing` 以逗号连接，空列表省略。
+- 子行仅在对应字段存在时紧跟：`obs.image …`（与顶层 `image` 同字段同顺序）、
+  `obs.image.error …`、`obs.error <code> "<message>"`，各自的详情写作
+  `<前缀>.details=<紧凑 JSON>`。
+- 成员无法表示为合法 token，或观察为 `null`、无法读取时，按 `/observation/<成员>` 或
+  `json v1 path="/observation"` 兜底。树仅在所属完整 O 可读且类型化往返无损时进入可读
+  块，否则写 `json v1 path="/observation/tree" value=…`。
+
+`start` 首帧、`observe`/`wait_for`/`act`/变更类 `app` 返回的新观察，其完整 O 都取 `obs`
+行；看到 `base=_72` 只用于定位读树基线，需要调用时用完整 O/P 或当前 ready O；`inspect`
+始终使用完整历史 O 与实际节点 ref。
+
+**`inspection`。** 不写前置 `inspection.origin=` 行；空一行后沿用 3.3 的
+`inspect v3 … end inspect`。补看块无法无损编码时整值按 `json v1 path="/inspection"`
+兜底。
+
+**`app`。** 单行头按固定字段顺序输出（`kind` 必填）：
+
+```text
+app <kind> [pkg=<package>] [task=<task_id>] [src_task=<source_task_id>] [src_display=<source_display_id>] [display=<display_id>] [ownership=<ownership>] [reused=<true|false>] [state_preserved=<true|false|null>] [fg_restore=<foreground_restore>] [complete=<true|false>] [target_pids=<数组>] [killed_pids=<数组>] [remaining_pids=<数组>] [restarted=<true|false|null>] [total=<n>] [truncated=<true|false>] [fg=<前景>] [at=HH:MM:SS]
+```
+
+- `state_preserved`、`restarted` 的显式 `null` 原样写 `null`，与缺席严格区分。
+- `target_pids`、`killed_pids`、`remaining_pids` 存在时写紧凑整数数组，严格区分缺席与 `[]`。
+- 空字符串 token 成员不输出；数字成员显式 `null`、类型不匹配或其他不可表示情况使整对象按
+  `json v1 path="/app"` 兜底；未知成员按 `/app/<name>` 兜底。
+- `items` 存在时输出 `app_items v1` 块，空数组同样输出 `count=0`，与“未获得集合”区分：
+
+  ```text
+  app_items v1 kind=find count=<n>
+  <package> "<name>"
+  end app_items
+  ```
+
+  ```text
+  app_items v1 kind=list count=<n>
+  #<task_id> <package> <ownership>[ origin_display=<显示号>]
+  end app_items
+  ```
+
+- `tasks` 存在时输出 `app_tasks v1` 块，空数组同样输出 `count=0`：
+
+  ```text
+  app_tasks v1 count=<n>
+  #<task_id> <outcome>[ recents_cleaned=<true|false|null>][ error=<code> "<message>"[ details=<紧凑 JSON>]]
+  end app_tasks
+  ```
+
+- 块内单个条目无法表示时该条目整值按 `json v1 path="/app/items/<i>"`（或
+  `"/app/tasks/<i>"`）兜底；条目内的未知成员按 `/app/items/<i>/<name>`、
+  `/app/tasks/<i>/<name>` 兜底。`items`/`tasks` 不是数组时按 `/app/items`、`/app/tasks`
+  兜底。
+
+适配器严格解码成功并预分配 P、但服务结果未知时，只能从已接纳的请求补 `app.kind` 作为调用
+元数据；不得补 `task_id`、`display_id`、PID、`ownership` 或其他设备事实，也不得声称服务已
+登记或已 finished。适配器自身的参数接入拒绝不分配 P，也不补 `app`。
+
+**`wait`。** 条件等待的终态写在单行：
+
+```text
+wait trigger=<trigger> [matched=<a,b>] elapsed=<elapsed_ms>ms
+```
+
+`matched` 为空时省略；`trigger` 不是合法 token、`elapsed_ms` 不是整数、`matched` 不可表示
+或出现未知成员时，整值按 `json v1 path="/wait"` 兜底。验证采集失败时 `matched` 不出现。
+
+**`diagnosis`。** 首行后按存在性输出两个 JSON 行，`timeline` 非空时以空行接
+`timeline v1 … end timeline`：
+
+```text
+diagnosis summary="<summary>" coverage=<coverage> truncated=<true|false> [op=<operation_id>] [outcome=<outcome>]
+diagnosis.issues=<紧凑 JSON>
+diagnosis.timing_ms=<紧凑 JSON>
+```
+
+`summary` 使用双引号 JSON 字符串；`issues`/`timing_ms` 为 `null` 时按
+`/diagnosis/issues`、`/diagnosis/timing_ms` 兜底；`summary`、`coverage`、`truncated` 或
+可选 `op`/`outcome` 不可表示时整值按 `json v1 path="/diagnosis"` 兜底；未知成员按
+`/diagnosis/<name>` 兜底。`timeline` 为空数组时不输出块，其内容仍是 `structuredContent`
+的事实；`timeline` 为 `null` 或不可表示时按 `/diagnosis/timeline` 兜底。
+
+**`cleanup`。** 单行报告与可选错误子行：
+
+```text
+cleanup <state> [exec=<execution>] [tasks=<tasks>] [recents=<recents>] [display=<display>]
+cleanup.error <code> "<message>"
+cleanup.error.details=<紧凑 JSON>
+```
+
+成员无法表示为合法 token 时整值按 `json v1 path="/cleanup"` 兜底，`cleanup.error` 不可
+表示时按 `/cleanup/error` 兜底；未知成员按 `/cleanup/<name>` 兜底。
+
+**`error`。** 顶层错误行与可选详情行：
+
+```text
+error <code> "<message>"
+error.details=<紧凑 JSON>
+```
+
+`code`/`message` 不可表示时整值按 `json v1 path="/error"` 兜底，`details` 为 `null` 时按
+`/error/details` 兜底；未知成员按 `/error/<name>` 兜底。
+
+**`recovery`。** 单行给出后续应调用的入口与目标引用：
+
+```text
+recovery entry=<entry> ref=<精确 O/P|O|P|none> [input=<input_state>] [cause=<cause>]
+```
+
+`ref=` 在单次调用内按本次请求引用与本次结果事实确定性解析；无法证明安全时严格回退为抽象词
+`O`、`P` 或 `none`。解析只发生在文本投影层：`structured`/`both` 的 JSON
+`recovery.reference` 仍严格是 `"O"`、`"P"` 或 `"none"`，适配器不保存跨调用状态。错误码
+优先取顶层 `error.code`，不可得时取 `observation.error.code`（`observe`/`wait_for`
+采集失败路径）。合法 `O`/`P` 指以对应字母开头、长度不少于 2 且满足 token 规则的值。
+
+1. `reference=none`：恒为 `none`。
+2. `entry=retry` 且 `reference=O`：本次观察的合法 `O`、否则本次请求引用（合法 `O`），
+   否则抽象词 `O`。
+3. `entry=status`/`end` 且 `reference=O`：`target_reference`（合法 `O`）、否则请求引用、
+   否则抽象词 `O`。
+4. `entry=status` 且 `reference=P`：按下列顺序取首个成立者。
+   1. 错误码 `device_busy`：`blocking_operation_id` 是合法 `P` 时用它，否则回退 `P`（红线 1）。
+   2. 错误码属于 `reference_has_no_session`、`operation_unknown`、`operation_not_found`，
+      或错误码为 `request_closed` 而结果没有可解析的 `request_closed` 布尔值：
+      `target_reference`（合法 `P`）、否则请求引用、否则回退 `P`。
+   3. 本次 `operation_id` 是合法 `P` 且满足任一条件：`outcome=uncertain`、
+      `operation_state=running`、`phase=executed_revoked`、`request_closed=true`、
+      `cause` 属于 `running`/`executed_revoked`/`cleanup_pending`、错误码属于
+      `call_cancelled`/`transport_unavailable`/`invalid_response`/`task_lifecycle_busy`、
+      `cleanup.state` 为 `pending` 或 `unconfirmed`。
+   4. `start_operation_id`（合法 `P`）。
+   5. `session.origin`（合法 `P`）。
+   6. `target_reference`（合法 `P`）。
+   7. 否则回退 `P`（红线 4）。
+5. `entry=observe` 且 `reference=P`：
+   1. `session.origin`（合法 `P`）。
+   2. 本次请求引用是合法 `P` 且错误码不在 `operation_unknown`、`operation_not_found`、
+      `request_closed`、`reference_has_no_session` 之内：用它。
+   3. `operation_id` 是合法 `P` 且满足任一条件：`cause` 或 `phase` 为
+      `post_observation_failed`、`outcome=uncertain`、错误码属于
+      `observation_expired`/`observation_claimed`/`observation_retired`/
+      `hierarchy_unavailable`/`stale_screen`/`tree_too_large`/
+      `control_ui_on_virtual_display`/`display_unavailable`。
+   4. 否则回退 `P`（红线 2）。
+6. `entry=end` 且 `reference=P`：
+   1. `error.details.start_operation_id`（合法 `P`）。
+   2. `session.origin`（合法 `P`）。
+   3. `start_operation_id`（合法 `P`）。
+   4. 本次请求引用（合法 `P`）。
+   5. 否则回退 `P`（红线 3）。
+7. 其他 entry/reference 组合：`ref=` 保持服务给出的抽象词。
+
+四条安全红线即上述回退边界：跨 Agent 忙时没有 `blocking_operation_id` 就不填本次 `op` 或
+`session.origin`；`observation_not_found`、`no_ready_observation`、`content_unavailable`
+不填本次 `op`；无 `session` 的 `session_ended`/`session_expired`/`control_revoked` 对
+`end/P` 不填 `op`；被准入拒绝的 `start`（`recovering`、`device_unavailable`、
+`ledger_unavailable` 等）不返回被拒 `start` 自身的 `op`。任何成员不可表示时整值按
+`json v1 path="/recovery"` 兜底。
+
+### 3.3 树块
 
 树块只投影本次 `Result` 中已有的树或补看内容：不新增采集、不展开 delta、不缓存基线，
 也不读取请求参数、时间或随机数；同一个 `Result` 重复渲染逐字节相同。
 
-在 `result v3` 文本里（`text`/`both` 模式），错误结果同样按成员投影：`act` 重验失败交付的
-新观察会带树块，`is_error=true` 与树块可以出现在同一个结果里。交付与否不改变 `is_error` 的
+在 `result v4` 文本里（`text`/`both` 模式），错误结果同样按成员投影：`act` 重验失败交付的
+新观察会带树块，头行的 `err` 与树块可以出现在同一个结果里。交付与否不改变 `isError` 的
 判定：`act` 看 `outcome` 是否为 `executed`，`observe` 与 `wait_for` 看是否发布出核心 O，
 其余工具按 `error` 与各自的查询事实。
 `structured` 模式的错误文本是 `diagnostic v1`，不含树块。
@@ -323,10 +577,8 @@ observation
 空行、节点行，最后是 `end tree`：
 
 ```text
-result v3 is_error=false
-observation
- status=complete
- id=Oabc_72
+result v4 ok op=P7391_12
+obs O4821_72 fg=com.android.settings#177 at=22:05:11
 
 tree v4 full nodes=8
 
@@ -386,17 +638,15 @@ full 块头的 `nodes` 计展开历史链后的逻辑节点数。完整节点的
 defaults 行。
 
 delta 块头为 `tree v4 delta base=<O|_<序号>> changes=<n>`，正文按
-`set → add → remove → children → replace` 顺序输出。当前 O 来自同一结果的 `observation`
-组，不在块头重复。只有当前 O 与真实 base 都能在最后一个下划线处分成逐字节相同的
+`set → add → remove → children → replace` 顺序输出。当前 O 来自同一结果的 `obs` 行，
+不在块头重复。只有当前 O 与真实 base 都能在最后一个下划线处分成逐字节相同的
 `O<实例>` 前缀和规范正十进制序号时，base 才写成 `_<序号>`；否则写完整 O。短 base 只用于
 读树，不能作为调用引用。`changes` 是五个块的顶层声明条数之和：一个 `set` 条目即使改了
 多个字段也只计 1。零变化 delta 仍保留 `base` 与 `changes=0`，正文为空。
 
 ```text
-result v3 is_error=false
-observation
- status=complete
- id=Oabc_76
+result v4 ok op=P7391_13
+obs O4821_76 fg=com.android.settings#177 at=22:05:12
 
 tree v4 delta base=_72 changes=6
 
@@ -439,10 +689,13 @@ root..parent 的 ref 序列，
 满足 `n` 加非零十进制数字。服务的观察树与 detailed 全树上限为 128 KiB，subtree/query 为
 32 KiB；引擎返回的 `truncated` 仍保留。块分别以 `end tree` / `end inspect` 结束。
 缺失 `end result` 或 `end diagnostic` 表示对应文本被宿主截断；应改用宿主支持的
-`structured`，或通过 `inspect` 的 node/query 收窄。`both` 同时发送两种完整编码，会增加
-传输与上下文占用。
+`structured`，或通过 `inspect` 的 node/query 收窄。`both` 同时发送文本与结构化两种表示，
+会增加传输与上下文占用。
 
-### 3.2 shell 与 timeline 块
+### 3.4 shell 与 timeline 块
+
+`shell v1` 块自带头行；`timeline v1` 块前接 `diagnosis` 行与可选的
+`diagnosis.issues`/`diagnosis.timing_ms` 行，块前恰好一个空行：
 
 ```text
 shell v1 termination=exited exit_code=0 truncated=false output_bytes=6
@@ -457,7 +710,8 @@ end timeline
 shell 的 `output` 按换行分块，每块包含原换行并编码为 JSON 字符串，拼接后保留原输出；空串
 有一行 `output ""`，`null` 对应 `output_bytes=null` 且无 output 行。`output_error` 使用
 完整 JSON。timeline 的 event 为完整 canonical 对象，保持数组顺序与未来成员；timeline 为空
-时按 JSON 兜底。shell 的额外成员按 JSON Pointer 输出。这些内容只进入响应，不写日志。
+数组时不输出块（该空集合只保留在 `structuredContent`），非数组或不可表示时按 JSON 兜底。
+shell 的额外成员按 JSON Pointer 输出。这些内容只进入响应，不写日志。
 
 ## 4. stdio
 
@@ -531,9 +785,9 @@ device-mcp -transport http -config <private-config>
 
 取消结果一律 `isError=true`。适配器保留已有服务错误，缺少错误时合成 `call_cancelled`；`snap`
 是唯一例外：取消分支无条件返回 `call_cancelled`，并丢弃已取得的图片。适配器还在
-`error.details` 注入保留键 `mcp.cancelled=true`、`mcp.cancellation=<受控说明>`，两种
-完整编码均包含它们。此命名空间只由 MCP 适配器使用，`/api/*` 永不产生。文本无额外顶层
-`cancelled` 行；取消不改写原 `outcome`、观察与收尾证据。
+`error.details` 注入保留键 `mcp.cancelled=true`、`mcp.cancellation=<受控说明>`，文本与
+结构化两种表示都包含它们。此命名空间只由 MCP 适配器使用，`/api/*` 永不产生。文本无额外
+顶层 `cancelled` 行；取消不改写原 `outcome`、观察与收尾证据。
 
 漏收分两段：
 

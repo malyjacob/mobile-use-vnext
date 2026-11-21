@@ -1835,7 +1835,7 @@ func TestTextCarriesTreeBlock(t *testing.T) {
 				t.Fatalf("%s reported an error: %s", testCase.name, testTextContent(t, result))
 			}
 			text := testTextContent(t, result)
-			if !strings.HasPrefix(text, "result v3 is_error=false\n") || !strings.HasSuffix(text, "end result\n") {
+			if !strings.HasPrefix(text, "result v4 ok") || !strings.HasSuffix(text, "end result\n") {
 				t.Fatalf("%s text is not a complete result envelope:\n%s", testCase.name, text)
 			}
 			if !strings.Contains(text, testCase.trailer) {

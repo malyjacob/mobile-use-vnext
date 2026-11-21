@@ -46,8 +46,8 @@ func (f *fakeImageEncoder) Encode(source device.ImageSource, display device.Disp
 	}
 	return &protocol.ImageMeta{
 		CapturedAt: source.CapturedAt.UTC().Format(time.RFC3339),
-		Width:      540,
-		Height:     1200,
+		Width:      461,
+		Height:     1024,
 		MediaType:  imaging.MediaTypeJPEG,
 	}, f.data, nil
 }
@@ -597,6 +597,11 @@ func TestImageWithRealEncoderProducesJPEGCarrier(t *testing.T) {
 	}
 	if image.MediaType != imaging.MediaTypeJPEG || image.Base64 == "" {
 		t.Fatalf("real encoder metadata = %+v", image)
+	}
+	// The fake 1080x2400 screen must scale to the documented 461x1024 output,
+	// so the engine's own image budget is proven and not only the pure encoder.
+	if image.Width != 461 || image.Height != 1024 {
+		t.Fatalf("output = %dx%d, want 461x1024", image.Width, image.Height)
 	}
 	if image.Width > h.engine.cfg.ImageMaxLongSide || image.Height > h.engine.cfg.ImageMaxLongSide {
 		t.Fatalf("output %dx%d exceeds the long-side budget", image.Width, image.Height)

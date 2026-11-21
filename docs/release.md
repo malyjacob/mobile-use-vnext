@@ -19,9 +19,10 @@
 服务、App、Go 客户端与 MCP 共用一个 `contract_version`，必须精确相等才进行普通工作；
 不一致时普通同步按 `409 contract_mismatch` 拒绝，只有最小 STOP 仍可用。`release_version`
 只标识发行产物，不参与能力协商。Go 客户端源码随同一源码提交发布，不作为独立产物写入
-清单；MCP 适配器以 `device-mcp` 产物发布。MCP 完整文本的 `result v3`、普通树的
-`tree v4` 与详细补看的 `inspect v3` 是独立文本编码版本，不进入共同契约协商，也不增加
-`release/versions.json` 字段。
+清单；MCP 适配器以 `device-mcp` 产物发布。MCP 的 `text`/`both` 模式使用 `result v4` 紧凑文本，
+普通树使用 `tree v4`、详细补看使用 `inspect v3`，它们是独立文本编码版本，不进入共同契约协商，
+也不增加 `release/versions.json` 字段；`both`/`structured` 的 `structuredContent` 保持完整
+`Result` JSON。
 
 ## 2. 单一版本源
 
@@ -34,9 +35,9 @@
 | `android_version_code` | Android versionCode，写入 `AndroidManifest.xml` 与清单 |
 | `source_commit` | 该版本号冻结时的基线提交（仅供校验）；清单记录构建时的 HEAD |
 
-当前版本源为 `release_version=0.24.0`、`contract_version=21`、`android_version_code=26`；三者
+当前版本源为 `release_version=0.25.0`、`contract_version=21`、`android_version_code=27`；三者
 在 `release/versions.json` 中手改，Go、Java 和 XML 构建常量由生成脚本写入。版本源当前记录
-的冻结基线为 `79e06582f6b542516ae8e9bdb478de499f18dcc8`；发布清单的 `source_commit` 记录
+的冻结基线为 `6fe8d8bd1b408a5e7bb045d2d3394e7b8b67c994`；发布清单的 `source_commit` 记录
 实际构建时的干净实现 `HEAD`，不复制这个冻结基线。
 
 `scripts/generate-version.ps1` 生成：
@@ -72,7 +73,7 @@
 {
   "format": "mobile-use-vnext-release",
   "version": 1,
-  "release_version": "0.24.0",
+  "release_version": "0.25.0",
   "contract_version": 21,
   "source_commit": "<40 位提交>",
   "source_dirty": false,
@@ -81,7 +82,7 @@
   "go_experiment": "jsonv2",
   "build_target": {"goos": "linux", "goarch": "arm64", "cgo_enabled": false},
   "mcp": {"sdk": "github.com/modelcontextprotocol/go-sdk v1.8.0", "protocol": "2026-07-28"},
-  "android": {"package": "com.mobileuse.vnext", "version_name": "0.24.0", "version_code": 26},
+  "android": {"package": "com.mobileuse.vnext", "version_name": "0.25.0", "version_code": 27},
   "tool_catalog": {"count": 13, "sha256": "…"},
   "artifacts": [{"name": "device-service", "path": "device-service", "sha256": "…", "bytes": 0}]
 }

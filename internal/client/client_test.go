@@ -11,7 +11,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -113,16 +115,34 @@ func assertNoOperationHeader(t *testing.T, headers http.Header) {
 	}
 }
 
+// generatedOperationParts splits one generated P of the form
+// "P" + 4-digit process tag + "_" + monotonic sequence.
+func generatedOperationParts(t *testing.T, operation string) (string, uint64) {
+	t.Helper()
+	if len(operation) < 7 || operation[0] != 'P' || operation[5] != '_' {
+		t.Fatalf("generated operation ID %q has the wrong shape", operation)
+	}
+	tag := operation[1:5]
+	if tag[0] < '1' || tag[0] > '9' {
+		t.Fatalf("generated operation tag %q has a leading zero", tag)
+	}
+	for index := 0; index < len(tag); index++ {
+		if tag[index] < '0' || tag[index] > '9' {
+			t.Fatalf("generated operation tag %q is not 4 decimal digits", tag)
+		}
+	}
+	sequence, err := strconv.ParseUint(operation[6:], 10, 64)
+	if err != nil || sequence == 0 {
+		t.Fatalf("generated operation sequence %q is not a positive decimal", operation[6:])
+	}
+	return tag, sequence
+}
+
 func assertGeneratedOperation(t *testing.T, operation string) {
 	t.Helper()
-	if len(operation) != 25 || operation[0] != 'P' {
-		t.Fatalf("generated operation ID has the wrong shape")
-	}
-	for index := 1; index < len(operation); index++ {
-		character := operation[index]
-		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
-			t.Fatalf("generated operation ID is not lowercase hexadecimal")
-		}
+	generatedOperationParts(t, operation)
+	if !validOperationID(operation) {
+		t.Fatalf("generated operation ID does not satisfy validOperationID")
 	}
 }
 
@@ -299,19 +319,74 @@ func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, 
 func TestNewOperationIDFormatAndUniqueness(t *testing.T) {
 	const count = 256
 	seen := make(map[string]struct{}, count)
+	var prefix string
+	var previous uint64
 	for index := 0; index < count; index++ {
 		operation, err := NewOperationID()
 		if err != nil {
 			t.Fatalf("NewOperationID() error: %v", err)
 		}
 		assertGeneratedOperation(t, operation)
-		if !validOperationID(operation) {
-			t.Fatalf("case %d: NewOperationID returned an invalid operation ID", index)
+		tag, sequence := generatedOperationParts(t, operation)
+		if index == 0 {
+			prefix = tag
+		} else if tag != prefix {
+			t.Fatalf("case %d: process prefix changed from %q to %q", index, prefix, tag)
 		}
+		if sequence <= previous {
+			t.Fatalf("case %d: sequence %d did not advance past %d", index, sequence, previous)
+		}
+		previous = sequence
 		if _, duplicate := seen[operation]; duplicate {
 			t.Fatalf("case %d: NewOperationID returned a duplicate", index)
 		}
 		seen[operation] = struct{}{}
+	}
+}
+
+// TestNewOperationIDConcurrentCallsAreUnique proves the shared process prefix
+// plus the atomic sequence keep concurrent allocations collision-free without a
+// lock on the hot path.
+func TestNewOperationIDConcurrentCallsAreUnique(t *testing.T) {
+	const workers, perWorker = 8, 64
+	const total = workers * perWorker
+
+	ids := make(chan string, total)
+	var group sync.WaitGroup
+	for worker := 0; worker < workers; worker++ {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			for index := 0; index < perWorker; index++ {
+				operation, err := NewOperationID()
+				if err != nil {
+					t.Errorf("NewOperationID() error: %v", err)
+					return
+				}
+				ids <- operation
+			}
+		}()
+	}
+	group.Wait()
+	close(ids)
+
+	seen := make(map[string]struct{}, total)
+	var prefix string
+	for operation := range ids {
+		assertGeneratedOperation(t, operation)
+		tag, _ := generatedOperationParts(t, operation)
+		if prefix == "" {
+			prefix = tag
+		} else if tag != prefix {
+			t.Fatalf("concurrent prefixes %q and %q differ", prefix, tag)
+		}
+		if _, duplicate := seen[operation]; duplicate {
+			t.Fatalf("concurrent call returned a duplicate %q", operation)
+		}
+		seen[operation] = struct{}{}
+	}
+	if len(seen) != total {
+		t.Fatalf("collected %d unique operation IDs, want %d", len(seen), total)
 	}
 }
 
@@ -1246,7 +1321,7 @@ func TestInspectAndDiagnoseNeverAllocateOperation(t *testing.T) {
 func TestSnapImageDecodedAndCarrierCleared(t *testing.T) {
 	imageBytes := []byte{0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46}
 	encoded := base64.StdEncoding.EncodeToString(imageBytes)
-	body := fmt.Sprintf(`{"operation_id":"Psnap","image":{"captured_at":"2026-11-18T00:00:00Z","width":540,"height":1200,"media_type":"image/jpeg","read_only":true,"screen":{"width":1080,"height":2400,"rotation":0},"base64":"%s"}}`, encoded)
+	body := fmt.Sprintf(`{"operation_id":"Psnap","image":{"captured_at":"2026-11-18T00:00:00Z","width":461,"height":1024,"media_type":"image/jpeg","read_only":true,"screen":{"width":1080,"height":2400,"rotation":0},"base64":"%s"}}`, encoded)
 	var capture requestCapture
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		capture = captureRequest(t, request)
@@ -1273,8 +1348,8 @@ func TestSnapImageDecodedAndCarrierCleared(t *testing.T) {
 	if response.Image == nil || !bytes.Equal(response.Image.Data, imageBytes) {
 		t.Fatal("snap image was not decoded")
 	}
-	if response.Image.MediaType != "image/jpeg" || response.Image.Width != 540 ||
-		response.Image.Height != 1200 || !response.Image.ReadOnly ||
+	if response.Image.MediaType != "image/jpeg" || response.Image.Width != 461 ||
+		response.Image.Height != 1024 || !response.Image.ReadOnly ||
 		response.Image.CapturedAt != "2026-11-18T00:00:00Z" ||
 		response.Image.Screen == nil || response.Image.Screen.Width != 1080 {
 		t.Fatalf("snap image metadata = %+v", response.Image)
@@ -1285,7 +1360,7 @@ func TestSnapImageDecodedAndCarrierCleared(t *testing.T) {
 }
 
 func TestSnapRejectsInvalidSuccessShapes(t *testing.T) {
-	baseImage := `"captured_at":"2026-11-18T00:00:00Z","width":540,"height":1200,"media_type":"image/jpeg","read_only":true,"screen":{"width":1080,"height":2400,"rotation":0},"base64":"AAAA"`
+	baseImage := `"captured_at":"2026-11-18T00:00:00Z","width":461,"height":1024,"media_type":"image/jpeg","read_only":true,"screen":{"width":1080,"height":2400,"rotation":0},"base64":"AAAA"`
 	mutate := func(old, replacement string) string {
 		return strings.Replace(baseImage, old, replacement, 1)
 	}
@@ -1295,8 +1370,8 @@ func TestSnapRejectsInvalidSuccessShapes(t *testing.T) {
 		mutate(`"read_only":true`, `"read_only":false`),
 		mutate(`"captured_at":"2026-11-18T00:00:00Z"`, `"captured_at":""`),
 		mutate(`"captured_at":"2026-11-18T00:00:00Z"`, `"captured_at":"yesterday"`),
-		mutate(`"width":540`, `"width":0`),
-		mutate(`"height":1200`, `"height":0`),
+		mutate(`"width":461`, `"width":0`),
+		mutate(`"height":1024`, `"height":0`),
 		mutate(`{"width":1080,"height":2400,"rotation":0}`, `{"width":0,"height":2400,"rotation":0}`),
 		mutate(`{"width":1080,"height":2400,"rotation":0}`, `{"width":1080,"height":2400,"rotation":4}`),
 		mutate(`"screen":{"width":1080,"height":2400,"rotation":0}`, `"screen":null`),

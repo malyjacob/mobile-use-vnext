@@ -11,7 +11,7 @@ func projectExecution(e *execution, tool string, mode ResultMode) *sdk.CallToolR
 	}
 	var text string
 	if mode != ResultModeStructured {
-		text, err = encodeResultText(value, isError)
+		text, err = encodeResultText(value, isError, e.requestRef)
 	} else if isError {
 		text, err = encodeResultDiagnostic(value)
 	}
@@ -21,7 +21,7 @@ func projectExecution(e *execution, tool string, mode ResultMode) *sdk.CallToolR
 		if mode == ResultModeStructured {
 			text, _ = encodeResultDiagnostic(value)
 		} else {
-			text, _ = encodeResultText(value, true)
+			text, _ = encodeResultText(value, true, e.requestRef)
 		}
 	}
 	result := &sdk.CallToolResult{Content: []sdk.Content{}, IsError: isError}

@@ -6,6 +6,8 @@ package engine
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -67,6 +69,10 @@ const (
 // Config is the fixed internal policy for the first writable loop. These are
 // service policy, not per-call options.
 type Config struct {
+	// ServiceInstanceID is the durable 36-character UUID identity of this
+	// service process. The control App parses it as a UUID on control sync and
+	// on the minimal STOP carrier, so it is never shortened; the short O/P
+	// prefix is derived from it inside the engine instead.
 	ServiceInstanceID   string
 	AgentName           string
 	StartSessionTTL     time.Duration // 5min initialization, activation and first observation
@@ -213,7 +219,7 @@ func DefaultConfig(instanceID, agentName string) Config {
 		MaxLedgerBytes:               65536,
 		MaxRetiredRecords:            8,
 		ForegroundRestore:            2 * time.Second,
-		ImageMaxLongSide:             1200,
+		ImageMaxLongSide:             1024,
 		ImageQuality:                 80,
 		MaxImageBytes:                512 * 1024,
 		ImageMaxSpan:                 3 * time.Second,
@@ -394,6 +400,14 @@ type Engine struct {
 	nextCommand     int64
 	nextSession     int64
 	nextMessage     int64
+
+	// shortInstanceTag is the 4-digit decimal prefix of every visible O/P
+	// identity of this process (for example "4821"). It is derived from
+	// cfg.ServiceInstanceID, which itself stays the full 36-character UUID the
+	// control App validates, and it is fixed for the lifetime of the process:
+	// only the startup recovery, before the first identity is allocated, may
+	// move it off a tag an older generation already used.
+	shortInstanceTag string
 
 	// messages is the bounded message queue behind notify. It never reaches the
 	// ledger and holds no execution authority.
@@ -633,21 +647,22 @@ type cleanupState struct {
 // New constructs an engine with the real monotonic clock.
 func New(cfg Config, log *eventlog.Logger, dev Device, st Store, projector Projector, differ Differ, opts ...Option) *Engine {
 	e := &Engine{
-		cfg:            cfg,
-		log:            log,
-		dev:            dev,
-		store:          st,
-		projector:      projector,
-		differ:         differ,
-		startedAt:      time.Now(),
-		appNotify:      make(chan struct{}),
-		closeAttempted: map[displayOwner]bool{},
-		stopSeqByApp:   map[string]int64{},
-		closed:         map[string]time.Time{},
-		closedKnown:    map[string]bool{},
-		observations:   map[string]*observationState{},
-		operations:     map[string]*operationState{},
-		tickerDone:     make(chan struct{}),
+		cfg:              cfg,
+		log:              log,
+		dev:              dev,
+		store:            st,
+		projector:        projector,
+		differ:           differ,
+		startedAt:        time.Now(),
+		shortInstanceTag: strconv.Itoa(deriveShortInstanceTag(cfg.ServiceInstanceID)),
+		appNotify:        make(chan struct{}),
+		closeAttempted:   map[displayOwner]bool{},
+		stopSeqByApp:     map[string]int64{},
+		closed:           map[string]time.Time{},
+		closedKnown:      map[string]bool{},
+		observations:     map[string]*observationState{},
+		operations:       map[string]*operationState{},
+		tickerDone:       make(chan struct{}),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -978,16 +993,54 @@ func (e *Engine) extendSessionLocked(now time.Time, ttl time.Duration) {
 	}
 }
 
+// Short instance tag policy. A visible observation identity is
+// "O" + tag + "_" + sequence and a visible operation identity is
+// "P" + tag + "_" + sequence, so the tag stays a fixed 4-digit decimal number
+// without leading zeros while the durable service identity remains a full
+// UUID. "O4821_85" therefore stays short without losing restart distinction.
+const (
+	shortInstanceTagMin  = 1000
+	shortInstanceTagMax  = 9999
+	shortInstanceTagSpan = shortInstanceTagMax - shortInstanceTagMin + 1
+)
+
+// deriveShortInstanceTag maps one service instance identity to its 4-digit O/P
+// tag. A non-empty identity is hashed, so one instance keeps one tag for its
+// whole lifetime and two different instances almost always differ. An empty
+// identity draws a uniform random tag in [1000, 9999], falling back to
+// wall-clock entropy when the random source is unavailable.
+func deriveShortInstanceTag(instanceID string) int {
+	if instanceID != "" {
+		sum := sha256.Sum256([]byte(instanceID))
+		return int(binary.BigEndian.Uint32(sum[0:4])%shortInstanceTagSpan) + shortInstanceTagMin
+	}
+	var entropy [8]byte
+	if _, err := rand.Read(entropy[:]); err == nil {
+		return int(binary.BigEndian.Uint64(entropy[:])%shortInstanceTagSpan) + shortInstanceTagMin
+	}
+	return int(uint64(time.Now().UnixNano())%shortInstanceTagSpan) + shortInstanceTagMin
+}
+
+// instanceTagLocked returns the 4-digit O/P tag of this engine. It is fixed at
+// construction and is only ever replaced by the startup recovery, before any
+// identity has been allocated.
+func (e *Engine) instanceTagLocked() string {
+	if e.shortInstanceTag == "" {
+		e.shortInstanceTag = strconv.Itoa(deriveShortInstanceTag(e.cfg.ServiceInstanceID))
+	}
+	return e.shortInstanceTag
+}
+
 // ObservationID allocation.
 func (e *Engine) nextObservationIDLocked() string {
 	e.nextObservation++
-	return "O" + e.cfg.ServiceInstanceID + "_" + strconv.FormatInt(e.nextObservation, 10)
+	return "O" + e.instanceTagLocked() + "_" + strconv.FormatInt(e.nextObservation, 10)
 }
 
 // Operation IDs generated by the service when the SDK did not supply one.
 func (e *Engine) nextOperationIDLocked() string {
 	e.nextOperation++
-	return "P" + e.cfg.ServiceInstanceID + "_" + strconv.FormatInt(e.nextOperation, 10)
+	return "P" + e.instanceTagLocked() + "_" + strconv.FormatInt(e.nextOperation, 10)
 }
 
 func (e *Engine) nextCommandIDLocked() string {

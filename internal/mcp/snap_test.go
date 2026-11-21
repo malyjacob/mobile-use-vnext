@@ -29,7 +29,7 @@ func snapTestImageBytes(t *testing.T) []byte {
 
 func snapSuccessBody(operationID string) string {
 	return fmt.Sprintf(`{"operation_id":%q,"image":{"captured_at":"2026-11-18T00:00:00Z",`+
-		`"width":540,"height":1200,"media_type":"image/jpeg","read_only":true,`+
+		`"width":461,"height":1024,"media_type":"image/jpeg","read_only":true,`+
 		`"screen":{"width":1080,"height":2400,"rotation":0},"base64":%q}}`,
 		operationID, snapTestImageBase64)
 }
@@ -107,12 +107,9 @@ func TestSnapProjectsOneImageInEveryMode(t *testing.T) {
 			}
 			if mode != ResultModeStructured {
 				text := testTextContent(t, out)
-				requireTestContains(t, text, "is_error=false")
-				requireTestContains(t, text, `image={"captured_at":"2026-11-18T00:00:00Z"`)
-				requireTestContains(t, text, `"width":540`)
-				requireTestContains(t, text, `"height":1200`)
-				requireTestContains(t, text, `"media_type":"image/jpeg"`)
-				requireTestContains(t, text, `"read_only":true`)
+				requireTestContains(t, text, "result v4 ok")
+				requireTestContains(t, text, "image 461x1024 read_only screen=1080x2400 at=00:00:00")
+				requireTestNotContains(t, text, "media=")
 				requireTestNotContains(t, text, snapTestImageBase64)
 			}
 			if mode != ResultModeText {
@@ -122,7 +119,7 @@ func TestSnapProjectsOneImageInEveryMode(t *testing.T) {
 					t.Fatalf("structured image missing: %v", structured)
 				}
 				if image["captured_at"] != "2026-11-18T00:00:00Z" ||
-					image["width"] != float64(540) || image["height"] != float64(1200) ||
+					image["width"] != float64(461) || image["height"] != float64(1024) ||
 					image["media_type"] != "image/jpeg" || image["read_only"] != true {
 					t.Fatalf("structured image = %v", image)
 				}
@@ -213,7 +210,7 @@ func TestSnapCancellationDropsKnownCommitResult(t *testing.T) {
 		Result: &protocol.Result{
 			OperationID: "P7",
 			Image: &protocol.ImageMeta{
-				CapturedAt: "2026-11-18T00:00:00Z", Width: 540, Height: 1200,
+				CapturedAt: "2026-11-18T00:00:00Z", Width: 461, Height: 1024,
 				MediaType: "image/jpeg", ReadOnly: true,
 			},
 		},

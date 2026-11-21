@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
-	"reflect"
 	"strconv"
 	"strings"
 
@@ -63,7 +62,9 @@ type sessionView struct {
 	Origin    string `json:"origin"`
 	State     string `json:"state"`
 	Mode      string `json:"mode"`
+	Agent     string `json:"agent"`
 	StartedAt string `json:"started_at"`
+	ExpiresAt string `json:"expires_at"`
 	EndedAt   string `json:"ended_at"`
 	Reason    string `json:"reason"`
 }
@@ -96,11 +97,13 @@ type imageView struct {
 	Error      *errorView  `json:"error"`
 }
 
-// screenView is the admission display snapshot carried by a snap image.
+// screenView is the admission display snapshot carried by a snap image or a
+// full observation frame.
 type screenView struct {
-	Width    int `json:"width"`
-	Height   int `json:"height"`
-	Rotation int `json:"rotation"`
+	Width     int  `json:"width"`
+	Height    int  `json:"height"`
+	Rotation  int  `json:"rotation"`
+	DisplayID *int `json:"display_id"`
 }
 
 type shellView struct {
@@ -160,23 +163,34 @@ type waitView struct {
 
 // observationView is the observation header; tree bodies are not interpreted.
 type observationView struct {
-	Status   string       `json:"status"`
-	ID       string       `json:"id"`
-	Origin   string       `json:"origin"`
-	Revision int          `json:"revision"`
-	Quality  *qualityView `json:"quality"`
-	Missing  []string     `json:"missing"`
-	Tree     *treeView    `json:"tree"`
-	Image    *imageView   `json:"image"`
-	Error    *errorView   `json:"error"`
+	Status     string          `json:"status"`
+	ID         string          `json:"id"`
+	Origin     string          `json:"origin"`
+	Revision   int             `json:"revision"`
+	CapturedAt string          `json:"captured_at"`
+	Quality    *qualityView    `json:"quality"`
+	Screen     *screenView     `json:"screen"`
+	Foreground *foregroundView `json:"foreground"`
+	Missing    []string        `json:"missing"`
+	Tree       *treeView       `json:"tree"`
+	Image      *imageView      `json:"image"`
+	Error      *errorView      `json:"error"`
+}
+
+// notificationView is the notify delivery fact carried by the v4 aggregate
+// notify line and its optional error sub-line.
+type notificationView struct {
+	State string     `json:"state"`
+	Error *errorView `json:"error"`
 }
 
 type cleanupView struct {
-	State     string `json:"state"`
-	Execution string `json:"execution"`
-	Tasks     string `json:"tasks"`
-	Recents   string `json:"recents"`
-	Display   string `json:"display"`
+	State     string     `json:"state"`
+	Execution string     `json:"execution"`
+	Tasks     string     `json:"tasks"`
+	Recents   string     `json:"recents"`
+	Display   string     `json:"display"`
+	Error     *errorView `json:"error"`
 }
 
 // textInputView is the fixed composite-text stage snapshot. Both members must
@@ -188,29 +202,33 @@ type textInputView struct {
 
 // resultView is the probe's read-only projection of structuredContent.
 type resultView struct {
-	OperationID      string           `json:"operation_id"`
-	OperationState   string           `json:"operation_state"`
-	Outcome          string           `json:"outcome"`
-	Phase            string           `json:"phase"`
-	TextInput        *textInputView   `json:"text_input"`
-	Effect           *effectView      `json:"effect"`
-	TargetReference  string           `json:"target_reference"`
-	RequestClosed    *bool            `json:"request_closed"`
-	CanStart         *bool            `json:"can_start"`
-	BlockingCode     string           `json:"blocking_code"`
-	StartOperation   string           `json:"start_operation_id"`
-	ObservationState string           `json:"observation_state"`
-	Session          *sessionView     `json:"session"`
-	Image            *imageView       `json:"image"`
-	Observation      *observationView `json:"observation"`
-	Inspection       *inspectionView  `json:"inspection"`
-	App              *appView         `json:"app"`
-	Shell            *shellView       `json:"shell"`
-	Wait             *waitView        `json:"wait"`
-	Diagnosis        *diagnosisView   `json:"diagnosis"`
-	Cleanup          *cleanupView     `json:"cleanup"`
-	Error            *errorView       `json:"error"`
-	Recovery         *recoveryView    `json:"recovery"`
+	OperationID         string            `json:"operation_id"`
+	OperationState      string            `json:"operation_state"`
+	Outcome             string            `json:"outcome"`
+	Phase               string            `json:"phase"`
+	TextInput           *textInputView    `json:"text_input"`
+	Effect              *effectView       `json:"effect"`
+	TargetReference     string            `json:"target_reference"`
+	RequestClosed       *bool             `json:"request_closed"`
+	CanStart            *bool             `json:"can_start"`
+	BlockingCode        string            `json:"blocking_code"`
+	StartOperation      string            `json:"start_operation_id"`
+	ObservationState    string            `json:"observation_state"`
+	BlockingOperationID string            `json:"blocking_operation_id"`
+	Session             *sessionView      `json:"session"`
+	Image               *imageView        `json:"image"`
+	Observation         *observationView  `json:"observation"`
+	Notification        *notificationView `json:"notification"`
+	MessageID           string            `json:"message_id"`
+	Saved               *bool             `json:"saved"`
+	Inspection          *inspectionView   `json:"inspection"`
+	App                 *appView          `json:"app"`
+	Shell               *shellView        `json:"shell"`
+	Wait                *waitView         `json:"wait"`
+	Diagnosis           *diagnosisView    `json:"diagnosis"`
+	Cleanup             *cleanupView      `json:"cleanup"`
+	Error               *errorView        `json:"error"`
+	Recovery            *recoveryView     `json:"recovery"`
 }
 
 // checkError is one failed assertion with controlled reason and fields.
@@ -233,19 +251,34 @@ type callResult struct {
 	structured []byte
 	texts      []string
 	images     []*sdk.ImageContent
+	// textOnly records that this projection came from the result v4 text
+	// channel. Only then may a missing explicit fact be interpreted through the
+	// v4 default/omission rules.
+	textOnly bool
+	// textHeader is the parsed v4 header, kept for omission semantics.
+	textHeader *resultHeader
+	// requestRef is the single-call reference extracted from the tool
+	// arguments. It is used only to validate an exact recovery ref.
+	requestRef string
 }
 
 // project decodes a tool result into the probe's projection without printing
 // any content. The selected result mode is checked at the same time so an
-// ordinary probe never accepts a channel that the mode must omit.
-func project(result *sdk.CallToolResult, mode string) (*callResult, *checkError) {
+// ordinary probe never accepts a channel that the mode must omit. The optional
+// requestRef is the caller-supplied reference of this same call; it lets the
+// both-mode gate prove that an exact recovery ref is semantically grounded.
+func project(result *sdk.CallToolResult, mode string, requestRefs ...string) (*callResult, *checkError) {
 	if result == nil {
 		return nil, failf("empty_result")
 	}
 	if mode != resultModeBoth && mode != resultModeText && mode != resultModeStructured {
 		return nil, failf("invalid_result_mode")
 	}
-	projected := &callResult{result: result}
+	requestRef := ""
+	if len(requestRefs) > 0 {
+		requestRef = requestRefs[0]
+	}
+	projected := &callResult{result: result, requestRef: requestRef}
 	for _, content := range result.Content {
 		switch value := content.(type) {
 		case *sdk.TextContent:
@@ -287,6 +320,8 @@ func project(result *sdk.CallToolResult, mode string) (*callResult, *checkError)
 		}
 		projected.view = decoded.view
 		projected.object = decoded.object
+		projected.textOnly = true
+		projected.textHeader = &decoded.header
 	case resultModeStructured:
 		if result.StructuredContent == nil {
 			return nil, failf("structured_mode_content_missing")
@@ -319,18 +354,17 @@ func project(result *sdk.CallToolResult, mode string) (*callResult, *checkError)
 		if decoded.isError != result.IsError {
 			return nil, failf("both_mode_is_error_mismatch")
 		}
-		// Compare the complete decoded objects, not only the probe's typed
-		// projection: an unknown field must be equal in both channels too. Tree
-		// and inspection bodies are blocks the probe checks separately; the
-		// readable decoder intentionally restores only their headers.
-		if !semanticEqual(comparableResultObject(decoded.object), comparableResultObject(structuredObject)) {
-			return nil, failf("both_mode_object_mismatch")
-		}
-		if !reflect.DeepEqual(decoded.view, structuredView) {
-			return nil, failf("both_mode_projection_mismatch")
+		// The v4 text channel is a declared projection, not a byte-for-byte
+		// mirror of structuredContent. The gate applies every explicit omission
+		// rule, compares the complete remaining object (unknown fields included)
+		// and validates any exact recovery ref against the same-call facts.
+		if failure := compareResultTextToStructured(
+			decoded, structuredObject, structuredView, requestRef); failure != nil {
+			return nil, failure
 		}
 		projected.view = structuredView
 		projected.object = structuredObject
+		projected.textHeader = &decoded.header
 	}
 	if failure := checkTextInputSnapshot(projected.view.TextInput); failure != nil {
 		return nil, failure
@@ -356,58 +390,6 @@ func checkTextInputSnapshot(input *textInputView) *checkError {
 		return failf("text_input_stage_order_invalid")
 	}
 	return nil
-}
-
-// comparableResultObject strips the block bodies that the readable decoder
-// deliberately does not reconstruct (observation tree nodes, inspection tree
-// and matches) while keeping their header facts. Every other member, including
-// the complete app object and unknown fields, stays in the comparison.
-func comparableResultObject(object map[string]any) map[string]any {
-	clone := make(map[string]any, len(object))
-	for key, value := range object {
-		clone[key] = value
-	}
-	if observation, ok := object["observation"].(map[string]any); ok {
-		observationClone := make(map[string]any, len(observation))
-		for key, value := range observation {
-			observationClone[key] = value
-		}
-		if tree, ok := observation["tree"].(map[string]any); ok {
-			treeHeader := make(map[string]any, len(tree))
-			for key, value := range tree {
-				treeHeader[key] = value
-			}
-			for _, bodyKey := range []string{
-				"root", "set", "add", "remove", "children", "replace",
-			} {
-				delete(treeHeader, bodyKey)
-			}
-			observationClone["tree"] = treeHeader
-		}
-		clone["observation"] = observationClone
-	}
-	if inspection, ok := object["inspection"].(map[string]any); ok {
-		header := make(map[string]any, 7)
-		for _, key := range []string{
-			"observation_id", "origin", "revision", "captured_at", "scope",
-			"view",
-		} {
-			if value, exists := inspection[key]; exists {
-				header[key] = value
-			}
-		}
-		if tree, ok := inspection["tree"].(map[string]any); ok {
-			treeHeader := make(map[string]any, 1)
-			for _, key := range []string{"view"} {
-				if value, exists := tree[key]; exists {
-					treeHeader[key] = value
-				}
-			}
-			header["tree"] = treeHeader
-		}
-		clone["inspection"] = header
-	}
-	return clone
 }
 
 func checkDiagnosticText(values []string) *checkError {
@@ -459,12 +441,19 @@ func sessionStateOf(session *sessionView) string {
 // valid quality object. The typed view supplies the values; the decoded object
 // proves every member was present, so an omitted samples member can never be
 // mistaken for the valid samples=0 fact.
+//
+// In a text-only projection a missing quality is the v4 default omission: it is
+// valid only when the obs line carries no explicit quality token, which is the
+// stable/not_sampled default branch.
 func checkObservationQuality(projected *callResult, observation *observationView) *checkError {
 	if observation == nil {
 		return failf("post_observation_missing")
 	}
 	quality := observation.Quality
 	if quality == nil {
+		if projected.textOnly {
+			return checkObservationQualityOmitted(projected)
+		}
 		return failf("observation_quality_missing")
 	}
 	value, found := lookupPath(projected.object, []string{"observation", "quality"})
@@ -472,7 +461,13 @@ func checkObservationQuality(projected *callResult, observation *observationView
 	if !found || !isObject {
 		return failf("observation_quality_invalid")
 	}
-	for _, member := range []string{"state", "samples", "stop_reason"} {
+	members := []string{"state", "stop_reason"}
+	if !projected.textOnly {
+		// The audit-only sample count is retained in structuredContent and in
+		// both mode; the v4 text channel never renders it.
+		members = append(members, "samples")
+	}
+	for _, member := range members {
 		if _, present := qualityObject[member]; !present {
 			return failf("observation_quality_member_missing", field("member", member))
 		}
@@ -487,6 +482,51 @@ func checkObservationQuality(projected *callResult, observation *observationView
 	if !qualityStopReasons[quality.StopReason] {
 		return failf("observation_quality_stop_reason_invalid",
 			field("stop_reason", quality.StopReason))
+	}
+	return nil
+}
+
+// defaultQuality reports the two v4 omission branches: a stable settle (any
+// samples) or an explicit not-sampled unknown. Both are fully represented by
+// the absence of a quality token.
+func defaultQuality(quality *qualityView) bool {
+	if quality == nil {
+		return true
+	}
+	if quality.State == "stable" {
+		return true
+	}
+	return quality.State == qualityUnknown && quality.StopReason == qualityStopNotSampled
+}
+
+// observationQualityToken returns the single quality= token of the obs line, or
+// "" when the line carries none.
+func observationQualityToken(projected *callResult) (string, *checkError) {
+	for _, text := range projected.texts {
+		for _, line := range strings.Split(strings.TrimSuffix(text, "\n"), "\n") {
+			if !strings.HasPrefix(line, "obs ") && line != "obs" {
+				continue
+			}
+			for _, token := range strings.Fields(line) {
+				if strings.HasPrefix(token, "quality=") {
+					return strings.TrimPrefix(token, "quality="), nil
+				}
+			}
+			return "", nil
+		}
+	}
+	return "", failf("text_obs_line_missing")
+}
+
+// checkObservationQualityOmitted proves the v4 default quality is represented
+// by an explicit omission, never by a silently dropped non-default object.
+func checkObservationQualityOmitted(projected *callResult) *checkError {
+	token, failure := observationQualityToken(projected)
+	if failure != nil {
+		return failure
+	}
+	if token != "" {
+		return failf("observation_quality_unexpected", field("quality", token))
 	}
 	return nil
 }
@@ -535,6 +575,48 @@ func validReference(value string, prefix byte) bool {
 	return true
 }
 
+const (
+	// imageMaxLongSide is the frozen output long-edge bound of the image policy.
+	// Every screenshot the probe accepts must satisfy it; 461x1024 is the
+	// expected 1080x2400 result and must never be judged by the retired 1200
+	// bound.
+	imageMaxLongSide = 1024
+)
+
+// checkImageLongSide rejects an encoded image whose longest edge exceeds the
+// single output bound. It deliberately checks the longest edge only, so a
+// portrait 461x1024 frame is valid.
+func checkImageLongSide(meta *imageView) *checkError {
+	if meta.Width > imageMaxLongSide || meta.Height > imageMaxLongSide {
+		return failf("image_long_side_exceeds_limit",
+			field("width", strconv.Itoa(meta.Width)), field("height", strconv.Itoa(meta.Height)))
+	}
+	return nil
+}
+
+// expectedImageSize reproduces the proportional, never-upscaling output size of
+// one screenshot so a snap can prove the encoded 461x1024 geometry instead of
+// only accepting any positive size.
+func expectedImageSize(width, height, maxLongSide int) (int, int) {
+	longSide := width
+	if height > longSide {
+		longSide = height
+	}
+	scale := 1.0
+	if longSide > maxLongSide {
+		scale = float64(maxLongSide) / float64(longSide)
+	}
+	dstW := int(float64(width)*scale + 0.5)
+	dstH := int(float64(height)*scale + 0.5)
+	if dstW < 1 {
+		dstW = 1
+	}
+	if dstH < 1 {
+		dstH = 1
+	}
+	return dstW, dstH
+}
+
 // jpegMagic reports whether the bytes start with a JPEG SOI and marker.
 func jpegMagic(data []byte) bool {
 	return len(data) >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF
@@ -580,6 +662,9 @@ func imageBytes(projected *callResult, observation *observationView) ([]byte, *c
 		return nil, failf("image_metadata_dimensions",
 			field("width", strconv.Itoa(meta.Width)), field("height", strconv.Itoa(meta.Height)))
 	}
+	if failure := checkImageLongSide(meta); failure != nil {
+		return nil, failure
+	}
 	if meta.MediaType != imageJPEG {
 		return nil, failf("image_metadata_mime", field("media_type", meta.MediaType))
 	}
@@ -618,6 +703,9 @@ func snapImageBytes(projected *callResult, meta *imageView) ([]byte, *checkError
 		return nil, failf("image_metadata_dimensions",
 			field("width", strconv.Itoa(meta.Width)), field("height", strconv.Itoa(meta.Height)))
 	}
+	if failure := checkImageLongSide(meta); failure != nil {
+		return nil, failure
+	}
 	if meta.MediaType != imageJPEG {
 		return nil, failf("image_metadata_mime", field("media_type", meta.MediaType))
 	}
@@ -630,6 +718,13 @@ func snapImageBytes(projected *callResult, meta *imageView) ([]byte, *checkError
 	if meta.Screen == nil || meta.Screen.Width <= 0 || meta.Screen.Height <= 0 ||
 		meta.Screen.Rotation < 0 || meta.Screen.Rotation > 3 {
 		return nil, failf("image_metadata_screen_invalid")
+	}
+	expectedWidth, expectedHeight := expectedImageSize(
+		meta.Screen.Width, meta.Screen.Height, imageMaxLongSide)
+	if meta.Width != expectedWidth || meta.Height != expectedHeight {
+		return nil, failf("image_dimension_mismatch",
+			field("expected", strconv.Itoa(expectedWidth)+"x"+strconv.Itoa(expectedHeight)),
+			field("actual", strconv.Itoa(meta.Width)+"x"+strconv.Itoa(meta.Height)))
 	}
 	return raw, nil
 }

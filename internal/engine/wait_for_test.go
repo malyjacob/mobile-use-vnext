@@ -637,7 +637,7 @@ func (g *gateWaitImageEncoder) Encode(source device.ImageSource, display device.
 	<-g.release
 	return &protocol.ImageMeta{
 		CapturedAt: source.CapturedAt.UTC().Format(time.RFC3339),
-		Width:      540, Height: 1200, MediaType: imaging.MediaTypeJPEG,
+		Width:      461, Height: 1024, MediaType: imaging.MediaTypeJPEG,
 	}, g.data, nil
 }
 

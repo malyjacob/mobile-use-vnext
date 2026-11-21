@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 
@@ -222,10 +223,224 @@ func TestRetiredDisplayReusePreventsTaskDeletion(t *testing.T) {
 	}
 }
 
+// Fixed service instance identities whose derived 4-digit O/P tags are known.
+// They keep the restart-isolation assertions deterministic instead of relying
+// on a random pair that could collide with probability 1/9000.
+const (
+	// shortTagInstanceA derives tag 6325.
+	shortTagInstanceA = "11111111-1111-4111-8111-111111111111"
+	// shortTagInstanceADuplicate derives the same tag 6325 as shortTagInstanceA
+	// while being a different service identity.
+	shortTagInstanceADuplicate = "c0000000-0000-4000-8000-000000009855"
+	// shortTagInstanceB derives tag 1436 and shortTagInstanceBNext tag 1437.
+	shortTagInstanceB     = "22222222-2222-4222-8222-222222222222"
+	shortTagInstanceBNext = "d0000000-0000-4000-8000-000000000603"
+)
+
 func TestGeneratedReferencesDoNotRebindAfterRestart(t *testing.T) {
-	a := New(DefaultConfig(NewUUID(), "agent"), nil, nil, nil, nil, nil)
-	b := New(DefaultConfig(NewUUID(), "agent"), nil, nil, nil, nil, nil)
+	if deriveShortInstanceTag(shortTagInstanceA) == deriveShortInstanceTag(shortTagInstanceB) {
+		t.Fatal("test constants no longer derive different instance tags")
+	}
+	a := New(DefaultConfig(shortTagInstanceA, "agent"), nil, nil, nil, nil, nil)
+	b := New(DefaultConfig(shortTagInstanceB, "agent"), nil, nil, nil, nil, nil)
 	if a.nextObservationIDLocked() == b.nextObservationIDLocked() || a.nextOperationIDLocked() == b.nextOperationIDLocked() {
 		t.Fatal("new service reused old O/P identity")
+	}
+}
+
+func TestShortInstanceTagDerivation(t *testing.T) {
+	stable := deriveShortInstanceTag(shortTagInstanceA)
+	if stable != deriveShortInstanceTag(shortTagInstanceA) {
+		t.Fatal("one instance identity derived two different tags")
+	}
+	if stable < shortInstanceTagMin || stable > shortInstanceTagMax {
+		t.Fatalf("derived tag %d is outside [%d, %d]", stable, shortInstanceTagMin, shortInstanceTagMax)
+	}
+	text := strconv.Itoa(stable)
+	if len(text) != 4 || text[0] == '0' {
+		t.Fatalf("derived tag %q is not 4 digits without a leading zero", text)
+	}
+	// An absent identity still yields one in-range tag. The value is random, so
+	// only the range and the 4-digit shape are asserted.
+	anonymous := deriveShortInstanceTag("")
+	if anonymous < shortInstanceTagMin || anonymous > shortInstanceTagMax {
+		t.Fatalf("anonymous tag %d is outside [%d, %d]", anonymous, shortInstanceTagMin, shortInstanceTagMax)
+	}
+	// Guard the fixed constants the restart tests rely on: one deliberate
+	// collision pair and one adjacent-tag pair.
+	if deriveShortInstanceTag(shortTagInstanceA) != deriveShortInstanceTag(shortTagInstanceADuplicate) {
+		t.Fatal("deliberate tag collision constants no longer collide")
+	}
+	if deriveShortInstanceTag(shortTagInstanceB)+1 != deriveShortInstanceTag(shortTagInstanceBNext) {
+		t.Fatal("adjacent tag constants are no longer adjacent")
+	}
+}
+
+func TestGeneratedReferencesUseShortInstanceTag(t *testing.T) {
+	e := New(DefaultConfig(shortTagInstanceA, "agent"), nil, nil, nil, nil, nil)
+	tag := strconv.Itoa(deriveShortInstanceTag(shortTagInstanceA))
+	if got := e.instanceTagLocked(); got != tag {
+		t.Fatalf("instance tag = %q, want %q", got, tag)
+	}
+	// The durable identity the control App validates stays a full UUID.
+	if identity := e.InstanceID(); identity != shortTagInstanceA || len(identity) != 36 || !ValidateUUID(identity) {
+		t.Fatalf("service instance identity changed: %q", identity)
+	}
+	if observation := e.nextObservationIDLocked(); observation != "O"+tag+"_1" {
+		t.Fatalf("observation identity = %q, want O%s_1", observation, tag)
+	}
+	if operation := e.nextOperationIDLocked(); operation != "P"+tag+"_1" {
+		t.Fatalf("operation identity = %q, want P%s_1", operation, tag)
+	}
+	// A second allocation advances only the sequence.
+	if observation := e.nextObservationIDLocked(); observation != "O"+tag+"_2" {
+		t.Fatalf("second observation identity = %q, want O%s_2", observation, tag)
+	}
+	if operation := e.nextOperationIDLocked(); !validOperationID(operation) || operation != "P"+tag+"_2" {
+		t.Fatalf("second operation identity = %q, want a valid P%s_2", operation, tag)
+	}
+}
+
+// instanceTagRecoveryEngine builds a service process for instanceID, loads
+// record through the normal startup barrier and returns the engine.
+func instanceTagRecoveryEngine(t *testing.T, instanceID string, record *Ledger) *Engine {
+	t.Helper()
+	cfg := DefaultConfig(instanceID, "agent")
+	cfg.CleanupTimeout = 200 * time.Millisecond
+	cfg.LedgerTimeout = 200 * time.Millisecond
+	dev := newFakeDevice()
+	dev.displayExists = false
+	e := New(cfg, nil, dev, &fakeStore{record: record},
+		&testProjector{builder: observation.NewBuilder()}, testDiffer{})
+	e.SetDeviceReady(true)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		e.Shutdown(ctx)
+	})
+	if err := e.StartRecovery(context.Background()); err != nil {
+		t.Fatalf("StartRecovery: %v", err)
+	}
+	return e
+}
+
+// TestRestartAvoidsCollidingInstanceTag proves the ledger collision rule: two
+// service generations whose identities deliberately derive the same 4-digit tag
+// must not reuse the older O/P prefixes after the ledger is loaded.
+func TestRestartAvoidsCollidingInstanceTag(t *testing.T) {
+	previousTag := deriveShortInstanceTag(shortTagInstanceA)
+	if previousTag != deriveShortInstanceTag(shortTagInstanceADuplicate) {
+		t.Fatalf("test constants no longer collide: %d vs %d",
+			previousTag, deriveShortInstanceTag(shortTagInstanceADuplicate))
+	}
+	oldOrigin := "P" + strconv.Itoa(previousTag) + "_7"
+	oldObservation := "O" + strconv.Itoa(previousTag) + "_9"
+	record := oldLedger()
+	record.ServiceInstanceID = shortTagInstanceA
+	record.Session.Origin = oldOrigin
+
+	e := instanceTagRecoveryEngine(t, shortTagInstanceADuplicate, record)
+
+	wantTag := (previousTag-shortInstanceTagMin+1)%shortInstanceTagSpan + shortInstanceTagMin
+	e.mu.Lock()
+	tag, observations, operations := e.shortInstanceTag, e.nextObservation, e.nextOperation
+	observation := e.nextObservationIDLocked()
+	operation := e.nextOperationIDLocked()
+	e.mu.Unlock()
+	if observations != 0 || operations != 0 {
+		t.Fatalf("recovery allocated identities before the tag was fixed: O=%d P=%d", observations, operations)
+	}
+	if tag != strconv.Itoa(wantTag) {
+		t.Fatalf("restarted instance tag = %q, want the avoided successor %d", tag, wantTag)
+	}
+	if observation == oldObservation || operation == oldOrigin {
+		t.Fatalf("restarted instance reused an older identity: %q %q", observation, operation)
+	}
+	if observation != "O"+strconv.Itoa(wantTag)+"_1" || operation != "P"+strconv.Itoa(wantTag)+"_1" {
+		t.Fatalf("new identities = %q %q, want the avoided prefix", observation, operation)
+	}
+	// The durable identity is untouched: the control App still needs a UUID.
+	if identity := e.InstanceID(); identity != shortTagInstanceADuplicate ||
+		len(identity) != 36 || !ValidateUUID(identity) {
+		t.Fatalf("restarted identity changed: %q", identity)
+	}
+}
+
+// TestRecoveryAvoidsRetiredAndOriginTags proves each avoidance source on its
+// own: the main record's session origin, a retired record's service instance
+// identity and a retired record's session origin.
+func TestRecoveryAvoidsRetiredAndOriginTags(t *testing.T) {
+	currentTag := deriveShortInstanceTag(shortTagInstanceB)
+	retiredTag := deriveShortInstanceTag(shortTagInstanceBNext)
+	if currentTag+1 != retiredTag {
+		t.Fatalf("test constants are no longer adjacent: %d vs %d", currentTag, retiredTag)
+	}
+	retiredOrigin := "P" + strconv.Itoa(currentTag+2) + "_3"
+	cases := []struct {
+		name            string
+		retiredIdentity string
+		retiredOrigins  []string
+		wantTag         int
+	}{
+		// The main session origin blocks the current tag, the retired identity
+		// blocks its successor and the retired origin blocks the one after that.
+		{name: "identity and origin block in order", retiredIdentity: shortTagInstanceBNext,
+			retiredOrigins: []string{retiredOrigin}, wantTag: currentTag + 3},
+		{name: "retired identity alone is avoided", retiredIdentity: shortTagInstanceBNext,
+			wantTag: currentTag + 2},
+		{name: "retired origins alone are avoided",
+			retiredOrigins: []string{
+				"P" + strconv.Itoa(currentTag+1) + "_1", retiredOrigin,
+			}, wantTag: currentTag + 3},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			record := oldLedger()
+			// The loaded ledger belongs to this identity, so its own derived tag is
+			// never the reason to avoid: only the retained session origin is.
+			record.ServiceInstanceID = shortTagInstanceB
+			record.Session.Origin = "P" + strconv.Itoa(currentTag) + "_1"
+			if testCase.retiredIdentity != "" {
+				record.Retired = append(record.Retired, LedgerRetired{Record: &Ledger{
+					Format: ledgerFormat, Version: ledgerVersion,
+					ServiceInstanceID: testCase.retiredIdentity,
+					UpdatedAt:         time.Now().Add(-2 * time.Minute), AppInstanceID: testAppID,
+					Session: &LedgerSession{Origin: "Poldretired", Agent: "agent", Mode: "virtual",
+						State: SessionEnded, AppInstanceID: testAppID, StartedAt: time.Now().Add(-2 * time.Minute)},
+				}})
+			}
+			for _, origin := range testCase.retiredOrigins {
+				record.Retired = append(record.Retired, LedgerRetired{Record: &Ledger{
+					Format: ledgerFormat, Version: ledgerVersion,
+					UpdatedAt: time.Now().Add(-2 * time.Minute), AppInstanceID: testAppID,
+					Session: &LedgerSession{Origin: origin, Agent: "agent", Mode: "primary",
+						State: SessionEnded, AppInstanceID: testAppID, StartedAt: time.Now().Add(-2 * time.Minute)},
+				}})
+			}
+
+			e := instanceTagRecoveryEngine(t, shortTagInstanceB, record)
+
+			e.mu.Lock()
+			tag := e.shortInstanceTag
+			operation := e.nextOperationIDLocked()
+			e.mu.Unlock()
+			if tag != strconv.Itoa(testCase.wantTag) {
+				t.Fatalf("chosen tag = %q, want %d", tag, testCase.wantTag)
+			}
+			if operation != "P"+strconv.Itoa(testCase.wantTag)+"_1" {
+				t.Fatalf("new operation identity = %q", operation)
+			}
+			if operation == record.Session.Origin {
+				t.Fatalf("restarted instance reused the retired session origin %q", operation)
+			}
+			for _, origin := range testCase.retiredOrigins {
+				if operation == origin {
+					t.Fatalf("restarted instance reused a retired session origin %q", operation)
+				}
+			}
+			if identity := e.InstanceID(); len(identity) != 36 || !ValidateUUID(identity) {
+				t.Fatalf("service instance identity is no longer a 36-character UUID: %q", identity)
+			}
+		})
 	}
 }

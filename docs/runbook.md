@@ -399,7 +399,7 @@ stdio 的 `notifications/cancelled` 与 HTTP 的请求 SSE 流关闭都映射为
 
 ### 10.3 结果模式
 
-默认 `text` 发送完整文本与图片；`both` 同时发送完整文本、结构化结果与图片；`structured`
+默认 `text` 发送紧凑文本与图片；`both` 同时发送紧凑文本、结构化结果与图片；`structured`
 发送完整结构化结果与图片，错误时附最小诊断文本。模式只改变表示，事实和图片一致。HTTP
 客户端在每个请求上设置 `X-Mobile-Use-Result-Mode: both` 或 `structured`，不设置时使用进程
 默认。空值、多值、逗号、前后空白或非法值返回 `400`，不会执行工具；该头不传给设备服务。
@@ -412,13 +412,12 @@ Remove-Item Env:MOBILE_USE_MCP_RESULT_MODE
 ```
 
 优先级为显式 `-result-mode` > 环境变量 > `text`。显式空值与非法值退出 `2`，不回退。
-HTTP 进程也可用同一参数设置默认值，每请求头优先。完整文本以 `result v3 is_error=…`
-开头、`end result` 结束；观察字段位于 `observation` 组，普通树使用 `tree v4`，详细补看
-使用 `inspect v3`。错误最小诊断以 `diagnostic v1 is_error=true` 开头、
+HTTP 进程也可用同一参数设置默认值，每请求头优先。结果文本以 `result v4 <ok|err>` 开头、
+`end result` 结束；观察摘要是单行 `obs`，普通树使用 `tree v4`，详细补看使用 `inspect v3`；
+`both`/`structured` 保持完整 `Result` JSON。错误最小诊断以 `diagnostic v1 is_error=true` 开头、
 `end diagnostic` 结束。缺少对应终止行表示文本被宿主截断，可改用 `structured`，或通过
-`inspect` 的 node/query 收窄。只解析旧文本语法的宿主须迁移；成功的 `structured` 结果可以
-是 `content=[]`，不接受它的宿主使用 `both`/`text`。详细语法、取消保留键与图片规则见
-[MCP 入口](mcp.md)。
+`inspect` 的 node/query 收窄。成功的 `structured` 结果可以是 `content=[]`，不接受它的宿主
+使用 `both`/`text`。详细语法、取消保留键与图片规则见 [MCP 入口](mcp.md)。
 
 探针自身的默认检查模式是 `both`（与适配器的默认 `text` 无关）；可用
 `-result-mode text|structured` 检查其他投影，例如：

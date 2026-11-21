@@ -111,7 +111,7 @@ func TestSnapDeliversOneImageWithoutObservationChanges(t *testing.T) {
 	if image.Error != nil || !image.ReadOnly || image.MediaType != imaging.MediaTypeJPEG {
 		t.Fatalf("image metadata = %+v", image)
 	}
-	if image.Width != 540 || image.Height != 1200 || image.CapturedAt == "" {
+	if image.Width != 461 || image.Height != 1024 || image.CapturedAt == "" {
 		t.Fatalf("image metadata is incomplete: %+v", image)
 	}
 	if image.CapturedAt != imageAt.UTC().Format(time.RFC3339) {
@@ -636,8 +636,8 @@ func (b *blockingImageEncoder) Encode(source device.ImageSource, display device.
 	<-b.release
 	return &protocol.ImageMeta{
 		CapturedAt: source.CapturedAt.UTC().Format(time.RFC3339),
-		Width:      540,
-		Height:     1200,
+		Width:      461,
+		Height:     1024,
 		MediaType:  imaging.MediaTypeJPEG,
 	}, []byte("jpeg-bytes"), nil
 }

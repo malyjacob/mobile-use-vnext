@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"strconv"
 	"time"
 
 	"github.com/malyjacob/mobile-use-vnext/internal/device"
@@ -460,6 +461,11 @@ func (e *Engine) StartRecovery(ctx context.Context) error {
 	if record != nil {
 		e.droppedUnconfirmed = record.DroppedUnconfirmed
 	}
+	// The visible O/P prefix must not collide with any identity an older
+	// generation left in the ledger. This runs in the same critical section as
+	// the restore, before the recovering barrier is lifted and before any O/P
+	// is allocated.
+	e.avoidLedgerInstanceTagsLocked(record)
 	e.restoreRecoveryLocked(record)
 	if record != nil && record.Stop != nil {
 		e.stopBoundary = &stopBoundaryState{
@@ -474,6 +480,74 @@ func (e *Engine) StartRecovery(ctx context.Context) error {
 	}
 	e.driveRecovery(ctx)
 	return nil
+}
+
+// shortTagFromOperationReference extracts the 4-digit instance tag of one
+// visible operation identity ("P" + 4 digits + "_" + sequence). Anything else,
+// in particular an older full-UUID identity, yields no tag.
+func shortTagFromOperationReference(reference string) (int, bool) {
+	if len(reference) < 7 || reference[0] != 'P' || reference[5] != '_' {
+		return 0, false
+	}
+	tag := 0
+	for index := 1; index < 5; index++ {
+		character := reference[index]
+		if character < '0' || character > '9' {
+			return 0, false
+		}
+		tag = tag*10 + int(character-'0')
+	}
+	if tag < shortInstanceTagMin || tag > shortInstanceTagMax {
+		return 0, false
+	}
+	return tag, true
+}
+
+// avoidLedgerInstanceTagsLocked keeps this process's 4-digit O/P prefix
+// distinct from the identities an older generation already used. It runs once,
+// inside the startup recovery critical section, before the recovering barrier
+// is lifted and before any O/P is allocated, so the prefix never changes later.
+// The comparison set is every older service instance identity plus the session
+// origin of the main record and of every retired record.
+func (e *Engine) avoidLedgerInstanceTagsLocked(record *Ledger) {
+	if record == nil {
+		return
+	}
+	if e.nextObservation != 0 || e.nextOperation != 0 {
+		return
+	}
+	taken := make(map[int]struct{}, 8)
+	collect := func(item *Ledger) {
+		if item == nil {
+			return
+		}
+		if identity := item.ServiceInstanceID; identity != "" && identity != e.cfg.ServiceInstanceID {
+			taken[deriveShortInstanceTag(identity)] = struct{}{}
+		}
+		if item.Session != nil {
+			if tag, ok := shortTagFromOperationReference(item.Session.Origin); ok {
+				taken[tag] = struct{}{}
+			}
+		}
+	}
+	collect(record)
+	for _, retired := range record.Retired {
+		collect(retired.Record)
+	}
+	if len(taken) == 0 {
+		return
+	}
+	tag, err := strconv.Atoi(e.instanceTagLocked())
+	if err != nil {
+		return
+	}
+	for step := 0; step < shortInstanceTagSpan; step++ {
+		if _, used := taken[tag]; !used {
+			e.shortInstanceTag = strconv.Itoa(tag)
+			return
+		}
+		tag = (tag-shortInstanceTagMin+1)%shortInstanceTagSpan + shortInstanceTagMin
+	}
 }
 
 // driveRecovery resolves the durable old ownership. It only reads device

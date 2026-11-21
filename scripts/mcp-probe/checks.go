@@ -172,7 +172,33 @@ func (p *probe) call(ctx context.Context, name string, arguments any) (*callResu
 	if mode == "" {
 		mode = resultModeBoth
 	}
-	return project(result, mode)
+	return project(result, mode, requestRefOf(arguments))
+}
+
+// requestRefOf extracts the single-call reference from the already decoded
+// arguments. It exists only to validate an exact recovery ref and never
+// persists across calls.
+func requestRefOf(arguments any) string {
+	object, ok := arguments.(map[string]any)
+	if !ok {
+		return ""
+	}
+	reference, _ := object["reference"].(string)
+	return reference
+}
+
+// resultOutcome resolves the effective outcome of one projected call. In the
+// text-only channel v4 omits outcome=executed for a plain successful action;
+// that omission is the documented default and must not read as "no outcome".
+func resultOutcome(projected *callResult) string {
+	if projected.view.Outcome != "" {
+		return projected.view.Outcome
+	}
+	if projected.textOnly && !projected.result.IsError && projected.textHeader != nil &&
+		!projected.textHeader.HasOutcome && projected.textHeader.State == "" {
+		return outcomeExecuted
+	}
+	return ""
 }
 
 // errorProjectionCheck uses a read-only lookup of an unknown observation. It
@@ -478,8 +504,8 @@ func (p *probe) startCheck(ctx context.Context) (startSummary, bool) {
 		p.reporter.fail("start", "tool_is_error", field("code", codeOf(view)))
 		return startSummary{}, false
 	}
-	if view.Outcome != outcomeExecuted {
-		p.reporter.fail("start", "outcome_not_executed", field("outcome", view.Outcome), field("code", codeOf(view)))
+	if resultOutcome(projected) != outcomeExecuted {
+		p.reporter.fail("start", "outcome_not_executed", field("outcome", resultOutcome(projected)), field("code", codeOf(view)))
 		return startSummary{}, false
 	}
 	if !validReference(view.OperationID, 'P') {
@@ -529,7 +555,7 @@ func (p *probe) beginSession(ctx context.Context) (string, string, *checkError) 
 		return "", "", failure
 	}
 	view := projected.view
-	if projected.result.IsError || view.Outcome != outcomeExecuted {
+	if projected.result.IsError || resultOutcome(projected) != outcomeExecuted {
 		return "", "", failf("start_not_executed", field("code", codeOf(view)))
 	}
 	if !validReference(view.OperationID, 'P') {
@@ -997,37 +1023,28 @@ func requireTextLine(projected *callResult, wanted string) *checkError {
 	return failf("text_line_missing", field("line", wanted))
 }
 
-// requireQualityTextLines asserts the readable projection spells out all three
-// quality members with the same values as the typed projection. samples=0 must
-// be rendered explicitly.
-func requireQualityTextLines(projected *callResult, quality *qualityView) *checkError {
-	wanted := []string{
-		" quality.state=" + quality.State,
-		" quality.samples=" + strconv.Itoa(quality.Samples),
-		" quality.stop_reason=" + quality.StopReason,
+// checkQualityTextLine proves the v4 quality contract: the default pair
+// (stable settle or not-sampled) is omitted, and every non-default quality is
+// rendered once as quality=<state>(<stop_reason>). The audit-only sample count
+// never appears in text.
+func checkQualityTextLine(projected *callResult) *checkError {
+	token, failure := observationQualityToken(projected)
+	if failure != nil {
+		return failure
 	}
-	wantedSet := make(map[string]bool, len(wanted))
-	found := make(map[string]bool, len(wanted))
-	for _, fieldLine := range wanted {
-		wantedSet[fieldLine] = true
+	var quality *qualityView
+	if projected.view.Observation != nil {
+		quality = projected.view.Observation.Quality
 	}
-	for _, text := range projected.texts {
-		lines := strings.Split(strings.TrimSuffix(text, "\n"), "\n")
-		for start, line := range lines {
-			if line != "observation" {
-				continue
-			}
-			for index := start + 1; index < len(lines) && strings.HasPrefix(lines[index], " "); index++ {
-				if wantedSet[lines[index]] {
-					found[lines[index]] = true
-				}
-			}
+	if defaultQuality(quality) {
+		if token != "" {
+			return failf("text_line_unexpected", field("line", "quality="+token))
 		}
+		return nil
 	}
-	for _, fieldLine := range wanted {
-		if !found[fieldLine] {
-			return failf("text_line_missing", field("line", fieldLine))
-		}
+	wanted := quality.State + "(" + quality.StopReason + ")"
+	if token != wanted {
+		return failf("text_line_missing", field("line", "quality="+wanted))
 	}
 	return nil
 }
@@ -1081,18 +1098,33 @@ func (p *probe) waitForCheck(ctx context.Context, reference string) (string, boo
 		return "", false
 	}
 	quality := observation.Quality
-	if quality == nil || quality.State != qualityUnknown ||
+	if quality == nil {
+		if !projected.textOnly {
+			p.reporter.fail("wait_for", "quality_unexpected", field("state", qualityStateOf(quality)))
+			return "", false
+		}
+		// v4 omits the default quality pair; the not-sampled default is the
+		// wait_for branch and is proven by the absence of a quality token.
+		if failure := checkObservationQualityOmitted(projected); failure != nil {
+			p.reporter.fail("wait_for", failure.reason, failure.fields...)
+			return "", false
+		}
+	} else if quality.State != qualityUnknown ||
 		quality.Samples != 0 || quality.StopReason != qualityStopNotSampled {
 		p.reporter.fail("wait_for", "quality_unexpected",
 			field("state", qualityStateOf(quality)))
 		return "", false
+	}
+	qualityText := "default"
+	if quality != nil {
+		qualityText = quality.State + "/" + quality.StopReason
 	}
 	p.reporter.pass("wait_for",
 		field("trigger", view.Wait.Trigger),
 		field("matched", strconv.Itoa(len(view.Wait.Matched))),
 		field("ms", strconv.FormatInt(view.Wait.ElapsedMS, 10)),
 		field("id", observation.ID), field("status", observation.Status),
-		field("quality", quality.State+"/"+quality.StopReason))
+		field("quality", qualityText))
 	return observation.ID, true
 }
 
@@ -1183,9 +1215,9 @@ func (p *probe) actCheck(ctx context.Context, observationID string) bool {
 		return false
 	}
 	view := projected.view
-	if view.Outcome != outcomeExecuted {
+	if resultOutcome(projected) != outcomeExecuted {
 		code := codeOf(view)
-		outcome := view.Outcome
+		outcome := resultOutcome(projected)
 		if outcome == "" {
 			outcome = "none"
 		}
@@ -1236,10 +1268,16 @@ func (p *probe) actCheck(ctx context.Context, observationID string) bool {
 		return false
 	}
 	if p.mode() != resultModeStructured {
-		if failure := requireQualityTextLines(projected, observation.Quality); failure != nil {
+		if failure := checkQualityTextLine(projected); failure != nil {
 			p.reporter.fail("act", failure.reason, failure.fields...)
 			return false
 		}
+	}
+	qualityText, samplesText, stopText := "default", "omitted", "default"
+	if observation.Quality != nil {
+		qualityText = observation.Quality.State
+		samplesText = strconv.Itoa(observation.Quality.Samples)
+		stopText = observation.Quality.StopReason
 	}
 	p.reporter.pass("act",
 		"outcome=executed", "key=BACK", field("id", observation.ID),
@@ -1247,9 +1285,9 @@ func (p *probe) actCheck(ctx context.Context, observationID string) bool {
 		field("image_bytes", strconv.Itoa(len(raw))),
 		field("width", strconv.Itoa(observation.Image.Width)),
 		field("height", strconv.Itoa(observation.Image.Height)),
-		field("quality", observation.Quality.State),
-		field("samples", strconv.Itoa(observation.Quality.Samples)),
-		field("stop_reason", observation.Quality.StopReason),
+		field("quality", qualityText),
+		field("samples", samplesText),
+		field("stop_reason", stopText),
 		"effect=absent")
 	return true
 }
@@ -1267,8 +1305,8 @@ func (p *probe) endCheck(ctx context.Context, startID string) bool {
 		p.reporter.fail("end", "tool_is_error", field("code", codeOf(view)))
 		return false
 	}
-	if view.Outcome != outcomeExecuted {
-		p.reporter.fail("end", "outcome_not_executed", field("outcome", view.Outcome), field("code", codeOf(view)))
+	if resultOutcome(projected) != outcomeExecuted {
+		p.reporter.fail("end", "outcome_not_executed", field("outcome", resultOutcome(projected)), field("code", codeOf(view)))
 		return false
 	}
 	if view.Session == nil || view.Session.State != sessionEnded {
@@ -1300,11 +1338,11 @@ func (p *probe) cleanupOwnedSession(parent context.Context, startID string) {
 		p.reporter.fail("cleanup_owned_session", failure.reason, failure.fields...)
 		return
 	}
-	if projected.result.IsError || projected.view.Outcome != outcomeExecuted ||
+	if projected.result.IsError || resultOutcome(projected) != outcomeExecuted ||
 		projected.view.Session == nil || projected.view.Session.State != sessionEnded {
 		p.reporter.fail("cleanup_owned_session", "not_confirmed",
 			field("code", codeOf(projected.view)),
-			field("outcome", projected.view.Outcome),
+			field("outcome", resultOutcome(projected)),
 			field("session", sessionStateOf(projected.view.Session)))
 		return
 	}

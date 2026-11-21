@@ -598,10 +598,8 @@ func TestActScrollForwarded(t *testing.T) {
 		t.Fatalf("scroll body changed: %+v", requests)
 	}
 	text := testTextContent(t, result)
-	requireTestContains(t, text, "effect.state=observed")
-	requireTestContains(t, text, " quality.state=unstable")
-	requireTestContains(t, text, " quality.samples=3")
-	requireTestContains(t, text, " quality.stop_reason=max_samples")
+	requireTestContains(t, text, "\neffect=observed\n")
+	requireTestContains(t, text, "quality=unstable(max_samples)")
 	structured := testStructuredObject(t, result)
 	effect, _ := structured["effect"].(map[string]any)
 	if effect["state"] != "observed" {
@@ -650,7 +648,7 @@ func TestStrictAdmission(t *testing.T) {
 				t.Fatalf("%s: expected IsError", testCase.name)
 			}
 			text := testTextContent(t, result)
-			requireTestContains(t, text, "result v3 is_error=true\nerror.code=invalid_request")
+			requireTestContains(t, text, "result v4 err\nerror invalid_request")
 			structured := testStructuredObject(t, result)
 			errorObject, ok := structured["error"].(map[string]any)
 			if !ok || errorObject["code"] != "invalid_request" {
@@ -673,7 +671,7 @@ func TestStrictAdmission(t *testing.T) {
 		if !result.IsError {
 			t.Fatal("trailing second value was accepted")
 		}
-		requireTestContains(t, testTextContent(t, result), "result v3 is_error=true\nerror.code=invalid_request")
+		requireTestContains(t, testTextContent(t, result), "result v4 err\nerror invalid_request")
 		if fake.totalRequests() != 0 {
 			t.Fatal("client was called for a trailing value")
 		}
@@ -731,7 +729,7 @@ func TestKeepaliveDurationForwarding(t *testing.T) {
 			if !ok || sessionView["expires_at"] != "2026-11-09T00:02:00Z" {
 				t.Fatalf("session deadline lost: %#v", structured)
 			}
-			requireTestContains(t, testTextContent(t, result), "session.expires_at=2026-11-09T00:02:00Z")
+			requireTestContains(t, testTextContent(t, result), "expires=00:02:00")
 		})
 	}
 }
@@ -762,11 +760,8 @@ func TestStartProjectionWithFullTree(t *testing.T) {
 		t.Fatalf("start did not send an operation ID: %q", operation)
 	}
 	text := testTextContent(t, result)
-	requireTestContains(t, text, "operation_id="+operation)
-	requireTestContains(t, text, "outcome=executed")
-	requireTestContains(t, text, "\nobservation\n status=complete\n id=O1\n")
-	requireTestContains(t, text, "\n screen="+testScreenJSON+"\n")
-	requireTestContains(t, text, "\n foreground="+testForegroundJSON+"\n")
+	requireTestContains(t, text, "op="+operation)
+	requireTestContains(t, text, "\nobs O1 fg=com.example.probe#12 at=00:00:01 screen=1080x2400\n")
 	requireTestContains(t, text, "\n\ntree v4 full nodes=1\n\nn1 root 0,0,1080,2400\nend tree\n")
 	structured := testStructuredJSON(t, result)
 	requireTestContains(t, structured, fmt.Sprintf(`"operation_id":%q`, operation))
@@ -798,13 +793,11 @@ func TestObservePartialWithImage(t *testing.T) {
 	}
 	operation := fake.requestsFor("observe")[0].OperationID
 	text := testTextContent(t, result)
-	requireTestContains(t, text, "operation_id="+operation)
-	requireTestContains(t, text, "\nobservation\n status=partial\n")
-	requireTestContains(t, text, "\n missing=[\"tree\"]\n")
+	requireTestContains(t, text, "op="+operation)
+	requireTestContains(t, text, "\nobs O2 status=partial")
+	requireTestContains(t, text, "missing=tree")
 	requireTestContains(t, text, "\n\ntree v4 delta base=O1 changes=0\n\nend tree\n")
-	requireTestContains(t, text, "\"media_type\":\"image/png\"")
-	requireTestContains(t, text, "\"width\":2")
-	requireTestContains(t, text, "\"read_only\":true")
+	requireTestContains(t, text, "obs.image 2x3 read_only media=image/png")
 	requireTestNotContains(t, text, "base64")
 	requireTestNotContains(t, text, encodedImage)
 
@@ -841,8 +834,8 @@ func TestObserveFailedWithoutObservation(t *testing.T) {
 		t.Fatal("failed observation without an O should be an error")
 	}
 	text := testTextContent(t, result)
-	requireTestContains(t, text, "\nobservation\n status=failed\n")
-	requireTestContains(t, text, "error.code=hierarchy_unavailable")
+	requireTestContains(t, text, "\nobs status=failed")
+	requireTestContains(t, text, "error hierarchy_unavailable")
 }
 
 func TestActOutcomes(t *testing.T) {
@@ -866,8 +859,8 @@ func TestActOutcomes(t *testing.T) {
 			t.Fatalf("executed act reported an error: %s", testTextContent(t, result))
 		}
 		text := testTextContent(t, result)
-		requireTestContains(t, text, "outcome=executed")
-		requireTestContains(t, text, "\nobservation\n status=failed\n")
+		requireTestContains(t, text, "result v4 ok")
+		requireTestContains(t, text, "\nobs status=failed")
 	})
 
 	t.Run("not executed", func(t *testing.T) {
@@ -904,7 +897,7 @@ func TestReadOnlyToolProjections(t *testing.T) {
 		if result.IsError {
 			t.Fatalf("status not_seen reported an error: %s", testTextContent(t, result))
 		}
-		requireTestContains(t, testTextContent(t, result), "operation_state=not_seen")
+		requireTestContains(t, testTextContent(t, result), "state=not_seen")
 	})
 
 	t.Run("diagnose record unavailable", func(t *testing.T) {
@@ -922,8 +915,8 @@ func TestReadOnlyToolProjections(t *testing.T) {
 			t.Fatalf("diagnose record_unavailable reported an error: %s", testTextContent(t, result))
 		}
 		text := testTextContent(t, result)
-		requireTestContains(t, text, "diagnosis.coverage=record_unavailable")
-		requireTestContains(t, text, "diagnosis.truncated=false")
+		requireTestContains(t, text, "coverage=record_unavailable")
+		requireTestContains(t, text, "truncated=false")
 	})
 
 	t.Run("inspect content unavailable", func(t *testing.T) {
@@ -941,7 +934,7 @@ func TestReadOnlyToolProjections(t *testing.T) {
 		if !result.IsError {
 			t.Fatal("inspect content_unavailable should be an error")
 		}
-		requireTestContains(t, testTextContent(t, result), "error.code=content_unavailable")
+		requireTestContains(t, testTextContent(t, result), "error content_unavailable")
 	})
 }
 
@@ -964,14 +957,12 @@ func TestWorkToolProjections(t *testing.T) {
 			t.Fatalf("end with pending cleanup reported an error: %s", testTextContent(t, result))
 		}
 		text := testTextContent(t, result)
-		requireTestContains(t, text, "outcome=executed")
+		requireTestContains(t, text, "result v4 ok")
 		requireTestContains(t, text, "target_reference=P1")
-		requireTestContains(t, text, "cleanup.state=unconfirmed")
-		requireTestContains(t, text, "cleanup.execution=confirmed")
-		requireTestContains(t, text, "cleanup.display=unconfirmed")
-		requireTestContains(t, text, "cleanup.error={\"code\":\"display_release_unconfirmed\"")
-		requireTestContains(t, text, "session.state=ended")
-		if strings.Contains(text, "recovery.entry=") {
+		requireTestContains(t, text, "cleanup unconfirmed exec=confirmed tasks=confirmed recents=not_applicable display=unconfirmed")
+		requireTestContains(t, text, `cleanup.error display_release_unconfirmed "显示释放未确认"`)
+		requireTestContains(t, text, "session ended")
+		if strings.Contains(text, "recovery ") {
 			t.Fatalf("unconfirmed cleanup still requested recovery: %s", text)
 		}
 	})
@@ -1011,9 +1002,8 @@ func TestWorkToolProjections(t *testing.T) {
 			t.Fatalf("saved notify with unavailable delivery reported an error: %s", testTextContent(t, result))
 		}
 		text := testTextContent(t, result)
-		requireTestContains(t, text, "message_id=M1")
-		requireTestContains(t, text, "saved=true")
-		requireTestContains(t, text, "notification.state=unavailable")
+		requireTestContains(t, text, "notify id=M1 saved=true state=unavailable")
+		requireTestContains(t, text, "notify.error notification_unavailable")
 		requireTestNotContains(t, text, "hello")
 	})
 
@@ -1031,11 +1021,8 @@ func TestWorkToolProjections(t *testing.T) {
 			t.Fatalf("app find reported an error: %s", testTextContent(t, result))
 		}
 		text := testTextContent(t, result)
-		requireTestContains(t, text, "app.kind=find")
-		requireTestContains(t, text, `app.items=[{"name":"设置","package":"com.android.settings"}]`)
-		requireTestContains(t, text, "app.total=1")
-		requireTestContains(t, text, "app.truncated=false")
-		requireTestContains(t, text, "app.captured_at=2026-11-09T00:00:04Z")
+		requireTestContains(t, text, "app find total=1 truncated=false at=00:00:04")
+		requireTestContains(t, text, "app_items v1 kind=find count=1\ncom.android.settings \"设置\"\nend app_items")
 		requireTestNotContains(t, text, "outcome=")
 		requests := fake.requestsFor("app")
 		if len(requests) != 1 || requests[0].Body != `{"kind":"find"}` {
@@ -1119,7 +1106,7 @@ func TestCancellationWorkToolDirect(t *testing.T) {
 	requireTestContains(t, text, operation)
 	requireTestContains(t, text, "有界 end")
 	requireTestContains(t, text, "不证明")
-	requireTestContains(t, text, "cleanup.state=pending")
+	requireTestContains(t, text, "cleanup pending")
 }
 
 func TestCancellationReadOnlyDirect(t *testing.T) {
@@ -1213,8 +1200,7 @@ func TestReadOnlyServiceRecoveryIsPreserved(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			out := projectExecution(test.call, "status", ResultModeBoth)
 			text := testTextContent(t, out)
-			requireTestContains(t, text, "recovery.entry=status")
-			requireTestContains(t, text, "recovery.reference=P")
+			requireTestContains(t, text, "recovery entry=status ref=P7")
 			obj := testStructuredObject(t, out)
 			recovery, _ := obj["recovery"].(map[string]any)
 			if obj["operation_id"] != "P7" || recovery["entry"] != "status" || recovery["reference"] != "P" || recovery["cause"] != "running" {
@@ -1233,9 +1219,13 @@ func requireReadOnlyFailureWithoutRecovery(t *testing.T, e *execution, tool, cod
 				t.Fatal("failed query was reported as successful")
 			}
 			text := testTextContent(t, result)
-			requireTestContains(t, text, "error.code="+code)
-			requireTestNotContains(t, text, "operation_id=")
-			requireTestNotContains(t, text, "recovery.")
+			if mode == ResultModeStructured {
+				requireTestContains(t, text, "error.code="+code)
+			} else {
+				requireTestContains(t, text, "error "+code)
+			}
+			requireTestNotContains(t, text, "op=")
+			requireTestNotContains(t, text, "recovery ")
 			if code == "call_cancelled" {
 				requireTestContains(t, text, `"mcp.cancelled":true`)
 				requireTestContains(t, text, cancellationReadOnlyMessage)

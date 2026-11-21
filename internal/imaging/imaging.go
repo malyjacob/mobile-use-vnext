@@ -32,7 +32,7 @@ var (
 )
 
 const (
-	defaultMaxLongSide = 1200
+	defaultMaxLongSide = 1024
 	defaultQuality     = 80
 	defaultMaxBytes    = 512 * 1024
 	maxSourceBytes     = 24 << 20
