@@ -7,6 +7,7 @@ import (
 	"encoding/json/v2"
 	"os"
 	"strconv"
+	"strings"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -69,12 +70,18 @@ func checkLiveCatalog(tools []*sdk.Tool) *checkError {
 			return failf("source_catalog_name_missing", field("tool", wanted))
 		}
 		tool := live[wanted]
+		if containsHiddenResultTerm(tool.Description) {
+			return failf("catalog_description_hidden_result_term", field("tool", wanted))
+		}
 		if tool.Description != sourceTool.Description {
 			return failf("catalog_description_mismatch", field("tool", wanted))
 		}
 		liveBytes, err := json.Marshal(tool.InputSchema)
 		if err != nil {
 			return failf("catalog_schema_unusable", field("tool", wanted))
+		}
+		if containsHiddenResultTerm(string(liveBytes)) {
+			return failf("catalog_schema_hidden_result_term", field("tool", wanted))
 		}
 		liveSchema, liveErr := decodeExactJSON(liveBytes)
 		sourceSchema, sourceErr := decodeExactJSON(sourceTool.Schema)
@@ -87,6 +94,16 @@ func checkLiveCatalog(tools []*sdk.Tool) *checkError {
 		}
 	}
 	return checkActScrollSchema(live["act"])
+}
+
+func containsHiddenResultTerm(description string) bool {
+	folded := strings.ToLower(description)
+	for _, term := range []string{"quality", "effect", "观察质量", "滚动效果"} {
+		if strings.Contains(folded, term) {
+			return true
+		}
+	}
+	return false
 }
 
 // actSchemaProperty is the probe's explicit view of one act operation member.

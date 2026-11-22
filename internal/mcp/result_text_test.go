@@ -1268,6 +1268,7 @@ func expectedResultV4(t *testing.T, raw []byte, isError bool, requestRef ...stri
 	if !ok {
 		t.Fatalf("result is not an object: %s", raw)
 	}
+	delete(root, "effect")
 	if outcome, _ := root["outcome"].(string); !isError && outcome == "executed" {
 		if state, _ := root["operation_state"].(string); state == "" {
 			delete(root, "outcome")
@@ -1319,29 +1320,7 @@ func pruneResultV4Observation(root map[string]any) {
 	delete(observation, "origin")
 	delete(observation, "revision")
 	delete(observation, "actionable_until")
-	if quality, ok := observation["quality"].(map[string]any); ok {
-		state, _ := quality["state"].(string)
-		stop, _ := quality["stop_reason"].(string)
-		hasExtra := false
-		for name := range quality {
-			switch name {
-			case "state", "samples", "stop_reason":
-			default:
-				hasExtra = true
-			}
-		}
-		switch {
-		case state == "stable" && !hasExtra:
-			delete(observation, "quality")
-		case state == "unknown" && stop == "not_sampled" && !hasExtra:
-			delete(observation, "quality")
-		default:
-			delete(quality, "samples")
-			if stop, present := quality["stop_reason"].(string); present && stop == "" {
-				delete(quality, "stop_reason")
-			}
-		}
-	}
+	delete(observation, "quality")
 	pruneResultV4Time(observation, "captured_at")
 	pruneResultV4Image(observation, "image")
 	pruneForegroundV4(observation, "foreground")

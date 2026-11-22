@@ -38,7 +38,8 @@ var v4ResultFields = func() map[string]resultV4FieldKind {
 		}
 	}
 	add("", "operation_id operation_state outcome phase target_reference request_closed blocking_operation_id can_start blocking_code start_operation_id observation_state input_state message_id saved", v4Token)
-	add("", "effect text_input session cleanup error recovery observation app notification diagnosis", v4Object)
+	add("", "text_input session cleanup error recovery observation app notification diagnosis", v4Object)
+	add("", "effect", v4Omitted)
 	add("effect.", "state", v4Token)
 	add("text_input.", "write enter", v4Token)
 	add("", "image inspection shell wait", v4Object)
@@ -54,7 +55,8 @@ var v4ResultFields = func() map[string]resultV4FieldKind {
 	add("recovery.", "entry reference input_state cause", v4Token)
 	add("observation.", "status id captured_at", v4Token)
 	add("observation.", "origin revision actionable_until", v4Omitted)
-	add("observation.", "quality foreground screen image error", v4Object)
+	add("observation.", "foreground screen image error", v4Object)
+	add("observation.", "quality", v4Omitted)
 	add("observation.", "tree", v4Block)
 	add("observation.", "missing", v4JSON)
 	add("observation.quality.", "state stop_reason", v4Token)
@@ -130,7 +132,9 @@ func addErrorV4Fields(m map[string]resultV4FieldKind, prefix string) {
 // v4OmittedResultFields lists members that result v4 never renders, with the
 // reason required by the proposal's explicit omission table.
 var v4OmittedResultFields = map[string]string{
+	"effect":                       "model-facing text omits the evidence object; structured JSON retains it",
 	"observation.origin":           "same-session constant; session.origin carries it",
+	"observation.quality":          "model-facing text omits the sampling object; structured JSON retains it",
 	"observation.revision":         "internal revision; no caller decision depends on it",
 	"observation.actionable_until": "derived from captured_at plus a bounded deadline",
 	"observation.quality.samples":  "audit-only sample count; structured JSON retains it",
@@ -385,13 +389,8 @@ func encodeResultText(raw []byte, isError bool, requestRef string) (string, erro
 		}
 		w.fallback("/"+pointerPart(name), rawValue)
 	}
-	if rawValue, present := values["effect"]; present {
+	if _, present := values["effect"]; present {
 		handled["effect"] = true
-		if line, ok := renderEffectV4(rawValue); ok {
-			w.line(line)
-		} else {
-			w.fallback("/effect", rawValue)
-		}
 	}
 	if rawValue, present := values["text_input"]; present {
 		handled["text_input"] = true
@@ -525,23 +524,6 @@ func encodeResultText(raw []byte, isError bool, requestRef string) (string, erro
 
 	w.line("end result")
 	return w.String(), nil
-}
-
-func renderEffectV4(raw []byte) (string, bool) {
-	_, values, ok := resultMemberMap(raw)
-	if !ok {
-		return "", false
-	}
-	state, valid := rawStringValue(values["state"])
-	if !valid || !resultToken(state) {
-		return "", false
-	}
-	for name := range values {
-		if name != "state" {
-			return "", false
-		}
-	}
-	return "effect=" + state, true
 }
 
 func renderTextInputV4(raw []byte) (string, bool) {
@@ -892,17 +874,6 @@ func renderObservationV4(w *resultV4Writer, raw []byte, top map[string]json.RawM
 			emitted = true
 		}
 	}
-	if rawQuality, present := values["quality"]; present {
-		if line, omit, valid := compactQualityV4(rawQuality); valid {
-			if !omit {
-				parts = append(parts, "quality="+line)
-				emitted = true
-			}
-		} else {
-			w.fallback("/observation/quality", rawQuality)
-			emitted = true
-		}
-	}
 	hasSession := false
 	if rawSession, present := top["session"]; present && !rawIsNull(rawSession) {
 		hasSession = true
@@ -1050,46 +1021,6 @@ func compactForegroundV4(raw []byte) (string, bool) {
 	default:
 		return "", false
 	}
-}
-
-// compactQualityV4 renders quality=<state>(<stop_reason>) and reports whether
-// the whole object is omitted as the normal default.
-func compactQualityV4(raw []byte) (string, bool, bool) {
-	if rawIsNull(raw) {
-		return "", false, false
-	}
-	_, values, ok := resultMemberMap(raw)
-	if !ok {
-		return "", false, false
-	}
-	state, stateOK := rawStringValue(values["state"])
-	stop, stopOK := rawStringValue(values["stop_reason"])
-	if _, present := values["samples"]; present {
-		// samples is always omitted; keep scanning for unknown members.
-	}
-	for name := range values {
-		switch name {
-		case "state", "stop_reason", "samples":
-		default:
-			return "", false, false
-		}
-	}
-	if !stateOK || !resultToken(state) {
-		return "", false, false
-	}
-	if state == "stable" {
-		return "", true, true
-	}
-	if state == "unknown" && stopOK && stop == "not_sampled" {
-		return "", true, true
-	}
-	if stopOK && stop != "" {
-		if !resultToken(stop) {
-			return "", false, false
-		}
-		return state + "(" + stop + ")", false, true
-	}
-	return state, false, true
 }
 
 // resultPointer converts a dotted result path to an RFC6901 pointer.

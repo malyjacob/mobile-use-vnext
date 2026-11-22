@@ -217,12 +217,15 @@ func exactObject(data []byte) (map[string]any, error) {
 
 // compareResultTextToStructured applies every declared result v4 omission to
 // the structured copy and then requires the two remaining objects to mean the
-// same thing. Unknown/future members are never stripped: a field that is not in
-// the explicit omission table must survive the text projection.
+// same thing. effect and observation.quality are deliberately structured-only;
+// the text parser rejects them before this comparison. Unknown/future members
+// are never stripped: a field that is not in the explicit omission table must
+// survive the text projection.
 func compareResultTextToStructured(decoded *decodedTextResult,
 	structured map[string]any, view resultView, requestRef string) *checkError {
 	text := deepCloneObject(decoded.object)
 	want := deepCloneObject(structured)
+	delete(want, "effect")
 
 	// outcome: omitted only when !isError && executed && no operation_state.
 	if textOutcome, present := text["outcome"]; !present {
@@ -258,9 +261,7 @@ func compareResultTextToStructured(decoded *decodedTextResult,
 		delete(wantObs, "origin")
 		delete(wantObs, "revision")
 		delete(wantObs, "actionable_until")
-		if failure := normalizeObservationQuality(textObs, wantObs); failure != nil {
-			return failure
-		}
+		delete(wantObs, "quality")
 		_, hasTree := wantObs["tree"]
 		if failure := compareScreenFields(textObs, wantObs, hasTree, view.Session != nil); failure != nil {
 			return failure
@@ -314,34 +315,6 @@ func deepCloneValue(value any) any {
 	default:
 		return value
 	}
-}
-
-// normalizeObservationQuality removes the audit-only sample count and applies
-// the two default omission branches.
-func normalizeObservationQuality(textObs, wantObs map[string]any) *checkError {
-	wantQuality, wantHas := wantObs["quality"].(map[string]any)
-	textQuality, textHas := textObs["quality"].(map[string]any)
-	if !wantHas {
-		if textHas {
-			return failf("both_mode_quality_unexpected")
-		}
-		return nil
-	}
-	state, _ := wantQuality["state"].(string)
-	stopReason, _ := wantQuality["stop_reason"].(string)
-	delete(wantQuality, "samples")
-	if defaultQuality(&qualityView{State: state, StopReason: stopReason}) {
-		if textHas {
-			return failf("both_mode_quality_unexpected")
-		}
-		delete(wantObs, "quality")
-		return nil
-	}
-	if !textHas {
-		return failf("both_mode_quality_missing", field("state", state))
-	}
-	delete(textQuality, "samples")
-	return nil
 }
 
 // compareScreenFields implements the conditional screen omission. The full

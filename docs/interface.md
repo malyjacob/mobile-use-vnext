@@ -15,7 +15,7 @@
 | 方法 | 所有业务端点只接受 `POST`；其他方法返回 `405`，错误码 `invalid_request` |
 | 认证 | `/api/*` 用 `agent_token`；`/v1/control/*` 用 `control_token`；`Authorization: Bearer <token>` |
 | 身份隔离 | agent token 不能访问 `/v1/control/*`，control token 不能访问 `/api/*`；错误为 `401 unauthorized` |
-| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 22`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
+| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 23`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
 | 预分配 P | `/api/*` 可带 `X-Mobile-Use-Operation: P…`；缺省由服务分配。`status` 不使用该头 |
 | 请求体 | 必须是一个 JSON 对象；大小上限：`start`/`status`/`end`/`wait_for` 16 KiB，`observe` 32 KiB，`snap` 8 KiB，`act` 64 KiB，`inspect`/`keepalive`/`diagnose`/`app` 8 KiB，`notify` 16 KiB，`shell` 32 KiB，`sync` 32 KiB，`stop` 8 KiB |
 | 响应 | `Content-Type: application/json; charset=utf-8`，`Cache-Control: no-store` |
@@ -845,7 +845,7 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms）；
 
 | 字段 | 必填 | 类型 | 说明 |
 | --- | --- | --- | --- |
-| `contract_version` | 是 | 字符串 | 必须为 `"22"`，否则 `409 contract_mismatch` |
+| `contract_version` | 是 | 字符串 | 必须为 `"23"`，否则 `409 contract_mismatch` |
 | `app_instance_id` | 是 | UUID | App 进程实例；变化会撤销旧归属 |
 | `app_version` | 否（App 应发送） | 字符串 | 仅发行标识 |
 | `selected_mode` | 是 | `virtual`/`primary` | 用户选择 |
@@ -872,7 +872,7 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms）；
 
 ```json
 {
-  "contract_version": "22",
+  "contract_version": "23",
   "service_instance_id": "…",
   "control": {
     "revision": 42,
@@ -908,7 +908,7 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms）；
 ## 9. `POST /v1/control/stop`
 
 ```json
-{"contract_version":"22","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
+{"contract_version":"23","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
 ```
 
 - **不校验普通契约**：`contract_version` 字段存在但不参与准入，服务与 App 契约版本
@@ -918,7 +918,7 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms）；
 - 重复或过期 `seq` 不报错，只返回 `state=duplicate`。
 
 ```json
-{"contract_version":"22","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
+{"contract_version":"23","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
 ```
 
 `accepted` 恒为 `true`；`state` 为 `revoked`（绑定时撤销了活动会话）、`recorded`
@@ -931,7 +931,7 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms）；
 无认证，只表示进程可应答，不代表设备就绪或资源干净：
 
 ```json
-{"status":"ok","contract_version":"22","service_instance_id":"…","release_version":"…"}
+{"status":"ok","contract_version":"23","service_instance_id":"…","release_version":"…"}
 ```
 
 ## 11. 数据对象
@@ -982,6 +982,8 @@ Observation 的编码顺序固定为 `status`、`id`、`origin`、`revision`、`
 - `unstable`：`samples>=2`，且最终发布帧与紧邻前一帧的最新比较不一致。
 - `stable`：最终发布帧与紧邻前一帧形成相等对，样本数达到该阶段固定的最少样本门限，且
   `stop_reason=stable`；历史上有过相等对但最终帧不同不算 `stable`。
+  `wait_for stable=true` 以内容摘要为相等基准，`stable=false` 的条件等待以整树摘要为基准
+  （见 §14）。
 - `stop_reason` 说明采样为何结束：`stable` 收敛停止、`max_samples` 达到帧数上限、`budget`
   达到总预算、`unreadable` 某次采样读取失败并提前结束（失败不增加 `samples`）、
   `not_sampled` 未做收敛采样、`condition` 条件等待在满足条件的帧上结束、`timeout` 条件
@@ -1449,7 +1451,7 @@ task；应用在本屏前台、前台未知、前台服务或播放状态未知�
 
 ## 14. `POST /api/wait_for`
 
-`wait_for` 在当前会话的普通工作流上等待一个字面条件或整树稳定，退出后在同一工作位内做一次
+`wait_for` 在当前会话的普通工作流上等待一个字面条件或内容稳定，退出后在同一工作位内做一次
 验证采集并发布一个新观察。请求体上限 16 KiB：
 
 ```json
@@ -1464,7 +1466,7 @@ task；应用在本屏前台、前台未知、前台服务或播放状态未知�
 | `timeout` | 是 | 整数 1–40（秒） | 本次等待窗口；`stable=true` 时至少 2 |
 | `query` | 否 | 字符串，≤256 个 Unicode 码点，不得为空或全空白 | 公开树中存在至少一个节点在 `label`/`value`/`hint`/`resource` 上包含该文本 |
 | `absent_query` | 否 | 同上 | 帧已具备最小可读证据，且整棵公开树没有任何节点命中该文本 |
-| `stable` | 否 | 布尔，默认 `false` | 要求整树连续 3 帧一致；有查询时是条件满足后的门禁，无查询时是独立触发分支 |
+| `stable` | 否 | 布尔，默认 `false` | 要求内容摘要连续 3 帧一致；有查询时是条件满足后的门禁，无查询时是独立触发分支 |
 | `full` | 否 | 布尔，默认 `false` | `true` 强制本次发布的观察为 full |
 | `image` | 否 | 布尔，默认 `false` | `true` 在同一次验证采集中附加一张图片；`matched` 与 `terminal_reuse` 复用已选帧、不重采树，`terminal_capture` 读取一次终帧 |
 
@@ -1482,9 +1484,13 @@ task；应用在本屏前台、前台未知、前台服务或播放状态未知�
   门槛——除合成根外至少 1 个非 `context` 内容节点——且整棵树没有任何节点命中。
 - 检索范围严格等于服务公布的 `reported_visible_with_context` 公开树：视口外或被隐私策略
   抑制的内容永不命中，“未命中”不等于业务界面没有变化。
-- `stable=true` 按请求是否携带查询条件确定语义：无查询时它是独立触发分支（整树连续 3 帧摘要一致）；有查询
-  时它是门禁（条件与连续 3 帧一致同时成立）。判据是**连续相等帧数 == 3**，不是累计采样数；
-  采样最小间隔 600ms，因此 3 帧至少跨越 1.2s。
+- `stable=true` 要求连续 3 帧的内容摘要相等。无查询时它是独立触发分支；有查询时，退出帧
+  须同时命中条件。采样最小间隔 600ms，因此 3 帧至少跨越 1.2s。
+- 内容摘要保留前台状态、包与任务、显示宽高与旋转，以及公开树的结构、顺序和内容字段。
+  所有节点的 `bounds` 与 `ref` 不参与摘要；无子节点且无动作的叶子还忽略 `label`、
+  `value` 与 `hint`。查询和公开观察仍使用完整树。
+- `stable=false` 的条件等待直接按条件退出，质量比较仍使用原始身份链、完整公开树与屏幕
+  语境的整树摘要。终帧比较沿用该次等待的采样判据。
 - 退出分支固定为 `query`、`absent_query`、连续 3 帧稳定、`timeout` 到期、采样上限守卫
   （80 个有效帧）。
 

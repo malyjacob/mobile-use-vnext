@@ -273,67 +273,66 @@ func TestCheckObservationQuality(t *testing.T) {
 	})
 }
 
-// TestCheckQualityTextLine proves the v4 quality contract: the default pair is
-// omitted and a non-default quality is rendered once as state(stop_reason).
+// TestCheckQualityTextLine proves the v4 text projection never carries a
+// quality token, regardless of the structured value.
 func TestCheckQualityTextLine(t *testing.T) {
-	defaultProjected := &callResult{
+	clean := &callResult{
 		textOnly: true,
 		texts: []string{
 			"result v4 ok\nobs O7391_1 at=22:08:55\nend result\n",
 		},
+		object: map[string]any{
+			"observation": map[string]any{"id": "O7391_1"},
+		},
 		view: resultView{Observation: &observationView{ID: "O7391_1"}},
 	}
-	if failure := checkQualityTextLine(defaultProjected); failure != nil {
-		t.Fatalf("default quality omission rejected: %s", failure.reason)
+	if failure := checkQualityTextLine(clean); failure != nil {
+		t.Fatalf("quality omission rejected: %s", failure.reason)
 	}
-	nonDefault := &callResult{
+	present := &callResult{
 		textOnly: true,
 		texts: []string{
 			"result v4 ok\nobs O7391_1 quality=unstable(max_samples)\nend result\n",
 		},
-		view: resultView{Observation: &observationView{
-			ID:      "O7391_1",
-			Quality: &qualityView{State: "unstable", StopReason: "max_samples"},
-		}},
-	}
-	if failure := checkQualityTextLine(nonDefault); failure != nil {
-		t.Fatalf("non-default quality rejected: %s", failure.reason)
-	}
-	unexpected := &callResult{
-		textOnly: true,
-		texts: []string{
-			"result v4 ok\nobs O7391_1 quality=stable(stable)\nend result\n",
+		object: map[string]any{
+			"observation": map[string]any{"id": "O7391_1"},
 		},
 		view: resultView{Observation: &observationView{ID: "O7391_1"}},
 	}
-	if failure := checkQualityTextLine(unexpected); failure == nil ||
+	if failure := checkQualityTextLine(present); failure == nil ||
 		failure.reason != "text_line_unexpected" {
-		t.Fatalf("default quality token = %v, want text_line_unexpected", failure)
-	}
-	missing := &callResult{
-		textOnly: true,
-		texts: []string{
-			"result v4 ok\nobs O7391_1 at=22:08:55\nend result\n",
-		},
-		view: resultView{Observation: &observationView{
-			ID:      "O7391_1",
-			Quality: &qualityView{State: "unstable", StopReason: "max_samples"},
-		}},
-	}
-	if failure := checkQualityTextLine(missing); failure == nil ||
-		failure.reason != "text_line_missing" {
-		t.Fatalf("missing non-default quality = %v, want text_line_missing", failure)
+		t.Fatalf("quality token = %v, want text_line_unexpected", failure)
 	}
 }
 
 func TestCheckScrollEffect(t *testing.T) {
 	cases := []struct {
-		name   string
-		effect *effectView
-		object map[string]any
-		scroll bool
-		reason string
+		name     string
+		textOnly bool
+		texts    []string
+		effect   *effectView
+		object   map[string]any
+		scroll   bool
+		reason   string
 	}{
+		{
+			name: "text omits effect", textOnly: true,
+			texts:  []string{"result v4 ok\nobs O1\nend result\n"},
+			object: map[string]any{"observation": map[string]any{"id": "O1"}},
+			scroll: true,
+		},
+		{
+			name: "text carries effect line", textOnly: true,
+			texts:  []string{"result v4 ok\neffect=observed\nobs O1\nend result\n"},
+			object: map[string]any{"observation": map[string]any{"id": "O1"}},
+			scroll: true, reason: "text_effect_unexpected",
+		},
+		{
+			name: "text carries effect object", textOnly: true,
+			texts:  []string{"result v4 ok\nobs O1\nend result\n"},
+			object: map[string]any{"effect": map[string]any{"state": "observed"}},
+			scroll: true, reason: "text_effect_unexpected",
+		},
 		{name: "scroll observed", effect: &effectView{State: "observed"}, scroll: true},
 		{name: "scroll not observed", effect: &effectView{State: "not_observed"}, scroll: true},
 		{name: "scroll unknown", effect: &effectView{State: "unknown"}, scroll: true},
@@ -355,8 +354,12 @@ func TestCheckScrollEffect(t *testing.T) {
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
-			failure := checkScrollEffect(
-				resultView{Effect: testCase.effect}, testCase.object, testCase.scroll)
+			failure := checkScrollEffect(&callResult{
+				textOnly: testCase.textOnly,
+				texts:    testCase.texts,
+				view:     resultView{Effect: testCase.effect},
+				object:   testCase.object,
+			}, testCase.scroll)
 			if testCase.reason == "" {
 				if failure != nil {
 					t.Fatalf("valid effect rejected: %s", failure.reason)
@@ -370,29 +373,42 @@ func TestCheckScrollEffect(t *testing.T) {
 	}
 }
 
-func TestDecodeResultTextQualityAndEffect(t *testing.T) {
-	text := "result v4 ok op=P7391_12\n" +
-		"effect=observed\n" +
-		"obs O4821_85 at=22:08:55 quality=unstable(max_samples)\n" +
-		"end result\n"
-	decoded, failure := decodeResultText(text)
-	if failure != nil {
-		t.Fatalf("decodeResultText: %s", failure.reason)
+func TestDecodeResultTextRejectsQualityAndEffect(t *testing.T) {
+	cases := []struct {
+		name   string
+		text   string
+		reason string
+	}{
+		{
+			name:   "effect line",
+			text:   "result v4 ok\neffect=observed\nobs O4821_85\nend result\n",
+			reason: "text_result_effect_present",
+		},
+		{
+			name:   "quality token",
+			text:   "result v4 ok\nobs O4821_85 quality=unstable(max_samples)\nend result\n",
+			reason: "text_result_obs_quality_present",
+		},
+		{
+			name:   "effect fallback",
+			text:   "result v4 ok\njson v1 path=\"/effect\" value={\"state\":\"observed\"}\nend result\n",
+			reason: "text_result_effect_present",
+		},
+		{
+			name: "quality fallback",
+			text: "result v4 ok\n" +
+				"json v1 path=\"/observation\" value={\"quality\":{\"state\":\"stable\",\"samples\":1,\"stop_reason\":\"stable\"}}\n" +
+				"end result\n",
+			reason: "text_result_obs_quality_present",
+		},
 	}
-	view := decoded.view
-	if view.Effect == nil || view.Effect.State != "observed" {
-		t.Fatalf("effect = %+v", view.Effect)
-	}
-	if view.Observation == nil || view.Observation.Quality == nil {
-		t.Fatal("observation quality missing")
-	}
-	quality := view.Observation.Quality
-	if quality.State != "unstable" || quality.StopReason != "max_samples" {
-		t.Fatalf("quality = %+v", quality)
-	}
-	state, found := lookupPath(decoded.object, []string{"effect", "state"})
-	if !found || state != "observed" {
-		t.Fatalf("effect object = %#v, %v", state, found)
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if _, failure := decodeResultText(testCase.text); failure == nil ||
+				failure.reason != testCase.reason {
+				t.Fatalf("failure = %v, want %s", failure, testCase.reason)
+			}
+		})
 	}
 }
 
@@ -433,75 +449,64 @@ func TestProjectQualityAndEffectChannels(t *testing.T) {
 			if failure != nil {
 				t.Fatalf("project: %s", failure.reason)
 			}
-			if projected.view.Effect == nil || projected.view.Effect.State != "observed" {
-				t.Fatalf("effect = %+v", projected.view.Effect)
-			}
 			if mode == resultModeText {
-				// The stable quality is the default omission; text mode must not
-				// invent a quality object.
-				if projected.view.Observation.Quality != nil {
-					t.Fatalf("text default quality = %+v", projected.view.Observation.Quality)
+				if projected.view.Effect != nil {
+					t.Fatalf("text effect = %+v, want omitted", projected.view.Effect)
 				}
-				if failure := checkObservationQualityOmitted(projected); failure != nil {
-					t.Fatalf("default quality token: %s", failure.reason)
+				if projected.view.Observation.Quality != nil {
+					t.Fatalf("text quality = %+v, want omitted",
+						projected.view.Observation.Quality)
+				}
+				if failure := checkEffectTextLine(projected); failure != nil {
+					t.Fatalf("text effect line: %s", failure.reason)
+				}
+				if failure := checkQualityTextLine(projected); failure != nil {
+					t.Fatalf("text quality line: %s", failure.reason)
 				}
 				return
+			}
+			if projected.view.Effect == nil || projected.view.Effect.State != "observed" {
+				t.Fatalf("effect = %+v", projected.view.Effect)
 			}
 			quality := projected.view.Observation.Quality
 			if quality == nil || quality.State != "stable" || quality.Samples != 2 ||
 				quality.StopReason != "stable" {
 				t.Fatalf("quality = %+v", quality)
 			}
+			if mode == resultModeBoth {
+				if failure := checkEffectTextLine(projected); failure != nil {
+					t.Fatalf("both text effect: %s", failure.reason)
+				}
+				if failure := checkQualityTextLine(projected); failure != nil {
+					t.Fatalf("both text quality: %s", failure.reason)
+				}
+			}
 		})
 	}
 
-	t.Run("both mode rejects text without effect", func(t *testing.T) {
-		withoutEffect := map[string]any{
-			"operation_id": payload["operation_id"],
-			"outcome":      outcomeExecuted,
-			"observation":  observation,
-		}
+	t.Run("both mode rejects readable effect", func(t *testing.T) {
+		withEffect := "result v4 ok\neffect=observed\n" +
+			"obs O4821_85\nend result\n"
 		result := &sdk.CallToolResult{
-			Content:           []sdk.Content{&sdk.TextContent{Text: fakeResultText(withoutEffect, false)}},
+			Content:           []sdk.Content{&sdk.TextContent{Text: withEffect}},
 			StructuredContent: payload,
 		}
 		if _, failure := project(result, resultModeBoth); failure == nil ||
-			failure.reason != "both_mode_object_mismatch" {
-			t.Fatalf("failure = %v, want both_mode_object_mismatch", failure)
+			failure.reason != "text_result_effect_present" {
+			t.Fatalf("failure = %v, want text_result_effect_present", failure)
 		}
 	})
 
-	t.Run("both mode rejects missing non-default quality", func(t *testing.T) {
-		nonDefault := map[string]any{
-			"operation_id": payload["operation_id"],
-			"outcome":      outcomeExecuted,
-			"effect":       payload["effect"],
-			"observation": map[string]any{
-				"status": observationComplete,
-				"id":     observation["id"],
-				"quality": map[string]any{
-					"state": "unstable", "samples": 5, "stop_reason": "max_samples",
-				},
-				"tree": observation["tree"],
-			},
-		}
-		withoutQuality := map[string]any{
-			"operation_id": payload["operation_id"],
-			"outcome":      outcomeExecuted,
-			"effect":       payload["effect"],
-			"observation": map[string]any{
-				"status": observationComplete,
-				"id":     observation["id"],
-				"tree":   observation["tree"],
-			},
-		}
+	t.Run("both mode rejects readable quality", func(t *testing.T) {
+		withQuality := "result v4 ok\n" +
+			"obs O4821_85 quality=unstable(max_samples)\nend result\n"
 		result := &sdk.CallToolResult{
-			Content:           []sdk.Content{&sdk.TextContent{Text: fakeResultText(withoutQuality, false)}},
-			StructuredContent: nonDefault,
+			Content:           []sdk.Content{&sdk.TextContent{Text: withQuality}},
+			StructuredContent: payload,
 		}
 		if _, failure := project(result, resultModeBoth); failure == nil ||
-			failure.reason != "both_mode_quality_missing" {
-			t.Fatalf("failure = %v, want both_mode_quality_missing", failure)
+			failure.reason != "text_result_obs_quality_present" {
+			t.Fatalf("failure = %v, want text_result_obs_quality_present", failure)
 		}
 	})
 }
@@ -837,7 +842,7 @@ func TestDecodeResultTextObsLine(t *testing.T) {
 		{
 			name: "full fields",
 			text: "result v4 ok\n" +
-				"obs O4821_85 fg=tv.danmaku.bili#177 at=22:08:55 quality=unstable(max_samples) rot=1 missing=tree,image\n" +
+				"obs O4821_85 fg=tv.danmaku.bili#177 at=22:08:55 rot=1 missing=tree,image\n" +
 				"end result\n",
 			status:   observationComplete,
 			id:       "O4821_85",
@@ -869,8 +874,8 @@ func TestDecodeResultTextObsLine(t *testing.T) {
 	}{
 		{"bare obs", "result v4 ok\nobs\nend result\n", "text_result_obs_empty"},
 		{"complete with id", "result v4 ok\nobs O4821_85 status=complete\nend result\n", "text_result_obs_status_redundant"},
-		{"default quality", "result v4 ok\nobs O4821_85 quality=stable(stable)\nend result\n", "text_result_obs_quality_redundant"},
-		{"not sampled quality", "result v4 ok\nobs O4821_85 quality=unknown(not_sampled)\nend result\n", "text_result_obs_quality_redundant"},
+		{"default quality", "result v4 ok\nobs O4821_85 quality=stable(stable)\nend result\n", "text_result_obs_quality_present"},
+		{"non-default quality", "result v4 ok\nobs O4821_85 quality=unstable(max_samples)\nend result\n", "text_result_obs_quality_present"},
 		{"bad rotation", "result v4 ok\nobs O4821_85 rot=4\nend result\n", "text_result_rotation_invalid"},
 		{"bad time", "result v4 ok\nobs O4821_85 at=bad=time\nend result\n", "text_result_obs_invalid"},
 		{"out of order", "result v4 ok\nobs O4821_85 at=22:08:55 fg=none\nend result\n", "text_result_obs_invalid"},
@@ -1614,6 +1619,7 @@ func TestCompareResultTextToStructuredOmissions(t *testing.T) {
 	structured := map[string]any{
 		"operation_id": "P7391_12",
 		"outcome":      outcomeExecuted,
+		"effect":       map[string]any{"state": "observed"},
 		"session": map[string]any{
 			"origin": "P7391_12", "state": sessionActive, "mode": "virtual",
 			"agent": "local-agent", "started_at": "2026-11-21T22:05:10.123456789Z",
@@ -1654,16 +1660,15 @@ func TestCompareResultTextToStructuredOmissions(t *testing.T) {
 		t.Fatalf("declared omissions rejected: %s %v", failure.reason, failure.fields)
 	}
 
-	t.Run("non-default quality must appear", func(t *testing.T) {
+	t.Run("quality and effect remain structured-only", func(t *testing.T) {
 		structuredBad := deepCloneObject(structured)
 		structuredBad["observation"].(map[string]any)["quality"] = map[string]any{
 			"state": "unstable", "samples": 5, "stop_reason": "max_samples",
 		}
 		decodedBad := &decodedTextResult{object: deepCloneObject(decoded.object), isError: false,
 			header: decoded.header, view: decoded.view}
-		if failure := compareResultTextToStructured(decodedBad, structuredBad, structuredView, ""); failure == nil ||
-			failure.reason != "both_mode_quality_missing" {
-			t.Fatalf("missing non-default quality = %v", failure)
+		if failure := compareResultTextToStructured(decodedBad, structuredBad, structuredView, ""); failure != nil {
+			t.Fatalf("structured-only facts rejected: %s %v", failure.reason, failure.fields)
 		}
 	})
 

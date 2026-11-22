@@ -253,14 +253,16 @@ status(P)、重复 P 与冻结结果只复制最后一次已提交快照，迟�
 
 ### 条件等待（wait_for）
 
-`wait_for` 是普通工作（`WorkWaitFor`）：先在唯一工作位上等待一个字面条件或整树稳定，再在同一
+`wait_for` 是普通工作（`WorkWaitFor`）：先在唯一工作位上等待一个字面条件或内容稳定，再在同一
 工作位内做一次验证采集并发布一个新 `O`。
 
 - 准入在单一状态锁内完成：引用解析、已过期会话拦截（`409 session_expired`，绝不复活）、
   普通屏障与工作位、工作记录、基线确认与 `SessionTTL=120s` 单调续租。已过期会话不被本次
   调用续租，也不被推进成 `control_revoked`。
 - 等待期只采样、不发布：每帧读一次目标屏层级并用只读投影计算摘要，不发布、不推进 ref 连续号、
-  不确认基线。采样最小间隔 `MinDwell=600ms`；稳定判据是连续相等帧数达到 `StableFrames=3`，
+  不确认基线。`stable=true` 比较屏幕语境与公开树内容。摘要忽略所有节点的 `bounds` 与
+  `ref`，以及无动作叶子的 `label`、`value` 和 `hint`。`stable=false` 的条件等待仍以
+  原始身份链、完整公开树与屏幕语境比较帧。采样最小间隔 `MinDwell=600ms`；稳定判据是连续相等帧数达到 `StableFrames=3`，
   不是累计采样数，因此 3 帧至少跨越 1.2s；`MaxSamples=80` 只计有效可读帧，
   `ProbeOnFailStreak=3` 决定连续失败后何时重探目标显示，
   `FrameTimeout=16s` 把单次慢读限成瞬态失败。这些值是服务策略，进程启动时校验，调用方不能设置。
@@ -633,7 +635,7 @@ P 已无法定位时，`end(P)` 返回 `409 operation_unknown`、`phase=referenc
 | 滚动效果 | `effect.state` | `observed` / `not_observed` / `unknown`；只在 `scroll` 结果与仍保留该原操作的 P 视图中出现，只表示是否观察到容器内内容位移，不表示动作因果、方向、距离或到达边界。`observed` 要求屏幕位移与容器相对位移同时成立且同号对达到门限，`not_observed` 用完整匹配集与容器四边不变判据，二者都不证明原始内容静止 |
 | 观察 | `observation.status` | `complete` / `partial` / `failed`；后观察失败不改写已确认的 `executed` |
 | 条件等待 | `wait.trigger` / `wait.matched` / `wait.elapsed_ms` | 等待因哪个分支退出、最终发布帧上成立哪些单帧条件、整次调用耗时；不表示页面之后不再变化，也不替代 `observation.status` |
-| 观察质量 | `observation.quality` | `state` / `samples` / `stop_reason`；只表示树是否收敛、经过多少有效采样，不限制输入授权 |
+| 观察质量 | `observation.quality` | `state` / `samples` / `stop_reason`；表示按该阶段的摘要判据是否收敛、经过多少有效采样，不限制输入授权 |
 | 图片 | `observation.image` | 本次附图的元数据或受控错误；图片失败不改写核心树与主动作 |
 | 会话 | `session.state` | `starting` / `active` / `ended` |
 | 物理收尾 | `cleanup.*` | 显示/任务/执行链是否确认释放 |
@@ -667,7 +669,7 @@ P 已无法定位时，`end(P)` 返回 `409 operation_unknown`、`phase=referenc
 ### 发布
 
 `release/versions.json` 是发行号、共同契约号与 Android versionCode 的唯一来源；当前为
-`release_version=0.26.0`、`contract_version=22`、`android_version_code=28`，构建生成
+`release_version=0.27.0`、`contract_version=23`、`android_version_code=29`，构建生成
 Go/Java 常量。`scripts/build-release.ps1` 产出整组产物与 `build/release/manifest.json`
 （源码提交、Go 版本、MCP SDK/协议、各产物 SHA-256/大小、Android 包名/版本、工具目录指纹）。
 工具目录固定为 `scripts/toolcatalog` 投影的 13 个工具，指纹是该目录注册顺序、名称、描述与

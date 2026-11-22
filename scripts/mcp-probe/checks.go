@@ -238,7 +238,7 @@ func (p *probe) instructionsCheck() bool {
 	p.reporter.pass("instructions",
 		field("bytes", strconv.Itoa(len(result.Instructions))),
 		field("source_bytes", strconv.Itoa(len(mcpsource.ServerInstructions()))),
-		"source_match=true", field("protocol", result.ProtocolVersion))
+		"source_match=true", "hidden_result_terms=absent", field("protocol", result.ProtocolVersion))
 	return true
 }
 
@@ -268,7 +268,7 @@ func (p *probe) compatibilityInstructionsCheck(ctx context.Context) bool {
 	}
 	p.reporter.pass("instructions_compat",
 		field("protocol", result.ProtocolVersion),
-		field("bytes", strconv.Itoa(len(result.Instructions))), "source_match=true")
+		field("bytes", strconv.Itoa(len(result.Instructions))), "source_match=true", "hidden_result_terms=absent")
 	return true
 }
 
@@ -277,6 +277,9 @@ func (p *probe) compatibilityInstructionsCheck(ctx context.Context) bool {
 func checkInstructions(result *sdk.InitializeResult) *checkError {
 	if result == nil || result.Instructions == "" {
 		return failf("instructions_missing")
+	}
+	if containsHiddenResultTerm(result.Instructions) {
+		return failf("instructions_hidden_result_term")
 	}
 	want := mcpsource.ServerInstructions()
 	if want == "" {
@@ -305,7 +308,7 @@ func (p *probe) catalogCheck(ctx context.Context) bool {
 	p.reporter.pass("tools",
 		field("count", strconv.Itoa(len(list.Tools))),
 		field("source_count", strconv.Itoa(len(toolNames))),
-		"legacy_absent=true")
+		"legacy_absent=true", "hidden_result_terms=absent")
 	p.reporter.pass("catalog",
 		field("tools", strconv.Itoa(len(toolNames))),
 		"names=set_equal", "description=identical", "schema=semantic_equal")
@@ -1023,28 +1026,33 @@ func requireTextLine(projected *callResult, wanted string) *checkError {
 	return failf("text_line_missing", field("line", wanted))
 }
 
-// checkQualityTextLine proves the v4 quality contract: the default pair
-// (stable settle or not-sampled) is omitted, and every non-default quality is
-// rendered once as quality=<state>(<stop_reason>). The audit-only sample count
-// never appears in text.
+// checkQualityTextLine proves the v4 text projection never carries a quality
+// token, regardless of the structured quality value.
 func checkQualityTextLine(projected *callResult) *checkError {
-	token, failure := observationQualityToken(projected)
-	if failure != nil {
-		return failure
-	}
-	var quality *qualityView
-	if projected.view.Observation != nil {
-		quality = projected.view.Observation.Quality
-	}
-	if defaultQuality(quality) {
-		if token != "" {
-			return failf("text_line_unexpected", field("line", "quality="+token))
+	for _, text := range projected.texts {
+		for _, line := range strings.Split(text, "\n") {
+			if !strings.HasPrefix(line, "obs ") {
+				continue
+			}
+			for _, token := range strings.Fields(line) {
+				if strings.HasPrefix(token, "quality=") {
+					return failf("text_line_unexpected", field("line", "quality"))
+				}
+			}
 		}
-		return nil
 	}
-	wanted := quality.State + "(" + quality.StopReason + ")"
-	if token != wanted {
-		return failf("text_line_missing", field("line", "quality="+wanted))
+	return nil
+}
+
+// checkEffectTextLine proves the v4 text projection never carries the
+// structured-only effect fact.
+func checkEffectTextLine(projected *callResult) *checkError {
+	for _, text := range projected.texts {
+		for _, line := range strings.Split(strings.TrimSuffix(text, "\n"), "\n") {
+			if strings.HasPrefix(line, "effect=") || strings.HasPrefix(line, "effect.") {
+				return failf("text_line_unexpected", field("line", "effect"))
+			}
+		}
 	}
 	return nil
 }
@@ -1098,26 +1106,34 @@ func (p *probe) waitForCheck(ctx context.Context, reference string) (string, boo
 		return "", false
 	}
 	quality := observation.Quality
-	if quality == nil {
-		if !projected.textOnly {
-			p.reporter.fail("wait_for", "quality_unexpected", field("state", qualityStateOf(quality)))
-			return "", false
-		}
-		// v4 omits the default quality pair; the not-sampled default is the
-		// wait_for branch and is proven by the absence of a quality token.
+	qualityText := "omitted"
+	if projected.textOnly {
 		if failure := checkObservationQualityOmitted(projected); failure != nil {
 			p.reporter.fail("wait_for", failure.reason, failure.fields...)
 			return "", false
 		}
-	} else if quality.State != qualityUnknown ||
-		quality.Samples != 0 || quality.StopReason != qualityStopNotSampled {
-		p.reporter.fail("wait_for", "quality_unexpected",
-			field("state", qualityStateOf(quality)))
-		return "", false
-	}
-	qualityText := "default"
-	if quality != nil {
+		if failure := checkQualityTextLine(projected); failure != nil {
+			p.reporter.fail("wait_for", failure.reason, failure.fields...)
+			return "", false
+		}
+	} else {
+		if quality == nil {
+			p.reporter.fail("wait_for", "quality_unexpected", field("state", qualityStateOf(quality)))
+			return "", false
+		}
+		if quality.State != qualityUnknown ||
+			quality.Samples != 0 || quality.StopReason != qualityStopNotSampled {
+			p.reporter.fail("wait_for", "quality_unexpected",
+				field("state", qualityStateOf(quality)))
+			return "", false
+		}
 		qualityText = quality.State + "/" + quality.StopReason
+		if p.mode() == resultModeBoth {
+			if failure := checkQualityTextLine(projected); failure != nil {
+				p.reporter.fail("wait_for", failure.reason, failure.fields...)
+				return "", false
+			}
+		}
 	}
 	p.reporter.pass("wait_for",
 		field("trigger", view.Wait.Trigger),
@@ -1263,7 +1279,7 @@ func (p *probe) actCheck(ctx context.Context, observationID string) bool {
 		p.reporter.fail("act", failure.reason, failure.fields...)
 		return false
 	}
-	if failure := checkScrollEffect(view, projected.object, false); failure != nil {
+	if failure := checkScrollEffect(projected, false); failure != nil {
 		p.reporter.fail("act", failure.reason, failure.fields...)
 		return false
 	}
@@ -1273,7 +1289,7 @@ func (p *probe) actCheck(ctx context.Context, observationID string) bool {
 			return false
 		}
 	}
-	qualityText, samplesText, stopText := "default", "omitted", "default"
+	qualityText, samplesText, stopText := "omitted", "omitted", "omitted"
 	if observation.Quality != nil {
 		qualityText = observation.Quality.State
 		samplesText = strconv.Itoa(observation.Quality.Samples)

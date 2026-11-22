@@ -93,16 +93,15 @@ func TestTreeTextGuideStatesResultV4AndTreeV4(t *testing.T) {
 		"非 `executed`、错误结果与带 `state=` 的重放摘要一律显式输出",
 		"`text`/`both` 是面向调用的紧凑投影",
 		"`structured` 保留完整审计字段",
-		"`obs [<O>] [status=…] [fg=…] [at=HH:MM:SS] [quality=…] [screen=<W>x<H>[@<display_id>]] [rot=<1|2|3>] [missing=…]`",
+		"`obs [<O>] [status=…] [fg=…] [at=HH:MM:SS] [screen=<W>x<H>[@<display_id>]] [rot=<1|2|3>] [missing=…]`",
 		"`obs ` 后首个不含 `=` 的字段是完整 O",
 		"`status=complete` 省略",
-		"`quality` 只写非默认的 `quality=<state>(<stop_reason>)`",
 		"`fg` 写 `<包名>#<task_id>`、`<包名>`、`#<task_id>`、`present`、`none` 或 `unknown(<reason>)`",
 		"`obs.image` 与顶层 `image` 同字段同顺序",
 		"`screen` 仅在带 `session` 或无树帧输出",
 		"`rot` 在非零旋转时始终输出",
 		"所有 `HH:MM:SS` 均为 UTC 秒级时间",
-		"`origin`/`revision`/`actionable_until` 与默认 `quality` 只在 `structured` JSON 中保留",
+		"`origin`/`revision`/`actionable_until` 只在 `structured` JSON 中保留",
 		"单行 `image [<W>x<H>] [read_only] [media=<非 jpeg>]",
 		"`app_items v1 kind=find|list count=<n>`",
 		"`app_tasks v1 count=<n>`",
@@ -303,7 +302,6 @@ func TestServerInstructionsCarryCrossToolRules(t *testing.T) {
 		"keepalive",
 		"wait.trigger",
 		"wait.matched",
-		"`quality=unstable/unknown` 本身不阻止输入",
 		"写入全文",
 		"app.list",
 		"diagnose",
@@ -344,6 +342,54 @@ func TestServerInstructionsCarryCrossToolRules(t *testing.T) {
 			t.Errorf("server instructions lack %q", required)
 		}
 	}
+}
+
+// TestDiscoveryOmitsObservationInternals scans every published description
+// and input-schema description together with both discovery instruction paths.
+// The two structured evidence objects remain in result JSON but their field
+// names are absent from the model-facing discovery surface.
+func TestDiscoveryOmitsObservationInternals(t *testing.T) {
+	catalog, err := json.Marshal(CatalogSnapshot())
+	if err != nil {
+		t.Fatalf("marshal catalog snapshot: %v", err)
+	}
+	discovery := strings.ToLower(string(catalog) + "\n" + ServerInstructions())
+	for _, forbidden := range []string{
+		"quality",
+		"effect",
+		"观察质量",
+		"滚动效果",
+		"observed/not_observed/unknown",
+		"observed",
+		"not_observed",
+		"unstable",
+		"内容位移状态",
+		"观察采样状态",
+	} {
+		if strings.Contains(discovery, forbidden) {
+			t.Errorf("discovery surface contains %q", forbidden)
+		}
+	}
+
+	waitFor := testDefinitionByName(t, "wait_for")
+	for _, required := range []string{"内容稳定", "忽略 bounds 与无动作叶子文本", "连续 3 帧"} {
+		requireTestContains(t, waitFor.description, required)
+	}
+	requireTestNotContains(t, waitFor.description, "整树连续 3 帧一致")
+
+	var schema struct {
+		Properties map[string]struct {
+			Description string `json:"description"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(waitFor.schema, &schema); err != nil {
+		t.Fatalf("decode wait_for schema: %v", err)
+	}
+	stable := schema.Properties["stable"].Description
+	for _, required := range []string{"内容稳定", "忽略 bounds 与无动作叶子文本", "连续 3 帧"} {
+		requireTestContains(t, stable, required)
+	}
+	requireTestNotContains(t, stable, "整树连续 3 帧一致")
 }
 
 // TestServerInstructionsKeepContractBoundary proves the instructions publish
@@ -549,6 +595,8 @@ func TestToolDescriptionsAreCallerOriented(t *testing.T) {
 		"wait_for": {
 			"1..40",
 			"stable=true",
+			"内容稳定",
+			"忽略 bounds 与无动作叶子文本",
 			"连续 3 帧",
 			"wait.trigger",
 			"wait.matched",
@@ -710,6 +758,8 @@ func TestLiveToolDescriptionsClarifyWaitAndTextRecovery(t *testing.T) {
 			"轮询当前会话的公开树条件",
 			"任一条件成立",
 			"stable=true",
+			"内容稳定",
+			"忽略 bounds 与无动作叶子文本",
 			"连续 3 帧",
 			"发布新观察时调用成功",
 			"`obs` 行",

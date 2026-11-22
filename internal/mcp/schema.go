@@ -29,13 +29,12 @@ const treeTextGuide = "结果文本：text/both 以 `result v4 <ok|err> [op=…]
 	"常规成功（`ok` 且无 `state=`）省略 `outcome=executed`；非 `executed`、错误结果与带 `state=` 的重放摘要一律显式输出 `outcome=…`。" +
 	"`op=` 只是本次调用编号参考、`at=` 只是 UTC 秒级时序提示，均不替代引擎对会话归属、显示代次与期限的权威校验。" +
 	"`text`/`both` 是面向调用的紧凑投影；`structured` 保留完整审计字段与全部三态、空集合语义。\n" +
-	"观察为单行 `obs [<O>] [status=…] [fg=…] [at=HH:MM:SS] [quality=…] [screen=<W>x<H>[@<display_id>]] [rot=<1|2|3>] [missing=…]`：" +
+	"观察为单行 `obs [<O>] [status=…] [fg=…] [at=HH:MM:SS] [screen=<W>x<H>[@<display_id>]] [rot=<1|2|3>] [missing=…]`：" +
 	"`obs ` 后首个不含 `=` 的字段是完整 O；`status=complete` 省略，`partial`/`failed` 显式；" +
-	"`quality` 只写非默认的 `quality=<state>(<stop_reason>)`；" +
 	"`fg` 写 `<包名>#<task_id>`、`<包名>`、`#<task_id>`、`present`、`none` 或 `unknown(<reason>)`；" +
 	"`screen` 仅在带 `session` 或无树帧输出；" +
 	"`rot` 在非零旋转时始终输出；所有 `HH:MM:SS` 均为 UTC 秒级时间；" +
-	"`origin`/`revision`/`actionable_until` 与默认 `quality` 只在 `structured` JSON 中保留。" +
+	"`origin`/`revision`/`actionable_until` 只在 `structured` JSON 中保留。" +
 	"`obs.image` 与顶层 `image` 同字段同顺序（仅前缀不同）；" +
 	"`obs.error <code> \"<message>\"` 子行只在对应字段存在时紧跟。\n" +
 	"其他块：单行 `image [<W>x<H>] [read_only] [media=<非 jpeg>] [screen=<W>x<H>[@<display_id>]] [rot=<1|2|3>] [at=HH:MM:SS]`、" +
@@ -101,7 +100,7 @@ const treeTextGuide = "结果文本：text/both 以 `result v4 <ok|err> [op=…]
 	"`button`/`input`/`scroll` 的省略动作分别是已存在的 `tap`/`text`/`swipe` 源能力；" +
 	"`!动作` 表示该默认能力缺失，不能由调用方补授权。" +
 	"滚动用 `operation.type=scroll` + `operation.container` 表达；raw `swipe` 是原始手势。" +
-	"`scroll` 不承诺真实方向、触摸消费者或业务安全；`unstable`/`unknown` 的观察质量不阻止输入。"
+	"`scroll` 不承诺真实方向、触摸消费者或业务安全。"
 
 // callerGuidance is the cross-tool part of the server instructions. It is
 // written for the calling agent: session progression, O/P identity, tool
@@ -123,8 +122,7 @@ const callerGuidance = "会话与推进：首次可直接 start({})。已有 act
 	"start 租期五分钟；普通活动在续期点只增不减，至少续至两分钟后。" +
 	"status、inspect、diagnose、snap、app 查询不续租。keepalive 可重设并缩短租期，不延长 O。\n\n" +
 	"选择工具：observe 单次采集，snap 只看画面，wait_for 等公开树条件，inspect 补看历史树，diagnose 查健康。" +
-	"wait_for 以 wait.trigger 说明退出分支，以 wait.matched 说明终帧命中项；有新 O 就用它继续。" +
-	"`quality=unstable/unknown` 本身不阻止输入。\n\n" +
+	"wait_for 以 wait.trigger 说明退出分支，以 wait.matched 说明终帧命中项；有新 O 就用它继续。\n\n" +
 	"输入：act 认领 ready O 才消费。ref 点按/长按默认 bubble=true，自动按 3×3 网格选点；" +
 	"无动作目标按视觉区锚定最近交互祖先，竞争遮挡时停止外扩并自动吸附唯一局部共位可点击控件。" +
 	"operation.bubble=false 只点原目标，坐标省略 bubble。坐标 tap/long_press/text 使用最深命中集合，" +
@@ -274,7 +272,7 @@ var toolCatalog = []toolDefinition{
 		name: "wait_for",
 		description: "轮询当前会话的公开树条件。reference 与 timeout 必填，timeout 为 1..40 秒（stable=true 时至少 2）。" +
 			"\nquery/absent_query 按 label/value/hint/resource 做字面折叠子串匹配；同时提供时任一条件成立即可满足查询条件。" +
-			"stable=true 还要求整树连续 3 帧一致。倒计时或实时进度页面可保持 stable=false。" +
+			"stable=true 要求内容稳定（忽略 bounds 与无动作叶子文本）连续 3 帧一致。倒计时或实时进度页面也可使用该模式。" +
 			"\n发布新观察时调用成功，包括 wait.trigger=timeout；从 `obs` 行取得完整 O。" +
 			"看到 `base=_72` 时，用 `72` 替换当前 O 的末尾序号得到指定 full 的完整编号；缺少该 full 时设置 full=true 再 observe。" +
 			"同一 full 上的多个差分各自应用。" +
@@ -312,7 +310,7 @@ var toolCatalog = []toolDefinition{
     "stable": {
       "type": "boolean",
       "default": false,
-      "description": "true 时要求整树连续 3 帧一致；有查询时它是条件满足后的稳定门禁，无查询时它是独立触发分支。"
+      "description": "true 时要求内容稳定（忽略 bounds 与无动作叶子文本）连续 3 帧一致；有查询时它是条件满足后的稳定门禁，无查询时它是独立触发分支。"
     },
     "full": {
       "type": "boolean",
@@ -356,9 +354,8 @@ var toolCatalog = []toolDefinition{
 			"\n滚动：用 operation.type=scroll + container。ref 可直接指向同视口嵌套滚动栈任一层；非滚动节点自动向上找最近滚动祖先。" +
 			"坐标容器自动选择该点所在最内层滚动容器，规划失败时回退外层滚动祖先。轨迹在安全区间居中起止，并依次尝试 50%/25%/75% 三条轴线避让。" +
 			"swipe 是原始手势；树节点的 `swipe` 仅表示源能力，手势仍按当前 O 准入。" +
-			"返回的 effect.state 以 observed/not_observed/unknown 报告内容位移证据；执行事实见 outcome。scroll 不承诺真实方向、触摸消费者或业务安全。" +
+			"执行事实见 outcome。scroll 不承诺真实方向、触摸消费者或业务安全。" +
 			"\n恢复：重验目标变化可返回 target_changed；若附新观察，从 `obs` 行取得完整 O，直接用新 O 和新 P 重试。" +
-			"unstable/unknown 的 observation.quality 不阻止输入（文本 `obs` 行写作 `quality=`）。" +
 			"通常 uncertain 先查询原 P，再按 recovery 处理；executed 后用观察判断业务结果。",
 		schema: json.RawMessage(`{
   "type": "object",

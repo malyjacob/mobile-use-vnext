@@ -442,18 +442,17 @@ func sessionStateOf(session *sessionView) string {
 // proves every member was present, so an omitted samples member can never be
 // mistaken for the valid samples=0 fact.
 //
-// In a text-only projection a missing quality is the v4 default omission: it is
-// valid only when the obs line carries no explicit quality token, which is the
-// stable/not_sampled default branch.
+// In a text-only projection observation.quality is always omitted. The
+// structured channel retains and validates the complete object.
 func checkObservationQuality(projected *callResult, observation *observationView) *checkError {
 	if observation == nil {
 		return failf("post_observation_missing")
 	}
+	if projected.textOnly {
+		return checkObservationQualityOmitted(projected)
+	}
 	quality := observation.Quality
 	if quality == nil {
-		if projected.textOnly {
-			return checkObservationQualityOmitted(projected)
-		}
 		return failf("observation_quality_missing")
 	}
 	value, found := lookupPath(projected.object, []string{"observation", "quality"})
@@ -461,13 +460,7 @@ func checkObservationQuality(projected *callResult, observation *observationView
 	if !found || !isObject {
 		return failf("observation_quality_invalid")
 	}
-	members := []string{"state", "stop_reason"}
-	if !projected.textOnly {
-		// The audit-only sample count is retained in structuredContent and in
-		// both mode; the v4 text channel never renders it.
-		members = append(members, "samples")
-	}
-	for _, member := range members {
+	for _, member := range []string{"state", "stop_reason", "samples"} {
 		if _, present := qualityObject[member]; !present {
 			return failf("observation_quality_member_missing", field("member", member))
 		}
@@ -484,19 +477,6 @@ func checkObservationQuality(projected *callResult, observation *observationView
 			field("stop_reason", quality.StopReason))
 	}
 	return nil
-}
-
-// defaultQuality reports the two v4 omission branches: a stable settle (any
-// samples) or an explicit not-sampled unknown. Both are fully represented by
-// the absence of a quality token.
-func defaultQuality(quality *qualityView) bool {
-	if quality == nil {
-		return true
-	}
-	if quality.State == "stable" {
-		return true
-	}
-	return quality.State == qualityUnknown && quality.StopReason == qualityStopNotSampled
 }
 
 // observationQualityToken returns the single quality= token of the obs line, or
@@ -518,39 +498,55 @@ func observationQualityToken(projected *callResult) (string, *checkError) {
 	return "", failf("text_obs_line_missing")
 }
 
-// checkObservationQualityOmitted proves the v4 default quality is represented
-// by an explicit omission, never by a silently dropped non-default object.
+// checkObservationQualityOmitted proves the text projection carries neither the
+// quality object nor its readable token.
 func checkObservationQualityOmitted(projected *callResult) *checkError {
+	if _, present := lookupPath(projected.object, []string{"observation", "quality"}); present {
+		return failf("observation_quality_unexpected")
+	}
 	token, failure := observationQualityToken(projected)
 	if failure != nil {
 		return failure
 	}
 	if token != "" {
-		return failf("observation_quality_unexpected", field("quality", token))
+		return failf("observation_quality_unexpected")
 	}
 	return nil
 }
 
-// checkScrollEffect asserts the effect fact appears exactly on scroll results:
-// every scroll result must carry a valid state, and no non-scroll result may
-// carry the member at all, not even as an explicit null.
-func checkScrollEffect(view resultView, object map[string]any, scroll bool) *checkError {
+// checkScrollEffect validates the structured effect fact and proves a text
+// projection omits it. Every structured scroll result must carry a valid state;
+// no structured non-scroll result may carry the member, even as explicit null.
+func checkScrollEffect(projected *callResult, scroll bool) *checkError {
+	if projected.textOnly {
+		if _, present := lookupPath(projected.object, []string{"effect"}); present {
+			return failf("text_effect_unexpected")
+		}
+		for _, text := range projected.texts {
+			for _, line := range strings.Split(strings.TrimSuffix(text, "\n"), "\n") {
+				if strings.HasPrefix(line, "effect=") || strings.HasPrefix(line, "effect.") {
+					return failf("text_effect_unexpected")
+				}
+			}
+		}
+		return nil
+	}
 	if !scroll {
-		if view.Effect != nil {
+		if projected.view.Effect != nil {
 			return failf("effect_on_non_scroll")
 		}
-		if object != nil {
-			if _, present := object["effect"]; present {
+		if projected.object != nil {
+			if _, present := projected.object["effect"]; present {
 				return failf("effect_on_non_scroll")
 			}
 		}
 		return nil
 	}
-	if view.Effect == nil {
+	if projected.view.Effect == nil {
 		return failf("scroll_effect_missing")
 	}
-	if !effectStates[view.Effect.State] {
-		return failf("scroll_effect_state_invalid", field("state", view.Effect.State))
+	if !effectStates[projected.view.Effect.State] {
+		return failf("scroll_effect_state_invalid", field("state", projected.view.Effect.State))
 	}
 	return nil
 }

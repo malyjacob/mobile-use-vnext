@@ -557,18 +557,15 @@ func TestActScrollSchema(t *testing.T) {
 		"scroll 不承诺真实方向、触摸消费者或业务安全",
 		"同视口嵌套滚动栈任一层",
 		"非滚动节点自动向上找最近滚动祖先",
-		"effect.state",
-		"observed/not_observed/unknown",
 		"执行事实见 outcome",
-		"observation.quality 不阻止输入",
 	} {
 		requireTestContains(t, definition.description, fragment)
 	}
 }
 
 // TestActScrollForwarded proves the admitted scroll branch reaches the device
-// service with the canonical container/direction/amount body and that the
-// returned effect/quality are projected to both text and structured forms.
+// service with the canonical container/direction/amount body, omits the two
+// evidence objects from readable text and retains them in structured content.
 func TestActScrollForwarded(t *testing.T) {
 	fake := newTestDeviceService(t)
 	fake.setHandler("act", func(writer http.ResponseWriter, request *http.Request, body string) {
@@ -599,8 +596,8 @@ func TestActScrollForwarded(t *testing.T) {
 		t.Fatalf("scroll body changed: %+v", requests)
 	}
 	text := testTextContent(t, result)
-	requireTestContains(t, text, "\neffect=observed\n")
-	requireTestContains(t, text, "quality=unstable(max_samples)")
+	requireTestNotContains(t, text, "effect=")
+	requireTestNotContains(t, text, "quality=")
 	structured := testStructuredObject(t, result)
 	effect, _ := structured["effect"].(map[string]any)
 	if effect["state"] != "observed" {

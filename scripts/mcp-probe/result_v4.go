@@ -363,16 +363,7 @@ func (p *v4Parser) decodeLine(lines []string, index int) (int, *checkError) {
 	line := lines[index]
 	switch {
 	case strings.HasPrefix(line, "effect="):
-		if failure := p.enter(1); failure != nil {
-			return 0, failure
-		}
-		state := strings.TrimPrefix(line, "effect=")
-		if !resultToken(state) {
-			return 0, failf("text_result_effect_invalid")
-		}
-		if failure := p.set([]string{"effect", "state"}, state); failure != nil {
-			return 0, failure
-		}
+		return 0, failf("text_result_effect_present")
 	case strings.HasPrefix(line, "text_input "):
 		if failure := p.enter(2); failure != nil {
 			return 0, failure
@@ -1093,17 +1084,7 @@ func (p *v4Parser) decodeObs(line string) *checkError {
 				return failure
 			}
 		case "quality":
-			state, stopReason, parseFailure := parseQualityToken(value)
-			if parseFailure != nil {
-				return parseFailure
-			}
-			quality := map[string]any{"state": state, "stop_reason": stopReason}
-			if defaultQuality(&qualityView{State: state, StopReason: stopReason}) {
-				return failf("text_result_obs_quality_redundant", field("quality", value))
-			}
-			if failure := p.set([]string{"observation", "quality"}, quality); failure != nil {
-				return failure
-			}
+			return failf("text_result_obs_quality_present")
 		case "screen":
 			width, height, display, parseFailure := parseGeometryToken(value)
 			if parseFailure != nil {
@@ -1167,26 +1148,6 @@ func (p *v4Parser) decodeObs(line string) *checkError {
 	}
 	p.haveObs = true
 	return nil
-}
-
-func parseQualityToken(value string) (string, string, *checkError) {
-	open := strings.IndexByte(value, '(')
-	if open < 0 {
-		if resultToken(value) && qualityStates[value] {
-			return value, "", nil
-		}
-		return "", "", failf("text_result_obs_quality_invalid", field("quality", value))
-	}
-	if open == 0 || !strings.HasSuffix(value, ")") {
-		return "", "", failf("text_result_obs_quality_invalid", field("quality", value))
-	}
-	state := value[:open]
-	stopReason := value[open+1 : len(value)-1]
-	if !resultToken(state) || !resultToken(stopReason) || !qualityStates[state] ||
-		!qualityStopReasons[stopReason] {
-		return "", "", failf("text_result_obs_quality_invalid", field("quality", value))
-	}
-	return state, stopReason, nil
 }
 
 func parseForegroundToken(token string) any {
@@ -1814,6 +1775,14 @@ func (p *v4Parser) decodeRecovery(line string) *checkError {
 
 // finish applies the explicit-omission rules that need the complete body.
 func (p *v4Parser) finish() *checkError {
+	if _, present := p.object["effect"]; present {
+		return failf("text_result_effect_present")
+	}
+	if observation, ok := p.object["observation"].(map[string]any); ok {
+		if _, present := observation["quality"]; present {
+			return failf("text_result_obs_quality_present")
+		}
+	}
 	// Only a non-error, executed, stateless result is represented by the plain
 	// `ok` header. An error result always keeps its outcome explicit.
 	if p.header.HasOutcome && p.header.Ok && p.header.State == "" &&

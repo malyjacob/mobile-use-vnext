@@ -131,6 +131,26 @@ func TestCheckLiveCatalog(t *testing.T) {
 			t.Fatalf("failure = %v", failure)
 		}
 	})
+	t.Run("hidden result term in live description", func(t *testing.T) {
+		tools := sourceCatalogTools(t)
+		tools[2].Description += " QUALITY"
+		if failure := checkLiveCatalog(tools); failure == nil ||
+			failure.reason != "catalog_description_hidden_result_term" {
+			t.Fatalf("failure = %v", failure)
+		}
+	})
+	t.Run("hidden result term in live schema", func(t *testing.T) {
+		tools := sourceCatalogTools(t)
+		tools[2].InputSchema = map[string]any{
+			"type": "object", "properties": map[string]any{
+				"flag": map[string]string{"type": "boolean", "description": "滚动效果"},
+			},
+		}
+		if failure := checkLiveCatalog(tools); failure == nil ||
+			failure.reason != "catalog_schema_hidden_result_term" {
+			t.Fatalf("failure = %v", failure)
+		}
+	})
 	t.Run("description mismatch", func(t *testing.T) {
 		tools := sourceCatalogTools(t)
 		tools[2].Description += " drift"

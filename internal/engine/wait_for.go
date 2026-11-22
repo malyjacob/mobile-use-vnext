@@ -29,7 +29,7 @@ const waitCaptureReserve = 35 * time.Second
 type waitFrame struct {
 	capture device.Capture
 	tree    *protocol.Tree
-	digest  sampleDigest
+	digest  [32]byte
 }
 
 // waitFrameSource is the closed set of origins of the frame a wait publishes.
@@ -56,7 +56,7 @@ const (
 type waitRun struct {
 	samples     int
 	consecutive int
-	lastDigest  sampleDigest
+	lastDigest  [32]byte
 	// lastFrame is the latest successful Capture+Preview+digest frame. It is
 	// cleared by every failed polling attempt, so it exists only while the
 	// most recent attempt succeeded.
@@ -233,7 +233,7 @@ func (e *Engine) pollWaitConditions(work *workState, session *sessionState,
 			return protocol.WaitTriggerTimeout, e.terminalReuse(run), nil
 		}
 
-		frame, frameTimeout, attempted := e.sampleWaitFrame(work, session, deadline)
+		frame, frameTimeout, attempted := e.sampleWaitFrame(work, session, deadline, req.Stable)
 		if frame == nil {
 			// A slow (capped) read, a device error, a Preview/digest failure or
 			// a display-probe failure all end the chain: a frame read before the
@@ -248,6 +248,11 @@ func (e *Engine) pollWaitConditions(work *workState, session *sessionState,
 			}
 			// Running out of the caller's own window is never a device failure.
 			if time.Until(deadline) <= 0 {
+				if req.Stable && attempted {
+					// An attempted failure breaks the content-stability chain
+					// even when the caller's deadline expires on the same return.
+					run.consecutive = 0
+				}
 				run.stopReason = protocol.QualityStopTimeout
 				return protocol.WaitTriggerTimeout, e.terminalReuse(run), nil
 			}
@@ -366,7 +371,7 @@ func (e *Engine) terminalReuse(run *waitRun) *waitFrame {
 // attempted: a window that expired before the read started is not a failed
 // attempt and must not invalidate the previous successful frame.
 func (e *Engine) sampleWaitFrame(work *workState, session *sessionState,
-	deadline time.Time) (*waitFrame, bool, bool) {
+	deadline time.Time, stable bool) (*waitFrame, bool, bool) {
 	frameTimeout := min(time.Until(deadline), e.cfg.Wait.FrameTimeout)
 	if frameTimeout <= 0 {
 		return nil, false, false
@@ -381,7 +386,7 @@ func (e *Engine) sampleWaitFrame(work *workState, session *sessionState,
 	if projectErr != nil {
 		return nil, false, true
 	}
-	digest, digestErr := sampleDigestOf(&cap, projection.Tree)
+	digest, digestErr := waitDigestOf(&cap, projection.Tree, stable)
 	if digestErr != nil {
 		return nil, false, true
 	}
@@ -437,7 +442,7 @@ func (e *Engine) completeWaitCapture(ctx context.Context, work *workState,
 	} else {
 		tree, coreErr = e.captureTree(ctx, work, session, phase)
 		if tree != nil {
-			e.absorbWaitTerminalFrame(run, tree)
+			absorbWaitTerminalFrame(run, tree, req.Stable)
 		}
 	}
 	publication.quality = waitQualityOf(e.cfg.Wait, run, source)
@@ -510,13 +515,19 @@ func (e *Engine) completeWaitCapture(ctx context.Context, work *workState,
 // absorbWaitTerminalFrame lets the terminal frame of a timed-out wait take part
 // in the same comparison the waiting phase used. A run without any valid frame
 // stays exactly not_sampled: a pure sleep never sampled anything.
-func (e *Engine) absorbWaitTerminalFrame(run *waitRun, tree *treeAttempt) {
+func absorbWaitTerminalFrame(run *waitRun, tree *treeAttempt, stable bool) {
 	if run.samples == 0 {
 		return
 	}
-	digest, err := sampleDigestOf(&tree.capture, tree.projection.Tree)
+	digest, err := waitDigestOf(&tree.capture, tree.projection.Tree, stable)
 	if err != nil {
 		run.consecutive = 0
+		if stable {
+			// A content digest failure is not a readable terminal sample.
+			return
+		}
+		// Tree-digest failures keep the existing stable=false accounting so
+		// its state, samples and stop_reason remain unchanged.
 	} else if run.consecutive > 0 && digest == run.lastDigest {
 		run.consecutive++
 	} else {

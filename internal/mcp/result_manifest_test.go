@@ -205,6 +205,59 @@ func TestResultFieldManifest(t *testing.T) {
 	}
 }
 
+// TestResultV4QualityEffectOmissionManifest pins both parent objects as
+// omitted, proves their reflected members inherit that coverage, and verifies
+// non-default values remain absent from the readable projection.
+func TestResultV4QualityEffectOmissionManifest(t *testing.T) {
+	for _, path := range []string{"effect", "observation.quality"} {
+		if kind := v4ResultFields[path]; kind != v4Omitted {
+			t.Errorf("%s classification = %s, want v4Omitted", path, v4KindName(kind))
+		}
+		if reason := v4OmittedResultFields[path]; reason == "" {
+			t.Errorf("%s has no omission reason", path)
+		}
+	}
+
+	manifest := v4AnalyzeManifest()
+	if len(manifest.problems) != 0 {
+		sort.Strings(manifest.problems)
+		t.Fatalf("result v4 field manifest failed:\n%s", strings.Join(manifest.problems, "\n"))
+	}
+	for _, expected := range []struct {
+		goPath    string
+		wirePath  string
+		coveredBy string
+	}{
+		{goPath: "protocol.Effect.State", wirePath: "effect.state", coveredBy: "effect"},
+		{goPath: "protocol.Quality.State", wirePath: "observation.quality.state", coveredBy: "observation.quality"},
+		{goPath: "protocol.Quality.Samples", wirePath: "observation.quality.samples", coveredBy: "observation.quality.samples"},
+		{goPath: "protocol.Quality.StopReason", wirePath: "observation.quality.stop_reason", coveredBy: "observation.quality"},
+	} {
+		found := false
+		for _, field := range manifest.fields {
+			if field.goPath != expected.goPath || field.wirePath != expected.wirePath {
+				continue
+			}
+			found = true
+			if field.coveredBy != expected.coveredBy {
+				t.Errorf("%s coveredBy = %q, want %q", expected.wirePath, field.coveredBy, expected.coveredBy)
+			}
+		}
+		if !found {
+			t.Errorf("manifest has no reflected field %s -> %s", expected.goPath, expected.wirePath)
+		}
+	}
+
+	raw := []byte(`{"operation_id":"P1","outcome":"uncertain","effect":{"state":"unknown"},` +
+		`"observation":{"status":"partial","id":"O1","quality":{"state":"unstable","samples":4,"stop_reason":"max_samples"}}}`)
+	text, err := encodeResultText(raw, false, "")
+	if err != nil {
+		t.Fatalf("encodeResultText: %v", err)
+	}
+	requireTestNotContains(t, text, "effect=")
+	requireTestNotContains(t, text, "quality=")
+}
+
 // TestResultV4ManifestReverseControl proves the completeness gate fails when a
 // new wire member is added without classifying it.
 func TestResultV4ManifestReverseControl(t *testing.T) {
@@ -1761,7 +1814,7 @@ func v4ScanType(valueType reflect.Type, wirePath, coveredBy string, stack map[re
 				problems = append(problems, fmt.Sprintf("%s has no result v4 projection or omission declaration at %s", goPath, fieldPath))
 			}
 			childCoveredBy := coveredBy
-			if classified && (kind == v4JSON || kind == v4Block) {
+			if classified && (kind == v4JSON || kind == v4Block || kind == v4Omitted) {
 				childCoveredBy = fieldPath
 			}
 			manifest.fields = append(manifest.fields, rmfWireField{

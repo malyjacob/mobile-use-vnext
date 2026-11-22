@@ -41,7 +41,7 @@ adb forward          主机 18881 → 服务；主机 18883 → 手机 MCP
    `adb forward`，也不需要 Agent token。
 
 只需要直连 HTTP 的 Agent 则使用 `http://127.0.0.1:18881/api/<tool>`、`agent_token` 与
-`X-Mobile-Use-Contract: 22`。
+`X-Mobile-Use-Contract: 23`。
 
 ## 1. 默认部署后的网络与进程
 
@@ -208,10 +208,10 @@ MCP 适配器对每次工具调用提供 `both`、`text`、`structured` 三种�
 | `text`（默认） | 紧凑 `result v4` 文本与图片 | 不发送 | 默认模式；只读取文本通道的宿主 |
 | `structured` | 图片；`isError=true` 时附最小 `diagnostic v1` 文本 | 完整 `Result` JSON | 会把结构化结果交给模型或程序的宿主 |
 
-`text`/`both` 的文本是面向调用方的紧凑投影：固定或冗余元信息（`observation.origin`、
-`observation.revision`、`observation.actionable_until`、默认 `observation.quality` 与
-`samples`、`session.agent`、`inspection.origin`、默认 JPEG `media_type`、日期与纳秒部分）
-被省略，不承诺与结构化 JSON 逐字段互相还原；`/api/*` 与 `both`/`structured` 的
+`text`/`both` 的文本是面向调用方的紧凑投影。文本省略整个 `observation.quality` 和
+`effect`，以及 `observation.origin`、`observation.revision`、`observation.actionable_until`、
+`session.agent`、`inspection.origin`、默认 JPEG `media_type`、日期与纳秒部分。
+`/api/*` 与 `both`/`structured` 的
 `structuredContent` 完整无损保留 `Result` JSON，含全部审计字段、三态与空集合语义。需要
 精确机器字段时使用 `structured` 或 `both`，逐项规则见 [MCP 入口](mcp.md)。
 
@@ -229,7 +229,7 @@ MCP 适配器对每次工具调用提供 `both`、`text`、`structured` 三种�
 `text` 中每次观察写成单行，`obs ` 之后首个不含 `=` 的字段是完整 `O`：
 
 ```text
-obs [<O>] [status=…] [fg=…] [at=HH:MM:SS] [quality=…] [screen=<W>x<H>[@<display_id>]] [rot=…] [missing=…]
+obs [<O>] [status=…] [fg=…] [at=HH:MM:SS] [screen=<W>x<H>[@<display_id>]] [rot=…] [missing=…]
 ```
 
 结构化结果中该编号仍是 `observation.id`。可见 O/P 形如 `O4821_72` 与 `P7391_12`：
@@ -310,7 +310,7 @@ HTTP 宿主在原有 `Authorization` 头之外按需添加：
 
 ```text
 Authorization: Bearer <agent_token>
-X-Mobile-Use-Contract: 22
+X-Mobile-Use-Contract: 23
 Content-Type: application/json; charset=utf-8
 ```
 
@@ -318,7 +318,7 @@ Content-Type: application/json; charset=utf-8
 $deploy = Get-Content .state/deploy.json -Raw | ConvertFrom-Json
 $headers = @{
     Authorization           = "Bearer $($deploy.agent_token)"
-    'X-Mobile-Use-Contract' = '22'
+    'X-Mobile-Use-Contract' = '23'
 }
 Invoke-RestMethod http://127.0.0.1:18881/api/status -Method Post `
   -Headers $headers -ContentType 'application/json' -Body '{}'
@@ -400,8 +400,9 @@ $newOid = $wait.observation.id
   `query`/`absent_query`，对应项也按固定顺序列出，调用方按 `observation` 继续即可。
 - 条件或稳定判据满足后服务立即返回，不跑满 `timeout`；等待期不发布中间帧，只有最终验证采集
   发布一个新 O。`query`/`absent_query` 只匹配当前公开可见树，视口外内容不参与。
-- `stable=true` 要求整树连续 3 帧一致（至少跨越 1.2 秒）；页面有倒计时或实时进度变化时保持
-  `stable=false`，否则会等到 `timeout` 到期。
+- `stable=true` 要求连续 3 帧内容摘要一致（至少跨越 1.2 秒）。摘要忽略节点坐标、ref
+  与无动作叶子的文本，因此倒计时或实时进度可以继续变化。页面内容条件仍可用
+  `query` 或 `absent_query`，它们匹配完整公开树。
 - 宿主侧工具超时必须覆盖验证采集：该阶段整体受 35 秒固定预留截止约束，带图与无图调用都按
   `timeout <= host_timeout - 35s` 预留。宿主默认 60 秒时，`timeout` 取 25 秒以内；否则宿主
   会取消本次调用。
@@ -565,7 +566,7 @@ Header: Authorization: Bearer <mcp_token>
 两种选择：
 
 ```text
-直连 HTTP:  http://127.0.0.1:18880/api/<tool>   + agent_token + X-Mobile-Use-Contract: 22
+直连 HTTP:  http://127.0.0.1:18880/api/<tool>   + agent_token + X-Mobile-Use-Contract: 23
 MCP HTTP:   http://127.0.0.1:18882/mcp          + mcp_token
 ```
 
@@ -751,7 +752,7 @@ GET 判断工具是否可用。
 $deploy = Get-Content .state/deploy.json -Raw | ConvertFrom-Json
 $headers = @{
     Authorization           = "Bearer $($deploy.agent_token)"
-    'X-Mobile-Use-Contract' = '22'
+    'X-Mobile-Use-Contract' = '23'
 }
 $start = Invoke-RestMethod http://127.0.0.1:18881/api/start -Method Post `
   -Headers $headers -ContentType 'application/json' -Body '{}'

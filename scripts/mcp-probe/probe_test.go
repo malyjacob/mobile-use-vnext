@@ -827,11 +827,6 @@ func fakeResultText(payload map[string]any, isError bool) string {
 	}
 	builder.WriteByte('\n')
 
-	if effect, ok := payload["effect"].(map[string]any); ok {
-		if state, ok := effect["state"].(string); ok {
-			builder.WriteString("effect=" + state + "\n")
-		}
-	}
 	if input, ok := payload["text_input"].(map[string]any); ok {
 		builder.WriteString("text_input write=" + input["write"].(string) +
 			" enter=" + input["enter"].(string) + "\n")
@@ -1021,14 +1016,6 @@ func writeFakeObservation(builder *strings.Builder, observation map[string]any, 
 	}
 	if capturedAt, ok := observation["captured_at"].(string); ok && capturedAt != "" {
 		builder.WriteString(" at=" + fakeClock(capturedAt))
-	}
-	if quality, ok := observation["quality"].(map[string]any); ok {
-		state, _ := quality["state"].(string)
-		stopReason, _ := quality["stop_reason"].(string)
-		if state != "" && !(state == "stable" ||
-			(state == qualityUnknown && stopReason == qualityStopNotSampled)) {
-			builder.WriteString(" quality=" + state + "(" + stopReason + ")")
-		}
 	}
 	tree, hasTree := observation["tree"].(map[string]any)
 	screen, hasScreen := observation["screen"].(map[string]any)
@@ -1756,6 +1743,13 @@ func TestAdapterChecksImageLeakFails(t *testing.T) {
 // TestInstructionsCheck proves the mandatory discovery check compares the live
 // instructions with the source accessor and rejects a missing payload.
 func TestInstructionsCheck(t *testing.T) {
+	for _, term := range []string{"QUALITY", "effect", "观察质量", "滚动效果"} {
+		result := &sdk.InitializeResult{Instructions: mcpserver.ServerInstructions() + " " + term}
+		if failure := checkInstructions(result); failure == nil ||
+			failure.reason != "instructions_hidden_result_term" {
+			t.Fatalf("instructions term %q: failure = %v", term, failure)
+		}
+	}
 	source := mcpserver.ServerInstructions()
 	for _, required := range []string{
 		"新 v4 只生成普通节点定义",
@@ -2769,15 +2763,36 @@ func checkScrollActResult(projected *callResult, mode string) *checkError {
 	if resultOutcome(projected) != outcomeExecuted {
 		return failf("scroll_act_not_executed", field("outcome", resultOutcome(projected)))
 	}
-	if failure := checkScrollEffect(view, projected.object, true); failure != nil {
+	if failure := checkScrollEffect(projected, true); failure != nil {
 		return failure
 	}
 	if failure := checkObservationQuality(projected, view.Observation); failure != nil {
 		return failure
 	}
+	if mode == resultModeText {
+		if view.Effect != nil {
+			return failf("text_effect_unexpected")
+		}
+		if view.Observation.Quality != nil {
+			return failf("observation_quality_unexpected")
+		}
+		if failure := checkEffectTextLine(projected); failure != nil {
+			return failure
+		}
+		if failure := checkQualityTextLine(projected); failure != nil {
+			return failure
+		}
+		return nil
+	}
+	if view.Effect == nil {
+		return failf("scroll_effect_missing")
+	}
 	quality := view.Observation.Quality
-	if mode != resultModeStructured {
-		if failure := requireTextLine(projected, "effect="+view.Effect.State); failure != nil {
+	if quality == nil {
+		return failf("observation_quality_missing")
+	}
+	if mode == resultModeBoth {
+		if failure := checkEffectTextLine(projected); failure != nil {
 			return failure
 		}
 		if failure := checkQualityTextLine(projected); failure != nil {
@@ -2787,11 +2802,6 @@ func checkScrollActResult(projected *callResult, mode string) *checkError {
 	effectState, found := lookupPath(projected.object, []string{"effect", "state"})
 	if !found || effectState != view.Effect.State {
 		return failf("effect_object_mismatch")
-	}
-	if mode == resultModeText {
-		// The v4 text channel never renders the audit-only sample count; the
-		// default stable quality is proven by omission.
-		return nil
 	}
 	samples, found := lookupPath(projected.object,
 		[]string{"observation", "quality", "samples"})
@@ -2803,7 +2813,7 @@ func checkScrollActResult(projected *callResult, mode string) *checkError {
 }
 
 // TestActScrollResultProjection drives one scroll act through the real adapter
-// and asserts the same effect/quality facts in text, structured and both modes.
+// and proves text omits effect/quality while structured and both retain them.
 // The parallel key act proves a non-scroll result never carries an effect.
 func TestActScrollResultProjection(t *testing.T) {
 	for _, mode := range []string{resultModeBoth, resultModeText, resultModeStructured} {
@@ -2824,18 +2834,23 @@ func TestActScrollResultProjection(t *testing.T) {
 			if failure := checkScrollActResult(projected, mode); failure != nil {
 				t.Fatalf("scroll projection: %s %v", failure.reason, failure.fields)
 			}
-			// Expected values are literals, not read back from the same struct.
-			if projected.view.Effect == nil || projected.view.Effect.State != "observed" {
-				t.Fatalf("effect = %+v, want observed", projected.view.Effect)
-			}
-			quality := projected.view.Observation.Quality
 			if mode == resultModeText {
-				if quality != nil {
-					t.Fatalf("text default quality = %+v", quality)
+				if projected.view.Effect != nil {
+					t.Fatalf("text effect = %+v, want omitted", projected.view.Effect)
 				}
-			} else if quality.State != "stable" || quality.Samples != 2 ||
-				quality.StopReason != "stable" {
-				t.Fatalf("quality = %+v", quality)
+				if projected.view.Observation.Quality != nil {
+					t.Fatalf("text quality = %+v, want omitted",
+						projected.view.Observation.Quality)
+				}
+			} else {
+				if projected.view.Effect == nil || projected.view.Effect.State != "observed" {
+					t.Fatalf("structured effect = %+v, want observed", projected.view.Effect)
+				}
+				quality := projected.view.Observation.Quality
+				if quality == nil || quality.State != "stable" || quality.Samples != 2 ||
+					quality.StopReason != "stable" {
+					t.Fatalf("structured quality = %+v, want stable/2/stable", quality)
+				}
 			}
 
 			key, failure := runner.call(ctx, "act", map[string]any{
@@ -2848,7 +2863,7 @@ func TestActScrollResultProjection(t *testing.T) {
 			if key.view.Effect != nil {
 				t.Fatalf("key result carries effect %+v", key.view.Effect)
 			}
-			if failure := checkScrollEffect(key.view, key.object, false); failure != nil {
+			if failure := checkScrollEffect(key, false); failure != nil {
 				t.Fatalf("key result effect: %s", failure.reason)
 			}
 			if _, present := lookupPath(key.object, []string{"effect"}); present {

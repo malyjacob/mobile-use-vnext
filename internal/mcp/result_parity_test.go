@@ -166,9 +166,9 @@ func TestAgentResultLosslessParity(t *testing.T) {
 	}
 }
 
-// TestEffectQualityModeParity proves text, both and structured expose the same
-// effect/quality values from the one decoded protocol.Result, including the
-// explicit samples=0 and not_sampled facts.
+// TestEffectQualityModeParity proves text and both omit effect/quality from
+// readable text while structured and the structured half of both retain the
+// complete protocol.Result values, including samples=0 and not_sampled.
 func TestEffectQualityModeParity(t *testing.T) {
 	source := &protocol.Result{
 		OperationID:     "P1",
@@ -205,13 +205,19 @@ func TestEffectQualityModeParity(t *testing.T) {
 			}
 			continue
 		}
+		if mode == ResultModeBoth {
+			got, err := decodeResultJSON([]byte(testStructuredJSON(t, out)))
+			if err != nil || !reflect.DeepEqual(want, got) {
+				t.Fatalf("both structured parity err=%v got=%#v", err, got)
+			}
+		}
 		text := testTextContent(t, out)
 		wantText := expectedResultV4(t, canonical, false)
 		decoded, flag, err := decodeResultText(t, text)
 		if err != nil || flag || !sameJSONValue(wantText, decoded) {
 			t.Fatalf("text parity mode=%v err=%v", mode, err)
 		}
-		requireTestContains(t, text, "\neffect=unknown\n")
+		requireTestNotContains(t, text, "effect=")
 		requireTestNotContains(t, text, "quality=")
 	}
 }
@@ -516,9 +522,9 @@ func TestHTTPModesSelectProjectionPerCall(t *testing.T) {
 func TestCatalogFingerprintBaseline(t *testing.T) {
 	// The catalog has thirteen tools. This baseline covers the caller-oriented
 	// descriptions after result v4/tree v4 local guidance was added to start,
-	// observe, wait_for, act, app and inspect, including act auto-resolution
-	// and candidate-based retry guidance.
-	const baseline = "a18acde933ad4358ee0b6d5ec28ca2e4dcba643e33453de31c436763e561c54e"
+	// observe, wait_for, act, app and inspect, including content-stability
+	// guidance and omission of the two structured evidence objects.
+	const baseline = "24e29ffad62cd998e1ac5fc26fcf4479e672806132ddce55ad3785794ebc6f0b"
 	if got := CatalogFingerprint(); got != baseline {
 		t.Fatalf("catalog changed: %s", got)
 	}

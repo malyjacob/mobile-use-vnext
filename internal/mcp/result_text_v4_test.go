@@ -86,7 +86,7 @@ func TestResultV4ObservationStatusOmission(t *testing.T) {
 	requireTestContains(t, text, "\nobs status=complete\n")
 }
 
-func TestResultV4QualityOmissionBoundaries(t *testing.T) {
+func TestResultV4QualityEffectOmissionBoundaries(t *testing.T) {
 	stable := assertResultTextParity(t, []byte(`{"observation":{"status":"complete","id":"O1",`+
 		`"quality":{"state":"stable","samples":3,"stop_reason":"stable"}}}`), false)
 	requireTestNotContains(t, stable, "quality=")
@@ -96,11 +96,16 @@ func TestResultV4QualityOmissionBoundaries(t *testing.T) {
 	requireTestNotContains(t, notSampled, "quality=")
 	unstable := assertResultTextParity(t, []byte(`{"observation":{"status":"partial","id":"O1",`+
 		`"quality":{"state":"unstable","samples":4,"stop_reason":"max_samples"}}}`), true)
-	requireTestContains(t, unstable, "quality=unstable(max_samples)")
+	requireTestNotContains(t, unstable, "quality=")
 	requireTestNotContains(t, unstable, "samples=")
 	unknown := assertResultTextParity(t, []byte(`{"observation":{"status":"partial","id":"O1",`+
 		`"quality":{"state":"unknown","samples":1,"stop_reason":"unreadable"}}}`), true)
-	requireTestContains(t, unknown, "quality=unknown(unreadable)")
+	requireTestNotContains(t, unknown, "quality=")
+
+	effect := assertResultTextParity(t, []byte(`{"outcome":"executed","effect":{"state":"observed"}}`), false)
+	requireTestNotContains(t, effect, "effect=")
+	unknownEffect := assertResultTextParity(t, []byte(`{"outcome":"uncertain","effect":{"state":"unknown"}}`), false)
+	requireTestNotContains(t, unknownEffect, "effect=")
 }
 
 func TestResultV4ScreenAndRotationRules(t *testing.T) {

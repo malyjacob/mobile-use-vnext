@@ -15,7 +15,7 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
   `snap`、`wait_for`、`act`、`inspect`、`keepalive`、`end`、`app`、`notify`、`shell`、
   `diagnose`。不注册 `/health`、认证初始化、旧工具别名或旧协议回退。
 - 目录指纹是工具数、注册顺序、名称、描述与入参 schema 的 canonical SHA-256。当前源码的
-  工具目录指纹为 `a18acde933ad4358ee0b6d5ec28ca2e4dcba643e33453de31c436763e561c54e`。
+  工具目录指纹为 `24e29ffad62cd998e1ac5fc26fcf4479e672806132ddce55ad3785794ebc6f0b`。
   发布清单中的指纹对应其记录的源码提交。发布时从目标提交重建并核验清单。
   探针按工具名比对实际 `tools/list` 的描述和入参 schema，并核对只读注解。传入 `-manifest`
   时，探针将清单中的工具数和目录 SHA-256 分别与源码目录的对应值比对。探针将
@@ -86,7 +86,6 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
 `nodes`，差分头只写 `base` 与 `changes`；块头 `view=` 以及 `nodes`/`entries` 两项计数
 属于 `inspect v3` 补看头。动作列的 `swipe` 表示节点的源能力，受控滚动使用
 `operation.type=scroll` 和 `container`。嵌套容器可按要滚动的区域选择 ref。
-`effect.state` 报告内容位移证据，执行事实由 `outcome` 表达。
 
 调用参数在进入客户端前由 `internal/protocol` 的严格解码器接入：未知成员、重复键、大小写
 变体、尾随第二个 JSON 值、类型混用与未声明 `null` 都被拒绝，且不产生设备调用。参数错误
@@ -119,11 +118,10 @@ schema 以 `reference` 与 `timeout` 为必填，`query`、`absent_query`、`sta
 `observation.id`）。超时若发布新 O，`isError=false`，`wait.matched` 含 `timeout` 及终帧
 命中的条件（文本写作 `matched=`）。命中条件或满足稳定状态时复用候选帧。到时或采样上限
 退出时，若最新成功轮询帧仍在 `CaptureMaxAge=15s` 内且之后没有失败尝试，则复用该帧。否则
-做一次终帧采集。连续 3 帧稳定由 `observation.quality.state=stable` 表达，文本省略该默认
-质量项；`wait.elapsed_ms` 计自准入完成至终帧发布（文本写作 `elapsed=<ms>ms`），验证采集
-整体受 35 秒固定预留约束，实际耗时可超过 `timeout` 至多约 35 秒；两个条件只匹配当前公开
-可见树且 `stable=true` 对整树计算摘要，
-页面有倒计时或实时进度变化时应保持 `stable=false`。参数在适配器侧按同一严格解码器接入，
+做一次终帧采集。`stable=true` 要求连续 3 帧内容摘要一致，忽略节点的 `bounds`、`ref` 与
+无动作叶子的文本。两个条件仍匹配当前完整公开可见树。`wait.elapsed_ms` 计自准入完成至终帧
+发布（文本写作 `elapsed=<ms>ms`），验证采集整体受 35 秒固定预留约束，实际耗时可超过
+`timeout` 至多约 35 秒。参数在适配器侧按同一严格解码器接入，
 解码器可判定的非法组合在发出 HTTP 请求前被拒；两个条件折叠后相同由引擎准入在请求发出后
 拒绝，不接触设备。
 
@@ -173,7 +171,7 @@ kind 成员矩阵是互斥权威：
 呈现的紧凑投影，面向调用方阅读与上下文效率，不承诺与结构化 JSON 逐字段互相还原；
 `/api/*` 与 `both`/`structured` 的 `structuredContent` 完整无损保留 `Result` JSON，含全部
 审计字段、三态与空集合语义。完整时间戳、`observation.origin`、`observation.revision`、
-`observation.actionable_until`、`observation.quality.samples`、`session.agent` 与
+`observation.actionable_until`、`observation.quality`、`effect`、`session.agent` 与
 `inspection.origin` 只在 `structured`/`both` 的 JSON 中保留。
 
 完整结果是 `(canonical A, CallToolResult.IsError, ImageContent)`。`A` 是去除图片 base64
@@ -186,8 +184,8 @@ kind 成员矩阵是互斥权威：
 `effect` 与 `observation.quality` 取自同一份 `Result`，适配器不重算或补投影这些事实：
 `effect` 只由 `scroll` 的操作结果与保留的 P 视图携带，带树的观察都携带
 `observation.quality`（未采样或重验交付为 `unknown`/`0`/`not_sampled`），只有没有树的失败
-观察不携带它。`structured`/`both` 的 `structuredContent` 携带完整对象，文本按 3.2 输出
-非默认质量的 `quality=` 项。两者的成员与取值见 [接口契约](interface.md) §11。
+观察不携带它。`structured`/`both` 的 `structuredContent` 携带完整对象；`text` 与
+`both` 的 `result v4` 文本省略两个整对象。成员与取值见 [接口契约](interface.md) §11。
 
 复合 `text` 的 `text_input`、`wait_for` 的 `wait`、`snap` 的顶层 `image` 与 `app` 结果同样
 取自这一份 `Result`；文本行与块语法见 3.2。显式 `press_enter=false` 和非法组合不会产生
@@ -261,7 +259,7 @@ end result
 
 成员按下列固定顺序投影，各自仅在该成员存在时出现，字段行与块按此顺序交错：
 
-1. 动作与状态控制标量：`effect=<state>`、`text_input write=<write> enter=<enter>`、
+1. 动作与状态控制标量：`text_input write=<write> enter=<enter>`、
    `target_reference=<ref>`、`request_closed=<true|false>`（永不省略）、
    `blocking_operation_id=<P>`、`can_start=<true|false>`、`blocking_code=<code>`、
    `start_operation_id=<P>`、`observation_state=<state>`、`input_state=<state>`。
@@ -290,8 +288,8 @@ end result
 | `observation.origin` | 始终省略 | 同会话恒等于 `start` 时的 `session.origin`，避免每帧重复 |
 | `observation.revision` | 始终省略 | 内部递增版本号，操作与恢复都不依赖 |
 | `observation.actionable_until` | 始终省略 | 由本次采集的最早读取时刻加 60 秒输入期限推导，并受会话租期截断；截止由服务端精确裁定 |
-| `observation.quality` | 省略整对象 | 仅 `state=stable`，或 `state=unknown` 且 `stop_reason=not_sampled` |
-| `observation.quality.samples` | 始终省略 | 非默认质量只写 `quality=<state>(<stop_reason>)`；采样次数仅供审计 |
+| `observation.quality` | 始终省略整对象 | 完整对象由结构化结果提供 |
+| `effect` | 始终省略整对象 | 完整对象由结构化结果提供 |
 | `observation.screen` | 条件省略 | 仅当顶层 `session` 为空或缺席且观察带树；`screen` 存在且 `rotation != 0` 时 `rot=<1\|2\|3>` 恒输出 |
 | `image.media_type`、`observation.image.media_type` | 省略 | 仅 `image/jpeg`；非 JPEG 写 `media=<type>` |
 | `session.agent` | 始终省略 | 单一固定 Agent 名称，无决策价值 |
@@ -300,7 +298,7 @@ end result
 
 除上表列出的成员外，`Result` 的其余成员都在 `result v4` 中显式投影，不静默丢弃：
 `request_closed` 永不省略；`target_reference`、`blocking_operation_id`、`can_start`、
-`blocking_code`、`start_operation_id`、`observation_state`、`input_state`、`effect`、
+`blocking_code`、`start_operation_id`、`observation_state`、`input_state`、
 `text_input`、`wait`、`cleanup`、`error`、`recovery` 与 `app` 的全部三态、缺席和空集合语义
 100% 保留。
 
@@ -377,7 +375,7 @@ token，或时间值既非合法 RFC3339 也不是安全 token 时，整对象�
 **观察行。** 单行摘要，`obs ` 之后首个不含 `=` 的字段是完整 `O`：
 
 ```text
-obs [<O>] [status=<partial|failed|…>] [fg=<前景>] [at=HH:MM:SS] [quality=<state>(<stop_reason>)] [screen=<W>x<H>[@<display_id>]] [rot=<1|2|3>] [missing=<a,b>]
+obs [<O>] [status=<partial|failed|…>] [fg=<前景>] [at=HH:MM:SS] [screen=<W>x<H>[@<display_id>]] [rot=<1|2|3>] [missing=<a,b>]
 ```
 
 - `status=complete` 通常省略；整行没有其他字段时写 `obs status=complete`，不产出裸 `obs`
@@ -386,8 +384,6 @@ obs [<O>] [status=<partial|failed|…>] [fg=<前景>] [at=HH:MM:SS] [quality=<st
 - `fg` 按 `foreground.state` 编码：`package` 与 `task_id` 都有写 `<package>#<task_id>`，
   只有 `package` 写 `<package>`，只有 `task_id` 写 `#<task_id>`，都没有写 `present`；
   `none` 写 `none`；`unknown` 写 `unknown(<reason>)`，`reason` 为空时写 `unknown`。
-- `quality` 只写非默认值 `quality=<state>(<stop_reason>)`，没有 `stop_reason` 时写
-  `quality=<state>`；默认质量整项省略，`samples` 从不出现。
 - `screen` 仅在顶层 `session` 非空或观察没有树时输出；`screen` 存在时，无论 `screen=` 是否
   省略，`rotation != 0` 都一律输出 `rot=<rotation>`。
 - `missing` 以逗号连接，空列表省略。
