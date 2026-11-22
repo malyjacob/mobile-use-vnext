@@ -1,6 +1,7 @@
 # 提案：wait_for 内容稳定判据与 text/工具描述不再披露 quality/effect
 
-状态：提案，未实现。
+状态：已实现（实现提交 `6202abe40a18ccbfae5d0975b7173509eba50d26`，2026-11-22）。
+发布交付与验收见[验证记录](../../verification/wait-content-stability-and-text-omit.md)。
 基线提交：`61d0b5e0830afccbe4fa607bcae7286a90dd7425`（分支 `master`，2026-11-22）。
 适用范围：`wait_for stable=true` 的稳定判据与 `observation.quality` 语义；MCP `text`/`both`
 文本投影；MCP 工具描述面。
@@ -49,13 +50,13 @@
 
 | 断言 | 证据 |
 | --- | --- |
-| `wait_for` 的稳定门禁对每个轮询帧用 `sampleDigestOf`（L1 原始身份链 + L2 公开树 + L3 语境）计算 `consecutive`，要求连续 3 帧相等 | [wait_for.go:287-320](../../internal/engine/wait_for.go#L287-L320)、[settle.go:298-308](../../internal/engine/settle.go#L298-L308) |
-| L1/L2 都含 `bounds`，动画页永不收敛 | [settle.go:346-371](../../internal/engine/settle.go#L346-L371)（bounds 在 354-357）、[settle.go:317-342](../../internal/engine/settle.go#L317-L342) |
-| text 的 `obs` 行会输出非默认 `quality=`，结果会输出 `effect=` | [result_text.go:895-905](../../internal/mcp/result_text.go#L895-L905)、[result_text.go:388-395](../../internal/mcp/result_text.go#L388-L395)、[docs/mcp.md:293-294](../../docs/mcp.md#L293-L294) |
-| 工具描述面不止 `tools/list`：`treeTextGuide` 与 `callerGuidance` 在 `ServerInstructions()`，经 `initialize`/`server/discover` 发布 | [schema.go:31-38](../../internal/mcp/schema.go#L31-L38)、[schema.go:104](../../internal/mcp/schema.go#L104)、[schema.go:127](../../internal/mcp/schema.go#L127)、[schema.go:154](../../internal/mcp/schema.go#L154)、[server.go:63](../../internal/mcp/server.go#L63) |
-| `CatalogSnapshot()` 只覆盖 13 个 tool 的 description/schema，不含 `treeTextGuide`/`callerGuidance` | [catalog.go:26-37](../../internal/mcp/catalog.go#L26-L37) |
-| `wait_for` 描述与 `stable` 参数说明仍写“整树连续 3 帧一致” | [schema.go:277](../../internal/mcp/schema.go#L277)、[schema.go:315](../../internal/mcp/schema.go#L315) |
-| probe 的 both 模式要求 structured 的非省略字段在 text 中出现；text-only 仍检查 quality/effect | [result_semantics.go:218-292](../../scripts/mcp-probe/result_semantics.go#L218-L292)、[result_semantics.go:319-345](../../scripts/mcp-probe/result_semantics.go#L319-L345)、[checks.go:1026-1050](../../scripts/mcp-probe/checks.go#L1026-L1050)、[result.go:534-556](../../scripts/mcp-probe/result.go#L534-L556) |
+| `wait_for` 的稳定门禁对每个轮询帧用 `sampleDigestOf`（L1 原始身份链 + L2 公开树 + L3 语境）计算 `consecutive`，要求连续 3 帧相等 | [wait_for.go:287-320](../../../internal/engine/wait_for.go#L287-L320)、[settle.go:298-308](../../../internal/engine/settle.go#L298-L308) |
+| L1/L2 都含 `bounds`，动画页永不收敛 | [settle.go:346-371](../../../internal/engine/settle.go#L346-L371)（bounds 在 354-357）、[settle.go:317-342](../../../internal/engine/settle.go#L317-L342) |
+| text 的 `obs` 行会输出非默认 `quality=`，结果会输出 `effect=` | [result_text.go:895-905](../../../internal/mcp/result_text.go#L895-L905)、[result_text.go:388-395](../../../internal/mcp/result_text.go#L388-L395)、[docs/mcp.md:293-294](../../../docs/mcp.md#L293-L294) |
+| 工具描述面不止 `tools/list`：`treeTextGuide` 与 `callerGuidance` 在 `ServerInstructions()`，经 `initialize`/`server/discover` 发布 | [schema.go:31-38](../../../internal/mcp/schema.go#L31-L38)、[schema.go:104](../../../internal/mcp/schema.go#L104)、[schema.go:127](../../../internal/mcp/schema.go#L127)、[schema.go:154](../../../internal/mcp/schema.go#L154)、[server.go:63](../../../internal/mcp/server.go#L63) |
+| `CatalogSnapshot()` 只覆盖 13 个 tool 的 description/schema，不含 `treeTextGuide`/`callerGuidance` | [catalog.go:26-37](../../../internal/mcp/catalog.go#L26-L37) |
+| `wait_for` 描述与 `stable` 参数说明仍写“整树连续 3 帧一致” | [schema.go:277](../../../internal/mcp/schema.go#L277)、[schema.go:315](../../../internal/mcp/schema.go#L315) |
+| probe 的 both 模式要求 structured 的非省略字段在 text 中出现；text-only 仍检查 quality/effect | [result_semantics.go:218-292](../../../scripts/mcp-probe/result_semantics.go#L218-L292)、[result_semantics.go:319-345](../../../scripts/mcp-probe/result_semantics.go#L319-L345)、[checks.go:1026-1050](../../../scripts/mcp-probe/checks.go#L1026-L1050)、[result.go:534-556](../../../scripts/mcp-probe/result.go#L534-L556) |
 
 ### 1.3 为什么不做完整方案
 
@@ -409,9 +410,26 @@ renderResultV4:
 
 ---
 
-## 11. 实现结果（归档时补写）
+## 11. 实现结果
 
-本节在提案归档时补写；当前状态为“提案，未实现”。
+### 11.1 已落地
+
+| 提案条目 | 实现与证据 |
+| --- | --- |
+| 内容稳定判据与终帧 | [wait_content.go](../../../internal/engine/wait_content.go) 的 `waitDigestOf`、`contentDigestOf` 与 [wait_for.go](../../../internal/engine/wait_for.go) 的轮询及终帧比较。网易云播放进度变化期间 3 次稳定等待通过，每次 1.66–1.76 秒 |
+| 条件等待与动作回归 | `stable=false` 条件等待仍用原三层摘要。[wait_content_test.go](../../../internal/engine/wait_content_test.go) 覆盖含条件的门禁、采样复用和终帧。B 站 `act(scroll)` 的结构化质量仍为 `unstable/2/budget` |
+| MCP 投影 | [result_text.go](../../../internal/mcp/result_text.go) 的省略清单、`encodeResultText`、`renderObservationV4`；B 站同一 `both` 响应的文本省略两个整对象，结构化 `effect.state=observed`，采样质量保留 |
+| 工具描述与独立探针 | [schema.go](../../../internal/mcp/schema.go) 的工具表与 `ServerInstructions`，探针 [catalog.go](../../../scripts/mcp-probe/catalog.go)、[checks.go](../../../scripts/mcp-probe/checks.go) 与 [result_v4.go](../../../scripts/mcp-probe/result_v4.go)。主机 stdio 和手机 HTTP 均通过 `tools/list`、`server/discover`、`initialize` |
+| 发布与文档 | [版本源](../../../release/versions.json) 发行 0.27.0、契约 23、Android versionCode 29。独立正式文档审计复检 CLEAN。手机完整包覆盖部署并保留私有数据，同提交构建的两个 Windows exe 已替换并核验 |
+
+### 11.2 与提案不同或未执行
+
+| 项 | 结论与理由 |
+| --- | --- |
+| 实现审查提出所有终帧摘要错误均不计样 | 内容摘要路径采纳，摘要失败清零且不增加采样。原整树摘要路径保留既有行为，维持提案对 `stable=false` 的兼容要求。处理理由已回复审查者 |
+| 知乎单独复测 | 未执行。提案允许 B 站或知乎，B 站已完成同一响应双投影闭环 |
+| 外部宿主管理的 MCP 进程切换 | 未执行。按交付边界由依赖方重启并重新发现工具 |
+| Issue 原建议中的 delta 动画几何变化省略、细分结构化原因与自定义过滤 | 未执行。按已确认范围保留 delta、现有结构化字段、`budget` 分支与 `not_observed` 证据门槛 |
 
 ---
 
