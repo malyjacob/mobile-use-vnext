@@ -1,10 +1,11 @@
 # 提案：加固 app 跨屏启动归属核验、虚拟屏前台彻底终止与未确认恢复收敛
 
-状态：提案，未实现。
+状态：已实现（实现提交 `cabfd40c627c2b829cd00a20dc1730605cce1044`，2026-11-22）。
+发布交付与验收见[验证记录](../../verification/app-window-task-lifecycle-hardening.md)。
 基线提交：`00394dd55898dd1faea6eb218db7f0f3ccacad5b`（分支 `master`，`2026-11-22`）。
 适用范围：`POST /api/app`、Go 客户端与 MCP `app` 工具的 `open`、`kill` 及变更分支 `uncertain` 恢复投影；覆盖 Issue #35 与 Issue #39。
 影响范围：`internal/engine/openapp.go`、`internal/engine/app_kill.go`、`internal/engine/app.go`、`internal/engine/recovery.go`、`internal/engine/openapp_test.go`、`internal/engine/app_lifecycle_test.go`、`internal/engine/recovery_entry_test.go`、`internal/engine/internal_uncertain_test.go`、`internal/engine/ui_execution_test.go`、`internal/mcp/schema.go`、`internal/mcp/schema_test.go`、`internal/mcp/result_parity_test.go`、`scripts/mcp-probe/app_suite.go`、`scripts/mcp-probe/app_suite_test.go`、`scripts/mcp-probe/probe_test.go`、`docs/interface.md`、`docs/mcp.md`、`docs/integration.md`、`docs/architecture.md`、`docs/client.md`、`docs/control-protocol.md`、`docs/phone-operations.md`、`docs/release.md`、`docs/runbook.md`、`README.md`、`release/versions.json` 及版本生成产物。
-契约（`/api/*` 字段与 `contract_version`）：改变。`/api/app` 请求与响应 JSON 字段名和结构不变，但两项执行与恢复语义发生变化：一是虚拟屏下 `app.kill` 不再拒绝本屏前台自有（`owned`）任务，并在确认进程结束（或确认进程集本为空）后同步移除该任务窗口容器（`RemoveTask`）与会话任务登记（仍拒绝主屏/他屏有任务、同屏多窗口或非 `owned` 目标）；二是 `app` 变更分支的 `finished + outcome=uncertain` 恢复投影 `recovery.entry` 从 `status` 收敛为 `observe`。按 [release.md](../../docs/release.md#L51-L52) 的执行语义变化规则，`contract_version` 由 `23` 前进为 `24`（拟 `release_version` `0.27.0` → `0.28.0`、`android_version_code` `29` → `30`，实施冻结时核对未被占用）。
+契约（`/api/*` 字段与 `contract_version`）：改变。`/api/app` 请求与响应 JSON 字段名和结构不变，但两项执行与恢复语义发生变化：一是虚拟屏下 `app.kill` 不再拒绝本屏前台自有（`owned`）任务，并在确认进程结束（或确认进程集本为空）后同步移除该任务窗口容器（`RemoveTask`）与会话任务登记（仍拒绝主屏/他屏有任务、同屏多窗口或非 `owned` 目标）；二是 `app` 变更分支的 `finished + outcome=uncertain` 恢复投影 `recovery.entry` 从 `status` 收敛为 `observe`。按 [release.md](../../../docs/release.md#L51-L52) 的执行语义变化规则，`contract_version` 由 `23` 前进为 `24`（拟 `release_version` `0.27.0` → `0.28.0`、`android_version_code` `29` → `30`，实施冻结时核对未被占用）。
 
 本文引用的函数名、行号、常量与默认值均以该基线提交为准；实现落地前若代码已前进，须按当时的 `HEAD` 重新核对（重点：`internal/engine/openapp.go`、`internal/engine/app_kill.go`、`internal/engine/app.go`、`internal/engine/recovery.go`、`internal/mcp/schema.go`、`scripts/mcp-probe/app_suite.go`）。
 
@@ -16,7 +17,7 @@
 
 1. **修复跨屏同包下 `app.open` 新建归属核验与后验兜底收编（#39）**：`appOpen` 改用单次全设备 `TaskList` 建立启动前已知任务基线（并从中过滤出目标屏候选供 `selectReusableTask` 复用），`verifyLaunchedTask` 只匹配启动前全设备均不存在的新 `TaskID` 并区分目标屏与他屏，彻底消除主屏既有同包任务（含刚 `handoff` 出去的任务）造成的伪多任务歧义；若虚拟屏 `LaunchApp` 回执未知或 2.6 秒轮询期内任务未出齐，但在进入 `finishAppUncertainWork` 后置观察完成后确认目标虚拟屏出现唯一新建同包任务，仍通过返回 `bool` 的条件化 helper `rememberOwnedTask` 将其登记为 `owned`，并按已证实事实与登记结果回填 `AppView` 字段（保持 `outcome=uncertain` 不改判）。
 2. **彻底化虚拟屏 `app.kill`：允许终止虚拟屏前台自有应用并同步拆除任务窗口壳（#35）**：在虚拟屏模式下取消 `killGuard` 的本屏前台拒绝（`kill_refused_foreground`），保留主屏/他屏同包任务拒绝（`kill_refused_task_elsewhere`）、同屏多窗口共享拒绝（`kill_refused_process_shared`）、非 `owned` 拒绝（`kill_refused_not_owned`）与 FGS/播放保护；在确认原进程全部结束（或确认原进程集合为空）后，同一工作内检查并执行 `RemoveTask` 移除任务容器壳并从 `session.Tasks` 移除，消除残留死壳及退栈后的「空树前台」污染。
-3. **消除 `app` 终态 `uncertain` 恢复入口自指死循环（#39）**：将 `recovery.go` 中 `appPlan` 对 `OutcomeUncertain` 的映射从 `entry=status, reference=P` 修正为 `entry=observe, reference=P, input_state=retired`（与原设计文档 [unified-app-lifecycle.md](implemented/unified-app-lifecycle.md#L280) 及 `mcp-probe` 矩阵一致），保留 `CodeTaskLifecycleBusy` 走 `status/P`。
+3. **消除 `app` 终态 `uncertain` 恢复入口自指死循环（#39）**：将 `recovery.go` 中 `appPlan` 对 `OutcomeUncertain` 的映射从 `entry=status, reference=P` 修正为 `entry=observe, reference=P, input_state=retired`（与原设计文档 [unified-app-lifecycle.md](unified-app-lifecycle.md#L280) 及 `mcp-probe` 矩阵一致），保留 `CodeTaskLifecycleBusy` 走 `status/P`。
 
 明确不做：不在只读 `app.list` 中自动收编陌生任务；不改变 `app.close`、`app.claim`、`app.handoff`、`act`/`shell` 的现有语义；不放开主屏上的 `kill`/`close`/`claim`/`handoff`；不修改 Android 控制 App 业务逻辑或固定 `uiautomator` 制品。
 
@@ -40,22 +41,22 @@
 
 | 断言 | 基线证据（`file:line`） |
 | --- | --- |
-| `appOpen` 启动前只调用单屏 `TasksOnDisplay(work.Ctx, session.Display.ID)` 采样 `preTasks`，丢弃了主屏及其他显示屏的同包任务 | [openapp.go:58](../../internal/engine/openapp.go#L58)、[launch.go:292-307](../../internal/android/launch.go#L292-L307) |
-| `verifyLaunchedTask` 用单屏 `preTasks` 构造 `known`，却在轮询中调用全设备 `e.dev.TaskList(work.Ctx)` 过滤 `!known[task.TaskID]`；主屏既有任务 `#213` 与虚屏新任务 `#214` 同时命中导致 `len(matches) > 1` 在第 0ms 直接返回 `nil, false, false` | [openapp.go:477-522](../../internal/engine/openapp.go#L477-L522)（`known` 在 `:479-482`，全设备 `TaskList` 在 `:496`，多匹配拒绝在 `:514-515`） |
-| 若主屏有 1 个既有同包任务而虚拟屏未及时出现新任务，`len(matches) == 1` 且 `DisplayID != session.Display.ID` 会将主屏既有任务误标为 `moved = true`（`application_moved`） | [openapp.go:508-513](../../internal/engine/openapp.go#L508-L513)、[openapp.go:241-248](../../internal/engine/openapp.go#L241-L248) |
-| `LaunchUnknown`（`:220-226`）与 `verifyLaunchedTask` 返回 `!ok`（`:234-240`）直接进入 `finishAppUncertainWork`，跳过 `:250` 的 `e.rememberTask(session, *task, true)` | [openapp.go:220-256](../../internal/engine/openapp.go#L220-L256) |
-| `finishAppUncertainWork` 在 `:267` 调用 `appPostObservation` 并于 `:272` 完成操作，但未结合最新任务列表将本屏已落地的唯一新任务补记进 `session.Tasks` 或回填 `AppView` | [app.go:248-275](../../internal/engine/app.go#L248-L275)；对应字段规则已在原提案 [unified-app-lifecycle.md:219](implemented/unified-app-lifecycle.md#L219) 定义 |
-| 未进入 `session.Tasks` 的虚拟屏任务在 `appList` 默认给 `shared`，在 `appClose`/`appHandoff` 报 `task_not_tracked`，在 `appKill` 报 `kill_refused_not_owned`，`appClaim` 只读主屏 `0` | [app_query.go:224-231](../../internal/engine/app_query.go#L224-L231)、[app_close.go:232-236](../../internal/engine/app_close.go#L232-L236)、[app_transfer.go:199](../../internal/engine/app_transfer.go#L199)、[app_transfer.go:576-579](../../internal/engine/app_transfer.go#L576-L579)、[app_kill.go:187-192](../../internal/engine/app_kill.go#L187-L192) |
-| `appPlan` 将 `OutcomeUncertain` 映射为 `RecoveryEntryStatus`；`statusOperationLocked` 对 `OperationFinished` 操作调用 `operationViewLocked` 原样回放 `op.Recovery`，形成 `status(op)` 自指死循环 | [recovery.go:270-272](../../internal/engine/recovery.go#L270-L272)、[status.go:111-154](../../internal/engine/status.go#L111-L154)、[engine.go:1277-1281](../../internal/engine/engine.go#L1277-L1281) |
-| 与之矛盾的是，原提案与 MCP/probe 已按 `observe/P` 验收 `app` 终态 `uncertain`：`resolveObserveRecoveryP` 显式识别 `outcome=="uncertain"` | [unified-app-lifecycle.md:280](implemented/unified-app-lifecycle.md#L280)、[result_text.go:1770-1779](../../internal/mcp/result_text.go#L1770-L1779)、[app_matrix_test.go:184](../../scripts/mcp-probe/app_matrix_test.go#L184)、[app_matrix_test.go:427](../../scripts/mcp-probe/app_matrix_test.go#L427) |
-| `appKill` 在 `KillProcess` 与 `awaitKillVerification` 确认进程结束后直接调用 `finishAppExecuted`，从未调用 `RemoveTask` 或 `removeSessionTaskLocked`，残留死任务壳继续出现在 `am stack list` | [app_kill.go:105-162](../../internal/engine/app_kill.go#L105-L162)、[dumpsys.go:258-303](../../internal/android/dumpsys.go#L258-L303)、[process.go:477-491](../../internal/android/process.go#L477-L491) |
-| `killGuard` 读虚拟屏 `Foreground` 并在匹配 `task.Package` 时以 `kill_refused_foreground` 拒绝；而主屏禁止已由 `appModeGuardLocked` 保障，跨屏同包已由 `otherDisplay` 拒绝 | [app.go:132-142](../../internal/engine/app.go#L132-L142)、[app_kill.go:193-222](../../internal/engine/app_kill.go#L193-L222) |
-| `KillProcess` 发信号前要求通过 `/proc/<pid>/stat` 重验 `StartTicks`，若进程已消失则返回 `instance_gone`（`DispatchNotDispatched`） | [process.go:459-469](../../internal/android/process.go#L459-L469) |
+| `appOpen` 启动前只调用单屏 `TasksOnDisplay(work.Ctx, session.Display.ID)` 采样 `preTasks`，丢弃了主屏及其他显示屏的同包任务 | [openapp.go:58](../../../internal/engine/openapp.go#L58)、[launch.go:292-307](../../../internal/android/launch.go#L292-L307) |
+| `verifyLaunchedTask` 用单屏 `preTasks` 构造 `known`，却在轮询中调用全设备 `e.dev.TaskList(work.Ctx)` 过滤 `!known[task.TaskID]`；主屏既有任务 `#213` 与虚屏新任务 `#214` 同时命中导致 `len(matches) > 1` 在第 0ms 直接返回 `nil, false, false` | [openapp.go:477-522](../../../internal/engine/openapp.go#L477-L522)（`known` 在 `:479-482`，全设备 `TaskList` 在 `:496`，多匹配拒绝在 `:514-515`） |
+| 若主屏有 1 个既有同包任务而虚拟屏未及时出现新任务，`len(matches) == 1` 且 `DisplayID != session.Display.ID` 会将主屏既有任务误标为 `moved = true`（`application_moved`） | [openapp.go:508-513](../../../internal/engine/openapp.go#L508-L513)、[openapp.go:241-248](../../../internal/engine/openapp.go#L241-L248) |
+| `LaunchUnknown`（`:220-226`）与 `verifyLaunchedTask` 返回 `!ok`（`:234-240`）直接进入 `finishAppUncertainWork`，跳过 `:250` 的 `e.rememberTask(session, *task, true)` | [openapp.go:220-256](../../../internal/engine/openapp.go#L220-L256) |
+| `finishAppUncertainWork` 在 `:267` 调用 `appPostObservation` 并于 `:272` 完成操作，但未结合最新任务列表将本屏已落地的唯一新任务补记进 `session.Tasks` 或回填 `AppView` | [app.go:248-275](../../../internal/engine/app.go#L248-L275)；对应字段规则已在原提案 [unified-app-lifecycle.md:219](unified-app-lifecycle.md#L219) 定义 |
+| 未进入 `session.Tasks` 的虚拟屏任务在 `appList` 默认给 `shared`，在 `appClose`/`appHandoff` 报 `task_not_tracked`，在 `appKill` 报 `kill_refused_not_owned`，`appClaim` 只读主屏 `0` | [app_query.go:224-231](../../../internal/engine/app_query.go#L224-L231)、[app_close.go:232-236](../../../internal/engine/app_close.go#L232-L236)、[app_transfer.go:199](../../../internal/engine/app_transfer.go#L199)、[app_transfer.go:576-579](../../../internal/engine/app_transfer.go#L576-L579)、[app_kill.go:187-192](../../../internal/engine/app_kill.go#L187-L192) |
+| `appPlan` 将 `OutcomeUncertain` 映射为 `RecoveryEntryStatus`；`statusOperationLocked` 对 `OperationFinished` 操作调用 `operationViewLocked` 原样回放 `op.Recovery`，形成 `status(op)` 自指死循环 | [recovery.go:270-272](../../../internal/engine/recovery.go#L270-L272)、[status.go:111-154](../../../internal/engine/status.go#L111-L154)、[engine.go:1277-1281](../../../internal/engine/engine.go#L1277-L1281) |
+| 与之矛盾的是，原提案与 MCP/probe 已按 `observe/P` 验收 `app` 终态 `uncertain`：`resolveObserveRecoveryP` 显式识别 `outcome=="uncertain"` | [unified-app-lifecycle.md:280](unified-app-lifecycle.md#L280)、[result_text.go:1770-1779](../../../internal/mcp/result_text.go#L1770-L1779)、[app_matrix_test.go:184](../../../scripts/mcp-probe/app_matrix_test.go#L184)、[app_matrix_test.go:427](../../../scripts/mcp-probe/app_matrix_test.go#L427) |
+| `appKill` 在 `KillProcess` 与 `awaitKillVerification` 确认进程结束后直接调用 `finishAppExecuted`，从未调用 `RemoveTask` 或 `removeSessionTaskLocked`，残留死任务壳继续出现在 `am stack list` | [app_kill.go:105-162](../../../internal/engine/app_kill.go#L105-L162)、[dumpsys.go:258-303](../../../internal/android/dumpsys.go#L258-L303)、[process.go:477-491](../../../internal/android/process.go#L477-L491) |
+| `killGuard` 读虚拟屏 `Foreground` 并在匹配 `task.Package` 时以 `kill_refused_foreground` 拒绝；而主屏禁止已由 `appModeGuardLocked` 保障，跨屏同包已由 `otherDisplay` 拒绝 | [app.go:132-142](../../../internal/engine/app.go#L132-L142)、[app_kill.go:193-222](../../../internal/engine/app_kill.go#L193-L222) |
+| `KillProcess` 发信号前要求通过 `/proc/<pid>/stat` 重验 `StartTicks`，若进程已消失则返回 `instance_gone`（`DispatchNotDispatched`） | [process.go:459-469](../../../internal/android/process.go#L459-L469) |
 
 ### 1.3 为什么直觉会出错
 
-- **“先 `RemoveTask` 再 `KillProcess` 也行”**：错误。Android `am stack remove` 在无后台服务时可能促使系统提前回收进程，导致紧随其后的 `KillProcess` 在 `/proc/<pid>/stat` 校核阶段命中 `instance_gone`（[process.go:464-466](../../internal/android/process.go#L464-L466)），将本可确认的清理打成 `kill_unconfirmed`。必须**先终止并核验原进程实例，再拆除任务窗口壳**。
-- **“既然在虚拟屏上，`app.list` 和 `killGuard` 直接把本屏所有未登记任务当作 `owned` 即可”**：错误。`app.list` 是纯只读查询（[app_query.go:160](../../internal/engine/app_query.go#L160)），且现有契约测试显式断言未登记任务在 `list` 中保持 `shared`、未 `owned` 的任务在 `kill` 中被 `kill_refused_not_owned` 拒绝（[app_lifecycle_test.go:41-65](../../internal/engine/app_lifecycle_test.go#L41-L65)、[394-404](../../internal/engine/app_lifecycle_test.go#L394-L404)）；更重要的是，若应用因 `singleTask` 把用户主屏既有任务吸到了虚拟屏，盲目认领为 `owned` 会导致 `end` 收尾误删用户主屏任务。正确做法是从源头用全设备 `preAllTasks` 修复 `app.open` 的新建归属判定与兜底收编。
+- **“先 `RemoveTask` 再 `KillProcess` 也行”**：错误。Android `am stack remove` 在无后台服务时可能促使系统提前回收进程，导致紧随其后的 `KillProcess` 在 `/proc/<pid>/stat` 校核阶段命中 `instance_gone`（[process.go:464-466](../../../internal/android/process.go#L464-L466)），将本可确认的清理打成 `kill_unconfirmed`。必须**先终止并核验原进程实例，再拆除任务窗口壳**。
+- **“既然在虚拟屏上，`app.list` 和 `killGuard` 直接把本屏所有未登记任务当作 `owned` 即可”**：错误。`app.list` 是纯只读查询（[app_query.go:160](../../../internal/engine/app_query.go#L160)），且现有契约测试显式断言未登记任务在 `list` 中保持 `shared`、未 `owned` 的任务在 `kill` 中被 `kill_refused_not_owned` 拒绝（[app_lifecycle_test.go:41-65](../../../internal/engine/app_lifecycle_test.go#L41-L65)、[394-404](../../../internal/engine/app_lifecycle_test.go#L394-L404)）；更重要的是，若应用因 `singleTask` 把用户主屏既有任务吸到了虚拟屏，盲目认领为 `owned` 会导致 `end` 收尾误删用户主屏任务。正确做法是从源头用全设备 `preAllTasks` 修复 `app.open` 的新建归属判定与兜底收编。
 - **“把 `verifyLaunchedTask` 改成只过滤 `task.DisplayID == session.Display.ID` 且不用改 `preTasks`”**：不完整。若不持有全设备 `preAllTasks`，就无法区分「目标屏没有新任务且他屏新起了一个任务（`application_moved`）」与「他屏本来就有一个旧任务」，也无法拦截主屏旧任务被 `singleTask` 隐式移入虚拟屏时被误当成新建 `owned` 任务。
 - **“干脆禁止主屏也有任务的 `open` 即可”**：违背多屏独立操作能力——用户完全可能在主屏挂着微信/B站的同时，在虚拟屏单独开一个同包任务，跨屏并存本来就是虚屏会话的核心使用场景。
 - **“`app` `uncertain` 既然已经返回了后置观察 `O_next`，`recovery` 应该直接给 `entry=retry, ref=O`”**：错误。`retry` 语义是「什么都没派发，用同一套参数重调同一工具」，对已进入派发的 `open`/`kill`/`claim`/`handoff`/`close` 返回 `retry` 会诱导调用方重放副作用。正确入口是 `observe/P`（告知先观察/查询核对现场、不要重放；若响应已附带新 `O_next` 则调用方可直接使用）。
@@ -115,7 +116,7 @@
    - **主动作终态不改判**：`Outcome` 严格保持 `OutcomeUncertain`（`504 app_launch_unconfirmed`），绝不因后置观察或后验任务列表成功而改写为 `executed`（遵守硬约束第 8 条）。
    - **已证实落点与条件化登记（`rememberOwnedTask`）**：在 `appPostObservation` 完成之后、`finishOperation` 冻结结果之前，若工作与原会话仍有效（`!e.detachedWorkRevoked(work)` 且 `e.sessionForWork(work) != nil` 且 `session.Mode == "virtual"`），执行一次只读 `TaskList` 核对：
      - 若存在**唯一**新增同包任务落在目标虚拟屏（`len(onTarget) == 1`，依然排除 `known` 中的旧任务）：
-       1. 在 `AppView` 上填充已证实的启动/落点物理事实：`task_id = onTarget[0].TaskID`、`display_id = session.Display.ID`、`reused = false`、`state_preserved = false`（与 [unified-app-lifecycle.md:219](implemented/unified-app-lifecycle.md#L219) 一致）；
+       1. 在 `AppView` 上填充已证实的启动/落点物理事实：`task_id = onTarget[0].TaskID`、`display_id = session.Display.ID`、`reused = false`、`state_preserved = false`（与 [unified-app-lifecycle.md:219](unified-app-lifecycle.md#L219) 一致）；
        2. 在引擎短锁内调用返回 `bool` 的 `e.rememberOwnedTask(work, session, onTarget[0])` 执行条件化提交：重验工作未撤销、原会话未结束且 `Epoch` 未变、`Mode == "virtual"`、`!e.transferProtectsLocked(onTarget[0].TaskID)`，若任务尚未入表则校验 `len(session.Tasks) < maxTrackedTasks`（与既有 `rememberTask` 容量约束一致）后记为 `TaskOwned` 并异步落盘，若已在表则校验其为 `TaskOwned`——全部满足才返回 `true`；
        3. **仅当 `rememberOwnedTask` 返回 `true` 时**，才在 `AppView` 上回填 `ownership = "owned"`；若因并发撤销、迁移保护或容量上限等原因返回 `false`，省略 `ownership`，不得伪造自有声明。
      - 若 `len(onTarget) == 0 && len(elsewhere) == 1` 且 `view.TaskID == nil`：只填充 `task_id = elsewhere[0].TaskID`，保持 `display_id` 与 `ownership` 省略。
@@ -151,9 +152,9 @@
          - 若 `listErr == nil` 且 `task.TaskID` 已不在 `tasks` 中（说明 Android 在最后一个进程死亡时已自动销毁了该 `TaskRecord`）：若 `!killDispatched` 则补齐 `target_pids=[]`/`killed_pids=[]`/`remaining_pids=[]`/`restarted=false`；调用 `forgetKilledTask(epoch, task.TaskID)` 移除登记并持久化，得 `executed`。
          - 若 `task.TaskID` 仍在 `tasks` 中（或 `listErr != nil`）：派发前再次重验 `!e.workRevoked(work)`（撤销处理同上，区分 `!killDispatched` → `OutcomeNotExecuted` 与 `killDispatched` → `OutcomeUncertain`），随后调用一次 `removeRes, removeErr := e.dev.RemoveTask(work.Ctx, task.TaskID)`：
            - 当且仅当 `removeRes.Receipt == device.DispatchTerminated && removeErr == nil` 时确认任务壳已拆除：若 `!killDispatched` 则补齐空 PID 数组与 `restarted=false`；调用 `forgetKilledTask(epoch, task.TaskID)` 移除登记并异步持久化，得 `executed`。
-           - 若回执为 `DispatchNotDispatched`：不因 `TaskList` 追认回执（遵守 [unified-app-lifecycle.md:151](implemented/unified-app-lifecycle.md#L151) 规则），保持 `session.Tasks` 登记不变；若 `!killDispatched`（未杀进程且 `RemoveTask` 也未进入派发，设备零副作用）：按 `finishAppError` 返回 `OutcomeNotExecuted`（撤销返回撤销码、超时/传输中断按既有预派发失败码映射，省略 `killed_pids`/`remaining_pids`/`restarted`）；若 `killDispatched`：进入 `OutcomeUncertain`（`CodeKillUnconfirmed`）。
+           - 若回执为 `DispatchNotDispatched`：不因 `TaskList` 追认回执（遵守 [unified-app-lifecycle.md:151](unified-app-lifecycle.md#L151) 规则），保持 `session.Tasks` 登记不变；若 `!killDispatched`（未杀进程且 `RemoveTask` 也未进入派发，设备零副作用）：按 `finishAppError` 返回 `OutcomeNotExecuted`（撤销返回撤销码、超时/传输中断按既有预派发失败码映射，省略 `killed_pids`/`remaining_pids`/`restarted`）；若 `killDispatched`：进入 `OutcomeUncertain`（`CodeKillUnconfirmed`）。
            - 若回执为 `DispatchUnknown` 或带错（已进入派发但结果未确认）：保持 `session.Tasks` 登记不变，若 `!killDispatched` 则补齐 `target_pids=[]`/`killed_pids=[]`/`remaining_pids=[]`/`restarted=false`，进入 `OutcomeUncertain`（`CodeKillUnconfirmed`）。
-       - **`forgetKilledTask(epoch, taskID)` 条件化删表**：短锁内参照 [app_transfer.go:677](../../internal/engine/app_transfer.go#L677) 严格校验 `e.session != nil && e.session.Epoch == epoch && e.session.State != SessionEnded`，满足时从 `e.session.Tasks` 删除 `taskID` 并调用 `e.persistAsync()`，防止会话已结束或切换代次后跨会话误删。
+       - **`forgetKilledTask(epoch, taskID)` 条件化删表**：短锁内参照 [app_transfer.go:677](../../../internal/engine/app_transfer.go#L677) 严格校验 `e.session != nil && e.session.Epoch == epoch && e.session.State != SessionEnded`，满足时从 `e.session.Tasks` 删除 `taskID` 并调用 `e.persistAsync()`，防止会话已结束或切换代次后跨会话误删。
    - **第三步（终态与后置观察）**：
      - `processesGone && taskRemoved` → `finishAppExecuted(work, op, view)`（随后的 `appPostObservation` 采集的是已移除死壳后的干净虚拟屏）；
      - `!processesGone` → `finishAppUncertainWork(..., CodeKillUnconfirmed, "已派发进程终止，但无法确认原实例全部结束", nil)`；
@@ -165,7 +166,7 @@
 - `recovery.go` 的 `appPlan` 将 `in.Code == protocol.CodeTaskLifecycleBusy` 与 `in.Outcome == OutcomeUncertain` 分离：
   - `in.Code == protocol.CodeTaskLifecycleBusy`（前置拒绝，任务仍有旧搬移/删除责任在途）继续返回 `{entry: "status", reference: "P", input_state: in.InputState}`；
   - `in.Outcome == OutcomeUncertain`（`open`、`claim`、`handoff`、`close`、`kill` 五个变更分支已认领并派发但未确认）固定返回 `{entry: "observe", reference: "P", input_state: effectiveSafeState}`，其中 `effectiveSafeState` 取 `recoveryInputRetired(in.InputState)`，若为 `effective` 则归一为 `retired`（严格满足不变量 I4：`entry=observe` 时 `input_state` 不得为 `effective`）。
-- 操作还在运行中（`op.State == OperationRunning`）调用 `status(P)` 时，`statusOperationLocked`（[status.go:118-124](../../internal/engine/status.go#L118-L124)）仍优先返回 `{entry: "status", reference: "P", cause: "running"}`；一旦操作进入 `OperationFinished`，`status(P)` 回放 `op.Recovery` 即收敛为 `observe/P/retired`。
+- 操作还在运行中（`op.State == OperationRunning`）调用 `status(P)` 时，`statusOperationLocked`（[status.go:118-124](../../../internal/engine/status.go#L118-L124)）仍优先返回 `{entry: "status", reference: "P", cause: "running"}`；一旦操作进入 `OperationFinished`，`status(P)` 回放 `op.Recovery` 即收敛为 `observe/P/retired`。
 
 ---
 
@@ -281,19 +282,19 @@ appKill(ctx, op, req):
 
 | 文件 | 改动 |
 | --- | --- |
-| [internal/engine/openapp.go](../../internal/engine/openapp.go) | `appOpen` 改用一次 `e.dev.TaskList(work.Ctx)` 取 `preAllTasks` 并过滤出 `preDisplayTasks`，传入 `finishOpenVirtual` 与 `finishOpenPrimary`；`verifyLaunchedTask` 每轮 `TaskList` `err == nil` 先重置 `candidate`/`moved` 再按 `!known[task.TaskID]` 区分 `onTarget` 与 `elsewhere`；`finishOpenVirtual` 的 `LaunchUnknown` 与 `!ok` 路径改调带 `reconcileOpenVirtualTask` 回调的 `finishAppUncertainOpen`（锁内 `rememberOwnedTask` 返回 `bool` 决定是否写入 `ownership = "owned"`，保持 `OutcomeUncertain`）；`finishOpenPrimary` 不执行兜底登记 |
-| [internal/engine/app.go](../../internal/engine/app.go) | 为 `finishAppUncertainWork` 抽出一层可复用的收口 helper（或可选 `afterPostObs` 回调），使 `finishAppUncertainOpen` 能在 `appPostObservation` 后、`finishOperation` 冻结前执行一次 `reconcileOpenVirtualTask` |
-| [internal/engine/app_kill.go](../../internal/engine/app_kill.go) | `killGuard` 保持先判 `entry.Ownership == TaskOwned`（`kill_refused_not_owned`）再新增 `e.transferProtectsLocked(task.TaskID)`（`CodeTaskLifecycleBusy`），删除本屏 `Foreground` 检查（原 `:214-222`）；`appKill` 记录 `killDispatched := len(final.instances) > 0`，并在 `processesGone` 后调用 `removeKilledTask` + `forgetKilledTask`（含会话代次与活跃状态守卫），严格区分 `!killDispatched` 预派发撤销/未派发的 `OutcomeNotExecuted`、无运行进程但移壳未确认的 `OutcomeUncertain` 与全部确认的 `OutcomeExecuted` |
-| [internal/engine/recovery.go](../../internal/engine/recovery.go) | `appPlan` 将 `:270-272` 拆开：`CodeTaskLifecycleBusy` 保留 `RecoveryEntryStatus`；`in.Outcome == OutcomeUncertain` 返回 `RecoveryEntryObserve` + `RecoveryReferenceP` + 非 `effective` 的 `retired` |
-| [internal/mcp/schema.go](../../internal/mcp/schema.go) | 更新 `app` 工具描述 `:592`：`kill` 去掉“非前台”隐含前置，明确虚拟屏可将当前前台唯一 `owned` 任务连同任务窗口彻底终止并移除，但若应用在主屏或其他屏仍有任务则拒绝（保留 `"live owned"` 约束词汇） |
-| [internal/mcp/schema_test.go](../../internal/mcp/schema_test.go)、[internal/mcp/result_parity_test.go](../../internal/mcp/result_parity_test.go) | 更新 `schema.go:592` 描述后同步更新 `schema_test.go:25` 的 `baselineDiscoveryBytes`（现基线 `36250`）与 `result_parity_test.go:527` 的 `TestCatalogFingerprintBaseline` 指纹基线；保持 `schema_test.go:671-680`（尤其 `:675`）对 `"live owned"` 等关键词校验通过 |
-| [internal/engine/openapp_test.go](../../internal/engine/openapp_test.go) | 新增：1) 主屏存在同包既有任务（模拟 `handoff` 后 `open`）时虚拟屏 `open` 一次性 `executed` 且 `owned`；2) 同场景中 `LaunchApp` 仅在他屏新建任务仍报 `application_moved`；3) `singleTask` 主屏旧任务若留在已知集合不误登记为 `owned`；4) `LaunchUnknown` / 超时后置观察前任务落地时 `outcome=uncertain` 仍保留并经 `rememberOwnedTask` 登记 `owned`、回填 `task_id`/`display_id`/`ownership`（含并发撤销/保护导致登记失败时省略 `ownership` 的对照）。更新 `:235` `TestAppOpenLaunchUnknownIsUncertain` 的 `recovery` 断言为 `observe/P/retired` |
-| [internal/engine/app_lifecycle_test.go](../../internal/engine/app_lifecycle_test.go) | 改造 `TestAppKillRefusesUnownedForegroundAndGuards`：将原 `foreground` 拒绝用例改为「虚拟屏前台 `owned` 任务可直接 `kill`，不仅终止进程而且移除任务壳、清理 `session.Tasks`、后置观察返回 `fg=none`」；新增「虚拟屏前台 `owned` 任务在主屏 `display=0` 仍有同包任务时以 `kill_refused_task_elsewhere` 拒绝」、「进程已死但 `RemoveTask` 失败/未确认时整体为 `uncertain (kill_unconfirmed)` 且保留 `session.Tasks` 登记」、「`processesGone` 前置检查已无任务壳时跳过 `RemoveTask` 并清理 `session.Tasks`」、「`kill` 遇到 `transferProtectsLocked` 时在非 `owned` 之后拒绝 `task_lifecycle_busy`」、「零运行实例时未进派发即撤销/未派发返回 `not_executed` 且省略统计字段，而 `RemoveTask` `DispatchUnknown` 返回 `uncertain` 并使用 `确认无运行进程，但无法确认任务窗口已移除`」；核查已有 `TestAppKillTerminatesExactInstances` 与 `TestAppKillConfirmedEmptyProcessSetIsExecutedWithoutSignal` 验证任务已从设备与 `session.Tasks` 清除 |
-| [internal/engine/recovery_entry_test.go](../../internal/engine/recovery_entry_test.go) | 更新 `:195-200` 为 `RecoveryEntryObserve`；补充 `app` 全部五个变更 kind（`open`/`claim`/`handoff`/`close`/`kill`）的 `OutcomeUncertain` 测试用例与反向对照 |
-| [internal/engine/internal_uncertain_test.go](../../internal/engine/internal_uncertain_test.go)、[internal/engine/ui_execution_test.go](../../internal/engine/ui_execution_test.go) | 两处 `hookedDevice.tasks` 原依赖 `appOpen` 仅在启动后调用 `TaskList`（`:31-42` 与 `:35-44`）；同步调整为仅在 `launchCalls > 0`（启动派发后）返回脚本化的缺失/多任务歧义，保持对 `open_app_missing_task_attribution` 与 `open_app_multiple_task_attribution` 的严格覆盖 |
-| [scripts/mcp-probe/app_suite.go](../../scripts/mcp-probe/app_suite.go)、[scripts/mcp-probe/app_suite_test.go](../../scripts/mcp-probe/app_suite_test.go)、[scripts/mcp-probe/probe_test.go](../../scripts/mcp-probe/probe_test.go) | `app_suite.go` 在受控虚屏 `app_kill` 执行后新增校验：`app.list` 不再包含该 `task_id`；若执行了 `kill`，在进入 `app_close` 前重新 `open` 受控目标并走完 `app_close` 闭环（替代原 `SKIP app_close`）；同步 `app_suite_test.go` 与 `probe_test.go` 的 fake 桩响应，将 `probe_test.go:733-743`（`fakeAdapter.handle`）与 `:2187-2207`（`fakeRecoveryService`）固定返回 `task_id: 42` 的 `app.list` 桩改为随 `kill` → `list` → 重新 `open` → `close` 演进的有状态桩，并更新 `:2624` 的 `PASS app_kill_refused` 断言 |
-| [release/versions.json](../../release/versions.json) 与生成脚本产物 | 实施时将 `contract_version` 升至 `24`、`release_version` 拟升至 `0.28.0`、`android_version_code` 升至 `30`，运行 `./scripts/generate-version.ps1` 重新生成 Go/Java/XML 版本文件（不手改生成文件） |
-| `docs/` 与 [README.md](../../README.md) | 见 §6.5 |
+| [internal/engine/openapp.go](../../../internal/engine/openapp.go) | `appOpen` 改用一次 `e.dev.TaskList(work.Ctx)` 取 `preAllTasks` 并过滤出 `preDisplayTasks`，传入 `finishOpenVirtual` 与 `finishOpenPrimary`；`verifyLaunchedTask` 每轮 `TaskList` `err == nil` 先重置 `candidate`/`moved` 再按 `!known[task.TaskID]` 区分 `onTarget` 与 `elsewhere`；`finishOpenVirtual` 的 `LaunchUnknown` 与 `!ok` 路径改调带 `reconcileOpenVirtualTask` 回调的 `finishAppUncertainOpen`（锁内 `rememberOwnedTask` 返回 `bool` 决定是否写入 `ownership = "owned"`，保持 `OutcomeUncertain`）；`finishOpenPrimary` 不执行兜底登记 |
+| [internal/engine/app.go](../../../internal/engine/app.go) | 为 `finishAppUncertainWork` 抽出一层可复用的收口 helper（或可选 `afterPostObs` 回调），使 `finishAppUncertainOpen` 能在 `appPostObservation` 后、`finishOperation` 冻结前执行一次 `reconcileOpenVirtualTask` |
+| [internal/engine/app_kill.go](../../../internal/engine/app_kill.go) | `killGuard` 保持先判 `entry.Ownership == TaskOwned`（`kill_refused_not_owned`）再新增 `e.transferProtectsLocked(task.TaskID)`（`CodeTaskLifecycleBusy`），删除本屏 `Foreground` 检查（原 `:214-222`）；`appKill` 记录 `killDispatched := len(final.instances) > 0`，并在 `processesGone` 后调用 `removeKilledTask` + `forgetKilledTask`（含会话代次与活跃状态守卫），严格区分 `!killDispatched` 预派发撤销/未派发的 `OutcomeNotExecuted`、无运行进程但移壳未确认的 `OutcomeUncertain` 与全部确认的 `OutcomeExecuted` |
+| [internal/engine/recovery.go](../../../internal/engine/recovery.go) | `appPlan` 将 `:270-272` 拆开：`CodeTaskLifecycleBusy` 保留 `RecoveryEntryStatus`；`in.Outcome == OutcomeUncertain` 返回 `RecoveryEntryObserve` + `RecoveryReferenceP` + 非 `effective` 的 `retired` |
+| [internal/mcp/schema.go](../../../internal/mcp/schema.go) | 更新 `app` 工具描述 `:592`：`kill` 去掉“非前台”隐含前置，明确虚拟屏可将当前前台唯一 `owned` 任务连同任务窗口彻底终止并移除，但若应用在主屏或其他屏仍有任务则拒绝（保留 `"live owned"` 约束词汇） |
+| [internal/mcp/schema_test.go](../../../internal/mcp/schema_test.go)、[internal/mcp/result_parity_test.go](../../../internal/mcp/result_parity_test.go) | 更新 `schema.go:592` 描述后同步更新 `schema_test.go:25` 的 `baselineDiscoveryBytes`（现基线 `36250`）与 `result_parity_test.go:527` 的 `TestCatalogFingerprintBaseline` 指纹基线；保持 `schema_test.go:671-680`（尤其 `:675`）对 `"live owned"` 等关键词校验通过 |
+| [internal/engine/openapp_test.go](../../../internal/engine/openapp_test.go) | 新增：1) 主屏存在同包既有任务（模拟 `handoff` 后 `open`）时虚拟屏 `open` 一次性 `executed` 且 `owned`；2) 同场景中 `LaunchApp` 仅在他屏新建任务仍报 `application_moved`；3) `singleTask` 主屏旧任务若留在已知集合不误登记为 `owned`；4) `LaunchUnknown` / 超时后置观察前任务落地时 `outcome=uncertain` 仍保留并经 `rememberOwnedTask` 登记 `owned`、回填 `task_id`/`display_id`/`ownership`（含并发撤销/保护导致登记失败时省略 `ownership` 的对照）。更新 `:235` `TestAppOpenLaunchUnknownIsUncertain` 的 `recovery` 断言为 `observe/P/retired` |
+| [internal/engine/app_lifecycle_test.go](../../../internal/engine/app_lifecycle_test.go) | 改造 `TestAppKillRefusesUnownedForegroundAndGuards`：将原 `foreground` 拒绝用例改为「虚拟屏前台 `owned` 任务可直接 `kill`，不仅终止进程而且移除任务壳、清理 `session.Tasks`、后置观察返回 `fg=none`」；新增「虚拟屏前台 `owned` 任务在主屏 `display=0` 仍有同包任务时以 `kill_refused_task_elsewhere` 拒绝」、「进程已死但 `RemoveTask` 失败/未确认时整体为 `uncertain (kill_unconfirmed)` 且保留 `session.Tasks` 登记」、「`processesGone` 前置检查已无任务壳时跳过 `RemoveTask` 并清理 `session.Tasks`」、「`kill` 遇到 `transferProtectsLocked` 时在非 `owned` 之后拒绝 `task_lifecycle_busy`」、「零运行实例时未进派发即撤销/未派发返回 `not_executed` 且省略统计字段，而 `RemoveTask` `DispatchUnknown` 返回 `uncertain` 并使用 `确认无运行进程，但无法确认任务窗口已移除`」；核查已有 `TestAppKillTerminatesExactInstances` 与 `TestAppKillConfirmedEmptyProcessSetIsExecutedWithoutSignal` 验证任务已从设备与 `session.Tasks` 清除 |
+| [internal/engine/recovery_entry_test.go](../../../internal/engine/recovery_entry_test.go) | 更新 `:195-200` 为 `RecoveryEntryObserve`；补充 `app` 全部五个变更 kind（`open`/`claim`/`handoff`/`close`/`kill`）的 `OutcomeUncertain` 测试用例与反向对照 |
+| [internal/engine/internal_uncertain_test.go](../../../internal/engine/internal_uncertain_test.go)、[internal/engine/ui_execution_test.go](../../../internal/engine/ui_execution_test.go) | 两处 `hookedDevice.tasks` 原依赖 `appOpen` 仅在启动后调用 `TaskList`（`:31-42` 与 `:35-44`）；同步调整为仅在 `launchCalls > 0`（启动派发后）返回脚本化的缺失/多任务歧义，保持对 `open_app_missing_task_attribution` 与 `open_app_multiple_task_attribution` 的严格覆盖 |
+| [scripts/mcp-probe/app_suite.go](../../../scripts/mcp-probe/app_suite.go)、[scripts/mcp-probe/app_suite_test.go](../../../scripts/mcp-probe/app_suite_test.go)、[scripts/mcp-probe/probe_test.go](../../../scripts/mcp-probe/probe_test.go) | `app_suite.go` 在受控虚屏 `app_kill` 执行后新增校验：`app.list` 不再包含该 `task_id`；若执行了 `kill`，在进入 `app_close` 前重新 `open` 受控目标并走完 `app_close` 闭环（替代原 `SKIP app_close`）；同步 `app_suite_test.go` 与 `probe_test.go` 的 fake 桩响应，将 `probe_test.go:733-743`（`fakeAdapter.handle`）与 `:2187-2207`（`fakeRecoveryService`）固定返回 `task_id: 42` 的 `app.list` 桩改为随 `kill` → `list` → 重新 `open` → `close` 演进的有状态桩，并更新 `:2624` 的 `PASS app_kill_refused` 断言 |
+| [release/versions.json](../../../release/versions.json) 与生成脚本产物 | 实施时将 `contract_version` 升至 `24`、`release_version` 拟升至 `0.28.0`、`android_version_code` 升至 `30`，运行 `./scripts/generate-version.ps1` 重新生成 Go/Java/XML 版本文件（不手改生成文件） |
+| `docs/` 与 [README.md](../../../README.md) | 见 §6.5 |
 
 ### 6.2 配置与取值
 
@@ -325,23 +326,23 @@ appKill(ctx, op, req):
 
 实施阶段须同步修改下列文档，并在实现提交前由独立只读文档审计 subagent 审至 `clean`：
 
-- [docs/interface.md](../../docs/interface.md)：
+- [docs/interface.md](../../../docs/interface.md)：
   - `:18` 协议头示例 `X-Mobile-Use-Contract` 从 `23` 更新到 `24`；
   - `:1333-1338`、`app.kill` 准入说明删除「应用在本屏前台……拒绝」，补充说明在虚拟屏可直接终止本屏前台 `owned` 任务（主屏/他屏仍有该包任务时仍以 `kill_refused_task_elsewhere` 拒绝），且在确认原进程全部结束（或原进程集为空）后同步移除该任务窗口容器及会话登记；
   - `:1340-1345` 核对并更新 `open`/`kill` 失败、恢复与已证明身份字段规则说明（确保 `open uncertain` 与 `kill` 收口表述与现行行为一致）；
   - `:1357-1365` 补充标注 `kill_refused_foreground` 保留在 `409` 受控错误码词表中，现行虚拟屏实现已不再因本屏前台拒绝；
   - 共同 `contract_version` 样例与字段说明（`:848, 875, 911, 921, 934` 等处）从 `23` 同步到 `24`。
-- [docs/architecture.md](../../docs/architecture.md)：
+- [docs/architecture.md](../../../docs/architecture.md)：
   - `:154-159` 更新 `open` 的全设备启动前基线核验及 `kill` 去掉非前台限制并同步拆任务窗口；
   - `:671-672` 同步版本与契约号。
-- [docs/integration.md](../../docs/integration.md)：
+- [docs/integration.md](../../../docs/integration.md)：
   - `:44, 313, 321, 569, 755` 各处示例与要求中的 `X-Mobile-Use-Contract` 从 `23` 更新至 `24`；
   - `:734` `kill_refused_*` 行去掉「前台」拒绝原因，保留非 owned、跨屏/同屏冲突、FGS/播放与 root；
   - `:737` `504 app_launch_unconfirmed` 改为：返回 `recovery entry=observe ref=<P>` 时按 `observe` / `app.list` 核验（仅传输超时未知操作结果时先用 `status(P)` 确认是否已完成）。
-- [docs/mcp.md](../../docs/mcp.md)：`:17-18`（尤其 `:18` 固化的 tool catalog fingerprint `24e29ffad62cd998e1ac5fc26fcf4479e672806132ddce55ad3785794ebc6f0b`）随 `internal/mcp/schema.go:592` 描述调整同步更新为新指纹，并核对工具说明与版本一致性。
-- [docs/release.md](../../docs/release.md)：`:38-41`（含 `:40` 冻结 `source_commit`）、`:76-77`、`:85` 随 `release/versions.json`（`contract_version=24`、`release_version=0.28.0`、`android_version_code=30`）同步升级。
-- [README.md](../../README.md)：`:10-11` 与 `:167`（`X-Mobile-Use-Contract: 24`）同步版本、Android versionCode 与契约号。
-- [docs/client.md](../../docs/client.md#L22)、[docs/control-protocol.md](../../docs/control-protocol.md#L26-L158)、[docs/phone-operations.md](../../docs/phone-operations.md#L124-L257)、[docs/runbook.md](../../docs/runbook.md#L122-L274)：同步 `contract_version=24`、`release_version` 与 `android_version_code`。
+- [docs/mcp.md](../../../docs/mcp.md)：`:17-18`（尤其 `:18` 固化的 tool catalog fingerprint `24e29ffad62cd998e1ac5fc26fcf4479e672806132ddce55ad3785794ebc6f0b`）随 `internal/mcp/schema.go:592` 描述调整同步更新为新指纹，并核对工具说明与版本一致性。
+- [docs/release.md](../../../docs/release.md)：`:38-41`（含 `:40` 冻结 `source_commit`）、`:76-77`、`:85` 随 `release/versions.json`（`contract_version=24`、`release_version=0.28.0`、`android_version_code=30`）同步升级。
+- [README.md](../../../README.md)：`:10-11` 与 `:167`（`X-Mobile-Use-Contract: 24`）同步版本、Android versionCode 与契约号。
+- [docs/client.md](../../../docs/client.md#L22)、[docs/control-protocol.md](../../../docs/control-protocol.md#L26-L158)、[docs/phone-operations.md](../../../docs/phone-operations.md#L124-L257)、[docs/runbook.md](../../../docs/runbook.md#L122-L274)：同步 `contract_version=24`、`release_version` 与 `android_version_code`。
 
 ---
 
@@ -386,7 +387,7 @@ appKill(ctx, op, req):
 | 恢复收敛：`TestRecoveryAppUncertainIsObserve` | `open`/`claim`/`handoff`/`close`/`kill` 在 `OutcomeUncertain` 下经 `planRecovery` 与 `status(P)` 均输出 `entry=observe, reference=P, input_state=retired`；`CodeTaskLifecycleBusy` 保留 `status/P`；全套 I1–I9 不变式通过 |
 | MCP 与 Probe 单测 | `internal/mcp`（含 `schema_test.go` `"live owned"`/`baselineDiscoveryBytes` 与 `result_parity_test.go` `TestCatalogFingerprintBaseline`）、`scripts/mcp-probe`（含更新后有状态 `probe_test.go`）、`protocol` 全量单测通过；`generate-version.ps1 -Check` 通过；交叉构建 `GOEXPERIMENT=jsonv2 GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build ./...` 通过 |
 
-### 8.2 实机/系统级与发布默认范围（按 [AGENTS.md](../../AGENTS.md) 第 19、24 条由主代理亲自执行）
+### 8.2 实机/系统级与发布默认范围（按 [AGENTS.md](../../../AGENTS.md) 第 19、24 条由主代理亲自执行）
 
 实施阶段按默认发布范围完成三项交付与最小闭环实机验证：
 
@@ -402,7 +403,7 @@ appKill(ctx, op, req):
 
 ### 8.3 记录
 
-实施与验证结束后按 [process.md](../process.md#L172-L201) 执行「先提交实现、再归档提案」：将本文移入 `maintenance/proposals/implemented/` 并重写相对链接，补充 §11 实现结果，并将实机、构建与探针完整记录写入 `maintenance/verification/app-window-task-lifecycle-hardening.md`。
+实施与验证结束后按 [process.md](../../process.md#L172-L201) 执行「先提交实现、再归档提案」：将本文移入 `maintenance/proposals/implemented/` 并重写相对链接，补充 §11 实现结果，并将实机、构建与探针完整记录写入 `maintenance/verification/app-window-task-lifecycle-hardening.md`。
 
 ---
 
@@ -435,20 +436,35 @@ appKill(ctx, op, req):
 
 ---
 
-## 11. 实现结果（归档时补写）
+## 11. 实现结果
 
-实现提交：`<hash>`。实现与验证记录：`../../verification/app-window-task-lifecycle-hardening.md`
-（本节在归档移动之后补写，届时文件在 `implemented/` 下，故链接比新建时多一层）。
+实现提交：`cabfd40c627c2b829cd00a20dc1730605cce1044`。实现与验证记录：[app-window-task-lifecycle-hardening.md](../../verification/app-window-task-lifecycle-hardening.md)。
 
 ### 11.1 已落地
 
-| 提案条目 | 落点 |
+| 提案条目 | 实现与证据 |
 | --- | --- |
+| §4.1 全设备启动前基线与跨屏归属 | [openapp.go](../../../internal/engine/openapp.go) 的 `appOpen` 改为单次 `TaskList` 取 `preAllTasks`，并以 `tasksOnDisplay` 过滤复用集合；`verifyLaunchedTask` 用 `diffNewPackageTasks` 每轮重置候选，只认启动后新增且落在目标屏的唯一同包任务。实机 `handoff` 后同包重开一次 `executed`、`ownership=owned`、`task=235 display=197` |
+| §4.1.3 未确认收编 | [openapp.go](../../../internal/engine/openapp.go) 的 `finishOpenUncertain`、`reconcileOpenVirtualTask`、`rememberOwnedTask` 与 [app.go](../../../internal/engine/app.go) 的 `finishAppUncertainWorkAfter` 钩子：后置观察后一次只读核对，仅在唯一新建任务且条件化登记成功时写 `ownership=owned`，主 outcome 保持 `uncertain` |
+| §4.2 虚拟屏前台终止与任务窗口移除 | [app_kill.go](../../../internal/engine/app_kill.go) 的 `killGuard` 删除本屏 `Foreground` 拒绝并把 `owned` 判定排在迁移保护之前；`appKill` 以 `killDispatched` 分层，`removeKilledTask`、`finishKillRemovalRevoked`、`forgetKilledTask`、`fillEmptyKillFacts` 完成壳移除与条件化登记删除。实机前台受控应用 `killed_pids=1`，`app.list` 随即不含该任务 |
+| §4.3 终态 uncertain 恢复收敛 | [recovery.go](../../../internal/engine/recovery.go) 的 `appPlan`：`task_lifecycle_busy` 保持 `status/P`，`OutcomeUncertain` 改为 `observe/P/retired`（`effective` 归一为 `retired`）。五个变更 kind 的 `status(P)` 回放一致，运行中仍先返回 `running` |
+| §6.1 MCP 描述与指纹 | [schema.go](../../../internal/mcp/schema.go) 的 `app` kill 描述与 [result_parity_test.go](../../../internal/mcp/result_parity_test.go) 指纹基线；`go run ./scripts/toolcatalog` 与 [docs/mcp.md](../../../docs/mcp.md) 一致为 `6a22be013e8653b79f1c46e6c5c9212309454eee1b4f377836b81936b49c95e8` |
+| §6.1 独立探针 | [app_suite.go](../../../scripts/mcp-probe/app_suite.go) 新增 `app_kill_removed` 与 kill 后重开→close 闭环；stdio 与手机 HTTP 的 `app-lifecycle` 在 `both`/`text`/`structured` 下均 `RESULT PASS` |
+| §6.1 版本源与文档 | [versions.json](../../../release/versions.json) 发行 0.28.0、契约 24、versionCode 30，生成产物由 `generate-version.ps1` 重写；`docs/` 与 README 同步，独立只读文档审计两轮后复核 clean |
 
 ### 11.2 与提案不同或未执行
 
 | 项 | 结论与理由 |
 | --- | --- |
+| 收编入口命名 | 实现为 `finishOpenUncertain`（提案写作 `finishAppUncertainOpen`），行为一致 |
+| `baselineDiscoveryBytes` | 未修改：kill 描述变长后实测 `total=35526 < 36250`，断言未失败 |
+| 测试门控方式 | 两个既有归因子用例的 `hookedDevice.tasks` 按“启动是否已派发”（`launchCalls>0`）门控，而非按 `TaskList` 调用序号，避免分支相关脆弱 |
+| 探针额外输出 | 拒绝路径新增 `SKIP app_kill_removed`（明确“未验证移除”），并新增拒绝路径与移除失败两个反向用例，未扩大实现范围 |
+| `RemoveTask` 未派发的预派发码 | 沿用 [app_close.go](../../../internal/engine/app_close.go) 既有映射返回 `409 control_revoked` 的 `not_executed`，未新造错误码 |
+| 后验收编时机 | 仅在 `appPostObservation` 之后、`finishOperation` 冻结之前执行一次，未在前置额外读取，避免多余设备读 |
+| 恢复收敛的清理范围 | 未改 `statusOperationLocked`/`operationViewLocked`，运行中 `status(P)` 语义保持 |
+| 系统自发崩溃留下的死壳 | 仍不在范围内：未调用 `kill` 的系统崩溃残留由调用方按 `fg` 与后续 `app.close`/`app.kill` 清理 |
+| 实机未确认 `open` 触发 | 线上时序难以稳定制造 `LaunchUnknown`，该分支由单元测试与后验收编用例覆盖 |
 
 ---
 
