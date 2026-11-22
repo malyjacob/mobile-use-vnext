@@ -1,6 +1,7 @@
 # 项目实施状态
 
-状态：2026-11-22，0.25.0（契约 21）完成 `result v4` 紧凑结果外壳、短 `O`/`P` 标识、精确 `recovery` 引用与 1024 截屏长边上限；手机整组覆盖部署（保留 App 私有数据）、Windows 主机两件产物磁盘替换、双入口独立探针与虚拟屏实机 `result v4` 文本闭环均 PASS（[记录](verification/compact-result-envelope-and-image-sizing.md)）。
+状态：2026-11-22，0.26.0（契约 22）完成 `act` 静态目标解析策略与错误返回契约统一（#27、#28、#31）：新增 `422 no_safe_trajectory`、以统一 `candidates`/`blocking_refs` 取代 9 个历史引导/诊断键、升级 `scroll` 同视口栈/祖先提升/居中 3 轴线、`tap`/`long_press` 4 级规划与视觉锚定冒泡/共位吸附、坐标 `pointSet` 与 raw `swipe` 豁免及非 `text` `409 target_changed` 9 项封闭 `reason`；手机整组覆盖部署（保留 App 私有数据）、Windows 主机两件产物磁盘替换、双入口独立探针与双入口虚拟屏实机最小闭环均 PASS（[记录](verification/act-target-resolution-and-error-contract.md)）。
+2026-11-22，0.25.0（契约 21）完成 `result v4` 紧凑结果外壳、短 `O`/`P` 标识、精确 `recovery` 引用与 1024 截屏长边上限；手机整组覆盖部署（保留 App 私有数据）、Windows 主机两件产物磁盘替换、双入口独立探针与虚拟屏实机 `result v4` 文本闭环均 PASS（[记录](verification/compact-result-envelope-and-image-sizing.md)）。
 2026-11-21，0.24.0（契约 21）MCP 无损结果与树文本完成整组发布、虚拟屏双入口逐字段对照和独立探针验证（[记录](verification/mcp-lossless-text-format.md)）。
 0.22.0（契约 20）把会话显示屏身份加入 `observation.screen.display_id`，
 并把受管 shell 的显示屏语义写入契约与工具说明，整组部署后在虚拟屏会话实测（issue #11）；
@@ -49,6 +50,7 @@
 | 默认观察树坐标省略（契约 20） | 已实现 / 已实测（有限） | `6838423`：动作位置优先，无动作 `text` 与匿名节点省略矩形，重复与 1% 面积判据；0.20.0/契约 20/versionCode 22 整组构建、清单核验、覆盖部署，主机两个 exe 替换与两条独立探针 PASS。实机受控页三帧策略复算 0 mismatch、文字坐标全隐藏、`inspect` 补回原矩形、ref tap executed；三份附件回放与 85% 门槛对照未执行（[记录](verification/compact-observation-bounds.md)） |
 | MCP 结果模式 | 已实现 | 已实测：both/text/structured 的主机 stdio 闭环、手机 HTTP 三模式各 12 工具及取消恢复；大值仅合成测试，外部宿主/截断/race 未验证（[记录](verification/mcp-result-modes.md)） |
 | MCP `result v4` 紧凑外壳、短 `O`/`P` 与精确恢复引用（0.25.0） | 已实现 / 已实测（有限） | `fcf6ca2`：`text`/`both` 改为 `result v4` 的一到两行外壳，观察、会话与集合行紧凑化，`text` 正式与 `structured` 分层；真实 `O`/`P` 改为 4 位实例标签加序号（实机 `O2137_1`/`P4434_1`），`recovery` 按路线 R1 解析为可直接回传的真实编号并在四条红线回退抽象 `P`；截屏长边上限 `1200→1024`（`1080×2400` 得 `461×1024`）。0.25.0/契约 21/versionCode 27 整组构建、双清单核验（13 工具、指纹 `e42f9adb…`）、手机覆盖部署、主机两件产物替换、主机 stdio 与手机 HTTP 独立探针、虚拟屏实机最小 `v4` 文本闭环均 PASS；`docs/` 独立审计 6 项修正后 CLEAN；宿主重连与主屏/其他机型重演未执行（[记录](verification/compact-result-envelope-and-image-sizing.md)） |
+| 统一 `act` 静态目标解析策略与错误返回契约（0.26.0，契约 22） | 已实现 / 已实测（有限） | `b305e23`：解决 #27/#28/#31；新增 `422 no_safe_trajectory`，废除 9 个历史引导/诊断键，全 `act` 静态 `422` 统一返回经当前 `O` 干跑的 `candidates`（至多 4 项含 `executable`）与可选 `blocking_refs`；`scroll` 支持双向 ≥85% 同视口免阻、非滚动 `ref` 祖先提升、坐标最内层/回退/消歧与 3 轴线居中轨迹；`tap`/`long_press` 将 `grid_3x3` 扶正为第 4 级执行候选并新增 `coextensive_child`/`bubble_ancestor`/`bubble_colocated` 双绑定重验，彻底删除过期 Legacy 副本；坐标升级 `pointSet`（上限 64）与 raw `swipe` 豁免；非 `text` `409 target_changed` 附 9 项封闭 `reason`。0.26.0/契约 22/versionCode 28 整组构建、双清单核验（13 工具、指纹 `a18acde9…`）、手机覆盖部署（保留 App 私有数据）、主机两件产物替换、主机 stdio 与手机 HTTP 独立探针及双入口设置页 8 步闭环均 PASS；`docs/` 独立审计 9 项修正后 CLEAN；宿主重连由用户处理，第三方复杂页面与 `primary` 模式由 `internal/engine` 全量单测覆盖（[记录](verification/act-target-resolution-and-error-contract.md)） |
 | Go client（`internal/client`） | 已实现 | 已验证：P 保留、断线、重复 P、取消、只读取消、图片 |
 | 控制同步消息投递 | 已实现 | 已验证：App 私存、系统通知、消息中心列表/详情、本地已读、确认释放、跨服务重启保留 |
 | 完整 control_view 呈现 | 已实现 | 已验证：Activity/通知/悬浮同源、失鲜、停止优先级、清理/权限/模式详情、主屏确认 |

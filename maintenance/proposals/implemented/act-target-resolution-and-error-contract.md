@@ -1,12 +1,13 @@
 # 提案：统一 act 静态目标解析策略与错误返回契约
 
-状态：提案，未实现。
+状态：已实现（实现提交 `b305e23675d1b55c2f05ca8a904e579e400c72fd`，2026-11-22）。
+构建、实机与双入口探针结果见[验证记录](../../verification/act-target-resolution-and-error-contract.md)。
 基线提交：`c38a43eb2d4821ab2993ee9bba27ce77f042ae51`（分支 `master`，`2026-11-22`）。
 适用范围：`act` 全分支（`tap`、`long_press`、`scroll`、`swipe`，以及 `text` 的焦点点击/坐标解析）的静态目标解析、对应的认领后实时重验、静态 `422` 错误码与 `error.details` 契约、`409 target_changed` 的归因 `reason`，以及 MCP 工具说明与 `serverInstructions`。不改变 `key`、`text` 的写入/回车状态机与 `text_input`、公开树 `Node`/`ReadNode` 形状、O/P 生命周期、STOP 与恢复入口规则。
 影响范围：`internal/engine`（`scroll.go`、`tap_scope.go`、`point.go`、`act.go`、`act_revalidation_policy.go` 及测试）、`internal/protocol`（`errors.go` 及测试）、`internal/httpapi`（`app_test.go` 错误详情线测试）、`internal/client`（客户端保真测试）、`internal/mcp`（`schema.go`、`schema_test.go`、`result_manifest_test.go`、`result_parity_test.go`）、`scripts/mcp-probe`（如涉及目录与错误详情校验）、受影响的正式文档（`docs/interface.md`、`docs/architecture.md`、`docs/mcp.md`、`docs/integration.md`、`docs/release.md`、`docs/runbook.md`、`docs/phone-operations.md`、`docs/control-protocol.md`、`docs/client.md`、`README.md`）；实施发布时涉及 `release/versions.json` 及版本生成物、手机整组构建/清单/覆盖部署、主机侧 `build/device-mcp.exe` 与 `build/mcp-probe.exe` 及 `maintenance/verification/`。Android 控制 App 业务逻辑与固定 uiautomator JAR 不变。
 契约（`/api/*` 字段与 `contract_version`）：改变（破坏性清理）——新增 `422` 错误码 `no_safe_trajectory`；统一全 `act` 静态 `422` 码表与 `error.details` 契约（以统一 `candidates` 与可选 `blocking_refs` 取代 9 个历史引导/诊断键：`occluding_ref`、`occluding_refs`、`ambiguous_refs`、`owner_refs`、`nearest_actionable_ref`、`safe_point`、`safe_carrier_ref`、`suggested_point`、`suggested_carrier_ref`）；为非 `text` 的 `409 target_changed` 新增封闭 `details.reason`；升级 `scroll`/`tap`/`long_press`/`point`/`swipe` 的静态解析与重验语义。共同契约拟从 `21` 升级为 `22`（配套建议 `release_version="0.26.0"`、`android_version_code=28`）；本提案落盘不修改版本源。
 
-本文引用的函数名、行号、常量与默认值均以该基线提交为准；实现落地前若代码已前进，须按当时的 `HEAD` 重新核对（重点：[scroll.go](../../internal/engine/scroll.go)、[tap_scope.go](../../internal/engine/tap_scope.go)、[point.go](../../internal/engine/point.go)、[act.go](../../internal/engine/act.go)、[act_revalidation_policy.go](../../internal/engine/act_revalidation_policy.go)、[errors.go](../../internal/protocol/errors.go)、[schema.go](../../internal/mcp/schema.go)、[interface.md](../../docs/interface.md)、[versions.json](../../release/versions.json)）。
+本文引用的函数名、行号、常量与默认值均以该基线提交为准；实现落地前若代码已前进，须按当时的 `HEAD` 重新核对（重点：[scroll.go](../../../internal/engine/scroll.go)、[tap_scope.go](../../../internal/engine/tap_scope.go)、[point.go](../../../internal/engine/point.go)、[act.go](../../../internal/engine/act.go)、[act_revalidation_policy.go](../../../internal/engine/act_revalidation_policy.go)、[errors.go](../../../internal/protocol/errors.go)、[schema.go](../../../internal/mcp/schema.go)、[interface.md](../../../docs/interface.md)、[versions.json](../../../release/versions.json)）。
 
 ---
 
@@ -38,31 +39,31 @@
    - 默认 `bubble=true` 时，引擎盲目沿父链爬上 `n5223`，把正下方的 `n5232` 当成阻塞者；随后引擎试图在 `n5223` 其它空白区域找安全点——本次凑巧 `n5223` 被子控件占满才报 `422 no_safe_point`（否则就会**静默点到几百像素外的大容器背景**！）。报错时 `n5232` 被混在 `occluding_refs=["n5230","n5232","n5253"]` 里，不标注它就是重合的评论按钮，调用方仍须人工对照树与坐标。
 4. **连带历史债务**：
    - `tap`/`long_press` 静态 `422` 堆砌了两代共 15 个零散 `details` 键（旧引导组 4 个 + 新诊断组 5 个 + 分类作用域 6 个）；`scroll` 把“非滚动容器”“无几何”“轨迹被阻”混为一个裸 `unsupported_node_action`；`point` 与 `target_changed` 的 `details` 全空。
-   - [tap_scope.go](../../internal/engine/tap_scope.go#L1722-L1836) 仍留着 100 余行过期副本 `staticTapRefCheckLegacy` 与 `planBubbleTapTargetLegacy`，导致 `text(ref)` 焦点点击对 `root`/`context`/无几何返回旧版裸 `unsupported_node_action` 与已被取代的 `occluding_ref`。
+   - [tap_scope.go](../../../internal/engine/tap_scope.go#L1722-L1836) 仍留着 100 余行过期副本 `staticTapRefCheckLegacy` 与 `planBubbleTapTargetLegacy`，导致 `text(ref)` 焦点点击对 `root`/`context`/无几何返回旧版裸 `unsupported_node_action` 与已被取代的 `occluding_ref`。
    - `tapSuggestStaticPoint` 的 3×3 网格明明已经用整树严格谓词证明了安全落点，却只在错误路径上输出 `suggested_point` 而不直接执行，白白强制调用方多一轮往返。
 
 ### 1.2 证据链
 
 #### 通路一：滚动嵌套互锁、贴边起滑与错误空壳
-1. **后代滚动容器一刀切阻塞**：[scroll.go:180-251](../../internal/engine/scroll.go#L180-L251) 的 `scrollSafeSpans` 在 `222-243` 行把每个公开节点的最近 `isScrollContainer`（非 `want` 且非 `want` 的 raw 祖先）记入 `blocked`。当 `want` 包裹同矩形子滚动容器时，`blocked` 覆盖 `100%` 基础区间，可用区间为空。
-2. **坐标滚动把嵌套父子全判歧义**：[scroll.go:539-574](../../internal/engine/scroll.go#L539-L574) 的 `scrollContainerAtPoint` 遍历整棵树，把包含 `(x, y)` 的每一个公开候选规约到各自最近的 `isScrollContainer` 并写入 `scopes` 集合。只要存在外层包内层的滚动结构，`len(scopes) >= 2`，`572` 行必然返回裸 `422 ambiguous_point`。
-3. **单一中心线 + 贴边起滑**：[scroll.go:206](../../internal/engine/scroll.go#L206) 只取正交中点一条线；[scroll.go:352-418](../../internal/engine/scroll.go#L352-L418) 的 `scrollGeometry` 在 `393, 403` 行内部写死以 `rect` 中点作正交坐标，并在 `394-411` 行把 `down`/`up`/`right`/`left` 的起点钉在容器边缘内侧 `margin`，容器贴底边时极易踩中底部固定栏或导航手势条。
-4. **`scroll` 错误无细节、缺全树环守卫，而 `effect` 天然兼容子树**：[scroll.go:488-529, 576-587](../../internal/engine/scroll.go#L488-L587) 将非滚动容器、无几何与无安全轨迹全部映射为无 `details` 的 `422 unsupported_node_action`（空投影或损坏映射在 `477, 507` 行也报 `422`）；`scrollSafeSpans`（`217` 行）与 `scrollContainerAtPoint`（`542` 行）未做全树拓扑环校验；[scroll.go:919-964](../../internal/engine/scroll.go#L919-L964) 的 `scrollContentUnits` 本就递归收集容器整棵子树的内容单元，天然支持同视口滚动栈的 `effect` 计算。
+1. **后代滚动容器一刀切阻塞**：[scroll.go:180-251](../../../internal/engine/scroll.go#L180-L251) 的 `scrollSafeSpans` 在 `222-243` 行把每个公开节点的最近 `isScrollContainer`（非 `want` 且非 `want` 的 raw 祖先）记入 `blocked`。当 `want` 包裹同矩形子滚动容器时，`blocked` 覆盖 `100%` 基础区间，可用区间为空。
+2. **坐标滚动把嵌套父子全判歧义**：[scroll.go:539-574](../../../internal/engine/scroll.go#L539-L574) 的 `scrollContainerAtPoint` 遍历整棵树，把包含 `(x, y)` 的每一个公开候选规约到各自最近的 `isScrollContainer` 并写入 `scopes` 集合。只要存在外层包内层的滚动结构，`len(scopes) >= 2`，`572` 行必然返回裸 `422 ambiguous_point`。
+3. **单一中心线 + 贴边起滑**：[scroll.go:206](../../../internal/engine/scroll.go#L206) 只取正交中点一条线；[scroll.go:352-418](../../../internal/engine/scroll.go#L352-L418) 的 `scrollGeometry` 在 `393, 403` 行内部写死以 `rect` 中点作正交坐标，并在 `394-411` 行把 `down`/`up`/`right`/`left` 的起点钉在容器边缘内侧 `margin`，容器贴底边时极易踩中底部固定栏或导航手势条。
+4. **`scroll` 错误无细节、缺全树环守卫，而 `effect` 天然兼容子树**：[scroll.go:488-529, 576-587](../../../internal/engine/scroll.go#L488-L587) 将非滚动容器、无几何与无安全轨迹全部映射为无 `details` 的 `422 unsupported_node_action`（空投影或损坏映射在 `477, 507` 行也报 `422`）；`scrollSafeSpans`（`217` 行）与 `scrollContainerAtPoint`（`542` 行）未做全树拓扑环校验；[scroll.go:919-964](../../../internal/engine/scroll.go#L919-L964) 的 `scrollContentUnits` 本就递归收集容器整棵子树的内容单元，天然支持同视口滚动栈的 `effect` 计算。
 
 #### 通路二：`bubble` 远端漂移、共位兄弟盲区、网格闲置与过期副本
-1. **父链盲爬**：[tap_scope.go:959-979](../../internal/engine/tap_scope.go#L959-L979) 的 `nearestInteractiveAncestor` 只沿 `parent` 向上寻找第一个 `isTouchInteractive` 节点，对几何共位的兄弟/堂兄弟按钮完全不可见。
-2. **锚点脱靶漂移**：[tap_scope.go:999-1034](../../internal/engine/tap_scope.go#L999-L1034) 的 `chooseBubbleTapPoint` 在 `child` 中心被阻塞或失败后（`1004-1020` 行），直接在 `1027` 行退回到 `enumerateTapCandidates(scope, ancestorRaw)` 遍历整个大祖先容器寻找落点，没有限制在 `child` 附近且不因竞争控件阻塞而中止漂移。
-3. **算得出却不点**：[tap_scope.go:1332-1367](../../internal/engine/tap_scope.go#L1332-L1367) 的 `tapSuggestStaticPoint` 仅在 `chooseTapPlan` / `chooseBubbleTapPoint` 全部失败后的 `diagnoseTapStaticFailure`（`1369-1432` 行）中运行 3×3 网格，并用 `provesGuidancePoint` 证明点可用，却只把坐标写入错误体。
-4. **过期副本仍在服务且与新路径割裂**：[act.go:297-298, 366-370](../../internal/engine/act.go#L297-L370) 与 [tap_scope.go:1821-1836](../../internal/engine/tap_scope.go#L1821-L1836) 的 `staticTextRefCheck` 对 `root`/`context`/缺几何返回旧版裸 `unsupported_node_action`，其余焦点规划则调用 `staticTapRefCheckLegacy`（`1722-1780` 行）与 `planBubbleTapTargetLegacy`（`1782-1815` 行）继续产生 `occluding_ref`。
+1. **父链盲爬**：[tap_scope.go:959-979](../../../internal/engine/tap_scope.go#L959-L979) 的 `nearestInteractiveAncestor` 只沿 `parent` 向上寻找第一个 `isTouchInteractive` 节点，对几何共位的兄弟/堂兄弟按钮完全不可见。
+2. **锚点脱靶漂移**：[tap_scope.go:999-1034](../../../internal/engine/tap_scope.go#L999-L1034) 的 `chooseBubbleTapPoint` 在 `child` 中心被阻塞或失败后（`1004-1020` 行），直接在 `1027` 行退回到 `enumerateTapCandidates(scope, ancestorRaw)` 遍历整个大祖先容器寻找落点，没有限制在 `child` 附近且不因竞争控件阻塞而中止漂移。
+3. **算得出却不点**：[tap_scope.go:1332-1367](../../../internal/engine/tap_scope.go#L1332-L1367) 的 `tapSuggestStaticPoint` 仅在 `chooseTapPlan` / `chooseBubbleTapPoint` 全部失败后的 `diagnoseTapStaticFailure`（`1369-1432` 行）中运行 3×3 网格，并用 `provesGuidancePoint` 证明点可用，却只把坐标写入错误体。
+4. **过期副本仍在服务且与新路径割裂**：[act.go:297-298, 366-370](../../../internal/engine/act.go#L297-L370) 与 [tap_scope.go:1821-1836](../../../internal/engine/tap_scope.go#L1821-L1836) 的 `staticTextRefCheck` 对 `root`/`context`/缺几何返回旧版裸 `unsupported_node_action`，其余焦点规划则调用 `staticTapRefCheckLegacy`（`1722-1780` 行）与 `planBubbleTapTargetLegacy`（`1782-1815` 行）继续产生 `occluding_ref`。
 
 #### 通路三：坐标单节点独裁与信息截留
-1. **同深度多节点一律拒死**：[point.go:58-92](../../internal/engine/point.go#L58-L92) 的 `resolvePoint` 只在 `bestCount == 1` 时返回 `pointUnique`；`bestCount > 1` 在 [point.go:122-131](../../internal/engine/point.go#L122-L131) 直接返回无 `details` 的 `422 ambiguous_point`，既不区分节点是否具备点击能力，也不返回命中的 `ref`；连不接受 `ref` 的原始 `swipe` 起点也会因此被拒。
-2. **新鲜重验仅限单索引、缺拓扑环守卫且未优先用 `work.Projector`**：[act.go:477, 834-860](../../internal/engine/act.go#L834-L860) 的 `provePointTarget` 只在 `pointUnique` 时运行，且在 `Preview` 前直接调用未带环守卫的 `lineageOf`（[act.go:1657-1663](../../internal/engine/act.go#L1657-L1663)），并在 `847` 行直接读取 `e.projector` 而忽略 `work.Projector`。
+1. **同深度多节点一律拒死**：[point.go:58-92](../../../internal/engine/point.go#L58-L92) 的 `resolvePoint` 只在 `bestCount == 1` 时返回 `pointUnique`；`bestCount > 1` 在 [point.go:122-131](../../../internal/engine/point.go#L122-L131) 直接返回无 `details` 的 `422 ambiguous_point`，既不区分节点是否具备点击能力，也不返回命中的 `ref`；连不接受 `ref` 的原始 `swipe` 起点也会因此被拒。
+2. **新鲜重验仅限单索引、缺拓扑环守卫且未优先用 `work.Projector`**：[act.go:477, 834-860](../../../internal/engine/act.go#L834-L860) 的 `provePointTarget` 只在 `pointUnique` 时运行，且在 `Preview` 前直接调用未带环守卫的 `lineageOf`（[act.go:1657-1663](../../../internal/engine/act.go#L1657-L1663)），并在 `847` 行直接读取 `e.projector` 而忽略 `work.Projector`。
 
 #### 通路四：`act` 错误契约割裂、`target_changed` 零归因与 MCP 指引过时
-1. **details 键膨胀且 `CloneErrorDetails` 要求受控容器**：[errors.go:9-22](../../internal/protocol/errors.go#L9-L22) 列出的白名单键在 `act` 静态拒绝上横跨两代 15 个键；[errors.go:60-111](../../internal/protocol/errors.go#L60-L111) 的 `CloneErrorDetails` 递归复制 string-keyed map、slice 与 array（不递归结构体），因此新契约对象须使用 `map[string]any` 切片承载。
-2. **重验 `target_changed` 缺少原因**：[act.go:862-865](../../internal/engine/act.go#L862-L865)、[scroll.go:782-785](../../internal/engine/scroll.go#L782-L785)、[tap_scope.go:151-153](../../internal/engine/tap_scope.go#L151-L153) 与 `revalidateTapTargetFrame` / `revalidateBubbleTapFrame` 的全部 `target_changed` 出口均无 `details.reason`（唯一例外是 `text` 在 [act.go:1346-1361](../../internal/engine/act.go#L1346-L1361) 的 `decorateTextRevalidateError` 补充 `stage`/`reason`/`dispatch`，且其 `1347` 行遇到 `apiErr.Details != nil` 会早退）。
-3. **MCP 工具说明与指引**：[schema.go:128-131, 328-352, 392-421](../../internal/mcp/schema.go#L128-L131) 仍按旧保守语义及旧键 `nearest_actionable_ref`/`safe_point`/`suggested_point`/`suggested_carrier_ref` 指导模型。
+1. **details 键膨胀且 `CloneErrorDetails` 要求受控容器**：[errors.go:9-22](../../../internal/protocol/errors.go#L9-L22) 列出的白名单键在 `act` 静态拒绝上横跨两代 15 个键；[errors.go:60-111](../../../internal/protocol/errors.go#L60-L111) 的 `CloneErrorDetails` 递归复制 string-keyed map、slice 与 array（不递归结构体），因此新契约对象须使用 `map[string]any` 切片承载。
+2. **重验 `target_changed` 缺少原因**：[act.go:862-865](../../../internal/engine/act.go#L862-L865)、[scroll.go:782-785](../../../internal/engine/scroll.go#L782-L785)、[tap_scope.go:151-153](../../../internal/engine/tap_scope.go#L151-L153) 与 `revalidateTapTargetFrame` / `revalidateBubbleTapFrame` 的全部 `target_changed` 出口均无 `details.reason`（唯一例外是 `text` 在 [act.go:1346-1361](../../../internal/engine/act.go#L1346-L1361) 的 `decorateTextRevalidateError` 补充 `stage`/`reason`/`dispatch`，且其 `1347` 行遇到 `apiErr.Details != nil` 会早退）。
+3. **MCP 工具说明与指引**：[schema.go:128-131, 328-352, 392-421](../../../internal/mcp/schema.go#L128-L131) 仍按旧保守语义及旧键 `nearest_actionable_ref`/`safe_point`/`suggested_point`/`suggested_carrier_ref` 指导模型。
 
 ### 1.3 为什么直觉会出错
 
@@ -81,7 +82,7 @@
 - **G3（坐标目标命中集合防漂移与智能消歧）**：坐标解析保留最深同深度节点集合 `S`；`swipe` 彻底取消 `ambiguous_point`；`tap`/`long_press`/`text` 仅在出现 ≥2 个可交互竞争者且无法按请求动作唯一消歧时才报 `ambiguous_point`，否则直接放行并在通过拓扑守卫后的派发前证明整个命中集合未漂移。
 - **G4（统一 `act` 静态错误码与极简 `candidates` 契约）**：全 `act` 静态目标拒绝统一为 5 个正交 `422` 错误码（新增 `no_safe_trajectory`）；废除 9 个历史 `details` 键，全面统一为 `reason`、`scope`/`scope_ref`、`candidates`（至多 4 项，含 `executable`）、可选 `blocking_refs`（至多 3 项），以及 `unsupported_node_action` 必带的动作/祖先字段；彻底删除 `staticTapRefCheckLegacy`，让 `text(ref)` 焦点点击复用统一规划器并共享统一有界拓扑守卫。
 - **G5（`409 target_changed` 归因）**：为非 `text` 的 `act` 重验 `target_changed` 附带封闭枚举 `details.reason`，保留 `text` 自有的 `stage`/`reason`/`dispatch` 契约不受干扰。
-- **G6（MCP 说明与指引同步）**：同步更新 [schema.go](../../internal/mcp/schema.go) 的 `callerGuidance`、`act` 工具描述与 `bubble`/`container` 参数说明，使调用方明确理解自动解析边界与基于 `candidates[0]` 的零重观察重试路径。
+- **G6（MCP 说明与指引同步）**：同步更新 [schema.go](../../../internal/mcp/schema.go) 的 `callerGuidance`、`act` 工具描述与 `bubble`/`container` 参数说明，使调用方明确理解自动解析边界与基于 `candidates[0]` 的零重观察重试路径。
 - **G7（契约升级与整组交付）**：推进 `contract_version 21 → 22`、`release_version 0.25.0 → 0.26.0`、`android_version_code 27 → 28`，按规范完成测试、文档审计、干净构建、清单核验、手机整组部署、最小实机闭环、主机工具替换及独立探针验证。
 
 **非目标**
@@ -186,7 +187,7 @@
 3. **有效 `bubble=false`**：
    - 不做祖先提升、不做共位吸附；若目标缺动作返回 `422 unsupported_node_action`（`reason=target_missing_action|target_has_other_action`, `scope="target"`, `scope_ref=C.Ref`），并在 `candidates` 中自动探测并附上最近可用交互祖先（`relation="ancestor"`）与共位可点击节点（`relation="overlapping"` / `"child"`）供调用方一眼取用。
 4. **`text(ref)` 焦点点击**：
-   - 删除 `staticTapRefCheckLegacy` 与 `planBubbleTapTargetLegacy`；调整 [act.go:297-298](../../internal/engine/act.go#L297-L298)，使 `text(ref)` 先过统一 `invalid_target`（`root`/`context`/`no_geometry` + `candidates`）与 `409 node_disabled`，再做 `text` 的 `role=input && hasAction(text)` / `!protected` 检查（失败保持 `422 text_target_uncertain` + `stage/reason/dispatch`），最后复用本节第 1 条的直接 4 级 `tap` 规划（`bubble=false`，禁用 `coextensive_child`）：若该输入框无 `"tap"` 能力则报 `422 unsupported_node_action`（`reason=target_has_other_action`, `target_actions`），若焦点位置被阻则报 `422 no_safe_point` + `candidates`。
+   - 删除 `staticTapRefCheckLegacy` 与 `planBubbleTapTargetLegacy`；调整 [act.go:297-298](../../../internal/engine/act.go#L297-L298)，使 `text(ref)` 先过统一 `invalid_target`（`root`/`context`/`no_geometry` + `candidates`）与 `409 node_disabled`，再做 `text` 的 `role=input && hasAction(text)` / `!protected` 检查（失败保持 `422 text_target_uncertain` + `stage/reason/dispatch`），最后复用本节第 1 条的直接 4 级 `tap` 规划（`bubble=false`，禁用 `coextensive_child`）：若该输入框无 `"tap"` 能力则报 `422 unsupported_node_action`（`reason=target_has_other_action`, `target_actions`），若焦点位置被阻则报 `422 no_safe_point` + `candidates`。
 
 ### 4.3 坐标目标“命中集合防漂移证明”与智能消歧（`point`）
 
@@ -204,8 +205,8 @@
            - **若 `len(U_match) == 1`**：**唯一匹配动作消歧通过**，接受为 `pointSet`（`mode=point_disambiguated`）。
            - **否则（`len(U_match) >= 2` 或 `len(U_match) == 0` 且存在 ≥2 竞争交互拥有者）**：静态拒绝 `422 ambiguous_point`（`reason=competing_targets`, `scope="point"`），`candidates` 列出竞争拥有者（优先取 `U_match`，若空取 `U`，`relation="competing"`，按 `executable=true` 优先、裁剪面积升序、先序升序，至多 4 项）。
 3. **认领后新鲜帧重验（`provePointTarget`）**：
-   - **先导校验**：对 `point.state == pointUnique || point.state == pointSet` 均先运行 `validateTapRawTopology(fresh)`（畸形返回 `503 hierarchy_unavailable`），并在 `lineageOf`（[act.go:1657-1663](../../internal/engine/act.go#L1657-L1663)）增加索引越界/环 visited 守卫，防止畸形环无限循环。
-   - **Projector 一致性**：修复 [act.go:847](../../internal/engine/act.go#L847) 忽略 `work.Projector` 的不一致——优先使用 `work.Projector`，`nil` 时回退 `e.projector`，均无或 `Preview` 失败则返回 `503 hierarchy_unavailable`。
+   - **先导校验**：对 `point.state == pointUnique || point.state == pointSet` 均先运行 `validateTapRawTopology(fresh)`（畸形返回 `503 hierarchy_unavailable`），并在 `lineageOf`（[act.go:1657-1663](../../../internal/engine/act.go#L1657-L1663)）增加索引越界/环 visited 守卫，防止畸形环无限循环。
+   - **Projector 一致性**：修复 [act.go:847](../../../internal/engine/act.go#L847) 忽略 `work.Projector` 的不一致——优先使用 `work.Projector`，`nil` 时回退 `e.projector`，均无或 `Preview` 失败则返回 `503 hierarchy_unavailable`。
    - **集合相等证明**：在 `act.go:477`（重验入口）与 `act.go:136`（事件日志）均对 `pointUnique` 和 `pointSet` 统一接入 `provePointTarget`：对 `point.indices` 中每个观察 raw 节点索引运行 `matchFreshNode(fresh, obsCapture, obsRaw)`，要求均唯一匹配到互不相同的新鲜 raw 索引组成 `WantSet`；在 `Preview(fresh)` 公开树上运行 `resolvePointSet(fp.Tree.Root, x, y)` 得新鲜映射索引集合 `FreshSet`（每一命中均有有效映射且数量与 `WantSet` 一致）。**当且仅当 `FreshSet == WantSet`（无序集合严格相等）**时通过；任何增删浮层、深层新节点、移位或失配返回 `409 target_changed`（`reason=point_changed`；`text` 由 `decorateTextRevalidateError` 按 §4.4.3 覆盖为 `text` 专属详情）。
 
 ### 4.4 统一 `act` 错误返回体系
@@ -287,12 +288,12 @@
 | `scope_blocked` | 目标（及 `coextensive_child` 的 `B`）匹配且能力有效，但固定点、固定载体（含 `carrierRaw != nil && !match.independentContent` 门禁）及兜底安全区均未通过安全谓词 |
 | `point_changed` | 坐标 `pointUnique` / `pointSet` 在新鲜帧中的最深命中集合或映射不再与期望集合相等 |
 
-*注：对于 `req.Operation.Type == "text"`，[act.go:1346-1361](../../internal/engine/act.go#L1346-L1361) 的 `decorateTextRevalidateError` 须把重验 `CodeTargetChanged` 的详情替换为 `text` 专属的 `stage`/`reason`（`target_unconfirmed`）/`dispatch` 结构（不再因前序详情非空而早退），确保不破坏既有 `text` 状态机解析。*
+*注：对于 `req.Operation.Type == "text"`，[act.go:1346-1361](../../../internal/engine/act.go#L1346-L1361) 的 `decorateTextRevalidateError` 须把重验 `CodeTargetChanged` 的详情替换为 `text` 专属的 `stage`/`reason`（`target_unconfirmed`）/`dispatch` 结构（不再因前序详情非空而早退），确保不破坏既有 `text` 状态机解析。*
 
 #### 4. 受控中文错误消息与 MCP 指引同步
 
 - 为每组 `code` + `reason` 提供简洁清晰的受控中文 `message`，绝不夹带节点文本或标签。
-- 同步改写 [schema.go](../../internal/mcp/schema.go) 中的 `callerGuidance`、`act` 工具描述与 `bubble`/`container` 参数描述：删除对 `nearest_actionable_ref`、`safe_point`、`suggested_point`、`suggested_carrier_ref` 与旧保守禁忌的引用，明确告知模型：
+- 同步改写 [schema.go](../../../internal/mcp/schema.go) 中的 `callerGuidance`、`act` 工具描述与 `bubble`/`container` 参数描述：删除对 `nearest_actionable_ref`、`safe_point`、`suggested_point`、`suggested_carrier_ref` 与旧保守禁忌的引用，明确告知模型：
   1. 滚动支持同视口嵌套栈直传、非滚动节点自动向上找滚动容器、轨迹自动居中避开顶底边；
   2. 点击支持 3×3 自动选点、`bubble` 视觉锚定并自动吸附唯一局部共位按钮；
   3. 遇到静态 422（`invalid_target`/`unsupported_node_action`/`ambiguous_point`/`no_safe_point`/`no_safe_trajectory`）时，直接取 `error.details.candidates` 中第一个 `executable=true` 的 `ref` 用同一 `O`（新 `P`）重试，无需重观察或手算坐标。
@@ -611,18 +612,28 @@ t5 dispatch：注入一次 Tap / LongPress / Swipe / Text focus -> 后观察提�
 
 ## 11. 实现结果（归档时补写）
 
-实现提交：`<hash>`。实现与验证记录：`../../verification/act-target-resolution-and-error-contract.md`
-（本节在归档移动之后补写，届时文件在 `implemented/` 下，故链接比新建时多一层）。
+实现提交：`b305e23675d1b55c2f05ca8a904e579e400c72fd`（短 hash `b305e23`）。
+实现与验证记录：[act-target-resolution-and-error-contract.md](../../verification/act-target-resolution-and-error-contract.md)。
 
 ### 11.1 已落地
 
 | 提案条目 | 落点 |
 | --- | --- |
+| §4.5 统一静态 `422` 码表与零旧键细节契约 | [errors.go](../../../internal/protocol/errors.go) 新增 `CodeNoSafeTrajectory` 与 422 状态映射、更新白名单注释；[act_target_shared.go](../../../internal/engine/act_target_shared.go) 统一构造经当前 `O` 干跑计算的 `candidates`（`[]map[string]any`，至多 4 项含 `executable`）与可选 `blocking_refs`（至多 3 项）；全链路移除 9 个历史引导/诊断键；[errors_test.go](../../../internal/protocol/errors_test.go)、[decode_response_test.go](../../../internal/protocol/decode_response_test.go)、[app_test.go](../../../internal/httpapi/app_test.go)、[client_test.go](../../../internal/client/client_test.go)、[result_manifest_test.go](../../../internal/mcp/result_manifest_test.go)、[result_parity_test.go](../../../internal/mcp/result_parity_test.go) 验证深拷贝与三模式/取消无损透传。 |
+| §4.1 `scroll` 同视口栈、祖先提升、居中轨迹与坐标消歧 | [scroll.go](../../../internal/engine/scroll.go) 与 [act_target_shared.go](../../../internal/engine/act_target_shared.go) 接入有界拓扑环守卫、双向 `≥85%` `isCoextensive` 同视口免阻塞、非滚动 `ref` 最近 `role=scroll` 祖先提升、坐标最内层/祖先回退/唯一可执行消歧、安全区间正中对称 `scrollGeometry(orthogonalCoord)` 与 `50% → 25% → 75%` 3 轴线探测、唯一可执行内层子滚动兜底、`422 no_safe_trajectory` 与重验 `target_changed` 归因。 |
+| §4.2 `tap`/`long_press`/`text(focus)` 与视觉锚定冒泡/共位吸附 | [tap_scope.go](../../../internal/engine/tap_scope.go) 与 [act.go](../../../internal/engine/act.go) 将 `grid_3x3` 扶正为第 4 级正常执行候选，新增同视口阻塞子容器委托（`coextensive_child`）、视觉锚定 `bubble_ancestor` 与反底板守卫 `bubble_colocated` 双绑定重验，彻底删除 `staticTapRefCheckLegacy` 与 `planBubbleTapTargetLegacy`，`text(ref)` 焦点接入统一校验与直接 4 级规划（禁用祖先提升/共位/子容器委托）。 |
+| §4.3 坐标目标最深命中集合与 `swipe` 豁免 | [point.go](../../../internal/engine/point.go) 与 [act.go](../../../internal/engine/act.go) 接入有界拓扑环守卫与带环检查的 `lineageOf`，实现 `resolvePointSet`（上限 64）、raw `swipe` 永不报 `ambiguous_point`、唯一动作拥有者自动消歧与 `pointSet` 集合相等重验（优先使用 `work.Projector`）。 |
+| §4.4 非 `text` `409 target_changed` 封闭归因 | [act.go](../../../internal/engine/act.go)、[act_revalidation_policy.go](../../../internal/engine/act_revalidation_policy.go)、[scroll.go](../../../internal/engine/scroll.go)、[tap_scope.go](../../../internal/engine/tap_scope.go) 落地 9 项封闭 `details.reason`；`decorateTextRevalidateError` 替换并保留 `text` 专属 `stage`/`reason=target_unconfirmed`/`dispatch` 结构。 |
+| §4.6 MCP 说明与目录指纹 | [schema.go](../../../internal/mcp/schema.go) 更新 `callerGuidance`、`act` 工具描述及 `bubble`/`container` 参数说明，13 工具目录指纹更新为 `a18acde933ad4358ee0b6d5ec28ca2e4dcba643e33453de31c436763e561c54e`；[schema_test.go](../../../internal/mcp/schema_test.go)、[server_test.go](../../../internal/mcp/server_test.go) 同步回归。 |
+| §6.1 版本源、正式文档与测试套件 | [versions.json](../../../release/versions.json) 推进至 `0.26.0` / 契约 `22` / `android_version_code=28` 并生成 Go/Java/XML 常量；同步更新 `README.md` 与 9 份 `docs/` 正式文档并通过独立只读文档审计 `CLEAN`；新增 4 个提案测试文件（`act_proposal_point_reasons_test.go`、`act_proposal_scroll_coord_test.go`、`act_proposal_tap_bubble_test.go`、`act_target_resolution_proposal_test.go`）并完成 7 份引擎既有测试适配。 |
 
 ### 11.2 与提案不同或未执行
 
 | 项 | 结论与理由 |
 | --- | --- |
+| 独立只读文档审计重发起与二审闭合 | 首次发起的 `docs_audit_v22`（`auto/deepseek-flash`）停留 `pending_init` 超 35 分钟无响应，按 `AGENTS.md` #17 记录原因后在不中断原任务的前提下改由 `docs_audit_v22_final`（`ollama-cloud/deepseek-v4.1-flash:1017`，`max`）完成两轮审计：初审 9 项发现（`docs/mcp.md:18` 目录指纹未刷新，以及 `docs/architecture.md`/`docs/interface.md`/`docs/mcp.md` 8 处边界措辞偏差）全部闭合后复检 `CLEAN`。 |
+| 依赖 Agent 宿主托管进程重启与重连 | 未执行。按 `AGENTS.md` #19 与提案 §8.2 由用户处理；本次已完成 Windows `build/device-mcp.exe` 与 `build/mcp-probe.exe` 磁盘替换（保留旧运行映像备份 `.device-mcp.exe.previous-42a48154a8ad4a8590cd9531d1b0dbaa`）以及独立探针/闭环验证。 |
+| 第三方复杂页面真机构造与 `primary` 模式 | 实机最小闭环在虚拟屏系统设置页（`com.android.settings`）经 Windows 主机 stdio 与手机 HTTP MCP 双入口完整验证：非滚动同视口外包装 `422 unsupported_node_action` + `candidates[0].ref` 同 `O` 重试、非滚动叶节点祖先提升滚动、坐标居中滚动、`409 node_disabled` 保 `O`、`bubble=false` 422 `candidates[0].ref` 同 `O` 重试、`bubble=true` 提升点击、重叠节点坐标点击与 raw `swipe`。跨兄弟共位按钮（`bubble_colocated`）、真双向嵌套滚动栈、多候选 `422 ambiguous_point`、`422 no_safe_trajectory`、`409 target_changed` 9 种 `reason` 与 `primary` 模式未在真机第三方应用单独构造，由 `internal/engine` 全量单元测试覆盖。 |
 
 ---
 
