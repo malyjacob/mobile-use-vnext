@@ -15,7 +15,7 @@
 | 方法 | 所有业务端点只接受 `POST`；其他方法返回 `405`，错误码 `invalid_request` |
 | 认证 | `/api/*` 用 `agent_token`；`/v1/control/*` 用 `control_token`；`Authorization: Bearer <token>` |
 | 身份隔离 | agent token 不能访问 `/v1/control/*`，control token 不能访问 `/api/*`；错误为 `401 unauthorized` |
-| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 23`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
+| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 24`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
 | 预分配 P | `/api/*` 可带 `X-Mobile-Use-Operation: P…`；缺省由服务分配。`status` 不使用该头 |
 | 请求体 | 必须是一个 JSON 对象；大小上限：`start`/`status`/`end`/`wait_for` 16 KiB，`observe` 32 KiB，`snap` 8 KiB，`act` 64 KiB，`inspect`/`keepalive`/`diagnose`/`app` 8 KiB，`notify` 16 KiB，`shell` 32 KiB，`sync` 32 KiB，`stop` 8 KiB |
 | 响应 | `Content-Type: application/json; charset=utf-8`，`Cache-Control: no-store` |
@@ -845,7 +845,7 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms）；
 
 | 字段 | 必填 | 类型 | 说明 |
 | --- | --- | --- | --- |
-| `contract_version` | 是 | 字符串 | 必须为 `"23"`，否则 `409 contract_mismatch` |
+| `contract_version` | 是 | 字符串 | 必须为 `"24"`，否则 `409 contract_mismatch` |
 | `app_instance_id` | 是 | UUID | App 进程实例；变化会撤销旧归属 |
 | `app_version` | 否（App 应发送） | 字符串 | 仅发行标识 |
 | `selected_mode` | 是 | `virtual`/`primary` | 用户选择 |
@@ -872,7 +872,7 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms）；
 
 ```json
 {
-  "contract_version": "23",
+  "contract_version": "24",
   "service_instance_id": "…",
   "control": {
     "revision": 42,
@@ -908,7 +908,7 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms）；
 ## 9. `POST /v1/control/stop`
 
 ```json
-{"contract_version":"23","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
+{"contract_version":"24","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
 ```
 
 - **不校验普通契约**：`contract_version` 字段存在但不参与准入，服务与 App 契约版本
@@ -918,7 +918,7 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms）；
 - 重复或过期 `seq` 不报错，只返回 `state=duplicate`。
 
 ```json
-{"contract_version":"23","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
+{"contract_version":"24","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
 ```
 
 `accepted` 恒为 `true`；`state` 为 `revoked`（绑定时撤销了活动会话）、`recorded`
@@ -931,7 +931,7 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms）；
 无认证，只表示进程可应答，不代表设备就绪或资源干净：
 
 ```json
-{"status":"ok","contract_version":"23","service_instance_id":"…","release_version":"…"}
+{"status":"ok","contract_version":"24","service_instance_id":"…","release_version":"…"}
 ```
 
 ## 11. 数据对象
@@ -1275,7 +1275,8 @@ compact 几何策略是固定的服务策略，不是请求字段，按以下顺
 顶层 `app` 只保留给 `list` 的包名过滤。旧 `observation_id` 在所有 app kind 中按未知成员拒绝。
 
 `find`/`list` 是查询：不消耗当前 ready O、不续租、不改变阅读基线，成功与失败都不带
-`outcome`。`open`/`claim`/`handoff`/`close`/`kill` 消费当前 ready O；成功后返回原会话屏的一次
+`outcome`。`open`/`claim`/`handoff`/`close`/`kill` 消费当前 ready O；已提交（含
+`outcome=uncertain` 的已派发变更）后返回原会话屏的一次
 full 无图观察。主屏会话只允许 `find`/`list`/`open`；`claim`/`handoff`/`close`/`kill` 在消费 O
 之前以 `409 window_action_not_supported_on_primary_display` 拒绝。`list` 的 `reference` 必须
 是当前 ready O，或是指向本 Agent 活动原会话的 P；`scope=primary` 在主屏会话与 `session`
@@ -1318,8 +1319,9 @@ full 无图观察。主屏会话只允许 `find`/`list`/`open`；`claim`/`handof
 字段省略而不是填 `0`；`display_id=0` 是合法的主屏值。
 
 `open` 在虚拟会话中优先复用目标屏上该包的 live 窗口（前台 task 命中优先，否则 task ID
-最小），否则在目标屏新建并登记为 `owned`；主屏打开只按同屏应用处理，返回
-`ownership=shared`，不登记用户任务。`claim` 把主屏 `0` 上的单个精确 live 任务移入本会话
+最小），否则在目标屏新建并登记为 `owned`。启动前以一次全设备任务快照为基线：目标屏子集
+只决定复用，归属只认启动后新增且落在目标屏的唯一同包任务，任何屏的既有任务都不算本次
+新建。主屏打开只按同屏应用处理，返回 `ownership=shared`，不登记用户任务。`claim` 把主屏 `0` 上的单个精确 live 任务移入本会话
 虚屏并登记 `borrowed`，`source_display_id=0`。`handoff` 把本会话虚屏的单个任务移回主屏
 `0`，登记 `shared`；默认不
 恢复前台，`restore_foreground=true` 时只做一次有界尽力恢复。虚拟屏 `open`、`claim`、
@@ -1330,22 +1332,34 @@ full 无图观察。主屏会话只允许 `find`/`list`/`open`；`claim`/`handof
 包含借入窗口即整体拒绝。每项独立给出 `outcome` 与 `recents_cleaned`；`complete=true` 当且仅当
 全部项 `executed` 且 `recents_cleaned=true`，仅 recents 未确认不把顶层 outcome 改成失败。
 
-`kill` 只接受本会话 live `owned` 任务，且该包在本屏没有其他窗口、在其他显示屏没有 live
-task；应用在本屏前台、前台未知、前台服务或播放状态未知或正在播放（未显式
+`kill` 只接受本会话 live `owned` 任务；虚拟屏上处于当前前台的 `live owned` 任务同样可终止
+（前台不再是拒绝原因），该应用在主屏或其他显示屏仍有 live task、本屏还有其他同包窗口、
+非本会话 `owned`、迁移责任未确认、前台服务或播放状态未知或正在播放（未显式
 `allow_stop_playback=true`）、或 root 不可用时拒绝。派发前按 boot、PID、start ticks 复核原
-进程实例，对每个原实例发送一次精确 `kill -9`；只读后验给出已结束、仍存在与新实例事实，
-不 force-stop、不追杀重启后的新进程。原目标进程集合已确认空时，`target_pids=[]`、
-`killed_pids=[]`、`remaining_pids=[]`、`restarted=false`，无需发信号。
+进程实例，对每个原实例发送一次精确 `kill -9`；确认原进程实例全部结束（或原进程集为空）后
+同步移除该任务窗口容器与会话登记，进程与窗口壳都确认才报 `executed`；进程已结束但窗口壳
+未确认时以 `409 kill_unconfirmed` 报 `uncertain`；未发出进程终止信号（原进程集为空）且任务
+窗口移除未派发时保持 `not_executed` 并给出 `409 control_revoked`；只读后验给出已结束、仍
+存在与新实例事实。不 force-stop、不追杀重启后的新进程。原目标进程集合已确认空时无需发
+信号：该调用进入完成事实（`executed`，或窗口壳未确认的 `kill_unconfirmed`）时补齐
+`killed_pids=[]`、`remaining_pids=[]`、`restarted=false`，以 `not_executed` 收口的结果在统计上
+只带 `target_pids=[]`。
 
 `open` 的常见失败包括 `app_not_found`、`app_launch_failed`、`app_launch_unconfirmed`、
 `application_moved`、`task_focus_unavailable`；其中 `app_not_found` 的 `recovery` 为
-`entry=user`、`reference=none`、`input_state=effective`。`claim`/`handoff`/`close`/`kill` 的
-目标选择失败按 `task_not_found`、`task_not_tracked`、`task_target_ambiguous`、
-`close_refused_borrowed` 或对应的 `kill_refused_*` 返回。所有拒绝都保留已证明的身份与
-作用屏，不伪造已派发事实。
+`entry=user`、`reference=none`、`input_state=effective`；`app_launch_unconfirmed` 的
+`recovery` 为 `entry=observe`、`reference=P`、`input_state=retired`，该不确定结果可能已带
+`task_id` 与 `display_id`（目标屏出现唯一新建同包任务时）、`ownership=owned`（仅在该任务
+登记成功时；登记未成功时省略 `ownership`）；唯一新任务落在其他显示屏时只回填 `task_id`。
+`status(P)` 在该操作结束后回放同一入口，运行中仍先返回 `entry=status`、`cause=running`；
+`task_lifecycle_busy` 的前置拒绝保持 `entry=status`、`reference=P`。`claim`/`handoff`/
+`close`/`kill` 的目标选择失败按 `task_not_found`、`task_not_tracked`、
+`task_target_ambiguous`、`close_refused_borrowed` 或对应的 `kill_refused_*` 返回。所有
+拒绝都保留已证明的身份与作用屏，不伪造已派发事实。
 
-每次成功变更后服务发布原会话屏的一次 full 无图观察；后观察失败保留主 outcome 与已证明字段，
-`observation.status=failed` 与 `error` 表达采集失败。STOP 撤权后的迟到结果不发布新观察。
+每次已提交变更后（含 `outcome=uncertain` 的已派发变更）服务发布原会话屏的一次 full 无图观察；
+后观察失败保留主 outcome 与已证明字段，`observation.status=failed` 与 `error` 表达采集失败。
+STOP 撤权后的迟到结果不发布新观察。
 
 `app` 的七种 kind 在 MCP 适配器都预分配 P。HTTP 每次新调用同样分配自己的 P；`reference`
 只用于定位既有会话，不是本次调用的 P。`find` 使用 detached P，不因调用时恰有全局活动会话
@@ -1361,7 +1375,8 @@ task；应用在本屏前台、前台未知、前台服务或播放状态未知�
 `kill_refused_process_shared`、`kill_unconfirmed`、`app_capacity_exceeded`（`details.limit`）与
 `task_lifecycle_busy` 均为 `409`；请求形状错误为 `422 invalid_request`；应用清单、任务或进程
 读取失败为 `503`（`app_list_unavailable`/`device_unavailable`）；`open` 的启动未确认为
-`504 app_launch_unconfirmed`。
+`504 app_launch_unconfirmed`。`kill_refused_foreground` 保留为封闭码表成员，虚拟屏实现不再
+因本屏前台产生该拒绝。
 
 ### `POST /api/notify`
 

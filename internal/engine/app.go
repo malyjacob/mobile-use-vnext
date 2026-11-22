@@ -247,6 +247,16 @@ func (e *Engine) finishAppExecuted(work *workState, op *operationState, view *pr
 // action and still delivers the post observation of the original display.
 func (e *Engine) finishAppUncertainWork(work *workState, op *operationState, view *protocol.AppView,
 	code, message string, details map[string]any) (*protocol.Result, *protocol.APIError) {
+	return e.finishAppUncertainWorkAfter(work, op, view, code, message, details, nil)
+}
+
+// finishAppUncertainWorkAfter is the same close-out with one conditional hook
+// that runs after the post observation and before the operation is frozen. A
+// branch that can still prove a bounded fact from a later read reconciles it
+// there, so the frozen result carries every proven fact without changing the
+// uncertain outcome.
+func (e *Engine) finishAppUncertainWorkAfter(work *workState, op *operationState, view *protocol.AppView,
+	code, message string, details map[string]any, after func()) (*protocol.Result, *protocol.APIError) {
 	apiErr := protocol.NewError(protocol.Status(code), code, message)
 	if apiErr.HTTPStatus == 500 {
 		apiErr.HTTPStatus = 409
@@ -268,6 +278,9 @@ func (e *Engine) finishAppUncertainWork(work *workState, op *operationState, vie
 			result.Observation = public
 			phase = postPhase
 		}
+	}
+	if after != nil {
+		after()
 	}
 	result.Recovery = e.finishOperation(op, OutcomeUncertain, phase, apiErr)
 	e.addSessionIfEnded(result)

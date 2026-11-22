@@ -33,7 +33,10 @@ func TestOpenAppAttributionFailureDoesNotRetainUIExecution(t *testing.T) {
 			var hide atomic.Bool
 			hide.Store(true)
 			h.engine.dev = &hookedDevice{Device: h.device, tasks: func(ctx context.Context) ([]device.Task, error) {
-				if !hide.Load() {
+				// The whole-device pre-launch baseline stays the real fact; the
+				// scripted missing/ambiguous attribution only starts after the
+				// launch dispatch.
+				if !hide.Load() || !h.launchDispatched() {
 					return h.device.TaskList(ctx)
 				}
 				if multiple {

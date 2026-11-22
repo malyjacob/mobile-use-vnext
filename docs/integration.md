@@ -41,7 +41,7 @@ adb forward          主机 18881 → 服务；主机 18883 → 手机 MCP
    `adb forward`，也不需要 Agent token。
 
 只需要直连 HTTP 的 Agent 则使用 `http://127.0.0.1:18881/api/<tool>`、`agent_token` 与
-`X-Mobile-Use-Contract: 23`。
+`X-Mobile-Use-Contract: 24`。
 
 ## 1. 默认部署后的网络与进程
 
@@ -310,7 +310,7 @@ HTTP 宿主在原有 `Authorization` 头之外按需添加：
 
 ```text
 Authorization: Bearer <agent_token>
-X-Mobile-Use-Contract: 23
+X-Mobile-Use-Contract: 24
 Content-Type: application/json; charset=utf-8
 ```
 
@@ -318,7 +318,7 @@ Content-Type: application/json; charset=utf-8
 $deploy = Get-Content .state/deploy.json -Raw | ConvertFrom-Json
 $headers = @{
     Authorization           = "Bearer $($deploy.agent_token)"
-    'X-Mobile-Use-Contract' = '23'
+    'X-Mobile-Use-Contract' = '24'
 }
 Invoke-RestMethod http://127.0.0.1:18881/api/status -Method Post `
   -Headers $headers -ContentType 'application/json' -Body '{}'
@@ -566,7 +566,7 @@ Header: Authorization: Bearer <mcp_token>
 两种选择：
 
 ```text
-直连 HTTP:  http://127.0.0.1:18880/api/<tool>   + agent_token + X-Mobile-Use-Contract: 23
+直连 HTTP:  http://127.0.0.1:18880/api/<tool>   + agent_token + X-Mobile-Use-Contract: 24
 MCP HTTP:   http://127.0.0.1:18882/mcp          + mcp_token
 ```
 
@@ -731,10 +731,10 @@ GET 判断工具是否可用。
 | `409 device_busy` | 已有普通工作 | 读 `blocking_operation_id`，串行化后重试 |
 | `409 task_target_ambiguous` | `claim`/`handoff`/`close` 按包名匹配到多个任务 | 读 `details.task_ids`，用精确 `task_id` 加新 P 重试；不取第一个 |
 | `409 close_refused_borrowed` | 关闭目标含借入窗口且 `allow_borrowed=false` | 先 `handoff` 该窗口，或显式传 `allow_borrowed=true` 并接受销毁 |
-| `409 kill_refused_*` / `409 root_unavailable` | 目标非本会话 owned、跨屏/同屏冲突、前台、FGS/播放，或 root 不可用 | 按受控原因处理；不绕过身份、前台与播放检查 |
+| `409 kill_refused_*` / `409 root_unavailable` | 目标非本会话 owned、跨屏/同屏冲突、FGS/播放，或 root 不可用 | 按受控原因处理，不绕过身份与播放检查；虚拟屏前台自有任务可直接终止并移除任务窗口 |
 | `409 task_lifecycle_busy` | 该 task 仍有未确认的旧搬移/删除责任 | 用 `status` 与 `app.list` 核验现状；只限制该任务，稍后新 P 重试 |
 | `503 app_list_unavailable` | 应用清单读取失败 | 条件恢复后用新 P 重新 `app.find`，不伪造空列表 |
-| `504 app_launch_unconfirmed` | `app.open` 已派发启动但归属未确认 | 用 `status(P)` 查询原结果，再用新 `observe`/`app.list` 核验；不重放启动 |
+| `504 app_launch_unconfirmed` | `app.open` 已派发启动但归属未确认 | 按 `recovery entry=observe`、`reference=P` 用 `observe`/`app.list` 核验（仅传输超时且未知操作结果时先用 `status(P)` 确认是否已完成）；不重放启动 |
 | `409 observation_expired`/`target_changed` | O 过期或目标变化 | `target_changed` 的重验失败结果通常已带新观察：用它的 O 加新 P 重试；没有 `observation` 时再 `observe`。不要重放旧动作 |
 | `503 delivery_unavailable` | 慢交付额度不足 | 等待既有结果交付后再试，不排队 |
 | `504 action_result_uncertain` | 输入已派发但结果未知 | `status(P)`/重新观察，不重放 |
@@ -752,7 +752,7 @@ GET 判断工具是否可用。
 $deploy = Get-Content .state/deploy.json -Raw | ConvertFrom-Json
 $headers = @{
     Authorization           = "Bearer $($deploy.agent_token)"
-    'X-Mobile-Use-Contract' = '23'
+    'X-Mobile-Use-Contract' = '24'
 }
 $start = Invoke-RestMethod http://127.0.0.1:18881/api/start -Method Post `
   -Headers $headers -ContentType 'application/json' -Body '{}'

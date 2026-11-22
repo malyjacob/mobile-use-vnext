@@ -151,12 +151,17 @@ engine 的状态锁只做有限内存检查与转换：锁内不等待 ADB、u2 
   与恢复重试）都查询同一保护池；出站未确认或已交出的任务不得被任何清理路径重新认领或按
   ID 删除。确认未派发后才解除排除；同一 task 有旧 `RemoveTask`/`MoveTask` 责任未结束时，
   再 claim 返回 `task_lifecycle_busy`，只限制该任务。
-- `open` 在虚屏优先复用同包 live 任务（先前台、否则最小 task ID），否则新建并登记 owned；
-  主屏 open 返回 shared、不登记。`claim` 要求主屏 live task 精确且 root 只有单个 leaf；
-  `handoff` 每次只交还一个任务，默认不恢复前台。`close` 冻结不超过 16 个本会话管理的 live
-  目标，逐项记录 outcome 与独立 recents 核验；`complete` 仅在全部关闭且 recents 全确认时
-  为真。`kill` 仅对本会话 live owned 且同屏唯一可归因、非前台、无已知 FGS/播放（或显式
-  允许）的应用执行精确 PID `kill -9`，不 force-stop、不追杀重启。
+- `open` 启动前以一次全设备任务快照为基线：目标屏子集只决定复用（先前台、否则最小
+  task ID），归属只认启动后新增且落在目标屏的唯一同包任务，任何屏的既有任务都不会被当作
+  本次新建。虚拟屏未确认时，后置观察后的任务核对回填已证实的唯一落点，仅在登记成功时写
+  owned，否则省略 ownership；主 outcome 仍为 uncertain。主屏 open 返回 shared、不登记。
+  `claim` 要求主屏 live task 精确且 root 只有单个 leaf；`handoff` 每次只交还一个任务，
+  默认不恢复前台。`close` 冻结不超过 16 个本会话管理的 live 目标，逐项记录 outcome 与
+  独立 recents 核验；`complete` 仅在全部关闭且 recents 全确认时为真。`kill` 仅对本会话
+  同屏唯一可归因、无已知 FGS/播放（或显式允许）的 live owned 应用执行精确 PID
+  `kill -9`；虚拟屏上处于当前前台的 `live owned` 任务同样可终止（前台不再是拒绝原因），
+  确认原进程实例全部结束（或原进程集为空）后同步移除任务窗口容器与会话登记，进程与窗口
+  壳都确认才报 executed。不 force-stop、不追杀重启。
 - 五个变更成功提交后统一做一次原会话屏 full 无图后观察；后观察失败保留 executed 与
   `observation.status=failed`，不改写主 outcome；STOP 撤权后的迟到候选不发布。
 
@@ -669,7 +674,7 @@ P 已无法定位时，`end(P)` 返回 `409 operation_unknown`、`phase=referenc
 ### 发布
 
 `release/versions.json` 是发行号、共同契约号与 Android versionCode 的唯一来源；当前为
-`release_version=0.27.0`、`contract_version=23`、`android_version_code=29`，构建生成
+`release_version=0.28.0`、`contract_version=24`、`android_version_code=30`，构建生成
 Go/Java 常量。`scripts/build-release.ps1` 产出整组产物与 `build/release/manifest.json`
 （源码提交、Go 版本、MCP SDK/协议、各产物 SHA-256/大小、Android 包名/版本、工具目录指纹）。
 工具目录固定为 `scripts/toolcatalog` 投影的 13 个工具，指纹是该目录注册顺序、名称、描述与

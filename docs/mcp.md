@@ -15,7 +15,7 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
   `snap`、`wait_for`、`act`、`inspect`、`keepalive`、`end`、`app`、`notify`、`shell`、
   `diagnose`。不注册 `/health`、认证初始化、旧工具别名或旧协议回退。
 - 目录指纹是工具数、注册顺序、名称、描述与入参 schema 的 canonical SHA-256。当前源码的
-  工具目录指纹为 `24e29ffad62cd998e1ac5fc26fcf4479e672806132ddce55ad3785794ebc6f0b`。
+  工具目录指纹为 `6a22be013e8653b79f1c46e6c5c9212309454eee1b4f377836b81936b49c95e8`。
   发布清单中的指纹对应其记录的源码提交。发布时从目标提交重建并核验清单。
   探针按工具名比对实际 `tools/list` 的描述和入参 schema，并核对只读注解。传入 `-manifest`
   时，探针将清单中的工具数和目录 SHA-256 分别与源码目录的对应值比对。探针将

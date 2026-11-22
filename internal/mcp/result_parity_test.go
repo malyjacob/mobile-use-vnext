@@ -523,8 +523,11 @@ func TestCatalogFingerprintBaseline(t *testing.T) {
 	// The catalog has thirteen tools. This baseline covers the caller-oriented
 	// descriptions after result v4/tree v4 local guidance was added to start,
 	// observe, wait_for, act, app and inspect, including content-stability
-	// guidance and omission of the two structured evidence objects.
-	const baseline = "24e29ffad62cd998e1ac5fc26fcf4479e672806132ddce55ad3785794ebc6f0b"
+	// guidance and omission of the two structured evidence objects. It also
+	// covers app kill stating that a virtual-display foreground task is
+	// terminated together with its task window container, while the same app
+	// still having a task on the primary or another display refuses.
+	const baseline = "6a22be013e8653b79f1c46e6c5c9212309454eee1b4f377836b81936b49c95e8"
 	if got := CatalogFingerprint(); got != baseline {
 		t.Fatalf("catalog changed: %s", got)
 	}

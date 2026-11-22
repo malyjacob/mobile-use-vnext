@@ -80,9 +80,11 @@ func (p *probe) appLifecycleChecks(ctx context.Context, start startSummary) bool
 		field("task_id", strconv.Itoa(taskID)), field("display_id", strconv.Itoa(displayID)),
 		"ownership=owned")
 
-	// A kill is attempted only on the controlled owned task. While its window is
-	// foreground the service must refuse; if the service instead executes, the
-	// closed loop simply loses that task and close is skipped.
+	// A kill is attempted only on the controlled owned task. The virtual screen
+	// now permits killing the foreground owned task: on success the task window
+	// must disappear from app.list, and the closed loop reopens the controlled
+	// target so app.close still runs against a live owned task. A refusal keeps
+	// the original close path.
 	killed := false
 	kill, failure := p.call(ctx, "app", map[string]any{
 		"kind": "kill", "reference": nextO, "target": map[string]any{"task_id": taskID},
@@ -114,6 +116,8 @@ func (p *probe) appLifecycleChecks(ctx context.Context, start startSummary) bool
 		p.reporter.pass("app_kill_refused",
 			field("task_id", strconv.Itoa(taskID)), field("code", code),
 			"outcome="+outcomeOrNone(resultOutcome(kill)))
+		p.reporter.skip("app_kill_removed", "controlled_task_not_killed",
+			field("task_id", strconv.Itoa(taskID)))
 	} else {
 		if resultOutcome(kill) != outcomeExecuted || kill.view.App == nil ||
 			kill.view.App.Kind != "kill" || kill.view.App.SourceTaskID == nil ||
@@ -141,32 +145,61 @@ func (p *probe) appLifecycleChecks(ctx context.Context, start startSummary) bool
 	}
 
 	if killed {
-		p.reporter.skip("app_close", "controlled_task_killed")
-	} else {
-		closed, failure := p.call(ctx, "app", map[string]any{
-			"kind": "close", "reference": nextO, "target": map[string]any{"task_id": taskID},
+		remaining, failure := p.killRemovalCount(ctx, start.OperationID, target, taskID)
+		if failure != nil {
+			p.reporter.fail("app_kill_removed", failure.reason, failure.fields...)
+			return false
+		}
+		if remaining > 0 {
+			p.reporter.fail("app_kill_removed", "killed_task_still_listed",
+				field("task_id", strconv.Itoa(taskID)), field("remaining", strconv.Itoa(remaining)))
+			return false
+		}
+		p.reporter.pass("app_kill_removed",
+			field("task_id", strconv.Itoa(taskID)), field("remaining", "0"))
+
+		reopened, failure := p.call(ctx, "app", map[string]any{
+			"kind": "open", "reference": nextO, "target": map[string]any{"app": target},
 		})
 		if failure != nil {
 			p.reporter.fail("app_close", failure.reason, failure.fields...)
 			return false
 		}
-		if failure := checkCloseResult(closed, taskID); failure != nil {
+		if reopened.result.IsError || resultOutcome(reopened) != outcomeExecuted ||
+			reopened.view.App == nil || reopened.view.App.Kind != "open" {
+			p.reporter.fail("app_close", "reopen_after_kill_not_executed",
+				field("outcome", resultOutcome(reopened)), field("code", codeOf(reopened.view)))
+			return false
+		}
+		reopenedApp := reopened.view.App
+		if reopenedApp.Package != target || reopenedApp.TaskID == nil ||
+			*reopenedApp.TaskID <= 0 || reopenedApp.DisplayID == nil ||
+			*reopenedApp.DisplayID <= 0 || reopenedApp.Ownership != "owned" {
+			p.reporter.fail("app_close", "reopen_after_kill_facts_unexpected",
+				field("ownership", reopenedApp.Ownership),
+				field("task_id", integerString(reopenedApp.TaskID)),
+				field("display_id", integerString(reopenedApp.DisplayID)))
+			return false
+		}
+		reopenedTaskID := *reopenedApp.TaskID
+		reopenO, failure := appPostObservation(reopened.view)
+		if failure != nil {
 			p.reporter.fail("app_close", failure.reason, failure.fields...)
 			return false
 		}
-		if resultOutcome(closed) == outcomeExecuted {
-			updated, failure := appPostObservation(closed.view)
-			if failure != nil {
-				p.reporter.fail("app_close", failure.reason, failure.fields...)
-				return false
-			}
-			nextO = updated
+		closedO, failure := p.closeControlledTask(ctx, reopenO, reopenedTaskID)
+		if failure != nil {
+			p.reporter.fail("app_close", failure.reason, failure.fields...)
+			return false
 		}
-		p.reporter.pass("app_close",
-			field("task_id", strconv.Itoa(taskID)),
-			field("outcome", resultOutcome(closed)),
-			field("tasks", strconv.Itoa(len(closed.view.App.Tasks))),
-			"is_error="+strconv.FormatBool(closed.result.IsError))
+		nextO = closedO
+	} else {
+		closedO, failure := p.closeControlledTask(ctx, nextO, taskID)
+		if failure != nil {
+			p.reporter.fail("app_close", failure.reason, failure.fields...)
+			return false
+		}
+		nextO = closedO
 	}
 
 	// claim needs a second controlled task that already lives on the primary
@@ -234,6 +267,69 @@ func appPostObservation(view resultView) (string, *checkError) {
 		return "", failf("app_post_observation_id_invalid")
 	}
 	return observation.ID, nil
+}
+
+// killRemovalCount re-reads the controlled task list through the read-only
+// app.list projection and returns how many listed entries still carry taskID.
+// The list consumes no O, so the caller can keep using the kill result's
+// post-observation as the next ready reference.
+func (p *probe) killRemovalCount(ctx context.Context, reference, target string, taskID int) (int, *checkError) {
+	list, failure := p.call(ctx, "app", map[string]any{
+		"kind": "list", "reference": reference, "app": target,
+	})
+	if failure != nil {
+		return 0, failure
+	}
+	if list.result.IsError || list.view.App == nil || list.view.App.Kind != "list" {
+		return 0, failf("kill_removal_list_unavailable", field("code", codeOf(list.view)))
+	}
+	if !list.view.App.HasTaskItems {
+		return 0, failf("kill_removal_list_items_missing")
+	}
+	if list.view.App.Truncated == nil {
+		return 0, failf("kill_removal_list_truncated_missing")
+	}
+	if *list.view.App.Truncated {
+		// A truncated list cannot prove absence: the killed task could sit
+		// outside the returned window.
+		return 0, failf("kill_removal_list_truncated")
+	}
+	remaining := 0
+	for _, item := range list.view.App.TaskItems {
+		if item.TaskID == taskID {
+			remaining++
+		}
+	}
+	return remaining, nil
+}
+
+// closeControlledTask closes one live controlled task and reports the shared
+// app_close pass line. It returns the post-close ready O when the close
+// executed so the caller can keep the observation chain current.
+func (p *probe) closeControlledTask(ctx context.Context, reference string, taskID int) (string, *checkError) {
+	closed, failure := p.call(ctx, "app", map[string]any{
+		"kind": "close", "reference": reference, "target": map[string]any{"task_id": taskID},
+	})
+	if failure != nil {
+		return "", failure
+	}
+	if failure := checkCloseResult(closed, taskID); failure != nil {
+		return "", failure
+	}
+	nextO := reference
+	if resultOutcome(closed) == outcomeExecuted {
+		updated, failure := appPostObservation(closed.view)
+		if failure != nil {
+			return "", failure
+		}
+		nextO = updated
+	}
+	p.reporter.pass("app_close",
+		field("task_id", strconv.Itoa(taskID)),
+		field("outcome", resultOutcome(closed)),
+		field("tasks", strconv.Itoa(len(closed.view.App.Tasks))),
+		"is_error="+strconv.FormatBool(closed.result.IsError))
+	return nextO, nil
 }
 
 // readyObservation requests one fresh full observation through the session

@@ -28,9 +28,13 @@ func TestInternalUncertainKeepsSessionActiveAndOrdinaryWorkUsable(t *testing.T) 
 			h.device.recentKnown = true
 			h.device.recentIDs = map[int]bool{77: true}
 			h.device.mu.Unlock()
-			// TasksOnDisplay still supplies the real pre-launch task list;
-			// hide or make ambiguous the subsequent TaskList attribution read.
-			h.engine.dev = &hookedDevice{Device: h.device, tasks: func(context.Context) ([]device.Task, error) {
+			// The pre-launch baseline is a whole-device read and must stay the
+			// real fact; only the post-dispatch attribution read is scripted as a
+			// missing or ambiguous new task.
+			h.engine.dev = &hookedDevice{Device: h.device, tasks: func(ctx context.Context) ([]device.Task, error) {
+				if !h.launchDispatched() {
+					return h.device.TaskList(ctx)
+				}
 				if multiple {
 					return []device.Task{
 						{TaskID: 77, DisplayID: 12, Package: "com.example"},

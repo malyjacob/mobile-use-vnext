@@ -392,14 +392,22 @@ type fakeAdapter struct {
 	primaryCandidate bool
 	legacyInspect    bool
 	omitInspectBlock bool
+	// appTaskID is the one live controlled task; kill success clears it and a
+	// later open allocates the next id, so the app-lifecycle loop can prove the
+	// removal and then close a freshly reopened task.
+	appTaskID       int
+	appNextTaskID   int
+	killRefusalCode string
+	keepKilledTask  bool
 }
 
 func newFakeAdapter() *fakeAdapter {
 	return &fakeAdapter{
-		canStart:   true,
-		sessions:   make(map[string]bool),
-		image:      testJPEG(4096),
-		resultMode: resultModeBoth,
+		canStart:      true,
+		sessions:      make(map[string]bool),
+		image:         testJPEG(4096),
+		resultMode:    resultModeBoth,
+		appNextTaskID: 41,
 	}
 }
 
@@ -674,17 +682,29 @@ func (f *fakeAdapter) handle(ctx context.Context, name string, request *sdk.Call
 				},
 			}, ""), nil
 		}
+		targetTaskID := 0
+		targetApp := ""
+		if targetObject, ok := arguments["target"].(map[string]any); ok {
+			if value, ok := targetObject["task_id"].(float64); ok {
+				targetTaskID = int(value)
+			}
+			targetApp, _ = targetObject["app"].(string)
+		}
 		if kind == "open" {
-			target := ""
-			if targetObject, ok := arguments["target"].(map[string]any); ok {
-				target, _ = targetObject["app"].(string)
+			if f.appTaskID == 0 {
+				f.appNextTaskID++
+				f.appTaskID = f.appNextTaskID
+			}
+			packageName := controlledAppPackage
+			if targetApp != "" {
+				packageName = targetApp
 			}
 			o := f.nextID("O")
 			return f.result(map[string]any{
 				"operation_id": f.nextID("P"),
 				"outcome":      outcomeExecuted,
 				"app": map[string]any{
-					"kind": "open", "package": target, "task_id": 42,
+					"kind": "open", "package": packageName, "task_id": f.appTaskID,
 					"display_id": 12, "ownership": "owned",
 					"reused": false, "state_preserved": false,
 				},
@@ -692,15 +712,36 @@ func (f *fakeAdapter) handle(ctx context.Context, name string, request *sdk.Call
 			}, ""), nil
 		}
 		if kind == "kill" {
-			return f.errorResult(map[string]any{
+			sourceTaskID := targetTaskID
+			if sourceTaskID == 0 {
+				sourceTaskID = f.appTaskID
+			}
+			if f.killRefusalCode != "" {
+				return f.errorResult(map[string]any{
+					"operation_id": f.nextID("P"),
+					"outcome":      "not_executed",
+					"app": map[string]any{
+						"kind": "kill", "package": controlledAppPackage,
+						"source_task_id": sourceTaskID, "display_id": 12,
+					},
+					"error": map[string]any{"code": f.killRefusalCode},
+				}), nil
+			}
+			if !f.keepKilledTask {
+				f.appTaskID = 0
+			}
+			o := f.nextID("O")
+			return f.result(map[string]any{
 				"operation_id": f.nextID("P"),
-				"outcome":      "not_executed",
+				"outcome":      outcomeExecuted,
 				"app": map[string]any{
 					"kind": "kill", "package": controlledAppPackage,
-					"source_task_id": 42, "display_id": 12,
+					"source_task_id": sourceTaskID, "display_id": 12,
+					"target_pids": []int{101}, "killed_pids": []int{101},
+					"remaining_pids": []int{}, "restarted": false,
 				},
-				"error": map[string]any{"code": "kill_refused_foreground"},
-			}), nil
+				"observation": f.observation(o, "P1", 2, false),
+			}, ""), nil
 		}
 		if kind == "claim" {
 			o := f.nextID("O")
@@ -716,6 +757,11 @@ func (f *fakeAdapter) handle(ctx context.Context, name string, request *sdk.Call
 			}, ""), nil
 		}
 		if kind == "close" {
+			closedTaskID := targetTaskID
+			if closedTaskID == 0 {
+				closedTaskID = f.appTaskID
+			}
+			f.appTaskID = 0
 			o := f.nextID("O")
 			return f.result(map[string]any{
 				"operation_id": f.nextID("P"),
@@ -723,21 +769,32 @@ func (f *fakeAdapter) handle(ctx context.Context, name string, request *sdk.Call
 				"app": map[string]any{
 					"kind": "close", "display_id": 12,
 					"tasks": []any{map[string]any{
-						"task_id": 42, "outcome": outcomeExecuted, "recents_cleaned": true,
+						"task_id": closedTaskID, "outcome": outcomeExecuted, "recents_cleaned": true,
 					}},
 					"complete": true,
 				},
 				"observation": f.observation(o, "P1", 2, false),
 			}, ""), nil
 		}
+		items := []any{}
+		total := 0
+		if f.appTaskID != 0 && scope != "primary" &&
+			(filterPackage == "" || filterPackage == controlledAppPackage) {
+			packageName := controlledAppPackage
+			if filterPackage != "" {
+				packageName = filterPackage
+			}
+			items = []any{map[string]any{
+				"task_id": f.appTaskID, "package": packageName, "ownership": "owned",
+			}}
+			total = 1
+		}
 		return f.result(map[string]any{
 			"operation_id": f.nextID("P"),
 			"app": map[string]any{
 				"kind": "list", "display_id": displayID,
-				"items": []any{map[string]any{
-					"task_id": 42, "package": "com.example.probe", "ownership": "owned",
-				}},
-				"total": 1, "truncated": false, "captured_at": "2026-01-01T00:00:00Z",
+				"items": items,
+				"total": total, "truncated": false, "captured_at": "2026-01-01T00:00:00Z",
 				"foreground": map[string]any{"state": "unknown", "reason": "foreground_unavailable"},
 			},
 		}, ""), nil
@@ -1883,6 +1940,12 @@ type fakeRecoveryService struct {
 	operations    map[string]string // P -> finished/running
 	outcomes      map[string]string
 	image         []byte
+	// appTaskID is the one live controlled task. A successful kill clears it so
+	// the follow-up app.list proves removal, and the next open returns a new id
+	// for the closed close loop.
+	appTaskID       int
+	appNextTaskID   int
+	killRefusalCode string
 	// The two omission switches are reverse controls: removing a fact from a
 	// fixture must make the matching probe check fail.
 	omitActQuality   bool
@@ -1892,11 +1955,12 @@ type fakeRecoveryService struct {
 func startFakeRecoveryService(t *testing.T) *fakeRecoveryService {
 	t.Helper()
 	fake := &fakeRecoveryService{
-		token:      "test-agent-token",
-		canStart:   true,
-		operations: make(map[string]string),
-		outcomes:   make(map[string]string),
-		image:      testJPEG(4096),
+		token:         "test-agent-token",
+		canStart:      true,
+		operations:    make(map[string]string),
+		outcomes:      make(map[string]string),
+		image:         testJPEG(4096),
+		appNextTaskID: 41,
 	}
 	fake.server = httptest.NewServer(http.HandlerFunc(fake.serve))
 	t.Cleanup(fake.server.Close)
@@ -2192,9 +2256,9 @@ func (f *fakeRecoveryService) writeApp(writer http.ResponseWriter, operationID s
 		truncated := false
 		items := []protocol.AppTaskItem{}
 		total := 0
-		if appBody.App != "" && appBody.Scope != protocol.AppScopePrimary {
+		if appBody.App != "" && appBody.Scope != protocol.AppScopePrimary && f.appTaskID != 0 {
 			items = []protocol.AppTaskItem{{
-				TaskID: 42, Package: appBody.App, Ownership: "owned",
+				TaskID: f.appTaskID, Package: appBody.App, Ownership: "owned",
 			}}
 			total = 1
 		}
@@ -2206,7 +2270,11 @@ func (f *fakeRecoveryService) writeApp(writer http.ResponseWriter, operationID s
 			Foreground: &protocol.Foreground{State: "unknown", Reason: "foreground_unavailable"},
 		}
 	case protocol.AppKindOpen:
-		taskID := 42
+		if f.appTaskID == 0 {
+			f.appNextTaskID++
+			f.appTaskID = f.appNextTaskID
+		}
+		taskID := f.appTaskID
 		displayID := 12
 		reused := false
 		statePreserved := false
@@ -2219,6 +2287,11 @@ func (f *fakeRecoveryService) writeApp(writer http.ResponseWriter, operationID s
 		f.revision++
 		observation = f.observationLocked(false, stableTestQuality())
 	case protocol.AppKindClose:
+		closedTaskID := appBody.Target.TaskID
+		if closedTaskID == 0 {
+			closedTaskID = f.appTaskID
+		}
+		f.appTaskID = 0
 		displayID := 12
 		recents := true
 		complete := true
@@ -2226,7 +2299,7 @@ func (f *fakeRecoveryService) writeApp(writer http.ResponseWriter, operationID s
 		view = &protocol.AppView{
 			Kind: protocol.AppKindClose, DisplayID: &displayID, Complete: &complete,
 			Tasks: []protocol.AppCloseTask{{
-				TaskID: 42, Outcome: outcomeExecuted,
+				TaskID: closedTaskID, Outcome: outcomeExecuted,
 				RecentsCleaned: &recents, HasRecentsCleaned: true,
 			}},
 			HasTasks: true,
@@ -2234,14 +2307,36 @@ func (f *fakeRecoveryService) writeApp(writer http.ResponseWriter, operationID s
 		f.revision++
 		observation = f.observationLocked(false, stableTestQuality())
 	case protocol.AppKindKill:
-		sourceTaskID := 42
+		sourceTaskID := appBody.Target.TaskID
+		if sourceTaskID == 0 {
+			sourceTaskID = f.appTaskID
+		}
 		displayID := 12
-		outcome = "not_executed"
+		outcome = outcomeExecuted
 		view = &protocol.AppView{
 			Kind: protocol.AppKindKill, Package: controlledAppPackage,
 			SourceTaskID: &sourceTaskID, DisplayID: &displayID,
 		}
-		resultError = &protocol.Error{Code: "kill_refused_foreground", Message: "前台任务不可终止"}
+		if f.killRefusalCode != "" {
+			outcome = "not_executed"
+			resultError = &protocol.Error{Code: f.killRefusalCode, Message: "任务不可终止"}
+		} else {
+			targetPIDs := []int{101}
+			killedPIDs := []int{101}
+			remainingPIDs := []int{}
+			restarted := false
+			view.TargetPIDs = targetPIDs
+			view.HasTargetPIDs = true
+			view.KilledPIDs = killedPIDs
+			view.HasKilledPIDs = true
+			view.RemainingPIDs = remainingPIDs
+			view.HasRemainingPIDs = true
+			view.Restarted = &restarted
+			view.HasRestarted = true
+			f.appTaskID = 0
+			f.revision++
+			observation = f.observationLocked(false, stableTestQuality())
+		}
 	default:
 		f.mutex.Unlock()
 		f.writeResult(writer, &protocol.Result{
@@ -2621,8 +2716,45 @@ func TestAppLifecycleAgainstRealAdapter(t *testing.T) {
 			for _, want := range []string{
 				"PASS app_open",
 				"PASS app_list_controlled",
-				"PASS app_kill_refused",
-				"PASS app_close",
+				"PASS app_kill task_id=42 target_pids=1 killed_pids=1 restarted=false",
+				"PASS app_kill_removed task_id=42 remaining=0",
+				"PASS app_close task_id=43 outcome=executed tasks=1 is_error=false",
+				"SKIP app_claim reason=controlled_primary_task_absent",
+				"PASS end",
+			} {
+				if !strings.Contains(output.String(), want) {
+					t.Fatalf("missing %q in:\n%s", want, output.String())
+				}
+			}
+		})
+	}
+}
+
+// TestAppLifecycleRefusedKillAgainstRealAdapter keeps the refusal branch on the
+// real result encoder: a valid kill refusal code must still pass
+// app_kill_refused, skip the removal proof and close the original task.
+func TestAppLifecycleRefusedKillAgainstRealAdapter(t *testing.T) {
+	for _, mode := range []string{resultModeBoth, resultModeText, resultModeStructured} {
+		t.Run(mode, func(t *testing.T) {
+			fake := startFakeRecoveryService(t)
+			fake.killRefusalCode = "kill_refused_task_elsewhere"
+			session, service := newRealAdapterSession(t, fake, mode)
+
+			var output bytes.Buffer
+			reporter := newReporter(&output)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			runner := &probe{
+				reporter: reporter, session: session, service: service,
+				resultMode: mode, suite: suiteAppLifecycle, appTarget: controlledAppPackage,
+			}
+			if code := reporter.finish(runner.runChecks(ctx)); code != 0 {
+				t.Fatalf("app lifecycle suite failed (exit %d):\n%s", code, output.String())
+			}
+			for _, want := range []string{
+				"PASS app_kill_refused task_id=42 code=kill_refused_task_elsewhere outcome=not_executed",
+				"SKIP app_kill_removed reason=controlled_task_not_killed task_id=42",
+				"PASS app_close task_id=42 outcome=executed tasks=1 is_error=false",
 				"SKIP app_claim reason=controlled_primary_task_absent",
 				"PASS end",
 			} {

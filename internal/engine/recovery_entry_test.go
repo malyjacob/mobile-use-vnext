@@ -93,6 +93,15 @@ func recoveryCases() []planCase {
 		return recoveryInput{Tool: "app", AppKind: protocol.AppKindOpen, Reference: o, Code: code, Phase: phase,
 			Outcome: outcome, Claimed: isClaimed, InputState: input}
 	}
+	appUncertain := func(kind, code, input string) recoveryInput {
+		return recoveryInput{Tool: "app", AppKind: kind, Reference: o, Code: code, Phase: "dispatch",
+			Outcome: uncertain, Claimed: true, InputState: input}
+	}
+	appBusy := func(kind, input string) recoveryInput {
+		return recoveryInput{Tool: "app", AppKind: kind, Reference: o,
+			Code: protocol.CodeTaskLifecycleBusy, Phase: "admission",
+			Outcome: notExecuted, Claimed: false, InputState: input}
+	}
 
 	return []planCase{
 		// act: session lifecycle.
@@ -193,16 +202,44 @@ func recoveryCases() []planCase {
 		{"open_app launch failed", openApp(protocol.CodeAppLaunchFailed, "dispatch", notExecuted, true, retired),
 			wantRecovery(protocol.RecoveryEntryObserve, p, retired, "")},
 		{"open_app task focus uncertain", openApp(protocol.CodeTaskFocus, "dispatch", uncertain, true, retired),
-			wantRecovery(protocol.RecoveryEntryStatus, p, retired, "")},
+			wantRecovery(protocol.RecoveryEntryObserve, p, retired, "")},
 		{"open_app launch uncertain", openApp(protocol.CodeAppLaunchUnknown, "dispatch", uncertain, true, retired),
-			wantRecovery(protocol.RecoveryEntryStatus, p, retired, "")},
+			wantRecovery(protocol.RecoveryEntryObserve, p, retired, "")},
 		{"open_app moved", openApp(protocol.CodeAppMoved, "dispatch", uncertain, true, retired),
-			wantRecovery(protocol.RecoveryEntryStatus, p, retired, "")},
+			wantRecovery(protocol.RecoveryEntryObserve, p, retired, "")},
 		{"open_app post observation failed", openApp("", "post_observation_failed", executed, true, retired),
 			wantRecovery(protocol.RecoveryEntryObserve, p, retired, postObs)},
 		{"open_app executed revoked", openApp("", "executed_revoked", executed, true, retired),
 			wantRecovery(protocol.RecoveryEntryStatus, p, revoked, execRevoked)},
 		{"open_app success", openApp("", "finished", executed, true, ""), nil},
+
+		// app mutations: every finished-but-unconfirmed kind converges on one
+		// new observation. A status step here would replay the same projection
+		// from status(P) forever, so the old observation's input authority is
+		// always reported as retired.
+		{"app claim uncertain", appUncertain(protocol.AppKindClaim, protocol.CodeTaskMoveUnconfirmed, retired),
+			wantRecovery(protocol.RecoveryEntryObserve, p, retired, "")},
+		{"app handoff uncertain", appUncertain(protocol.AppKindHandoff, protocol.CodeTaskMoveUnconfirmed, retired),
+			wantRecovery(protocol.RecoveryEntryObserve, p, retired, "")},
+		{"app close uncertain", appUncertain(protocol.AppKindClose, protocol.CodeAppTaskUnconfirmed, retired),
+			wantRecovery(protocol.RecoveryEntryObserve, p, retired, "")},
+		{"app kill uncertain", appUncertain(protocol.AppKindKill, protocol.CodeKillUnconfirmed, retired),
+			wantRecovery(protocol.RecoveryEntryObserve, p, retired, "")},
+		{"app open uncertain", appUncertain(protocol.AppKindOpen, protocol.CodeAppLaunchUnknown, retired),
+			wantRecovery(protocol.RecoveryEntryObserve, p, retired, "")},
+		{"app uncertain without input state", appUncertain(protocol.AppKindOpen, protocol.CodeAppLaunchUnknown, ""),
+			wantRecovery(protocol.RecoveryEntryObserve, p, retired, "")},
+		{"app uncertain with effective input", appUncertain(protocol.AppKindKill, protocol.CodeKillUnconfirmed, eff),
+			wantRecovery(protocol.RecoveryEntryObserve, p, retired, "")},
+		// Reverse control: a task still owned by an earlier transfer is a
+		// pre-dispatch refusal with a bounded status step, and it forwards the
+		// referenced observation's usability unchanged.
+		{"app task lifecycle busy", appBusy(protocol.AppKindClaim, eff),
+			wantRecovery(protocol.RecoveryEntryStatus, p, eff, "")},
+		{"app task lifecycle busy retired", appBusy(protocol.AppKindKill, retired),
+			wantRecovery(protocol.RecoveryEntryStatus, p, retired, "")},
+		{"app task lifecycle busy without input state", appBusy(protocol.AppKindClose, ""),
+			wantRecovery(protocol.RecoveryEntryStatus, p, "", "")},
 
 		// observe: the O is read, never claimed.
 		{"observe session ended", recoveryInput{Tool: "observe", Reference: o, Code: protocol.CodeSessionEnded,
@@ -589,6 +626,92 @@ func TestRecoveryUncertainIsStatus(t *testing.T) {
 			t.Fatalf("%s: recovery = %+v", code, got)
 		}
 	}
+}
+
+// TestRecoveryAppUncertainIsObserve is T5b: the five app mutation kinds store
+// the same projection at the terminal write, and the replayed status(P) reports
+// it unchanged. A running operation still answers status first, so the
+// convergence happens exactly when the operation finishes.
+func TestRecoveryAppUncertainIsObserve(t *testing.T) {
+	for _, test := range []struct {
+		kind string
+		code string
+	}{
+		{protocol.AppKindOpen, protocol.CodeAppLaunchUnknown},
+		{protocol.AppKindClaim, protocol.CodeTaskMoveUnconfirmed},
+		{protocol.AppKindHandoff, protocol.CodeTaskMoveUnconfirmed},
+		{protocol.AppKindClose, protocol.CodeAppTaskUnconfirmed},
+		{protocol.AppKindKill, protocol.CodeKillUnconfirmed},
+	} {
+		test := test
+		t.Run(test.kind, func(t *testing.T) {
+			h := newHarness(t)
+			h.startSession()
+			operationID := "Puncertain" + test.kind
+			op, duplicate, apiErr := h.engine.registerOperation(operationID, "agent", appTool)
+			if apiErr != nil || duplicate != nil || op == nil {
+				t.Fatalf("register %s: op=%+v duplicate=%+v apiErr=%+v",
+					operationID, op, duplicate, apiErr)
+			}
+			h.engine.setOperationAppKind(op, test.kind)
+			h.engine.setOperationReference(op, protocol.RecoveryReferenceO)
+			h.engine.mu.Lock()
+			op.Claimed = true
+			h.engine.mu.Unlock()
+
+			running, apiErr := h.engine.Status("agent", operationID)
+			if apiErr != nil {
+				t.Fatalf("running status(%s) rejected: %v", operationID, apiErr)
+			}
+			requireRecovery(t, running, protocol.RecoveryEntryStatus,
+				protocol.RecoveryReferenceP, "", protocol.RecoveryCauseRunning)
+
+			dispatchErr := protocol.NewError(protocol.Status(test.code), test.code, "已派发但未确认")
+			got := h.engine.finishOperation(op, OutcomeUncertain, "dispatch", dispatchErr)
+			if !recoveryIs(got, protocol.RecoveryEntryObserve, protocol.RecoveryReferenceP,
+				protocol.RecoveryInputRetired, "") {
+				t.Fatalf("%s finishOperation recovery = %+v", test.kind, got)
+			}
+
+			replay, apiErr := h.engine.Status("agent", operationID)
+			if apiErr != nil {
+				t.Fatalf("status(%s) rejected: %v", operationID, apiErr)
+			}
+			if replay.Outcome != OutcomeUncertain {
+				t.Fatalf("%s replayed outcome = %q, want uncertain", test.kind, replay.Outcome)
+			}
+			requireRecovery(t, replay, protocol.RecoveryEntryObserve,
+				protocol.RecoveryReferenceP, protocol.RecoveryInputRetired, "")
+		})
+	}
+}
+
+// TestRecoveryAppTaskLifecycleBusyIsStatus is the reverse control for T5b: an
+// earlier transfer still owns the task, so the bounded step stays status(P) and
+// the referenced observation keeps its usability fact untouched.
+func TestRecoveryAppTaskLifecycleBusyIsStatus(t *testing.T) {
+	h := newHarness(t)
+	h.startSession()
+	operationID := "Pbusyclaim"
+	op, duplicate, apiErr := h.engine.registerOperation(operationID, "agent", appTool)
+	if apiErr != nil || duplicate != nil || op == nil {
+		t.Fatalf("register %s: op=%+v duplicate=%+v apiErr=%+v", operationID, op, duplicate, apiErr)
+	}
+	h.engine.setOperationAppKind(op, protocol.AppKindClaim)
+	h.engine.setOperationReference(op, protocol.RecoveryReferenceO)
+
+	busy := protocol.NewError(409, protocol.CodeTaskLifecycleBusy, "任务仍有搬移或删除责任在途")
+	got := h.engine.finishOperation(op, OutcomeNotExecuted, "admission", busy)
+	if !recoveryIs(got, protocol.RecoveryEntryStatus, protocol.RecoveryReferenceP,
+		protocol.RecoveryInputEffective, "") {
+		t.Fatalf("finishOperation recovery = %+v", got)
+	}
+	replay, apiErr := h.engine.Status("agent", operationID)
+	if apiErr != nil {
+		t.Fatalf("status(%s) rejected: %v", operationID, apiErr)
+	}
+	requireRecovery(t, replay, protocol.RecoveryEntryStatus, protocol.RecoveryReferenceP,
+		protocol.RecoveryInputEffective, "")
 }
 
 // TestRecoverySessionEndIsEnd is T6: an ended session cannot be observed again;

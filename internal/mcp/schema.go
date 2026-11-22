@@ -589,7 +589,7 @@ var toolCatalog = []toolDefinition{
 			"\n- claim 将主屏的精确 live 任务移入本会话虚屏并登记 borrowed。" +
 			"\n- handoff 将本会话虚屏的单个任务移回主屏 0，可选恢复前台。" +
 			"\n- close 关闭本会话虚屏目标窗口，可显式允许关闭 borrowed。" +
-			"\n- kill 用 task_id 终止本会话 live owned 且同屏唯一可归因的应用，可显式允许停止播放。" +
+			"\n- kill 用 task_id 终止本会话同屏唯一的 live owned 任务，并连同其任务窗口容器一并移除；虚拟屏上处于当前前台也可终止，但该应用在主屏或其他显示屏仍有任务时拒绝，可显式允许停止播放。" +
 			"\nclaim/handoff/close 的 target 用 task_id 或包名二选一，仍须通过服务准入。" +
 			"find/list 的 items 以 `app_items v1` 块、close 的 tasks 以 `app_tasks v1` 块交付，空集合输出 count=0，与未获得集合区分。" +
 			"变更结果按 outcome 与 recovery 处理。已执行后尝试发布原会话屏 full 无图观察；" +

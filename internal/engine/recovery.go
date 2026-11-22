@@ -267,8 +267,23 @@ func appPlan(in recoveryInput) *protocol.Recovery {
 	if _, ok := statusCodes[in.Code]; ok {
 		return newRecovery(protocol.RecoveryEntryStatus, protocol.RecoveryReferenceP, in.InputState, "")
 	}
-	if in.Code == protocol.CodeTaskLifecycleBusy || in.Outcome == OutcomeUncertain {
+	if in.Code == protocol.CodeTaskLifecycleBusy {
+		// A pre-dispatch refusal: an earlier transfer still owns this task, so
+		// the bounded advancing step is one status query. The referenced
+		// observation is untouched and keeps the usability it already had.
 		return newRecovery(protocol.RecoveryEntryStatus, protocol.RecoveryReferenceP, in.InputState, "")
+	}
+	if in.Outcome == OutcomeUncertain {
+		// A claimed mutation that finished unconfirmed must not name itself: a
+		// status(P) projection here would replay the same entry forever. The
+		// semantic next step is one new observation of the live screen. I4
+		// forbids calling the old O still effective, so that state degrades to
+		// retired like every other absent usability fact.
+		inputState := recoveryInputRetired(in.InputState)
+		if inputState == protocol.RecoveryInputEffective {
+			inputState = protocol.RecoveryInputRetired
+		}
+		return newRecovery(protocol.RecoveryEntryObserve, protocol.RecoveryReferenceP, inputState, "")
 	}
 	if in.Phase == "post_observation_failed" {
 		return newRecovery(protocol.RecoveryEntryObserve, protocol.RecoveryReferenceP,

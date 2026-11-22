@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/malyjacob/mobile-use-vnext/internal/device"
+	"github.com/malyjacob/mobile-use-vnext/internal/observation"
 	"github.com/malyjacob/mobile-use-vnext/internal/protocol"
 )
 
@@ -390,39 +391,310 @@ func TestAppClosePartialReportsPerItemFacts(t *testing.T) {
 	}
 }
 
-func TestAppKillRefusesUnownedForegroundAndGuards(t *testing.T) {
-	t.Run("not owned", func(t *testing.T) {
-		h := newHarness(t)
+// protectTask installs one unresolved transfer responsibility for a task id.
+func (h *killHarness) protectTask(taskID int, pkg string) {
+	h.engine.mu.Lock()
+	defer h.engine.mu.Unlock()
+	h.engine.transfers = append(h.engine.transfers, &transferState{record: LedgerTransfer{
+		OperationID: "Ptransfer", Direction: TransferOut, State: TransferUnknown,
+		LeafTaskID: taskID, RootTaskID: taskID, Package: pkg,
+		SourceDisplayID: 12, TargetDisplayID: 0,
+	}})
+}
+
+// killRequest builds the exact kill request of one task id.
+func killRequest(o *protocol.Observation, p string, taskID int) (string, *protocol.AppRequest) {
+	return p, &protocol.AppRequest{Kind: protocol.AppKindKill, Reference: o.ID,
+		Target: &protocol.AppTarget{TaskID: taskID, UseTask: true}}
+}
+
+func TestAppKillRefusesUnownedTask(t *testing.T) {
+	h := newKillHarness(t)
+	first := h.startSession()
+	h.addTask(device.Task{TaskID: 77, RootID: 77, DisplayID: 12, Package: "com.example.app"})
+	p, request := killRequest(first.Observation, "Pkillunowned", 77)
+	result, _ := h.engine.App(context.Background(), "agent", p, request)
+	if result.Error == nil || result.Error.Code != protocol.CodeKillNotOwned ||
+		result.Outcome != OutcomeNotExecuted {
+		t.Fatalf("unowned kill result=%+v", result)
+	}
+	h.device.mu.Lock()
+	kills, removes := len(h.device.killCalls), len(h.device.removeCalls)
+	h.device.mu.Unlock()
+	if kills != 0 || removes != 0 {
+		t.Fatalf("unowned kill dispatched kills=%d removes=%d", kills, removes)
+	}
+}
+
+// TestAppKillRefusedWhenSamePackageTaskOnPrimaryDisplay keeps the cross-display
+// protection: a primary-display task of the same package still forbids the kill.
+func TestAppKillRefusedWhenSamePackageTaskOnPrimaryDisplay(t *testing.T) {
+	h := newKillHarness(t)
+	first := h.startSession()
+	task := device.Task{TaskID: 201, RootID: 201, DisplayID: 12, Package: "com.netease.cloudmusic"}
+	h.addTask(task)
+	h.ownTask(task, TaskOwned, nil)
+	h.addTask(device.Task{TaskID: 90, RootID: 90, DisplayID: 0, Package: "com.netease.cloudmusic"})
+	h.device.mu.Lock()
+	h.device.foreground = &device.Foreground{State: device.ForegroundPresent,
+		Package: "com.netease.cloudmusic", TaskID: intPtr(201)}
+	h.device.processes = device.PackageProcesses{UserID: 10123, Instances: []device.ProcessInstance{
+		{PID: 731, StartTicks: 55, Name: "com.netease.cloudmusic"},
+	}}
+	h.device.mu.Unlock()
+
+	p, request := killRequest(first.Observation, "Pkillelsewhere", 201)
+	result, _ := h.engine.App(context.Background(), "agent", p, request)
+	if result.Error == nil || result.Error.Code != protocol.CodeKillTaskElsewhere ||
+		result.Outcome != OutcomeNotExecuted {
+		t.Fatalf("other-display kill result=%+v", result)
+	}
+	h.device.mu.Lock()
+	kills, removes := len(h.device.killCalls), len(h.device.removeCalls)
+	h.device.mu.Unlock()
+	if kills != 0 || removes != 0 {
+		t.Fatalf("refused kill dispatched kills=%d removes=%d", kills, removes)
+	}
+	h.engine.mu.Lock()
+	entry := h.engine.sessionTaskLocked(h.engine.session, 201)
+	ready := h.engine.observations[first.Observation.ID].Status == ObservationReady
+	h.engine.mu.Unlock()
+	if entry == nil {
+		t.Fatalf("refused kill dropped the registration")
+	}
+	if !ready {
+		t.Fatalf("refused kill consumed the observation")
+	}
+}
+
+// TestAppKillRemoveUnknownStaysUncertainAndKeepsRegistration proves the second
+// step never invents executed and never drops the registration on an unknown
+// removal receipt.
+func TestAppKillRemoveUnknownStaysUncertainAndKeepsRegistration(t *testing.T) {
+	h := newKillHarness(t)
+	first := h.startSession()
+	task := device.Task{TaskID: 201, RootID: 201, DisplayID: 12, Package: "com.netease.cloudmusic"}
+	h.addTask(task)
+	h.ownTask(task, TaskOwned, nil)
+	unknown := device.DispatchUnknown
+	h.device.mu.Lock()
+	h.device.processes = device.PackageProcesses{UserID: 10123, Instances: []device.ProcessInstance{
+		{PID: 731, StartTicks: 55, Name: "com.netease.cloudmusic"},
+	}}
+	h.device.removeReceipt = &unknown
+	h.device.mu.Unlock()
+
+	p, request := killRequest(first.Observation, "Pkillremoveunknown", 201)
+	result, _ := h.engine.App(context.Background(), "agent", p, request)
+	if result.Outcome != OutcomeUncertain || result.Error == nil ||
+		result.Error.Code != protocol.CodeKillUnconfirmed {
+		t.Fatalf("unknown removal result=%+v", result)
+	}
+	if result.Error.Message != "已终止应用进程，但无法确认任务窗口已移除" {
+		t.Fatalf("unknown removal message=%q", result.Error.Message)
+	}
+	if !result.App.HasKilledPIDs || len(result.App.KilledPIDs) != 1 || result.App.KilledPIDs[0] != 731 {
+		t.Fatalf("kill facts=%+v", result.App)
+	}
+	h.engine.mu.Lock()
+	entry := h.engine.sessionTaskLocked(h.engine.session, 201)
+	h.engine.mu.Unlock()
+	if entry == nil {
+		t.Fatalf("unconfirmed removal dropped the registration")
+	}
+	h.device.mu.Lock()
+	live := append([]device.Task(nil), h.device.tasks...)
+	h.device.mu.Unlock()
+	found := false
+	for _, surviving := range live {
+		if surviving.TaskID == 201 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("an unknown removal must not be reported as a removed shell: %+v", live)
+	}
+}
+
+// TestAppKillSkipsRemovalWhenShellAlreadyGone proves the pre-check: once Android
+// destroyed the TaskRecord with the last process no removal is dispatched.
+func TestAppKillSkipsRemovalWhenShellAlreadyGone(t *testing.T) {
+	h := newKillHarness(t)
+	h.script.dropTaskWhenProcessGone = 201
+	first := h.startSession()
+	task := device.Task{TaskID: 201, RootID: 201, DisplayID: 12, Package: "com.netease.cloudmusic"}
+	h.addTask(task)
+	h.ownTask(task, TaskOwned, nil)
+	h.device.mu.Lock()
+	h.device.processes = device.PackageProcesses{UserID: 10123, Instances: []device.ProcessInstance{
+		{PID: 731, StartTicks: 55, Name: "com.netease.cloudmusic"},
+	}}
+	h.device.mu.Unlock()
+
+	p, request := killRequest(first.Observation, "Pkillshellgone", 201)
+	result, _ := h.engine.App(context.Background(), "agent", p, request)
+	if result.Outcome != OutcomeExecuted || result.Error != nil {
+		t.Fatalf("shell-gone kill outcome=%q error=%+v", result.Outcome, result.Error)
+	}
+	h.device.mu.Lock()
+	kills := append([]int(nil), h.device.killCalls...)
+	removes := append([]int(nil), h.device.removeCalls...)
+	live := append([]device.Task(nil), h.device.tasks...)
+	h.device.mu.Unlock()
+	if len(kills) != 1 || kills[0] != 731 {
+		t.Fatalf("kill calls=%v want [731]", kills)
+	}
+	if len(removes) != 0 {
+		t.Fatalf("a gone task shell must not be removed again: %v", removes)
+	}
+	for _, surviving := range live {
+		if surviving.TaskID == 201 {
+			t.Fatalf("task shell survived: %+v", live)
+		}
+	}
+	h.engine.mu.Lock()
+	entry := h.engine.sessionTaskLocked(h.engine.session, 201)
+	h.engine.mu.Unlock()
+	if entry != nil {
+		t.Fatalf("killed task stayed registered: %+v", entry)
+	}
+}
+
+// TestAppKillTransferProtectionFollowsOwnership proves the guard order: the
+// ownership decision comes before the transfer protection.
+func TestAppKillTransferProtectionFollowsOwnership(t *testing.T) {
+	t.Run("unowned is not lifecycle busy", func(t *testing.T) {
+		h := newKillHarness(t)
 		first := h.startSession()
-		h.addTask(device.Task{TaskID: 77, RootID: 77, DisplayID: 12, Package: "com.example.app"})
-		result, _ := h.engine.App(context.Background(), "agent", "Pkill",
-			&protocol.AppRequest{Kind: protocol.AppKindKill, Reference: first.Observation.ID,
-				Target: &protocol.AppTarget{TaskID: 77, UseTask: true}})
-		if result.Error == nil || result.Error.Code != protocol.CodeKillNotOwned {
-			t.Fatalf("unowned kill result=%+v", result)
+		h.addTask(device.Task{TaskID: 201, RootID: 201, DisplayID: 12, Package: "com.example.app"})
+		h.protectTask(201, "com.example.app")
+		p, request := killRequest(first.Observation, "Pkilltransferunowned", 201)
+		result, _ := h.engine.App(context.Background(), "agent", p, request)
+		if result.Error == nil || result.Error.Code != protocol.CodeKillNotOwned ||
+			result.Outcome != OutcomeNotExecuted {
+			t.Fatalf("unowned transfer kill result=%+v", result)
 		}
 	})
-	t.Run("foreground", func(t *testing.T) {
-		h := newHarness(t)
+	t.Run("owned is lifecycle busy", func(t *testing.T) {
+		h := newKillHarness(t)
 		first := h.startSession()
-		task := device.Task{TaskID: 77, RootID: 77, DisplayID: 12, Package: "com.example.app"}
+		task := device.Task{TaskID: 201, RootID: 201, DisplayID: 12, Package: "com.example.app"}
+		h.addTask(task)
+		h.ownTask(task, TaskOwned, nil)
+		h.protectTask(201, "com.example.app")
+		p, request := killRequest(first.Observation, "Pkilltransferowned", 201)
+		result, _ := h.engine.App(context.Background(), "agent", p, request)
+		if result.Error == nil || result.Error.Code != protocol.CodeTaskLifecycleBusy ||
+			result.Outcome != OutcomeNotExecuted {
+			t.Fatalf("owned transfer kill result=%+v", result)
+		}
+		h.device.mu.Lock()
+		kills, removes := len(h.device.killCalls), len(h.device.removeCalls)
+		h.device.mu.Unlock()
+		if kills != 0 || removes != 0 {
+			t.Fatalf("busy kill dispatched kills=%d removes=%d", kills, removes)
+		}
+		h.engine.mu.Lock()
+		ready := h.engine.observations[first.Observation.ID].Status == ObservationReady
+		h.engine.mu.Unlock()
+		if !ready {
+			t.Fatalf("busy kill consumed the observation")
+		}
+	})
+}
+
+// TestAppKillEmptyProcessSetRemovalOutcome covers the zero-signal branches: the
+// removal receipt decides between uncertain and not_executed, and a not_executed
+// view never carries the three process statistics.
+func TestAppKillEmptyProcessSetRemovalOutcome(t *testing.T) {
+	newEmpty := func(t *testing.T) (*killHarness, *protocol.Observation) {
+		t.Helper()
+		h := newKillHarness(t)
+		first := h.startSession()
+		task := device.Task{TaskID: 201, RootID: 201, DisplayID: 12, Package: "com.example.app"}
 		h.addTask(task)
 		h.ownTask(task, TaskOwned, nil)
 		h.device.mu.Lock()
-		h.device.foreground = &device.Foreground{State: device.ForegroundPresent,
-			Package: "com.example.app", TaskID: intPtr(77)}
+		h.device.processes = device.PackageProcesses{UserID: 10123,
+			Instances: []device.ProcessInstance{}}
 		h.device.mu.Unlock()
-		result, _ := h.engine.App(context.Background(), "agent", "Pkill",
-			&protocol.AppRequest{Kind: protocol.AppKindKill, Reference: first.Observation.ID,
-				Target: &protocol.AppTarget{TaskID: 77, UseTask: true}})
-		if result.Error == nil || result.Error.Code != protocol.CodeKillForeground {
-			t.Fatalf("foreground kill result=%+v", result)
+		return h, first.Observation
+	}
+
+	t.Run("unknown removal", func(t *testing.T) {
+		h, observation := newEmpty(t)
+		unknown := device.DispatchUnknown
+		h.device.mu.Lock()
+		h.device.removeReceipt = &unknown
+		h.device.mu.Unlock()
+		p, request := killRequest(observation, "Pkillemptyunknown", 201)
+		result, _ := h.engine.App(context.Background(), "agent", p, request)
+		if result.Outcome != OutcomeUncertain || result.Error == nil ||
+			result.Error.Code != protocol.CodeKillUnconfirmed {
+			t.Fatalf("empty unknown removal result=%+v", result)
+		}
+		if result.Error.Message != "确认无运行进程，但无法确认任务窗口已移除" {
+			t.Fatalf("empty unknown removal message=%q", result.Error.Message)
+		}
+		if !result.App.HasKilledPIDs || result.App.KilledPIDs == nil ||
+			len(result.App.KilledPIDs) != 0 || !result.App.HasRemainingPIDs ||
+			result.App.RemainingPIDs == nil || len(result.App.RemainingPIDs) != 0 ||
+			result.App.Restarted == nil || *result.App.Restarted {
+			t.Fatalf("empty unknown removal facts=%+v", result.App)
+		}
+		h.engine.mu.Lock()
+		entry := h.engine.sessionTaskLocked(h.engine.session, 201)
+		h.engine.mu.Unlock()
+		if entry == nil {
+			t.Fatalf("unconfirmed removal dropped the registration")
+		}
+	})
+
+	t.Run("not dispatched removal", func(t *testing.T) {
+		h, observation := newEmpty(t)
+		notDispatched := device.DispatchNotDispatched
+		h.device.mu.Lock()
+		h.device.removeReceipt = &notDispatched
+		h.device.mu.Unlock()
+		p, request := killRequest(observation, "Pkillemptynotdispatched", 201)
+		result, _ := h.engine.App(context.Background(), "agent", p, request)
+		if result.Outcome != OutcomeNotExecuted || result.Error == nil ||
+			result.Error.Code != protocol.CodeStopped {
+			t.Fatalf("empty not dispatched removal result=%+v", result)
+		}
+		if result.App.HasKilledPIDs || result.App.KilledPIDs != nil ||
+			result.App.HasRemainingPIDs || result.App.RemainingPIDs != nil ||
+			result.App.HasRestarted || result.App.Restarted != nil {
+			t.Fatalf("not_executed kill leaked process statistics: %+v", result.App)
+		}
+	})
+
+	t.Run("revoked before removal", func(t *testing.T) {
+		h, observation := newEmpty(t)
+		h.script.onProcessRead = func(call int) {
+			if call != 2 {
+				return
+			}
+			h.engine.mu.Lock()
+			h.engine.revokeSessionLocked("user_stop", time.Now())
+			h.engine.mu.Unlock()
+		}
+		p, request := killRequest(observation, "Pkillemptyrevoked", 201)
+		result, _ := h.engine.App(context.Background(), "agent", p, request)
+		if result.Outcome != OutcomeNotExecuted || result.Error == nil ||
+			result.Error.Code != protocol.CodeStopped {
+			t.Fatalf("revoked removal result=%+v", result)
+		}
+		if result.App.HasKilledPIDs || result.App.KilledPIDs != nil ||
+			result.App.HasRemainingPIDs || result.App.RemainingPIDs != nil ||
+			result.App.HasRestarted || result.App.Restarted != nil {
+			t.Fatalf("revoked kill leaked process statistics: %+v", result.App)
 		}
 		h.device.mu.Lock()
-		kills := len(h.device.killCalls)
+		removes := len(h.device.removeCalls)
 		h.device.mu.Unlock()
-		if kills != 0 {
-			t.Fatalf("foreground guard dispatched %d signals", kills)
+		if removes != 0 {
+			t.Fatalf("revoked kill dispatched %d removals", removes)
 		}
 	})
 }
@@ -457,6 +729,24 @@ func TestAppKillTerminatesExactInstances(t *testing.T) {
 	if len(h.device.killCalls) != 2 || h.device.killCalls[0] != 500 || h.device.killCalls[1] != 501 {
 		t.Fatalf("kill calls=%v", h.device.killCalls)
 	}
+	h.device.mu.Lock()
+	removes := append([]int(nil), h.device.removeCalls...)
+	live := append([]device.Task(nil), h.device.tasks...)
+	h.device.mu.Unlock()
+	if len(removes) != 1 || removes[0] != 77 {
+		t.Fatalf("remove calls=%v want [77]", removes)
+	}
+	for _, surviving := range live {
+		if surviving.TaskID == 77 {
+			t.Fatalf("task shell survived the kill: %+v", live)
+		}
+	}
+	h.engine.mu.Lock()
+	entry := h.engine.sessionTaskLocked(h.engine.session, 77)
+	h.engine.mu.Unlock()
+	if entry != nil {
+		t.Fatalf("killed task stayed registered: %+v", entry)
+	}
 }
 
 func TestAppKillConfirmedEmptyProcessSetIsExecutedWithoutSignal(t *testing.T) {
@@ -481,6 +771,24 @@ func TestAppKillConfirmedEmptyProcessSetIsExecutedWithoutSignal(t *testing.T) {
 	}
 	if len(h.device.killCalls) != 0 {
 		t.Fatalf("empty process set dispatched %d signals", len(h.device.killCalls))
+	}
+	h.device.mu.Lock()
+	removes := append([]int(nil), h.device.removeCalls...)
+	live := append([]device.Task(nil), h.device.tasks...)
+	h.device.mu.Unlock()
+	if len(removes) != 1 || removes[0] != 77 {
+		t.Fatalf("remove calls=%v want [77]", removes)
+	}
+	for _, surviving := range live {
+		if surviving.TaskID == 77 {
+			t.Fatalf("task shell survived the kill: %+v", live)
+		}
+	}
+	h.engine.mu.Lock()
+	entry := h.engine.sessionTaskLocked(h.engine.session, 77)
+	h.engine.mu.Unlock()
+	if entry != nil {
+		t.Fatalf("killed task stayed registered: %+v", entry)
 	}
 }
 
@@ -543,6 +851,176 @@ func TestTransferPoolExcludesLiveScanAndDeletes(t *testing.T) {
 func (e taskEntry) OwnedProven() taskEntry {
 	e.Proven = true
 	return e
+}
+
+// killScriptDevice models the Android task/foreground linkage the kill flow
+// depends on: the scripted foreground is reported only while its task is still
+// live on the queried display, and the death of the last process may take the
+// task shell with it. Every other fact comes from the shared fake.
+type killScriptDevice struct {
+	*fakeDevice
+	// dropTaskWhenProcessGone is a task id Android destroys once its package has
+	// no live process left. Zero disables the behavior.
+	dropTaskWhenProcessGone int
+	// onProcessRead runs after one package process read with its 1-based call
+	// number, outside the device lock, so a test can interleave a STOP.
+	onProcessRead func(call int)
+	processReads  int
+}
+
+// Foreground reports the scripted foreground while its task is still live.
+func (d *killScriptDevice) Foreground(_ context.Context, displayID int) (device.Foreground, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.foregroundOfLocked(displayID), nil
+}
+
+// foregroundOfLocked resolves the scripted foreground against the live tasks.
+// The caller holds the device lock.
+func (d *killScriptDevice) foregroundOfLocked(displayID int) device.Foreground {
+	if d.foreground == nil {
+		return device.Foreground{State: device.ForegroundPresent, Package: "com.example", TaskID: intPtr(42)}
+	}
+	if d.foreground.TaskID != nil {
+		for _, task := range d.tasks {
+			if task.TaskID == *d.foreground.TaskID && task.DisplayID == displayID {
+				return *d.foreground
+			}
+		}
+		return device.Foreground{State: device.ForegroundNone}
+	}
+	return *d.foreground
+}
+
+// Capture attaches the same derived foreground to the captured page.
+func (d *killScriptDevice) Capture(ctx context.Context, display device.Display) (device.Capture, error) {
+	capture, err := d.fakeDevice.Capture(ctx, display)
+	d.mu.Lock()
+	capture.Foreground = d.foregroundOfLocked(display.ID)
+	d.mu.Unlock()
+	return capture, err
+}
+
+// PackageProcesses records the read and runs the optional interleaving hook.
+func (d *killScriptDevice) PackageProcesses(ctx context.Context, pkg string) (device.PackageProcesses, error) {
+	processes, err := d.fakeDevice.PackageProcesses(ctx, pkg)
+	d.mu.Lock()
+	d.processReads++
+	call := d.processReads
+	d.mu.Unlock()
+	if d.onProcessRead != nil {
+		d.onProcessRead(call)
+	}
+	return processes, err
+}
+
+// KillProcess drops the modeled task shell once the package has no process left.
+func (d *killScriptDevice) KillProcess(ctx context.Context, pid int, startTicks uint64) (device.DispatchReceipt, error) {
+	receipt, err := d.fakeDevice.KillProcess(ctx, pid, startTicks)
+	if receipt == device.DispatchTerminated && err == nil {
+		d.mu.Lock()
+		if d.dropTaskWhenProcessGone != 0 && len(d.processes.Instances) == 0 {
+			kept := d.tasks[:0]
+			for _, task := range d.tasks {
+				if task.TaskID == d.dropTaskWhenProcessGone {
+					continue
+				}
+				kept = append(kept, task)
+			}
+			d.tasks = kept
+		}
+		d.mu.Unlock()
+	}
+	return receipt, err
+}
+
+// killHarness is the shared app harness plus the kill-specific device linkage.
+type killHarness struct {
+	*harness
+	script *killScriptDevice
+}
+
+// newKillHarness builds the standard harness over the kill-specific device. It
+// mirrors newHarness; the shared harness helper only accepts its own fake.
+func newKillHarness(t *testing.T) *killHarness {
+	t.Helper()
+	base := newFakeDevice()
+	script := &killScriptDevice{fakeDevice: base}
+	cfg := DefaultConfig("instance-test", "agent")
+	cfg.CleanupTimeout = 700 * time.Millisecond
+	cfg.LedgerTimeout = 200 * time.Millisecond
+	store := &fakeStore{}
+	eng := New(cfg, nil, script, store,
+		&testProjector{builder: observation.NewBuilder()}, testDiffer{})
+	eng.SetDeviceReady(true)
+	eng.StartClock()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		eng.Shutdown(ctx)
+	})
+	h := &harness{t: t, engine: eng, device: base, store: store,
+		appInstance: "11111111-1111-4111-8111-111111111111",
+		modeGen:     "22222222-2222-4222-8222-222222222222"}
+	h.sync(nil, nil)
+	return &killHarness{harness: h, script: script}
+}
+
+// TestAppKillForegroundVirtualTaskRemovesShell is the Issue #35 reproduction: the
+// single foreground owned task of a virtual display must be terminable directly,
+// and its dead task shell must not survive the kill.
+func TestAppKillForegroundVirtualTaskRemovesShell(t *testing.T) {
+	h := newKillHarness(t)
+	first := h.startSession()
+	task := device.Task{TaskID: 201, RootID: 201, DisplayID: 12, Package: "com.netease.cloudmusic"}
+	h.addTask(task)
+	h.ownTask(task, TaskOwned, nil)
+	h.device.mu.Lock()
+	h.device.foreground = &device.Foreground{State: device.ForegroundPresent,
+		Package: "com.netease.cloudmusic", TaskID: intPtr(201)}
+	h.device.processes = device.PackageProcesses{UserID: 10123, Instances: []device.ProcessInstance{
+		{PID: 731, StartTicks: 55, Name: "com.netease.cloudmusic"},
+	}}
+	h.device.mu.Unlock()
+
+	result, apiErr := h.engine.App(context.Background(), "agent", "Pkillfg",
+		&protocol.AppRequest{Kind: protocol.AppKindKill, Reference: first.Observation.ID,
+			Target: &protocol.AppTarget{TaskID: 201, UseTask: true}})
+	if apiErr != nil {
+		t.Fatalf("app kill: %v", apiErr)
+	}
+	if result.Outcome != OutcomeExecuted || result.Error != nil {
+		t.Fatalf("foreground owned kill outcome=%q error=%+v", result.Outcome, result.Error)
+	}
+	h.device.mu.Lock()
+	kills := append([]int(nil), h.device.killCalls...)
+	removes := append([]int(nil), h.device.removeCalls...)
+	live := append([]device.Task(nil), h.device.tasks...)
+	h.device.mu.Unlock()
+	if len(kills) != 1 || kills[0] != 731 {
+		t.Fatalf("kill calls=%v want [731]", kills)
+	}
+	if len(removes) != 1 || removes[0] != 201 {
+		t.Fatalf("remove calls=%v want [201]", removes)
+	}
+	for _, surviving := range live {
+		if surviving.TaskID == 201 {
+			t.Fatalf("task shell survived the kill: %+v", live)
+		}
+	}
+	h.engine.mu.Lock()
+	entry := h.engine.sessionTaskLocked(h.engine.session, 201)
+	h.engine.mu.Unlock()
+	if entry != nil {
+		t.Fatalf("killed task stayed registered: %+v", entry)
+	}
+	if result.Observation == nil || result.Observation.Foreground == nil {
+		t.Fatalf("post observation has no foreground: %+v", result.Observation)
+	}
+	if result.Observation.Foreground.State != device.ForegroundNone ||
+		result.Observation.Foreground.TaskID != nil {
+		t.Fatalf("post observation foreground=%+v want an absent foreground", result.Observation.Foreground)
+	}
 }
 
 func TestAppDuplicatePRepublishesOnlyKind(t *testing.T) {

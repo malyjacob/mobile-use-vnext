@@ -7,8 +7,8 @@ HTTP 协议配对。
 
 - 模块：`github.com/malyjacob/mobile-use-vnext`
 - Go：1.27.1，启用 `GOEXPERIMENT=jsonv2`
-- 契约：`contract_version = "23"`，服务、HTTP 客户端、控制 App 精确相等才做普通工作
-- 发行：`0.27.0`；`release/versions.json` 是发行号、契约号与 Android versionCode（29）的唯一
+- 契约：`contract_version = "24"`，服务、HTTP 客户端、控制 App 精确相等才做普通工作
+- 发行：`0.28.0`；`release/versions.json` 是发行号、契约号与 Android versionCode（30）的唯一
   来源，构建生成 Go/Java 常量
 
 ## 能力边界
@@ -164,7 +164,7 @@ $env:GOEXPERIMENT = 'jsonv2'; go test ./...
 ## 接口
 
 Agent 工具（`POST /api/<tool>`，`Authorization: Bearer <agent_token>`，
-`X-Mobile-Use-Contract: 23`）：
+`X-Mobile-Use-Contract: 24`）：
 
 | 工具 | 说明 |
 | --- | --- |
