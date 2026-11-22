@@ -320,7 +320,7 @@ func decodeResultTextV4(t *testing.T, text string) (map[string]any, bool, error)
 			if err != nil {
 				return nil, false, err
 			}
-			if err := put("/text_input", map[string]any{"write": fields["write"], "enter": fields["enter"]}); err != nil {
+			if err := put("/text_input", map[string]any{"write": fields["write"], "submit": fields["submit"]}); err != nil {
 				return nil, false, err
 			}
 		default:

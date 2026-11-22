@@ -12,22 +12,26 @@ import (
 // app_code, field, task_ids, allowed_kinds, allowed_scopes,
 // blocking_operation_id, start_operation_id, reason, target_actions,
 // ancestor_ref, ancestor_actions, scope, scope_ref, candidates, blocking_refs,
-// stage, dispatch (focus/write/enter closed-state object), candidate_count
-// (non-negative integer). The act static rejection taxonomy owns reason,
-// target_actions, ancestor_ref, ancestor_actions, scope, scope_ref, candidates,
-// and blocking_refs. Non-text target_changed uses reason with its own closed
-// enum. candidates is fixed to []map[string]any whose objects contain ref,
-// role, actions ([]string), bounds ([]int [left, top, right, bottom]),
-// relation, and executable (bool); blocking_refs is []string. The text action
-// owns stage/reason/dispatch/candidate_count and no other tool inherits that
-// vocabulary. Details never carry user text, device output, trees, commands or
-// credentials.
+// changed_ref, stage, dispatch (focus/write/submit closed-state object),
+// candidate_count (non-negative integer). The act static rejection taxonomy
+// owns reason, target_actions, ancestor_ref, ancestor_actions, scope, scope_ref,
+// candidates, and blocking_refs. Non-text target_changed uses reason with its
+// own closed enum. changed_ref is the one optional public n-prefixed ancestor
+// ref that attributes a target_changed rejection to the concrete changed
+// ancestor; it is omitted whenever it cannot be located uniquely. candidates
+// is fixed to []map[string]any whose objects contain ref, role, actions
+// ([]string), bounds ([]int [left, top, right, bottom]), relation, and
+// executable (bool); blocking_refs is []string. The text action owns
+// stage/reason/dispatch/candidate_count and no other tool inherits that
+// vocabulary: stage is target/focus/write/verify/submit and dispatch always
+// carries the three keys focus, write and submit. Details never carry user
+// text, device output, trees, commands or credentials.
 type APIError struct {
 	Code       string
 	Message    string
 	Details    map[string]any
 	HTTPStatus int
-	Outcome    string // not_executed / uncertain / "" (no active action)
+	Outcome    string // not_executed / partial / uncertain / "" (no active action)
 }
 
 // Error implements error.
@@ -176,22 +180,27 @@ const (
 	CodeTextTooLong        = "text_too_long"
 	CodeTextTargetUnknown  = "text_target_uncertain"
 	CodeTextResultUnknown  = "text_result_uncertain"
-	CodeTargetChanged      = "target_changed"
-	CodeForegroundChanged  = "foreground_changed"
-	CodeForegroundUnknown  = "foreground_unknown"
-	CodeControlUI          = "control_ui_on_virtual_display"
-	CodeActionUnknown      = "action_result_uncertain"
-	CodeDisplayUnavailable = "display_unavailable"
-	CodeDisplayCreate      = "display_create_failed"
-	CodeHierarchyFailed    = "hierarchy_unavailable"
-	CodeTreeTooLarge       = "tree_too_large"
-	CodeStaleScreen        = "stale_screen"
-	CodeStopped            = "control_revoked"
-	CodeRequestClosed      = "request_closed"
-	CodeCleanupUnconfirmed = "cleanup_unconfirmed"
-	CodeUnsupported        = "unsupported_feature"
-	CodeInternal           = "internal_error"
-	CodeForbidden          = "forbidden"
+	// CodeTextSubmitNotExecuted is the confirmed-partial fact of a composite
+	// text action: the write is executed while the submission is certainly not
+	// executed and no unknown physical side effect exists. It is 409 and always
+	// accompanies outcome=partial; it never claims an uncertain receipt.
+	CodeTextSubmitNotExecuted = "text_submit_not_executed"
+	CodeTargetChanged         = "target_changed"
+	CodeForegroundChanged     = "foreground_changed"
+	CodeForegroundUnknown     = "foreground_unknown"
+	CodeControlUI             = "control_ui_on_virtual_display"
+	CodeActionUnknown         = "action_result_uncertain"
+	CodeDisplayUnavailable    = "display_unavailable"
+	CodeDisplayCreate         = "display_create_failed"
+	CodeHierarchyFailed       = "hierarchy_unavailable"
+	CodeTreeTooLarge          = "tree_too_large"
+	CodeStaleScreen           = "stale_screen"
+	CodeStopped               = "control_revoked"
+	CodeRequestClosed         = "request_closed"
+	CodeCleanupUnconfirmed    = "cleanup_unconfirmed"
+	CodeUnsupported           = "unsupported_feature"
+	CodeInternal              = "internal_error"
+	CodeForbidden             = "forbidden"
 
 	// Tool-surface codes. These describe controlled stages of the
 	// discovery, app launch and managed shell tools; no new code changes the
@@ -261,7 +270,8 @@ func Status(code string) int {
 		CodeObservationRetired, CodeNoReadyObservation, CodeNodeNotFound,
 		CodeNodeDisabled, CodeDisplayUnavailable, CodeStopped,
 		CodeRequestClosed, CodeCleanupUnconfirmed, CodeTextTargetUnknown,
-		CodeTextResultUnknown, CodeStaleScreen, CodeTargetChanged,
+		CodeTextResultUnknown, CodeTextSubmitNotExecuted, CodeStaleScreen,
+		CodeTargetChanged,
 		CodeForegroundChanged, CodeForegroundUnknown, CodeControlUI,
 		CodeAppNotFound, CodeAppMoved, CodeAppTaskUnconfirmed, CodeTaskFocus,
 		CodeContentUnavailable, CodeInspectionTooLarge, CodeRootUnavailable,

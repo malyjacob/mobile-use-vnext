@@ -1,20 +1,22 @@
 package engine
 
 import (
+	"context"
 	"sort"
 
 	"github.com/malyjacob/mobile-use-vnext/internal/device"
+	"github.com/malyjacob/mobile-use-vnext/internal/eventlog"
 	"github.com/malyjacob/mobile-use-vnext/internal/protocol"
 )
 
 const (
-	coextensiveMinPercent       = 85
-	colocatedMinOverlapPercent  = 50
-	colocatedMaxScreenPercent   = 50
-	maxStaticCandidates         = 4
-	maxCandidateDryRuns         = 16
-	maxBlockingRefs             = 3
-	maxPointHitSet              = 64
+	coextensiveMinPercent      = 85
+	colocatedMinOverlapPercent = 50
+	colocatedMaxScreenPercent  = 50
+	maxStaticCandidates        = 4
+	maxCandidateDryRuns        = 16
+	maxBlockingRefs            = 3
+	maxPointHitSet             = 64
 )
 
 const (
@@ -88,6 +90,325 @@ func probeTargetChangedError(state actProbeState, match actMatch, message string
 		return targetChangedError(targetChangedReasonLineageChanged, message)
 	}
 	return targetChangedError(targetChangedReasonTargetMissing, message)
+}
+
+// The write-submit revalidation signal is the closed submit reason literal of the
+// text stage, carried in error.details["reason"] so the single mapping in the
+// text stage can forward it without re-parsing the message. The HTTP code and
+// every other reason stay exactly as the ordinary revalidation produced them.
+const submitFrameReasonDisabled = "submit_disabled"
+
+// submitFrameDisabledError reports an execution target that is observed disabled
+// on the fresh frame. It is a 409 target_changed with the submit classification,
+// never an authorization to dispatch.
+func submitFrameDisabledError() *protocol.APIError {
+	return targetChangedError(submitFrameReasonDisabled, targetChangedMessage)
+}
+
+// submitExecutionEnabled proves the fresh enabled state of the execution target
+// of one write-submit frame. A plan that observed the target disabled must see
+// the explicit disabled -> enabled transition; any other plan must not see an
+// explicit disable. A missing flag is accepted only when no transition is owed.
+func submitExecutionEnabled(frame *tapFrame, initiallyDisabled bool) bool {
+	if frame == nil || frame.raw == nil {
+		return false
+	}
+	if initiallyDisabled {
+		return frame.raw.HasEnabled && frame.raw.Enabled
+	}
+	return !(frame.raw.HasEnabled && !frame.raw.Enabled)
+}
+
+// tapPlanExecutionRaw returns the raw node a tap plan would actually execute on:
+// the bubble ancestor, the coextensive delegate, the co-located carrier or the
+// direct target. The child/parent selector is never the execution target.
+func tapPlanExecutionRaw(plan *tapPlan) *device.RawNode {
+	if plan == nil {
+		return nil
+	}
+	switch {
+	case plan.bubbleAncestorRaw != nil:
+		return plan.bubbleAncestorRaw
+	case plan.colocatedRaw != nil:
+		return plan.colocatedRaw
+	case plan.delegateRaw != nil:
+		return plan.delegateRaw
+	default:
+		return plan.targetRaw
+	}
+}
+
+// structureWithoutEnabled copies one node with its enabled tri-state erased, so
+// two nodes can be compared for every other field.
+func structureWithoutEnabled(node *device.RawNode) device.RawNode {
+	copied := *node
+	copied.HasEnabled, copied.Enabled = false, false
+	return copied
+}
+
+// submitExecutionDisabledOnFresh attributes a failed submit frame to a disabled
+// execution target. It reports true when exactly one fresh node matches the
+// plan's execution target on every field except the enabled state and is
+// explicitly disabled there. The target stays rejected; only the reason changes
+// from a generic capability change to submit_disabled.
+func submitExecutionDisabledOnFresh(fresh *device.Capture, want *device.RawNode) bool {
+	if fresh == nil || want == nil {
+		return false
+	}
+	screen := fresh.Display.Bounds()
+	empty := structureWithoutEnabled(want)
+	matches := 0
+	for index := range fresh.Nodes {
+		node := &fresh.Nodes[index]
+		if node.DisplayID != want.DisplayID || !node.HasEnabled || node.Enabled {
+			continue
+		}
+		candidate := structureWithoutEnabled(node)
+		if compatible, _ := sameStructure(&empty, &candidate); !compatible {
+			continue
+		}
+		if !geometryCompatible(want.Bounds, node.Bounds, screen,
+			actTier2MinOverlap) {
+			continue
+		}
+		matches++
+		if matches > 1 {
+			return false
+		}
+	}
+	return matches == 1
+}
+
+// actTargetProbeOutcome maps one probe state to the closed event outcome.
+func actTargetProbeOutcome(state actProbeState) string {
+	switch state {
+	case actProbeUnique:
+		return "proven"
+	case actProbeAmbiguous:
+		return "ambiguous"
+	case actProbeNone:
+		return "none"
+	case actProbeCancelled:
+		return "stopped"
+	case actProbeBudgetExhausted:
+		return "budget"
+	default:
+		return "malformed"
+	}
+}
+
+// actTargetLog records one ref-target match decision. tier is the bounded
+// integer level that actually proved the target (1-4) and is present only for a
+// unique match; a rejection carries no tier. No ref, label, text or tree
+// content is ever written.
+func (e *Engine) actTargetLog(operationID, outcome string, tier int) {
+	if e == nil || e.log == nil || operationID == "" || outcome == "" {
+		return
+	}
+	fields := []eventlog.Field{
+		eventlog.Str("operation_id", operationID),
+		eventlog.Str("outcome", outcome),
+	}
+	if tier > 0 && tier <= 4 {
+		fields = append(fields, eventlog.Int("tier", tier))
+	}
+	e.log.Event(eventlog.Debug, "act.target", fields...)
+}
+
+// bubbleRelationChangedError reports a C->A relationship change and attributes
+// it to the original public ancestor ref. The nearest-interactive-ancestor
+// relationship is precisely what changed, so the parent ref is the attribution.
+func bubbleRelationChangedError(ancestorRef string) *protocol.APIError {
+	apiErr := targetChangedError(targetChangedReasonLineageChanged,
+		targetChangedMessage)
+	if ancestorRef != "" {
+		apiErr.WithDetail("changed_ref", ancestorRef)
+	}
+	return apiErr
+}
+
+// tapFrameTier4OcclusionProven reports whether a Tier 4 landing point still
+// reaches the proven target subtree and no interactive public node outside that
+// subtree covers it. Tier 4 accepts a rebuilt ancestor, so the subtree scope
+// alone can no longer prove that a newly inserted sibling overlay does not own
+// the point; the whole-tree deepest hit must stay inside the target subtree.
+// Tier 1-3 never call this and keep their exact previous gates.
+func tapFrameTier4OcclusionProven(view *tapPublicView, target *protocol.Node,
+	x, y int) bool {
+	if view == nil || view.tree == nil || view.tree.Root == nil || target == nil {
+		return false
+	}
+	if len(externalInteractiveOwnersAt(view, target, x, y)) > 0 {
+		return false
+	}
+	ref, state := resolvePoint(view.tree.Root, x, y)
+	if state != pointUnique || ref == "" {
+		return false
+	}
+	hit := view.byRef[ref]
+	if hit == nil {
+		return false
+	}
+	return hit == target || isPublicAncestor(view, target, hit)
+}
+
+// attachChangedRef adds the optional changed_ref detail to a lineage_changed
+// 409. The attribution is bounded pure CPU and never overrides the primary
+// error: an unresolvable or ambiguous change omits the detail rather than
+// guessing.
+func attachChangedRef(ctx context.Context, apiErr *protocol.APIError,
+	obs *observationState, fresh *device.Capture, want *device.RawNode) {
+	if apiErr == nil || obs == nil || obs.Projection == nil ||
+		obs.Projection.Capture == nil || obs.Projection.Tree == nil ||
+		fresh == nil || want == nil {
+		return
+	}
+	if apiErr.Code != protocol.CodeTargetChanged ||
+		apiErr.Details["reason"] != targetChangedReasonLineageChanged {
+		return
+	}
+	if _, exists := apiErr.Details["changed_ref"]; exists {
+		return
+	}
+	if ref := changedPublicAncestorRef(ctx, obs, fresh, want); ref != "" {
+		apiErr.WithDetail("changed_ref", ref)
+	}
+}
+
+// changedPublicAncestorRef names the nearest public ancestor that no longer
+// aligns on the fresh frame. The whole attribution is bounded: the candidate scan
+// and both lineage walks charge the shared budget and inspect STOP, and at most
+// maxChangedRefAncestors levels are examined. A hidden raw wrapper has no public
+// ref and therefore never masquerades as a public layer: the search continues
+// outward until a level is uniquely locatable. "" means "not provable".
+func changedPublicAncestorRef(ctx context.Context, obs *observationState,
+	fresh *device.Capture, want *device.RawNode) string {
+	original := obs.Projection.Capture
+	oldIndex := indexOf(original, want)
+	if oldIndex < 0 {
+		return ""
+	}
+	limits := defaultActMatchLimits()
+	budget := &matchBudget{
+		ctx: ctx, candidateLimit: len(original.Nodes) + len(fresh.Nodes),
+		lineageLimit: limits.lineageLimit, lineageDepth: limits.lineageDepth,
+	}
+	candidate, ok := changedStructureCandidate(original, oldIndex, fresh, budget)
+	if !ok {
+		return ""
+	}
+	oldChain, ok := lineageL1(original, oldIndex, budget)
+	if !ok {
+		return ""
+	}
+	newChain, ok := lineageL1(fresh, candidate, budget)
+	if !ok {
+		return ""
+	}
+	// An ancestor is only blamed when the old chain itself lost it. A level that
+	// still has exactly one structural counterpart in the fresh ancestor chain is
+	// merely shifted (for example behind a newly inserted wrapper) and is never
+	// reported as changed. Two or more possible counterparts are ambiguous, so
+	// the whole attribution is omitted rather than guessed.
+	for level := 0; level < len(oldChain) && level < maxChangedRefAncestors; level++ {
+		if !budget.consumeCandidate() {
+			return ""
+		}
+		entry := oldChain[level]
+		counterparts := 0
+		for depth := 0; depth < len(newChain) && depth < maxChangedRefAncestors; depth++ {
+			if !budget.consumeCandidate() {
+				return ""
+			}
+			if newChain[depth].root == entry.root &&
+				newChain[depth].key == entry.key {
+				counterparts++
+			}
+		}
+		switch {
+		case counterparts == 1:
+			continue
+		case counterparts > 1:
+			return ""
+		}
+		// The level is gone. A hidden raw wrapper has no public ref and never
+		// masquerades as a public layer: keep walking outward to the nearest
+		// ancestor that is uniquely addressable.
+		if ref := projectionPublicRefForRaw(obs.Projection, entry.parent); ref != "" {
+			return ref
+		}
+	}
+	return ""
+}
+
+// maxChangedRefAncestors bounds one changed_ref attribution walk.
+const maxChangedRefAncestors = 64
+
+// changedStructureCandidate finds the single fresh node that still carries the
+// failed target's source structure within the tier-2 geometry band. None or more
+// than one candidate leaves the change unattributable. The scan is budget-and-
+// ctx bounded.
+func changedStructureCandidate(original *device.Capture, oldIndex int,
+	fresh *device.Capture, budget *matchBudget) (int, bool) {
+	if original == nil || fresh == nil || budget == nil || oldIndex < 0 ||
+		oldIndex >= len(original.Nodes) {
+		return -1, false
+	}
+	want := &original.Nodes[oldIndex]
+	screen := fresh.Display.Bounds()
+	candidate := -1
+	for index := range fresh.Nodes {
+		if !budget.consumeCandidate() {
+			return -1, false
+		}
+		node := &fresh.Nodes[index]
+		if node.DisplayID != want.DisplayID {
+			continue
+		}
+		if compatible, _ := sameStructure(want, node); !compatible {
+			continue
+		}
+		if want.Bounds != node.Bounds &&
+			!geometryCompatible(want.Bounds, node.Bounds, screen,
+				actTier2MinOverlap) {
+			continue
+		}
+		if candidate >= 0 {
+			return -1, false
+		}
+		candidate = index
+	}
+	return candidate, candidate >= 0
+}
+
+// projectionPublicRefForRaw resolves one raw index back to a public ref through
+// both source maps. The lookup requires strict uniqueness across Source and
+// ContextSource, and the synthetic root raw index is never reported.
+func projectionPublicRefForRaw(projection *Projection, rawIndex int) string {
+	if projection == nil || rawIndex < 0 ||
+		(projection.Capture != nil && rawIndex == projection.Capture.Root) {
+		return ""
+	}
+	ref := ""
+	for candidateRef, index := range projection.Source {
+		if index != rawIndex || candidateRef == "" {
+			continue
+		}
+		if ref != "" && ref != candidateRef {
+			return ""
+		}
+		ref = candidateRef
+	}
+	for candidateRef, index := range projection.ContextSource {
+		if index != rawIndex || candidateRef == "" {
+			continue
+		}
+		if ref != "" && ref != candidateRef {
+			return ""
+		}
+		ref = candidateRef
+	}
+	return ref
 }
 
 func rectArea64(rect device.Rect) int64 {

@@ -499,6 +499,9 @@ func (e *execution) isError(tool string) bool {
 		return result == nil || result.Image == nil ||
 			e.image == nil || len(e.image.Data) == 0
 	case "act":
+		// Only the complete outcome is success: a partial text act confirms the
+		// write but certainly did not submit, so it stays an error even when it
+		// delivers a fresh ready observation.
 		return result == nil || result.Outcome != "executed"
 	case "inspect":
 		return result == nil || result.Inspection == nil

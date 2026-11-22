@@ -658,15 +658,15 @@ func (p *v4Parser) decodeTextInput(line string) *checkError {
 		if !found || !resultToken(value) {
 			return failf("text_result_text_input_invalid")
 		}
-		if (index == 0 && key != "write") || (index == 1 && key != "enter") {
+		if (index == 0 && key != "write") || (index == 1 && key != "submit") {
 			return failf("text_result_text_input_invalid")
 		}
 		values[key] = value
 	}
-	if values["write"] == "" || values["enter"] == "" {
+	if values["write"] == "" || values["submit"] == "" {
 		return failf("text_result_text_input_invalid")
 	}
-	for _, member := range []string{"write", "enter"} {
+	for _, member := range []string{"write", "submit"} {
 		if failure := p.set([]string{"text_input", member}, values[member]); failure != nil {
 			return failure
 		}

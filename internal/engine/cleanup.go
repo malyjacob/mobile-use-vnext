@@ -447,8 +447,17 @@ func (e *Engine) finishCleanup(target cleanupTarget, cleanup *cleanupState, resu
 		if e.current != nil && e.current.SessionEpoch == target.epoch {
 			e.current = nil
 		}
-		if e.baseline != nil && e.baseline.Origin == target.origin {
-			e.baseline = nil
+		if e.baselines != nil {
+			kept := make([]*baselineState, 0, len(e.baselines))
+			for _, b := range e.baselines {
+				if b != nil && b.Origin != target.origin {
+					kept = append(kept, b)
+				}
+			}
+			e.baselines = kept
+			if !e.hasBaselineLocked(e.activeBaselineID) {
+				e.activeBaselineID = ""
+			}
 		}
 	}
 	e.commands = filterCommands(e.commands, target)

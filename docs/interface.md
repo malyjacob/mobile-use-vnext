@@ -15,7 +15,7 @@
 | 方法 | 所有业务端点只接受 `POST`；其他方法返回 `405`，错误码 `invalid_request` |
 | 认证 | `/api/*` 用 `agent_token`；`/v1/control/*` 用 `control_token`；`Authorization: Bearer <token>` |
 | 身份隔离 | agent token 不能访问 `/v1/control/*`，control token 不能访问 `/api/*`；错误为 `401 unauthorized` |
-| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 24`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
+| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 25`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
 | 预分配 P | `/api/*` 可带 `X-Mobile-Use-Operation: P…`；缺省由服务分配。`status` 不使用该头 |
 | 请求体 | 必须是一个 JSON 对象；大小上限：`start`/`status`/`end`/`wait_for` 16 KiB，`observe` 32 KiB，`snap` 8 KiB，`act` 64 KiB，`inspect`/`keepalive`/`diagnose`/`app` 8 KiB，`notify` 16 KiB，`shell` 32 KiB，`sync` 32 KiB，`stop` 8 KiB |
 | 响应 | `Content-Type: application/json; charset=utf-8`，`Cache-Control: no-store` |
@@ -26,8 +26,8 @@
 - 未知成员、重复成员名、大小写变体、尾随第二个 JSON 值、类型混用 → `422 invalid_request`；
 - 必填字段必须实际出现；未声明 nullable 的字段出现显式 `null` → `422 invalid_request`
   （`status` 的 `reference`、`observe` 的 `full`/`image`/`wait_ms`、`snap` 的 `reference`、
-  `wait_for` 的 `query`/`absent_query`/`stable`/`full`/`image`、`act` 的 `image`、
-  `text`/`key` 的值等）；
+  `wait_for` 的 `query`/`absent_query`/`stable`/`full`/`image`、`act` 的 `image`/
+  `auto_submit`/`submit_ref`、`text`/`key` 的值等）；
 - 请求体为空、只有空白或不是对象 → `422 invalid_request`；
 - 编号规则：`O…` 为观察，`P…` 为操作；引用长度 1–64，首字符必须是 `O` 或 `P`。
   客户端预分配的 P 至少 2 个字符。服务生成的编号为 `O<4位>_<seq>` / `P<4位>_<seq>`：4 位
@@ -66,7 +66,7 @@ app, shell, wait, notification, diagnosis, cleanup, error, recovery
 ```
 
 事实互不替代：`outcome`（动作执行）、`effect`（本次受控滚动的位移观察）、
-`text_input`（复合 text 的 write/enter 原语）、
+`text_input`（复合 text 的 write/submit 原语）、
 `wait`（条件等待的退出分支、单帧匹配项与耗时）、
 `image`（`snap` 的顶层单张图片元数据）、
 `observation.status` 与 `observation.quality`（观察及其收敛质量）、`session.state`（会话）、
@@ -83,16 +83,17 @@ app, shell, wait, notification, diagnosis, cleanup, error, recovery
   `app_code`、`field`、
   `task_ids`、`allowed_kinds`、`allowed_scopes`、`blocking_operation_id`、`start_operation_id`、
   `reason`、`target_actions`、`ancestor_ref`、`ancestor_actions`、`scope`、`scope_ref`、
-  `candidates`、`blocking_refs`、`stage`、`dispatch`、`candidate_count`；
-  `ancestor_ref`、`scope_ref` 与 `reason`/`scope`/`stage` 是字符串，`target_actions`、
+  `candidates`、`blocking_refs`、`changed_ref`、`stage`、`dispatch`、`candidate_count`；
+  `ancestor_ref`、`scope_ref`、`changed_ref` 与 `reason`/`scope`/`stage` 是字符串，`target_actions`、
   `ancestor_actions`、`blocking_refs` 是字符串数组，`candidates` 是至多 4 项的对象数组
   （每项固定含 `ref`、`role`、`actions`、`bounds`、`relation`、`executable`，其中 `bounds`
   为 `[left, top, right, bottom]` 4 整数数组、`executable` 为布尔，绝不含 `label`/
   `value`/`text` 正文），
-  `dispatch` 是只含 `focus`、`write`、`enter` 三个字符串成员的 JSON 对象，
+  `dispatch` 是只含 `focus`、`write`、`submit` 三个字符串成员的 JSON 对象，
   `candidate_count` 是非负整数；均不得字符串化。`act` 静态拒绝的 `reason`、`scope`、
   `scope_ref`、`target_actions`、`ancestor_ref`、`ancestor_actions`、`candidates`、
-  `blocking_refs` 与非 `text` 重验 `409 target_changed` 的归因 `reason` 枚举见 §6。
+  `blocking_refs` 与非 `text` 重验 `409 target_changed` 的归因 `reason` 枚举见 §6；
+  `changed_ref` 只在 `reason=lineage_changed` 且能唯一确定变动的公开祖先时出现。
   `stage`、`reason`、`dispatch`、`candidate_count` 的 text 取值只属于 `text` 错误，其他动作
   不继承该组。没有可证事实时省略可选键，不以 `null` 或空字符串代替；
   已声明必出的动作数组即使为空也输出 `[]`。`mcp.*` 是 [MCP 适配器](mcp.md) 的保留命名空间，
@@ -107,8 +108,8 @@ app, shell, wait, notification, diagnosis, cleanup, error, recovery
   `outcome=executed`（含 `executed_revoked`）或 `uncertain` 时出现；`not_executed` 永不出现。
   对象缺失表示本次结果没有该事实（可能是原操作不是 `scroll`、未执行，或原操作事实已封闭、
   已淘汰而不可用），缺失不表示“未观察到位移”。
-- `text_input` 只出现在已接纳且有效 `press_enter=true` 的 `text` 操作结果与仍保留该原操作的
-  P 视图；`write`、`enter` 两键固定出现，枚举与合法组合见 §6。显式 `press_enter=false`、
+- `text_input` 只出现在已接纳且有效 `auto_submit=true` 的 `text` 操作结果与仍保留该原操作的
+  P 视图；`write`、`submit` 两键固定出现，枚举与合法组合见 §6。显式 `auto_submit=false`、
   其他动作、认领前拒绝和未接纳调用都不出现该对象。它不替代 `outcome`、`error` 或后观察。
 
 `recovery` 的成员：
@@ -130,7 +131,8 @@ app, shell, wait, notification, diagnosis, cleanup, error, recovery
 - `observe`：观察证据作废，需要重新采集；`reference=P`。这里的 P 是已有、且其原会话仍是
   当前活动会话的操作编号（常见为 `session.origin`，也可用该会话所属的 `operation_id`）；
   它不是本次 `observe` 调用新分配的 P。请求体 `reference` 与本次调用 P 是两个字段，规则
-  见 §5。已认领 `text` 的写入或 ENTER 无法确认、已认领后未派发任何原语但目标条件不再成立、
+  见 §5。已认领 `text` 的写入或提交无法确认、写入已确认但提交确定未派发（`partial`）、
+  已认领后未派发任何原语但目标条件不再成立、
   或主动作已确认而后观察失败时，该入口直接指向一次新观察；原会话已撤销、结束、过期或
   绑定失效时改由 `end`/`status` 表达，见 §6。
 - `status`：结果未定或收尾未完成；轮询对象按工具取本结果的 `operation_id`、
@@ -151,9 +153,9 @@ HTTP 状态映射（默认由 `protocol.Status` 按 code 决定；认领前的 t
 | --- | --- |
 | 200 | 成功；含 `end`/`status` 的同帧 `cleanup=pending`/`unconfirmed`（退休收尾事实不是 HTTP 错误） |
 | 401 | `unauthorized` |
-| 409 | `contract_mismatch`、`device_busy`、`session_*`、`reference_has_no_session`、`operation_*`、`observation_*`、`node_not_found`、`node_disabled`、`stale_screen`、`target_changed`、`foreground_changed`、`foreground_unknown`、`control_revoked`、`request_closed`、`control_unavailable`、`stop_unavailable`、`mode_not_selected`、`device_locked`、`device_not_interactive`、`recovering`、`no_ready_observation`、`display_unavailable`、`text_target_uncertain`、`text_result_uncertain`、`control_ui_on_virtual_display`、`app_not_found`、`application_moved`、`task_focus_unavailable`、`task_remove_unconfirmed`、`content_unavailable`、`inspection_too_large`、`root_unavailable`、`window_action_not_supported_on_primary_display`、`task_not_found`、`task_not_tracked`、`task_target_ambiguous`、`task_root_shared`、`task_move_unconfirmed`、`close_refused_borrowed`、`kill_refused_not_owned`、`kill_refused_task_elsewhere`、`kill_refused_foreground`、`kill_refused_playback`、`kill_refused_process_shared`、`kill_unconfirmed`、`app_capacity_exceeded`、`task_lifecycle_busy` |
+| 409 | `contract_mismatch`、`device_busy`、`session_*`、`reference_has_no_session`、`operation_*`、`observation_*`、`node_not_found`、`node_disabled`、`stale_screen`、`target_changed`、`foreground_changed`、`foreground_unknown`、`control_revoked`、`request_closed`、`control_unavailable`、`stop_unavailable`、`mode_not_selected`、`device_locked`、`device_not_interactive`、`recovering`、`no_ready_observation`、`display_unavailable`、`text_target_uncertain`、`text_result_uncertain`、`text_submit_not_executed`、`control_ui_on_virtual_display`、`app_not_found`、`application_moved`、`task_focus_unavailable`、`task_remove_unconfirmed`、`content_unavailable`、`inspection_too_large`、`root_unavailable`、`window_action_not_supported_on_primary_display`、`task_not_found`、`task_not_tracked`、`task_target_ambiguous`、`task_root_shared`、`task_move_unconfirmed`、`close_refused_borrowed`、`kill_refused_not_owned`、`kill_refused_task_elsewhere`、`kill_refused_foreground`、`kill_refused_playback`、`kill_refused_process_shared`、`kill_unconfirmed`、`app_capacity_exceeded`、`task_lifecycle_busy` |
 | 422 | `invalid_request`、`invalid_coordinates`、`ambiguous_point`、`unsupported_key`、`unsupported_node_action`、`invalid_target`、`no_safe_point`、`no_safe_trajectory`、`text_too_long`、`reference_invalid`；认领前的 text 静态输入能力/保护拒绝（`text_target_uncertain`，含首次结果、`status(P)` 与重复 P）；`app` 的未知 kind、分支外成员、`target` 形状错误与显式 `null` 也归入 `invalid_request` |
-| 503 | `device_unavailable`、`display_create_failed`、`hierarchy_unavailable`、`tree_too_large`、`app_launch_failed`、`app_list_unavailable`、`shell_start_failed`、`delivery_unavailable`；以及 `observation.status=failed` 或没有新 O 的 `partial` 结果 |
+| 503 | `device_unavailable`、`display_create_failed`、`hierarchy_unavailable`、`tree_too_large`、`app_launch_failed`、`app_list_unavailable`、`shell_start_failed`、`delivery_unavailable`；以及 `observation.status=failed`，或 `observation.status=partial` 且没有新 O 的只读图片结果 |
 | 504 | `action_result_uncertain`（输入已派发但无法确认完成）、`app_launch_unconfirmed`、`shell_result_unconfirmed`；`app` 的 `app_launch_unconfirmed` 仅用于 `open` |
 | 500 | `internal_error`（接入层自身失败）；工具结果中的 500 会被改写为 409 |
 
@@ -307,13 +309,16 @@ HTTP 状态映射（默认由 `protocol.Status` 按 code 决定；认领前的 t
 
 - `observe(O1)`：若 O1 是 `ready` 的 full 候选，先把它确认为基线，然后执行一次新采集。
   新采集通常相对 O1 返回 delta；页面未变时是空差异（只有 `format`、`base`、`view`）。
+  若 O1 之后发生主路径未命中的变化（如跨页回返），`base` 也可能是池中另一条仍在 4 个 revision、
+  180 秒窗口内的已确认 full；只有历史候选的差分小于该候选 full 的 50% 时才会这样选择。
 - `observe(P…)`：强制 full。P 必须属于本 Agent 且其原会话仍活动。
 - 引用已结束会话的 `O` → `409 session_ended`；O 不存在或不属于本 Agent →
   `409 observation_not_found`；P 已封闭 → `409 request_closed`；P 不存在 →
   `409 operation_unknown`；P 属于本 Agent 但原会话已结束或不可用 →
   `409 reference_has_no_session`。
   `observe` 不要求 O 仍为 `ready`（`claimed`/`expired` 也可再次观察），但只有
-  `ready` 的 full 候选会被确认为基线。
+  `ready` 的 full 候选会被确认为基线。未被确认的 full 仍可作为阅读材料，但不成为
+  `delta.base`；基线池的确认、保护、窗口与选择规则见[架构](architecture.md) §4。
 
 `observe({reference:"P9"})` 的 `reference` 引用本 Agent 已有的 P9 原操作，不是本次 `observe`
 的请求体 P。本次 `observe` 仍是一次新调用，响应 `operation_id` 是本次新分配或由请求头预分配
@@ -431,17 +436,28 @@ STOP、原租期、请求与工作期限、会话绑定显示 ID/代次与几何
 | --- | --- | --- |
 | `tap` | `target` + 可选 `bubble` | `target` 为 `{"ref":"n1"}` 或 `{"x":1,"y":2}`；`bubble` 只适用于 ref 目标 |
 | `long_press` | `target` + 可选 `bubble` | 同上 |
-| `text` | `target` + `text` + 可选 `press_enter` | `ref` 目标必须指向可确认的输入对象（坐标目标在派发时绑定焦点输入）；`text` 必填字符串，可 `""`，≤4096 个 Unicode 码点 |
+| `text` | `target` + `text` + 可选 `auto_submit` + 可选 `submit_ref` | `ref` 目标必须指向可确认的输入对象（坐标目标在派发时绑定焦点输入）；`text` 必填字符串，可 `""`，≤4096 个 Unicode 码点；`auto_submit` 为 presence-aware 布尔，默认 `true`；`submit_ref` 省略为 `"enter_key"`，或为公开节点编号 `n<digits>` |
 | `swipe` | `from` + `to` + 可选 `duration_ms` | 两个坐标对象，起终点不能相同，不接受 `ref`；`duration_ms` 为 50–2000 的整数，省略为 300 |
 | `scroll` | `container` + `direction` + 可选 `amount` | `container` 为 `{"ref":"n1"}` 或 `{"x":1,"y":2}`；`direction` 为 `up`/`down`/`left`/`right`（大小写敏感）；`amount` 为 `page`（默认）或 `half` |
 | `key` | `key` | 固定白名单：`BACK`、`ENTER`、`DEL`、`TAB`、`ESCAPE`、`DPAD_UP`、`DPAD_DOWN`、`HOME`、`APP_SWITCH` |
 
-`bubble` 与 `press_enter` 都是 presence-aware 布尔：省略表示该适用分支的有效值为 `true`，
+`text` 的三种常见形状：
+
+```json
+{"reference":"O1","operation":{"type":"text","target":{"ref":"n7"},"text":"周杰伦"}}
+{"reference":"O1","operation":{"type":"text","target":{"ref":"n7"},"text":"周杰伦","auto_submit":false}}
+{"reference":"O1","operation":{"type":"text","target":{"ref":"n7"},"text":"周杰伦","submit_ref":"n12"}}
+```
+
+`bubble` 与 `auto_submit` 都是 presence-aware 布尔：省略表示该适用分支的有效值为 `true`，
 显式 `false` 关闭；显式 `true` 与省略等价。`null`、非布尔、重复键和大小写变体按
 `422 invalid_request` 拒绝。`bubble` 只适用于 `tap`/`long_press` 的 `ref` 目标；坐标目标必须
 省略该成员，坐标目标携带 `bubble` 或其他 operation 携带 `bubble` 均为 `422 invalid_request`。
-`press_enter` 只适用于 `text`，其他 operation 携带即为 `422 invalid_request`。旧名
-`allow_ancestor_fallback` 不是别名，按未知成员拒绝。
+`auto_submit` 与 `submit_ref` 只适用于 `text`，其他 operation 携带即为 `422 invalid_request`。
+`submit_ref` 必须是 `"enter_key"` 或满足公开节点编号语法 `^n[1-9][0-9]*$` 的字符串，长度不超过
+64；`null`、非字符串、空串与其他形状均为 `422 invalid_request`。`auto_submit=false` 时只忽略
+提交语义（不查找、不规划、不点击），不忽略 `submit_ref` 的语法校验。旧名
+`allow_ancestor_fallback` 与已废除的 `press_enter` 都不是别名，按未知成员拒绝。
 
 `target`/`container`/`from`/`to` 的规则：`ref` 与坐标互斥；坐标必须同时有 `x`、`y`，为 ≥0
 的整数；`ref` 不能为空或 `null`；`key`/`text` 不能是 `null`。分支成员互斥：`scroll` 不接受
@@ -506,15 +522,21 @@ STOP、原租期、请求与工作期限、会话绑定显示 ID/代次与几何
 不派发，O 保持 `ready`。目标子树外同级节点不参与直接目标的阻塞或候选排序。坐标目标、`swipe`、
 `scroll` 与 `key` 不使用这套规划。
 
+`text` 的 `submit_ref` 节点在认领前用完整 `tap` 规划器（等效 `bubble=true`）做与普通 ref 点击
+相同的结构、能力与安全落点检查，另允许该节点在写前显式 `enabled=false`；该放宽只用于文本提交，
+不改变普通 `tap`/`long_press` 的禁用门禁。`submit_ref` 自身不存在返回 `409 node_not_found`，
+其结构/能力/无安全点沿用上述 5 个静态 `422` 码与 `candidates`，`details.scope_ref` 指向
+`submit_ref` 或其祖先。该静态规划同时适用于 ref `text` 与坐标 `text`，失败不认领 O。
+
 除参数语法、节点存在/禁用及 `text` 自身输入能力/保护拒绝外，`act` 的认领前静态目标解析与规划拒绝统一收口为 5 个正交 `422` 错误码，均为 `outcome=not_executed`，
 不认领 O、不采集、不派发；并发 STOP、到期或其他工作消费仍按既有投影处理：
 
 | code | 适用分支 | 含义 | `reason` |
 | --- | --- | --- | --- |
-| `422 invalid_target` | `tap` / `long_press` / `text(ref)` / `scroll` | 目标自身或坐标位置在结构/几何上不可操作 | `root` / `context` / `no_geometry` / `no_scroll_container` |
-| `422 unsupported_node_action` | `tap` / `long_press` / `text(focus)` / `scroll` | 目标有效，但自身与合法关联对象均不具备本次动作能力 | `target_missing_action` / `target_has_other_action` / `not_scrollable` / `ancestor_missing_action` / `ancestor_invalid` / `no_interactive_ancestor` |
+| `422 invalid_target` | `tap` / `long_press` / `text(ref)` / `text(submit)` / `scroll` | 目标自身或坐标位置在结构/几何上不可操作 | `root` / `context` / `no_geometry` / `no_scroll_container` |
+| `422 unsupported_node_action` | `tap` / `long_press` / `text(focus)` / `text(submit)` / `scroll` | 目标有效，但自身与合法关联对象均不具备本次动作能力 | `target_missing_action` / `target_has_other_action` / `not_scrollable` / `ancestor_missing_action` / `ancestor_invalid` / `no_interactive_ancestor` |
 | `422 ambiguous_point` | 坐标 `tap` / `long_press` / `text` / `scroll` | 坐标落在 ≥2 个竞争的可操作目标上且无法唯一消歧 | `competing_targets` / `competing_scroll_containers` |
-| `422 no_safe_point` | `tap` / `long_press` / `text(focus)` | 目标具备能力（或共位冲突），但未能证明安全落点 | `blocked` / `ambiguous` / `owner_mismatch` / `mixed` / `colocated_ambiguous` |
+| `422 no_safe_point` | `tap` / `long_press` / `text(focus)` / `text(submit)` | 目标具备能力（或共位冲突），但未能证明安全落点 | `blocked` / `ambiguous` / `owner_mismatch` / `mixed` / `colocated_ambiguous` |
 | `422 no_safe_trajectory` | `scroll` | 滚动容器合法，但 3 条轴线均无满足最小行程的安全轨迹 | `trajectory_blocked` / `insufficient_travel` |
 
 `node_not_found`（409）、`node_disabled`（409）与 `hierarchy_unavailable`（503）语义不变，
@@ -598,7 +620,8 @@ STOP、原租期、请求与工作期限、会话绑定显示 ID/代次与几何
 静态检查（不认领、不派发）：会话必须 `active`；O 必须为 `ready` 且未过期；ref 节点存在、
 非 root、非 context、有 bounds、`enabled` 不为已知 `false`，并具备对应动作能力；`text` 还要
 求 `role=input`、`actions` 含 `text`、`protected` 明确为 `false`；坐标目标必须落在目标逻辑屏
-内；`HOME`/`APP_SWITCH` 仅在主屏（`display.ID==0`）可用。坐标目标（`tap`/`long_press`/`text`
+内；`HOME`/`APP_SWITCH` 仅在主屏（`display.ID==0`）可用。`text` 的 `submit_ref` 节点是唯一的
+禁用放行例外：其自身静态规划允许写前 `enabled=false`，写后提交仍要求显式启用。坐标目标（`tap`/`long_press`/`text`
 的 `target`、`swipe` 的 `from`）在观察的公开树中解析最深命中节点集合 S（包含该点、有正面积
 bounds、非 root、非 context 且处于最大深度的全部公开节点）：
 
@@ -624,16 +647,24 @@ bounds、非 root、非 context 且处于最大深度的全部公开节点）：
 不继承显式时长） → 实时重验（目标显示仍存在、
 重新采集、原始拓扑完整、前台包/任务与观察时一致；ref 目标使用下面的分层重验；坐标目标绑定
 单节点或命中集合时，要求新鲜帧内对应对象全部通过匹配，且原点解析得到的最深命中集合与期望集合
-完全相等）→ 派发本次动作所需的输入（`text` 为必要聚焦 +
-显示绑定写入，并以写入调用内同节点刷新值确认；有效 `press_enter=true` 时在独立前台/读数
-门禁后再至多派发一次 ENTER，任何一步失败都不重放）。
+完全相等）→ 派发本次动作所需的输入（`text` 为必要聚焦、显示绑定写入并以写入调用内同节点刷新值
+确认；`auto_submit=true` 时再按 `submit_ref` 在独立前台/节点证据门禁后至多派发一次提交原语，
+任何一步失败都不重放，节点提交失败也不补发 `ENTER`）。
 
-ref 目标按 Tier 1→2→3 匹配：Tier 1 要求目标 bounds 相同，祖先链 L1 不比较祖先 bounds、
+ref 目标按 Tier 1→2→3→4 匹配：Tier 1 要求目标 bounds 相同，祖先链 L1 不比较祖先 bounds、
 Focused/Selected；Tier 2 在 L1 相同时允许受限目标微移（重叠率至少 0.50，并检查尺寸、中心与
 屏内几何）；Tier 3 使用去掉可证明透明层的 L2（重叠率至少 0.60），且要求非根强锚点。
 透明层的 text/description/resource 必须三项均已知为空，交互与状态均已知安全。每 Tier 都要求
 旧→新及新→旧双向唯一；多候选立即拒绝，只有零候选才进入下一 Tier。目标内容/能力的已知
 冲突或 presence 变化不允许靠几何猜测；动态文案改写不提供额外 Tier。
+
+Tier 4 只在 Tier 1–3 全部零候选且观察到祖先链失配时进入：要求同显示、目标结构无已知冲突、
+矩形在屏内且双向面积覆盖均 ≥80%、尺寸差不超过 `max(8, 较大边/5)`、中心位移不超过
+`max(16, 较大边/4)`，并满足 E1 自身非空文案/描述
+精确相等、E2 全树双向唯一的非空资源，或 E3 有界子树可读文案指纹（点击/长按/输入目标要求两侧
+非空且排序后完全相等）之一。E3 每侧最多访问 64 个后代并计入同一匹配预算。正向与反向扫描都
+要求全树唯一；Tier 4 命中的点击/长按/输入执行目标实际落点还须通过全树最深命中与外部竞争交互拥有者检查
+（`tapFrameTier4OcclusionProven`），Tier 1–3 保持原有目标子树与双绑定关系边界。
 
 `tap`/`long_press`/`text` 的 ref 在新鲜公开树中先证明原点，仍安全则保留；原点失效时可在
 已匹配载体内重算安全点。原载体失效后，只有目标自身的稳定非空 text/description 或双端唯一
@@ -648,15 +679,23 @@ resource 能独立证明身份，才可在同一目标子树内重新选点/载�
 应用自定义触摸代理或业务回调。子树外同级重叠不导致该 `ref` 规划自拒，也不在树模型中证明
 谁消费真实触摸；`executed` 只证明输入已派发，不证明 Android 实际事件消费者或应用业务结果。
 
-`scroll` 的授权单位是同一可证明的滚动容器，不要求起点叶身份不变。容器通过同一 Tier 1–3
+`scroll` 的授权单位是同一可证明的滚动容器，不要求起点叶身份不变。容器通过同一 Tier 1–4
 双向唯一匹配后，仍须有公开滚动能力、裁剪矩形和沿轴至少 0.50 的重叠；离轴两边变化不得超过
 `max(8px, min(旧宽/高, 新宽/高)/50)`。允许轴向伸缩，先在原选定轴线以双向同视口规则证明原段
 仍安全；失效时只在该容器的新鲜安全区间中按 `50% → 25% → 75%` 居中重算起终点，再证明整段。
-失败按具体原因返回 `409 target_changed`。
+Tier 4 的滚动容器证据允许容器内文案变化：唯一资源，或两侧非空可读文案至少有 1 项重合（或相同
+非空资源且双向覆盖 ≥85%）。失败按具体原因返回 `409 target_changed`。
 ref 与坐标容器选择器都按此处理，实际 Swipe 使用新鲜 frame 与受控滚动时长。
 
-raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms）；坐标 tap/long_press/text 保持原点
-授权，不因 ref 匹配获得改点能力。`scroll` 不证明真实滚动方向、触摸消费者或业务安全。
+raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms），并按起点最深命中集合做结构
+与防新遮挡证明：新帧命中集合须与旧集合等大且全部映射到互异有效节点，每个节点同显示、同包、
+同类、同可编辑性，资源与点击/长按/滚动/启用/密码/勾选三态无冲突；任一侧具备动作能力时文案与
+描述也不得冲突，两侧均为无动作被动叶子时忽略其文案与描述；新矩形须在屏内、仍包含起点，且与旧
+矩形尺寸兼容、重叠率 ≥0.60、面积比不超过 4 倍。`Focused`、`Selected`、`Checked` 与祖先包装层
+差异不参与判定。观察时命中超过 64 个节点则不做集合证明，只保留前台级校验；观察时命中为空时，
+新鲜帧同一点也必须仍为空。坐标 `tap`/`long_press`/`text` 保持原点授权，目标自身文案与能力严格
+一致，祖先链重建时使用 Tier 4 的紧几何与 E1/E2/E3 证据，并在新鲜命中集合上确认没有新的竞争交互
+拥有者；不因 ref 匹配获得改点能力。`scroll` 不证明真实滚动方向、触摸消费者或业务安全。
 
 非 `text` 动作在认领后实时重验返回 `409 target_changed` 时，固定在 `error.details.reason`
 给出封闭归因（原始/公开拓扑损坏先返回 `503 hierarchy_unavailable`）：
@@ -671,7 +710,12 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms）；
 | `scroll_scope_changed` | 滚动容器几何轴向重叠不足 `0.50`，或离轴边变化超过容差 |
 | `trajectory_blocked` | 滚动容器与作用域有效，但原轨迹失效且 3 条轴线均无法重规划出可证安全段 |
 | `scope_blocked` | 点击目标及能力有效，但原点、固定载体与兜底安全区均未通过安全谓词 |
-| `point_changed` | 坐标单节点或最深命中集合在新鲜帧中的映射或集合不再相等 |
+| `point_changed` | 坐标目标或起点最深命中集合在新鲜帧中不再满足对应动作证明：坐标点击/输入的目标结构、语义证据、几何或竞争拥有者失配，或 raw `swipe` 的命中集合大小、结构、遮挡或几何不再成立 |
+
+`409 target_changed` 且 `reason=lineage_changed` 时，服务可在 `error.details.changed_ref` 附带
+原目标公开祖先链中第一个与新鲜帧失配、且能唯一确定的具体祖先 ref；`bubble_ancestor` 的最近交互
+祖先变化时，该字段指向原先的交互祖先。无法唯一定位、祖先为 `root` 或计算失败时省略该字段。
+`changed_ref` 不进入日志或事件。
 
 `text` 在重验阶段返回 `409 target_changed` 时仍保持 `text` 专属的 `stage=target`、
 `reason=target_unconfirmed`、`dispatch` 结构，不使用上述非 `text` 枚举。
@@ -694,9 +738,10 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms）；
 
 | `outcome` | 含义 | 附带 |
 | --- | --- | --- |
-| `executed` | 输入已派发且有完成证据（`text` 以一次写入调用中同一候选节点刷新后的完整值精确相等确认；默认/true 复合 text 还要求 `write=executed` 且 `enter=executed`） | 后观察（full 或 delta）；复合 text 另带 `text_input`；若期间被撤销，则 `recovery` 为 `entry=status`、`reference=P`、`input_state=revoked`、`cause=executed_revoked`，且无后观察；已认领 `text` 的实时投影在原 cleanup 非 pending 时把该入口改为 `entry=end` 并给 `blocking_code`。`scroll` 必带 `effect`：有后树时为计算结果，撤销或无法计算时为 `unknown` |
-| `not_executed` | 未派发（静态拒绝、重验失败、工作被撤销、完整写入回执证明写原语未调用等） | `error`、`recovery`；重验失败且已交付新帧时另带 `observation`。默认/true 复合 text 的已认领结果仍带初始或最后快照 `text_input`；`text` 错误另带 `stage`/`reason`/`dispatch`；`not_executed` 不带 `effect` |
-| `uncertain` | 已派发但无法确认完成（传输失败、读回失败、超时） | `error`（`action_result_uncertain` / `text_target_uncertain` / `text_result_uncertain`）、`recovery`；复合 text 带当前 `text_input`，focus 已派发但两键未派发时整体仍为 `uncertain`；`text` 错误另带 `stage`/`reason`/`dispatch`。原操作已结束而其原会话仍活动时，`text` 的语义恢复为 `entry=observe`、`reference=P`、`input_state=retired`；会话/耐久/设备/忙等实时事实仍可按 §6 覆盖为 `end`/`status`/`user` 并给 `blocking_code`。`scroll` 必带 `effect=unknown`（没有可计算的后树） |
+| `executed` | 输入已派发且有完成证据（`text` 以一次写入调用中同一候选节点刷新后的完整值精确相等确认；`auto_submit=true` 复合 text 还要求 `write=executed` 且 `submit=executed`） | 后观察（full 或 delta）；复合 text 另带 `text_input`；若期间被撤销，则 `recovery` 为 `entry=status`、`reference=P`、`input_state=revoked`、`cause=executed_revoked`，且无后观察；已认领 `text` 的实时投影在原 cleanup 非 pending 时把该入口改为 `entry=end` 并给 `blocking_code`。`scroll` 必带 `effect`：有后树时为计算结果，撤销或无法计算时为 `unknown` |
+| `partial` | 写入已确认、自动提交确定未派发（`dispatch.submit` 为 `not_attempted`/`not_dispatched`）且 `dispatch.focus`/`dispatch.write` 均非 `unknown`、没有未知物理副作用；只由复合 `text` 产生 | `error.code=text_submit_not_executed`（HTTP 409；期间 STOP 撤权改为 `control_revoked`）、复合 text 的 `text_input:{write:executed,submit:not_executed}`；原会话仍活动且交付成功时另带新 `ready observation`，此时首次结果省略 `recovery`；不能交付时结果可带 `observation.status=failed` 但无新 O，`recovery` 为 `observe(P, retired)`；重复 P/`status(P)` 同；冻结/撤权结果不带 `observation`，`recovery` 按实时覆盖。`partial` 不带 `effect`，也不改写后观察或 `cleanup` |
+| `not_executed` | 未派发（静态拒绝、重验失败、工作被撤销、完整写入回执证明写原语未调用等） | `error`、`recovery`；重验失败且已交付新帧时另带 `observation`。`auto_submit=true` 复合 text 的已认领结果仍带初始或最后快照 `text_input`；`text` 错误另带 `stage`/`reason`/`dispatch`；`not_executed` 不带 `effect` |
+| `uncertain` | 已派发但无法确认完成（传输失败、读回失败、超时） | `error`（`action_result_uncertain` / `text_target_uncertain` / `text_result_uncertain`）、`recovery`；复合 text 带当前 `text_input`；写入未确认或未派发而焦点已派发、或提交已派发但回执未知时整体为 `uncertain`；`text` 错误另带 `stage`/`reason`/`dispatch`。原操作已结束而其原会话仍活动时，`text` 的语义恢复为 `entry=observe`、`reference=P`、`input_state=retired`；会话/耐久/设备/忙等实时事实仍可按 §6 覆盖为 `end`/`status`/`user` 并给 `blocking_code`。`scroll` 必带 `effect=unknown`（没有可计算的后树） |
 
 `scroll` 的 `effect` 只表示是否观察到容器内内容位移：`observed`/`not_observed`/`unknown` 的
 含义与固定判据见 §11。`effect` 不改写 `outcome`、`error`、`recovery` 或 `observation.status`；
@@ -712,7 +757,7 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms）；
 - 后观察在树收敛后采集（见 §1）；收敛期间被撤销时 `outcome` 仍是 `executed`、
   `recovery` 为 `entry=status`、`reference=P`、`input_state=revoked`、`cause=executed_revoked`、
   无后观察。收敛预算耗尽不算后观察失败：照常发布最后一帧。
-- `text` 的 `press_enter` 省略或有效为 true 时执行复合流程。ref 目标在认领后的新鲜帧中已满足
+- `text` 的 `auto_submit` 省略或有效为 `true` 时执行复合流程。ref 目标在认领后的新鲜帧中已满足
   安全输入条件且 `focused`，并通过完整绑定门禁（focus 过滤前锚点唯一性、严格同 TaskID、
   package/class 与 resource/description presence/值、几何）时跳过焦点点击；否则只执行一次
   必要焦点点击并在 afterTap 帧绑定。坐标目标保持原点授权下的一个聚焦与按点绑定。随后一次
@@ -723,17 +768,33 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms）；
   永远表示未知。写前不调用 GetText，写后不以另一棵树的重新采集/重绑定/GetText 证明写入；
   提交门禁仍重验原 session/work/P、显示 ID 与 generation、STOP/终态和期限。写入候选不成立
   时不重写、不补点击、不补第二次 SetText。
-- 显式 `press_enter=false` 在写入证据提交后完成：零 ENTER，不返回 `text_input`；后续失焦或
-  位移不改变已确认的写入事实。默认/true 在 write 提交后、发送 ENTER 前做一次只读前台核对和
-  一次严格 `getTextOnDisplay`（使用本次 set 的结构 target）：原任务上下文仍一致、候选扫描时
-  原 target 唯一且 focused、同节点刷新读取的实际值仍精确等于请求，才进入 ENTER 的独立许可；
-  至多发送一次 `KEYCODE_ENTER`。不能确认时保留 `write=executed,enter=not_executed`，整体为
-  `uncertain`。返回值固定携带 `text_input:{"write":…,"enter":…}`，两个键都出现，枚举仅为
+- 显式 `auto_submit=false` 在写入证据提交后完成：零提交原语，不返回 `text_input`；后续失焦或
+  位移不改变已确认的写入事实，`submit_ref` 即使出现也被语法校验后忽略（不查找节点、不规划、
+  不派发）。`auto_submit` 省略或为 `true` 时在 write 提交后、提交派发前按 `submit_ref` 分两条互斥路径：
+  - `enter_key`：做一次只读前台核对和一次严格 `getTextOnDisplay`（使用本次 set 的结构 target）。
+    原任务上下文仍一致、候选唯一且同节点刷新值精确等于请求时，进入 ENTER 的独立许可，至多发送
+    一次 `KEYCODE_ENTER`。若传输无错而 `candidate_count=0`，允许一次写后 `Capture` 重绑定：
+    新帧须同显示、同前台任务且拓扑完整；候选须同包同类、可见、可编辑、已知聚焦/启用且非密码，
+    完整值等于请求；资源或描述锚点须在写前帧与写后帧都唯一，无锚点时满足条件的候选须全局唯一；
+    几何接受键盘顶起的同水平带、清除按钮导致的同垂直带内水平伸缩或重叠率 ≥0.50。重绑定后须用
+    新目标再做一次精确读回，全部通过才发送至多一次 ENTER；候选计数非 0、上下文变化或读回不等
+    时保留 `write=executed,submit=not_executed`，安全停在 `partial`。
+  - 节点 `submit_ref="n…"`：写后重新采集新鲜帧，核对同显示与同前台任务，对静态计划涉及的执行
+    节点（含 `coextensive_child`、`bubble_ancestor`、`bubble_colocated` 的委托节点）走 Tier 1–4
+    与安全落点重验；键盘顶起导致仅 Y 轴平移时允许同水平带的唯一匹配回退。写前显式禁用的执行
+    目标必须在新帧中显式启用；首次帧仍禁用或布局尚未落定时，可在可中断等待 150ms 后复采一次。
+    通过后发送至多一次 `Tap`；节点提交失败绝不补发 ENTER。
+- 两条提交路径都要求同 TaskID 的前台上下文与具体节点证据：`enter_key` 以写前目标/重绑定目标的
+  `GetTextOnDisplay` 完整读回为准，`submit_ref` 以 Tier 1–4 的节点匹配、启用状态与安全落点为准；
+  包名、同屏截图或单纯前台一致都不能替代节点证据。
+- 返回值固定携带 `text_input:{"write":…,"submit":…}`，两个键都出现，枚举仅为
   `not_executed|uncertain|executed`；合法组合只有 `(N,N)`、`(U,N)`、`(E,N)`、`(E,U)`、
-  `(E,E)`。ENTER 非 `not_executed` 必须已有 `write=executed`。读回成功只确认写入，ENTER 只
-  确认按键原语，两者都不证明搜索、提交、导航或业务结果。`text_input.enter=uncertain` 时先
-  观察当前页面，不原样重发 ENTER；`write=executed,enter=not_executed` 且原会话仍活动时，
-  可取新 O 后按需单独发送 `operation.type=key,operation.key=ENTER`，不必重新填字。ref 输入
+  `(E,E)`，`submit` 非 `not_executed` 必须已有 `write=executed`。读回成功只确认写入，提交原语
+  只确认按键或点击，两者都不证明搜索、提交、导航或业务结果。`text_input.submit=uncertain` 时先
+  观察当前页面，不原样重发；`write=executed,submit=not_executed` 且原会话仍活动时，可取新 O 后
+  按需单独发送 `operation.type=key,operation.key=ENTER`，不必重新填字。`partial` 的首次结果在
+  附带有效新 `ready O` 时省略 `recovery`；重复 P、`status(P)` 与冻结/交付失败时稳定投影为
+  `observe(P, retired)`，并受实时会话/耐久/设备/忙覆盖。ref 输入
   绑定按 exact（稳定锚点与相同 bounds）、near（覆盖点击点且重叠率至少 0.80）、shifted
   （稳定锚点、同一水平带与受限尺寸的纵向位移）依次尝试；唯一性在 focus 过滤前统计，焦点仅作
   安全门禁。所有分支保持 package/class 与 resource/description 的 presence/值一致；要求
@@ -742,18 +803,19 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms）；
   的字段替换不可辨识。
 - 复合 `text` 的 `text_input` 是 engine 在锁内发布的不可变快照：首次结果、运行中
   `status(P)`、重复 P 与冻结结果都复制同一对象，不按 `phase` 或 `error.details` 重建。
-  冻结先到后，迟到回执不能回补；`write=executed,enter=not_executed` 不自动补发 ENTER，
-  `enter=uncertain` 也不是重试授权。焦点点击不在公开 `text_input` 内，但计入整体 outcome；
-  只有焦点点击、SetText 与 ENTER 都没有获得派发许可或均已确定未派发时整体才是
-  `not_executed`。显式 false 的 `KnownOutcome=executed` 与 write 提交在同一短锁；复合 text
-  只在 write 与 enter 均确认后设置。
-- `text` 的路由、聚焦、写入、读回或 ENTER 失败在 `error.details` 固定给出：
+  冻结先到后，迟到回执不能回补；`write=executed,submit=not_executed` 不自动补发提交，
+  `submit=uncertain` 也不是重试授权。焦点点击不在公开 `text_input` 内，但计入整体 outcome；
+  只有焦点点击、SetText 与提交原语都没有获得派发许可或均已确定未派发时整体才是
+  `not_executed`；写入确认、自动提交确定未派发且无未知物理副作用时为 `partial`；其余为
+  `uncertain`。显式 `auto_submit=false` 的 `KnownOutcome=executed` 与 write 提交在同一短锁；复合 text
+  只在 write 与 submit 均确认后设置。
+- `text` 的路由、聚焦、写入、读回或提交失败在 `error.details` 固定给出：
 
   | 字段 | 类型与取值 |
   | --- | --- |
-  | `stage` | `target` / `focus` / `write` / `verify` / `enter`；失败所在逻辑环节 |
+  | `stage` | `target` / `focus` / `write` / `verify` / `submit`；失败所在逻辑环节 |
   | `reason` | 封闭字符串枚举，见下表；调用方不解析 `message` |
-  | `dispatch` | 固定 `focus`/`write`/`enter` 三键对象；各值为 `not_attempted` / `not_dispatched` / `dispatched` / `unknown`，分别表达该原语是否被调用，不等同于内容确认成功 |
+  | `dispatch` | 固定 `focus`/`write`/`submit` 三键对象；各值为 `not_attempted` / `not_dispatched` / `dispatched` / `unknown`，分别表达该原语是否被调用，不等同于内容确认成功 |
   | `candidate_count` | 非负整数；仅该失败环节取得有效候选计数时出现，`0` 保留，未知时省略 |
 
   | `stage` | `reason` | 顶层 code / HTTP | 含义 |
@@ -766,34 +828,38 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms）；
   | `write` | `dispatch_not_sent` | `device_unavailable` / 503 | 写入原语确定未派发 |
   | `write` | `receipt_unknown` / `rpc_result_invalid` | `text_result_uncertain` / 409 | 无完整可靠回执或响应畸形；派发事实 `unknown` |
   | `verify` | `readback_unavailable` / `readback_mismatch` | `text_result_uncertain` / 409 | 已派发；同节点刷新值不可读或完整值不等 |
-  | `enter` | `enter_target_unconfirmed` / `enter_context_unconfirmed` | `text_target_uncertain` / 409 | write 已确认，但 ENTER 目标或前台无法确认；ENTER 未派发 |
-  | `enter` | `enter_not_sent` / `enter_unconfirmed` | `action_result_uncertain` / 504 | ENTER 明确未派发，或回执未知/终止但带错误 |
-  | 已记录环节 | `authorization_revoked` / `deadline_exceeded` | `control_revoked` 或 `text_result_uncertain` / 409 | 撤销/归属失效用前者；仅工作期限到且原会话仍活动用后者 |
+  | `submit` | `submit_target_unconfirmed` / `submit_context_unconfirmed` | `text_submit_not_executed` / 409 | write 已确认，但提交目标或前台无法确认；提交未派发，整体 `partial` |
+  | `submit` | `submit_disabled` | `text_submit_not_executed` / 409 | 节点提交的执行目标在新鲜帧仍显式禁用；提交未派发，整体 `partial` |
+  | `submit` | `submit_scope_blocked` | `text_submit_not_executed` / 409 | 节点提交的安全落点被阻塞；提交未派发，整体 `partial` |
+  | `submit` | `submit_not_sent` | `text_submit_not_executed` / 409 | 提交明确未派发；整体 `partial` |
+  | `submit` | `submit_unconfirmed` | `action_result_uncertain` / 504 | 提交已派发但终止或回执无法确认；整体 `uncertain` |
+  | 已记录环节 | `authorization_revoked` / `deadline_exceeded` | `control_revoked` 或 `text_submit_not_executed` / 409 | 撤销/归属失效用前者；仅工作期限到、原会话仍活动且属于 `partial` 时用后者；写入未确认的期限到期仍为 `text_result_uncertain` |
 
-  `dispatch` 区分“尚未申请原语许可”和“已经确定未派发”；跳过的聚焦、false 的 ENTER 为
+  `dispatch` 区分“尚未申请原语许可”和“已经确定未派发”；跳过的聚焦、`auto_submit=false` 的提交为
   `not_attempted`。同一个错误不混用 tap 的 `reason` 与 text 的 `reason`。前台、设备、层级、
   会话与静态 JSON 等公共错误保留各自 code 与详情，不伪造 text 设备事实。`message` 为对应
   原因的固定中文短句，不嵌入请求值、实际值、原始异常或 RPC 响应；不提供 expected/actual
   text、文本 hash、长度、节点、截图或第二套恢复动作。
 - 已认领 `text` 的首次终态、finished `status(P)` 与重复 P 共用同一只读 live-context 投影。
   原会话仍是当前活动会话且与认领时 sessionEpoch/AppInstanceID/ModeGeneration/显示
-  ID 与 generation 绑定一致时：写入/ENTER uncertain、已认领但未派发任何原语而目标条件不再
-  成立、后观察失败分别投影为 `observe`/`P`；账本/回执耐久、会话撤销/结束/过期、startup
-  recovering、设备或控制同步、需要人处理的控制条件、其他普通 work/busy 按固定优先级覆盖为
-  `end`/`status`/`user` 并给 `blocking_code`（会话撤销/结束/过期或绑定失效且原 cleanup
-  非 pending 时为 `end`；同 agent 的 busy 另给 `blocking_operation_id`），
-  解除后恢复原语义入口。临时阻塞只改结果副本，不写回原操作的 recovery；过期会话即使
-  housekeeping 尚未运行也按 `session_expired` 表达。
+  ID 与 generation 绑定一致时：写入/提交 uncertain、写入确认但提交确定未派发（`partial`）、
+  已认领但未派发任何原语而目标条件不再成立、后观察失败分别投影为 `observe`/`P`；账本/回执耐久、
+  会话撤销/结束/过期、startup recovering、设备或控制同步、需要人处理的控制条件、其他普通
+  work/busy 按固定优先级覆盖为 `end`/`status`/`user` 并给 `blocking_code`（会话撤销/结束/过期
+  或绑定失效且原 cleanup 非 pending 时为 `end`；同 agent 的 busy 另给
+  `blocking_operation_id`），解除后恢复原语义入口。临时阻塞只改结果副本，不写回原操作的
+  recovery；过期会话即使 housekeeping 尚未运行也按 `session_expired` 表达。
 - 坐标目标只证明一个点：`tap`/`long_press`/`text` 证明其 `target`，`swipe` 只证明起点
-  `from`；终点是方向与幅度，不参与节点身份。观察时点解析不到节点时按前台级派发。`scroll`
-  不证明叶节点或单点：它证明选定容器与新鲜 frame 中的整段轨迹，坐标只是容器选择器。
+  `from`；终点是方向与幅度，不参与节点身份。观察时命中集合为空则按空白点的“仍为空”规则证明，
+  超过 64 个命中时 raw `swipe` 只做前台级校验；坐标点击/输入的目标自身文案与能力仍严格一致。
+  `scroll` 不证明叶节点或单点：它证明选定容器与新鲜 frame 中的整段轨迹，坐标只是容器选择器。
 - 后观察失败时：HTTP 503，但 `outcome` 仍是 `executed`，`observation.status=failed`，
   `recovery` 为 `entry=observe`、`reference=P`、`input_state=retired`、
   `cause=post_observation_failed`；不能因后观察失败改判未执行。
 - 失败码：`node_not_found`、`node_disabled`、`unsupported_node_action`、`invalid_target`、
   `no_safe_point`、`no_safe_trajectory`、`invalid_coordinates`、`ambiguous_point`、`unsupported_key`、
   `invalid_request`（含超长文本）、
-  `text_target_uncertain`、`text_result_uncertain`、`action_result_uncertain`、
+  `text_target_uncertain`、`text_result_uncertain`、`text_submit_not_executed`、`action_result_uncertain`、
   `target_changed`、`foreground_changed`、`foreground_unknown`、
   `display_unavailable`、`hierarchy_unavailable`、`device_unavailable`、`stale_screen`、
   `device_busy`、`session_ended`、`observation_retired`、`observation_expired`、
@@ -845,7 +911,7 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms）；
 
 | 字段 | 必填 | 类型 | 说明 |
 | --- | --- | --- | --- |
-| `contract_version` | 是 | 字符串 | 必须为 `"24"`，否则 `409 contract_mismatch` |
+| `contract_version` | 是 | 字符串 | 必须为 `"25"`，否则 `409 contract_mismatch` |
 | `app_instance_id` | 是 | UUID | App 进程实例；变化会撤销旧归属 |
 | `app_version` | 否（App 应发送） | 字符串 | 仅发行标识 |
 | `selected_mode` | 是 | `virtual`/`primary` | 用户选择 |
@@ -872,7 +938,7 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms）；
 
 ```json
 {
-  "contract_version": "24",
+  "contract_version": "25",
   "service_instance_id": "…",
   "control": {
     "revision": 42,
@@ -908,7 +974,7 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms）；
 ## 9. `POST /v1/control/stop`
 
 ```json
-{"contract_version":"24","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
+{"contract_version":"25","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
 ```
 
 - **不校验普通契约**：`contract_version` 字段存在但不参与准入，服务与 App 契约版本
@@ -918,7 +984,7 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms）；
 - 重复或过期 `seq` 不报错，只返回 `state=duplicate`。
 
 ```json
-{"contract_version":"24","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
+{"contract_version":"25","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
 ```
 
 `accepted` 恒为 `true`；`state` 为 `revoked`（绑定时撤销了活动会话）、`recorded`
@@ -931,7 +997,7 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms）；
 无认证，只表示进程可应答，不代表设备就绪或资源干净：
 
 ```json
-{"status":"ok","contract_version":"24","service_instance_id":"…","release_version":"…"}
+{"status":"ok","contract_version":"25","service_instance_id":"…","release_version":"…"}
 ```
 
 ## 11. 数据对象
@@ -1124,7 +1190,10 @@ compact 几何策略是固定的服务策略，不是请求字段，按以下顺
   新的 full 与 delta 的 `add`/`replace` 只含普通节点定义。读取历史 full、`add` 或
   `replace` 时，先展开其中的历史 `chain`，链内 ref 可作差分引用，应用结果为展开的 full；
 - 最终图必须单父、无环且全部可达；根变化或同 ref 角色变化退 full。仅跨父移动或增删包装层
-  不强制 full；只有合法 delta 且 `10×deltaBytes < 7×fullBytes` 才发送 delta；
+  不强制 full。`delta.base` 必须是仍在池内、满足 `revision - base.Revision <= 4` 且采集龄
+  `< 180s` 的已确认 full；主路径差分只有 `10×deltaBytes < 7×fullBytes` 才发送，历史回返候选
+  只有 `10×deltaBytes < 5×candidateFullBytes` 且主路径未命中时才可发送。历史 50% 规则只限制
+  差分体积，不证明两帧属于同一页面；超过窗口的旧基线不再参与；
 - 公共 full 超过 128 KiB、单个内部快照超过 4 MiB，或该快照连同受保护历史仍超过 32 MiB 的
   留存额度时，服务返回 `503 tree_too_large`，`details.budget` 分别取 `public_full`、
   `internal_snapshot`、`retained_snapshots`，`details.limit` 为对应字节上限；错误不携带
@@ -1190,6 +1259,11 @@ compact 几何策略是固定的服务策略，不是请求字段，按以下顺
 旧 `observation_id` 按未知成员拒绝。动作诊断中的节点编号可能只出现在完整快照中。
 例如 `error.details.candidates` 或 `error.details.blocking_refs` 指出候选或阻塞节点，调用方可传入原 act
 请求的 O 作为 `reference`，并用该诊断编号作为 `node` 查看子树。
+
+基线池内的活动基线 O 受留存淘汰保护，因此凡仍可能作为 `delta.base` 发出的 O，
+`inspect(reference=baseID)` 在池窗口内可读；基线退出池后不再承诺补看。`inspect` 仍受本节
+128 KiB/32 KiB 大小预算，不因它是基线而放宽；预算不足或树已被淘汰分别返回
+`inspection_too_large` 与 `content_unavailable`，不回退到 compact 或旧树。
 
 - 补看固定使用 `view=detailed`：逐节点展开、不折 `chain`、不隐藏已知几何；`tree` 作用域的
   `view` 在嵌套完整树里声明，`subtree`/`query` 在 inspection 信封声明一次；
@@ -1555,7 +1629,7 @@ STOP 撤权后的迟到结果不发布新观察。
 ### 准入、期限与撤销
 
 - 准入在单一状态锁内完成：解析引用、拦截已过期会话（`409 session_expired`，绝不复活）、
-  普通屏障与工作位、工作记录、基线确认与 `SessionTTL=120s` 单调续租。已过期会话不被本次
+  普通屏障与工作位、工作记录、当前 `full` O 的基线确认与 `SessionTTL=120s` 单调续租。已过期会话不被本次
   调用续租，也不被推进成 `control_revoked`。
 - 等待期独占唯一普通工作位，其他普通工具立即返回 `409 device_busy`，不建普通动作队列。
 - 与 `observe` 相同，服务在进入引擎前先为本次结果预留投递容量：无图 256 KiB、带图 1 MiB，

@@ -19,13 +19,17 @@ instance, err := c.Discover(ctx)
 `POST /api/status {}` 取得当前准入事实（`can_start`、`blocking_code`、本 Agent 的
 `session`、`start_operation_id` 与 `cleanup`）。它不生成 P、不续租、不创建会话。
 
-当前共同契约为 `"24"`。契约版本不等时返回 `contract_mismatch`；客户端不刷新版本、不重发
+当前共同契约为 `"25"`。契约版本不等时返回 `contract_mismatch`；客户端不刷新版本、不重发
 业务动作。端口可应答、`/health` 正常都不等于 `can_start=true`。
 
 公开树与 detailed inspection 使用相同的完整节点布尔默认/unknown 规则，不携带 defaults。
 delta 的 set 保留显式 false/空值/null；应用器将五块作为固定基线的原子最终图声明，支持
-存续节点迁移与新增组装父。调用方始终按 `delta.base` 应用到该 full 基线副本，不能叠加在上一份
-delta 结果上；阅读 ref 连续性不代替服务端输入授权。格式见[接口契约](interface.md)。
+存续节点迁移与新增组装父。服务端维护至多 4 条近期已确认 full 基线（同一会话 origin 与同一
+目标显示 ID/代次，`revision - base.Revision <= 4` 且采集龄 `< 180s`），`delta.base` 可指向其中任一
+条；跨页回返使用更严格的历史差分阈值。调用方必须保留所有可能被引用的已确认 full 树，并逐条
+按 `delta.base` 应用到对应完整树，不能叠加在上一份 delta 结果上；`observe(P)` 与
+`full=true` 强制 full，基线仍在池内时可经 `inspect(reference=base)` 回看。阅读 ref 连续性
+不代替服务端输入授权。格式见[接口契约](interface.md)。
 
 ## 2. 操作编号 P
 
@@ -64,7 +68,8 @@ type Response struct {
 }
 ```
 
-`Result` 与服务 HTTP 结果同形：`outcome`、`phase`、`session`、`observation`、`inspection`、
+`Result` 与服务 HTTP 结果同形：`outcome`（`executed`/`not_executed`/`uncertain`/`partial`）、
+`phase`、`session`、`observation`、`inspection`、
 `app`、`shell`、`wait`、`notification`、`diagnosis`、`cleanup`、`error`、`recovery` 等字段
 只在本次确有该事实时出现；`recovery` 缺失表示本次结果没有待恢复事实。客户端不改写主事实：
 `observation.status=failed` 的 503 仍是带 `Result` 的正常响应，不降成无归属异常。
@@ -85,6 +90,11 @@ type Response struct {
 一个新 O 与 `recovery`（`entry=retry`、`reference=O`、`input_state=effective`）。客户端必须在
 错误响应上同样解码 `observation`（本仓库客户端已如此），不得丢弃；`retry` 指向的 O 以结果里的
 `observation.id` 为准，没有该成员时用该操作原请求引用的 O（重复 `P` 时即请求体里的 O）。
+`outcome=partial` 是复合 `text` 的已确认部分完成：写入已执行、提交确定未派发。首次结果在原
+会话活动且现场观察成功时附带新的 `ready O` 并省略 `recovery`；重复 `P`、`status(P)` 与冻结
+结果在会话仍活动且无实时阻塞时稳定给出 `recovery`（`entry=observe`、`reference=P`、
+`input_state=retired`），撤权或实时阻塞按服务端投影覆盖。客户端同样必须在错误响应上解码
+`text_input` 与 `observation`。
 重复 `P`、`status(P)` 与冻结结果的视图不带 O 编号。
 
 | 方法 | 请求参数 | P |
@@ -127,14 +137,20 @@ MCP 适配器的严格解码拒绝；两个条件折叠后相同则是引擎准�
 `container`/`direction`/`amount` 与 `swipe` 的 `from`/`to`/`duration_ms` 互斥，缺成员、
 混用或 `duration_ms` 为负数、1–49/2001 以上都会在发送前被拒绝；`duration_ms=0` 表示省略并
 使用服务端默认 300，不表示一个显式的零时长。请求引用字段是 `reference`；`operation.bubble`
-与 `operation.press_enter` 使用 presence-aware 结构，省略时不写成员，显式 `false` 必须写成
-`false`，不能按 Go bool 零值省略。编码器与 HTTP 解码共用同一分支校验：坐标目标或其他动作
-携带 `bubble`、非 text 携带 `press_enter` 都在发送前拒绝。客户端不新增滚动、质量或效果参数，
-也不在本地选择容器或起止点；`status(P)` 与重复 P 视图中的 `effect` 只按服务返回值读取，不重算。
-`Result.text_input` 出现时 `write` 与 `enter` 都必须存在且属于固定枚举，合法组合受响应
+与 `operation.auto_submit` 使用 presence-aware 结构，省略时不写成员，显式 `false` 必须写成
+`false`，不能按 Go bool 零值省略。`operation.submit_ref` 只适用于 `text`，省略时不写成员，
+出现时必须是 `"enter_key"` 或 `^n[1-9][0-9]*$` 且不超过 64 个字符。编码器与 HTTP 解码共用
+同一分支校验：坐标目标或其他动作携带 `bubble`、非 text 携带 `auto_submit`/`submit_ref`
+都在发送前拒绝；已废除的 `press_enter` 按未知成员拒绝。`auto_submit=false` 时 `submit_ref`
+只做类型与语法校验，随后忽略提交语义。客户端不新增滚动、质量或效果参数，也不在本地选择容器
+或起止点；`status(P)` 与重复 P 视图中的 `effect` 只按服务返回值读取，不重算。
+`Result.text_input` 出现时 `write` 与 `submit` 都必须存在且属于固定枚举，合法组合受响应
 解码器约束；客户端不补 `not_executed`、不根据 `phase` 推导阶段，也不在本地改写快照。
-`text` 错误的 `details` 保留嵌套 `dispatch` 对象、`stage`/`reason` 与 `candidate_count`；
-响应解码器不把 `0` 当成缺失、不改写枚举，客户端也不据此重建 `text_input` 或恢复入口。
+`outcome=partial` 时快照固定为 `write=executed`、`submit=not_executed`，客户端把
+`text_submit_not_executed` 与可能随结果交付的新 ready O 一起保留；没有新 O 时按 recovery 的
+`observe(P)` 获取现场。`text` 错误的 `details` 保留嵌套 `dispatch` 对象、`stage`/`reason` 与
+`candidate_count`；响应解码器不把 `0` 当成缺失、不改写枚举，客户端也不据此重建
+`text_input` 或恢复入口。
 
 `Client.App(ctx, *protocol.AppRequest, ...Option)` 按 `Kind` 编码七个互斥分支：编码器只写所选
 分支的成员；分支不完整、缺少选择器，或 `open`/`kill` 使用不允许的选择器时，`Encode` 在发送
@@ -169,6 +185,7 @@ type Error struct {
 | Code | 含义 |
 | --- | --- |
 | 服务稳定错误码（如 `session_ended`、`operation_unknown`、`device_busy`、`invalid_request`） | 服务已返回结构化 `Result`；`Result` 保留完整阶段事实与可能的 `request_closed` |
+| `text_submit_not_executed` | 复合 `text` 的 `outcome=partial`：写入已确认、提交确定未派发；`Result` 可能带新的 ready O 与 `text_input` |
 | `transport_unavailable` | 未取得服务响应（拨号、写入、读取、超时、取消）；P 保留 |
 | `invalid_response` | 响应无法解析、形状不符或图片载体无效 |
 | `response_too_large` | 响应超过 8 MiB 上限 |

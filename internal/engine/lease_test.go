@@ -39,7 +39,7 @@ func TestKeepaliveDefaultCanShortenLease(t *testing.T) {
 	h.engine.mu.Lock()
 	h.engine.session.ExpiresAt = time.Now().Add(30 * time.Minute)
 	inputUntil := h.engine.current.ActionableUntil
-	baseline := h.engine.baseline
+	baseline := baselineWithID(h.engine.baselines, h.engine.activeBaselineID)
 	h.engine.mu.Unlock()
 	before := time.Now()
 	result, apiErr := h.engine.Keepalive("agent", "Pshorten-default", &protocol.KeepaliveRequest{Reference: start.OperationID})
@@ -53,7 +53,8 @@ func TestKeepaliveDefaultCanShortenLease(t *testing.T) {
 	}
 	h.engine.mu.Lock()
 	defer h.engine.mu.Unlock()
-	if !h.engine.session.ExpiresAt.Equal(expires) || !h.engine.current.ActionableUntil.Equal(inputUntil) || h.engine.baseline != baseline {
+	if !h.engine.session.ExpiresAt.Equal(expires) || !h.engine.current.ActionableUntil.Equal(inputUntil) ||
+		baselineWithID(h.engine.baselines, h.engine.activeBaselineID) != baseline {
 		t.Fatal("reset changed observation/baseline or returned another expiry")
 	}
 }

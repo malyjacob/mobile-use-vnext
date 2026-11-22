@@ -22,14 +22,21 @@ import (
 // A ref is continued only with that unique candidate. Every ambiguous outcome
 // allocates a new ref: never a nearest coordinate, never traversal order alone.
 //
-// Passes run as a deterministic five-stage pipeline:
+// Passes run as a deterministic six-stage pipeline:
 //  1. unique anonymous structure top-down from synthetic root;
 //  2. six content/identity passes (local exact, local resource-only, global
 //     exact, local input anchor, local public, global public);
-//  3. strict descendant-set container voting alternating with
+//  3. descendant-set container voting in two layers under one snapshot: 3A
+//     prefers the single unmatched child of an already anchored parent, 3B
+//     anchors self-bottom-up across rebuilt wrappers through the unique
+//     container chain of the matched descendants' LCA;
 //  4. dirty-queue local recovery under newly anchored parents;
-//  5. single-pass zero-shift ordinal container recovery with an independent
-//     fixed point, followed by local-only recovery and monotonic ref allocation.
+//  5. single-pass zero-shift ordinal container recovery over every non-input
+//     container bucket with an independent fixed point, followed by local-only
+//     recovery;
+//  6. single static-geometry pass over unmatched non-input leaves under the
+//     same anchored parent (equal bucket counts, +-4px bijection, order
+//     preserving).
 //
 // All passes work against snapshots and charge a deterministic work budget;
 // exhaustion aborts the incomplete batch without partial application.
@@ -194,6 +201,8 @@ const (
 	sourceLocalPublicPost
 	sourceOrdinal
 	sourcePostOrdinalLocal
+	sourceBottomUpVote
+	sourceStaticGeometry
 )
 
 type matchStats struct {
@@ -210,6 +219,7 @@ type matchStats struct {
 	stage3Matched    int
 	stage4Matched    int
 	stage5Matched    int
+	stage6Matched    int
 	postLocalMatched int
 }
 
@@ -275,6 +285,8 @@ type publicMatchIndex struct {
 	prevTout     []int
 	prevKey      []matchKey
 	prevPub      []publicKey
+	prevContext  []bool
+	prevBounds   []*protocol.Bounds
 
 	root        int
 	curCount    int
@@ -286,6 +298,8 @@ type publicMatchIndex struct {
 	tout        []int // indexed by raw node index
 	curKey      []matchKey
 	curPub      []publicKey
+	curContext  []bool
+	curBounds   []*protocol.Bounds
 }
 
 func buildPublicMatchIndex(prevSnap *Snapshot, cap *device.Capture, units []unit) *publicMatchIndex {
@@ -314,6 +328,8 @@ func buildPublicMatchIndex(prevSnap *Snapshot, cap *device.Capture, units []unit
 		idx.prevTout = make([]int, prevCount)
 		idx.prevKey = make([]matchKey, prevCount)
 		idx.prevPub = make([]publicKey, prevCount)
+		idx.prevContext = make([]bool, prevCount)
+		idx.prevBounds = make([]*protocol.Bounds, prevCount)
 
 		cursor := 0
 		var walkPrev func(node *protocol.Node, parentPos int)
@@ -326,6 +342,10 @@ func buildPublicMatchIndex(prevSnap *Snapshot, cap *device.Capture, units []unit
 			idx.prevTin[pos] = pos
 			if parentPos >= 0 {
 				idx.prevChildren[parentPos] = append(idx.prevChildren[parentPos], pos)
+			}
+			idx.prevContext[pos] = node.Context
+			if !node.Context {
+				idx.prevBounds[pos] = node.Bounds
 			}
 			if rawIdx, ok := prevSnap.Source[node.Ref]; ok {
 				raw := &prevSnap.Capture.Nodes[rawIdx]
@@ -395,6 +415,8 @@ func buildPublicMatchIndex(prevSnap *Snapshot, cap *device.Capture, units []unit
 	idx.curChildren = make([][]int, curCount)
 	idx.curKey = make([]matchKey, curCount)
 	idx.curPub = make([]publicKey, curCount)
+	idx.curContext = make([]bool, curCount)
+	idx.curBounds = make([]*protocol.Bounds, curCount)
 
 	for rank, cur := range order {
 		idx.curParent[rank] = curParentByRaw[cur]
@@ -404,11 +426,13 @@ func buildPublicMatchIndex(prevSnap *Snapshot, cap *device.Capture, units []unit
 		}
 		raw := &cap.Nodes[cur]
 		if units[cur].context {
+			idx.curContext[rank] = true
 			idx.curKey[rank] = contextSignature(raw)
 			continue
 		}
 		idx.curKey[rank] = signature(raw, units[cur].role)
 		idx.curPub[rank] = publicSignature(raw, units[cur].role)
+		idx.curBounds[rank] = displayBounds(cap, raw)
 	}
 
 	return idx
@@ -435,25 +459,97 @@ func (idx *publicMatchIndex) curPubKey(cur int) publicKey {
 	return idx.curPub[idx.curPos[cur]]
 }
 
-func (idx *publicMatchIndex) curAnonymousContainer(cur int) bool {
-	if cur == idx.root {
+// prevContainer reports whether prevPos is a published non-root node with at
+// least one published child. Containers are the only candidates of descendant
+// voting, ordinal recovery and container identity comparison.
+func (idx *publicMatchIndex) prevContainer(prevPos int) bool {
+	if prevPos <= idx.prevRoot || prevPos >= idx.prevCount {
 		return false
 	}
-	pos := idx.curPos[cur]
-	if pos < 0 || len(idx.curChildren[pos]) == 0 {
-		return false
-	}
-	return isStructurallyMatchable(idx.curKey[pos], idx.curPub[pos])
+	return len(idx.prevChildren[prevPos]) > 0
 }
 
-func (idx *publicMatchIndex) prevAnonymousContainer(prevPos int) bool {
-	if prevPos == idx.prevRoot || prevPos < 0 || prevPos >= idx.prevCount {
+// curContainer reports whether cur is a published non-root node with at least
+// one published child.
+func (idx *publicMatchIndex) curContainer(cur int) bool {
+	pos := idx.curPos[cur]
+	if pos <= 0 || cur == idx.root {
 		return false
 	}
-	if len(idx.prevChildren[prevPos]) == 0 {
+	return len(idx.curChildren[pos]) > 0
+}
+
+func (idx *publicMatchIndex) prevEditable(prevPos int) bool {
+	if prevPos < 0 || prevPos >= idx.prevCount {
 		return false
 	}
-	return isStructurallyMatchable(idx.prevKey[prevPos], idx.prevPub[prevPos])
+	return idx.prevKey[prevPos].editable
+}
+
+func (idx *publicMatchIndex) curEditable(cur int) bool {
+	pos := idx.curPos[cur]
+	if pos < 0 {
+		return false
+	}
+	return idx.curKey[pos].editable
+}
+
+func (idx *publicMatchIndex) prevIsContext(prevPos int) bool {
+	if prevPos < 0 || prevPos >= idx.prevCount {
+		return false
+	}
+	return idx.prevContext[prevPos]
+}
+
+func (idx *publicMatchIndex) curIsContext(cur int) bool {
+	pos := idx.curPos[cur]
+	return pos >= 0 && idx.curContext[pos]
+}
+
+// prevAncestorOf reports whether candidate is an ancestor of node in the
+// previous public tree, using the Euler intervals of the preorder walk.
+func (idx *publicMatchIndex) prevAncestorOf(candidate, node int) bool {
+	if candidate < 0 || candidate >= idx.prevCount || node < 0 || node >= idx.prevCount {
+		return false
+	}
+	return idx.prevTin[candidate] <= idx.prevTin[node] && idx.prevTout[node] <= idx.prevTout[candidate]
+}
+
+// prevStaticLeaf reports whether prevPos is eligible for the static-geometry
+// closing pass: an unmatched check is the caller's job, but the node itself
+// must be a non-context, non-editable public leaf with a known positive
+// rectangle.
+func (idx *publicMatchIndex) prevStaticLeaf(prevPos int) bool {
+	if prevPos <= idx.prevRoot || prevPos >= idx.prevCount {
+		return false
+	}
+	if idx.prevIsContext(prevPos) || idx.prevKey[prevPos].editable {
+		return false
+	}
+	if len(idx.prevChildren[prevPos]) != 0 {
+		return false
+	}
+	return positiveBounds(idx.prevBounds[prevPos])
+}
+
+// curStaticLeaf reports whether cur is eligible for the static-geometry closing
+// pass: a non-context, non-editable public leaf with known positive bounds.
+func (idx *publicMatchIndex) curStaticLeaf(cur int) bool {
+	pos := idx.curPos[cur]
+	if pos <= 0 || cur == idx.root {
+		return false
+	}
+	if idx.curIsContext(cur) || idx.curKey[pos].editable {
+		return false
+	}
+	if len(idx.curChildren[pos]) != 0 {
+		return false
+	}
+	return positiveBounds(idx.curBounds[pos])
+}
+
+func positiveBounds(b *protocol.Bounds) bool {
+	return b != nil && b.Right > b.Left && b.Bottom > b.Top
 }
 
 // directChildUnder maps oldPos to the direct published child of anchor whose
@@ -610,7 +706,7 @@ func (st *matchState) assign(cur, prevPos int, source matchSource) {
 	case sourceExact, sourceResource, sourceGlobalExact, sourceInput, sourceLocalPublic, sourceGlobalPublic:
 		st.stats.stage2Matched++
 		st.stats.totalMatched++
-	case sourceDescendantVote:
+	case sourceDescendantVote, sourceBottomUpVote:
 		st.stats.stage3Matched++
 		st.stats.totalMatched++
 	case sourceLocalStructure, sourceLocalExact, sourceLocalResource, sourceLocalInput, sourceLocalPublicPost:
@@ -621,6 +717,9 @@ func (st *matchState) assign(cur, prevPos int, source matchSource) {
 		st.stats.totalMatched++
 	case sourcePostOrdinalLocal:
 		st.stats.postLocalMatched++
+		st.stats.totalMatched++
+	case sourceStaticGeometry:
+		st.stats.stage6Matched++
 		st.stats.totalMatched++
 	}
 }
@@ -726,6 +825,8 @@ const (
 	bucketInputAnchor
 	bucketPublic
 	bucketShape
+	bucketContainerOrdinal
+	bucketStaticLeaf
 )
 
 type bucketKey struct {
@@ -740,6 +841,11 @@ type bucketKey struct {
 	actions   uint8
 	editable  bool
 	protected bool
+	// pubHasRes and pubResource keep the published resource hint separate from
+	// the raw resource id. Buckets that decide container or leaf identity use
+	// both so an unpublished difference can never be silently ignored.
+	pubHasRes   bool
+	pubResource string
 }
 
 func unitBucket(k matchKey, _ publicKey) bucketKey {
@@ -817,6 +923,41 @@ func shapeBucket(k matchKey) bucketKey {
 	return bk
 }
 
+// containerOrdinalBucket groups non-input containers for the zero-shift
+// ordinal pass. It carries the public identity evidence a reader can observe
+// (published resource hint and readable label) plus the raw resource evidence,
+// role, actions and protection. Actionable containers additionally keep raw
+// class and package so two unrelated control rows never share an ordinal slot
+// just because both are clickable.
+func containerOrdinalBucket(k matchKey, pk publicKey) bucketKey {
+	bk := bucketKey{
+		kind:        bucketContainerOrdinal,
+		role:        k.role,
+		hasRes:      k.hasRes,
+		resource:    k.resource,
+		label:       k.label,
+		actions:     k.actions,
+		protected:   k.protected,
+		pubHasRes:   pk.hasRes,
+		pubResource: pk.resource,
+	}
+	if k.actions != 0 {
+		bk.class = k.class
+		bk.pkg = k.pkg
+	}
+	return bk
+}
+
+// staticLeafBucket groups unmatched leaves for the static-geometry closing pass
+// (design §4.1.2). It uses the same identity evidence as the ordinal container
+// bucket, minus geometry, so only genuinely indistinguishable siblings can ever
+// be considered.
+func staticLeafBucket(k matchKey, pk publicKey) bucketKey {
+	bk := containerOrdinalBucket(k, pk)
+	bk.kind = bucketStaticLeaf
+	return bk
+}
+
 func hasIdentityMatch(k matchKey, _ publicKey) bool {
 	return hasIdentity(k)
 }
@@ -851,12 +992,19 @@ type contentPass struct {
 	eligible func(matchKey, publicKey) bool
 }
 
-// matchRefs assigns refs to the published units of cap, continuing the
-// builder's previous snapshot through the five-stage continuity pipeline and
-// allocating new refs strictly monotonically from b.nextRef.
-func (b *Builder) matchRefs(cap *device.Capture, units []unit, refs []string) {
-	b.lastStats = matchStats{}
-	idx := buildPublicMatchIndex(b.prev, cap, units)
+// matchRefs assigns refs to the published units of cap, continuing an explicit
+// previous snapshot through the six-stage continuity pipeline and allocating
+// new refs strictly monotonically from nextRef. It never touches the builder's
+// own continuity state: the caller keeps the returned high-water mark and match
+// statistics only when the candidate is published.
+func (b *Builder) matchRefs(
+	prev *Snapshot,
+	cap *device.Capture,
+	units []unit,
+	refs []string,
+	nextRef int,
+) (int, matchStats) {
+	idx := buildPublicMatchIndex(prev, cap, units)
 	st := newMatchState(idx, refs)
 
 	limit := uint64(128*(idx.prevCount+idx.curCount+1) + 65_536)
@@ -867,13 +1015,22 @@ func (b *Builder) matchRefs(cap *device.Capture, units []unit, refs []string) {
 
 	allocate := func() string {
 		for {
-			ref := formatRef(b.nextRef)
-			b.nextRef++
+			ref := formatRef(nextRef)
+			nextRef++
 			if !st.usedRef[ref] {
 				st.usedRef[ref] = true
 				return ref
 			}
 		}
+	}
+
+	finish := func() (int, matchStats) {
+		st.stats.workLimit = budget.limit
+		st.stats.workUsed = budget.used
+		st.stats.candidateVisits = budget.candidateVisits
+		st.stats.voteComparisons = budget.voteComparisons
+		st.stats.budgetHit = budget.exhausted()
+		return nextRef, st.stats
 	}
 
 	if idx.prevRoot >= 0 {
@@ -886,12 +1043,7 @@ func (b *Builder) matchRefs(cap *device.Capture, units []unit, refs []string) {
 				refs[cur] = allocate()
 			}
 		}
-		st.stats.workLimit = budget.limit
-		st.stats.workUsed = budget.used
-		st.stats.candidateVisits = budget.candidateVisits
-		st.stats.voteComparisons = budget.voteComparisons
-		b.lastStats = st.stats
-		return
+		return finish()
 	}
 
 	dirty := newParentQueue(idx)
@@ -919,7 +1071,8 @@ func (b *Builder) matchRefs(cap *device.Capture, units []unit, refs []string) {
 		}
 	}
 
-	// Stage 3 finds container anchors via strict descendant vote;
+	// Stage 3 finds container anchors via descendant vote (3A under anchored
+	// parents, 3B bottom-up through rebuilt wrappers);
 	// Stage 4 recovers direct children only below anchored parents.
 	for !budget.exhausted() {
 		before := st.matchCount()
@@ -958,6 +1111,15 @@ func (b *Builder) matchRefs(cap *device.Capture, units []unit, refs []string) {
 		}
 	}
 
+	// Stage 6 closes the static-geometry gap of unchanged separated leaves. It
+	// runs once and never re-triggers an earlier stage.
+	if !budget.exhausted() {
+		matchStaticGeometrySiblings(st, budget)
+		if budget.exhausted() && st.stats.stoppedStage == "" {
+			st.stats.stoppedStage = "static_geometry"
+		}
+	}
+
 	// Safe degradation assigns sequential fresh refs in public preorder.
 	for _, cur := range idx.order {
 		if refs[cur] == "" {
@@ -965,12 +1127,7 @@ func (b *Builder) matchRefs(cap *device.Capture, units []unit, refs []string) {
 		}
 	}
 
-	st.stats.workLimit = budget.limit
-	st.stats.workUsed = budget.used
-	st.stats.candidateVisits = budget.candidateVisits
-	st.stats.voteComparisons = budget.voteComparisons
-	st.stats.budgetHit = budget.exhausted()
-	b.lastStats = st.stats
+	return finish()
 }
 
 func matchUniqueContainers(st *matchState, budget *workBudget, dirty *parentQueue) {
@@ -1399,20 +1556,36 @@ func samePairSet(rc, rp []pairEntry, budget *workBudget) (bool, bool) {
 	return true, true
 }
 
+// matchContainersByDescendants anchors unmatched containers from the pairs of
+// already matched descendants below them (design §4.1.1). Both layers collect
+// proposals against the same snapshot and commit them atomically:
+//
+//   - 3A: the current container's parent is already anchored, and every matched
+//     descendant points into one and the same unmatched direct child of that
+//     anchor whose full matched-pair set equals the current container's set.
+//   - 3B: the current container's parent is not anchored (a rebuilt wrapper), so
+//     the previous container is found self-bottom-up: the LCA of the descendants'
+//     previous positions is climbed for old containers with the identical pair
+//     set, the current container is climbed for unmatched containers with the
+//     identical pair set, and only a single compatible pair on each side is
+//     accepted.
 func matchContainersByDescendants(st *matchState, budget *workBudget, dirty *parentQueue) bool {
 	baseR := st.snapshotPairs()
 	intervals := buildSnapshotIntervals(st.idx, baseR)
 	var proposals []pairProposal
 
+	// Stage 3A: an anchored parent names one expected previous child.
 	for _, cur := range st.idx.order {
 		if !budget.charge(1) {
 			return false
 		}
 		budget.visitCandidate()
-		if cur == st.idx.root || st.curUsed(cur) || !st.idx.curAnonymousContainer(cur) {
+		if cur == st.idx.root || baseR.curUsed(cur) ||
+			!st.idx.curContainer(cur) || st.idx.curEditable(cur) {
 			continue
 		}
-		anchor, anchored := st.matchedOld(st.idx.parentOf(cur))
+		parent := st.idx.parentOf(cur)
+		anchor, anchored := baseR.pairOfCur(parent)
 		if !anchored {
 			continue
 		}
@@ -1447,8 +1620,11 @@ func matchContainersByDescendants(st *matchState, budget *workBudget, dirty *par
 			}
 		}
 		if conflict || expectedPrev < 0 || baseR.oldUsed(expectedPrev) ||
-			!st.idx.prevAnonymousContainer(expectedPrev) ||
-			!sameShape(st.idx.prevKey[expectedPrev], st.idx.curMatchKey(cur)) {
+			!st.idx.prevContainer(expectedPrev) || st.idx.prevEditable(expectedPrev) ||
+			!sameContainerIdentity(
+				st.idx.prevKey[expectedPrev], st.idx.curMatchKey(cur),
+				st.idx.prevPub[expectedPrev], st.idx.curPubKey(cur),
+			) {
 			continue
 		}
 
@@ -1470,6 +1646,43 @@ func matchContainersByDescendants(st *matchState, budget *workBudget, dirty *par
 		})
 	}
 
+	// Stage 3B: bottom-up anchoring across rebuilt wrappers.
+	for _, cur := range st.idx.order {
+		if !budget.charge(1) {
+			return false
+		}
+		budget.visitCandidate()
+		if cur == st.idx.root || baseR.curUsed(cur) ||
+			!st.idx.curContainer(cur) || st.idx.curEditable(cur) {
+			continue
+		}
+		parent := st.idx.parentOf(cur)
+		if parent >= 0 {
+			if _, anchored := baseR.pairOfCur(parent); anchored {
+				continue // 3A owns the anchored-parent layer.
+			}
+		}
+		rc, ok := intervals.collectByCurInterval(st.idx.tin[cur], st.idx.tout[cur], budget)
+		if !ok {
+			return false
+		}
+		if len(rc) == 0 {
+			continue
+		}
+		prevPos, ok, found := matchBottomUpContainer(st, intervals, cur, rc, budget)
+		if !ok {
+			return false
+		}
+		if !found {
+			continue
+		}
+		proposals = append(proposals, pairProposal{
+			cur:     cur,
+			prevPos: prevPos,
+			source:  sourceBottomUpVote,
+		})
+	}
+
 	accepted, ok := st.chooseBatchIfBidirectionallyUnique(proposals, baseR, budget)
 	if !ok || len(accepted) == 0 {
 		return false
@@ -1481,6 +1694,140 @@ func matchContainersByDescendants(st *matchState, budget *workBudget, dirty *par
 		}
 	}
 	return true
+}
+
+// matchBottomUpContainer finds the single previous container that belongs to an
+// unanchored current container through the matched pairs below it. ok is false
+// only when the work budget is exhausted; found reports whether one unique pair
+// survived every check.
+func matchBottomUpContainer(
+	st *matchState,
+	intervals snapshotIntervals,
+	cur int,
+	rc []pairEntry,
+	budget *workBudget,
+) (prevPos int, ok bool, found bool) {
+	idx := st.idx
+
+	// 1. LCA of every previous position of the matched descendant pairs.
+	lca := rc[0].prevPos
+	for _, pr := range rc[1:] {
+		if !budget.charge(1) {
+			return 0, false, false
+		}
+		for lca > idx.prevRoot && !idx.prevAncestorOf(lca, pr.prevPos) {
+			if !budget.charge(1) {
+				return 0, false, false
+			}
+			lca = idx.prevParent[lca]
+			if lca < 0 {
+				return 0, true, false
+			}
+		}
+		if lca <= idx.prevRoot {
+			// The pairs only meet at the synthetic root: no container chain.
+			return 0, true, false
+		}
+	}
+
+	// 2a. Old containers on the LCA chain whose matched-pair set is identical.
+	var prevChain []int
+	for p := lca; p > idx.prevRoot && p >= 0; p = idx.prevParent[p] {
+		if !budget.charge(1) {
+			return 0, false, false
+		}
+		if st.prevUsed(p) || idx.prevEditable(p) || !idx.prevContainer(p) {
+			continue
+		}
+		rp, complete := intervals.collectByPrevInterval(idx.prevTin[p], idx.prevTout[p], budget)
+		if !complete {
+			return 0, false, false
+		}
+		equal, complete := samePairSet(rc, rp, budget)
+		if !complete {
+			return 0, false, false
+		}
+		if equal {
+			prevChain = append(prevChain, p)
+		}
+	}
+	if len(prevChain) == 0 {
+		return 0, true, false
+	}
+
+	// 2b. Unmatched current containers on the chain above cur with the same
+	// matched-pair set. A matched parent stops the climb.
+	var curChain []int
+	for c := cur; c >= 0 && c != idx.root; {
+		if st.curUsed(c) || idx.curEditable(c) || !idx.curContainer(c) {
+			break
+		}
+		rp, complete := intervals.collectByCurInterval(idx.tin[c], idx.tout[c], budget)
+		if !complete {
+			return 0, false, false
+		}
+		equal, complete := samePairSet(rc, rp, budget)
+		if !complete {
+			return 0, false, false
+		}
+		if !equal {
+			break
+		}
+		curChain = append(curChain, c)
+		parent := idx.parentOf(c)
+		if parent == idx.root || st.curUsed(parent) {
+			break
+		}
+		c = parent
+	}
+	if len(curChain) == 0 {
+		return 0, true, false
+	}
+
+	// 3. Exactly one compatible old candidate, and exactly one compatible
+	// current candidate which must be cur itself.
+	prevCand := -1
+	for _, p := range prevChain {
+		if !budget.charge(1) {
+			return 0, false, false
+		}
+		budget.visitCandidate()
+		if !sameContainerIdentity(
+			idx.prevKey[p], idx.curMatchKey(cur),
+			idx.prevPub[p], idx.curPubKey(cur),
+		) {
+			continue
+		}
+		if prevCand >= 0 {
+			return 0, true, false // nested same-signature shells: no guess.
+		}
+		prevCand = p
+	}
+	if prevCand < 0 {
+		return 0, true, false
+	}
+
+	curCand := -1
+	for _, c := range curChain {
+		if !budget.charge(1) {
+			return 0, false, false
+		}
+		budget.visitCandidate()
+		if !sameContainerIdentity(
+			idx.prevKey[prevCand], idx.curMatchKey(c),
+			idx.prevPub[prevCand], idx.curPubKey(c),
+		) {
+			continue
+		}
+		if curCand >= 0 {
+			return 0, true, false
+		}
+		curCand = c
+	}
+	if curCand != cur {
+		return 0, true, false
+	}
+	return prevCand, true, true
 }
 
 func matchLocalUnderAnchoredParents(
@@ -1556,12 +1903,18 @@ func matchLocalUnderAnchoredParents(
 	}
 }
 
+// matchOrdinalContainersZeroShift recovers a zero-shift ordinal group of
+// non-input containers under one anchored parent (design §4.1.1, Stage 5). The
+// bucket is the generalized container identity bucket, not just anonymous
+// shapes. A bucket is accepted only when both sides hold the same number k >= 2
+// and at least one member was already matched by a non-ordinal stage at the same
+// rank, so a wholesale content replacement never inherits stale refs.
 func matchOrdinalContainersZeroShift(st *matchState, budget *workBudget, dirty *parentQueue) bool {
 	baseR := st.snapshotPairs()
 	var proposals []pairProposal
 
 	for _, parentCur := range st.idx.order {
-		anchor, anchored := st.matchedOld(parentCur)
+		anchor, anchored := baseR.pairOfCur(parentCur)
 		if !anchored {
 			continue
 		}
@@ -1576,14 +1929,15 @@ func matchOrdinalContainersZeroShift(st *matchState, budget *workBudget, dirty *
 				return false
 			}
 			budget.visitCandidate()
-			if !st.idx.prevAnonymousContainer(oldPos) {
+			if !st.idx.prevContainer(oldPos) || st.idx.prevEditable(oldPos) {
 				continue
 			}
-			shape := shapeBucket(st.idx.prevKey[oldPos])
-			pgroups[shape] = append(pgroups[shape], oldPos)
-			if !seen[shape] {
-				seen[shape] = true
-				keyOrder = append(keyOrder, shape)
+			k, pk := st.idx.prevKey[oldPos], st.idx.prevPub[oldPos]
+			group := containerOrdinalBucket(k, pk)
+			pgroups[group] = append(pgroups[group], oldPos)
+			if !seen[group] {
+				seen[group] = true
+				keyOrder = append(keyOrder, group)
 			}
 		}
 		for _, cur := range st.idx.childrenOf(parentCur) {
@@ -1591,14 +1945,15 @@ func matchOrdinalContainersZeroShift(st *matchState, budget *workBudget, dirty *
 				return false
 			}
 			budget.visitCandidate()
-			if !st.idx.curAnonymousContainer(cur) {
+			if !st.idx.curContainer(cur) || st.idx.curEditable(cur) {
 				continue
 			}
-			shape := shapeBucket(st.idx.curMatchKey(cur))
-			cgroups[shape] = append(cgroups[shape], cur)
-			if !seen[shape] {
-				seen[shape] = true
-				keyOrder = append(keyOrder, shape)
+			k, pk := st.idx.curMatchKey(cur), st.idx.curPubKey(cur)
+			group := containerOrdinalBucket(k, pk)
+			cgroups[group] = append(cgroups[group], cur)
+			if !seen[group] {
+				seen[group] = true
+				keyOrder = append(keyOrder, group)
 			}
 		}
 
@@ -1686,6 +2041,226 @@ func matchOrdinalContainersZeroShift(st *matchState, budget *workBudget, dirty *
 		}
 	}
 	return true
+}
+
+// matchStaticGeometrySiblings closes the last continuity gap for truly
+// stationary screens (design §4.1.2). Under one already anchored parent, two
+// identical non-input leaves that sit apart and did not move are otherwise
+// permanently indistinguishable, so every frame would renumber them.
+//
+// The pass is deliberately narrow and runs at most once:
+//   - only direct public children of an anchored parent pair,
+//   - never context nodes, never editable units and never containers (a public
+//     leaf only), so a list that recycles slot coordinates cannot hand a card
+//     container's ref to a new card's inner button,
+//   - buckets must hold the same unmatched count k >= 2 on both sides,
+//   - every old leaf needs exactly one current leaf within +-4px on all four
+//     edges, every current leaf is hit exactly once (strict 1-to-1 bijection),
+//   - the pairs must keep public preorder, so swapped siblings never trade refs.
+//
+// A bucket that fails any condition is skipped whole; the batch is committed
+// through the same bidirectional uniqueness gate as every other stage.
+func matchStaticGeometrySiblings(st *matchState, budget *workBudget) bool {
+	baseR := st.snapshotPairs()
+	var proposals []pairProposal
+
+	for _, parentCur := range st.idx.order {
+		if !budget.charge(1) {
+			return false
+		}
+		anchor, anchored := baseR.pairOfCur(parentCur)
+		if !anchored {
+			continue
+		}
+
+		oldBuckets := make(map[bucketKey][]int)
+		curBuckets := make(map[bucketKey][]int)
+		var keyOrder []bucketKey
+		seen := make(map[bucketKey]bool)
+
+		for _, oldPos := range st.idx.prevChildren[anchor] {
+			if !budget.charge(1) {
+				return false
+			}
+			budget.visitCandidate()
+			if baseR.oldUsed(oldPos) || !st.idx.prevStaticLeaf(oldPos) {
+				continue
+			}
+			key := staticLeafBucket(st.idx.prevKey[oldPos], st.idx.prevPub[oldPos])
+			oldBuckets[key] = append(oldBuckets[key], oldPos)
+			if !seen[key] {
+				seen[key] = true
+				keyOrder = append(keyOrder, key)
+			}
+		}
+		for _, cur := range st.idx.childrenOf(parentCur) {
+			if !budget.charge(1) {
+				return false
+			}
+			budget.visitCandidate()
+			if baseR.curUsed(cur) || !st.idx.curStaticLeaf(cur) {
+				continue
+			}
+			key := staticLeafBucket(st.idx.curMatchKey(cur), st.idx.curPubKey(cur))
+			curBuckets[key] = append(curBuckets[key], cur)
+			if !seen[key] {
+				seen[key] = true
+				keyOrder = append(keyOrder, key)
+			}
+		}
+
+		for _, key := range keyOrder {
+			olds, curs := oldBuckets[key], curBuckets[key]
+			if len(olds) < 2 || len(olds) != len(curs) {
+				continue
+			}
+			pairs, complete := pairStaticLeafBounds(st.idx, olds, curs, budget)
+			if !complete {
+				return false
+			}
+			if pairs == nil {
+				continue
+			}
+			for _, pr := range pairs {
+				proposals = append(proposals, pairProposal{
+					cur:     pr.cur,
+					prevPos: pr.prevPos,
+					source:  sourceStaticGeometry,
+				})
+			}
+		}
+	}
+
+	accepted, ok := st.chooseBatchIfBidirectionallyUnique(proposals, baseR, budget)
+	if !ok {
+		return false
+	}
+	if len(accepted) == 0 {
+		return true
+	}
+	st.applyBatch(accepted)
+	return true
+}
+
+// staticLeafPair is one accepted static-geometry pairing.
+type staticLeafPair struct {
+	prevPos int
+	cur     int
+}
+
+// staticGeometryTolerance is the maximum per-edge difference of two rectangles
+// that still count as "did not move".
+const staticGeometryTolerance = 4
+
+// staticLeafBounds returns the published bounds of one leaf position. Callers
+// only pass positions already proven to carry a positive rectangle.
+func staticLeafBounds(b *protocol.Bounds) device.Rect {
+	if b == nil {
+		return device.Rect{}
+	}
+	return device.Rect{Left: b.Left, Top: b.Top, Right: b.Right, Bottom: b.Bottom}
+}
+
+// sameStaticBounds reports whether the four edges differ by at most the static
+// geometry tolerance.
+func sameStaticBounds(a, b device.Rect) bool {
+	return absInt(a.Left-b.Left) <= staticGeometryTolerance &&
+		absInt(a.Top-b.Top) <= staticGeometryTolerance &&
+		absInt(a.Right-b.Right) <= staticGeometryTolerance &&
+		absInt(a.Bottom-b.Bottom) <= staticGeometryTolerance
+}
+
+func absInt(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
+// pairStaticLeafBounds pairs two equal-sized buckets by a strict +-4px
+// bijection that also preserves public preorder. It returns nil (no error) when
+// the bucket is ambiguous, has a single candidate on either side, or would swap
+// siblings; complete is false only on work-budget exhaustion.
+func pairStaticLeafBounds(
+	idx *publicMatchIndex,
+	olds, curs []int,
+	budget *workBudget,
+) ([]staticLeafPair, bool) {
+	sortedCurs := make([]int, len(curs))
+	copy(sortedCurs, curs)
+	topOf := make(map[int]int, len(curs))
+	for _, c := range curs {
+		topOf[c] = staticLeafBounds(idx.curBounds[idx.curPos[c]]).Top
+	}
+	sort.Slice(sortedCurs, func(i, j int) bool {
+		ti, tj := topOf[sortedCurs[i]], topOf[sortedCurs[j]]
+		if ti != tj {
+			return ti < tj
+		}
+		li := staticLeafBounds(idx.curBounds[idx.curPos[sortedCurs[i]]]).Left
+		lj := staticLeafBounds(idx.curBounds[idx.curPos[sortedCurs[j]]]).Left
+		if li != lj {
+			return li < lj
+		}
+		return idx.tin[sortedCurs[i]] < idx.tin[sortedCurs[j]]
+	})
+	tops := make([]int, len(sortedCurs))
+	for i, c := range sortedCurs {
+		tops[i] = topOf[c]
+	}
+
+	sortedOlds := make([]int, len(olds))
+	copy(sortedOlds, olds)
+	sort.Ints(sortedOlds)
+
+	hit := make(map[int]int, len(curs))
+	pairs := make([]staticLeafPair, 0, len(sortedOlds))
+	for _, oldPos := range sortedOlds {
+		if !budget.charge(1) {
+			return nil, false
+		}
+		oldRect := staticLeafBounds(idx.prevBounds[oldPos])
+		start := sort.SearchInts(tops, oldRect.Top-staticGeometryTolerance)
+		matched := -1
+		for i := start; i < len(sortedCurs); i++ {
+			if !budget.charge(1) {
+				return nil, false
+			}
+			budget.visitCandidate()
+			c := sortedCurs[i]
+			if tops[i] > oldRect.Top+staticGeometryTolerance {
+				break
+			}
+			if !sameStaticBounds(oldRect, staticLeafBounds(idx.curBounds[idx.curPos[c]])) {
+				continue
+			}
+			if matched >= 0 {
+				return nil, true // more than one candidate: never guess.
+			}
+			matched = c
+		}
+		if matched < 0 {
+			return nil, true
+		}
+		hit[matched]++
+		if hit[matched] > 1 {
+			return nil, true
+		}
+		pairs = append(pairs, staticLeafPair{prevPos: oldPos, cur: matched})
+	}
+	if len(hit) != len(sortedCurs) {
+		return nil, true
+	}
+
+	lastTin := -1
+	for _, pr := range pairs {
+		tin := idx.tin[pr.cur]
+		if tin <= lastTin {
+			return nil, true // siblings swapped: order must be preserved.
+		}
+		lastTin = tin
+	}
+	return pairs, true
 }
 
 // hasIdentity reports whether a raw key carries evidence strong enough for
@@ -1785,6 +2360,40 @@ func sameResourceOnly(a, b matchKey) bool {
 	}
 	return a.role == b.role && a.class == b.class && a.pkg == b.pkg &&
 		a.resource == b.resource && a.actions == b.actions && a.protected == b.protected
+}
+
+// sameContainerIdentity reports whether two published containers may stand for
+// the same unit in descendant voting (design §4.1.1). Inputs are excluded
+// entirely: an editable unit is identified through its value/input-anchor
+// channel, never through descendant voting.
+//
+// Anonymous containers compare by shape only. A container that carries public
+// identity evidence must agree on every raw identity field, or on the complete
+// published identity. Published resource equality already covers the
+// "unlabelled actionable container" case, so two rows sharing a template
+// resource and readable label can anchor through their unique descendants.
+func sameContainerIdentity(prevK, curK matchKey, prevPK, curPK publicKey) bool {
+	if prevK.editable || curK.editable {
+		return false
+	}
+	if isStructurallyMatchable(prevK, prevPK) && isStructurallyMatchable(curK, curPK) {
+		return sameShape(prevK, curK)
+	}
+	if sameUnit(prevK, curK) {
+		return true
+	}
+	if !hasPublicIdentity(prevPK) || !hasPublicIdentity(curPK) {
+		return false
+	}
+	if !samePublicUnit(prevPK, curPK) {
+		return false
+	}
+	if prevK.actions != 0 && prevK.label == "" {
+		// samePublicUnit already compares hasRes/resource; keep the guard
+		// explicit so a future relaxation cannot silently drop it.
+		return prevPK.hasRes == curPK.hasRes && prevPK.resource == curPK.resource
+	}
+	return true
 }
 
 // sameShape matches label-free containers: no label on either side, the same

@@ -176,9 +176,9 @@ func (e *Engine) clearTextPrimitive(work *workState, primitive string) {
 	case "write":
 		op.TextStage.write = protocol.TextInputNotExecuted
 		op.TextStage.dispatchWrite = textDispatchNotDispatched
-	case "enter":
-		op.TextStage.enter = protocol.TextInputNotExecuted
-		op.TextStage.dispatchEnter = textDispatchNotDispatched
+	case "submit":
+		op.TextStage.submit = protocol.TextInputNotExecuted
+		op.TextStage.dispatchSubmit = textDispatchNotDispatched
 	default:
 		return
 	}

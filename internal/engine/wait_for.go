@@ -503,7 +503,7 @@ func (e *Engine) completeWaitCapture(ctx context.Context, work *workState,
 	}
 	publication.matched = waitMatched(tree.projection.Tree, req, trigger)
 	public, _, publishErr := e.publishTreeAttempt(work, session, phase, tree, base,
-		forceFull || req.Full, status, image, publication.quality)
+		true, forceFull || req.Full, status, image, publication.quality)
 	e.logQuality(work.OperationID, phase, public, publication.quality)
 	if publishErr != nil {
 		return publication, publishErr

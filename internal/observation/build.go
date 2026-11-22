@@ -81,44 +81,61 @@ func (b *Builder) Build(cap *device.Capture) (*Snapshot, error) {
 
 // Candidate projects one capture without advancing continuity. The returned
 // commit function publishes exactly this candidate as the new continuity state
-// (previous snapshot and ref counter); a discarded candidate leaves the builder
-// exactly as it was, so a rejected acquisition can never shift the refs of a
-// later published tree.
+// (previous snapshot, ref counter and match statistics); a discarded candidate
+// leaves the builder exactly as it was, so a rejected acquisition can never
+// shift the refs of a later published tree. It is the ordinary-baseline case of
+// CandidateAgainst and shares its pure projection path.
 func (b *Builder) Candidate(cap *device.Capture) (*Snapshot, func(), error) {
-	prev, nextRef := b.prev, b.nextRef
-	snapshot, err := b.build(cap)
-	candidatePrev, candidateNextRef := b.prev, b.nextRef
-	b.prev, b.nextRef = prev, nextRef
+	return b.CandidateAgainst(b.prev, cap)
+}
+
+// CandidateAgainst projects one capture against an explicit previous snapshot
+// instead of the builder's current continuity state. It is a pure read-only
+// probe: the builder's previous snapshot, ref high-water mark and match
+// statistics are untouched until the returned commit function runs. A
+// multi-baseline delta probe can therefore try a historical page-return
+// baseline and discard the candidate without polluting the ref numbering of the
+// observation that is eventually published.
+//
+// Fresh refs are allocated above the builder's current high-water mark, so a
+// committed candidate never reuses a number another observation may already
+// hold.
+func (b *Builder) CandidateAgainst(prev *Snapshot, cap *device.Capture) (*Snapshot, func(), error) {
+	snapshot, nextRef, stats, err := b.buildAgainst(prev, cap, b.nextRef)
 	if err != nil {
 		return nil, nil, err
 	}
 	commit := func() {
-		b.prev, b.nextRef = candidatePrev, candidateNextRef
+		b.prev, b.nextRef, b.lastStats = snapshot, nextRef, stats
 	}
 	return snapshot, commit, nil
 }
 
-// build is the projection itself. It advances the builder's continuity state;
-// only Build and the returned commit of Candidate may keep that state.
-func (b *Builder) build(cap *device.Capture) (*Snapshot, error) {
+// buildAgainst is the projection itself: it projects cap against an explicit
+// previous snapshot and returns the candidate snapshot, its next ref
+// high-water mark and its match statistics without mutating the builder. Only
+// Build and the commit returned by Candidate/CandidateAgainst may keep that
+// state.
+func (b *Builder) buildAgainst(prev *Snapshot, cap *device.Capture, nextRef int) (*Snapshot, int, matchStats, error) {
 	if cap == nil {
-		return nil, invalidTree("capture is missing")
+		return nil, 0, matchStats{}, invalidTree("capture is missing")
 	}
 	if cap.Display.Width <= 0 || cap.Display.Height <= 0 {
-		return nil, invalidTree("display rectangle is empty")
+		return nil, 0, matchStats{}, invalidTree("display rectangle is empty")
 	}
 	if cap.Root < 0 || cap.Root >= len(cap.Nodes) {
-		return nil, invalidTree("capture root is missing")
+		return nil, 0, matchStats{}, invalidTree("capture root is missing")
 	}
 	if cap.Nodes[cap.Root].Parent != -1 {
-		return nil, invalidTree("capture root has a parent")
+		return nil, 0, matchStats{}, invalidTree("capture root has a parent")
 	}
 
 	units := project(cap)
 
 	// Refs are computed against the previous snapshot, per raw node, so newly
 	// published units get monotonic numbers in preorder.
-	refs := b.assignRefs(cap, units)
+	refs := make([]string, len(cap.Nodes))
+	nextRef, stats := b.matchRefs(prev, cap, units, refs, nextRef)
 
 	// Build in source preorder and attach every published unit to its nearest
 	// published ancestor so descendants across unpublished wrappers remain
@@ -164,8 +181,7 @@ func (b *Builder) build(cap *device.Capture) (*Snapshot, error) {
 	snap.Tree = &protocol.Tree{Format: "full", Scope: protocol.Scope, Root: root}
 	collectRefs(root, &snap.Refs)
 
-	b.prev = snap
-	return snap, nil
+	return snap, nextRef, stats, nil
 }
 
 // Preview projects one capture without advancing continuity state. The settle
@@ -173,8 +189,8 @@ func (b *Builder) build(cap *device.Capture) (*Snapshot, error) {
 // may keep the ref numbering of the next observation: advancing it on every
 // sample would shift the refs of already published observations.
 func (b *Builder) Preview(cap *device.Capture) (*Snapshot, error) {
-	prev, nextRef := b.prev, b.nextRef
-	defer func() { b.prev, b.nextRef = prev, nextRef }()
+	prev, nextRef, stats := b.prev, b.nextRef, b.lastStats
+	defer func() { b.prev, b.nextRef, b.lastStats = prev, nextRef, stats }()
 	return b.Build(cap)
 }
 
@@ -258,14 +274,6 @@ func project(cap *device.Capture) []unit {
 	// synthetic root takes its place and its kept children become root's
 	// children.
 	return units
-}
-
-// assignRefs maps every published (or root) raw index to a ref, continuing the
-// previous snapshot's refs conservatively.
-func (b *Builder) assignRefs(cap *device.Capture, units []unit) []string {
-	refs := make([]string, len(cap.Nodes))
-	b.matchRefs(cap, units, refs)
-	return refs
 }
 
 // postOrder returns children before parents, starting at the traversal root.

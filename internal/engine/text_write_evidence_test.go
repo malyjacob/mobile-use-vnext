@@ -186,11 +186,11 @@ func requireTextDetail(t *testing.T, details map[string]any, key string, want an
 	}
 }
 
-func requireTextDispatch(t *testing.T, details map[string]any, focus, write, enter string) {
+func requireTextDispatch(t *testing.T, details map[string]any, focus, write, submit string) {
 	t.Helper()
 	dispatch := textDispatchOf(t, details)
-	if dispatch["focus"] != focus || dispatch["write"] != write || dispatch["enter"] != enter {
-		t.Fatalf("dispatch = %+v, want focus=%s write=%s enter=%s", dispatch, focus, write, enter)
+	if dispatch["focus"] != focus || dispatch["write"] != write || dispatch["submit"] != submit {
+		t.Fatalf("dispatch = %+v, want focus=%s write=%s submit=%s", dispatch, focus, write, submit)
 	}
 }
 
@@ -220,7 +220,7 @@ func TestTextFocusedRefSkipsFocusAndAcceptsSetReadback(t *testing.T) {
 		t.Fatalf("focused ref text outcome = %q error=%+v", result.Outcome, result.Error)
 	}
 	if result.TextInput != nil {
-		t.Fatalf("press_enter=false returned text_input: %+v", result.TextInput)
+		t.Fatalf("auto_submit=false returned text_input: %+v", result.TextInput)
 	}
 	tap, set, get, key := dev.counts()
 	if tap != 0 || set != 1 || get != 0 || key != 0 {
@@ -339,10 +339,10 @@ func TestTextMalformedSetResultIsAnUnknownReceipt(t *testing.T) {
 	}
 }
 
-// TestTextEnterGateRequiresFreshExactValue proves the independent ENTER probe
-// never dispatches ENTER when the target value no longer matches, and keeps the
-// already-confirmed write.
-func TestTextEnterGateRequiresFreshExactValue(t *testing.T) {
+// TestTextSubmitGateRequiresFreshExactValue proves the independent submission
+// probe never dispatches ENTER when the target value no longer matches, and
+// keeps the already-confirmed write as the honest partial fact.
+func TestTextSubmitGateRequiresFreshExactValue(t *testing.T) {
 	bounds := device.Rect{Left: 100, Top: 300, Right: 900, Bottom: 400}
 	t.Run("value_changed", func(t *testing.T) {
 		h, dev, obsRef, ref := newTextEvidenceHarness(t, bounds)
@@ -351,15 +351,9 @@ func TestTextEnterGateRequiresFreshExactValue(t *testing.T) {
 		dev.setSteps = []textSetStep{{result: exactText("hello")}}
 		changed := "hello!"
 		dev.getSteps = []textGetStep{{result: device.TextResult{CandidateCount: 1, Value: &changed}}}
-		result := h.actWith(t, "PtextEnterValue", textFlowRequest(obsRef, ref, "hello", nil))
-		if result.Outcome != OutcomeUncertain {
-			t.Fatalf("outcome = %q, want uncertain (%+v)", result.Outcome, result)
-		}
-		requireTextInput(t, result, protocol.TextInputExecuted, protocol.TextInputNotExecuted)
-		details := textDetailsOf(t, result)
-		requireTextDetail(t, details, "stage", "enter")
-		requireTextDetail(t, details, "reason", "enter_target_unconfirmed")
-		requireTextDispatch(t, details, "dispatched", "dispatched", "not_attempted")
+		result := h.actWith(t, "PtextSubmitValue", textFlowRequest(obsRef, ref, "hello", nil))
+		requirePartialTextResult(t, result, protocol.CodeTextSubmitNotExecuted,
+			"submit", "submit_target_unconfirmed")
 		tap, set, get, key := dev.counts()
 		if tap != 1 || set != 1 || get != 1 || key != 0 {
 			t.Fatalf("primitive calls tap=%d set=%d get=%d key=%d, want 1/1/1/0",
@@ -376,15 +370,9 @@ func TestTextEnterGateRequiresFreshExactValue(t *testing.T) {
 		h.device.foreground = &device.Foreground{
 			State: device.ForegroundPresent, Package: "com.other", TaskID: &otherTask,
 		}
-		result := h.actWith(t, "PtextEnterContext", textFlowRequest(obsRef, ref, "hello", nil))
-		if result.Outcome != OutcomeUncertain {
-			t.Fatalf("outcome = %q, want uncertain (%+v)", result.Outcome, result)
-		}
-		requireTextInput(t, result, protocol.TextInputExecuted, protocol.TextInputNotExecuted)
-		details := textDetailsOf(t, result)
-		requireTextDetail(t, details, "stage", "enter")
-		requireTextDetail(t, details, "reason", "enter_context_unconfirmed")
-		requireTextDispatch(t, details, "dispatched", "dispatched", "not_attempted")
+		result := h.actWith(t, "PtextSubmitContext", textFlowRequest(obsRef, ref, "hello", nil))
+		requirePartialTextResult(t, result, protocol.CodeTextSubmitNotExecuted,
+			"submit", "submit_context_unconfirmed")
 		tap, set, get, key := dev.counts()
 		if tap != 1 || set != 1 || get != 0 || key != 0 {
 			t.Fatalf("primitive calls tap=%d set=%d get=%d key=%d, want 1/1/0/0",
@@ -719,7 +707,7 @@ func TestTextFinishedEventIsBounded(t *testing.T) {
 	for _, required := range []string{
 		`operation_id="PtextLog"`, `outcome="uncertain"`, `stage="verify"`,
 		`reason="readback_mismatch"`, `focus_dispatch="dispatched"`,
-		`write_dispatch="dispatched"`, `enter_dispatch="not_attempted"`,
+		`write_dispatch="dispatched"`, `submit_dispatch="not_attempted"`,
 	} {
 		if !strings.Contains(events, required) {
 			t.Fatalf("text event lacks %s: %s", required, events)

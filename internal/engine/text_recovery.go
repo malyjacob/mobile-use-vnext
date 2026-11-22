@@ -36,6 +36,20 @@ func (e *Engine) applyLiveTextRecoveryLocked(op *operationState, result *protoco
 		return
 	}
 
+	// A delivered partial frame is only real evidence while it is still the
+	// session's current ready observation. The publish committed before this
+	// result was built; STOP or a newer acquisition may have won in between. An
+	// observation identity that lost that authority is removed in this same short
+	// lock, so the live projection below can never omit recovery because of an O
+	// the caller would not be allowed to use. A failed or read-only placeholder
+	// carries no identity: it is the delivery-failure fact itself and stays on
+	// the result, it simply cannot suppress recovery.
+	if op.Outcome == OutcomePartial && result.Observation != nil &&
+		result.Observation.ID != "" &&
+		!e.partialDeliveryReadyLocked(op, result.Observation, now) {
+		result.Observation = nil
+	}
+
 	origin := e.sessionByOriginLocked(op.SessionOrigin)
 	valid := origin != nil && e.session == origin && origin.State == SessionActive &&
 		now.Before(origin.ExpiresAt) && textBindingMatchesLocked(op, origin)
@@ -153,6 +167,38 @@ func (e *Engine) applyLiveTextRecoveryLocked(op *operationState, result *protoco
 	result.Recovery = base
 	result.BlockingCode = ""
 	result.BlockingOperationID = ""
+	if op.Outcome == OutcomePartial && deliveredReadyObservation(result.Observation) {
+		// The caller already holds the fresh ready observation of a partial
+		// completion: there is no next semantic step to project on this first
+		// response. Replays and status(P) carry no observation and therefore
+		// keep the persisted observe(P, retired) base.
+		result.Recovery = nil
+	}
+}
+
+// partialDeliveryReadyLocked reports whether the partial frame returned by this
+// result is still exactly the current, ready, unexpired observation of the
+// original session and agent. The caller holds e.mu.
+func (e *Engine) partialDeliveryReadyLocked(op *operationState, observation *protocol.Observation,
+	now time.Time) bool {
+	if op == nil || op.TextStage == nil || observation == nil || observation.ID == "" ||
+		e.current == nil {
+		return false
+	}
+	current := e.current
+	if current.ID != observation.ID || current.Status != ObservationReady ||
+		current.Agent != op.Agent || current.SessionEpoch != op.TextStage.sessionEpoch ||
+		current.DisplayID != op.TextStage.displayID {
+		return false
+	}
+	return now.Before(current.ActionableUntil)
+}
+
+// deliveredReadyObservation reports the closed success predicate of one
+// on-the-spot delivered observation: it must have an identity and must not be a
+// failed read-only placeholder.
+func deliveredReadyObservation(observation *protocol.Observation) bool {
+	return observation != nil && observation.ID != "" && observation.Status != "failed"
 }
 
 // textBindingMatchesLocked reports whether the operation's immutable admission
@@ -187,14 +233,14 @@ func (e *Engine) logTextFinished(op *operationState, result *protocol.Result) {
 		return
 	}
 	e.mu.Lock()
-	focus, write, enter := textStageSnapshotLocked(op)
+	focus, write, submit := textStageSnapshotLocked(op)
 	e.mu.Unlock()
 	fields := []eventlog.Field{
 		eventlog.Str("operation_id", op.ID),
 		eventlog.Str("outcome", result.Outcome),
 		eventlog.Str("focus_dispatch", focus),
 		eventlog.Str("write_dispatch", write),
-		eventlog.Str("enter_dispatch", enter),
+		eventlog.Str("submit_dispatch", submit),
 	}
 	if result.Error != nil && result.Error.Details != nil {
 		if stage, ok := result.Error.Details["stage"].(string); ok && stage != "" {

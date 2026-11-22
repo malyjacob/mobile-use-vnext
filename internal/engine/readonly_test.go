@@ -604,7 +604,8 @@ func TestInspectDoesNotChangeAuthority(t *testing.T) {
 		h.engine.nextObservation != nextObservation {
 		t.Fatalf("inspect allocated a new operation or observation")
 	}
-	if h.engine.work != nil || h.engine.baseline != nil {
+	if h.engine.work != nil ||
+		baselineWithID(h.engine.baselines, h.engine.activeBaselineID) != nil {
 		t.Fatalf("inspect took work or acknowledged a baseline")
 	}
 }

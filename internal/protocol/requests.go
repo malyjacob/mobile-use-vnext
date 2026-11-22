@@ -15,6 +15,9 @@ const (
 	MaxCommandRunes = 4096
 	MaxWaitMS       = 10000
 	MaxReferenceLen = 64
+	// MaxSubmitRefLen bounds the text-only submit_ref member on its own; the
+	// value shares no budget with a session reference or any other member.
+	MaxSubmitRefLen = 64
 
 	// Wait timeout bounds in seconds. The upper bound keeps one synchronous
 	// wait inside the fixed 90s HTTP ceiling once the bounded verification
@@ -94,6 +97,11 @@ const (
 	MaxSwipeDurationMS     = 2000
 )
 
+// SubmitRefEnterKey is the closed submit_ref literal that names the one bounded
+// ENTER submission path. It is a fixed lowercase token and can never collide
+// with the public node-ref grammar (ValidPublicRef).
+const SubmitRefEnterKey = "enter_key"
+
 // Target is exactly one of a public ref or absolute screen coordinates.
 type Target struct {
 	UseRef bool
@@ -127,11 +135,18 @@ type Operation struct {
 	// target or any other operation type is rejected.
 	Bubble    bool
 	HasBubble bool
-	// PressEnter is the presence-aware text member. Omitted means effective
-	// true (one bounded ENTER after an exact readback); explicit false stops
-	// after the input path. Other operation types cannot carry it.
-	PressEnter    bool
-	HasPressEnter bool
+	// AutoSubmit is the presence-aware text member. Omitted means effective
+	// true (one bounded submission after an exact readback); explicit false
+	// stops after the input path and semantically ignores SubmitRef. Other
+	// operation types cannot carry it.
+	AutoSubmit    bool
+	HasAutoSubmit bool
+	// SubmitRef is the presence-aware text member that names the submission
+	// target: SubmitRefEnterKey (the default) or one public n-prefixed node
+	// ref. Other operation types cannot carry it. The value is always
+	// validated; it is ignored only when AutoSubmit is effectively false.
+	SubmitRef    string
+	HasSubmitRef bool
 }
 
 // EffectiveBubble returns the branch-qualified value. It is meaningful only
@@ -140,10 +155,34 @@ func (o *Operation) EffectiveBubble() bool {
 	return o == nil || !o.HasBubble || o.Bubble
 }
 
-// EffectivePressEnter returns the branch-qualified value. It is meaningful only
-// for text; callers use ValidateEffectiveDefaults first.
-func (o *Operation) EffectivePressEnter() bool {
-	return o == nil || !o.HasPressEnter || o.PressEnter
+// EffectiveAutoSubmit returns the branch-qualified submission switch. It is
+// meaningful only for text; callers use ValidateEffectiveDefaults first.
+func (o *Operation) EffectiveAutoSubmit() bool {
+	return o == nil || !o.HasAutoSubmit || o.AutoSubmit
+}
+
+// EffectiveSubmitRef returns the branch-qualified submission selector. An
+// omitted member defaults to SubmitRefEnterKey. It is meaningful only for
+// text; the value is validated for every text operation, but callers gate the
+// submission path with EffectiveAutoSubmit because an effectively false switch
+// ignores the selector entirely.
+func (o *Operation) EffectiveSubmitRef() string {
+	if o == nil || !o.HasSubmitRef || o.SubmitRef == "" {
+		return SubmitRefEnterKey
+	}
+	return o.SubmitRef
+}
+
+// IsSubmitTap reports whether this operation submits by tapping a public node:
+// it is a text operation, AutoSubmit is effectively true, and the effective
+// submit_ref is not SubmitRefEnterKey. It never looks a node up and never
+// proves the ref exists; callers use ValidateEffectiveDefaults first so a
+// present value is one of the two admitted shapes.
+func (o *Operation) IsSubmitTap() bool {
+	if o == nil || o.Type != "text" || !o.EffectiveAutoSubmit() {
+		return false
+	}
+	return o.EffectiveSubmitRef() != SubmitRefEnterKey
 }
 
 // ValidateEffectiveDefaults checks the closed membership rules shared by HTTP
@@ -155,8 +194,8 @@ func (o *Operation) ValidateEffectiveDefaults() *APIError {
 	}
 	switch o.Type {
 	case "tap", "long_press":
-		if o.HasPressEnter {
-			return Invalid("press_enter 只适用于 text")
+		if o.HasAutoSubmit || o.HasSubmitRef {
+			return Invalid("auto_submit 与 submit_ref 只适用于 text")
 		}
 		if o.HasBubble && (o.Target == nil || !o.Target.UseRef) {
 			return Invalid("bubble 只适用于 ref 目标；坐标目标不接受 bubble")
@@ -165,13 +204,38 @@ func (o *Operation) ValidateEffectiveDefaults() *APIError {
 		if o.HasBubble {
 			return Invalid("bubble 只适用于 tap 或 long_press 的 ref 目标")
 		}
+		// The syntax is checked for every text operation, including
+		// auto_submit=false, where the member is then ignored.
+		if o.HasSubmitRef {
+			if apiErr := checkSubmitRef(o.SubmitRef); apiErr != nil {
+				return apiErr
+			}
+		}
 	default:
 		if o.HasBubble {
 			return Invalid("bubble 只适用于 tap 或 long_press 的 ref 目标")
 		}
-		if o.HasPressEnter {
-			return Invalid("press_enter 只适用于 text")
+		if o.HasAutoSubmit || o.HasSubmitRef {
+			return Invalid("auto_submit 与 submit_ref 只适用于 text")
 		}
+	}
+	return nil
+}
+
+// checkSubmitRef admits exactly the closed ENTER literal or one public node
+// ref, never an empty or over-long value.
+func checkSubmitRef(ref string) *APIError {
+	if ref == "" {
+		return Invalid("submit_ref 不能为空")
+	}
+	if len(ref) > MaxSubmitRefLen {
+		return Invalid("submit_ref 长度超限").WithDetail("limit", MaxSubmitRefLen)
+	}
+	if ref == SubmitRefEnterKey {
+		return nil
+	}
+	if !ValidPublicRef(ref) {
+		return Invalid("submit_ref 只接受 enter_key 或公开节点编号")
 	}
 	return nil
 }
@@ -446,7 +510,8 @@ type rawOperation struct {
 	Amount     jsontext.Value `json:"amount"`
 	DurationMS jsontext.Value `json:"duration_ms"`
 	Bubble     jsontext.Value `json:"bubble"`
-	PressEnter jsontext.Value `json:"press_enter"`
+	AutoSubmit jsontext.Value `json:"auto_submit"`
+	SubmitRef  jsontext.Value `json:"submit_ref"`
 }
 
 type rawTarget struct {
@@ -492,24 +557,36 @@ func parseOperation(raw *rawOperation) (*Operation, *APIError) {
 	hasAmount := len(raw.Amount) > 0
 	hasDuration := len(raw.DurationMS) > 0
 	hasBubble := len(raw.Bubble) > 0
-	hasPressEnter := len(raw.PressEnter) > 0
+	hasAutoSubmit := len(raw.AutoSubmit) > 0
+	hasSubmitRef := len(raw.SubmitRef) > 0
 	bubble, bubblePresent, bubbleErr := parseOptionalBool("bubble", raw.Bubble)
 	if bubbleErr != nil {
 		return nil, bubbleErr
 	}
-	pressEnter, pressEnterPresent, pressEnterErr := parseOptionalBool("press_enter", raw.PressEnter)
-	if pressEnterErr != nil {
-		return nil, pressEnterErr
+	autoSubmit, autoSubmitPresent, autoSubmitErr := parseOptionalBool("auto_submit", raw.AutoSubmit)
+	if autoSubmitErr != nil {
+		return nil, autoSubmitErr
 	}
 	op.Bubble, op.HasBubble = bubble, bubblePresent
-	op.PressEnter, op.HasPressEnter = pressEnter, pressEnterPresent
+	op.AutoSubmit, op.HasAutoSubmit = autoSubmit, autoSubmitPresent
+	if hasSubmitRef {
+		if isJSONNull(raw.SubmitRef) {
+			return nil, Invalid("submit_ref 不接受 null")
+		}
+		var submitRef string
+		if err := json.Unmarshal(raw.SubmitRef, &submitRef); err != nil {
+			return nil, Invalid("submit_ref 必须是字符串")
+		}
+		op.SubmitRef, op.HasSubmitRef = submitRef, true
+	}
 	switch raw.Type {
 	case "tap", "long_press":
 		if raw.Target.Value == nil {
 			return nil, Invalid("该操作需要 target")
 		}
 		if raw.From.Present || raw.To.Present || hasKey || hasText ||
-			raw.Container.Present || hasDirection || hasAmount || hasDuration || hasPressEnter {
+			raw.Container.Present || hasDirection || hasAmount || hasDuration ||
+			hasAutoSubmit || hasSubmitRef {
 			return nil, Invalid("该操作只接受 target 与按分支解释的 bubble")
 		}
 		target, err := parseTarget(raw.Target.Value)
@@ -526,7 +603,7 @@ func parseOperation(raw *rawOperation) (*Operation, *APIError) {
 		}
 		if raw.From.Present || raw.To.Present || hasKey ||
 			raw.Container.Present || hasDirection || hasAmount || hasDuration || hasBubble {
-			return nil, Invalid("text 操作只接受 target、text 与可选的 press_enter")
+			return nil, Invalid("text 操作只接受 target、text 与可选的 auto_submit、submit_ref")
 		}
 		if !hasText || string(raw.Text) == "null" {
 			return nil, Invalid("text 操作需要非 null 的 text")
@@ -546,7 +623,7 @@ func parseOperation(raw *rawOperation) (*Operation, *APIError) {
 		op.Text = text
 	case "swipe":
 		if raw.Target.Present || raw.Container.Present || hasKey || hasText ||
-			hasDirection || hasAmount || hasBubble || hasPressEnter {
+			hasDirection || hasAmount || hasBubble || hasAutoSubmit || hasSubmitRef {
 			return nil, Invalid("swipe 只接受 from、to 与 duration_ms")
 		}
 		if raw.From.Value == nil || raw.To.Value == nil {
@@ -576,7 +653,7 @@ func parseOperation(raw *rawOperation) (*Operation, *APIError) {
 		op.From, op.To, op.DurationMS = from, to, duration
 	case "scroll":
 		if raw.Target.Present || raw.From.Present || raw.To.Present ||
-			hasKey || hasText || hasDuration || hasBubble || hasPressEnter {
+			hasKey || hasText || hasDuration || hasBubble || hasAutoSubmit || hasSubmitRef {
 			return nil, Invalid("scroll 只接受 container、direction 与 amount")
 		}
 		if !raw.Container.Present {
@@ -607,7 +684,7 @@ func parseOperation(raw *rawOperation) (*Operation, *APIError) {
 	case "key":
 		if raw.Target.Present || raw.From.Present || raw.To.Present || hasText ||
 			raw.Container.Present || hasDirection || hasAmount || hasDuration ||
-			hasBubble || hasPressEnter {
+			hasBubble || hasAutoSubmit || hasSubmitRef {
 			return nil, Invalid("key 操作只接受 key")
 		}
 		if !hasKey || string(raw.Key) == "null" {

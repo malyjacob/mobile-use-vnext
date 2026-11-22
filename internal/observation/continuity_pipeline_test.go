@@ -491,7 +491,7 @@ func TestContinuityScrollListShiftsAndAnchoredParentLocalRecovery(t *testing.T) 
 		}
 	})
 
-	t.Run("ambiguous_buttons_under_same_anchored_card_get_fresh_refs", func(t *testing.T) {
+	t.Run("separated_identical_buttons_under_same_anchored_card_keep_refs", func(t *testing.T) {
 		b := NewBuilder()
 		first := buildOne(t, b, scrollCardsCapture([]string{"A", "B"}, 0, 2))
 		second := buildOne(t, b, scrollCardsCapture([]string{"A", "B"}, 0, 2))
@@ -501,11 +501,40 @@ func TestContinuityScrollListShiftsAndAnchoredParentLocalRecovery(t *testing.T) 
 			if oldCard.Ref != newCard.Ref || oldCard.Children[0].Ref != newCard.Children[0].Ref {
 				t.Fatalf("card %s or title drifted: %s -> %s", title, oldCard.Ref, newCard.Ref)
 			}
-			oldFavs := map[string]bool{oldCard.Children[1].Ref: true, oldCard.Children[2].Ref: true}
-			for _, fav := range newCard.Children[1:] {
-				if oldFavs[fav.Ref] {
-					t.Fatalf("ambiguous fav button under card %s reused old ref %s", title, fav.Ref)
+			for i := 1; i < len(oldCard.Children); i++ {
+				if oldCard.Children[i].Ref != newCard.Children[i].Ref {
+					t.Fatalf("separated identical button %d under card %s renumbered: %s -> %s",
+						i, title, oldCard.Children[i].Ref, newCard.Children[i].Ref)
 				}
+			}
+		}
+	})
+
+	t.Run("overlapping_identical_buttons_under_same_anchored_card_get_fresh_refs", func(t *testing.T) {
+		build := func() *device.Capture {
+			c := newCap(1080, 2400)
+			root := c.root()
+			scroll := c.add(root, scrollable(withClass(visible(rect(0, 100, 1080, 2300)), "android.widget.ScrollView")))
+			card := c.add(scroll, withClass(visible(rect(0, 120, 1080, 460)), "android.widget.LinearLayout"))
+			c.add(card, withText(withClass(visible(rect(20, 140, 800, 240)), "android.widget.TextView"), "A"))
+			for b := 0; b < 2; b++ {
+				btn := clickable(withRes(withClass(withText(visible(rect(820, 140, 1020, 240)), "收藏"), "android.widget.Button"), "app:id/fav"))
+				c.add(card, btn)
+			}
+			return c.capture()
+		}
+		b := NewBuilder()
+		first := buildOne(t, b, build())
+		oldCard := findCardByTitle(first.Tree, "A")
+		oldRefs := map[string]bool{oldCard.Children[1].Ref: true, oldCard.Children[2].Ref: true}
+		second := buildOne(t, b, build())
+		newCard := findCardByTitle(second.Tree, "A")
+		if newCard.Ref != oldCard.Ref || newCard.Children[0].Ref != oldCard.Children[0].Ref {
+			t.Fatalf("card or title drifted with identical buttons in one rectangle")
+		}
+		for _, fav := range newCard.Children[1:] {
+			if oldRefs[fav.Ref] {
+				t.Fatalf("overlapping ambiguous fav button reused old ref %s", fav.Ref)
 			}
 		}
 	})

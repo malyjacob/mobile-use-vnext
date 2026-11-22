@@ -41,7 +41,7 @@ adb forward          主机 18881 → 服务；主机 18883 → 手机 MCP
    `adb forward`，也不需要 Agent token。
 
 只需要直连 HTTP 的 Agent 则使用 `http://127.0.0.1:18881/api/<tool>`、`agent_token` 与
-`X-Mobile-Use-Contract: 24`。
+`X-Mobile-Use-Contract: 25`。
 
 ## 1. 默认部署后的网络与进程
 
@@ -185,8 +185,9 @@ Header: Authorization: Bearer <mcp_token>
    `diagnose` 和 `snap` 发布 `annotations.readOnlyHint=true`。
 
 MCP 的 `act` schema 含 `scroll` 分支（`container`/`direction`/`amount`）与 `swipe` 的可选
-`duration_ms`；观察质量与滚动效果的字段和投影见[接口契约](interface.md)与
-[MCP 入口](mcp.md)，本页不重复滚动判据。
+`duration_ms`；`text` 分支另含 `auto_submit`（默认 `true`）与 `submit_ref`（默认
+`"enter_key"`，或满足 `^n[1-9][0-9]*$` 且不超过 64 个字符的公开节点编号）；观察质量与滚动
+效果的字段和投影见[接口契约](interface.md)与 [MCP 入口](mcp.md)，本页不重复滚动判据。
 
 只替换手机上的二进制或重启 service 进程，不会让已连接的宿主自动刷新工具；必须重启宿主进程/
 连接。MCP 适配器本身不保存会话，重启后重新发现即可。
@@ -195,7 +196,8 @@ MCP 服务在 `server/discover` 与兼容 `initialize` 响应中发布同一份 
 包括完整树图例及会话、O/P、引用和恢复等跨工具规则。宿主应将该说明提供给模型。说明同时
 给出 `result v4` 外壳、`obs` 单行、`app_items`/`app_tasks` 块与 `recovery ref=`
 的语法。各工具描述提供本工具的关键分流和恢复提示，`start` 也简述 O/P 与 full/delta。
-用 `base` 指向的 full 和本次 delta 重建当前树。
+用 `base` 指向的 full 和本次 delta 重建当前树；`base` 可指向近期 4 个 revision、采集龄小于
+180 秒的任一已确认 full（基线池最多 4 条），客户端必须保留这些完整树并逐条应用。
 
 ### 4.5 结果模式
 
@@ -219,8 +221,8 @@ MCP 适配器对每次工具调用提供 `both`、`text`、`structured` 三种�
   对应单向模式。
 - `text` 文本以 `result v4 <ok|err> [op=<P>] [state=…] [outcome=…] [phase=…]` 开头、
   `end result` 结束；常规成功省略 `outcome=executed`，错误结果、`not_executed`、
-  `uncertain` 与带 `state=` 的重放摘要显式输出 `outcome=…`。缺少终止行表示文本被宿主
-  截断，应改用 `structured` 或通过 `inspect` 的 node/query 收窄。
+  `uncertain`、`partial` 与带 `state=` 的重放摘要显式输出 `outcome=…`。缺少终止行表示文本
+  被宿主截断，应改用 `structured` 或通过 `inspect` 的 node/query 收窄。
 - `structured` 成功且无图时 `content=[]`；不接受空 content 的宿主使用 `both` 或 `text`。
   错误附带的 `diagnostic v1` 以 `diagnostic v1 is_error=true` 开头、`end diagnostic`
   结束，只用于解释，不代表完整结果。
@@ -241,11 +243,16 @@ obs [<O>] [status=…] [fg=…] [at=HH:MM:SS] [screen=<W>x<H>[@<display_id>]] [r
 
 `recovery` 行写作 `recovery entry=<entry> ref=<精确 O/P|O|P|none> [input=…] [cause=…]`：
 能确定性证明时 `ref=` 直接给出可抄用的真实编号，抽象词 `O`/`P` 只在无法证明安全时出现；
-`structured` 中的 `recovery.reference` 仍是 `"O"`/`"P"`/`"none"`。
+`structured` 中的 `recovery.reference` 仍是 `"O"`/`"P"`/`"none"`。`outcome=partial` 的首次
+结果在附带有效新 ready O 时省略 `recovery`；重复 P、`status(P)` 或交付失败时，在会话仍活动
+且无实时阻塞时给出 `observe(P, retired)`，撤权或实时阻塞按 `recovery` 的覆盖规则处理。
 
-普通观察树由 `tree v4` 标识，完整块头只写 `nodes`，差分块头写 `base` 与 `changes`。指向
-同一个完整 base 的多条差分分别应用到该整树。`base=_72` 是文本读树简写，不能作为后续工具
-调用的引用。需要操作当前观察时使用 `obs` 行的完整 O，需要看历史树时使用完整历史 O。
+普通观察树由 `tree v4` 标识，完整块头只写 `nodes`，差分块头写 `base` 与 `changes`。`base`
+指向基线池中的近期任一已确认 full（同一会话 origin、同一目标显示 ID/代次、
+`revision - base.Revision <= 4`、采集龄 `< 180s`，最多 4 条）；主路径阈值 70%，历史回返试探
+阈值 50%。指向同一个完整 base 的多条差分分别应用到该整树，不能叠加在上一份 delta 上。`base=_72` 是文本读树简写，
+不能作为后续工具调用的引用。`observe(P)` 与 `full=true` 强制 full；`inspect(base)` 在基线
+仍在池内时可回看。需要操作当前观察时使用 `obs` 行的完整 O，需要看历史树时使用完整历史 O。
 
 `inspect` 继续使用 `inspect v3` 的两格缩进、方括号矩形和显式动作词。`tree v4` 的默认动作、
 `@` 同矩形引用与短 base 不适用于补看块。未知或无法无损表达的字段继续在文本中使用绝对
@@ -310,7 +317,7 @@ HTTP 宿主在原有 `Authorization` 头之外按需添加：
 
 ```text
 Authorization: Bearer <agent_token>
-X-Mobile-Use-Contract: 24
+X-Mobile-Use-Contract: 25
 Content-Type: application/json; charset=utf-8
 ```
 
@@ -318,7 +325,7 @@ Content-Type: application/json; charset=utf-8
 $deploy = Get-Content .state/deploy.json -Raw | ConvertFrom-Json
 $headers = @{
     Authorization           = "Bearer $($deploy.agent_token)"
-    'X-Mobile-Use-Contract' = '24'
+    'X-Mobile-Use-Contract' = '25'
 }
 Invoke-RestMethod http://127.0.0.1:18881/api/status -Method Post `
   -Headers $headers -ContentType 'application/json' -Body '{}'
@@ -359,16 +366,13 @@ Invoke-RestMethod http://127.0.0.1:18881/api/status -Method Post `
 {"reference":"O4821_72","operation":{"type":"text","target":{"ref":"n1"},"text":"查询"}}
 {"reference":"O4821_72","operation":{"type":"tap","target":{"x":100,"y":200}}}
 {"reference":"O4821_72","operation":{"type":"tap","target":{"ref":"n1"},"bubble":false}}
-{"reference":"O4821_72","operation":{"type":"text","target":{"ref":"n1"},"text":"草稿","press_enter":false}}
+{"reference":"O4821_72","operation":{"type":"text","target":{"ref":"n1"},"text":"草稿","auto_submit":false}}
+{"reference":"O4821_72","operation":{"type":"text","target":{"ref":"n1"},"text":"周杰伦","submit_ref":"n7"}}
 ```
 
-ref 点按/长按默认 `bubble=true`，原目标无 `tap`/`long_press`/`text` 动作时先在目标视觉区内尝试最近交互祖先提升，遇竞争控件止漂并自动吸附唯一局部共位按钮；`scroll` 支持同视口滚动栈直传、非滚动节点自动祖先提升与坐标最内层/回退/消歧；遇静态目标解析或规划 `422`（`invalid_target`/`unsupported_node_action`/`ambiguous_point`/`no_safe_point`/`no_safe_trajectory`）时，若 `error.details.candidates` 非空，取首个 `executable=true` 的 `ref` 用同一 O 与新 P 重试（无候选或无可执行项时按错误原因另行处理）。坐标目标不传 `bubble`。`text` 默认 `press_enter=true`，一次调用已包含必要
-聚焦（已聚焦 ref 不重复点击）、全文写入、同节点刷新精确读回和至多一次 ENTER，不需要先 tap
-或另发 ENTER；草稿、多行、逐字段填写或清空但不提交时显式 `press_enter=false`。复合 text
-结果携带 `text_input.write/enter`；`enter=uncertain` 先观察页面，不原样重发。text 失败时
-读取 `error.details.stage/reason/dispatch` 区分未派发、目标不唯一、读回不等与 ENTER 问题，
-不要解析 `message`；写入或 ENTER 仍 uncertain 且会话活动时按 `recovery entry=observe
-ref=<P>`（`structured` 中为 `recovery.entry`）用新 P 获取现场，而不是循环 `status(P)`。
+ref 点按/长按默认 `bubble=true`，原目标无 `tap`/`long_press`/`text` 动作时先在目标视觉区内尝试最近交互祖先提升，遇竞争控件止漂并自动吸附唯一局部共位按钮；`scroll` 支持同视口滚动栈直传、非滚动节点自动祖先提升与坐标最内层/回退/消歧；遇静态目标解析或规划 `422`（`invalid_target`/`unsupported_node_action`/`ambiguous_point`/`no_safe_point`/`no_safe_trajectory`）时，若 `error.details.candidates` 非空，取首个 `executable=true` 的 `ref` 用同一 O 与新 P 重试（无候选或无可执行项时按错误原因另行处理）。坐标目标不传 `bubble`。`text` 默认 `auto_submit=true`、`submit_ref="enter_key"`，一次调用已包含必要聚焦（已聚焦 ref 不重复点击）、全文写入、同节点刷新精确读回和至多一次 ENTER，不需要先 tap 或另发 ENTER；草稿、多行、逐字段填写或清空但不提交时显式 `auto_submit=false`（此时 `submit_ref` 只做语法校验后忽略）。`submit_ref="n<ref>"` 表示写后点击该提交按钮：认领前按完整 tap 规划校验，写前灰置也接受，写后重验启用状态与安全落点，失败不补发 ENTER。复合 text 结果携带 `text_input.write/submit`；`submit=uncertain` 先观察页面，不原样重发。`write=executed` 且提交确定未派发时 `outcome=partial`、`error.code=text_submit_not_executed`
+（期间 STOP 撤权为 `control_revoked`），首次结果通常附带新的 ready O；用 `obs` 行取该 O
+继续，需要时再读回框值，不重放原文字。text 失败时读取 `error.details.stage/reason/dispatch` 区分未派发、目标不唯一、读回不等与提交问题，不要解析 `message`；写入或提交仍 uncertain 且会话活动时按 `recovery entry=observe ref=<P>`（`structured` 中为 `recovery.entry`）用新 P 获取现场，而不是循环 `status(P)`。
 
 P 的两种用法：`observe({"reference":"P7391_4"})` 的 `reference` 引用本 Agent 已有的
 `P7391_4` 原操作，不是本次 `observe` 的请求体 P；本次调用仍使用自己的新 P。
@@ -566,7 +570,7 @@ Header: Authorization: Bearer <mcp_token>
 两种选择：
 
 ```text
-直连 HTTP:  http://127.0.0.1:18880/api/<tool>   + agent_token + X-Mobile-Use-Contract: 24
+直连 HTTP:  http://127.0.0.1:18880/api/<tool>   + agent_token + X-Mobile-Use-Contract: 25
 MCP HTTP:   http://127.0.0.1:18882/mcp          + mcp_token
 ```
 
@@ -735,7 +739,8 @@ GET 判断工具是否可用。
 | `409 task_lifecycle_busy` | 该 task 仍有未确认的旧搬移/删除责任 | 用 `status` 与 `app.list` 核验现状；只限制该任务，稍后新 P 重试 |
 | `503 app_list_unavailable` | 应用清单读取失败 | 条件恢复后用新 P 重新 `app.find`，不伪造空列表 |
 | `504 app_launch_unconfirmed` | `app.open` 已派发启动但归属未确认 | 按 `recovery entry=observe`、`reference=P` 用 `observe`/`app.list` 核验（仅传输超时且未知操作结果时先用 `status(P)` 确认是否已完成）；不重放启动 |
-| `409 observation_expired`/`target_changed` | O 过期或目标变化 | `target_changed` 的重验失败结果通常已带新观察：用它的 O 加新 P 重试；没有 `observation` 时再 `observe`。不要重放旧动作 |
+| `409 observation_expired`/`target_changed` | O 过期或目标变化 | `target_changed` 的重验失败结果通常已带新观察：用它的 O 加新 P 重试；没有 `observation` 时再 `observe`。`reason=lineage_changed` 时 `error.details.changed_ref` 指向第一个失配的具体公开祖先；不要据此重放旧动作 |
+| `409 text_submit_not_executed` | 复合 text 写入已确认、提交确定未派发（`outcome=partial`） | 结果通常已附带新的 ready O，直接用它继续；没有新 O 时按 `recovery entry=observe` 获取现场；不要重放原文字，也不要自动补发 ENTER |
 | `503 delivery_unavailable` | 慢交付额度不足 | 等待既有结果交付后再试，不排队 |
 | `504 action_result_uncertain` | 输入已派发但结果未知 | `status(P)`/重新观察，不重放 |
 | `409 session_not_found`/`operation_not_found` | 引用不属于当前身份或已淘汰 | 重新建立会话，不猜测旧引用 |
@@ -752,7 +757,7 @@ GET 判断工具是否可用。
 $deploy = Get-Content .state/deploy.json -Raw | ConvertFrom-Json
 $headers = @{
     Authorization           = "Bearer $($deploy.agent_token)"
-    'X-Mobile-Use-Contract' = '24'
+    'X-Mobile-Use-Contract' = '25'
 }
 $start = Invoke-RestMethod http://127.0.0.1:18881/api/start -Method Post `
   -Headers $headers -ContentType 'application/json' -Body '{}'

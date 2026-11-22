@@ -131,8 +131,12 @@ const callerGuidance = "会话与推进：首次可直接 start({})。已有 act
 	"规划失败时回退外层祖先；轨迹在安全区间居中并尝试 50%/25%/75% 三条轴线避让。" +
 	"静态 422（invalid_target、unsupported_node_action、ambiguous_point、no_safe_point、no_safe_trajectory）不消费 O；" +
 	"取 error.details.candidates 中第一个 executable=true 的 ref，用同一 O 和新 P 重试，无需重观察或手算坐标。" +
-	"text 默认 press_enter=true，写入全文并精确读回后至多发送一次 ENTER。仅填字时显式 operation.press_enter=false，不发送 ENTER。" +
-	"text_input 分别报告 write 与 enter，业务结果用页面事实核对。\n\n" +
+	"text 默认 auto_submit=true、submit_ref=\"enter_key\"：写入全文并精确读回后至多发送一次 ENTER。" +
+	"仅填字时显式 operation.auto_submit=false，只写入并读回，不发送 ENTER（submit_ref 一并忽略）。" +
+	"已知页面提交按钮时用 operation.submit_ref=\"n<ref>\"，写后点击该按钮，一次调用完成填写与提交；" +
+	"提交失败不会补发 ENTER（单次调用至多一种提交原语）。" +
+	"text_input 分别报告 write 与 submit；write=executed 且 submit 确定未派发时整体 outcome=partial" +
+	"（error.code=text_submit_not_executed，并当场交付新 ready O）。业务结果用页面事实核对。\n\n" +
 	"恢复：优先直接使用 `recovery` 行给出的精确 `ref=` 编号调用对应 `entry`；" +
 	"当 `ref=` 是抽象词 `O`/`P` 时，再按场景取观察 `O`、`op`、`blocking_operation_id`、`start_operation_id` 或 `session.origin`。" +
 	"retry/O 表示尚未派发，用新观察的完整 O 或仍适用的原 O 发起新调用。" +
@@ -140,8 +144,12 @@ const callerGuidance = "会话与推进：首次可直接 start({})。已有 act
 	"status/P 按目标取编号：当前动作用 operation_id，忙用 blocking_operation_id，" +
 	"自身恢复用 start_operation_id，收尾用 target_reference 或刚查询的 P。" +
 	"status(O) 撤销时对同一 O 调 end；end/reference=P 用原会话的归属 P。user 处理阻塞，update 配套升级，两者均不传引用。\n" +
-	"已认领 text 的整体 outcome=uncertain，且结果给出 `recovery entry=observe ref=<P>` 时，直接 observe 核对当前框值/页面。" +
-	"text_input.enter=uncertain 时先观察；write=executed、enter=not_executed 且原会话活动时，取新 O 后可按需单发 ENTER。\n" +
+	"已认领 text 的整体 outcome=uncertain 或 partial，且结果给出 `recovery entry=observe ref=<P>` 时，" +
+	"直接 observe 核对当前框值/页面。" +
+	"partial 表示写入已确认、提交确定未派发：结果附带有效新 O 时直接用它继续（必要时读回框值）；" +
+	"现场观察发布失败或未附带 O 时按 `recovery` 的 P 观察。" +
+	"text_input.submit=uncertain 时先观察；write=executed、submit=not_executed 且原会话活动时，取新 O 后可按需单发 ENTER。" +
+	"不要原样重发，也不要自动 end/restart。\n" +
 	"通常 uncertain 先用 status 跟踪原 P，running 时继续跟踪，finished 且会话活动时再 observe。避免原样重发或自动 end/restart。" +
 	"not_executed 表示未派发；executed 后如仅观察、图片或清理失败，保留执行事实。device_busy 时跟随阻塞 P 串行。" +
 	"任务完成后 end，pending cleanup 按 recovery 查询。"
@@ -346,10 +354,15 @@ var toolCatalog = []toolDefinition{
 			"candidates 非空时，直接取第一个 executable=true 的 ref，用同一 O、新 P 重试，无需重观察或手算坐标。" +
 			"诊断 ref 可能因 compact 裁剪不在普通树中；原 O 内容仍保留时可用 " +
 			"inspect({reference:原 O,node:诊断 ref}) 补看详细子树。" +
-			"\n文本：默认 press_enter=true。必要聚焦（已聚焦 ref 跳过）、全文写入、同节点刷新精确读回，随后至多一次 ENTER。" +
-			"普通输入无需先 tap 或另发 ENTER。仅填字、草稿、多行、清空或逐字段编辑时显式 press_enter=false，只写入并读回。默认分支返回 text_input:{write,enter}，false 时省略。" +
-			"文本错误看 details.stage/reason/dispatch，区分 not_attempted/not_dispatched/dispatched/unknown。" +
-			"已认领 text 的整体 outcome=uncertain（也可能仅已派发聚焦），且实际结果给出 `recovery entry=observe ref=<P>` 时，" +
+			"\n文本：默认 auto_submit=true、submit_ref=\"enter_key\"。必要聚焦（已聚焦 ref 跳过）、全文写入、同节点刷新精确读回，随后至多一次 ENTER；" +
+			"写后提交失败不会补发 ENTER。" +
+			"普通输入无需先 tap 或另发 ENTER。仅填字、草稿、多行、清空或逐字段编辑时显式 operation.auto_submit=false，只写入并读回，submit_ref 一并忽略。" +
+			"已知页面提交按钮时用 operation.submit_ref=\"n<ref>\"：认领前按 tap 同一静态规划校验该按钮（写前灰置也接受），写后重验按钮的启用状态与点击安全点，再至多点击一次。" +
+			"默认分支返回 text_input:{write,submit}，auto_submit=false 时省略。" +
+			"write=executed 且提交确定未派发时整体 outcome=partial，错误码 text_submit_not_executed，并当场交付新 ready O 供继续观察；" +
+			"现场观察发布失败时不附带 O，按 recovery 的 P 观察；提交已派发但回执未知保持 outcome=uncertain。" +
+			"文本错误看 details.stage（target/focus/write/verify/submit）与 reason、dispatch（focus/write/submit），区分 not_attempted/not_dispatched/dispatched/unknown。" +
+			"已认领 text 的整体 outcome=uncertain（也可能仅已派发聚焦）或 outcome=partial（写入确认、提交未派发），且实际结果给出 `recovery entry=observe ref=<P>` 时，" +
 			"直接 observe 核对当前框值/页面。reference 使用原活动会话的具体归属 P，如 session.origin 或属于该会话的 operation_id。避免原样重发。" +
 			"\n滚动：用 operation.type=scroll + container。ref 可直接指向同视口嵌套滚动栈任一层；非滚动节点自动向上找最近滚动祖先。" +
 			"坐标容器自动选择该点所在最内层滚动容器，规划失败时回退外层滚动祖先。轨迹在安全区间居中起止，并依次尝试 50%/25%/75% 三条轴线避让。" +
@@ -401,9 +414,16 @@ var toolCatalog = []toolDefinition{
           "type": "boolean",
           "description": "仅 tap/long_press 且 target 为 ref 时适用；省略按 true 处理。true 自动 3×3 选点，按目标视觉区锚定最近交互祖先；竞争遮挡时停止外扩并自动吸附唯一的局部共位可点击控件。false 只点原目标，不做提升或吸附。坐标目标和其他动作须省略。"
         },
-        "press_enter": {
+        "auto_submit": {
           "type": "boolean",
-          "description": "仅 text 适用；省略按 true 处理；false 禁止发送 ENTER，并省略 text_input。其他动作须省略。"
+          "description": "仅 text 适用；省略按 true 处理。true 表示写入并精确读回后按 submit_ref 至多提交一次；false 只写入并读回，提交语义与 submit_ref 一并忽略。其他动作须省略。"
+        },
+        "submit_ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^(enter_key|n[1-9][0-9]*)$",
+          "description": "仅 text 且 auto_submit=true 时适用；省略按 \"enter_key\" 处理。\"enter_key\" 表示至多按一次 ENTER；n<ref> 表示写后点击该提交按钮，至多一次且失败不补发 ENTER。其他动作须省略。"
         },
         "container": {
           "description": "scroll 的滚动容器选择器：ref 或 x/y 坐标，二选一。ref 可为任意公开节点：自身为滚动容器时直接使用，否则自动向上找最近 role=scroll 祖先；同视口嵌套滚动栈可直接传任一层。x/y 自动选择该点所在最内层滚动容器，规划失败时回退外层滚动祖先。",

@@ -659,6 +659,15 @@ func (r *Recovery) MarshalJSONTo(enc *jsontext.Encoder) error {
 	return enc.WriteToken(jsontext.EndObject)
 }
 
+// OutcomePartial is the fourth closed global action outcome value. The producer
+// set is not_executed, uncertain, executed and partial; only the composite text
+// action produces partial, which states that the write is confirmed executed
+// while the submission is certainly not executed, with no unknown physical side
+// effect. It is not a degraded executed: a caller that only inspects executed
+// must treat partial as an unfinished action. The response decoder stays
+// forward-compatible and does not enforce the closed set on a decoded value.
+const OutcomePartial = "partial"
+
 // Text-input primitive states. The wire enum is closed; "unknown" is the
 // explicit uncertain value, never an omitted member.
 const (
@@ -667,15 +676,17 @@ const (
 	TextInputExecuted    = "executed"
 )
 
-// TextInputView is the fixed write/enter snapshot of an accepted text action
-// whose effective press_enter value is true. Both keys are always present.
+// TextInputView is the fixed write/submit snapshot of an accepted text action
+// whose effective auto_submit value is true. Both keys are always present; the
+// submission key is named submit because a submission can be one bounded ENTER
+// or one node tap.
 type TextInputView struct {
-	Write string
-	Enter string
+	Write  string
+	Submit string
 }
 
 // ValidTextInput reports whether the pair is one of the five ordered states.
-// ENTER can never be non-not_executed before write is executed.
+// Submit can never be non-not_executed before write is executed.
 func ValidTextInput(v *TextInputView) bool {
 	if v == nil {
 		return false
@@ -685,22 +696,22 @@ func ValidTextInput(v *TextInputView) bool {
 	default:
 		return false
 	}
-	switch v.Enter {
+	switch v.Submit {
 	case TextInputNotExecuted, TextInputUncertain, TextInputExecuted:
 	default:
 		return false
 	}
 	switch {
 	case v.Write == TextInputNotExecuted:
-		return v.Enter == TextInputNotExecuted
+		return v.Submit == TextInputNotExecuted
 	case v.Write == TextInputUncertain:
-		return v.Enter == TextInputNotExecuted
+		return v.Submit == TextInputNotExecuted
 	default:
 		return true
 	}
 }
 
-// MarshalJSONTo writes the fixed write/enter object.
+// MarshalJSONTo writes the fixed write/submit object.
 func (v *TextInputView) MarshalJSONTo(enc *jsontext.Encoder) error {
 	if v == nil {
 		return writeNull(enc)
@@ -712,7 +723,7 @@ func (v *TextInputView) MarshalJSONTo(enc *jsontext.Encoder) error {
 		return err
 	}
 	for _, field := range []struct{ name, value string }{
-		{"write", v.Write}, {"enter", v.Enter},
+		{"write", v.Write}, {"submit", v.Submit},
 	} {
 		if err := writeName(enc, field.name); err != nil {
 			return err
@@ -732,7 +743,7 @@ type Result struct {
 	Phase          string
 	Effect         *Effect
 	// TextInput is the fixed primitive snapshot of a default/true text action.
-	// It is nil for every other action and for explicit press_enter=false.
+	// It is nil for every other action and for explicit auto_submit=false.
 	TextInput   *TextInputView
 	Observation *Observation
 	Inspection  *InspectionView

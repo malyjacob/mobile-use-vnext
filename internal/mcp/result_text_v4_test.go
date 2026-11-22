@@ -52,6 +52,11 @@ func TestResultV4HeaderRules(t *testing.T) {
 			want: "result v4 ok op=P4 outcome=uncertain\n",
 		},
 		{
+			name: "partial keeps outcome",
+			raw:  `{"operation_id":"P6","outcome":"partial"}`,
+			want: "result v4 ok op=P6 outcome=partial\n",
+		},
+		{
 			name: "phase retained",
 			raw:  `{"operation_id":"P5","outcome":"executed","phase":"completed"}`,
 			want: "result v4 ok op=P5 phase=completed\n",
@@ -70,6 +75,18 @@ func TestResultV4HeaderRules(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestResultV4TextInputSubmitLine(t *testing.T) {
+	// The partial text act carries the renamed write/submit snapshot and its
+	// durable observe(P) recovery; the exact P is this operation's own id.
+	text := assertResultTextProjection(t, []byte(`{"operation_id":"P6","outcome":"partial",`+
+		`"text_input":{"write":"executed","submit":"not_executed"},`+
+		`"error":{"code":"text_submit_not_executed","message":"写入已确认，提交未派发"},`+
+		`"recovery":{"entry":"observe","reference":"P","input_state":"retired"}}`), true, "O1")
+	requireTestContains(t, text, "text_input write=executed submit=not_executed\n")
+	requireTestContains(t, text, "recovery entry=observe ref=P6 input=retired\n")
+	requireTestNotContains(t, text, "enter=")
 }
 
 func TestResultV4ObservationStatusOmission(t *testing.T) {

@@ -105,7 +105,8 @@ func (e *Engine) Start(ctx context.Context, agent, p string) (finalResult *proto
 	e.uiCheckpointReady = false
 	op.SessionOrigin = op.ID
 	work.SessionEpoch = session.Epoch
-	e.baseline = nil
+	e.baselines = nil
+	e.activeBaselineID = ""
 	e.current = nil
 	e.lastSession = nil
 	e.cleanup = nil

@@ -37,8 +37,8 @@ func TestTreeBudgetsNameTheirBudget(t *testing.T) {
 			currentBefore := h.engine.current.ID
 			retainedBefore := len(h.engine.observations)
 			baselineID := ""
-			if h.engine.baseline != nil {
-				baselineID = h.engine.baseline.ObservationID
+			if baseline := baselineWithID(h.engine.baselines, h.engine.activeBaselineID); baseline != nil {
+				baselineID = baseline.ObservationID
 			}
 			h.engine.mu.Unlock()
 
@@ -65,8 +65,8 @@ func TestTreeBudgetsNameTheirBudget(t *testing.T) {
 			currentAfter := h.engine.current.ID
 			retainedAfter := len(h.engine.observations)
 			baselineAfter := ""
-			if h.engine.baseline != nil {
-				baselineAfter = h.engine.baseline.ObservationID
+			if baseline := baselineWithID(h.engine.baselines, h.engine.activeBaselineID); baseline != nil {
+				baselineAfter = baseline.ObservationID
 			}
 			h.engine.mu.Unlock()
 			if currentAfter != currentBefore {
@@ -116,21 +116,20 @@ type retainedHistoryEntry struct {
 }
 
 type engineHistory struct {
-	current  *observationState
-	baseline *baselineState
-	retained map[string]retainedHistoryEntry
+	current          *observationState
+	baselines        []*baselineState
+	activeBaselineID string
+	retained         map[string]retainedHistoryEntry
 }
 
 func fingerprintEngineHistory(e *Engine) engineHistory {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	history := engineHistory{
-		current:  e.current,
-		retained: make(map[string]retainedHistoryEntry, len(e.observations)),
-	}
-	if e.baseline != nil {
-		baseline := *e.baseline
-		history.baseline = &baseline
+		current:          e.current,
+		baselines:        append([]*baselineState(nil), e.baselines...),
+		activeBaselineID: e.activeBaselineID,
+		retained:         make(map[string]retainedHistoryEntry, len(e.observations)),
 	}
 	for id, obs := range e.observations {
 		if obs == nil {
@@ -161,7 +160,22 @@ func sameBaseline(left, right *baselineState) bool {
 		left.Origin == right.Origin &&
 		left.Revision == right.Revision &&
 		left.CapturedAt.Equal(right.CapturedAt) &&
-		left.Tree == right.Tree
+		left.DisplayID == right.DisplayID &&
+		left.DisplayGeneration == right.DisplayGeneration &&
+		left.Tree == right.Tree &&
+		left.Projection == right.Projection
+}
+
+func sameBaselinePool(left, right []*baselineState) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if !sameBaseline(left[i], right[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 func requireRetainedHistoryEntry(t *testing.T, e *Engine, id string,
@@ -183,8 +197,9 @@ func requireEngineHistoryUnchanged(t *testing.T, e *Engine, before engineHistory
 	if after.current != before.current {
 		t.Fatalf("rejected acquisition replaced current")
 	}
-	if !sameBaseline(after.baseline, before.baseline) {
-		t.Fatalf("rejected acquisition changed the baseline")
+	if !sameBaselinePool(after.baselines, before.baselines) ||
+		after.activeBaselineID != before.activeBaselineID {
+		t.Fatalf("rejected acquisition changed the baseline pool")
 	}
 	if len(after.retained) != len(before.retained) {
 		t.Fatalf("rejected acquisition changed retained count: %d -> %d",
@@ -276,10 +291,25 @@ func installRetainedSnapshot(t *testing.T, e *Engine, id, status string,
 
 func installFixtureBaseline(e *Engine, obs *observationState) {
 	e.mu.Lock()
-	e.baseline = &baselineState{
-		ObservationID: obs.ID, Origin: obs.Origin, Revision: obs.Revision,
-		CapturedAt: obs.CapturedAt, Tree: obs.Compact,
+	origin, revision, displayID, displayGeneration := "", 0, 0, ""
+	if e.session != nil {
+		origin = e.session.Origin
+		revision = e.session.Revision
+		displayID = e.session.Display.ID
+		displayGeneration = e.session.Display.Generation
 	}
+	obs.Origin = origin
+	obs.Revision = revision
+	obs.DisplayID = displayID
+	obs.DisplayGeneration = displayGeneration
+	entry := &baselineState{
+		ObservationID: obs.ID, Origin: origin, Revision: revision,
+		CapturedAt: time.Now(), DisplayID: displayID,
+		DisplayGeneration: displayGeneration,
+		Tree:              obs.Compact, Projection: obs.Projection,
+	}
+	e.baselines = []*baselineState{entry}
+	e.activeBaselineID = obs.ID
 	e.mu.Unlock()
 }
 
@@ -470,7 +500,7 @@ func TestRetainedSnapshotEvictionProtectsCurrentAndClaimed(t *testing.T) {
 		}
 		requireRetainedHistoryEntry(t, h.engine, id, want)
 	}
-	if !sameBaseline(after.baseline, before.baseline) {
+	if !sameBaselinePool(after.baselines, before.baselines) {
 		t.Fatalf("retained eviction changed the baseline")
 	}
 	for id, want := range before.retained {

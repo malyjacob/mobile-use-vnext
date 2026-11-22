@@ -79,3 +79,102 @@ func TestCandidateCommitPublishesExactState(t *testing.T) {
 			dump(third.Tree))
 	}
 }
+
+// candidateAgainstPageCapture builds a list page; candidateAgainstOtherPage
+// builds a different page whose top-level text would be a sibling of the list.
+func candidateAgainstPageCapture(marker string) *capBuilder {
+	c := newCap(1080, 2400)
+	root := c.root()
+	row := c.add(root, withClass(visible(rect(0, 0, 1080, 200)), "android.widget.LinearLayout"))
+	c.add(row, withText(withClass(visible(rect(10, 10, 500, 90)), "android.widget.TextView"), marker))
+	return c
+}
+
+// CandidateAgainst(prev, cap) is the read-only probe of a historical baseline:
+// it must project cap against prev exactly, publish nothing, consume no ref
+// numbers and leave the current continuity state untouched.
+func TestCandidateAgainstUsesExplicitBaselineWithoutMovingHighWater(t *testing.T) {
+	b := NewBuilder()
+	pageA := buildOne(t, b, candidateAgainstPageCapture("列表页").capture())
+	_ = buildOne(t, b, candidateAgainstPageCapture("详情页").capture())
+
+	// The historical baseline still names the list page's refs even though the
+	// builder's previous snapshot is now the other page.
+	candidate, commit, err := b.CandidateAgainst(pageA, candidateAgainstPageCapture("列表页").capture())
+	if err != nil {
+		t.Fatalf("CandidateAgainst: %v", err)
+	}
+	if candidate == nil || commit == nil {
+		t.Fatal("CandidateAgainst must return a snapshot and a commit function")
+	}
+	if pageA.Tree.Root.Ref != candidate.Tree.Root.Ref ||
+		pageA.Tree.Root.Children[0].Ref != candidate.Tree.Root.Children[0].Ref ||
+		pageA.Tree.Root.Children[0].Children[0].Ref != candidate.Tree.Root.Children[0].Children[0].Ref {
+		t.Fatalf("candidate did not continue the explicit baseline:\nwant %s\n got %s",
+			dump(pageA.Tree), dump(candidate.Tree))
+	}
+
+	// A discarded probe is invisible: a later Build must allocate exactly the
+	// refs it would have allocated without the probe.
+	plain := NewBuilder()
+	_ = buildOne(t, plain, candidateAgainstPageCapture("列表页").capture())
+	_ = buildOne(t, plain, candidateAgainstPageCapture("详情页").capture())
+	withoutProbe := buildOne(t, plain, candidateAgainstPageCapture("列表页").capture())
+
+	afterProbe := buildOne(t, b, candidateAgainstPageCapture("列表页").capture())
+	if len(withoutProbe.Refs) != len(afterProbe.Refs) {
+		t.Fatalf("probe changed continuity: refs %v vs %v", withoutProbe.Refs, afterProbe.Refs)
+	}
+	for i := range withoutProbe.Refs {
+		if withoutProbe.Refs[i] != afterProbe.Refs[i] {
+			t.Fatalf("discarded CandidateAgainst consumed a ref at %d: %s vs %s",
+				i, withoutProbe.Refs[i], afterProbe.Refs[i])
+		}
+	}
+}
+
+func TestCandidateAgainstCommitPublishesProbeState(t *testing.T) {
+	b := NewBuilder()
+	pageA := buildOne(t, b, candidateAgainstPageCapture("列表页").capture())
+	_ = buildOne(t, b, candidateAgainstPageCapture("详情页").capture())
+
+	candidate, commit, err := b.CandidateAgainst(pageA, candidateAgainstPageCapture("列表页").capture())
+	if err != nil {
+		t.Fatalf("CandidateAgainst: %v", err)
+	}
+	if b.Previous() == candidate {
+		t.Fatal("CandidateAgainst must not publish before commit")
+	}
+	commit()
+	if b.Previous() != candidate {
+		t.Fatal("commit must publish exactly the probe snapshot")
+	}
+	next := buildOne(t, b, candidateAgainstPageCapture("列表页").capture())
+	if next.Tree.Root.Children[0].Ref != candidate.Tree.Root.Children[0].Ref {
+		t.Fatalf("committed probe was not applied as continuity: %s",
+			dump(next.Tree))
+	}
+}
+
+func TestCandidateAgainstNilBaselineStartsFreshAboveHighWater(t *testing.T) {
+	b := NewBuilder()
+	seeded := buildOne(t, b, candidateCapture().capture())
+	nextNumber := len(seeded.Refs) + 1
+	candidate, _, err := b.CandidateAgainst(nil, candidateCapture().capture())
+	if err != nil {
+		t.Fatalf("CandidateAgainst(nil): %v", err)
+	}
+	if candidate.Tree.Root.Ref != formatRef(nextNumber) {
+		t.Fatalf("fresh projection must start at the current high-water mark %s, got %s",
+			formatRef(nextNumber), candidate.Tree.Root.Ref)
+	}
+	live := map[string]bool{}
+	for _, ref := range seeded.Refs {
+		live[ref] = true
+	}
+	for _, ref := range candidate.Refs {
+		if live[ref] {
+			t.Fatalf("nil-baseline candidate reused a live ref %s", ref)
+		}
+	}
+}

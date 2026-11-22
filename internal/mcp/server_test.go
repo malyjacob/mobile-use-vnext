@@ -514,9 +514,9 @@ func TestActScrollSchema(t *testing.T) {
 	if duration.Type != "integer" || duration.Minimum != protocol.MinSwipeDurationMS || duration.Maximum != protocol.MaxSwipeDurationMS {
 		t.Fatalf("duration_ms schema = %+v", duration)
 	}
-	// bubble and press_enter are branch-qualified booleans. Publishing a
-	// default here would read as applying to coordinates or other actions.
-	for member, branch := range map[string]string{"bubble": "tap/long_press", "press_enter": "text"} {
+	// bubble, auto_submit and the submit selector are branch-qualified. Publishing
+	// a default here would read as applying to coordinates or other actions.
+	for member, branch := range map[string]string{"bubble": "tap/long_press", "auto_submit": "text"} {
 		var option struct {
 			Type        string `json:"type"`
 			Description string `json:"description"`
@@ -528,6 +528,25 @@ func TestActScrollSchema(t *testing.T) {
 		if option.Type != "boolean" || option.Default != nil || !strings.Contains(option.Description, branch) {
 			t.Fatalf("%s schema = %+v, want a branch-qualified boolean without default", member, option)
 		}
+	}
+	var submitRef struct {
+		Type        string          `json:"type"`
+		MinLength   int             `json:"minLength"`
+		MaxLength   int             `json:"maxLength"`
+		Pattern     string          `json:"pattern"`
+		Description string          `json:"description"`
+		Default     json.RawMessage `json:"default"`
+	}
+	if err := json.Unmarshal(operation.Properties["submit_ref"], &submitRef); err != nil {
+		t.Fatalf("submit_ref schema: %v", err)
+	}
+	if submitRef.Type != "string" || submitRef.MinLength != 1 || submitRef.MaxLength != 64 ||
+		submitRef.Pattern != "^(enter_key|n[1-9][0-9]*)$" || len(submitRef.Default) != 0 ||
+		!strings.Contains(submitRef.Description, "text") {
+		t.Fatalf("submit_ref schema = %+v, want a branch-qualified closed string without default", submitRef)
+	}
+	if _, retired := operation.Properties["press_enter"]; retired {
+		t.Fatal("act schema still publishes press_enter")
 	}
 	var target, container struct {
 		Description string          `json:"description"`
@@ -859,6 +878,38 @@ func TestActOutcomes(t *testing.T) {
 		text := testTextContent(t, result)
 		requireTestContains(t, text, "result v4 ok")
 		requireTestContains(t, text, "\nobs status=failed")
+	})
+
+	t.Run("partial keeps write fact and delivers ready observation", func(t *testing.T) {
+		fake := newTestDeviceService(t)
+		fake.setHandler("act", func(writer http.ResponseWriter, request *http.Request, body string) {
+			writeTestJSON(writer, http.StatusConflict, fmt.Sprintf(
+				`{"operation_id":%q,"outcome":"partial","phase":"finished",`+
+					`"text_input":{"write":"executed","submit":"not_executed"},`+
+					`"error":{"code":"text_submit_not_executed","message":"写入已确认，提交未派发","details":`+
+					`{"stage":"submit","reason":"submit_target_unconfirmed","candidate_count":0,`+
+					`"dispatch":{"focus":"not_attempted","write":"executed","submit":"not_attempted"}}},`+
+					`"observation":{"status":"complete","id":"O2","origin":%q,"revision":2,`+
+					`"quality":{"state":"stable","samples":1,"stop_reason":"stable"}}}`,
+				testOperationHeader(request), testOperationHeader(request)))
+		})
+		session := connectTestInMemory(t, newTestMCPServer(t, fake))
+		result := callTestTool(t, session, "act", map[string]any{
+			"reference": "O1",
+			"operation": map[string]any{
+				"type": "text", "target": map[string]any{"ref": "n1"}, "text": "x",
+				"submit_ref": "enter_key",
+			},
+		})
+		if !result.IsError {
+			t.Fatal("partial act should be an error")
+		}
+		text := testTextContent(t, result)
+		requireTestContains(t, text, "result v4 err")
+		requireTestContains(t, text, "outcome=partial")
+		requireTestContains(t, text, "text_input write=executed submit=not_executed")
+		requireTestContains(t, text, "\nobs O2\n")
+		requireTestNotContains(t, text, "recovery ")
 	})
 
 	t.Run("not executed", func(t *testing.T) {

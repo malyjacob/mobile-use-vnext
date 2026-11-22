@@ -349,7 +349,7 @@ func TestActDirectEntrySharesBooleanBranchValidation(t *testing.T) {
 			Type: "tap", Target: &protocol.Target{X: 1, Y: 2},
 			Bubble: true, HasBubble: true}},
 		{Reference: "O1", Operation: protocol.Operation{
-			Type: "key", Key: "BACK", PressEnter: false, HasPressEnter: true}},
+			Type: "key", Key: "BACK", AutoSubmit: false, HasAutoSubmit: true}},
 		{Reference: "O1", Operation: protocol.Operation{
 			Type: "text", Target: &protocol.Target{UseRef: true, Ref: "n1"}, Text: "x",
 			Bubble: false, HasBubble: true}},
@@ -451,32 +451,33 @@ func newTextFlowHarness(t *testing.T, bounds device.Rect) (*harness, *textFlowDe
 	return h, dev, start.Observation.ID, input.Ref
 }
 
-func textFlowRequest(obsRef, ref, text string, pressEnter *bool) *protocol.ActRequest {
+func textFlowRequest(obsRef, ref, text string, autoSubmit *bool) *protocol.ActRequest {
 	req := &protocol.ActRequest{
 		Reference: obsRef,
 		Operation: protocol.Operation{
 			Type: "text", Target: &protocol.Target{UseRef: true, Ref: ref}, Text: text,
 		},
 	}
-	if pressEnter != nil {
-		req.Operation.PressEnter, req.Operation.HasPressEnter = *pressEnter, true
+	if autoSubmit != nil {
+		req.Operation.AutoSubmit, req.Operation.HasAutoSubmit = *autoSubmit, true
 	}
 	return req
 }
 
-func requireTextInput(t *testing.T, result *protocol.Result, write, enter string) {
+func requireTextInput(t *testing.T, result *protocol.Result, write, submit string) {
 	t.Helper()
 	if result == nil || result.TextInput == nil {
 		t.Fatalf("result text_input is absent: %+v", result)
 	}
-	if result.TextInput.Write != write || result.TextInput.Enter != enter {
-		t.Fatalf("text_input = %+v, want write=%s enter=%s", result.TextInput, write, enter)
+	if result.TextInput.Write != write || result.TextInput.Submit != submit {
+		t.Fatalf("text_input = %+v, want write=%s submit=%s", result.TextInput, write, submit)
 	}
 }
 
-// TestActTextDefaultIncludesOneEnter proves the omitted press_enter sends one
-// ENTER after the exact readback and publishes the fixed primitive snapshot.
-func TestActTextDefaultIncludesOneEnter(t *testing.T) {
+// TestActTextDefaultIncludesOneSubmit proves the omitted auto_submit sends one
+// ENTER submission after the exact readback and publishes the fixed primitive
+// snapshot.
+func TestActTextDefaultIncludesOneSubmit(t *testing.T) {
 	bounds := device.Rect{Left: 100, Top: 300, Right: 900, Bottom: 400}
 	h, dev, obsRef, ref := newTextFlowHarness(t, bounds)
 	h.device.scriptCaptures(
@@ -494,9 +495,9 @@ func TestActTextDefaultIncludesOneEnter(t *testing.T) {
 	}
 }
 
-// TestActTextExplicitFalseOnlyInputs proves press_enter=false suppresses ENTER
-// and the public text_input object while keeping focus/write/readback.
-func TestActTextExplicitFalseOnlyInputs(t *testing.T) {
+// TestActTextAutoSubmitFalseOnlyInputs proves auto_submit=false suppresses the
+// submission and the public text_input object while keeping focus/write/readback.
+func TestActTextAutoSubmitFalseOnlyInputs(t *testing.T) {
 	bounds := device.Rect{Left: 100, Top: 300, Right: 900, Bottom: 400}
 	h, dev, obsRef, ref := newTextFlowHarness(t, bounds)
 	h.device.scriptCaptures(
@@ -518,10 +519,11 @@ func TestActTextExplicitFalseOnlyInputs(t *testing.T) {
 	}
 }
 
-// TestActTextReadbackMismatchNeverSendsEnter proves the exact readback gate is
-// a hard precondition for ENTER. The set call's own refreshed value confirmed
-// the write; the later ENTER probe sees a different value and stops.
-func TestActTextReadbackMismatchNeverSendsEnter(t *testing.T) {
+// TestActTextSubmitReadbackMismatchStopsAsPartial proves the exact readback
+// gate is a hard precondition for the submission. The set call's own refreshed
+// value confirmed the write; the later submission probe sees a different value
+// and stops as the honest partial fact, delivering the fresh ready observation.
+func TestActTextSubmitReadbackMismatchStopsAsPartial(t *testing.T) {
 	bounds := device.Rect{Left: 100, Top: 300, Right: 900, Bottom: 400}
 	h, dev, obsRef, ref := newTextFlowHarness(t, bounds)
 	different := "different"
@@ -534,18 +536,42 @@ func TestActTextReadbackMismatchNeverSendsEnter(t *testing.T) {
 		textFlowBuild(0, bounds, "hello", true),
 	)
 	result := h.actWith(t, "PtextMismatch", textFlowRequest(obsRef, ref, "hello", nil))
-	if result.Outcome != OutcomeUncertain {
-		t.Fatalf("readback mismatch outcome = %q, want uncertain (%+v)", result.Outcome, result)
-	}
+	requirePartialTextResult(t, result, protocol.CodeTextSubmitNotExecuted,
+		"submit", "submit_target_unconfirmed")
 	requireTextInput(t, result, protocol.TextInputExecuted, protocol.TextInputNotExecuted)
 	if dev.keyCalls != 0 {
 		t.Fatalf("readback mismatch sent %d ENTER calls, want 0", dev.keyCalls)
 	}
 }
 
-// TestActTextEnterNotDispatchedKeepsWriteExecuted proves the two primitives are
-// independent and no second ENTER is attempted on replay.
-func TestActTextEnterNotDispatchedKeepsWriteExecuted(t *testing.T) {
+// requirePartialTextResult asserts the complete closed projection of one
+// confirmed-partial text result: partial outcome, the fixed 409 code, the
+// stage/reason group and the confirmed write with a not-executed submission.
+func requirePartialTextResult(t *testing.T, result *protocol.Result, code, stage, reason string) {
+	t.Helper()
+	if result == nil || result.Outcome != OutcomePartial {
+		t.Fatalf("result = %+v, want outcome partial", result)
+	}
+	if result.Error == nil || result.Error.Code != code {
+		t.Fatalf("result error = %+v, want code %s", result.Error, code)
+	}
+	details := textDetailsOf(t, result)
+	requireTextDetail(t, details, "stage", stage)
+	requireTextDetail(t, details, "reason", reason)
+	dispatch := textDispatchOf(t, details)
+	if dispatch["focus"] != "dispatched" || dispatch["write"] != "dispatched" ||
+		(dispatch["submit"] != "not_attempted" && dispatch["submit"] != "not_dispatched") {
+		t.Fatalf("partial dispatch = %+v, want focus/write dispatched and submit never attempted or not dispatched",
+			dispatch)
+	}
+	requireTextInput(t, result, protocol.TextInputExecuted, protocol.TextInputNotExecuted)
+}
+
+// TestActTextSubmitNotDispatchedKeepsWriteExecuted proves the two primitives are
+// independent: a definitely-not-dispatched ENTER is a partial completion, it
+// never dispatches a second submission, and a duplicate P replays the saved
+// observe base without inventing another ready observation.
+func TestActTextSubmitNotDispatchedKeepsWriteExecuted(t *testing.T) {
 	bounds := device.Rect{Left: 100, Top: 300, Right: 900, Bottom: 400}
 	h, dev, obsRef, ref := newTextFlowHarness(t, bounds)
 	dev.setKeyMode("not_dispatched")
@@ -554,23 +580,50 @@ func TestActTextEnterNotDispatchedKeepsWriteExecuted(t *testing.T) {
 		textFlowBuild(0, bounds, "", true),
 		textFlowBuild(0, bounds, "hello", true),
 	)
-	result := h.actWith(t, "PtextEnterNo", textFlowRequest(obsRef, ref, "hello", nil))
-	if result.Outcome != OutcomeUncertain {
-		t.Fatalf("enter not-dispatched outcome = %q, want uncertain (%+v)", result.Outcome, result)
+	result := h.actWith(t, "PtextSubmitNo", textFlowRequest(obsRef, ref, "hello", nil))
+	requirePartialTextResult(t, result, protocol.CodeTextSubmitNotExecuted,
+		"submit", "submit_not_sent")
+	if result.Observation == nil || result.Observation.ID == "" ||
+		result.Observation.Status == "failed" {
+		t.Fatalf("partial first response carried no ready observation: %+v", result.Observation)
 	}
-	requireTextInput(t, result, protocol.TextInputExecuted, protocol.TextInputNotExecuted)
+	if result.Recovery != nil {
+		t.Fatalf("partial first response recovery = %+v, want omitted with a valid ready O", result.Recovery)
+	}
 	if dev.keyCalls != 1 {
 		t.Fatalf("ENTER calls = %d, want exactly 1", dev.keyCalls)
 	}
 
-	duplicate, apiErr := h.engine.Act(context.Background(), "agent", "PtextEnterNo",
+	duplicate, apiErr := h.engine.Act(context.Background(), "agent", "PtextSubmitNo",
 		textFlowRequest(obsRef, ref, "hello", nil))
 	if apiErr != nil {
 		t.Fatalf("duplicate P admission: %+v", apiErr)
 	}
 	requireTextInput(t, duplicate, protocol.TextInputExecuted, protocol.TextInputNotExecuted)
+	if duplicate.Outcome != OutcomePartial {
+		t.Fatalf("duplicate outcome = %q, want partial", duplicate.Outcome)
+	}
+	if duplicate.Observation != nil {
+		t.Fatalf("duplicate P invented a ready observation: %+v", duplicate.Observation)
+	}
+	requireObserveRecovery(t, duplicate.Recovery)
 	if dev.keyCalls != 1 {
 		t.Fatalf("duplicate P sent another ENTER: calls=%d", dev.keyCalls)
+	}
+
+	status, apiErr := h.engine.Status("agent", "PtextSubmitNo")
+	if apiErr != nil {
+		t.Fatalf("status(P): %+v", apiErr)
+	}
+	if status.Outcome != OutcomePartial {
+		t.Fatalf("status(P) outcome = %q, want partial", status.Outcome)
+	}
+	if status.Observation != nil {
+		t.Fatalf("status(P) invented a ready observation: %+v", status.Observation)
+	}
+	requireObserveRecovery(t, status.Recovery)
+	if dev.keyCalls != 1 {
+		t.Fatalf("status(P) sent another ENTER: calls=%d", dev.keyCalls)
 	}
 }
 

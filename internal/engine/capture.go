@@ -219,24 +219,45 @@ func (e *Engine) captureAndPublish(ctx context.Context, work *workState, session
 	// phase without a settle policy never sampled and says exactly that.
 	quality := qualityOf(policy, run)
 	public, obs, publishErr := e.publishTreeAttempt(work, session, phase, tree, base,
-		forceFull, status, image, quality)
+		true, forceFull, status, image, quality)
 	// The quality fact is recorded after the commit outcome is known and outside
 	// the state lock; a failed commit never invents an observation id.
 	e.logQuality(work.OperationID, phase, public, quality)
 	return public, obs, publishErr
 }
 
+// Baseline pool policy. A delta may only be expressed against a confirmed full
+// observation close enough in revision and time, so the pool keeps at most
+// maxBaselines entries and prunes everything outside the fixed window. The
+// historical page-return threshold is stricter than the primary one: a merely
+// similar different page must not force a delta against a baseline the caller
+// did not just read.
+const (
+	maxBaselineRevisionSpan = 4
+	maxBaselines            = 4
+	maxBaselineAge          = 180 * time.Second
+)
+
 // publishTreeAttempt commits exactly one already-read frame as the session's
-// current observation and returns its public projection. Delta selection and
-// every commit gate live here, so the ordinary acquisition and the frame a
-// rejected act delivers share one funnel: a candidate never reaches the public
-// state unless the session, the work ownership, the display generation and the
-// capture age all still hold at this moment. quality is the fixed quality fact
-// of the attempt; the object is immutable per call and shared with the public
-// projection.
+// current observation and returns its public projection. Multi-baseline delta
+// selection and every commit gate live here, so the ordinary acquisition and
+// the frame a rejected act delivers share one funnel: a candidate never reaches
+// the public state unless the session, the work ownership, the display
+// generation and the capture age all still hold at this moment. quality is the
+// fixed quality fact of the attempt; the object is immutable per call and
+// shared with the public projection.
+//
+// Delta selection has two read-only steps. Step 1 diffs against the baseline
+// the projector's continuity state is aligned with (or the newest confirmed
+// baseline) and wins outright below 70% of the full encoding. Only when
+// allowPoolFallback is set and Step 1 produced no delta does Step 2 probe the
+// remaining historical baselines: each probe projects the same capture against
+// that baseline without publishing continuity state, and only a delta below 50%
+// of the candidate's full encoding may win. Otherwise the default candidate is
+// published as a full tree.
 func (e *Engine) publishTreeAttempt(work *workState, session *sessionState, phase string,
-	tree *treeAttempt, base time.Time, forceFull bool, status string,
-	image *protocol.ImageMeta, quality *protocol.Quality) (*protocol.Observation, *observationState, *protocol.APIError) {
+	tree *treeAttempt, base time.Time, allowPoolFallback bool, forceFull bool,
+	status string, image *protocol.ImageMeta, quality *protocol.Quality) (*protocol.Observation, *observationState, *protocol.APIError) {
 	stopped := protocol.NewError(409, protocol.CodeStopped, "原会话已撤销")
 	if tree == nil || tree.projection == nil || session == nil {
 		return nil, nil, protocol.NewError(503, protocol.CodeHierarchyFailed, "公开树构造失败")
@@ -248,35 +269,78 @@ func (e *Engine) publishTreeAttempt(work *workState, session *sessionState, phas
 		e.mu.Unlock()
 		return nil, nil, stopped
 	}
-	baseline := e.baseline
-	revision := currentSession.Revision
+	nextRevision := currentSession.Revision + 1
+	// Snapshot the baselines usable by the revision being published. This is a
+	// non-mutating filter: a rejected acquisition must not prune a baseline
+	// that is still the base of the current observation, so the pool is only
+	// rewritten after every commit gate has passed.
+	pool := e.baselinePoolForRevisionLocked(nextRevision, time.Now())
+	activeBaselineID := e.activeBaselineID
 	e.mu.Unlock()
 
-	useDelta := !forceFull && baseline != nil && baseline.Tree != nil &&
-		baseline.Origin == session.Origin &&
-		revision-baseline.Revision < 12 && time.Since(baseline.CapturedAt) < 180*time.Second
+	// The default candidate was projected against the projector's current
+	// continuity state. A historical baseline may replace it, so every
+	// committed field is held separately and a discarded candidate's commit
+	// function is never called.
+	chosenCompact, chosenProjection := tree.compact, tree.projection
+	chosenCost, chosenCommit := tree.cost, tree.commit
 	var delta *protocol.ReadDelta
-	if useDelta {
-		diff, diffErr := e.differ.Diff(baseline.ObservationID, baseline.Tree, tree.compact)
-		if diffErr != nil {
-			useDelta = false
-		} else {
-			encoded, encodeErr := json.Marshal(diff)
-			// The 70% rule is a bounded integer relation: an equal-size delta
-			// is not smaller and therefore falls back to the full tree.
-			if encodeErr == nil && 10*len(encoded) < 7*len(tree.compactBytes) {
-				delta = diff
-			} else {
-				useDelta = false
+	// poolSource is the closed baseline_pool enum of the published attempt:
+	// primary (active or newest baseline), historical (page-return probe) or
+	// full (no accepted delta).
+	poolSource := "full"
+	if !forceFull && len(pool) > 0 {
+		// Step 1 (primary path): the active baseline or the newest confirmed
+		// one. A successful primary delta never enters Step 2, so a temporary
+		// banner that disappears and reappears cannot resurrect its old ref.
+		primary := baselineWithID(pool, activeBaselineID)
+		if primary == nil {
+			primary = pool[0]
+		}
+		delta, _ = e.boundedBaselineDelta(primary, tree.compact, tree.compactBytes, 7)
+		if delta != nil {
+			poolSource = "primary"
+		}
+		if delta == nil && allowPoolFallback {
+			// Step 2 (historical page-return probe): try the remaining
+			// baselines newest first and keep the smallest delta that passes
+			// the stricter 50% rule. A candidate that cannot be published is
+			// skipped; the fallback full tree stays available.
+			bestBytes := 0
+			for _, candidate := range pool {
+				if candidate == primary {
+					continue
+				}
+				if e.workRevoked(work) || work.Ctx.Err() != nil {
+					return nil, nil, stopped
+				}
+				projection, commit, err := work.Projector.CandidateAgainst(candidate.Projection, &tree.capture)
+				if err != nil || projection == nil || projection.Tree == nil {
+					continue
+				}
+				compact, compactBytes, cost, ok := e.historicalCandidate(projection)
+				if !ok {
+					continue
+				}
+				candidateDelta, deltaBytes := e.boundedBaselineDelta(candidate, compact, compactBytes, 5)
+				if candidateDelta == nil || (bestBytes != 0 && deltaBytes >= bestBytes) {
+					continue
+				}
+				bestBytes = deltaBytes
+				delta = candidateDelta
+				poolSource = "historical"
+				chosenCompact, chosenProjection = compact, projection
+				chosenCost, chosenCommit = cost, commit
 			}
 		}
 	}
 
 	e.setWorkPhase(work, phase+".commit")
 	e.mu.Lock()
-	defer e.mu.Unlock()
+	now := time.Now()
 	if e.session == nil || e.session.State != SessionActive ||
-		!e.workAuthorizedLocked(work, time.Now()) {
+		!e.workAuthorizedLocked(work, now) {
+		e.mu.Unlock()
 		return nil, nil, stopped
 	}
 	// Bind publication to the captured material as well as the caller's session
@@ -286,18 +350,36 @@ func (e *Engine) publishTreeAttempt(work *workState, session *sessionState, phas
 		e.session.Display.ID != session.Display.ID ||
 		e.session.Display.Generation != tree.capture.Display.Generation ||
 		e.session.Display.ID != tree.capture.Display.ID {
+		e.mu.Unlock()
 		return nil, nil, protocol.NewError(409, protocol.CodeStaleScreen, "目标屏幕代次已变化")
 	}
-	if time.Since(tree.capture.CapturedAt) > e.cfg.CaptureMaxAge {
+	if now.Sub(tree.capture.CapturedAt) > e.cfg.CaptureMaxAge {
+		e.mu.Unlock()
 		return nil, nil, protocol.NewError(409, protocol.CodeStaleScreen, "节点采集已过期")
 	}
-	// Retention is decided before anything changes: the candidate, the
-	// protected set and every retained snapshot must fit one bounded budget, or
-	// the whole acquisition is rejected without deleting history.
-	victims, fits := e.planRetentionLocked(tree.cost)
+	// Use one commit-time pool for choosing, protecting and retaining bases.
+	// An entry that expired while the probe ran cannot back this observation.
+	commitPool := e.baselinePoolForRevisionLocked(e.session.Revision+1, now)
+	fallbackFull := func() {
+		delta = nil
+		poolSource = "full"
+		chosenCompact, chosenProjection = tree.compact, tree.projection
+		chosenCost, chosenCommit = tree.cost, tree.commit
+	}
+	if delta != nil && baselineWithID(commitPool, delta.Base) == nil {
+		fallbackFull()
+	}
+	// Decide retention before changing the pool or deleting any observation.
+	victims, fits := e.planRetentionLocked(chosenCost, commitPool)
+	if !fits && poolSource == "historical" && tree.cost < chosenCost {
+		fallbackFull()
+		victims, fits = e.planRetentionLocked(chosenCost, commitPool)
+	}
 	if !fits {
+		e.mu.Unlock()
 		return nil, nil, budgetError("retained_snapshots", e.cfg.MaxRetainedSnapshotCostBytes)
 	}
+	e.baselines = commitPool
 	e.session.Revision++
 	observationID := e.nextObservationIDLocked()
 	// The observation keeps the actionable window of the caller-provided base,
@@ -321,16 +403,23 @@ func (e *Engine) publishTreeAttempt(work *workState, session *sessionState, phas
 		CapturedAt: tree.capture.CapturedAt, ActionableUntil: actionableUntil,
 		Quality: quality,
 		Screen:  e.session.Display, Foreground: tree.capture.Foreground,
-		Projection: tree.projection, Compact: tree.compact, Cost: tree.cost,
-		Status: ObservationReady, Full: !useDelta,
+		Projection: chosenProjection, Compact: chosenCompact, Cost: chosenCost,
+		Status: ObservationReady, Full: delta == nil,
 	}
 	for _, victim := range victims {
 		delete(e.observations, victim.ID)
 	}
 	// The candidate's continuity state becomes visible only here: every commit
 	// gate and the retention dry-run already passed.
-	if tree.commit != nil {
-		tree.commit()
+	if chosenCommit != nil {
+		chosenCommit()
+	}
+	// Only a delta keeps an active baseline. A published full tree clears it
+	// until the next confirmed full observation; the pool itself stays.
+	if delta != nil {
+		e.activeBaselineID = delta.Base
+	} else {
+		e.activeBaselineID = ""
 	}
 	e.current = obs
 	e.observations[observationID] = obs
@@ -340,8 +429,147 @@ func (e *Engine) publishTreeAttempt(work *workState, session *sessionState, phas
 		ttl = e.cfg.StartSessionTTL
 	}
 	e.extendSessionLocked(time.Now(), ttl)
-	public := e.observationPublicLocked(obs, status, tree.compact, delta, image, quality)
+	public := e.observationPublicLocked(obs, status, chosenCompact, delta, image, quality)
+	e.mu.Unlock()
+	// The baseline path is a diagnostic fact of a certain commit; it is
+	// recorded outside the state lock.
+	e.logBaseline(work.OperationID, poolSource, delta != nil)
 	return public, obs, nil
+}
+
+// logBaseline records which delta path produced one published observation. The
+// pool value is the closed enum primary/historical/full and format is
+// delta/full; a ref, a base identity, tree content or text is never logged.
+func (e *Engine) logBaseline(operationID, pool string, delta bool) {
+	format := "full"
+	if delta {
+		format = "delta"
+	}
+	e.log.Event(eventlog.Debug, "observation.baseline",
+		eventlog.Str("operation_id", operationID),
+		eventlog.Str("baseline_pool", pool),
+		eventlog.Str("format", format))
+}
+
+// baselineWithID returns the pool entry with the given observation identity, or
+// nil when the identity is empty or no longer pooled. The pool is ordered
+// newest first, so a caller that does not find the active identity falls back
+// to the newest confirmed baseline.
+func baselineWithID(pool []*baselineState, id string) *baselineState {
+	if id == "" {
+		return nil
+	}
+	for _, b := range pool {
+		if b != nil && b.ObservationID == id {
+			return b
+		}
+	}
+	return nil
+}
+
+// hasBaselineLocked reports whether the pool still holds the given baseline.
+func (e *Engine) hasBaselineLocked(id string) bool {
+	return baselineWithID(e.baselines, id) != nil
+}
+
+// sortBaselinesLocked keeps the pool ordered by Revision descending. Two
+// confirmed observations never share a revision, so the order is total.
+func (e *Engine) sortBaselinesLocked() {
+	sort.SliceStable(e.baselines, func(left, right int) bool {
+		return e.baselines[left].Revision > e.baselines[right].Revision
+	})
+}
+
+// baselineEligibleLocked reports whether one pool entry may back a delta of
+// the observation at nextRevision: the same session origin and target display
+// identity (a display generation change invalidates ref continuity), a revision
+// span inside maxBaselineRevisionSpan and an age younger than maxBaselineAge.
+func (e *Engine) baselineEligibleLocked(b *baselineState, nextRevision int, now time.Time) bool {
+	if b == nil || b.Tree == nil || e.session == nil {
+		return false
+	}
+	return b.Origin == e.session.Origin &&
+		b.DisplayID == e.session.Display.ID &&
+		b.DisplayGeneration == e.session.Display.Generation &&
+		nextRevision-b.Revision <= maxBaselineRevisionSpan &&
+		now.Sub(b.CapturedAt) < maxBaselineAge
+}
+
+// baselinePoolForRevisionLocked returns the confirmed baselines usable by the
+// observation at nextRevision, in pool order, without changing the pool. A
+// rejected acquisition therefore never prunes the base of the current
+// observation; only a certain commit rewrites the pool.
+func (e *Engine) baselinePoolForRevisionLocked(nextRevision int, now time.Time) []*baselineState {
+	if len(e.baselines) == 0 {
+		return nil
+	}
+	pool := make([]*baselineState, 0, len(e.baselines))
+	for _, b := range e.baselines {
+		if e.baselineEligibleLocked(b, nextRevision, now) {
+			pool = append(pool, b)
+		}
+	}
+	return pool
+}
+
+// pruneBaselinesLocked drops every pool entry that can no longer serve the
+// observation at nextRevision and keeps the remaining entries newest first,
+// bounded to maxBaselines. The active identity is cleared when its entry is
+// pruned. The survivor slice is rebuilt so a dropped entry never stays
+// reachable through the pool's backing array.
+func (e *Engine) pruneBaselinesLocked(nextRevision int) {
+	e.baselines = e.baselinePoolForRevisionLocked(nextRevision, time.Now())
+	if e.activeBaselineID != "" && !e.hasBaselineLocked(e.activeBaselineID) {
+		e.activeBaselineID = ""
+	}
+}
+
+// truncateBaselinesLocked bounds the pool to maxBaselines and releases the
+// dropped tail references, so an out-of-window snapshot never stays reachable
+// through the pool.
+func (e *Engine) truncateBaselinesLocked() {
+	if len(e.baselines) <= maxBaselines {
+		return
+	}
+	for i := maxBaselines; i < len(e.baselines); i++ {
+		e.baselines[i] = nil
+	}
+	e.baselines = e.baselines[:maxBaselines]
+}
+
+// boundedBaselineDelta computes one delta against a confirmed baseline and
+// accepts it only when it is strictly smaller than ratioTenths/10 of the
+// candidate's compact full encoding. An equal-size delta is not smaller and
+// therefore falls back to the full tree.
+func (e *Engine) boundedBaselineDelta(b *baselineState, compact *protocol.ReadTree,
+	compactBytes []byte, ratioTenths int) (*protocol.ReadDelta, int) {
+	if b == nil || b.Tree == nil || compact == nil {
+		return nil, 0
+	}
+	diff, err := e.differ.Diff(b.ObservationID, b.Tree, compact)
+	if err != nil {
+		return nil, 0
+	}
+	encoded, err := json.Marshal(diff)
+	if err != nil || 10*len(encoded) >= ratioTenths*len(compactBytes) {
+		return nil, 0
+	}
+	return diff, len(encoded)
+}
+
+// historicalCandidate rebuilds the public compact representation of a
+// historical-baseline projection through the same public and internal budget
+// gate as the default candidate. A candidate that cannot be published is
+// skipped safely instead of failing the acquisition.
+func (e *Engine) historicalCandidate(projection *Projection) (*protocol.ReadTree, []byte, int, bool) {
+	if projection == nil || projection.Tree == nil || projection.Capture == nil {
+		return nil, nil, 0, false
+	}
+	compact, compactBytes, cost, apiErr := e.publicCandidate(*projection.Capture, projection)
+	if apiErr != nil {
+		return nil, nil, 0, false
+	}
+	return compact, compactBytes, cost, true
 }
 
 // budgetError builds the controlled tree budget failure. The details name the
@@ -360,8 +588,12 @@ func budgetError(budget string, limit int) *protocol.APIError {
 
 // planRetentionLocked is a bounded dry-run over the retained observation
 // metadata. It returns the oldest unprotected victims that make room for one
-// new snapshot, or fits=false without changing anything.
-func (e *Engine) planRetentionLocked(newCost int) ([]*observationState, bool) {
+// new snapshot, or fits=false without changing anything. Only baselines that
+// can still serve the observation being published are protected: an O that may
+// be emitted as a delta base must stay readable with inspect, while an
+// out-of-window entry no longer carries that guarantee. The pool itself is
+// rewritten only after this dry-run passes.
+func (e *Engine) planRetentionLocked(newCost int, pool []*baselineState) ([]*observationState, bool) {
 	total := 0
 	for _, obs := range e.observations {
 		if obs != nil {
@@ -375,8 +607,10 @@ func (e *Engine) planRetentionLocked(newCost int) ([]*observationState, bool) {
 	if e.current != nil {
 		protected[e.current.ID] = true
 	}
-	if e.baseline != nil {
-		protected[e.baseline.ObservationID] = true
+	for _, b := range pool {
+		if b != nil && b.ObservationID != "" {
+			protected[b.ObservationID] = true
+		}
 	}
 	for id, obs := range e.observations {
 		if obs != nil && obs.Status == ObservationClaimed {
@@ -518,28 +752,44 @@ func (e *Engine) projectCapture(work *workState, phase string, cap device.Captur
 	if err != nil {
 		return nil, protocol.NewError(503, protocol.CodeHierarchyFailed, "公开树构造失败")
 	}
-	compact := observation.ProjectCompactTree(projection.Tree)
-	if compact == nil || compact.Validate() != nil {
-		return nil, protocol.NewError(503, protocol.CodeHierarchyFailed, "公开树构造失败")
-	}
-	compactBytes, err := json.Marshal(compact)
-	if err != nil {
-		return nil, protocol.NewError(503, protocol.CodeHierarchyFailed, "公开树构造失败")
-	}
-	if len(compactBytes) > e.cfg.MaxFullTreeBytes {
-		return nil, budgetError("public_full", e.cfg.MaxFullTreeBytes)
-	}
-	cost, err := observation.SnapshotCost(&cap, projection.Tree)
-	if err != nil {
-		return nil, protocol.NewError(503, protocol.CodeHierarchyFailed, "公开树构造失败")
-	}
-	if cost > e.cfg.MaxSnapshotCostBytes {
-		return nil, budgetError("internal_snapshot", e.cfg.MaxSnapshotCostBytes)
+	compact, compactBytes, cost, apiErr := e.publicCandidate(cap, projection)
+	if apiErr != nil {
+		return nil, apiErr
 	}
 	return &treeAttempt{
 		capture: cap, projection: projection, compact: compact,
 		compactBytes: compactBytes, cost: cost, commit: commit,
 	}, nil
+}
+
+// publicCandidate validates one projected public tree against the public compact
+// and internal snapshot budgets and returns its compact representation, its
+// canonical bytes and the internal accounting cost. It is the single budget
+// gate of the ordinary candidate and the historical-baseline probe, so the two
+// paths cannot drift.
+func (e *Engine) publicCandidate(cap device.Capture, projection *Projection) (*protocol.ReadTree, []byte, int, *protocol.APIError) {
+	if projection == nil || projection.Tree == nil {
+		return nil, nil, 0, protocol.NewError(503, protocol.CodeHierarchyFailed, "公开树构造失败")
+	}
+	compact := observation.ProjectCompactTree(projection.Tree)
+	if compact == nil || compact.Validate() != nil {
+		return nil, nil, 0, protocol.NewError(503, protocol.CodeHierarchyFailed, "公开树构造失败")
+	}
+	compactBytes, err := json.Marshal(compact)
+	if err != nil {
+		return nil, nil, 0, protocol.NewError(503, protocol.CodeHierarchyFailed, "公开树构造失败")
+	}
+	if len(compactBytes) > e.cfg.MaxFullTreeBytes {
+		return nil, nil, 0, budgetError("public_full", e.cfg.MaxFullTreeBytes)
+	}
+	cost, err := observation.SnapshotCost(&cap, projection.Tree)
+	if err != nil {
+		return nil, nil, 0, protocol.NewError(503, protocol.CodeHierarchyFailed, "公开树构造失败")
+	}
+	if cost > e.cfg.MaxSnapshotCostBytes {
+		return nil, nil, 0, budgetError("internal_snapshot", e.cfg.MaxSnapshotCostBytes)
+	}
+	return compact, compactBytes, cost, nil
 }
 
 // readImageForAcquisition reads the requested image and confirms that the
@@ -743,8 +993,10 @@ func (e *Engine) pruneObservationsLocked() {
 	if e.current != nil {
 		protected[e.current.ID] = true
 	}
-	if e.baseline != nil {
-		protected[e.baseline.ObservationID] = true
+	for _, b := range e.baselines {
+		if b != nil && b.ObservationID != "" {
+			protected[b.ObservationID] = true
+		}
 	}
 	for id, obs := range e.observations {
 		if obs.Status == ObservationClaimed {
@@ -768,16 +1020,60 @@ func (e *Engine) pruneObservationsLocked() {
 	}
 }
 
-// confirmBaselineLocked promotes one received full candidate to the confirmed
-// baseline. Only an admitted observe(O) or a successful act claim may call it.
-// The baseline keeps the compact public read tree the delta is expressed
-// against; the complete internal snapshot stays with the retained observation.
+// confirmBaselineLocked promotes one received full candidate into the bounded
+// baseline pool. Only an admitted observe(O), wait_for(O) or a successful act
+// claim may call it. The baseline keeps the compact public read tree the delta
+// is expressed against and the complete internal projection a historical
+// page-return probe diffs from; the complete internal snapshot stays with the
+// retained observation.
+//
+// A baseline must stay retained: the pool protects its observation from
+// eviction and inspect(reference=base) has to remain readable, so a candidate
+// that is no longer the retained observation never enters. Only the current
+// observation may claim the active continuity alignment; confirming a retained
+// historical full (for example a replayed acknowledgement) must not point
+// activeBaselineID at a frame the projector's b.prev is not aligned with.
 func (e *Engine) confirmBaselineLocked(obs *observationState) {
-	if obs == nil || !obs.Full || obs.Compact == nil {
+	if obs == nil || !obs.Full || obs.Compact == nil || obs.Projection == nil {
 		return
 	}
-	e.baseline = &baselineState{
+	if e.observations[obs.ID] != obs {
+		return
+	}
+	nextRevision := obs.Revision + 1
+	if e.session != nil {
+		nextRevision = e.session.Revision + 1
+		if obs.Origin != e.session.Origin ||
+			obs.DisplayID != e.session.Display.ID ||
+			obs.DisplayGeneration != e.session.Display.Generation {
+			return
+		}
+	}
+	if nextRevision-obs.Revision > maxBaselineRevisionSpan ||
+		time.Since(obs.CapturedAt) >= maxBaselineAge {
+		return
+	}
+	e.pruneBaselinesLocked(nextRevision)
+	entry := &baselineState{
 		ObservationID: obs.ID, Origin: obs.Origin, Revision: obs.Revision,
-		CapturedAt: obs.CapturedAt, Tree: obs.Compact,
+		CapturedAt: obs.CapturedAt, DisplayID: obs.DisplayID,
+		DisplayGeneration: obs.DisplayGeneration,
+		Tree:              obs.Compact, Projection: obs.Projection,
+	}
+	replaced := false
+	for i, b := range e.baselines {
+		if b != nil && b.ObservationID == obs.ID {
+			e.baselines[i] = entry
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		e.baselines = append(e.baselines, entry)
+	}
+	e.sortBaselinesLocked()
+	e.truncateBaselinesLocked()
+	if e.current == obs {
+		e.activeBaselineID = obs.ID
 	}
 }

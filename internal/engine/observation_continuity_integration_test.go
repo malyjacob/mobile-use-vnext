@@ -745,9 +745,9 @@ func captureInspectReadOnlyGuard(t *testing.T, h *harness) inspectReadOnlyGuard 
 		observationCount: len(e.observations),
 		ordinaryWork:     e.work != nil,
 	}
-	if e.baseline != nil {
-		guard.baselineID = e.baseline.ObservationID
-		guard.baselineBytes, _ = protocol.JSON(e.baseline.Tree)
+	if baseline := baselineWithID(e.baselines, e.activeBaselineID); baseline != nil {
+		guard.baselineID = baseline.ObservationID
+		guard.baselineBytes, _ = protocol.JSON(baseline.Tree)
 	}
 	if e.current != nil {
 		guard.currentID = e.current.ID
@@ -960,8 +960,9 @@ func TestI02FixedBaselineDeltaChain(t *testing.T) {
 	assertDeliveredDelta(t, ackResult, observationStateByID(t, h.engine, current.ID), base,
 		startObservation.ID)
 	h.engine.mu.Lock()
-	if h.engine.baseline == nil || h.engine.baseline.ObservationID != startObservation.ID {
-		t.Fatalf("baseline changed during acknowledgement: %+v", h.engine.baseline)
+	if baseline := baselineWithID(h.engine.baselines, h.engine.activeBaselineID); baseline == nil ||
+		baseline.ObservationID != startObservation.ID {
+		t.Fatalf("baseline changed during acknowledgement: %+v", baseline)
 	}
 	h.engine.mu.Unlock()
 
@@ -1271,8 +1272,8 @@ func TestI04ActualProjectionPruningDeltaTopology(t *testing.T) {
 
 		h.engine.mu.Lock()
 		baselineID := ""
-		if h.engine.baseline != nil {
-			baselineID = h.engine.baseline.ObservationID
+		if baseline := baselineWithID(h.engine.baselines, h.engine.activeBaselineID); baseline != nil {
+			baselineID = baseline.ObservationID
 		}
 		h.engine.mu.Unlock()
 		if baselineID != startObservation.ID {
@@ -1381,9 +1382,9 @@ func takeI03Guard(t *testing.T, h *harness, builder *observation.Builder) i03Gua
 		guard.displayID = e.session.Display.ID
 		guard.displayGeneration = e.session.Display.Generation
 	}
-	if e.baseline != nil {
-		guard.baselineID = e.baseline.ObservationID
-		guard.baselineBytes, _ = protocol.JSON(e.baseline.Tree)
+	if baseline := baselineWithID(e.baselines, e.activeBaselineID); baseline != nil {
+		guard.baselineID = baseline.ObservationID
+		guard.baselineBytes, _ = protocol.JSON(baseline.Tree)
 	}
 	if e.current != nil {
 		guard.currentID = e.current.ID
@@ -1443,8 +1444,8 @@ func i03Baseline(t *testing.T) (*harness, *protocol.Result, *protocol.Observatio
 	current := publishedObservation(t, ack, "baseline acknowledgement")
 	h.engine.mu.Lock()
 	baselineID := ""
-	if h.engine.baseline != nil {
-		baselineID = h.engine.baseline.ObservationID
+	if baseline := baselineWithID(h.engine.baselines, h.engine.activeBaselineID); baseline != nil {
+		baselineID = baseline.ObservationID
 	}
 	h.engine.mu.Unlock()
 	if baselineID != startObservation.ID {

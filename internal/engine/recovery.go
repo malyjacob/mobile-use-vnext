@@ -80,6 +80,12 @@ func planRecoveryFor(in recoveryInput) *protocol.Recovery {
 	case "shell":
 		return shellPlan(in)
 	}
+	if in.Tool == "act" && in.ActAction == "text" && in.Claimed && in.Outcome == OutcomePartial {
+		// Keep the same saved base after revocation. The live text projection
+		// selects the current session or cleanup recovery when forming a result.
+		return newRecovery(protocol.RecoveryEntryObserve, protocol.RecoveryReferenceP,
+			protocol.RecoveryInputRetired, "")
+	}
 	if isSessionEndCode(in.Code) {
 		return newRecovery(protocol.RecoveryEntryEnd, protocol.RecoveryReferenceP, in.InputState, "")
 	}
@@ -99,8 +105,8 @@ func planRecoveryFor(in recoveryInput) *protocol.Recovery {
 	}
 	if in.Tool == "act" && in.ActAction == "text" && in.Claimed &&
 		in.Outcome == OutcomeUncertain {
-		// A finished text action whose write/ENTER facts remain unconfirmed is
-		// not a self-loop on status: the semantic next step is one new
+		// A finished text action whose write/submission facts remain unconfirmed
+		// is not a self-loop on status: the semantic next step is one new
 		// observation. Live session/durability/device blockers may still
 		// override this read-only projection.
 		return newRecovery(protocol.RecoveryEntryObserve, protocol.RecoveryReferenceP,
@@ -448,14 +454,14 @@ var (
 	}
 	// userCodes: no API call can succeed until a person changes the device.
 	userCodes = map[string]struct{}{
-		protocol.CodeDeviceLocked:       {},
-		protocol.CodeDeviceNotAwake:     {},
-		protocol.CodeStopUnavailable:    {},
-		protocol.CodeModeNotSelected:    {},
-		protocol.CodeControlUnavailable: {},
-		protocol.CodeAppNotFound:        {},
-		protocol.CodeRootUnavailable:    {},
-		protocol.CodeDisplayCreate:      {},
+		protocol.CodeDeviceLocked:        {},
+		protocol.CodeDeviceNotAwake:      {},
+		protocol.CodeStopUnavailable:     {},
+		protocol.CodeModeNotSelected:     {},
+		protocol.CodeControlUnavailable:  {},
+		protocol.CodeAppNotFound:         {},
+		protocol.CodeRootUnavailable:     {},
+		protocol.CodeDisplayCreate:       {},
 		protocol.CodeWindowActionPrimary: {},
 	}
 )

@@ -469,8 +469,8 @@ func (v *TextInputView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 		return err
 	}
 	var wire struct {
-		Write member[string] `json:"write"`
-		Enter member[string] `json:"enter"`
+		Write  member[string] `json:"write"`
+		Submit member[string] `json:"submit"`
 	}
 	if err := json.Unmarshal(raw, &wire, json.RejectUnknownMembers(true)); err != nil {
 		return err
@@ -479,11 +479,11 @@ func (v *TextInputView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 	if err != nil {
 		return err
 	}
-	enter, err := requireResponseMember(wire.Enter, "text_input.enter")
+	submit, err := requireResponseMember(wire.Submit, "text_input.submit")
 	if err != nil {
 		return err
 	}
-	view := &TextInputView{Write: write, Enter: enter}
+	view := &TextInputView{Write: write, Submit: submit}
 	if !ValidTextInput(view) {
 		return fmt.Errorf("text_input carries an invalid primitive combination")
 	}

@@ -46,8 +46,9 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 	var point *pointCheck
 	var scroll *scrollPlan
 	var tap *tapPlan
+	var submit *textSubmitPlan
 	if staticErr == nil {
-		point, scroll, tap, staticErr = staticActContentCheckWithTap(staticObs, &req.Operation)
+		point, scroll, tap, submit, staticErr = staticActContentCheckWithTap(staticObs, &req.Operation)
 	}
 	if staticErr != nil {
 		e.logActPoint(op.ID, point, false)
@@ -87,10 +88,17 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 		return e.finishWithError(op, "claim", claimErr), nil
 	}
 	if req.Operation.Type == "text" {
-		op.TextStagePressEnter = req.Operation.EffectivePressEnter()
+		op.TextStageAutoSubmit = req.Operation.EffectiveAutoSubmit()
 		e.initTextStageLocked(op, session)
 	}
 	e.touchSessionLocked(time.Now())
+	// The composite text branch keeps one session for the whole flow. Snapshot
+	// the locked session before unlocking so control sync cannot mutate Display
+	// under it; the rest of the engine already works from sessionForWork copies.
+	if session != nil {
+		sessionSnapshot := *session
+		session = &sessionSnapshot
+	}
 	e.mu.Unlock()
 
 	e.setOperationPhase(op, "revalidate")
@@ -138,10 +146,17 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 	e.setOperationPhase(op, "dispatch")
 	var outcome string
 	var dispatchErr *protocol.APIError
-	if scroll != nil {
+	var partialCapture *device.Capture
+	switch {
+	case scroll != nil:
 		outcome, dispatchErr = e.dispatchScroll(work, frame)
-	} else {
-		outcome, dispatchErr = e.dispatchAct(work, op, obs, &req.Operation, fresh, tapFrame)
+	case req.Operation.Type == "text":
+		// The composite text branch owns its own submission plan and may hand
+		// back the last legal post-write frame for partial delivery.
+		outcome, partialCapture, dispatchErr = e.dispatchText(work, op, session, obs,
+			&req.Operation, fresh, tapFrame, submit)
+	default:
+		outcome, dispatchErr = e.dispatchAct(work, &req.Operation, tapFrame)
 	}
 	if outcome == OutcomeUncertain {
 		e.markDispatchUnknown(work)
@@ -156,6 +171,13 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 		result.Recovery = e.finishOperation(op, OutcomeUncertain, "dispatch", dispatchErr)
 		e.addSessionIfEnded(result)
 		return result, nil
+	}
+	if outcome == OutcomePartial {
+		// A confirmed write whose submission certainly never left the engine is
+		// neither executed nor uncertain: it is the honest partial fact, with no
+		// unknown physical side effect. The delivery path clears the unknown
+		// dispatch marker itself before publishing.
+		return e.finishPartialText(work, op, session, partialCapture, dispatchErr, req.Image), nil
 	}
 	if outcome == OutcomeNotExecuted {
 		dispatchErr.Outcome = OutcomeNotExecuted
@@ -378,19 +400,35 @@ func newStaticActInvalidTargetError(reason, ref, message string) *protocol.APIEr
 
 // staticActContentCheckWithTap routes tap, long_press and text ref targets to
 // their bounded planners while keeping coordinate, swipe, scroll and key
-// validation on staticActContentCheck.
+// validation on staticActContentCheck. A text operation whose effective
+// submit_ref names a public node additionally plans that submit tap here, so a
+// missing or unsuitable submit target still rejects before the observation is
+// claimed and no device I/O happens.
 func staticActContentCheckWithTap(obs *observationState, operation *protocol.Operation) (
-	*pointCheck, *scrollPlan, *tapPlan, *protocol.APIError) {
+	*pointCheck, *scrollPlan, *tapPlan, *textSubmitPlan, *protocol.APIError) {
 	if operation != nil && operation.Target != nil && operation.Target.UseRef {
 		switch operation.Type {
 		case "tap", "long_press":
-			return staticTapRefCheck(obs, operation)
+			point, scroll, tap, apiErr := staticTapRefCheck(obs, operation)
+			return point, scroll, tap, nil, apiErr
 		case "text":
-			return staticTextRefCheck(obs, operation)
+			point, scroll, tap, apiErr := staticTextRefCheck(obs, operation)
+			if apiErr != nil {
+				return point, scroll, tap, nil, apiErr
+			}
+			submit, apiErr := planTextSubmitRef(obs, operation)
+			return point, scroll, tap, submit, apiErr
 		}
 	}
 	point, scroll, apiErr := staticActContentCheck(obs, operation)
-	return point, scroll, nil, apiErr
+	if apiErr != nil {
+		return point, scroll, nil, nil, apiErr
+	}
+	var submit *textSubmitPlan
+	if operation != nil && operation.Type == "text" {
+		submit, apiErr = planTextSubmitRef(obs, operation)
+	}
+	return point, scroll, nil, submit, apiErr
 }
 
 // claimObservationLocked performs the one-way ready->claimed transition and
@@ -419,7 +457,7 @@ func (e *Engine) claimObservationLocked(op *operationState, agent string, work *
 	if op != nil {
 		op.Claimed = true
 	}
-	if obs.Full {
+	if obs.Full && work.Kind == WorkAct {
 		e.confirmBaselineLocked(obs)
 	}
 	return nil
@@ -470,14 +508,109 @@ func stoppedActRevalidation() *protocol.APIError {
 // it, and once more before its unique result may reach a caller.
 func (e *Engine) probeActNode(ctx context.Context, revoked func() bool,
 	original, fresh *device.Capture, want *device.RawNode) (actMatch, actProbeState) {
+	return e.probeActNodeWith(ctx, revoked, original, fresh, want,
+		defaultActMatchOptions())
+}
+
+// probeActNodeWith probes one ref binding under an explicit match policy. STOP
+// is checked before the matcher, at every Tier boundary inside it, and once more
+// before the result reaches the caller.
+func (e *Engine) probeActNodeWith(ctx context.Context, revoked func() bool,
+	original, fresh *device.Capture, want *device.RawNode,
+	opts actMatchOptions) (actMatch, actProbeState) {
 	if ctx == nil || ctx.Err() != nil || (revoked != nil && revoked()) {
 		return actMatch{}, actProbeCancelled
 	}
-	match, state := matchActTarget(ctx, revoked, original, fresh, want)
+	match, state := matchActTargetWithOptions(ctx, revoked, original, fresh, want, opts)
 	if ctx.Err() != nil || (revoked != nil && revoked()) {
 		return actMatch{}, actProbeCancelled
 	}
 	return match, state
+}
+
+// tapFrameOptions is the optional policy of one tap-frame revalidation. The zero
+// value is the ordinary tap/long_press contract: Tier 1-4 with no enabled
+// transition, no soft-keyboard shift and no write-submit classification.
+type tapFrameOptions struct {
+	// match selects the target policy of every binding probe. Its
+	// allowEnabledTransition field is applied to the execution binding only.
+	match actMatchOptions
+	// submit enables the write-submit classifications: an execution target that
+	// is still explicitly disabled is reported as submit_disabled instead of a
+	// generic capability change. It never relaxes the enabled gate.
+	submit bool
+	// requireExecutionEnabled demands an explicitly enabled execution target on
+	// the fresh frame because the write-time plan observed it disabled.
+	requireExecutionEnabled bool
+	// keyboardShift enables the bounded soft-keyboard vertical-shift fallback for
+	// the plan's binding nodes.
+	keyboardShift bool
+}
+
+// submitTapFrameOptions is the complete write-submit revalidation policy.
+func submitTapFrameOptions(initiallyDisabled bool) tapFrameOptions {
+	options := tapFrameOptions{
+		submit:        true,
+		keyboardShift: true,
+	}
+	if initiallyDisabled {
+		options.match = options.match.withEnabledTransition()
+		options.requireExecutionEnabled = true
+	}
+	return options
+}
+
+// probeTapFrameNode probes one binding node of a tap-frame plan under the frame
+// policy. Only the execution binding may accept the disabled -> enabled
+// transition; every other binding keeps the ordinary structure comparison. The
+// soft-keyboard fallback applies to each binding because the whole page moves.
+func (e *Engine) probeTapFrameNode(ctx context.Context, revoked func() bool,
+	original, fresh *device.Capture, want *device.RawNode,
+	execution bool, opts tapFrameOptions) (actMatch, actProbeState) {
+	matchOpts := opts.match
+	if !execution {
+		matchOpts.allowEnabledTransition = false
+	}
+	if ctx == nil || ctx.Err() != nil || (revoked != nil && revoked()) {
+		return actMatch{}, actProbeCancelled
+	}
+	match, state := matchActTargetWithOptions(ctx, revoked, original, fresh, want, matchOpts)
+	if state == actProbeNone && opts.keyboardShift {
+		shifted, shiftedState := matchKeyboardShiftedSubmitNode(ctx, revoked,
+			original, fresh, want, matchOpts.allowEnabledTransition, matchOpts.limits)
+		switch shiftedState {
+		case actProbeNone:
+		case actProbeUnique:
+			match, state = shifted, shiftedState
+		default:
+			return shifted, shiftedState
+		}
+	}
+	if ctx.Err() != nil || (revoked != nil && revoked()) {
+		return actMatch{}, actProbeCancelled
+	}
+	return match, state
+}
+
+// framePublicTargetError applies the ordinary public action gate and, for a
+// write-submit plan, classifies an explicitly disabled execution target as
+// submit_disabled. A disabled target is still rejected: the classification only
+// names the reason.
+func framePublicTargetError(node *protocol.Node, action protocol.Action,
+	execution bool, opts tapFrameOptions) *protocol.APIError {
+	if validTapPublicTarget(node, action) {
+		return nil
+	}
+	if execution && opts.submit && explicitlyDisabledPublic(node) {
+		return submitFrameDisabledError()
+	}
+	return tapTargetChangedReason(targetChangedReasonCapabilityChanged)
+}
+
+// explicitlyDisabledPublic reports an explicitly disabled public target. A
+// missing flag is never treated as disabled here.
+func explicitlyDisabledPublic(node *protocol.Node) bool {
+	return node != nil && node.Enabled != nil && !*node.Enabled
 }
 
 // revalidateActTarget re-reads the live display and maps a requested target to
@@ -496,8 +629,11 @@ func (e *Engine) revalidateActTarget(work *workState, obs *observationState,
 	if apiErr := foregroundMatches(obs.Foreground, capture.Foreground); apiErr != nil {
 		return capture, nil, 0, apiErr
 	}
-	if point != nil && (point.state == pointUnique || point.state == pointSet) {
-		if apiErr := e.provePointTarget(work.Projector, capture, obs, point); apiErr != nil {
+	if point != nil && (point.state == pointUnique || point.state == pointSet ||
+		(point.state == pointNone && point.empty)) {
+		revokedPoint := func() bool { return e.workRevoked(work) }
+		if apiErr := e.provePointTarget(work.Ctx, revokedPoint, work.Projector,
+			capture, obs, point, operation); apiErr != nil {
 			return capture, nil, 0, apiErr
 		}
 	}
@@ -514,6 +650,9 @@ func (e *Engine) revalidateActTarget(work *workState, obs *observationState,
 	took := time.Since(started)
 	if apiErr != nil {
 		return capture, nil, took, apiErr
+	}
+	if frame != nil {
+		e.actTargetLog(work.OperationID, actTargetProbeOutcome(actProbeUnique), frame.tier)
 	}
 	if operation.Type == "text" {
 		if frame == nil || !freshTextTargetSafe(frame.raw) {
@@ -664,8 +803,12 @@ func hasCapabilityOnlyFreshNode(ctx context.Context, original, fresh *device.Cap
 	return matchedCount == 1, false
 }
 
-func probeTapTargetChangedError(ctx context.Context, original, fresh *device.Capture,
-	want *device.RawNode, state actProbeState, match actMatch) *protocol.APIError {
+func probeTapTargetChangedError(ctx context.Context, obs *observationState,
+	fresh *device.Capture, want *device.RawNode, state actProbeState, match actMatch) *protocol.APIError {
+	var original *device.Capture
+	if obs != nil && obs.Projection != nil {
+		original = obs.Projection.Capture
+	}
 	if state == actProbeNone && !match.lineageMismatch {
 		capChanged, cancelled := hasCapabilityOnlyFreshNode(ctx, original, fresh, want)
 		if cancelled {
@@ -675,7 +818,9 @@ func probeTapTargetChangedError(ctx context.Context, original, fresh *device.Cap
 			return tapTargetChangedReason(targetChangedReasonCapabilityChanged)
 		}
 	}
-	return probeTargetChangedError(state, match, targetChangedMessage)
+	apiErr := probeTargetChangedError(state, match, targetChangedMessage)
+	attachChangedRef(ctx, apiErr, obs, fresh, want)
+	return apiErr
 }
 
 // revalidateBubbleTapFrame re-proves both identities of a C->A target lift on
@@ -683,7 +828,8 @@ func probeTapTargetChangedError(ctx context.Context, original, fresh *device.Cap
 // even a uniquely matched ancestor cannot silently inherit the action.
 func (e *Engine) revalidateBubbleTapFrame(ctx context.Context,
 	revoked func() bool, workProjector Projector, obs *observationState,
-	fresh *device.Capture, plan *tapPlan) (*tapFrame, *protocol.APIError) {
+	fresh *device.Capture, plan *tapPlan,
+	opts tapFrameOptions) (*tapFrame, *protocol.APIError) {
 	stop := func() bool {
 		return ctx == nil || ctx.Err() != nil || (revoked != nil && revoked())
 	}
@@ -694,8 +840,8 @@ func (e *Engine) revalidateBubbleTapFrame(ctx context.Context,
 	if apiErr != nil {
 		return nil, apiErr
 	}
-	matchChild, childState := e.probeActNode(
-		ctx, revoked, obs.Projection.Capture, fresh, plan.targetRaw)
+	matchChild, childState := e.probeTapFrameNode(
+		ctx, revoked, obs.Projection.Capture, fresh, plan.targetRaw, false, opts)
 	switch childState {
 	case actProbeUnique:
 	case actProbeCancelled:
@@ -707,8 +853,8 @@ func (e *Engine) revalidateBubbleTapFrame(ctx context.Context,
 	default:
 		return nil, tapHierarchyError()
 	}
-	matchAncestor, ancestorState := e.probeActNode(
-		ctx, revoked, obs.Projection.Capture, fresh, plan.bubbleAncestorRaw)
+	matchAncestor, ancestorState := e.probeTapFrameNode(
+		ctx, revoked, obs.Projection.Capture, fresh, plan.bubbleAncestorRaw, true, opts)
 	switch ancestorState {
 	case actProbeUnique:
 	case actProbeCancelled:
@@ -717,7 +863,7 @@ func (e *Engine) revalidateBubbleTapFrame(ctx context.Context,
 		return nil, tapHierarchyError()
 	case actProbeNone, actProbeAmbiguous:
 		return nil, probeTapTargetChangedError(
-			ctx, obs.Projection.Capture, fresh, plan.bubbleAncestorRaw, ancestorState, matchAncestor)
+			ctx, obs, fresh, plan.bubbleAncestorRaw, ancestorState, matchAncestor)
 	default:
 		return nil, tapHierarchyError()
 	}
@@ -784,13 +930,14 @@ func (e *Engine) revalidateBubbleTapFrame(ctx context.Context,
 		return nil, tapTargetChangedReason(targetChangedReasonCapabilityChanged)
 	}
 	if !topology.isAncestor(ancestorIndex, childIndex) {
-		return nil, tapTargetChangedReason(targetChangedReasonLineageChanged)
+		return nil, bubbleRelationChangedError(plan.bubbleAncestorRef)
 	}
 	if nearestInteractiveAncestor(view, childPublic) != ancestorPublic {
-		return nil, tapTargetChangedReason(targetChangedReasonLineageChanged)
+		return nil, bubbleRelationChangedError(plan.bubbleAncestorRef)
 	}
-	if !validTapPublicTarget(ancestorPublic, protocol.Action(plan.action)) {
-		return nil, tapTargetChangedReason(targetChangedReasonCapabilityChanged)
+	if apiErr := framePublicTargetError(ancestorPublic,
+		protocol.Action(plan.action), true, opts); apiErr != nil {
+		return nil, apiErr
 	}
 	ancestorInput := &tapInput{
 		view: view, capture: fresh, topology: topology,
@@ -810,6 +957,10 @@ func (e *Engine) revalidateBubbleTapFrame(ctx context.Context,
 	if !ok {
 		return nil, tapTargetChangedReason(targetChangedReasonScopeBlocked)
 	}
+	if matchAncestor.tier == 4 &&
+		!tapFrameTier4OcclusionProven(view, ancestorPublic, x, y) {
+		return nil, tapTargetChangedReason(targetChangedReasonScopeBlocked)
+	}
 	frame := &tapFrame{
 		capture: fresh, raw: matchAncestor.raw, x: x, y: y,
 		tier: matchAncestor.tier, strategy: strategy,
@@ -827,7 +978,8 @@ func (e *Engine) revalidateBubbleTapFrame(ctx context.Context,
 // coextensive child delegation on the fresh frame before tapping inside B.
 func (e *Engine) revalidateCoextensiveChildFrame(ctx context.Context,
 	revoked func() bool, workProjector Projector, obs *observationState,
-	fresh *device.Capture, plan *tapPlan) (*tapFrame, *protocol.APIError) {
+	fresh *device.Capture, plan *tapPlan,
+	opts tapFrameOptions) (*tapFrame, *protocol.APIError) {
 	stop := func() bool {
 		return ctx == nil || ctx.Err() != nil || (revoked != nil && revoked())
 	}
@@ -841,8 +993,8 @@ func (e *Engine) revalidateCoextensiveChildFrame(ctx context.Context,
 	if stop() {
 		return nil, stoppedActRevalidation()
 	}
-	matchParent, parentState := e.probeActNode(
-		ctx, revoked, obs.Projection.Capture, fresh, plan.targetRaw)
+	matchParent, parentState := e.probeTapFrameNode(
+		ctx, revoked, obs.Projection.Capture, fresh, plan.targetRaw, false, opts)
 	switch parentState {
 	case actProbeUnique:
 	case actProbeCancelled:
@@ -851,12 +1003,12 @@ func (e *Engine) revalidateCoextensiveChildFrame(ctx context.Context,
 		return nil, tapHierarchyError()
 	case actProbeNone, actProbeAmbiguous:
 		return nil, probeTapTargetChangedError(
-			ctx, obs.Projection.Capture, fresh, plan.targetRaw, parentState, matchParent)
+			ctx, obs, fresh, plan.targetRaw, parentState, matchParent)
 	default:
 		return nil, tapHierarchyError()
 	}
-	matchDelegate, delegateState := e.probeActNode(
-		ctx, revoked, obs.Projection.Capture, fresh, plan.delegateRaw)
+	matchDelegate, delegateState := e.probeTapFrameNode(
+		ctx, revoked, obs.Projection.Capture, fresh, plan.delegateRaw, true, opts)
 	switch delegateState {
 	case actProbeUnique:
 	case actProbeCancelled:
@@ -865,7 +1017,7 @@ func (e *Engine) revalidateCoextensiveChildFrame(ctx context.Context,
 		return nil, tapHierarchyError()
 	case actProbeNone, actProbeAmbiguous:
 		return nil, probeTapTargetChangedError(
-			ctx, obs.Projection.Capture, fresh, plan.delegateRaw, delegateState, matchDelegate)
+			ctx, obs, fresh, plan.delegateRaw, delegateState, matchDelegate)
 	default:
 		return nil, tapHierarchyError()
 	}
@@ -912,8 +1064,11 @@ func (e *Engine) revalidateCoextensiveChildFrame(ctx context.Context,
 		return nil, tapTargetChangedReason(targetChangedReasonCapabilityChanged)
 	}
 	action := protocol.Action(plan.action)
-	if !validTapPublicTarget(freshParent, action) || !validTapPublicTarget(freshDelegate, action) {
-		return nil, tapTargetChangedReason(targetChangedReasonCapabilityChanged)
+	if apiErr := framePublicTargetError(freshParent, action, false, opts); apiErr != nil {
+		return nil, apiErr
+	}
+	if apiErr := framePublicTargetError(freshDelegate, action, true, opts); apiErr != nil {
+		return nil, apiErr
 	}
 	parentInput := &tapInput{
 		view: view, capture: fresh, topology: topology,
@@ -948,14 +1103,16 @@ func (e *Engine) revalidateCoextensiveChildFrame(ctx context.Context,
 		return nil, tapTargetChangedReason(targetChangedReasonScopeBlocked)
 	}
 	return e.resolveDirectTapScopeFrame(ctx, revoked, obs, fresh, topology, view,
-		plan, matchDelegate, freshDelegate, delegateIndex, delegateInput, delegateScope)
+		plan, matchDelegate, freshDelegate, delegateIndex, delegateInput,
+		delegateScope, opts)
 }
 
 // revalidateColocatedTapFrame re-proves both identities and the co-location
 // guard of a C->B bubble_colocated plan on the fresh frame.
 func (e *Engine) revalidateColocatedTapFrame(ctx context.Context,
 	revoked func() bool, workProjector Projector, obs *observationState,
-	fresh *device.Capture, plan *tapPlan) (*tapFrame, *protocol.APIError) {
+	fresh *device.Capture, plan *tapPlan,
+	opts tapFrameOptions) (*tapFrame, *protocol.APIError) {
 	stop := func() bool {
 		return ctx == nil || ctx.Err() != nil || (revoked != nil && revoked())
 	}
@@ -969,8 +1126,8 @@ func (e *Engine) revalidateColocatedTapFrame(ctx context.Context,
 	if stop() {
 		return nil, stoppedActRevalidation()
 	}
-	matchChild, childState := e.probeActNode(
-		ctx, revoked, obs.Projection.Capture, fresh, plan.targetRaw)
+	matchChild, childState := e.probeTapFrameNode(
+		ctx, revoked, obs.Projection.Capture, fresh, plan.targetRaw, false, opts)
 	switch childState {
 	case actProbeUnique:
 	case actProbeCancelled:
@@ -982,8 +1139,8 @@ func (e *Engine) revalidateColocatedTapFrame(ctx context.Context,
 	default:
 		return nil, tapHierarchyError()
 	}
-	matchColocated, colocatedState := e.probeActNode(
-		ctx, revoked, obs.Projection.Capture, fresh, plan.colocatedRaw)
+	matchColocated, colocatedState := e.probeTapFrameNode(
+		ctx, revoked, obs.Projection.Capture, fresh, plan.colocatedRaw, true, opts)
 	switch colocatedState {
 	case actProbeUnique:
 	case actProbeCancelled:
@@ -992,7 +1149,7 @@ func (e *Engine) revalidateColocatedTapFrame(ctx context.Context,
 		return nil, tapHierarchyError()
 	case actProbeNone, actProbeAmbiguous:
 		return nil, probeTapTargetChangedError(
-			ctx, obs.Projection.Capture, fresh, plan.colocatedRaw, colocatedState, matchColocated)
+			ctx, obs, fresh, plan.colocatedRaw, colocatedState, matchColocated)
 	default:
 		return nil, tapHierarchyError()
 	}
@@ -1056,9 +1213,13 @@ func (e *Engine) revalidateColocatedTapFrame(ctx context.Context,
 	if freshColocated == nil {
 		return nil, tapTargetChangedReason(targetChangedReasonCapabilityChanged)
 	}
-	if freshColocated == freshChild || isPublicAncestor(view, freshColocated, freshChild) ||
-		!validTapPublicTarget(freshColocated, protocol.Action(plan.action)) {
+	if freshColocated == freshChild ||
+		isPublicAncestor(view, freshColocated, freshChild) {
 		return nil, tapTargetChangedReason(targetChangedReasonCapabilityChanged)
+	}
+	if apiErr := framePublicTargetError(freshColocated,
+		protocol.Action(plan.action), true, opts); apiErr != nil {
+		return nil, apiErr
 	}
 	screen := screenRectFromDisplay(fresh.Display)
 	if !colocatedMatchGuard(view, freshChild, freshColocated, screen) {
@@ -1098,6 +1259,10 @@ func (e *Engine) revalidateColocatedTapFrame(ctx context.Context,
 		if stop() {
 			return nil, stoppedActRevalidation()
 		}
+		if matchColocated.tier == 4 &&
+			!tapFrameTier4OcclusionProven(view, freshColocated, plan.x, plan.y) {
+			return nil, tapTargetChangedReason(targetChangedReasonScopeBlocked)
+		}
 		return &tapFrame{
 			capture: fresh, raw: matchColocated.raw, x: plan.x, y: plan.y,
 			carrier: carrierRaw(fixedPointCarrier), tier: matchColocated.tier,
@@ -1112,6 +1277,10 @@ func (e *Engine) revalidateColocatedTapFrame(ctx context.Context,
 	if !ok || !provesSubtreeTapPoint(colocatedScope, x, y) {
 		return nil, tapTargetChangedReason(targetChangedReasonScopeBlocked)
 	}
+	if matchColocated.tier == 4 &&
+		!tapFrameTier4OcclusionProven(view, freshColocated, x, y) {
+		return nil, tapTargetChangedReason(targetChangedReasonScopeBlocked)
+	}
 	return &tapFrame{
 		capture: fresh, raw: matchColocated.raw, x: x, y: y,
 		carrier: carrierRaw(carrier), tier: matchColocated.tier, strategy: strategy,
@@ -1124,6 +1293,48 @@ func (e *Engine) revalidateColocatedTapFrame(ctx context.Context,
 func (e *Engine) revalidateTapTargetFrame(ctx context.Context,
 	revoked func() bool, workProjector Projector, obs *observationState,
 	fresh *device.Capture, plan *tapPlan) (*tapFrame, *protocol.APIError) {
+	return e.revalidateTapTargetFrameWith(ctx, revoked, workProjector, obs, fresh,
+		plan, tapFrameOptions{})
+}
+
+// revalidateSubmitTapFrame is the write-submit entry: it re-proves the static
+// submit tap plan on the post-write frame with the submit policy and refuses a
+// disabled execution target. It reuses every four-mode relationship guard and
+// recomputes the landing point exactly like an ordinary tap. The returned error
+// keeps the ordinary code; a still-disabled execution target carries the
+// submit_disabled classification.
+func (e *Engine) revalidateSubmitTapFrame(ctx context.Context, revoked func() bool,
+	workProjector Projector, obs *observationState, fresh *device.Capture,
+	plan *tapPlan, initiallyDisabled bool) (*tapFrame, *protocol.APIError) {
+	frame, apiErr := e.revalidateTapTargetFrameWith(ctx, revoked, workProjector,
+		obs, fresh, plan, submitTapFrameOptions(initiallyDisabled))
+	if apiErr != nil {
+		// When the target itself cannot be matched any more, the only extra
+		// distinction this entry adds is the reason: a uniquely attributable
+		// explicitly disabled execution target is reported as submit_disabled.
+		// The frame is still rejected; nothing here authorizes dispatch.
+		if apiErr.Code == protocol.CodeTargetChanged &&
+			apiErr.Details["reason"] != targetChangedReasonScopeBlocked &&
+			obs != nil && obs.Projection != nil &&
+			submitExecutionDisabledOnFresh(fresh, tapPlanExecutionRaw(plan)) {
+			return nil, submitFrameDisabledError()
+		}
+		return nil, apiErr
+	}
+	if !submitExecutionEnabled(frame, initiallyDisabled) {
+		return nil, submitFrameDisabledError()
+	}
+	return frame, nil
+}
+
+// revalidateTapTargetFrameWith re-proves one tap-frame plan under an explicit
+// policy. Only the execution binding of a write-submit plan receives the enabled
+// transition and the submit classification; every relationship guard, scope
+// proof and landing-point recomputation is shared with the ordinary tap path.
+func (e *Engine) revalidateTapTargetFrameWith(ctx context.Context,
+	revoked func() bool, workProjector Projector, obs *observationState,
+	fresh *device.Capture, plan *tapPlan,
+	opts tapFrameOptions) (*tapFrame, *protocol.APIError) {
 	stop := func() bool {
 		return ctx == nil || ctx.Err() != nil || (revoked != nil && revoked())
 	}
@@ -1135,13 +1346,13 @@ func (e *Engine) revalidateTapTargetFrame(ctx context.Context,
 		return nil, tapHierarchyError()
 	}
 	if plan.bubbleAncestorRaw != nil {
-		return e.revalidateBubbleTapFrame(ctx, revoked, workProjector, obs, fresh, plan)
+		return e.revalidateBubbleTapFrame(ctx, revoked, workProjector, obs, fresh, plan, opts)
 	}
 	if plan.colocatedRaw != nil {
-		return e.revalidateColocatedTapFrame(ctx, revoked, workProjector, obs, fresh, plan)
+		return e.revalidateColocatedTapFrame(ctx, revoked, workProjector, obs, fresh, plan, opts)
 	}
 	if plan.delegateRaw != nil {
-		return e.revalidateCoextensiveChildFrame(ctx, revoked, workProjector, obs, fresh, plan)
+		return e.revalidateCoextensiveChildFrame(ctx, revoked, workProjector, obs, fresh, plan, opts)
 	}
 	topology, apiErr := validateTapRawTopology(fresh)
 	if apiErr != nil {
@@ -1151,8 +1362,8 @@ func (e *Engine) revalidateTapTargetFrame(ctx context.Context,
 		return nil, stoppedActRevalidation()
 	}
 
-	match, matchState := e.probeActNode(
-		ctx, revoked, obs.Projection.Capture, fresh, plan.targetRaw)
+	match, matchState := e.probeTapFrameNode(
+		ctx, revoked, obs.Projection.Capture, fresh, plan.targetRaw, true, opts)
 	switch matchState {
 	case actProbeUnique:
 	case actProbeCancelled:
@@ -1161,7 +1372,7 @@ func (e *Engine) revalidateTapTargetFrame(ctx context.Context,
 		return nil, tapHierarchyError()
 	case actProbeNone, actProbeAmbiguous:
 		return nil, probeTapTargetChangedError(
-			ctx, obs.Projection.Capture, fresh, plan.targetRaw, matchState, match)
+			ctx, obs, fresh, plan.targetRaw, matchState, match)
 	default:
 		return nil, tapHierarchyError()
 	}
@@ -1201,8 +1412,9 @@ func (e *Engine) revalidateTapTargetFrame(ctx context.Context,
 		return nil, stoppedActRevalidation()
 	}
 	targetPublic := view.byRaw[targetIndex]
-	if !validTapPublicTarget(targetPublic, protocol.Action(plan.action)) {
-		return nil, tapTargetChangedReason(targetChangedReasonCapabilityChanged)
+	if apiErr := framePublicTargetError(targetPublic,
+		protocol.Action(plan.action), true, opts); apiErr != nil {
+		return nil, apiErr
 	}
 	input := &tapInput{
 		view: view, capture: fresh, topology: topology,
@@ -1219,14 +1431,24 @@ func (e *Engine) revalidateTapTargetFrame(ctx context.Context,
 		return nil, tapTargetChangedReason(targetChangedReasonScopeBlocked)
 	}
 	return e.resolveDirectTapScopeFrame(ctx, revoked, obs, fresh, topology, view,
-		plan, match, targetPublic, targetIndex, input, scope)
+		plan, match, targetPublic, targetIndex, input, scope, opts)
+}
+
+// directFrameOcclusionProven guards the direct and coextensive landing points
+// resolved by resolveDirectTapScopeFrame. A Tier 4 execution target lost its
+// stable ancestry, so the subtree scope alone no longer proves the point; a
+// newly inserted external owner or a deepest hit outside the target subtree
+// rejects the frame. Tier 1-3 frames are never affected.
+func directFrameOcclusionProven(match actMatch, view *tapPublicView,
+	target *protocol.Node, x, y int) bool {
+	return match.tier != 4 || tapFrameTier4OcclusionProven(view, target, x, y)
 }
 
 func (e *Engine) resolveDirectTapScopeFrame(ctx context.Context,
 	revoked func() bool, obs *observationState, fresh *device.Capture,
 	topology *tapRawTopology, view *tapPublicView, plan *tapPlan,
 	match actMatch, targetPublic *protocol.Node, targetIndex int,
-	input *tapInput, scope *tapScope) (*tapFrame, *protocol.APIError) {
+	input *tapInput, scope *tapScope, opts tapFrameOptions) (*tapFrame, *protocol.APIError) {
 	stop := func() bool {
 		return ctx == nil || ctx.Err() != nil || (revoked != nil && revoked())
 	}
@@ -1235,8 +1457,8 @@ func (e *Engine) resolveDirectTapScopeFrame(ctx context.Context,
 
 	var fixedCarrier *tapCarrier
 	if plan.carrierRaw != nil {
-		carrierMatch, carrierState := e.probeActNode(
-			ctx, revoked, obs.Projection.Capture, fresh, plan.carrierRaw)
+		carrierMatch, carrierState := e.probeTapFrameNode(
+			ctx, revoked, obs.Projection.Capture, fresh, plan.carrierRaw, false, opts)
 		switch carrierState {
 		case actProbeUnique:
 			carrierIndex := indexOf(fresh, carrierMatch.raw)
@@ -1270,6 +1492,9 @@ func (e *Engine) resolveDirectTapScopeFrame(ctx context.Context,
 		if stop() {
 			return nil, stoppedActRevalidation()
 		}
+		if !directFrameOcclusionProven(match, view, targetPublic, plan.x, plan.y) {
+			return nil, tapTargetChangedReason(targetChangedReasonScopeBlocked)
+		}
 		return &tapFrame{
 			capture: fresh, raw: targetRaw, x: plan.x, y: plan.y,
 			carrier: carrierRaw(originalPointCarrier), tier: match.tier,
@@ -1282,6 +1507,9 @@ func (e *Engine) resolveDirectTapScopeFrame(ctx context.Context,
 			scope, targetRaw, fixedCarrier); ok {
 			if stop() {
 				return nil, stoppedActRevalidation()
+			}
+			if !directFrameOcclusionProven(match, view, targetPublic, x, y) {
+				return nil, tapTargetChangedReason(targetChangedReasonScopeBlocked)
 			}
 			return &tapFrame{
 				capture: fresh, raw: targetRaw, x: x, y: y,
@@ -1304,6 +1532,9 @@ func (e *Engine) resolveDirectTapScopeFrame(ctx context.Context,
 	if !provesSubtreeTapPoint(scope, unbound.x, unbound.y) {
 		return nil, tapTargetChangedReason(targetChangedReasonScopeBlocked)
 	}
+	if !directFrameOcclusionProven(match, view, targetPublic, unbound.x, unbound.y) {
+		return nil, tapTargetChangedReason(targetChangedReasonScopeBlocked)
+	}
 	if stop() {
 		return nil, stoppedActRevalidation()
 	}
@@ -1313,133 +1544,92 @@ func (e *Engine) resolveDirectTapScopeFrame(ctx context.Context,
 	}, nil
 }
 
-// provePointTarget requires every observed hit-set node to match a distinct
-// fresh node by complete content identity and ancestry, and requires the fresh
-// public tree's deepest hit set at (x, y) to map to that exact unordered raw
-// index set. The projection is pure CPU and never advances ref continuity.
-func (e *Engine) provePointTarget(workProjector Projector, fresh *device.Capture,
-	obs *observationState, point *pointCheck) *protocol.APIError {
+// provePointTarget re-proves the coordinate target on the fresh frame. The
+// fresh deepest hit set must map one-to-one onto raw indices whose count equals
+// the observed set, and a bounded bipartite maximum matching must pair every
+// observed node with a distinct fresh node:
+//
+//   - bare swipe: structural compatibility plus an anti-occlusion geometry gate,
+//     deliberately ignoring passive leaf text and ancestor wrappers;
+//   - coordinate tap/long_press/text: the target's own structure stays strictly
+//     equal, while ancestors and geometry follow the ref tiers, and the fresh
+//     point must not introduce a new competing interactive owner.
+//
+// The projection is pure CPU and never advances ref continuity.
+func (e *Engine) provePointTarget(ctx context.Context, revoked func() bool,
+	workProjector Projector, fresh *device.Capture, obs *observationState,
+	point *pointCheck, operation *protocol.Operation) *protocol.APIError {
 	if point == nil || obs == nil || obs.Projection == nil || obs.Projection.Capture == nil {
 		return targetChangedAtPoint()
 	}
 	started := time.Now()
-	if _, apiErr := validateTapRawTopology(fresh); apiErr != nil {
+	finish := func(apiErr *protocol.APIError) *protocol.APIError {
 		point.took += time.Since(started)
 		return apiErr
+	}
+	if _, apiErr := validateTapRawTopology(fresh); apiErr != nil {
+		return finish(apiErr)
 	}
 	observedIndices := point.indices
 	if len(observedIndices) == 0 && point.index >= 0 {
 		observedIndices = []int{point.index}
 	}
-	if len(observedIndices) == 0 {
-		point.took += time.Since(started)
-		return targetChangedAtPoint()
-	}
-	wantSet, ok := matchFreshPointSet(fresh, obs.Projection.Capture, observedIndices)
-	if !ok {
-		point.took += time.Since(started)
-		return targetChangedAtPoint()
+	emptyPoint := len(observedIndices) == 0
+	if !emptyPoint && len(observedIndices) > maxPointHitSet {
+		return finish(targetChangedAtPoint())
 	}
 	projector := workProjector
 	if projector == nil {
 		projector = e.projector
 	}
 	if projector == nil {
-		point.took += time.Since(started)
-		return protocol.NewError(503, protocol.CodeHierarchyFailed, "公开树构造失败")
+		return finish(protocol.NewError(503, protocol.CodeHierarchyFailed, "公开树构造失败"))
 	}
 	projection, err := projector.Preview(fresh)
 	if err != nil || projection == nil || projection.Tree == nil ||
 		projection.Tree.Root == nil || projection.Source == nil {
-		point.took += time.Since(started)
-		return protocol.NewError(503, protocol.CodeHierarchyFailed, "公开树构造失败")
+		return finish(protocol.NewError(503, protocol.CodeHierarchyFailed, "公开树构造失败"))
 	}
 	freshNodes := resolvePointSet(projection.Tree.Root, point.x, point.y)
-	point.took += time.Since(started)
-	if len(freshNodes) != len(wantSet) {
-		return targetChangedAtPoint()
+	if len(freshNodes) != len(observedIndices) {
+		return finish(targetChangedAtPoint())
 	}
-	freshSet := make(map[int]struct{}, len(freshNodes))
+	if emptyPoint {
+		// A blank point stays authorized only while it is still blank. A node
+		// or overlay that now covers it would receive an input the caller never
+		// aimed at, so the proof fails exactly like a changed hit set.
+		return finish(nil)
+	}
+	freshIndices := make([]int, 0, len(freshNodes))
+	seen := make(map[int]struct{}, len(freshNodes))
 	for _, node := range freshNodes {
 		if node == nil || node.Ref == "" {
-			return targetChangedAtPoint()
+			return finish(targetChangedAtPoint())
 		}
-		freshIndex, mapped := projection.Source[node.Ref]
-		if !mapped || freshIndex < 0 || freshIndex >= len(fresh.Nodes) {
-			return targetChangedAtPoint()
+		index, mapped := projection.Source[node.Ref]
+		if !mapped || index < 0 || index >= len(fresh.Nodes) {
+			return finish(targetChangedAtPoint())
 		}
-		if _, duplicate := freshSet[freshIndex]; duplicate {
-			return targetChangedAtPoint()
+		if _, duplicate := seen[index]; duplicate {
+			return finish(targetChangedAtPoint())
 		}
-		if _, wanted := wantSet[freshIndex]; !wanted {
-			return targetChangedAtPoint()
-		}
-		freshSet[freshIndex] = struct{}{}
+		seen[index] = struct{}{}
+		freshIndices = append(freshIndices, index)
 	}
-	if len(freshSet) != len(wantSet) {
-		return targetChangedAtPoint()
+	proof := newPointProof(ctx, revoked, obs.Projection.Capture, fresh,
+		fresh.Display.Bounds())
+	if operation != nil && operation.Type == "swipe" {
+		return finish(proof.proveSwipeSet(observedIndices, freshIndices, point.x, point.y))
 	}
-	return nil
-}
-
-func matchFreshPointSet(fresh, original *device.Capture, observedIndices []int) (map[int]struct{}, bool) {
-	if fresh == nil || original == nil || len(observedIndices) == 0 {
-		return nil, false
-	}
-	type observedGroup struct {
-		identity rawIdentity
-		lineage  []rawIdentity
-		count    int
-	}
-	groups := make([]observedGroup, 0, len(observedIndices))
-	for _, obsIndex := range observedIndices {
-		if obsIndex < 0 || obsIndex >= len(original.Nodes) {
-			return nil, false
+	view, viewErr := buildTapPublicView(projection.Tree, fresh, projection.Source)
+	if viewErr != nil {
+		if viewErr.Code == protocol.CodeHierarchyFailed {
+			return finish(viewErr)
 		}
-		identity := identityOf(&original.Nodes[obsIndex])
-		lineage := lineageOf(original, obsIndex)
-		merged := false
-		for groupIndex := range groups {
-			if groups[groupIndex].identity == identity &&
-				sameLineage(groups[groupIndex].lineage, lineage) {
-				groups[groupIndex].count++
-				merged = true
-				break
-			}
-		}
-		if !merged {
-			groups = append(groups, observedGroup{
-				identity: identity,
-				lineage:  lineage,
-				count:    1,
-			})
-		}
+		return finish(targetChangedAtPoint())
 	}
-	wantSet := make(map[int]struct{}, len(observedIndices))
-	for groupIndex := range groups {
-		group := &groups[groupIndex]
-		matched := 0
-		for freshIndex := range fresh.Nodes {
-			if identityOf(&fresh.Nodes[freshIndex]) != group.identity {
-				continue
-			}
-			if !sameLineage(lineageOf(fresh, freshIndex), group.lineage) {
-				continue
-			}
-			matched++
-			if matched > group.count {
-				return nil, false
-			}
-			wantSet[freshIndex] = struct{}{}
-		}
-		if matched != group.count {
-			return nil, false
-		}
-	}
-	if len(wantSet) != len(observedIndices) {
-		return nil, false
-	}
-	return wantSet, true
+	return finish(proof.proveTargetSet(observedIndices, freshIndices, point.x, point.y,
+		view, freshNodes, operation))
 }
 
 func targetChangedAtPoint() *protocol.APIError {
@@ -1503,20 +1693,17 @@ func foregroundMatches(observed, fresh device.Foreground) *protocol.APIError {
 	}
 }
 
-// dispatchAct executes exactly one input branch and reports whether the device
-// accepted it. Anything after the first dispatched primitive that cannot be
-// confirmed is uncertain; nothing is replayed.
-func (e *Engine) dispatchAct(work *workState, op *operationState, obs *observationState,
-	operation *protocol.Operation, fresh *device.Capture,
+// dispatchAct executes exactly one non-text input branch and reports whether
+// the device accepted it. Anything after the first dispatched primitive that
+// cannot be confirmed is uncertain; nothing is replayed. Text is a composite
+// branch with its own dispatchText entry.
+func (e *Engine) dispatchAct(work *workState, operation *protocol.Operation,
 	frame *tapFrame) (string, *protocol.APIError) {
 	session := e.sessionForWork(work)
 	if session == nil || e.workRevoked(work) {
 		return OutcomeNotExecuted, protocol.NewError(409, protocol.CodeStopped, "会话已撤销")
 	}
 	displayID := session.Display.ID
-	if operation.Type == "text" {
-		return e.dispatchText(work, op, session, obs, operation, fresh, frame)
-	}
 	x, y := 0, 0
 	if operation.Target != nil {
 		x, y = operation.Target.X, operation.Target.Y
@@ -1566,26 +1753,29 @@ func (e *Engine) dispatchAct(work *workState, op *operationState, obs *observati
 }
 
 // dispatchText performs at most one focus tap, one display-bound set and one
-// independent ENTER. A ref that is already focused in the fresh frame and
+// independent submission. A ref that is already focused in the fresh frame and
 // passes the complete binding gate skips the focus tap. The set call's own
 // refreshed value of the same node is the write completion evidence; no second
 // tree acquisition or GetText is used to re-prove the write. The set is never
-// replayed and text is never rolled back.
+// replayed and text is never rolled back. A confirmed write whose submission
+// definitely never left the engine returns OutcomePartial with the last fresh
+// capture for on-the-spot delivery.
 func (e *Engine) dispatchText(work *workState, op *operationState, session *sessionState,
 	obs *observationState, operation *protocol.Operation,
-	fresh *device.Capture, frame *tapFrame) (string, *protocol.APIError) {
+	fresh *device.Capture, frame *tapFrame,
+	submit *textSubmitPlan) (string, *device.Capture, *protocol.APIError) {
 	if operation == nil || operation.Target == nil || fresh == nil {
-		return OutcomeNotExecuted, e.textError(op, 409, protocol.CodeTextTargetUnknown,
+		return OutcomeNotExecuted, nil, e.textError(op, 409, protocol.CodeTextTargetUnknown,
 			"无法唯一绑定目标输入对象", textStageTarget, textReasonTargetUnconfirmed,
 			OutcomeNotExecuted, nil)
 	}
-	composite := operation.EffectivePressEnter()
+	autoSubmit := operation.EffectiveAutoSubmit()
 
 	var bound textBinding
 	var apiErr *protocol.APIError
 	if operation.Target.UseRef {
 		if frame == nil || obs == nil || obs.Projection == nil || obs.Projection.Capture == nil {
-			return OutcomeNotExecuted, e.textError(op, 409, protocol.CodeTextTargetUnknown,
+			return OutcomeNotExecuted, nil, e.textError(op, 409, protocol.CodeTextTargetUnknown,
 				"无法唯一绑定目标输入对象", textStageTarget, textReasonTargetUnconfirmed,
 				OutcomeNotExecuted, nil)
 		}
@@ -1605,30 +1795,35 @@ func (e *Engine) dispatchText(work *workState, op *operationState, session *sess
 		if bound.raw == nil {
 			bound, apiErr = e.focusTextRef(work, op, session, obs, fresh, want, tapX, tapY)
 			if apiErr != nil {
-				return apiErr.Outcome, apiErr
+				return apiErr.Outcome, nil, apiErr
 			}
 		}
 	} else {
 		tapX, tapY := operation.Target.X, operation.Target.Y
 		bound, apiErr = e.focusTextPoint(work, op, session, fresh, tapX, tapY)
 		if apiErr != nil {
-			return apiErr.Outcome, apiErr
+			return apiErr.Outcome, nil, apiErr
 		}
+	}
+	if bound.raw == nil || bound.capture == nil {
+		return OutcomeNotExecuted, nil, e.textError(op, 409, protocol.CodeTextTargetUnknown,
+			"无法唯一绑定目标输入对象", textStageTarget, textReasonTargetUnconfirmed,
+			OutcomeNotExecuted, nil)
 	}
 	target := textTargetOf(bound.raw, session.Display)
 
 	if !e.setTextStage(work, op, textStageWrite) {
-		return OutcomeUncertain, e.textError(op, 409, protocol.CodeStopped,
+		return OutcomeUncertain, nil, e.textError(op, 409, protocol.CodeStopped,
 			"原工作已撤销", e.textCurrentStage(op), textReasonAuthorizationRevoked,
 			OutcomeUncertain, nil)
 	}
 	if apiErr := e.beginUIDispatchStage(work, "text", "write"); apiErr != nil {
 		if apiErr.Code == protocol.CodeStopped {
-			return e.textFailureOutcome(op), e.textError(op, 409, protocol.CodeStopped,
+			return e.textFailureOutcome(op), nil, e.textError(op, 409, protocol.CodeStopped,
 				"输入未派发：原工作已撤销", textStageWrite, textReasonAuthorizationRevoked,
 				e.textFailureOutcome(op), nil)
 		}
-		return e.textFailureOutcome(op), e.textError(op, 503, protocol.CodeDeviceUnavailable,
+		return e.textFailureOutcome(op), nil, e.textError(op, 503, protocol.CodeDeviceUnavailable,
 			"输入未派发", textStageWrite, textReasonDispatchNotSent,
 			e.textFailureOutcome(op), nil)
 	}
@@ -1636,7 +1831,7 @@ func (e *Engine) dispatchText(work *workState, op *operationState, session *sess
 	e.recordUIReceipt(work, result.Receipt)
 	if result.Receipt == device.DispatchNotDispatched {
 		e.commitTextReceipt(work, op, "write", result.Receipt, err)
-		return e.textFailureOutcome(op), e.textError(op, 503, protocol.CodeDeviceUnavailable,
+		return e.textFailureOutcome(op), nil, e.textError(op, 503, protocol.CodeDeviceUnavailable,
 			"输入未派发", textStageWrite, textReasonDispatchNotSent,
 			e.textFailureOutcome(op), nil)
 	}
@@ -1646,7 +1841,7 @@ func (e *Engine) dispatchText(work *workState, op *operationState, session *sess
 		if err != nil && errors.Is(err, device.ErrTextResultInvalid) {
 			reason = textReasonRPCResultInvalid
 		}
-		return OutcomeUncertain, e.textError(op, 409, protocol.CodeTextResultUnknown,
+		return OutcomeUncertain, nil, e.textError(op, 409, protocol.CodeTextResultUnknown,
 			"文字写入结果无法确认", textStageWrite, reason, OutcomeUncertain, nil)
 	}
 	e.commitTextReceipt(work, op, "write", device.DispatchTerminated, err)
@@ -1655,7 +1850,7 @@ func (e *Engine) dispatchText(work *workState, op *operationState, session *sess
 		if errors.Is(err, device.ErrTextResultInvalid) {
 			reason = textReasonRPCResultInvalid
 		}
-		return OutcomeUncertain, e.textError(op, 409, protocol.CodeTextResultUnknown,
+		return OutcomeUncertain, nil, e.textError(op, 409, protocol.CodeTextResultUnknown,
 			"文字写入结果无法确认", textStageWrite, reason, OutcomeUncertain, nil)
 	}
 	if result.CandidateCount != 1 {
@@ -1664,48 +1859,51 @@ func (e *Engine) dispatchText(work *workState, op *operationState, session *sess
 		// that nevertheless claims issuance or a value is contradictory and
 		// stays an unknown receipt.
 		if result.Issued || result.Accepted || result.Value != nil {
-			return OutcomeUncertain, e.textError(op, 409, protocol.CodeTextResultUnknown,
+			return OutcomeUncertain, nil, e.textError(op, 409, protocol.CodeTextResultUnknown,
 				"文字写入结果无法确认", textStageWrite, textReasonRPCResultInvalid,
 				OutcomeUncertain, nil)
 		}
 		e.setTextWriteNotDispatched(work, op)
 		count := result.CandidateCount
-		return e.textFailureOutcome(op), e.textError(op, 409, protocol.CodeTextTargetUnknown,
+		return e.textFailureOutcome(op), nil, e.textError(op, 409, protocol.CodeTextTargetUnknown,
 			"目标输入对象无法唯一确认", textStageWrite, textReasonNoUniqueTarget,
 			e.textFailureOutcome(op), &count)
 	}
 	if !result.Issued {
 		// The decode layer rejects this contradiction; keep the same unknown
 		// receipt classification if a different adapter ever produces it.
-		return OutcomeUncertain, e.textError(op, 409, protocol.CodeTextResultUnknown,
+		return OutcomeUncertain, nil, e.textError(op, 409, protocol.CodeTextResultUnknown,
 			"文字写入结果无法确认", textStageWrite, textReasonRPCResultInvalid,
 			OutcomeUncertain, nil)
 	}
 	if !e.noteTextWriteDispatched(work, op) {
-		return OutcomeUncertain, e.textError(op, 409, protocol.CodeStopped,
+		return OutcomeUncertain, nil, e.textError(op, 409, protocol.CodeStopped,
 			"原工作已撤销", e.textCurrentStage(op), textReasonAuthorizationRevoked,
 			OutcomeUncertain, nil)
 	}
 	count := 1
 	if result.Value == nil {
-		return OutcomeUncertain, e.textError(op, 409, protocol.CodeTextResultUnknown,
+		return OutcomeUncertain, nil, e.textError(op, 409, protocol.CodeTextResultUnknown,
 			"文字写入结果无法确认", textStageVerify, textReasonReadbackUnavailable,
 			OutcomeUncertain, &count)
 	}
 	if *result.Value != operation.Text {
-		return OutcomeUncertain, e.textError(op, 409, protocol.CodeTextResultUnknown,
+		return OutcomeUncertain, nil, e.textError(op, 409, protocol.CodeTextResultUnknown,
 			"目标输入框的完整内容与请求不一致", textStageVerify, textReasonReadbackMismatch,
 			OutcomeUncertain, &count)
 	}
 	if !e.commitTextWrite(work, op) {
-		return OutcomeUncertain, e.textError(op, 409, protocol.CodeStopped,
+		return OutcomeUncertain, nil, e.textError(op, 409, protocol.CodeStopped,
 			"原工作已撤销", e.textCurrentStage(op), textReasonAuthorizationRevoked,
 			OutcomeUncertain, nil)
 	}
-	if !composite {
-		return OutcomeExecuted, nil
+	if !autoSubmit {
+		return OutcomeExecuted, nil, nil
 	}
-	return e.dispatchTextEnter(work, op, session, obs, target, operation.Text)
+	if operation.IsSubmitTap() {
+		return e.dispatchTextSubmitTap(work, op, session, obs, submit)
+	}
+	return e.dispatchTextEnterSubmit(work, op, session, obs, bound, operation.Text)
 }
 
 // focusTextRef performs the one allowed focus tap for a ref target and binds
@@ -1806,7 +2004,7 @@ func (e *Engine) focusTextPoint(work *workState, op *operationState, session *se
 			"无法唯一绑定目标输入对象", textStageFocus, textReasonFocusUnconfirmed,
 			OutcomeUncertain, nil)
 	}
-	return textBinding{raw: raw, mode: textNear}, nil
+	return textBinding{raw: raw, mode: textNear, capture: &afterTap}, nil
 }
 
 func (e *Engine) focusTextBeginError(op *operationState, apiErr *protocol.APIError) *protocol.APIError {
@@ -1818,86 +2016,6 @@ func (e *Engine) focusTextBeginError(op *operationState, apiErr *protocol.APIErr
 	return e.textError(op, 503, protocol.CodeDeviceUnavailable,
 		"输入未派发", textStageFocus, textReasonFocusNotSent,
 		e.textFailureOutcome(op), nil)
-}
-
-// dispatchTextEnter performs the independent ENTER boundary. The write is
-// already confirmed; one read-only foreground check and one fresh exact read of
-// the same target decide whether ENTER may be authorized. It is sent at most
-// once and is never replayed.
-func (e *Engine) dispatchTextEnter(work *workState, op *operationState, session *sessionState,
-	obs *observationState, target device.TextTarget, text string) (string, *protocol.APIError) {
-	if !e.setTextStage(work, op, textStageEnter) {
-		return OutcomeUncertain, e.textError(op, 409, protocol.CodeStopped,
-			"原工作已撤销", textStageEnter, textReasonAuthorizationRevoked,
-			OutcomeUncertain, nil)
-	}
-	if e.workRevoked(work) {
-		return OutcomeUncertain, e.textError(op, 409, protocol.CodeStopped,
-			"原工作已撤销", textStageEnter, textReasonAuthorizationRevoked,
-			OutcomeUncertain, nil)
-	}
-	foreground, err := e.dev.Foreground(work.Ctx, session.Display.ID)
-	if err != nil || !sameTextTaskContext(obs.Foreground, foreground) {
-		return OutcomeUncertain, e.textError(op, 409, protocol.CodeTextTargetUnknown,
-			"无法确认 ENTER 的目标上下文", textStageEnter,
-			textReasonEnterContextUnconfirmed, OutcomeUncertain, nil)
-	}
-	if e.workRevoked(work) {
-		return OutcomeUncertain, e.textError(op, 409, protocol.CodeStopped,
-			"原工作已撤销", textStageEnter, textReasonAuthorizationRevoked,
-			OutcomeUncertain, nil)
-	}
-	read, readErr := e.dev.GetTextOnDisplay(work.Ctx, target)
-	if readErr != nil || read.CandidateCount != 1 || read.Value == nil || *read.Value != text {
-		var count *int
-		if readErr == nil {
-			count = &read.CandidateCount
-		}
-		return OutcomeUncertain, e.textError(op, 409, protocol.CodeTextTargetUnknown,
-			"无法确认 ENTER 的目标输入对象", textStageEnter,
-			textReasonEnterTargetUnconfirmed, OutcomeUncertain, count)
-	}
-	if e.workRevoked(work) || work.Ctx.Err() != nil {
-		return OutcomeUncertain, e.textError(op, 409, protocol.CodeStopped,
-			"原工作已撤销", textStageEnter, textReasonAuthorizationRevoked,
-			OutcomeUncertain, nil)
-	}
-	if !e.beginTextEnter(work, op) {
-		return OutcomeUncertain, e.textError(op, 409, protocol.CodeStopped,
-			"原工作已撤销", textStageEnter, textReasonAuthorizationRevoked,
-			OutcomeUncertain, nil)
-	}
-	if apiErr := e.beginUIDispatchStage(work, "key", "enter"); apiErr != nil {
-		if apiErr.Code == protocol.CodeStopped {
-			return OutcomeUncertain, e.textError(op, 409, protocol.CodeStopped,
-				"输入未派发：原工作已撤销", textStageEnter,
-				textReasonAuthorizationRevoked, OutcomeUncertain, nil)
-		}
-		return OutcomeUncertain, e.textError(op, 504, protocol.CodeActionUnknown,
-			"ENTER 未派发", textStageEnter, textReasonEnterNotSent,
-			OutcomeUncertain, nil)
-	}
-	receipt, keyErr := e.dev.Key(work.Ctx, session.Display.ID, "ENTER")
-	e.recordUIReceipt(work, receipt)
-	if receipt == device.DispatchNotDispatched {
-		e.commitTextReceipt(work, op, "enter", receipt, keyErr)
-		return OutcomeUncertain, e.textError(op, 504, protocol.CodeActionUnknown,
-			"ENTER 未派发", textStageEnter, textReasonEnterNotSent,
-			OutcomeUncertain, nil)
-	}
-	if receipt == device.DispatchTerminated && keyErr == nil {
-		e.commitTextReceipt(work, op, "enter", receipt, nil)
-		if e.confirmTextEnter(work, op) {
-			return OutcomeExecuted, nil
-		}
-		return OutcomeUncertain, e.textError(op, 409, protocol.CodeStopped,
-			"原工作已撤销", textStageEnter, textReasonAuthorizationRevoked,
-			OutcomeUncertain, nil)
-	}
-	e.commitTextReceipt(work, op, "enter", receipt, keyErr)
-	return OutcomeUncertain, e.textError(op, 504, protocol.CodeActionUnknown,
-		"输入已派发，但完成结果无法确认", textStageEnter,
-		textReasonEnterUnconfirmed, OutcomeUncertain, nil)
 }
 
 func actionUncertain() *protocol.APIError {
@@ -1919,9 +2037,9 @@ func staticTextError(reason string) *protocol.APIError {
 			"stage":  textStageTarget,
 			"reason": reason,
 			"dispatch": map[string]any{
-				"focus": textDispatchNotAttempted,
-				"write": textDispatchNotAttempted,
-				"enter": textDispatchNotAttempted,
+				"focus":  textDispatchNotAttempted,
+				"write":  textDispatchNotAttempted,
+				"submit": textDispatchNotAttempted,
 			},
 		},
 	}
@@ -1954,13 +2072,13 @@ func (e *Engine) decorateTextRevalidateError(op *operationState, apiErr *protoco
 // facts without changing the error or operation state.
 func (e *Engine) textDetails(op *operationState, stage, reason string, count *int) map[string]any {
 	e.mu.Lock()
-	focus, write, enter := textStageSnapshotLocked(op)
+	focus, write, submit := textStageSnapshotLocked(op)
 	e.mu.Unlock()
 	details := map[string]any{
 		"stage":  stage,
 		"reason": reason,
 		"dispatch": map[string]any{
-			"focus": focus, "write": write, "enter": enter,
+			"focus": focus, "write": write, "submit": submit,
 		},
 	}
 	if count != nil {
@@ -1982,6 +2100,10 @@ type textBinding struct {
 	mode       textBindingMode
 	anchor     optionalString
 	anchorKind string
+	// capture is the complete pre-write frame that owns raw. The write-after
+	// rebind needs both frames to prove anchor uniqueness; a raw pointer alone
+	// cannot answer how many same-anchor fields the pre-write frame had.
+	capture *device.Capture
 }
 
 func textCandidateSafe(node *device.RawNode) bool {
@@ -2136,11 +2258,11 @@ func bindFocusedText(original, fresh *device.Capture, want *device.RawNode,
 	switch {
 	case len(exact) == 1:
 		return textBinding{raw: exact[0], mode: textExact,
-			anchor: anchor, anchorKind: kind}, true
+			anchor: anchor, anchorKind: kind, capture: fresh}, true
 	case len(exact) > 1:
 		return textBinding{}, false
 	case len(near) == 1:
-		return textBinding{raw: near[0], mode: textNear}, true
+		return textBinding{raw: near[0], mode: textNear, capture: fresh}, true
 	case len(near) > 1:
 		return textBinding{}, false
 	}
@@ -2166,7 +2288,7 @@ func bindFocusedText(original, fresh *device.Capture, want *device.RawNode,
 		return textBinding{}, false
 	}
 	return textBinding{raw: shifted[0], mode: textShifted,
-		anchor: anchor, anchorKind: kind}, true
+		anchor: anchor, anchorKind: kind, capture: fresh}, true
 }
 
 // bindFocusedTextAtPoint preserves the coordinate-text path: no ref anchor

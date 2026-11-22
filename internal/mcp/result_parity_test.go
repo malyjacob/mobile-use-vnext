@@ -286,13 +286,29 @@ func resultModeFixtures() []resultModeFixture {
 		`"candidates":[{"ref":"n3","role":"button","actions":["tap"],"bounds":[10,20,30,40],"relation":"overlapping","executable":true}],`+
 		`"blocking_refs":["n4","n5"]}},`+
 		`"recovery":{"entry":"retry","reference":"O","input_state":"effective"}}`)
+	// A rejected revalidation names the nearest changed public ancestor in
+	// error.details.changed_ref; the controlled diagnostic must keep it.
+	add("act", "lineage_changed", `{"operation_id":"P19","operation_state":"finished","outcome":"not_executed",`+
+		`"error":{"code":"target_changed","message":"目标祖先已变化","details":`+
+		`{"reason":"lineage_changed","scope":"target","scope_ref":"n2","changed_ref":"n820"}},`+
+		`"recovery":{"entry":"retry","reference":"O","input_state":"effective"}}`)
 	add("act", "scroll_effect_quality", `{"operation_id":"P1","outcome":"executed","phase":"completed","effect":{"state":"observed"},"target_reference":"O1","observation":{"status":"complete","id":"O2","origin":"P1","revision":2,"quality":{"state":"unstable","samples":5,"stop_reason":"max_samples"},"tree":`+testFullTreeJSON+`}}`)
 	add("act", "scroll_effect_unknown", `{"operation_id":"P1","outcome":"uncertain","effect":{"state":"unknown"},"observation":{"status":"complete","id":"O3","quality":{"state":"unknown","samples":0,"stop_reason":"not_sampled"}},"error":{"code":"action_unknown","message":"动作结果不确定"}}`)
 	add("act", "error_image_v3_tree", `{"operation_id":"P1","outcome":"uncertain","observation":{"status":"complete","id":"O2","tree":`+v3RoleTree+`},"error":{"code":"action_unknown","message":"动作结果不确定"}}`)
-	add("act", "text_input_enter_deferred", `{"operation_id":"P1","outcome":"uncertain","text_input":{"write":"executed","enter":"not_executed"}}`)
-	add("act", "text_input_write_uncertain", `{"operation_id":"P1","outcome":"uncertain","text_input":{"write":"uncertain","enter":"not_executed"}}`)
-	add("act", "text_input_not_dispatched", `{"operation_id":"P1","outcome":"uncertain","text_input":{"write":"not_executed","enter":"not_executed"}}`)
-	add("act", "text_input_enter_uncertain", `{"operation_id":"P1","outcome":"uncertain","text_input":{"write":"executed","enter":"uncertain"}}`)
+	add("act", "text_input_submit_deferred", `{"operation_id":"P1","outcome":"uncertain","text_input":{"write":"executed","submit":"not_executed"}}`)
+	add("act", "text_input_write_uncertain", `{"operation_id":"P1","outcome":"uncertain","text_input":{"write":"uncertain","submit":"not_executed"}}`)
+	add("act", "text_input_not_dispatched", `{"operation_id":"P1","outcome":"uncertain","text_input":{"write":"not_executed","submit":"not_executed"}}`)
+	add("act", "text_input_submit_uncertain", `{"operation_id":"P1","outcome":"uncertain","text_input":{"write":"executed","submit":"uncertain"}}`)
+	// A partial text act confirms the write and never dispatched the submit: the
+	// closed error code, the fixed write/submit snapshot, a fresh ready O and
+	// the durable observe recovery coexist without any unknown dispatch.
+	add("act", "text_submit_partial", `{"operation_id":"P18","outcome":"partial",`+
+		`"text_input":{"write":"executed","submit":"not_executed"},`+
+		`"error":{"code":"text_submit_not_executed","message":"写入已确认，提交未派发","details":`+
+		`{"stage":"submit","reason":"submit_target_unconfirmed","candidate_count":0,`+
+		`"dispatch":{"focus":"not_attempted","write":"executed","submit":"not_attempted"}}},`+
+		`"observation":{"status":"complete","id":"O2","quality":{"state":"unknown","samples":0,"stop_reason":"not_sampled"}},`+
+		`"recovery":{"entry":"observe","reference":"P","input_state":"retired"}}`)
 	fixtures = append(fixtures, resultModeFixture{tool: "act", name: "executed_cancelled", raw: `{"outcome":"executed"}`, cancelled: true})
 	// The inspection tree scope carries the detailed view inside the nested
 	// complete tree; subtree and query declare it on the envelope.
@@ -526,8 +542,9 @@ func TestCatalogFingerprintBaseline(t *testing.T) {
 	// guidance and omission of the two structured evidence objects. It also
 	// covers app kill stating that a virtual-display foreground task is
 	// terminated together with its task window container, while the same app
-	// still having a task on the primary or another display refuses.
-	const baseline = "6a22be013e8653b79f1c46e6c5c9212309454eee1b4f377836b81936b49c95e8"
+	// still having a task on the primary or another display refuses, and the
+	// act(text) auto_submit/submit_ref contract with outcome=partial.
+	const baseline = "6bf61b2727acf0adc0850b7b790534ec4fee8a159fa8266ada0c9fb74eb1eef6"
 	if got := CatalogFingerprint(); got != baseline {
 		t.Fatalf("catalog changed: %s", got)
 	}
@@ -603,12 +620,12 @@ func TestHTTPTextErrorDetailsAcrossModes(t *testing.T) {
 			`{"operation_id":"P16","operation_state":"finished","outcome":"not_executed",`+
 				`"error":{"code":"text_target_uncertain","message":"目标输入对象无法唯一确认","details":`+
 				`{"stage":"write","reason":"no_unique_target","candidate_count":0,`+
-				`"dispatch":{"focus":"not_attempted","write":"not_dispatched","enter":"not_attempted"}}},`+
+				`"dispatch":{"focus":"not_attempted","write":"not_dispatched","submit":"not_attempted"}}},`+
 				`"recovery":{"entry":"observe","reference":"P","input_state":"retired"}}`)
 	})
 	a := &adapter{client: newTestDeviceClient(t, fake)}
 	execution := a.run(context.Background(), testDefinitionByName(t, "act"),
-		[]byte(`{"reference":"O1","operation":{"type":"text","target":{"ref":"n1"},"text":"x","press_enter":false}}`))
+		[]byte(`{"reference":"O1","operation":{"type":"text","target":{"ref":"n1"},"text":"x","auto_submit":false}}`))
 	if execution.result == nil || execution.result.Error == nil {
 		t.Fatalf("HTTP text failure was not projected: %#v", execution)
 	}
@@ -618,7 +635,7 @@ func TestHTTPTextErrorDetailsAcrossModes(t *testing.T) {
 	}
 	dispatch, ok := details["dispatch"].(map[string]any)
 	if !ok || dispatch["focus"] != "not_attempted" || dispatch["write"] != "not_dispatched" ||
-		dispatch["enter"] != "not_attempted" {
+		dispatch["submit"] != "not_attempted" {
 		t.Fatalf("client lost nested dispatch: %#v", details["dispatch"])
 	}
 
@@ -638,7 +655,7 @@ func TestHTTPTextErrorDetailsAcrossModes(t *testing.T) {
 			}
 			diagnostic := testTextContent(t, out)
 			requireTestContains(t, diagnostic, `"candidate_count":0`)
-			requireTestContains(t, diagnostic, `"dispatch":{"enter":"not_attempted","focus":"not_attempted","write":"not_dispatched"}`)
+			requireTestContains(t, diagnostic, `"dispatch":{"focus":"not_attempted","submit":"not_attempted","write":"not_dispatched"}`)
 			continue
 		}
 		decoded, flag, err := decodeResultText(t, testTextContent(t, out))

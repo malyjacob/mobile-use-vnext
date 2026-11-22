@@ -57,9 +57,11 @@ func (e *Engine) deliverRejectedObservation(work *workState, session *sessionSta
 	// forceFull keeps every delivered delta's base equal to the observation this
 	// rejected request actually used: a full reference was just confirmed as the
 	// baseline at claim time, while a delta reference would silently fall back to
-	// an older base the caller did not just read.
+	// an older base the caller did not just read. The delivery frame never
+	// probes historical baselines: it is read-only material for the next
+	// request, so only the primary path may produce its delta.
 	public, _, publishErr := e.publishTreeAttempt(work, session, "act.delivery", tree,
-		tree.capture.CapturedAt, !obs.Full, "complete", nil, quality)
+		tree.capture.CapturedAt, false, !obs.Full, "complete", nil, quality)
 	if publishErr != nil {
 		e.logQuality(work.OperationID, "act.delivery", nil, quality)
 		e.logDelivery(work, "failed", publishErr.Code, "")

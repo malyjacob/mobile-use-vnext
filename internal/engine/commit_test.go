@@ -326,10 +326,14 @@ func publishThresholdCandidate(t *testing.T, h *harness, base *protocol.ReadTree
 		h.engine.mu.Unlock()
 		t.Fatal("threshold fixture has no active session")
 	}
-	h.engine.baseline = &baselineState{
+	h.engine.baselines = []*baselineState{{
 		ObservationID: "Osynthetic", Origin: h.engine.session.Origin,
-		Revision: h.engine.session.Revision, CapturedAt: time.Now(), Tree: base,
-	}
+		Revision: h.engine.session.Revision, CapturedAt: time.Now(),
+		DisplayID:         h.engine.session.Display.ID,
+		DisplayGeneration: h.engine.session.Display.Generation,
+		Tree:              base,
+	}}
+	h.engine.activeBaselineID = "Osynthetic"
 	h.engine.mu.Unlock()
 	h.engine.differ = fixedReadDiffer{delta: delta}
 
@@ -365,7 +369,7 @@ func publishThresholdCandidate(t *testing.T, h *harness, base *protocol.ReadTree
 		commit:       func() {},
 	}
 	published, _, apiErr := h.engine.publishTreeAttempt(work, session, "test.boundary", attempt,
-		time.Now(), false, ObservationReady, nil, nil)
+		time.Now(), false, false, ObservationReady, nil, nil)
 	if apiErr != nil {
 		t.Fatalf("publish threshold candidate: %v", apiErr)
 	}

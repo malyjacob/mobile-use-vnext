@@ -113,7 +113,7 @@ var rmfCompositeInventory = map[string]string{
 	"Error":           "Code Message Details",
 	"Quality":         "State Samples StopReason",
 	"Effect":          "State",
-	"TextInputView":   "Write Enter",
+	"TextInputView":   "Write Submit",
 	"WaitResult":      "Trigger Matched ElapsedMS",
 }
 
@@ -340,16 +340,16 @@ func TestCanonicalJSONCoversManifest(t *testing.T) {
 	}
 }
 
-// TestCanonicalTextInputStates pins every legal write/enter snapshot,
+// TestCanonicalTextInputStates pins every legal write/submit snapshot,
 // including the write-only and not-dispatched states that the manifest
 // fixtures must keep representable.
 func TestCanonicalTextInputStates(t *testing.T) {
 	cases := []*protocol.TextInputView{
-		{Write: protocol.TextInputNotExecuted, Enter: protocol.TextInputNotExecuted},
-		{Write: protocol.TextInputUncertain, Enter: protocol.TextInputNotExecuted},
-		{Write: protocol.TextInputExecuted, Enter: protocol.TextInputNotExecuted},
-		{Write: protocol.TextInputExecuted, Enter: protocol.TextInputUncertain},
-		{Write: protocol.TextInputExecuted, Enter: protocol.TextInputExecuted},
+		{Write: protocol.TextInputNotExecuted, Submit: protocol.TextInputNotExecuted},
+		{Write: protocol.TextInputUncertain, Submit: protocol.TextInputNotExecuted},
+		{Write: protocol.TextInputExecuted, Submit: protocol.TextInputNotExecuted},
+		{Write: protocol.TextInputExecuted, Submit: protocol.TextInputUncertain},
+		{Write: protocol.TextInputExecuted, Submit: protocol.TextInputExecuted},
 	}
 	for _, snapshot := range cases {
 		value, err := canonicalResult(&execution{result: &protocol.Result{
@@ -944,7 +944,7 @@ func rmfResultFixtures() []rmfFixture {
 			Outcome:             "executed",
 			Phase:               "completed",
 			Effect:              &protocol.Effect{State: protocol.EffectObserved},
-			TextInput:           &protocol.TextInputView{Write: protocol.TextInputExecuted, Enter: protocol.TextInputExecuted},
+			TextInput:           &protocol.TextInputView{Write: protocol.TextInputExecuted, Submit: protocol.TextInputExecuted},
 			TargetReference:     "O1",
 			RequestClosed:       rmfPtr(false),
 			BlockingOperationID: "P2",
@@ -1359,7 +1359,7 @@ func rmfResultFixtures() []rmfFixture {
 			OperationID: "P20",
 			Outcome:     "uncertain",
 			TextInput: &protocol.TextInputView{
-				Write: protocol.TextInputExecuted, Enter: protocol.TextInputNotExecuted,
+				Write: protocol.TextInputExecuted, Submit: protocol.TextInputNotExecuted,
 			},
 		},
 	}
@@ -1369,17 +1369,55 @@ func rmfResultFixtures() []rmfFixture {
 			OperationID: "P21",
 			Outcome:     "uncertain",
 			TextInput: &protocol.TextInputView{
-				Write: protocol.TextInputNotExecuted, Enter: protocol.TextInputNotExecuted,
+				Write: protocol.TextInputNotExecuted, Submit: protocol.TextInputNotExecuted,
 			},
 		},
 	}
-	textInputEnterUncertain := rmfFixture{
-		name: "text_input_enter_uncertain",
+	textInputSubmitUncertain := rmfFixture{
+		name: "text_input_submit_uncertain",
 		result: protocol.Result{
 			OperationID: "P22",
 			Outcome:     "uncertain",
 			TextInput: &protocol.TextInputView{
-				Write: protocol.TextInputExecuted, Enter: protocol.TextInputUncertain,
+				Write: protocol.TextInputExecuted, Submit: protocol.TextInputUncertain,
+			},
+		},
+	}
+	// A partial text act confirms the write while the submit was never
+	// dispatched; it carries the closed error code and a fresh ready O.
+	textInputPartial := rmfFixture{
+		name: "text_input_partial",
+		result: protocol.Result{
+			OperationID: "P24",
+			Outcome:     "partial",
+			TextInput: &protocol.TextInputView{
+				Write: protocol.TextInputExecuted, Submit: protocol.TextInputNotExecuted,
+			},
+			Error: &protocol.Error{
+				Code:    protocol.CodeTextSubmitNotExecuted,
+				Message: "写入已确认，提交未派发",
+				Details: map[string]any{
+					"stage":           "submit",
+					"reason":          "submit_target_unconfirmed",
+					"candidate_count": 0,
+					"dispatch": map[string]any{
+						"focus": "not_attempted", "write": "executed", "submit": "not_attempted",
+					},
+				},
+			},
+			Observation: &protocol.Observation{
+				Status:          "complete",
+				ID:              "O7",
+				Origin:          "P24",
+				Revision:        7,
+				CapturedAt:      "2026-11-10T00:00:12Z",
+				ActionableUntil: "2026-11-10T00:01:12Z",
+				Quality: &protocol.Quality{
+					State:      protocol.QualityStable,
+					Samples:    2,
+					StopReason: protocol.QualityStopStable,
+				},
+				Tree: rmfFullTreeValue("n1"),
 			},
 		},
 	}
@@ -1423,7 +1461,7 @@ func rmfResultFixtures() []rmfFixture {
 		full, delta, query, snap,
 		appFind, appList, appListUnknownForeground, appOpen, appClaim, appHandoff, appClose, appKill,
 		scrollNotObserved, scrollUnknownEffect, notSampled,
-		textInputWriteOnly, textInputNotDispatched, textInputEnterUncertain,
+		textInputWriteOnly, textInputNotDispatched, textInputSubmitUncertain, textInputPartial,
 		staticNoSafeTrajectory,
 	}
 }

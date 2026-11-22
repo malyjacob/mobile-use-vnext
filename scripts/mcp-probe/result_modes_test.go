@@ -1789,6 +1789,54 @@ func TestResolveRecoveryReference(t *testing.T) {
 			want: "P7391_origin",
 		},
 		{
+			name: "status P partial operation outranks session origin",
+			view: resultView{
+				OperationID: "P7391_partial",
+				Outcome:     outcomePartial,
+				Session:     &sessionView{Origin: "P7391_origin"},
+				Recovery:    &recoveryView{Entry: "status", Reference: "P"},
+			},
+			want: "P7391_partial",
+		},
+		{
+			name: "status P partial keeps live blocker priority",
+			view: resultView{
+				OperationID:         "P7391_partial",
+				Outcome:             outcomePartial,
+				BlockingOperationID: "P7391_block",
+				Error:               &errorView{Code: "device_busy"},
+				Recovery:            &recoveryView{Entry: "status", Reference: "P"},
+			},
+			want: "P7391_block",
+		},
+		{
+			name: "observe P partial outranks session origin",
+			view: resultView{
+				OperationID: "P7391_partial",
+				Outcome:     outcomePartial,
+				Session:     &sessionView{Origin: "P7391_origin"},
+				Recovery:    &recoveryView{Entry: "observe", Reference: "P", InputState: "retired"},
+			},
+			want: "P7391_partial",
+		},
+		{
+			name: "observe P partial error code resolves operation",
+			view: resultView{
+				OperationID: "P7391_partial",
+				Error:       &errorView{Code: "text_submit_not_executed"},
+				Recovery:    &recoveryView{Entry: "observe", Reference: "P", InputState: "retired"},
+			},
+			want: "P7391_partial",
+		},
+		{
+			name: "observe P partial without operation id falls back",
+			view: resultView{
+				Outcome:  outcomePartial,
+				Recovery: &recoveryView{Entry: "observe", Reference: "P", InputState: "retired"},
+			},
+			want: "P",
+		},
+		{
 			name: "observe P from request",
 			view: resultView{
 				Recovery: &recoveryView{Entry: "observe", Reference: "P"},
@@ -1839,6 +1887,49 @@ func TestResolveRecoveryReference(t *testing.T) {
 				t.Fatalf("ref = %q, want %q", actual, testCase.want)
 			}
 		})
+	}
+}
+
+// TestBothModePartialTextSubmit proves the renamed write/submit snapshot and
+// outcome=partial survive the both-mode gate, and that the exact observe(P)
+// ref resolves to this operation's own P from the same-call facts.
+func TestBothModePartialTextSubmit(t *testing.T) {
+	payload := map[string]any{
+		"operation_id": "P7391_7",
+		"outcome":      outcomePartial,
+		"text_input":   map[string]any{"write": "executed", "submit": "not_executed"},
+		"error": map[string]any{
+			"code": "text_submit_not_executed", "message": "写入已确认，提交未派发",
+		},
+		"recovery": map[string]any{"entry": "observe", "reference": "P", "input_state": "retired"},
+	}
+	text := fakeResultText(payload, true)
+	for _, required := range []string{
+		"text_input write=executed submit=not_executed\n",
+		"result v4 err op=P7391_7 outcome=partial\n",
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("text projection lacks %q:\n%s", required, text)
+		}
+	}
+	projected, failure := project(&sdk.CallToolResult{
+		Content:           []sdk.Content{&sdk.TextContent{Text: text}},
+		StructuredContent: payload,
+		IsError:           true,
+	}, resultModeBoth, "")
+	if failure != nil {
+		t.Fatalf("partial both-mode result rejected: %s %v", failure.reason, failure.fields)
+	}
+	if projected.view.Outcome != outcomePartial {
+		t.Fatalf("outcome = %q, want partial", projected.view.Outcome)
+	}
+	if projected.view.TextInput == nil ||
+		projected.view.TextInput.Write != textInputExecuted ||
+		projected.view.TextInput.Submit != textInputNotExecuted {
+		t.Fatalf("text_input = %+v", projected.view.TextInput)
+	}
+	if got := resolveRecoveryReference(projected.view, ""); got != "P7391_7" {
+		t.Fatalf("recovery ref = %q, want the operation's own P", got)
 	}
 }
 

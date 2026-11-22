@@ -102,7 +102,11 @@ func testSchema(name string, additional bool) map[string]any {
 			"type": "object",
 			"properties": map[string]any{
 				"bubble":      map[string]any{"type": "boolean"},
-				"press_enter": map[string]any{"type": "boolean"},
+				"auto_submit": map[string]any{"type": "boolean"},
+				"submit_ref": map[string]any{
+					"type": "string", "minLength": 1, "maxLength": 64,
+					"pattern": "^(enter_key|n[1-9][0-9]*)$",
+				},
 			},
 		}
 		required = []string{"reference", "operation"}
@@ -172,6 +176,51 @@ func TestCheckSchemas(t *testing.T) {
 			"required": []string{}, "additionalProperties": false,
 		}
 		if failure := checkSchemas(tools); failure == nil || failure.reason != "required_mismatch" {
+			t.Fatalf("failure = %v", failure)
+		}
+	})
+	t.Run("act retired press_enter", func(t *testing.T) {
+		tools := testTools()
+		act := actToolFrom(t, tools)
+		schema, operation := actOperationSchema(t, act)
+		operation["press_enter"] = map[string]any{"type": "boolean"}
+		act.InputSchema = schema
+		if failure := checkSchemas(tools); failure == nil || failure.reason != "act_retired_press_enter" {
+			t.Fatalf("failure = %v", failure)
+		}
+	})
+	t.Run("act submit_ref default", func(t *testing.T) {
+		tools := testTools()
+		act := actToolFrom(t, tools)
+		schema, operation := actOperationSchema(t, act)
+		operation["submit_ref"] = map[string]any{
+			"type": "string", "minLength": 1, "maxLength": 64,
+			"pattern": "^(enter_key|n[1-9][0-9]*)$", "default": "enter_key",
+		}
+		act.InputSchema = schema
+		if failure := checkSchemas(tools); failure == nil || failure.reason != "act_branch_member_default" {
+			t.Fatalf("failure = %v", failure)
+		}
+	})
+	t.Run("act auto_submit type", func(t *testing.T) {
+		tools := testTools()
+		act := actToolFrom(t, tools)
+		schema, operation := actOperationSchema(t, act)
+		operation["auto_submit"] = map[string]any{"type": "string"}
+		act.InputSchema = schema
+		if failure := checkSchemas(tools); failure == nil || failure.reason != "act_branch_member_missing" {
+			t.Fatalf("failure = %v", failure)
+		}
+	})
+	t.Run("act submit_ref pattern", func(t *testing.T) {
+		tools := testTools()
+		act := actToolFrom(t, tools)
+		schema, operation := actOperationSchema(t, act)
+		operation["submit_ref"] = map[string]any{
+			"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^n[0-9]+$",
+		}
+		act.InputSchema = schema
+		if failure := checkSchemas(tools); failure == nil || failure.reason != "act_submit_ref_shape_invalid" {
 			t.Fatalf("failure = %v", failure)
 		}
 	})
@@ -886,7 +935,7 @@ func fakeResultText(payload map[string]any, isError bool) string {
 
 	if input, ok := payload["text_input"].(map[string]any); ok {
 		builder.WriteString("text_input write=" + input["write"].(string) +
-			" enter=" + input["enter"].(string) + "\n")
+			" submit=" + input["submit"].(string) + "\n")
 	}
 	for _, scalar := range []string{"target_reference", "blocking_operation_id", "blocking_code", "start_operation_id", "observation_state", "input_state"} {
 		if value, ok := payload[scalar].(string); ok && value != "" {
@@ -2148,7 +2197,7 @@ func (f *fakeRecoveryService) writeAct(writer http.ResponseWriter, operationID s
 		Image     bool   `json:"image"`
 		Operation struct {
 			Type       string `json:"type"`
-			PressEnter *bool  `json:"press_enter"`
+			AutoSubmit *bool  `json:"auto_submit"`
 		} `json:"operation"`
 	}
 	_ = json.Unmarshal(body, &actBody)
@@ -2171,11 +2220,11 @@ func (f *fakeRecoveryService) writeAct(writer http.ResponseWriter, operationID s
 		result.Effect = &protocol.Effect{State: protocol.EffectObserved}
 	}
 	// An accepted text act carries the stage snapshot unless the caller
-	// explicitly disabled ENTER; that false branch keeps the old shape.
+	// explicitly disabled auto_submit; that false branch keeps the old shape.
 	if actBody.Operation.Type == "text" &&
-		(actBody.Operation.PressEnter == nil || *actBody.Operation.PressEnter) {
+		(actBody.Operation.AutoSubmit == nil || *actBody.Operation.AutoSubmit) {
 		result.TextInput = &protocol.TextInputView{
-			Write: protocol.TextInputExecuted, Enter: protocol.TextInputExecuted,
+			Write: protocol.TextInputExecuted, Submit: protocol.TextInputExecuted,
 		}
 	}
 	f.mutex.Unlock()
@@ -3016,7 +3065,7 @@ func TestActScrollResultProjection(t *testing.T) {
 
 // TestActTextInputProjection drives composite text results through the real
 // adapter and asserts the fixed stage object in text, structured and both
-// modes, including the explicit press_enter=false shape with no object.
+// modes, including the explicit auto_submit=false shape with no object.
 func TestActTextInputProjection(t *testing.T) {
 	for _, mode := range []string{resultModeBoth, resultModeText, resultModeStructured} {
 		t.Run(mode, func(t *testing.T) {
@@ -3040,7 +3089,7 @@ func TestActTextInputProjection(t *testing.T) {
 			}
 			if entered.view.TextInput == nil ||
 				entered.view.TextInput.Write != protocol.TextInputExecuted ||
-				entered.view.TextInput.Enter != protocol.TextInputExecuted {
+				entered.view.TextInput.Submit != protocol.TextInputExecuted {
 				t.Fatalf("default text_input = %+v, want executed/executed", entered.view.TextInput)
 			}
 
@@ -3048,17 +3097,17 @@ func TestActTextInputProjection(t *testing.T) {
 				"reference": "O2",
 				"operation": map[string]any{
 					"type": "text", "target": map[string]any{"ref": "n1"},
-					"text": "probe", "press_enter": false,
+					"text": "probe", "auto_submit": false,
 				},
 			})
 			if failure != nil {
 				t.Fatalf("input-only text act: %s %v", failure.reason, failure.fields)
 			}
 			if inputOnly.view.TextInput != nil {
-				t.Fatalf("press_enter=false text_input = %+v, want absent", inputOnly.view.TextInput)
+				t.Fatalf("auto_submit=false text_input = %+v, want absent", inputOnly.view.TextInput)
 			}
 			if _, present := lookupPath(inputOnly.object, []string{"text_input"}); present {
-				t.Fatal("press_enter=false object carries text_input")
+				t.Fatal("auto_submit=false object carries text_input")
 			}
 		})
 	}
@@ -3068,11 +3117,11 @@ func TestActTextInputProjection(t *testing.T) {
 // ordered combinations are accepted and a partial or unknown state fails.
 func TestCheckTextInputSnapshot(t *testing.T) {
 	legal := []*textInputView{
-		{Write: textInputNotExecuted, Enter: textInputNotExecuted},
-		{Write: textInputUncertain, Enter: textInputNotExecuted},
-		{Write: textInputExecuted, Enter: textInputNotExecuted},
-		{Write: textInputExecuted, Enter: textInputUncertain},
-		{Write: textInputExecuted, Enter: textInputExecuted},
+		{Write: textInputNotExecuted, Submit: textInputNotExecuted},
+		{Write: textInputUncertain, Submit: textInputNotExecuted},
+		{Write: textInputExecuted, Submit: textInputNotExecuted},
+		{Write: textInputExecuted, Submit: textInputUncertain},
+		{Write: textInputExecuted, Submit: textInputExecuted},
 	}
 	for _, input := range legal {
 		if failure := checkTextInputSnapshot(input); failure != nil {
@@ -3083,10 +3132,10 @@ func TestCheckTextInputSnapshot(t *testing.T) {
 		t.Fatalf("absent snapshot rejected: %s", failure.reason)
 	}
 	illegal := []*textInputView{
-		{Write: "", Enter: textInputNotExecuted},
-		{Write: textInputNotExecuted, Enter: textInputExecuted},
-		{Write: textInputUncertain, Enter: textInputUncertain},
-		{Write: "unknown", Enter: textInputNotExecuted},
+		{Write: "", Submit: textInputNotExecuted},
+		{Write: textInputNotExecuted, Submit: textInputExecuted},
+		{Write: textInputUncertain, Submit: textInputUncertain},
+		{Write: "unknown", Submit: textInputNotExecuted},
 	}
 	for _, input := range illegal {
 		if failure := checkTextInputSnapshot(input); failure == nil {

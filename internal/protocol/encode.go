@@ -243,8 +243,8 @@ func encodeOperation(enc *jsontext.Encoder, op *Operation) error {
 		if err := rejectSwipeDuration(op); err != nil {
 			return err
 		}
-		if op.HasPressEnter {
-			return errors.New("press_enter is only valid for text")
+		if op.HasAutoSubmit || op.HasSubmitRef {
+			return errors.New("auto_submit and submit_ref are only valid for text")
 		}
 		if op.HasBubble && (op.Target == nil || !op.Target.UseRef) {
 			return errors.New("bubble is only valid for a ref target")
@@ -279,11 +279,19 @@ func encodeOperation(enc *jsontext.Encoder, op *Operation) error {
 		if err := writeString(enc, op.Text); err != nil {
 			return err
 		}
-		if op.HasPressEnter {
-			if err := writeName(enc, "press_enter"); err != nil {
+		if op.HasAutoSubmit {
+			if err := writeName(enc, "auto_submit"); err != nil {
 				return err
 			}
-			if err := writeBool(enc, op.PressEnter); err != nil {
+			if err := writeBool(enc, op.AutoSubmit); err != nil {
+				return err
+			}
+		}
+		if op.HasSubmitRef {
+			if err := writeName(enc, "submit_ref"); err != nil {
+				return err
+			}
+			if err := writeString(enc, op.SubmitRef); err != nil {
 				return err
 			}
 		}

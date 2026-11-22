@@ -41,7 +41,7 @@ var v4ResultFields = func() map[string]resultV4FieldKind {
 	add("", "text_input session cleanup error recovery observation app notification diagnosis", v4Object)
 	add("", "effect", v4Omitted)
 	add("effect.", "state", v4Token)
-	add("text_input.", "write enter", v4Token)
+	add("text_input.", "write submit", v4Token)
 	add("", "image inspection shell wait", v4Object)
 	add("wait.", "trigger", v4Token)
 	add("wait.", "matched", v4JSON)
@@ -532,16 +532,16 @@ func renderTextInputV4(raw []byte) (string, bool) {
 		return "", false
 	}
 	write, writeOK := rawStringValue(values["write"])
-	enter, enterOK := rawStringValue(values["enter"])
-	if !writeOK || !enterOK || !resultToken(write) || !resultToken(enter) {
+	submit, submitOK := rawStringValue(values["submit"])
+	if !writeOK || !submitOK || !resultToken(write) || !resultToken(submit) {
 		return "", false
 	}
 	for name := range values {
-		if name != "write" && name != "enter" {
+		if name != "write" && name != "submit" {
 			return "", false
 		}
 	}
-	return "text_input write=" + write + " enter=" + enter, true
+	return "text_input write=" + write + " submit=" + submit, true
 }
 
 func renderNotifyV4(w *resultV4Writer, values map[string]json.RawMessage, handled map[string]bool) {
@@ -1733,11 +1733,13 @@ func resolveStatusRecoveryP(top map[string]json.RawMessage, requestRef, cause st
 		requestClosed := resultTopBoolPtr(top, "request_closed")
 		cleanupState := resultCleanupState(top)
 		if resultTopString(top, "outcome") == "uncertain" ||
+			resultTopString(top, "outcome") == "partial" ||
 			resultTopString(top, "operation_state") == "running" ||
 			resultTopString(top, "phase") == "executed_revoked" ||
 			(requestClosed != nil && *requestClosed) ||
 			recoveryCauseIs(cause, "running", "executed_revoked", "cleanup_pending") ||
-			errorCodeIs(errCode, "call_cancelled", "transport_unavailable", "invalid_response", "task_lifecycle_busy") ||
+			errorCodeIs(errCode, "call_cancelled", "transport_unavailable", "invalid_response", "task_lifecycle_busy",
+				"text_submit_not_executed") ||
 			cleanupState == "pending" || cleanupState == "unconfirmed" {
 			return operationID
 		}
@@ -1758,6 +1760,15 @@ func resolveStatusRecoveryP(top map[string]json.RawMessage, requestRef, cause st
 
 func resolveObserveRecoveryP(top map[string]json.RawMessage, requestRef, cause string) string {
 	errCode := resultErrCode(top)
+	operationID := resultTopString(top, "operation_id")
+	// A confirmed partial text act owns the observe recovery even when a frozen
+	// copy still carries session.origin: the durable observe(P, retired) must
+	// resolve to this operation's own P both when the first response published
+	// a fresh ready O and when that observation failed or was never attached.
+	if (resultTopString(top, "outcome") == "partial" || errCode == "text_submit_not_executed") &&
+		isOpID(operationID) {
+		return operationID
+	}
 	if origin := resultNestedString(top, "session", "origin"); isOpID(origin) {
 		return origin
 	}
@@ -1766,15 +1777,16 @@ func resolveObserveRecoveryP(top map[string]json.RawMessage, requestRef, cause s
 		errCode != "request_closed" && errCode != "reference_has_no_session" {
 		return requestRef
 	}
-	operationID := resultTopString(top, "operation_id")
 	if isOpID(operationID) {
 		if cause == "post_observation_failed" ||
 			resultTopString(top, "phase") == "post_observation_failed" ||
 			resultTopString(top, "outcome") == "uncertain" ||
+			resultTopString(top, "outcome") == "partial" ||
 			errorCodeIs(errCode,
 				"observation_expired", "observation_claimed", "observation_retired",
 				"hierarchy_unavailable", "stale_screen", "tree_too_large",
-				"control_ui_on_virtual_display", "display_unavailable") {
+				"control_ui_on_virtual_display", "display_unavailable",
+				"text_submit_not_executed") {
 			return operationID
 		}
 	}
@@ -2014,7 +2026,7 @@ var resultFields = func() map[string]resultFieldKind {
 	add("", "effect", fieldObject)
 	add("effect.", "state", fieldToken)
 	add("", "text_input", fieldObject)
-	add("text_input.", "write enter", fieldToken)
+	add("text_input.", "write submit", fieldToken)
 	add("", "session cleanup error recovery observation app notification diagnosis", fieldObject)
 	add("", "image", fieldJSON)
 	add("", "inspection shell", fieldBlock)

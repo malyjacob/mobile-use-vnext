@@ -64,6 +64,11 @@ const (
 	OutcomeExecuted    = "executed"
 	OutcomeNotExecuted = "not_executed"
 	OutcomeUncertain   = "uncertain"
+	// OutcomePartial is the confirmed-partial fact of the composite text action:
+	// the write is confirmed executed while the submission is certainly not
+	// executed, with no unknown physical side effect. It is not a degraded
+	// executed and only the text branch may produce it.
+	OutcomePartial = protocol.OutcomePartial
 )
 
 // Config is the fixed internal policy for the first writable loop. These are
@@ -290,6 +295,11 @@ type Projection struct {
 	Tree    *protocol.Tree
 	Capture *device.Capture
 	Source  map[string]int
+	// ContextSource maps a context ref to its raw index. Context nodes are not
+	// actionable, so they stay out of Source; continuity and target
+	// revalidation still need their raw evidence to keep the reading ancestry
+	// stable.
+	ContextSource map[string]int
 }
 
 // Projector builds the public tree and keeps conservative ref continuity.
@@ -300,6 +310,16 @@ type Projector interface {
 	// candidate; a discarded candidate leaves ref numbering untouched, so a
 	// rejected acquisition never shifts the refs of a later published tree.
 	Candidate(capture *device.Capture) (*Projection, func(), error)
+	// CandidateAgainst projects one capture against an explicit historical
+	// baseline projection instead of the projector's current continuity state.
+	// It is a read-only probe: the projector's previous snapshot and ref
+	// high-water mark are untouched until the returned commit function runs, so
+	// a multi-baseline delta probe can try a page-return baseline and discard
+	// the candidate without shifting the refs of the observation that is
+	// eventually published. Fresh refs are allocated above the projector's
+	// current high-water mark, so a committed candidate never reuses a number
+	// another observation may already hold.
+	CandidateAgainst(prev *Projection, capture *device.Capture) (*Projection, func(), error)
 	// Preview projects a candidate frame without advancing ref continuity, so
 	// a settle sample never shifts the refs of already published observations.
 	Preview(capture *device.Capture) (*Projection, error)
@@ -378,14 +398,23 @@ type Engine struct {
 	maintenanceCancel  context.CancelFunc
 	maintenanceOwner   *cleanupState
 
-	session      *sessionState
-	lastSession  *sessionState
-	baseline     *baselineState
-	current      *observationState
-	observations map[string]*observationState
-	operations   map[string]*operationState
-	work         *workState
-	cleanup      *cleanupState
+	session     *sessionState
+	lastSession *sessionState
+	// baselines is the bounded pool of confirmed full observations a delta may
+	// be expressed against. Every entry stays retained in observations, so a
+	// published delta base can always be read back with inspect. Entries are
+	// immutable and ordered by Revision descending (newest first).
+	baselines []*baselineState
+	// activeBaselineID is the baseline the projector's current continuity
+	// state is aligned with: set when the current full observation is
+	// confirmed or a delta is published against it, cleared when a full is
+	// published or the session is rebuilt.
+	activeBaselineID string
+	current          *observationState
+	observations     map[string]*observationState
+	operations       map[string]*operationState
+	work             *workState
+	cleanup          *cleanupState
 	// shell is the current managed runner ownership. It keeps ordinary
 	// admission closed only until its bounded confirmation deadline.
 	shell        *shellState
@@ -481,10 +510,20 @@ type baselineState struct {
 	Origin        string
 	Revision      int
 	CapturedAt    time.Time
+	// DisplayID and DisplayGeneration bind the entry to the target display its
+	// public ref continuity belongs to. A baseline captured for a different
+	// display (for example after a display generation change) must never take
+	// part in re-numbering or delta selection.
+	DisplayID         int
+	DisplayGeneration string
 	// Tree is the confirmed compact public read tree that a delta of this
 	// baseline is expressed against. The complete internal snapshot stays with
 	// its retained observation.
 	Tree *protocol.ReadTree
+	// Projection is the immutable complete public projection of the confirmed
+	// full observation. A historical page-return probe projects a new capture
+	// against it without publishing continuity state.
+	Projection *Projection
 }
 
 type observationState struct {
@@ -565,9 +604,9 @@ type operationState struct {
 	// status(P) republishes it without an observation.
 	Wait *protocol.WaitResult
 	// TextStage is the private cumulative primitive evidence of one claimed
-	// text action (both press_enter branches). TextInput is its public immutable
+	// text action (both auto_submit branches). TextInput is its public immutable
 	// snapshot and exists only for the composite branch.
-	TextStagePressEnter bool
+	TextStageAutoSubmit bool
 	TextStage           *textStage
 	TextInput           *protocol.TextInputView
 }
@@ -1279,6 +1318,11 @@ func (e *Engine) operationViewLocked(op *operationState) *protocol.Result {
 	} else {
 		result.Recovery = op.Recovery
 	}
+	// A confirmed-partial text operation replays its saved observe(P, retired)
+	// base: the first response may have omitted recovery because it delivered a
+	// real ready observation, but a duplicate P or status(P) never carries that
+	// observation, so the live projector must keep the base (or a live
+	// session/durability/device/busy override) on every replay.
 	if op.Kind == "act" && op.ActAction == "text" && op.State == OperationFinished && op.Claimed {
 		e.applyLiveTextRecoveryLocked(op, result, time.Now())
 	}

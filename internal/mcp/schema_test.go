@@ -19,10 +19,12 @@ import (
 // server/discover, so the same server instructions must appear there too.
 const compatibilityProtocolVersion = "2025-11-25"
 
-// baselineDiscoveryBytes is the pre-#16 discovery payload measured on the
-// baseline commit: instructions (0) plus the complete tools/list JSON. The
-// deduplicated instructions and descriptions must stay strictly below it.
-const baselineDiscoveryBytes = 36250
+// baselineDiscoveryBytes is the measured discovery payload ceiling: instructions
+// plus the complete tools/list JSON. The deduplicated instructions and
+// descriptions must stay strictly below it. The current ceiling covers the
+// text auto_submit/submit_ref contract (result v4 partial, write/submit
+// snapshot and text_submit_not_executed).
+const baselineDiscoveryBytes = 37500
 
 // TestTreeTextGuideStatesTriStateOmission pins the shared tree legend to the
 // complete-node defaults and the different set semantics.
@@ -308,7 +310,8 @@ func TestServerInstructionsCarryCrossToolRules(t *testing.T) {
 		"notify 无 reference",
 		"同一 base 的每条 delta",
 		"不发送 ENTER",
-		"press_enter",
+		"auto_submit",
+		"submit_ref",
 		"text_input",
 		"bubble",
 		"统一用 reference",
@@ -414,9 +417,10 @@ func TestServerInstructionsKeepContractBoundary(t *testing.T) {
 	for _, required := range []string{
 		"请求引用统一用 reference",
 		"默认 bubble=true",
-		"默认 press_enter=true",
+		"默认 auto_submit=true",
 		"operation.bubble=false",
-		"operation.press_enter=false",
+		"operation.auto_submit=false",
+		"operation.submit_ref=",
 	} {
 		if !strings.Contains(instructions, required) {
 			t.Errorf("server instructions lack %q", required)
@@ -609,7 +613,8 @@ func TestToolDescriptionsAreCallerOriented(t *testing.T) {
 		},
 		"act": {
 			"reference",
-			"press_enter",
+			"auto_submit",
+			"submit_ref",
 			"text_input",
 			"bubble",
 			"另发 ENTER",
@@ -637,6 +642,9 @@ func TestToolDescriptionsAreCallerOriented(t *testing.T) {
 			"`!tap`/`!text`/`!swipe`",
 			"`@` 表示",
 			"uncertain",
+			"partial",
+			"text_submit_not_executed",
+			"dispatch（focus/write/submit）",
 			"`recovery entry=observe ref=<P>`",
 			"无需重观察或手算坐标",
 		},
@@ -781,6 +789,8 @@ func TestLiveToolDescriptionsClarifyWaitAndTextRecovery(t *testing.T) {
 			"session.origin",
 			"属于该会话的 operation_id",
 			"避免原样重发",
+			"submit_ref",
+			"text_submit_not_executed",
 			"`!tap`/`!text`/`!swipe`",
 			"`@` 表示",
 			"3×3 网格选点",
@@ -866,7 +876,9 @@ func TestActDescriptionKeepsCallerRecovery(t *testing.T) {
 	for _, required := range []string{
 		"全文写入",
 		"另发 ENTER",
-		"press_enter=false",
+		"auto_submit=false",
+		"submit_ref",
+		"text_submit_not_executed",
 		"text_input",
 		"bubble=true",
 		"3×3",

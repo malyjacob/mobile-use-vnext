@@ -381,9 +381,15 @@ func checkSchemas(tools []*sdk.Tool) *checkError {
 			if !ok {
 				return failf("act_operation_schema_invalid", field("tool", "act"))
 			}
-			for _, member := range []string{"bubble", "press_enter"} {
+			// bubble and auto_submit are branch-qualified booleans; submit_ref
+			// is the branch-qualified closed string selector. None may publish a
+			// JSON Schema default as if it applied to coordinates or other
+			// actions.
+			for member, wantType := range map[string]string{
+				"bubble": "boolean", "auto_submit": "boolean", "submit_ref": "string",
+			} {
 				option, declared := properties[member].(map[string]any)
-				if !declared || option["type"] != "boolean" {
+				if !declared || option["type"] != wantType {
 					return failf("act_branch_member_missing", field("member", member))
 				}
 				// A branch-qualified default must not be published as if it
@@ -391,6 +397,14 @@ func checkSchemas(tools []*sdk.Tool) *checkError {
 				if _, published := option["default"]; published {
 					return failf("act_branch_member_default", field("member", member))
 				}
+			}
+			submitRef, ok := properties["submit_ref"].(map[string]any)
+			if !ok || submitRef["minLength"] != float64(1) || submitRef["maxLength"] != float64(64) ||
+				submitRef["pattern"] != "^(enter_key|n[1-9][0-9]*)$" {
+				return failf("act_submit_ref_shape_invalid")
+			}
+			if _, retired := properties["press_enter"]; retired {
+				return failf("act_retired_press_enter", field("member", "press_enter"))
 			}
 		case "app":
 			var tree any

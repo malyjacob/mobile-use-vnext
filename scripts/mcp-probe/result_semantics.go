@@ -625,11 +625,13 @@ func resolveRecoveryReference(view resultView, requestRef string) string {
 		}
 		if isOpID(view.OperationID) &&
 			(view.Outcome == "uncertain" ||
+				view.Outcome == outcomePartial ||
 				view.OperationState == "running" ||
 				view.Phase == "executed_revoked" ||
 				(view.RequestClosed != nil && *view.RequestClosed) ||
 				oneOf(recovery.Cause, "running", "executed_revoked", "cleanup_pending") ||
-				oneOf(errCode, "call_cancelled", "transport_unavailable", "invalid_response", "task_lifecycle_busy") ||
+				oneOf(errCode, "call_cancelled", "transport_unavailable", "invalid_response", "task_lifecycle_busy",
+					"text_submit_not_executed") ||
 				(view.Cleanup != nil &&
 					(view.Cleanup.State == "pending" || view.Cleanup.State == "unconfirmed"))) {
 			return view.OperationID
@@ -645,6 +647,15 @@ func resolveRecoveryReference(view resultView, requestRef string) string {
 		}
 		return "P"
 	case recovery.Entry == "observe" && reference == "P":
+		// A confirmed partial text act owns the observe recovery even when a
+		// frozen copy still carries session.origin: the durable
+		// observe(P, retired) must resolve to this operation's own P both when
+		// the first response published a fresh ready O and when that
+		// observation failed or was never attached.
+		if (view.Outcome == outcomePartial || errCode == "text_submit_not_executed") &&
+			isOpID(view.OperationID) {
+			return view.OperationID
+		}
 		if view.Session != nil && isOpID(view.Session.Origin) {
 			return view.Session.Origin
 		}
@@ -657,9 +668,11 @@ func resolveRecoveryReference(view resultView, requestRef string) string {
 			(recovery.Cause == "post_observation_failed" ||
 				view.Phase == "post_observation_failed" ||
 				view.Outcome == "uncertain" ||
+				view.Outcome == outcomePartial ||
 				oneOf(errCode, "observation_expired", "observation_claimed",
 					"observation_retired", "hierarchy_unavailable", "stale_screen",
-					"tree_too_large", "control_ui_on_virtual_display", "display_unavailable")) {
+					"tree_too_large", "control_ui_on_virtual_display", "display_unavailable",
+					"text_submit_not_executed")) {
 			return view.OperationID
 		}
 		return "P"

@@ -1517,24 +1517,31 @@ func (e *Engine) revalidateScrollTarget(work *workState, obs *observationState,
 		qualityState = obs.Quality.State
 	}
 	revoked := func() bool { return e.workRevoked(work) }
-	match, matchState := e.probeActNode(
-		work.Ctx, revoked, obs.Projection.Capture, capture, plan.container)
+	match, matchState := e.probeActNodeWith(work.Ctx, revoked,
+		obs.Projection.Capture, capture, plan.container,
+		actMatchOptionsForOperation("scroll"))
 	switch matchState {
 	case actProbeUnique:
 	case actProbeCancelled:
+		e.actTargetLog(work.OperationID, actTargetProbeOutcome(matchState), 0)
 		return capture, nil, stoppedActRevalidation()
 	case actProbeBudgetExhausted, actProbeMalformed:
+		e.actTargetLog(work.OperationID, actTargetProbeOutcome(matchState), 0)
 		return capture, nil, protocol.NewError(503, protocol.CodeHierarchyFailed,
 			"实时目标重验失败")
 	case actProbeNone, actProbeAmbiguous:
+		e.actTargetLog(work.OperationID, actTargetProbeOutcome(matchState), 0)
 		changedErr := probeTargetChangedError(matchState, match, "滚动容器或实际轨迹已变化，本次未派发")
+		attachChangedRef(work.Ctx, changedErr, obs, capture, plan.container)
 		reason, _ := changedErr.Details["reason"].(string)
 		e.logScrollRevalidate(work.OperationID, false, false, false, false, qualityState, reason)
 		return capture, nil, changedErr
 	default:
+		e.actTargetLog(work.OperationID, actTargetProbeOutcome(matchState), 0)
 		return capture, nil, protocol.NewError(503, protocol.CodeHierarchyFailed,
 			"实时目标重验失败")
 	}
+	e.actTargetLog(work.OperationID, actTargetProbeOutcome(matchState), match.tier)
 	freshContainer := match.raw
 	freshIndex := indexOf(capture, freshContainer)
 	if freshIndex < 0 {

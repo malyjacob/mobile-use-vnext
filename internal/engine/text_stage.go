@@ -28,54 +28,57 @@ const (
 
 // Logical stages of one text action. currentStage is recorded at the boundary
 // that is about to run, so a freeze can report the last timely stage without
-// parsing work.Phase.
+// parsing work.Phase. "submit" names the one bounded submission primitive,
+// whichever physical form it takes (ENTER or a submit_ref tap).
 const (
 	textStageTarget = "target"
 	textStageFocus  = "focus"
 	textStageWrite  = "write"
 	textStageVerify = "verify"
-	textStageEnter  = "enter"
+	textStageSubmit = "submit"
 )
 
 // Closed reason vocabulary of text error details. The agent may rely on these
 // values instead of parsing the controlled message.
 const (
-	textReasonTargetNotEditable       = "target_not_editable"
-	textReasonTargetProtected         = "target_protected"
-	textReasonTargetUnconfirmed       = "target_unconfirmed"
-	textReasonFocusUnconfirmed        = "focus_unconfirmed"
-	textReasonFocusNotSent            = "focus_not_sent"
-	textReasonNoUniqueTarget          = "no_unique_target"
-	textReasonDispatchNotSent         = "dispatch_not_sent"
-	textReasonReceiptUnknown          = "receipt_unknown"
-	textReasonRPCResultInvalid        = "rpc_result_invalid"
-	textReasonReadbackUnavailable     = "readback_unavailable"
-	textReasonReadbackMismatch        = "readback_mismatch"
-	textReasonEnterTargetUnconfirmed  = "enter_target_unconfirmed"
-	textReasonEnterContextUnconfirmed = "enter_context_unconfirmed"
-	textReasonEnterNotSent            = "enter_not_sent"
-	textReasonEnterUnconfirmed        = "enter_unconfirmed"
-	textReasonAuthorizationRevoked    = "authorization_revoked"
-	textReasonDeadlineExceeded        = "deadline_exceeded"
+	textReasonTargetNotEditable        = "target_not_editable"
+	textReasonTargetProtected          = "target_protected"
+	textReasonTargetUnconfirmed        = "target_unconfirmed"
+	textReasonFocusUnconfirmed         = "focus_unconfirmed"
+	textReasonFocusNotSent             = "focus_not_sent"
+	textReasonNoUniqueTarget           = "no_unique_target"
+	textReasonDispatchNotSent          = "dispatch_not_sent"
+	textReasonReceiptUnknown           = "receipt_unknown"
+	textReasonRPCResultInvalid         = "rpc_result_invalid"
+	textReasonReadbackUnavailable      = "readback_unavailable"
+	textReasonReadbackMismatch         = "readback_mismatch"
+	textReasonSubmitTargetUnconfirmed  = "submit_target_unconfirmed"
+	textReasonSubmitContextUnconfirmed = "submit_context_unconfirmed"
+	textReasonSubmitDisabled           = "submit_disabled"
+	textReasonSubmitScopeBlocked       = "submit_scope_blocked"
+	textReasonSubmitNotSent            = "submit_not_sent"
+	textReasonSubmitUnconfirmed        = "submit_unconfirmed"
+	textReasonAuthorizationRevoked     = "authorization_revoked"
+	textReasonDeadlineExceeded         = "deadline_exceeded"
 )
 
 // textStage is the bounded cumulative evidence of one claimed text action,
-// including explicit press_enter=false. It lives on operationState so replacing
+// including explicit auto_submit=false. It lives on operationState so replacing
 // work.UI cannot erase an earlier primitive fact. It is the engine's original
 // operation fact, not a second authority: it is never persisted as ordinary
 // action history and never grants a dispatch.
 type textStage struct {
-	pressEnter bool
+	autoSubmit bool
 
-	focus string
-	write string
-	enter string
+	focus  string
+	write  string
+	submit string
 
-	enterAttempted bool
+	submitAttempted bool
 
-	dispatchFocus string
-	dispatchWrite string
-	dispatchEnter string
+	dispatchFocus  string
+	dispatchWrite  string
+	dispatchSubmit string
 
 	currentStage  string
 	failureReason string
@@ -92,18 +95,18 @@ type textStage struct {
 	displayGeneration string
 }
 
-func newTextStage(session *sessionState, pressEnter bool) *textStage {
+func newTextStage(session *sessionState, autoSubmit bool) *textStage {
 	if session == nil {
 		return nil
 	}
 	stage := &textStage{
-		pressEnter:        pressEnter,
+		autoSubmit:        autoSubmit,
 		focus:             textFocusNotAttempted,
 		write:             protocol.TextInputNotExecuted,
-		enter:             protocol.TextInputNotExecuted,
+		submit:            protocol.TextInputNotExecuted,
 		dispatchFocus:     textDispatchNotAttempted,
 		dispatchWrite:     textDispatchNotAttempted,
-		dispatchEnter:     textDispatchNotAttempted,
+		dispatchSubmit:    textDispatchNotAttempted,
 		currentStage:      textStageTarget,
 		sessionOrigin:     session.Origin,
 		sessionEpoch:      session.Epoch,
@@ -115,25 +118,40 @@ func newTextStage(session *sessionState, pressEnter bool) *textStage {
 	return stage
 }
 
-// textOverallOutcome derives the conservative action outcome from cumulative
-// primitive facts. Executed requires the write and, for the composite branch,
-// both keys confirmed. Not_executed requires that no primitive ever obtained a
-// dispatch permission; a dispatched focus alone keeps the whole action
-// uncertain.
+// textOverallOutcome is the single cumulative-outcome derivation for one text
+// action. Its order is the fact hierarchy:
+//  1. a confirmed write with no required submission, or with a confirmed
+//     submission, is executed;
+//  2. a confirmed write whose auto submission is still certainly not executed
+//     (never attempted or definitely not dispatched) is partial: the action is
+//     confirmed incomplete and has no unknown physical side effect;
+//  3. any primitive that may have reached Android keeps the action uncertain;
+//  4. otherwise nothing was dispatched.
 func textOverallOutcome(stage *textStage) string {
 	if stage == nil {
 		return OutcomeNotExecuted
 	}
 	if stage.write == protocol.TextInputExecuted &&
-		(!stage.pressEnter || stage.enter == protocol.TextInputExecuted) {
+		(!stage.autoSubmit || stage.submit == protocol.TextInputExecuted) {
 		return OutcomeExecuted
+	}
+	if stage.write == protocol.TextInputExecuted && stage.autoSubmit &&
+		stage.submit == protocol.TextInputNotExecuted &&
+		(stage.dispatchSubmit == textDispatchNotAttempted ||
+			stage.dispatchSubmit == textDispatchNotDispatched) &&
+		stage.dispatchFocus != textDispatchUnknown &&
+		stage.dispatchWrite != textDispatchUnknown {
+		// The partial fact is only honest while every non-submit primitive
+		// already carries a usable receipt: a confirmed write with a certain
+		// absence of submission and zero unknown physical effect.
+		return OutcomePartial
 	}
 	mayHaveDispatched := func(state string) bool {
 		return state == textDispatchUnknown || state == textDispatchDispatched
 	}
 	if mayHaveDispatched(stage.dispatchFocus) ||
 		mayHaveDispatched(stage.dispatchWrite) ||
-		mayHaveDispatched(stage.dispatchEnter) {
+		mayHaveDispatched(stage.dispatchSubmit) {
 		return OutcomeUncertain
 	}
 	return OutcomeNotExecuted
@@ -145,7 +163,7 @@ func (e *Engine) initTextStageLocked(op *operationState, session *sessionState) 
 	if op == nil || op.TextStage != nil {
 		return
 	}
-	stage := newTextStage(session, op.TextStagePressEnter)
+	stage := newTextStage(session, op.TextStageAutoSubmit)
 	if stage == nil {
 		return
 	}
@@ -156,11 +174,11 @@ func (e *Engine) initTextStageLocked(op *operationState, session *sessionState) 
 // publishTextInputLocked replaces the public immutable snapshot. Only the
 // composite branch has a public text_input object. The caller holds e.mu.
 func (e *Engine) publishTextInputLocked(op *operationState) {
-	if op == nil || op.TextStage == nil || !op.TextStage.pressEnter {
+	if op == nil || op.TextStage == nil || !op.TextStage.autoSubmit {
 		return
 	}
 	op.TextInput = &protocol.TextInputView{
-		Write: op.TextStage.write, Enter: op.TextStage.enter,
+		Write: op.TextStage.write, Submit: op.TextStage.submit,
 	}
 }
 
@@ -175,8 +193,8 @@ func textPrimitiveField(stage *textStage, primitive, state string) bool {
 		stage.focus = state
 	case "write":
 		stage.write = state
-	case "enter":
-		stage.enter = state
+	case "submit":
+		stage.submit = state
 	default:
 		return false
 	}
@@ -192,8 +210,8 @@ func textDispatchField(stage *textStage, primitive, state string) bool {
 		stage.dispatchFocus = state
 	case "write":
 		stage.dispatchWrite = state
-	case "enter":
-		stage.dispatchEnter = state
+	case "submit":
+		stage.dispatchSubmit = state
 	default:
 		return false
 	}
@@ -221,7 +239,9 @@ func (e *Engine) markTextPrimitiveLocked(work *workState, primitive, state strin
 // its dispatch fact in one short lock. A timely terminated call is "dispatched"
 // even when its semantic result is an error; a definite non-dispatch is
 // "not_dispatched"; anything without a usable end receipt is "unknown". The
-// write primitive's confirmation is deliberately not derived here.
+// write primitive's confirmation is deliberately not derived here. A STOP that
+// already finished the operation wins: a late receipt never rewrites the frozen
+// conservative facts.
 func (e *Engine) commitTextReceipt(work *workState, op *operationState,
 	primitive string, receipt device.DispatchReceipt, callErr error) bool {
 	if op == nil || op.TextStage == nil || primitive == "" {
@@ -261,14 +281,14 @@ func (e *Engine) commitTextReceipt(work *workState, op *operationState,
 		default:
 			op.TextStage.write = protocol.TextInputUncertain
 		}
-	case "enter":
+	case "submit":
 		switch {
 		case receipt == device.DispatchNotDispatched:
-			op.TextStage.enter = protocol.TextInputNotExecuted
+			op.TextStage.submit = protocol.TextInputNotExecuted
 		case receipt == device.DispatchTerminated && callErr == nil:
-			// confirmTextEnter publishes executed together with KnownOutcome.
+			// confirmTextSubmit publishes executed together with KnownOutcome.
 		default:
-			op.TextStage.enter = protocol.TextInputUncertain
+			op.TextStage.submit = protocol.TextInputUncertain
 		}
 	}
 	e.publishTextInputLocked(op)
@@ -333,7 +353,8 @@ func (e *Engine) setTextWriteNotDispatched(work *workState, op *operationState) 
 
 // commitTextWrite publishes the confirmed write. The explicit-false branch also
 // commits KnownOutcome=executed in the same lock, so STOP cannot split the two
-// facts. The composite branch leaves ENTER to its own independent gate.
+// facts. The composite branch leaves the submission to its own independent
+// gate; a later confirmed absence of submission derives OutcomePartial.
 func (e *Engine) commitTextWrite(work *workState, op *operationState) bool {
 	if op == nil || op.TextStage == nil {
 		return false
@@ -347,36 +368,46 @@ func (e *Engine) commitTextWrite(work *workState, op *operationState) bool {
 	}
 	op.TextStage.dispatchWrite = textDispatchDispatched
 	op.TextStage.write = protocol.TextInputExecuted
-	if !op.TextStage.pressEnter {
+	if !op.TextStage.autoSubmit {
 		op.KnownOutcome = OutcomeExecuted
+	} else {
+		// The submission is the next boundary this action will run. Recording
+		// it in the same lock as the confirmed write keeps a freeze between the
+		// two from reporting the completed write stage as if the action had
+		// never advanced past verify.
+		op.TextStage.currentStage = textStageSubmit
 	}
 	e.publishTextInputLocked(op)
 	return true
 }
 
-// beginTextEnter records the one allowed ENTER attempt and checks the write
-// stage and operation ownership before may_dispatch.
-func (e *Engine) beginTextEnter(work *workState, op *operationState) bool {
+// beginTextSubmit records the one allowed submission attempt and checks the
+// write stage and operation ownership before may_dispatch. It is one gate for
+// both physical submission forms (ENTER and a submit_ref tap), so no call can
+// obtain two submission primitives.
+func (e *Engine) beginTextSubmit(work *workState, op *operationState) bool {
 	if op == nil || op.TextStage == nil {
 		return false
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if op.State != OperationRunning || e.work != work ||
-		op.TextStage.enterAttempted ||
+		op.TextStage.submitAttempted ||
 		op.TextStage.write != protocol.TextInputExecuted ||
-		op.TextStage.enter != protocol.TextInputNotExecuted ||
+		op.TextStage.submit != protocol.TextInputNotExecuted ||
+		!op.TextStage.autoSubmit ||
 		!e.workAuthorizedLocked(work, time.Now()) || work.Ctx.Err() != nil ||
 		!e.textStageAuthorizedLocked(work) {
 		return false
 	}
-	op.TextStage.enterAttempted = true
+	op.TextStage.submitAttempted = true
 	return true
 }
 
-// confirmTextEnter publishes enter=executed and KnownOutcome=executed in one
-// critical section. A freeze that wins first leaves the enter fact uncertain.
-func (e *Engine) confirmTextEnter(work *workState, op *operationState) bool {
+// confirmTextSubmit publishes submit=executed and KnownOutcome=executed in one
+// critical section. A freeze that wins first leaves the submission fact
+// uncertain; a late receipt never rewrites it.
+func (e *Engine) confirmTextSubmit(work *workState, op *operationState) bool {
 	if op == nil || op.TextStage == nil {
 		return false
 	}
@@ -384,12 +415,12 @@ func (e *Engine) confirmTextEnter(work *workState, op *operationState) bool {
 	defer e.mu.Unlock()
 	if op.State != OperationRunning || e.work != work ||
 		op.TextStage.write != protocol.TextInputExecuted ||
-		op.TextStage.enter != protocol.TextInputUncertain ||
+		op.TextStage.submit != protocol.TextInputUncertain ||
 		!e.workAuthorizedLocked(work, time.Now()) || work.Ctx.Err() != nil ||
 		!e.textStageAuthorizedLocked(work) {
 		return false
 	}
-	op.TextStage.enter = protocol.TextInputExecuted
+	op.TextStage.submit = protocol.TextInputExecuted
 	e.publishTextInputLocked(op)
 	op.KnownOutcome = OutcomeExecuted
 	return true
@@ -418,11 +449,11 @@ func (e *Engine) textStageAuthorizedLocked(work *workState) bool {
 
 // textStageSnapshotLocked projects the bounded dispatch facts for one text
 // error. The caller holds e.mu.
-func textStageSnapshotLocked(op *operationState) (focus, write, enter string) {
+func textStageSnapshotLocked(op *operationState) (focus, write, submit string) {
 	if op == nil || op.TextStage == nil {
 		return textDispatchNotAttempted, textDispatchNotAttempted, textDispatchNotAttempted
 	}
-	return op.TextStage.dispatchFocus, op.TextStage.dispatchWrite, op.TextStage.dispatchEnter
+	return op.TextStage.dispatchFocus, op.TextStage.dispatchWrite, op.TextStage.dispatchSubmit
 }
 
 // textError builds one controlled text error together with the stage, reason,
@@ -431,7 +462,14 @@ func textStageSnapshotLocked(op *operationState) (focus, write, enter string) {
 // message or work.Phase.
 func (e *Engine) textError(op *operationState, status int, code, message, stage, reason, outcome string, count *int) *protocol.APIError {
 	e.mu.Lock()
-	focus, write, enter := textStageSnapshotLocked(op)
+	defer e.mu.Unlock()
+	return e.textErrorLocked(op, status, code, message, stage, reason, outcome, count)
+}
+
+// textErrorLocked is the same builder for a caller that already holds e.mu. It
+// lets a terminal decision and its saved error share one critical section.
+func (e *Engine) textErrorLocked(op *operationState, status int, code, message, stage, reason, outcome string, count *int) *protocol.APIError {
+	focus, write, submit := textStageSnapshotLocked(op)
 	if op != nil && op.State == OperationRunning && op.TextStage != nil {
 		op.TextStage.failureReason = reason
 		if count != nil {
@@ -439,12 +477,11 @@ func (e *Engine) textError(op *operationState, status int, code, message, stage,
 			op.TextStage.failureKnown = true
 		}
 	}
-	e.mu.Unlock()
 	details := map[string]any{
 		"stage":  stage,
 		"reason": reason,
 		"dispatch": map[string]any{
-			"focus": focus, "write": write, "enter": enter,
+			"focus": focus, "write": write, "submit": submit,
 		},
 	}
 	if count != nil {

@@ -407,7 +407,7 @@ func (p *testProjector) Build(capture *device.Capture) (*Projection, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Projection{Tree: snapshot.Tree, Capture: snapshot.Capture, Source: snapshot.Source}, nil
+	return projectionOf(snapshot), nil
 }
 
 func (p *testProjector) Candidate(capture *device.Capture) (*Projection, func(), error) {
@@ -415,7 +415,16 @@ func (p *testProjector) Candidate(capture *device.Capture) (*Projection, func(),
 	if err != nil {
 		return nil, nil, err
 	}
-	return &Projection{Tree: snapshot.Tree, Capture: snapshot.Capture, Source: snapshot.Source}, commit, nil
+	return projectionOf(snapshot), commit, nil
+}
+
+func (p *testProjector) CandidateAgainst(prev *Projection,
+	capture *device.Capture) (*Projection, func(), error) {
+	snapshot, commit, err := p.builder.CandidateAgainst(projectionSnapshot(prev), capture)
+	if err != nil {
+		return nil, nil, err
+	}
+	return projectionOf(snapshot), commit, nil
 }
 
 func (p *testProjector) Preview(capture *device.Capture) (*Projection, error) {
@@ -423,10 +432,30 @@ func (p *testProjector) Preview(capture *device.Capture) (*Projection, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Projection{Tree: snapshot.Tree, Capture: snapshot.Capture, Source: snapshot.Source}, nil
+	return projectionOf(snapshot), nil
 }
 
 func (p *testProjector) Reset() { p.builder.Reset() }
+
+// projectionOf projects one pure observation snapshot onto the engine view.
+func projectionOf(snapshot *observation.Snapshot) *Projection {
+	return &Projection{
+		Tree: snapshot.Tree, Capture: snapshot.Capture, Source: snapshot.Source,
+		ContextSource: snapshot.ContextSource,
+	}
+}
+
+// projectionSnapshot is the inverse wrapper a historical-baseline probe
+// consumes. Refs are not part of the continuity probe.
+func projectionSnapshot(projection *Projection) *observation.Snapshot {
+	if projection == nil {
+		return nil
+	}
+	return &observation.Snapshot{
+		Tree: projection.Tree, Capture: projection.Capture,
+		Source: projection.Source, ContextSource: projection.ContextSource,
+	}
+}
 
 type testDiffer struct{}
 
@@ -664,7 +693,7 @@ func TestStartObserveActTextEnd(t *testing.T) {
 
 	// The post-observation delta must reconstruct the current tree.
 	h.engine.mu.Lock()
-	baseline := h.engine.baseline
+	baseline := baselineWithID(h.engine.baselines, h.engine.activeBaselineID)
 	current := h.engine.current
 	h.engine.mu.Unlock()
 	if baseline == nil || baseline.ObservationID != first.ID {

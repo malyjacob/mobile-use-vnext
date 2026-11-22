@@ -59,7 +59,7 @@ func TestShellKeepsReadyObservation(t *testing.T) {
 	}
 	h.engine.mu.Lock()
 	ready := h.engine.current
-	baseline := h.engine.baseline
+	baseline := baselineWithID(h.engine.baselines, h.engine.activeBaselineID)
 	observations := len(h.engine.observations)
 	h.engine.mu.Unlock()
 	if ready == nil || ready.Status != ObservationReady || baseline == nil {
@@ -97,7 +97,8 @@ func TestShellKeepsReadyObservation(t *testing.T) {
 	}
 
 	h.engine.mu.Lock()
-	after, afterBaseline := h.engine.current, h.engine.baseline
+	after, afterBaseline := h.engine.current,
+		baselineWithID(h.engine.baselines, h.engine.activeBaselineID)
 	afterStatus := h.engine.observations[ready.ID].Status
 	afterObservations := len(h.engine.observations)
 	afterWork := h.engine.work

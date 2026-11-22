@@ -1,18 +1,12 @@
 package engine
 
 import (
-	"context"
-	"reflect"
 	"testing"
 	"time"
 
 	"github.com/malyjacob/mobile-use-vnext/internal/device"
 	"github.com/malyjacob/mobile-use-vnext/internal/protocol"
 )
-
-func proposalPointDisplay() device.Display {
-	return device.Display{ID: 12, Width: 1080, Height: 2400, Density: 420}
-}
 
 func proposalPointSetPage(display device.Display, variant string) device.Capture {
 	bounds := device.Rect{Left: 100, Top: 300, Right: 900, Bottom: 700}
@@ -68,6 +62,22 @@ func proposalPointLineagePage(display device.Display,
 	return revalCapture(display, root, anchor, target)
 }
 
+// proposalPointAnonymousLineagePage keeps the same rebuilt ancestor but the
+// target carries no E1/E2/E3 evidence.
+func proposalPointAnonymousLineagePage(display device.Display,
+	anchorResource string) device.Capture {
+	root := revalRoot(display.ID, 1)
+	anchorBounds := device.Rect{Left: 50, Top: 200, Right: 1030, Bottom: 1000}
+	anchor := proposalNode(1, 0, 1, display, anchorBounds,
+		"android.widget.FrameLayout", "")
+	anchor.ResourceID = anchorResource
+	anchor.Children = []int{2}
+	target := proposalClickableNode(2, 1, 2, display,
+		device.Rect{Left: 200, Top: 400, Right: 800, Bottom: 600},
+		"android.widget.Button", "")
+	return revalCapture(display, root, anchor, target)
+}
+
 func proposalPointScrollPage(display device.Display, bounds device.Rect,
 	withAxisBlockers bool) device.Capture {
 	root := revalRoot(display.ID, 1)
@@ -102,21 +112,6 @@ func proposalPointCoveredTargetPage(display device.Display,
 	cover := proposalClickableNode(2, 1, 2, display, bounds,
 		"android.widget.Button", "covering-control")
 	return revalCapture(display, root, target, cover)
-}
-
-func proposalPointRequireLineageMismatch(testingHandle *testing.T, match actMatch) {
-	testingHandle.Helper()
-	value := reflect.ValueOf(match)
-	signal := value.FieldByName("lineageMismatch")
-	if !signal.IsValid() {
-		stats := value.FieldByName("stats")
-		if stats.IsValid() && stats.Kind() == reflect.Struct {
-			signal = stats.FieldByName("lineageMismatch")
-		}
-	}
-	if !signal.IsValid() || signal.Kind() != reflect.Bool || !signal.Bool() {
-		testingHandle.Fatal("fresh target match lacks a true lineageMismatch signal")
-	}
 }
 
 func proposalPointRunTapWithDeadline(testingHandle *testing.T,
@@ -505,38 +500,62 @@ func TestProposalTargetChangedNineReasonMatrix(t *testing.T) {
 	})
 
 	t.Run("lineage_changed", func(t *testing.T) {
-		initialStep := proposalCaptureStep(func(display device.Display) device.Capture {
-			return proposalPointLineagePage(display, "old_panel")
-		})
-		freshStep := proposalCaptureStep(func(display device.Display) device.Capture {
-			return proposalPointLineagePage(display, "new_panel")
-		})
-		harnessUnderTest := newHarness(t)
-		harnessUnderTest.device.scriptCaptures(initialStep)
-		start := harnessUnderTest.startSession()
-		target := proposalFindLabel(t,
-			currentTree(t, harnessUnderTest.engine).Root, "Continue")
-		harnessUnderTest.device.scriptCaptures(freshStep)
-
-		result := harnessUnderTest.actP(t, "", start.Observation.ID,
-			protocol.Operation{
-				Type: "tap",
-				Target: &protocol.Target{
-					UseRef: true, Ref: target.Ref,
-				},
+		t.Run("tier4_accepts_rebuilt_ancestor", func(t *testing.T) {
+			initialStep := proposalCaptureStep(func(display device.Display) device.Capture {
+				return proposalPointLineagePage(display, "old_panel")
 			})
-		proposalRequireTargetChanged(t, result, "lineage_changed")
-		proposalRequireNoDispatch(t, harnessUnderTest)
+			freshStep := proposalCaptureStep(func(display device.Display) device.Capture {
+				return proposalPointLineagePage(display, "new_panel")
+			})
+			harnessUnderTest := newHarness(t)
+			harnessUnderTest.device.scriptCaptures(initialStep)
+			start := harnessUnderTest.startSession()
+			target := proposalFindLabel(t,
+				currentTree(t, harnessUnderTest.engine).Root, "Continue")
+			harnessUnderTest.device.scriptCaptures(freshStep)
 
-		display := proposalPointDisplay()
-		originalCapture := proposalPointLineagePage(display, "old_panel")
-		freshCapture := proposalPointLineagePage(display, "new_panel")
-		match, matchState := matchActTarget(context.Background(), nil,
-			&originalCapture, &freshCapture, &originalCapture.Nodes[2])
-		if matchState != actProbeNone {
-			t.Fatalf("lineage-only mismatch match state = %v, want none", matchState)
-		}
-		proposalPointRequireLineageMismatch(t, match)
+			result := harnessUnderTest.actP(t, "", start.Observation.ID,
+				protocol.Operation{
+					Type: "tap",
+					Target: &protocol.Target{
+						UseRef: true, Ref: target.Ref,
+					},
+				})
+			proposalRequireExecuted(t, result)
+			proposalRequireTap(t, harnessUnderTest, [2]int{500, 500})
+		})
+
+		t.Run("without_semantic_evidence_names_changed_ancestor",
+			func(t *testing.T) {
+				initialStep := proposalCaptureStep(func(display device.Display) device.Capture {
+					return proposalPointAnonymousLineagePage(display, "old_panel")
+				})
+				freshStep := proposalCaptureStep(func(display device.Display) device.Capture {
+					return proposalPointAnonymousLineagePage(display, "new_panel")
+				})
+				harnessUnderTest := newHarness(t)
+				harnessUnderTest.device.scriptCaptures(initialStep)
+				start := harnessUnderTest.startSession()
+				root := currentTree(t, harnessUnderTest.engine).Root
+				target := targetProofNodeByBounds(t, root,
+					device.Rect{Left: 200, Top: 400, Right: 800, Bottom: 600})
+				panel := targetProofNodeByBounds(t, root,
+					device.Rect{Left: 50, Top: 200, Right: 1030, Bottom: 1000})
+				harnessUnderTest.device.scriptCaptures(freshStep)
+
+				result := harnessUnderTest.actP(t, "", start.Observation.ID,
+					protocol.Operation{
+						Type: "tap",
+						Target: &protocol.Target{
+							UseRef: true, Ref: target.Ref,
+						},
+					})
+				proposalRequireTargetChanged(t, result, "lineage_changed")
+				if got := result.Error.Details["changed_ref"]; got != panel.Ref {
+					t.Fatalf("changed_ref = %#v, want %q", got, panel.Ref)
+				}
+				proposalRequireNoDispatch(t, harnessUnderTest)
+			})
 	})
 
 	t.Run("capability_changed", func(t *testing.T) {

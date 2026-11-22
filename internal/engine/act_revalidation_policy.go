@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"sort"
 	"time"
 
 	"github.com/malyjacob/mobile-use-vnext/internal/device"
@@ -101,10 +102,80 @@ func structureKeyOf(raw *device.RawNode) structureKey {
 	}
 }
 
+// actMatchMode selects the operation-specific Tier 4 evidence policy.
+type actMatchMode uint8
+
+const (
+	// actMatchTapLike is the tap, long_press and text policy: Tier 4 requires
+	// E1, E2 or an equal non-empty readable-text multiset over the subtree (E3).
+	actMatchTapLike actMatchMode = iota
+	// actMatchScroll is the scroll-container policy: a scrolled container's
+	// readable subtree legitimately changes, so E3 accepts a non-empty readable
+	// intersection or the same non-empty resource with strong coverage.
+	actMatchScroll
+)
+
+// actMatchOptions is the complete policy of one action-target match. The zero
+// value keeps the historical Tier 1-3 behavior and adds the bounded Tier 4
+// anti-rebuild proof; an absent limit field means the default limit.
+type actMatchOptions struct {
+	mode   actMatchMode
+	limits actMatchLimits
+	// allowEnabledTransition accepts a fresh explicit Enabled false -> true, or
+	// a fresh missing enabled flag, on the single binding this option is applied
+	// to. It is reserved for the write-submit execution target, never accepts
+	// true -> false, and never authorizes dispatch by itself: the caller must
+	// still prove the explicit enabled state on the fresh frame.
+	allowEnabledTransition bool
+}
+
+func defaultActMatchOptions() actMatchOptions {
+	return actMatchOptions{mode: actMatchTapLike}
+}
+
+// actMatchOptionsForOperation selects the Tier 4 evidence policy of one
+// operation type. Every other operation keeps the tap-like policy.
+func actMatchOptionsForOperation(operationType string) actMatchOptions {
+	options := defaultActMatchOptions()
+	if operationType == "scroll" {
+		options.mode = actMatchScroll
+	}
+	return options
+}
+
+// withLimits replaces the bounded matcher limits without changing the policy.
+func (options actMatchOptions) withLimits(limits actMatchLimits) actMatchOptions {
+	options.limits = limits
+	return options
+}
+
+// withEnabledTransition enables the write-submit enabled transition on this
+// option set. Callers apply it to the execution binding only.
+func (options actMatchOptions) withEnabledTransition() actMatchOptions {
+	options.allowEnabledTransition = true
+	return options
+}
+
+// sameStructureForSubmit is sameStructure with the write-submit enabled
+// transition. It is applied to the execution binding only.
+func sameStructureForSubmit(a, b *device.RawNode) (compatible, evidence bool) {
+	return sameStructureForAct(a, b,
+		defaultActMatchOptions().withEnabledTransition())
+}
+
 // sameStructure reports whether the two nodes have no known conflict and
 // whether their known fields supply positive identity evidence. Unknown and
 // unknown produce neither a conflict nor positive evidence.
 func sameStructure(a, b *device.RawNode) (compatible, evidence bool) {
+	return sameStructureForAct(a, b, defaultActMatchOptions())
+}
+
+// sameStructureForAct applies the match policy to the source structure
+// comparison. allowEnabledTransition is the only relaxation: the write plan may
+// observe its execution target change from disabled to enabled, or lose the
+// enabled flag while disabled. Nothing else is relaxed.
+func sameStructureForAct(a, b *device.RawNode,
+	options actMatchOptions) (compatible, evidence bool) {
 	if a == nil || b == nil {
 		return false, false
 	}
@@ -142,11 +213,20 @@ func sameStructure(a, b *device.RawNode) (compatible, evidence bool) {
 		!consumeOptional(left.Resource, right.Resource, true) {
 		return false, false
 	}
+	consumeEnabled := func(x, y tri) bool {
+		switch compareEnabledForAct(x, y, options.allowEnabledTransition) {
+		case triMismatch:
+			compatible = false
+		case triEqual:
+			evidence = true
+		}
+		return compatible
+	}
+
 	for _, pair := range [][2]tri{
 		{left.Clickable, right.Clickable},
 		{left.LongClickable, right.LongClickable},
 		{left.Scrollable, right.Scrollable},
-		{left.Enabled, right.Enabled},
 		{left.Checked, right.Checked},
 		{left.Password, right.Password},
 		{left.Checkable, right.Checkable},
@@ -155,7 +235,29 @@ func sameStructure(a, b *device.RawNode) (compatible, evidence bool) {
 			return false, false
 		}
 	}
+	if !consumeEnabled(left.Enabled, right.Enabled) {
+		return false, false
+	}
 	return true, evidence
+}
+
+// compareEnabledForAct is the enabled tri-state policy of one comparison. A
+// disabled -> enabled flip and a fresh missing flag are accepted only for the
+// write-submit execution binding; the reverse flip stays a mismatch.
+func compareEnabledForAct(original, fresh tri, allowTransition bool) triCompare {
+	if !allowTransition {
+		return compareTri(original, fresh)
+	}
+	switch {
+	case original.known && fresh.known && original.value == fresh.value:
+		return triEqual
+	case original.known && fresh.known && !original.value && fresh.value:
+		return triUnknown
+	case original.known && !fresh.known:
+		return triUnknown
+	default:
+		return compareTri(original, fresh)
+	}
 }
 
 type lineageEntry struct {
@@ -374,7 +476,12 @@ type matchBudget struct {
 	lineageSteps    int
 	lineageLimit    int
 	lineageDepth    int
-	stop            matchGate
+	// evidenceVisits bounds the Tier 4 semantic-evidence traversal. It has its
+	// own ceiling so a Tier 4 candidate scan can never exhaust the candidate
+	// budget that Tier 1-3 already charged.
+	evidenceVisits int
+	evidenceLimit  int
+	stop           matchGate
 }
 
 func (budget *matchBudget) fail(reason matchGate) bool {
@@ -417,6 +524,18 @@ func (budget *matchBudget) consumeLineage(depth int) bool {
 	return true
 }
 
+// consumeEvidence charges one bounded semantic-evidence visit.
+func (budget *matchBudget) consumeEvidence() bool {
+	if !budget.checkActive() {
+		return false
+	}
+	if budget.evidenceLimit > 0 && budget.evidenceVisits >= budget.evidenceLimit {
+		return budget.fail(matchBudgetExhausted)
+	}
+	budget.evidenceVisits++
+	return true
+}
+
 func (budget *matchBudget) terminalState() actProbeState {
 	if budget == nil {
 		return actProbeMalformed
@@ -438,6 +557,17 @@ type lineageAtTier struct {
 	ok      bool
 }
 
+type resourceAnchor struct {
+	displayID     int
+	pkg, resource string
+}
+
+// resourceCounts caches whole-tree resource uniqueness for E2.
+type resourceCounts struct {
+	original map[resourceAnchor]int
+	fresh    map[resourceAnchor]int
+}
+
 type tierMatcher struct {
 	ctx      context.Context
 	original *device.Capture
@@ -447,10 +577,19 @@ type tierMatcher struct {
 	budget   matchBudget
 	oldLines map[int]lineageAtTier
 	newLines map[int]lineageAtTier
+	opts     actMatchOptions
+	// geometryTier4 selects the Tier 4 geometry gate: tight bidirectional
+	// coverage or the soft-keyboard horizontal band.
+	geometryTier4 tier4Geometry
+	// counts caches the E2 resource census of both trees; countsReady marks a
+	// completed census, counts a nil result.
+	counts      *resourceCounts
+	countsReady bool
 }
 
 func newTierMatcher(ctx context.Context, original, fresh *device.Capture,
-	tier int, limits actMatchLimits) *tierMatcher {
+	tier int, options actMatchOptions) *tierMatcher {
+	limits := options.limits
 	candidateLimit := len(fresh.Nodes) + len(original.Nodes)
 	if limits.candidateLimit > 0 && limits.candidateLimit < candidateLimit {
 		candidateLimit = limits.candidateLimit
@@ -469,9 +608,11 @@ func newTierMatcher(ctx context.Context, original, fresh *device.Capture,
 		budget: matchBudget{
 			ctx: ctx, candidateLimit: candidateLimit,
 			lineageLimit: lineageLimit, lineageDepth: lineageDepth,
+			evidenceLimit: maxTier4EvidenceSteps,
 		},
 		oldLines: make(map[int]lineageAtTier),
 		newLines: make(map[int]lineageAtTier),
+		opts:     options,
 	}
 }
 
@@ -530,7 +671,7 @@ func (matcher *tierMatcher) edgeAtTier(oldIndex, newIndex int) (matched, lineage
 	if oldNode.DisplayID != newNode.DisplayID {
 		return false, false, true
 	}
-	compatible, _ := sameStructure(oldNode, newNode)
+	compatible, _ := sameStructureForAct(oldNode, newNode, matcher.opts)
 	if !compatible {
 		return false, false, true
 	}
@@ -698,11 +839,21 @@ func validActCapture(capture *device.Capture) bool {
 		capture.Display.Width > 0 && capture.Display.Height > 0
 }
 
-// matchActTargetWithLimits is the pure bounded matcher. Tier 4 is deliberately
-// absent: the three tiers below are the complete default policy.
+// matchActTargetWithLimits is the pure bounded matcher with the default
+// tap-like policy.
 func matchActTargetWithLimits(ctx context.Context, revoked func() bool,
 	original, fresh *device.Capture, want *device.RawNode,
 	limits actMatchLimits) (actMatch, actProbeState) {
+	return matchActTargetWithOptions(ctx, revoked, original, fresh, want,
+		defaultActMatchOptions().withLimits(limits))
+}
+
+// matchActTargetWithOptions is the pure bounded matcher. Tiers 1-3 stay exactly
+// as before. Only when all three return None and at least one of them observed a
+// lineage mismatch does the bounded Tier 4 anti-rebuild proof run.
+func matchActTargetWithOptions(ctx context.Context, revoked func() bool,
+	original, fresh *device.Capture, want *device.RawNode,
+	options actMatchOptions) (actMatch, actProbeState) {
 	if ctx == nil || !validActCapture(original) || !validActCapture(fresh) ||
 		want == nil {
 		return actMatch{}, actProbeMalformed
@@ -718,7 +869,7 @@ func matchActTargetWithLimits(ctx context.Context, revoked func() bool,
 		if ctx.Err() != nil || (revoked != nil && revoked()) {
 			return actMatch{stats: stats}, actProbeCancelled
 		}
-		matcher := newTierMatcher(ctx, original, fresh, tier, limits)
+		matcher := newTierMatcher(ctx, original, fresh, tier, options)
 		probe := matcher.probeWant(originalIndex)
 		stats.candidateVisits += matcher.budget.candidateVisits
 		stats.lineageSteps += matcher.budget.lineageSteps
@@ -747,13 +898,498 @@ func matchActTargetWithLimits(ctx context.Context, revoked func() bool,
 			return actMatch{stats: stats}, actProbeMalformed
 		}
 	}
-	return actMatch{stats: stats, lineageMismatch: sawLineageMismatch}, actProbeNone
+	if !sawLineageMismatch {
+		return actMatch{stats: stats}, actProbeNone
+	}
+	if ctx.Err() != nil || (revoked != nil && revoked()) {
+		return actMatch{stats: stats}, actProbeCancelled
+	}
+	matcher := newTierMatcher(ctx, original, fresh, 4, options)
+	probe := matcher.probeWantTier4(tier4TightGeometry, options.mode, originalIndex)
+	stats.candidateVisits += matcher.budget.candidateVisits
+	stats.lineageSteps += matcher.budget.lineageSteps
+	stats.tiers = 4
+	if ctx.Err() != nil || (revoked != nil && revoked()) {
+		return actMatch{stats: stats}, actProbeCancelled
+	}
+	switch probe.state {
+	case actProbeUnique:
+		return actMatch{
+			raw: &fresh.Nodes[probe.candidateIndex], tier: 4,
+			independentContent: probe.independentContent, stats: stats,
+		}, actProbeUnique
+	case actProbeAmbiguous:
+		return actMatch{stats: stats}, actProbeAmbiguous
+	case actProbeCancelled:
+		return actMatch{stats: stats}, actProbeCancelled
+	case actProbeBudgetExhausted:
+		return actMatch{stats: stats}, actProbeBudgetExhausted
+	case actProbeMalformed:
+		return actMatch{stats: stats}, actProbeMalformed
+	default:
+		return actMatch{stats: stats, lineageMismatch: true}, actProbeNone
+	}
 }
 
 func matchActTarget(ctx context.Context, revoked func() bool,
 	original, fresh *device.Capture, want *device.RawNode) (actMatch, actProbeState) {
-	return matchActTargetWithLimits(
-		ctx, revoked, original, fresh, want, defaultActMatchLimits())
+	return matchActTargetWithOptions(
+		ctx, revoked, original, fresh, want, defaultActMatchOptions())
+}
+
+// Tier 4 (anti-rebuild) constants. The bidirectional coverage gate keeps a large
+// rebuilt container from swallowing a small control, and the subtree census is
+// bounded per side.
+const (
+	actTier4MinOverlapPercent  = 80
+	actTier4ScrollCoverage     = 85
+	maxTier4EvidenceNodes      = 64
+	maxTier4EvidenceSteps      = 1 << 16
+	actTier4MinSizeTolerance   = 8
+	actTier4MinCenterTolerance = 16
+	actTier4SizeRatioDiv       = 5
+	actTier4CenterTolDiv       = 4
+)
+
+// tier4Geometry selects the geometry gate of the Tier 4 proof.
+type tier4Geometry uint8
+
+const (
+	// tier4TightGeometry is the anti-rebuild gate: both rectangles are on
+	// screen and cover each other from both directions.
+	tier4TightGeometry tier4Geometry = iota
+	// tier4HorizontalBand is the soft-keyboard gate: the rectangle may move on
+	// the vertical axis while its horizontal band stays unchanged.
+	tier4HorizontalBand
+)
+
+// tightGeometryCompatible is the Tier 4 bidirectional geometry lock. Both
+// rectangles must be valid on screen, cover each other by at least 80%, stay
+// within the size tolerance and stay within the center tolerance.
+func tightGeometryCompatible(a, b, screen device.Rect) bool {
+	if !rectValidOnScreen(a, screen) || !rectValidOnScreen(b, screen) {
+		return false
+	}
+	inter := a.Intersect(b)
+	if inter.Empty() {
+		return false
+	}
+	areaA, areaB, areaInter := rectArea64(a), rectArea64(b), rectArea64(inter)
+	if areaA <= 0 || areaB <= 0 || areaInter <= 0 {
+		return false
+	}
+	if areaInter*100 < areaA*actTier4MinOverlapPercent ||
+		areaInter*100 < areaB*actTier4MinOverlapPercent {
+		return false
+	}
+	aw, ah := a.Width(), a.Height()
+	bw, bh := b.Width(), b.Height()
+	if absInt(aw-bw) > max(actTier4MinSizeTolerance,
+		max(aw, bw)/actTier4SizeRatioDiv) ||
+		absInt(ah-bh) > max(actTier4MinSizeTolerance,
+			max(ah, bh)/actTier4SizeRatioDiv) {
+		return false
+	}
+	ax, ay := a.Center()
+	bx, by := b.Center()
+	return absInt(ax-bx) <= max(actTier4MinCenterTolerance,
+		max(aw, bw)/actTier4CenterTolDiv) &&
+		absInt(ay-by) <= max(actTier4MinCenterTolerance,
+			max(ah, bh)/actTier4CenterTolDiv)
+}
+
+// tier4GeometryCompatible applies one Tier 4 geometry gate on screen.
+func tier4GeometryCompatible(gate tier4Geometry, a, b, screen device.Rect) bool {
+	switch gate {
+	case tier4HorizontalBand:
+		return rectValidOnScreen(b, screen) && sameHorizontalBand(a, b)
+	default:
+		return tightGeometryCompatible(a, b, screen)
+	}
+}
+
+// countResourceAnchors censuses every non-empty resource identity of one tree.
+// Missing or malformed captures fail the proof instead of guessing.
+func countResourceAnchors(capture *device.Capture,
+	budget *matchBudget) (map[resourceAnchor]int, bool) {
+	if capture == nil || budget == nil {
+		return nil, false
+	}
+	counts := make(map[resourceAnchor]int)
+	for index := range capture.Nodes {
+		if !budget.consumeEvidence() {
+			return nil, false
+		}
+		node := &capture.Nodes[index]
+		if !node.ResourceSet || node.ResourceID == "" {
+			continue
+		}
+		counts[resourceAnchor{
+			displayID: node.DisplayID, pkg: node.Package,
+			resource: node.ResourceID,
+		}]++
+	}
+	return counts, true
+}
+
+// ensureResourceCounts computes the E2 census once per matcher.
+func (matcher *tierMatcher) ensureResourceCounts() (*resourceCounts, bool) {
+	if matcher.countsReady {
+		return matcher.counts, matcher.counts != nil
+	}
+	matcher.countsReady = true
+	original, ok := countResourceAnchors(matcher.original, &matcher.budget)
+	if !ok {
+		return nil, false
+	}
+	fresh, ok := countResourceAnchors(matcher.fresh, &matcher.budget)
+	if !ok {
+		return nil, false
+	}
+	matcher.counts = &resourceCounts{original: original, fresh: fresh}
+	return matcher.counts, true
+}
+
+// tier4SelfEvidence is E1: the target itself carries the same non-empty
+// readable text or description.
+func tier4SelfEvidence(oldNode, newNode *device.RawNode) bool {
+	if oldNode == nil || newNode == nil ||
+		!knownUnprotected(oldNode, newNode) {
+		return false
+	}
+	return stableNonEmptyContent(
+		oldNode.TextSet, oldNode.Text, newNode.TextSet, newNode.Text) ||
+		stableNonEmptyContent(
+			oldNode.DescSet, oldNode.Description,
+			newNode.DescSet, newNode.Description)
+}
+
+// tier4UniqueResource is E2: one non-empty resource identity that occurs
+// exactly once in each complete tree.
+func tier4UniqueResource(oldNode, newNode *device.RawNode,
+	counts *resourceCounts) bool {
+	if oldNode == nil || newNode == nil || counts == nil ||
+		!oldNode.ResourceSet || oldNode.ResourceID == "" ||
+		!newNode.ResourceSet || newNode.ResourceID != oldNode.ResourceID {
+		return false
+	}
+	anchor := resourceAnchor{
+		displayID: oldNode.DisplayID, pkg: oldNode.Package,
+		resource: oldNode.ResourceID,
+	}
+	return counts.original[anchor] == 1 && counts.fresh[anchor] == 1
+}
+
+// hasOwnReadableText reports whether a node carries its own readable text; E3 is
+// reserved for nodes without one.
+func hasOwnReadableText(node *device.RawNode) bool {
+	return node != nil &&
+		((node.TextSet && node.Text != "") ||
+			(node.DescSet && node.Description != ""))
+}
+
+// readableSubtree collects the non-empty readable Text and Description values of
+// the descendants in preorder. Visible, unprotected nodes only; every visited
+// node is charged to the evidence ceiling and at most maxTier4EvidenceNodes
+// descendants are visited.
+func readableSubtree(capture *device.Capture, index int,
+	budget *matchBudget) ([]string, bool) {
+	if capture == nil || budget == nil || index < 0 || index >= len(capture.Nodes) {
+		return nil, false
+	}
+	var texts []string
+	seen := make(map[int]struct{}, 8)
+	stack := make([]int, 0, 8)
+	pushChildren := func(node *device.RawNode) {
+		for childIndex := len(node.Children) - 1; childIndex >= 0; childIndex-- {
+			stack = append(stack, node.Children[childIndex])
+		}
+	}
+	pushChildren(&capture.Nodes[index])
+	visited := 0
+	for len(stack) > 0 {
+		current := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if current < 0 || current >= len(capture.Nodes) {
+			budget.failMalformed()
+			return nil, false
+		}
+		if _, duplicate := seen[current]; duplicate {
+			continue
+		}
+		seen[current] = struct{}{}
+		if visited >= maxTier4EvidenceNodes {
+			break
+		}
+		if !budget.consumeEvidence() {
+			return nil, false
+		}
+		visited++
+		node := &capture.Nodes[current]
+		if node.Visible && !node.Password {
+			if node.TextSet && node.Text != "" {
+				texts = append(texts, node.Text)
+			}
+			if node.DescSet && node.Description != "" {
+				texts = append(texts, node.Description)
+			}
+		}
+		pushChildren(node)
+	}
+	return texts, true
+}
+
+func sortedReadableTexts(texts []string) []string {
+	if len(texts) == 0 {
+		return nil
+	}
+	sorted := append([]string(nil), texts...)
+	sort.Strings(sorted)
+	return sorted
+}
+
+// sameReadableMultiset reports whether both sides carry the same non-empty
+// readable multiset.
+func sameReadableMultiset(left, right []string) bool {
+	if len(left) == 0 || len(right) == 0 || len(left) != len(right) {
+		return false
+	}
+	first, second := sortedReadableTexts(left), sortedReadableTexts(right)
+	for index := range first {
+		if first[index] != second[index] {
+			return false
+		}
+	}
+	return true
+}
+
+// sharesReadableText reports whether both sides share at least one readable
+// entry. It is the scroll-container relaxation of E3.
+func sharesReadableText(left, right []string) bool {
+	if len(left) == 0 || len(right) == 0 {
+		return false
+	}
+	seen := make(map[string]struct{}, len(left))
+	for _, value := range left {
+		seen[value] = struct{}{}
+	}
+	for _, value := range right {
+		if _, found := seen[value]; found {
+			return true
+		}
+	}
+	return false
+}
+
+// coverageAtLeastPercent reports whether both rectangles cover each other by at
+// least the requested percentage.
+func coverageAtLeastPercent(a, b device.Rect, minPercent int64) bool {
+	inter := a.Intersect(b)
+	if inter.Empty() {
+		return false
+	}
+	areaA, areaB, areaInter := rectArea64(a), rectArea64(b), rectArea64(inter)
+	if areaA <= 0 || areaB <= 0 || areaInter <= 0 {
+		return false
+	}
+	return areaInter*100 >= areaA*minPercent && areaInter*100 >= areaB*minPercent
+}
+
+// subtreeEvidence applies E3 for one target pair. A tap-like target needs the
+// same non-empty readable multiset; a scroll container accepts a shared entry or
+// the same non-empty resource with strong coverage.
+func subtreeEvidence(original *device.Capture, oldIndex int,
+	fresh *device.Capture, newIndex int, mode actMatchMode,
+	budget *matchBudget) (bool, bool) {
+	if original == nil || fresh == nil || budget == nil ||
+		oldIndex < 0 || oldIndex >= len(original.Nodes) ||
+		newIndex < 0 || newIndex >= len(fresh.Nodes) {
+		return false, false
+	}
+	oldNode := &original.Nodes[oldIndex]
+	newNode := &fresh.Nodes[newIndex]
+	if hasOwnReadableText(oldNode) || hasOwnReadableText(newNode) {
+		return false, true
+	}
+	if len(oldNode.Children) == 0 || len(newNode.Children) == 0 {
+		return false, true
+	}
+	oldTexts, ok := readableSubtree(original, oldIndex, budget)
+	if !ok {
+		return false, false
+	}
+	newTexts, ok := readableSubtree(fresh, newIndex, budget)
+	if !ok {
+		return false, false
+	}
+	if mode == actMatchScroll {
+		if sharesReadableText(oldTexts, newTexts) {
+			return true, true
+		}
+		return sameNonEmptyResourceCoverage(oldNode, newNode, actTier4ScrollCoverage), true
+	}
+	return sameReadableMultiset(oldTexts, newTexts), true
+}
+
+// sameNonEmptyResourceCoverage accepts the same non-empty resource identity when
+// both rectangles cover each other strongly.
+func sameNonEmptyResourceCoverage(a, b *device.RawNode, minPercent int64) bool {
+	if a == nil || b == nil || !a.ResourceSet || a.ResourceID == "" ||
+		!b.ResourceSet || b.ResourceID != a.ResourceID {
+		return false
+	}
+	return coverageAtLeastPercent(a.Bounds, b.Bounds, minPercent)
+}
+
+// tier4Evidence applies the three-way strong identity evidence of E1, E2, E3.
+func (matcher *tierMatcher) tier4Evidence(oldIndex, newIndex int,
+	mode actMatchMode) (bool, bool) {
+	oldNode := &matcher.original.Nodes[oldIndex]
+	newNode := &matcher.fresh.Nodes[newIndex]
+	if tier4SelfEvidence(oldNode, newNode) {
+		return true, true
+	}
+	counts, ok := matcher.ensureResourceCounts()
+	if !ok {
+		return false, false
+	}
+	if tier4UniqueResource(oldNode, newNode, counts) {
+		return true, true
+	}
+	return subtreeEvidence(matcher.original, oldIndex, matcher.fresh, newIndex,
+		mode, &matcher.budget)
+}
+
+// tier4Edge evaluates one anti-rebuild candidate edge. complete=false preserves
+// the terminal category in budget.stop.
+func (matcher *tierMatcher) tier4Edge(gate tier4Geometry, mode actMatchMode,
+	oldIndex, newIndex int) (matched, complete bool) {
+	if !matcher.budget.consumeCandidate() {
+		return false, false
+	}
+	oldNode := &matcher.original.Nodes[oldIndex]
+	newNode := &matcher.fresh.Nodes[newIndex]
+	if oldNode.DisplayID != newNode.DisplayID {
+		return false, true
+	}
+	compatible, _ := sameStructureForAct(oldNode, newNode, matcher.opts)
+	if !compatible {
+		return false, true
+	}
+	if !tier4GeometryCompatible(gate, oldNode.Bounds, newNode.Bounds, matcher.screen) {
+		return false, true
+	}
+	return matcher.tier4Evidence(oldIndex, newIndex, mode)
+}
+
+// probeWantTier4 proves one anti-rebuild target: a structure-compatible,
+// geometrically locked fresh node with strong semantic evidence that is unique in
+// both directions of the complete trees.
+func (matcher *tierMatcher) probeWantTier4(gate tier4Geometry,
+	mode actMatchMode, wantIndex int) actProbeResult {
+	if wantIndex < 0 || wantIndex >= len(matcher.original.Nodes) {
+		matcher.budget.failMalformed()
+		return actProbeResult{state: actProbeMalformed, candidateIndex: -1}
+	}
+	candidate := -1
+	for newIndex := range matcher.fresh.Nodes {
+		matched, complete := matcher.tier4Edge(gate, mode, wantIndex, newIndex)
+		if !complete {
+			return actProbeResult{
+				state: matcher.budget.terminalState(), candidateIndex: -1}
+		}
+		if !matched {
+			continue
+		}
+		if candidate >= 0 {
+			return actProbeResult{state: actProbeAmbiguous, candidateIndex: -1}
+		}
+		candidate = newIndex
+	}
+	if candidate < 0 {
+		return actProbeResult{state: actProbeNone, candidateIndex: -1}
+	}
+	incomingCount := 0
+	soleOldIndex := -1
+	for oldIndex := range matcher.original.Nodes {
+		matched, complete := matcher.tier4Edge(gate, mode, oldIndex, candidate)
+		if !complete {
+			return actProbeResult{
+				state: matcher.budget.terminalState(), candidateIndex: -1}
+		}
+		if !matched {
+			continue
+		}
+		incomingCount++
+		soleOldIndex = oldIndex
+		if incomingCount > 1 {
+			return actProbeResult{state: actProbeAmbiguous, candidateIndex: -1}
+		}
+	}
+	if incomingCount != 1 || soleOldIndex != wantIndex {
+		matcher.budget.failMalformed()
+		return actProbeResult{state: actProbeMalformed, candidateIndex: -1}
+	}
+	if !matcher.budget.checkActive() {
+		return actProbeResult{
+			state: matcher.budget.terminalState(), candidateIndex: -1}
+	}
+	return actProbeResult{
+		candidateIndex: candidate, independentContent: true,
+		state: actProbeUnique,
+	}
+}
+
+// matchKeyboardShiftedSubmitNode proves one write-submit binding that only moved
+// on the vertical axis with the soft keyboard: unchanged horizontal band, strong
+// semantic evidence and whole-tree bidirectional uniqueness. It never authorizes
+// dispatch by itself; the submit stage still proves the explicit enabled state.
+func matchKeyboardShiftedSubmitNode(ctx context.Context, revoked func() bool,
+	original, fresh *device.Capture, want *device.RawNode,
+	allowEnabledTransition bool,
+	limits actMatchLimits) (actMatch, actProbeState) {
+	if ctx == nil || !validActCapture(original) || !validActCapture(fresh) ||
+		want == nil {
+		return actMatch{}, actProbeMalformed
+	}
+	wantIndex := indexOf(original, want)
+	if wantIndex < 0 {
+		return actMatch{}, actProbeMalformed
+	}
+	options := defaultActMatchOptions().withLimits(limits)
+	if allowEnabledTransition {
+		options = options.withEnabledTransition()
+	}
+	if ctx.Err() != nil || (revoked != nil && revoked()) {
+		return actMatch{}, actProbeCancelled
+	}
+	matcher := newTierMatcher(ctx, original, fresh, 4, options)
+	probe := matcher.probeWantTier4(tier4HorizontalBand, actMatchTapLike, wantIndex)
+	stats := actMatchStats{
+		candidateVisits: matcher.budget.candidateVisits,
+		lineageSteps:    matcher.budget.lineageSteps,
+		tiers:           4,
+	}
+	if ctx.Err() != nil || (revoked != nil && revoked()) {
+		return actMatch{stats: stats}, actProbeCancelled
+	}
+	switch probe.state {
+	case actProbeUnique:
+		return actMatch{
+			raw: &fresh.Nodes[probe.candidateIndex], tier: 4,
+			independentContent: true, stats: stats,
+		}, actProbeUnique
+	case actProbeAmbiguous:
+		return actMatch{stats: stats}, actProbeAmbiguous
+	case actProbeCancelled:
+		return actMatch{stats: stats}, actProbeCancelled
+	case actProbeBudgetExhausted:
+		return actMatch{stats: stats}, actProbeBudgetExhausted
+	case actProbeMalformed:
+		return actMatch{stats: stats}, actProbeMalformed
+	default:
+		return actMatch{stats: stats}, actProbeNone
+	}
 }
 
 type tapFrame struct {

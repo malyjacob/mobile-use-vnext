@@ -195,6 +195,18 @@ func (p *observationProjector) Candidate(capture *device.Capture) (*engine.Proje
 	return engineProjection(snapshot), commit, nil
 }
 
+// CandidateAgainst projects one capture against an explicit historical baseline
+// projection. It is the read-only probe of the engine's bounded multi-baseline
+// pool: nothing is published until the engine calls the returned commit.
+func (p *observationProjector) CandidateAgainst(prev *engine.Projection,
+	capture *device.Capture) (*engine.Projection, func(), error) {
+	snapshot, commit, err := p.builder.CandidateAgainst(observationSnapshot(prev), capture)
+	if err != nil {
+		return nil, nil, err
+	}
+	return engineProjection(snapshot), commit, nil
+}
+
 // Preview projects a settle sample without moving ref continuity.
 func (p *observationProjector) Preview(capture *device.Capture) (*engine.Projection, error) {
 	snapshot, err := p.builder.Preview(capture)
@@ -207,6 +219,20 @@ func (p *observationProjector) Preview(capture *device.Capture) (*engine.Project
 func engineProjection(snapshot *observation.Snapshot) *engine.Projection {
 	return &engine.Projection{
 		Tree: snapshot.Tree, Capture: snapshot.Capture, Source: snapshot.Source,
+		ContextSource: snapshot.ContextSource,
+	}
+}
+
+// observationSnapshot wraps one engine projection back into the pure
+// observation snapshot shape a historical-baseline probe consumes. Refs are not
+// part of the continuity probe, so the snapshot ref list is omitted.
+func observationSnapshot(projection *engine.Projection) *observation.Snapshot {
+	if projection == nil {
+		return nil
+	}
+	return &observation.Snapshot{
+		Tree: projection.Tree, Capture: projection.Capture,
+		Source: projection.Source, ContextSource: projection.ContextSource,
 	}
 }
 

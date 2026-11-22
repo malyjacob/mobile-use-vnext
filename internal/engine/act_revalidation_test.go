@@ -453,12 +453,15 @@ func TestActRevalidationHierarchyAndTiers(t *testing.T) {
 					root := revalRoot(display.ID, 1)
 					anc := transparentNode(1, 0, 1, display.ID, device.Rect{Left: 0, Top: 100, Right: 1080, Bottom: 500}, 2)
 					anc.ResourceID = "toolbar"
-					btn := revalButton(2, 1, 2, display.ID, device.Rect{Left: 100, Top: 150, Right: 320, Bottom: 230}, "Send", "", "btn_send")
+					// The target carries no E1/E2/E3 evidence, so Tier 4 must not
+					// paper over a wrapper that is not provably transparent.
+					btn := revalButton(2, 1, 2, display.ID, device.Rect{Left: 100, Top: 150, Right: 320, Bottom: 230}, "", "", "")
 					btn.DescSet = true
 					return revalCapture(display, root, anc, btn), nil
 				})
 				start := h.startSession()
-				btnNode := mustFindNodeByTextOrResource(t, currentTree(t, h.engine).Root, "Send")
+				btnNode := targetProofNodeByBounds(t, currentTree(t, h.engine).Root,
+					device.Rect{Left: 100, Top: 150, Right: 320, Bottom: 230})
 
 				h.device.scriptCaptures(func(_ *fakeDevice, display device.Display) (device.Capture, error) {
 					root := revalRoot(display.ID, 1)
@@ -466,7 +469,7 @@ func TestActRevalidationHierarchyAndTiers(t *testing.T) {
 					anc.ResourceID = "toolbar"
 					wrap := transparentNode(2, 1, 2, display.ID, device.Rect{Left: 90, Top: 140, Right: 330, Bottom: 240}, 3)
 					tc.mutate(&wrap)
-					btn := revalButton(3, 2, 3, display.ID, device.Rect{Left: 100, Top: 150, Right: 320, Bottom: 230}, "Send", "", "btn_send")
+					btn := revalButton(3, 2, 3, display.ID, device.Rect{Left: 100, Top: 150, Right: 320, Bottom: 230}, "", "", "")
 					btn.DescSet = true
 					return revalCapture(display, root, anc, wrap, btn), nil
 				})
@@ -488,21 +491,24 @@ func TestActRevalidationHierarchyAndTiers(t *testing.T) {
 	})
 
 	t.Run("root_only_filtered_lineage_rejected", func(t *testing.T) {
-		// Covers N5: wrapper inserted under root; filtering leaves only root in L2 -> Tier 3 must reject.
+		// Covers N5: wrapper inserted under root; filtering leaves only root in L2.
+		// The target has no semantic evidence, so neither Tier 3 nor Tier 4 may
+		// accept the rebuilt ancestry.
 		h, rec := newRevalHarness(t)
 		h.device.scriptCaptures(func(_ *fakeDevice, display device.Display) (device.Capture, error) {
 			root := revalRoot(display.ID, 1)
-			btn := revalButton(1, 0, 1, display.ID, device.Rect{Left: 100, Top: 150, Right: 320, Bottom: 230}, "Pay", "", "btn_pay")
+			btn := revalButton(1, 0, 1, display.ID, device.Rect{Left: 100, Top: 150, Right: 320, Bottom: 230}, "", "", "")
 			btn.DescSet = true
 			return revalCapture(display, root, btn), nil
 		})
 		start := h.startSession()
-		btnNode := mustFindNodeByTextOrResource(t, currentTree(t, h.engine).Root, "Pay")
+		btnNode := targetProofNodeByBounds(t, currentTree(t, h.engine).Root,
+			device.Rect{Left: 100, Top: 150, Right: 320, Bottom: 230})
 
 		h.device.scriptCaptures(func(_ *fakeDevice, display device.Display) (device.Capture, error) {
 			root := revalRoot(display.ID, 1)
 			wrap := transparentNode(1, 0, 1, display.ID, device.Rect{Left: 90, Top: 140, Right: 330, Bottom: 240}, 2)
-			btn := revalButton(2, 1, 2, display.ID, device.Rect{Left: 100, Top: 150, Right: 320, Bottom: 230}, "Pay", "", "btn_pay")
+			btn := revalButton(2, 1, 2, display.ID, device.Rect{Left: 100, Top: 150, Right: 320, Bottom: 230}, "", "", "")
 			btn.DescSet = true
 			return revalCapture(display, root, wrap, btn), nil
 		})
@@ -1554,10 +1560,12 @@ func TestTextFocusBinding(t *testing.T) {
 	})
 
 	t.Run("focus_switched_before_readback_uncertain", func(t *testing.T) {
-		// Covers N24: focus moves to another node before the ENTER probe -> must
-		// finish uncertain without re-tapping. The write itself is confirmed by
-		// the set call's refreshed value; the independent Get sees no unique
-		// focused target and ENTER is not dispatched.
+		// Covers N24: focus moves to another node before the submission probe.
+		// The write is confirmed by the set call's refreshed value and the
+		// independent Get sees no unique focused target, so ENTER is certainly
+		// not dispatched. That is the confirmed partial fact: outcome=partial,
+		// text_submit_not_executed, submit_target_unconfirmed and a fresh ready
+		// O, with exactly the one original focus tap and no replay.
 		h, rec := newRevalHarness(t)
 		makeCap := func(focusIdx int, val string) captureStep {
 			return func(_ *fakeDevice, display device.Display) (device.Capture, error) {
@@ -1586,9 +1594,23 @@ func TestTextFocusBinding(t *testing.T) {
 				Text:   "done",
 			},
 		})
-		if apiErr != nil || res.Outcome != OutcomeUncertain {
-			t.Fatalf("focus switch before readback must return OutcomeUncertain: err=%+v res=%+v", apiErr, res)
+		if apiErr != nil || res.Outcome != OutcomePartial {
+			t.Fatalf("focus switch before submit must return OutcomePartial: err=%+v res=%+v", apiErr, res)
 		}
+		if res.Error == nil || res.Error.Code != protocol.CodeTextSubmitNotExecuted {
+			t.Fatalf("partial error = %+v, want %s", res.Error, protocol.CodeTextSubmitNotExecuted)
+		}
+		if got := res.Error.Details["reason"]; got != textReasonSubmitTargetUnconfirmed {
+			t.Fatalf("partial reason = %#v, want %q", got, textReasonSubmitTargetUnconfirmed)
+		}
+		if got := res.Error.Details["stage"]; got != textStageSubmit {
+			t.Fatalf("partial stage = %#v, want %q", got, textStageSubmit)
+		}
+		if res.Observation == nil || res.Observation.ID == "" ||
+			res.Observation.ID == start.Observation.ID {
+			t.Fatalf("partial must deliver a fresh ready O: %+v", res.Observation)
+		}
+		requireReadyObservation(t, h, res.Observation.ID)
 		if len(rec.recordedTaps()) != 1 {
 			t.Fatalf("focus switch must not re-tap: taps=%+v", rec.recordedTaps())
 		}

@@ -18,6 +18,7 @@ const (
 	resultModeStructured = "structured"
 
 	outcomeExecuted     = "executed"
+	outcomePartial      = "partial"
 	sessionActive       = "active"
 	sessionStarting     = "starting"
 	sessionEnded        = "ended"
@@ -194,10 +195,12 @@ type cleanupView struct {
 }
 
 // textInputView is the fixed composite-text stage snapshot. Both members must
-// be present on the wire; the probe treats a partial object as a failure.
+// be present on the wire; the probe treats a partial object as a failure. The
+// submission key is named submit because a submission is one bounded ENTER or
+// one node tap.
 type textInputView struct {
-	Write string `json:"write"`
-	Enter string `json:"enter"`
+	Write  string `json:"write"`
+	Submit string `json:"submit"`
 }
 
 // resultView is the probe's read-only projection of structuredContent.
@@ -383,10 +386,10 @@ func checkTextInputSnapshot(input *textInputView) *checkError {
 		return value == textInputNotExecuted ||
 			value == textInputUncertain || value == textInputExecuted
 	}
-	if !valid(input.Write) || !valid(input.Enter) {
+	if !valid(input.Write) || !valid(input.Submit) {
 		return failf("text_input_state_invalid")
 	}
-	if input.Enter != textInputNotExecuted && input.Write != textInputExecuted {
+	if input.Submit != textInputNotExecuted && input.Write != textInputExecuted {
 		return failf("text_input_stage_order_invalid")
 	}
 	return nil

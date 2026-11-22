@@ -251,18 +251,37 @@ func (e *Engine) freezeTextLocked(op *operationState, work *workState) {
 	if !deadline && work.Ctx != nil && work.Ctx.Err() == context.DeadlineExceeded {
 		deadline = true
 	}
-	sessionValid := e.session != nil && e.session.State != SessionEnded &&
-		e.session.Epoch == work.SessionEpoch && now.Before(e.session.ExpiresAt)
+	session := e.session
+	sessionValid := session != nil && session.State != SessionEnded &&
+		now.Before(session.ExpiresAt) && textBindingMatchesLocked(op, session)
+	// freezeWorkLocked already derived op.Outcome from the same cumulative
+	// primitive facts; reusing it keeps the partial classification
+	// single-sourced. A confirmed write whose submission is certainly not
+	// executed is partial with a control_revoked error when the original session
+	// is gone, and partial with text_submit_not_executed only when the live
+	// session merely ran out of its work budget.
+	partial := op.Outcome == OutcomePartial
 	code, reason, message := protocol.CodeStopped, textReasonAuthorizationRevoked, "原工作已撤销"
-	if sessionValid && deadline {
+	switch {
+	case sessionValid && deadline && partial:
+		code, reason, message = protocol.CodeTextSubmitNotExecuted, textReasonDeadlineExceeded,
+			"文字已写入，提交未执行"
+	case sessionValid && deadline:
 		code, reason, message = protocol.CodeTextResultUnknown, textReasonDeadlineExceeded,
 			"文字写入结果无法确认"
 	}
+	// A partial freeze always reports the submission boundary: the confirmed
+	// write has already moved this action past verify even if the stage field
+	// was not advanced by an interleaving freeze.
+	stageName := stage.currentStage
+	if partial {
+		stageName = textStageSubmit
+	}
 	details := map[string]any{
-		"stage":  stage.currentStage,
+		"stage":  stageName,
 		"reason": reason,
 		"dispatch": map[string]any{
-			"focus": stage.dispatchFocus, "write": stage.dispatchWrite, "enter": stage.dispatchEnter,
+			"focus": stage.dispatchFocus, "write": stage.dispatchWrite, "submit": stage.dispatchSubmit,
 		},
 	}
 	if stage.failureKnown {

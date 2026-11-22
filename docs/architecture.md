@@ -110,7 +110,7 @@ engine 的状态锁只做有限内存检查与转换：锁内不等待 ADB、u2 
   任何输入也不归还；静态拒绝发生在认领之前。
 - 过期由时钟（每秒）与请求时的惰性检查共同处理；有效期
   `min(本次采集最早读取起点 + 60s, session.expires_at)`。
-- 保留上限 `MaxObservations=32`；会话的 O、基线 O、已认领 O 受保护，其余按采集时间淘汰。
+- 保留上限 `MaxObservations=32`。当前 O、认领中的 O 和仍在窗口内的基线受保护，其余按采集时间淘汰。
 
 ### P（操作）
 
@@ -119,7 +119,7 @@ engine 的状态锁只做有限内存检查与转换：锁内不等待 ADB、u2 
 - 每个工具在任何设备副作用之前登记 P
   （`registerOperation`），可用 `X-Mobile-Use-Operation` 预分配；客户端传入的 P 按原值登记。
   缺省时服务生成 `P<4位>_<seq>`：4 位无前导零数字的实例标签加实例内单调序号（如
-  `P4821_12`）。格式为 `P` + 字母/数字/`-`/`_`，总长 ≤64；调用方不得解析编号中的数值，
+  `P7312_12`）。格式为 `P` + 字母/数字/`-`/`_`，总长 ≤64；调用方不得解析编号中的数值，
   也不得跨服务实例复用编号。
 - 同一 P 重复到达只返回原操作的公开视图，不再次派发（包括已失败的操作）。
 - 已完成操作的公开视图（重复 P、`status(P)` 与冻结结果）不带 `observation`；原操作交付过新
@@ -182,17 +182,15 @@ engine 的状态锁只做有限内存检查与转换：锁内不等待 ADB、u2 
   轴上阻塞区间；在最长安全区间正中对称展开 `page`/`half` 轨迹（`scrollGeometry` 显式接收选定轴线坐标，
   不回弹中点）。仅直接 `container.ref` 3 轴全败时检查唯一可执行非同视口内层子滚动兜底；否则返回
   `422 no_safe_trajectory`（`trajectory_blocked` / `insufficient_travel`）并附 `candidates` 与可选 `blocking_refs`；
-- 认领后容器走 Tier 1–3 双向唯一匹配，校验新鲜 `isScrollContainer` 与 `sameScrollScope`（轴向重叠与离轴容差）；
+- 认领后容器走 Tier 1–4 双向唯一匹配，校验新鲜 `isScrollContainer` 与 `sameScrollScope`（轴向重叠与离轴容差）；Tier 4 的滚动容器证据要求唯一资源，或两侧可读文案存在交集（或相同非空资源且双向覆盖 ≥85%），不要求容器内全部文案不变；
   新鲜树按相同双向同视口规则先证明原段，失效时在同一容器内按 3 轴线与居中规则重规划；失败返回
   `409 target_changed` 并附封闭归因 `details.reason`（`target_missing`/`target_ambiguous`/`lineage_changed`/`capability_changed`/`scroll_scope_changed`/`trajectory_blocked`）；
 - 静态不可执行在认领前拒绝，新鲜不成立走重验失败的交付路径。
 
-坐标 `tap`/`long_press`/`text` 与 raw `swipe` 均使用最深命中集合证明（`resolvePointSet`，先过有界拓扑校验，
-新鲜帧优先使用 `work.Projector` 并校验无序命中集合严格相等，失配报 `409 target_changed` 且 `reason=point_changed`）。
-raw `swipe` 永不返回 `ambiguous_point`（超过 64 个最深命中时降级为前台级校验）；`tap`/`long_press`/`text`
-对最深命中集合归约最近交互拥有者，≤1 个拥有者或恰 1 个满足请求动作能力的拥有者时直接消歧执行，否则返回
-`422 ambiguous_point` 并附排序 `candidates`。`scroll` 不证明真实滚动方向、触摸消费者、业务安全或到达边界；
-设备事实仍只有 `Scrollable bool`，公开 `axis` 没有生产者。
+坐标 `tap`/`long_press`/`text` 与 raw `swipe` 都以最深命中集合为授权单位：认领前在观察公开树中解析原点，认领后在新鲜帧重新取得命中集合，并按动作类型分别证明。集合匹配使用有界二分图最大匹配（Kuhn 增广路，命中集合顶点数上限 64），不要求逐边一一对应。
+
+- **坐标 `tap`/`long_press`/`text`**：单边兼容要求目标自身源结构（包、类、文案、描述、资源与全部能力/启用/密码/可编辑三态）无已知冲突，新矩形在屏内且仍包含原点。匹配分两级：优先要求几何相交（重叠率至少 0.50）且原始祖先链 L1 或 L2 对齐；祖先链重建时，允许以双向面积覆盖均 ≥80% 的紧几何，加 E1 自身非空可读文案/描述、E2 全树双向唯一的非空资源、或 E3 有界子树可读文案指纹（输入/点击目标要求两侧指纹非空且排序后完全相等）之一作为抗重建回退。通过后还要在新鲜命中集合上重新归约最近交互拥有者，确认原点未引入新的竞争交互目标；任一条件不成立返回 `409 target_changed`（`reason=point_changed`）。
+- **raw `swipe`**：只证明起点区域的源结构与防新遮挡，不要求无动作被动叶子的文案不变。新帧命中集合必须与旧集合等大且全部映射到互异有效节点；每个旧节点与新节点须同显示、同包、同类、同可编辑性，资源与点击/长按/滚动/启用/密码/勾选三态无冲突；任一侧具备动作能力时，文案与描述也不得冲突，两侧均为无动作被动叶子时忽略其文案与描述。新矩形必须在屏内、仍包含起点，且与旧矩形尺寸兼容、重叠率 ≥0.60、面积比不超过 4 倍。`Focused`、`Selected`、`Checked` 与祖先包装层差异不参与判定。任何新增更深层弹窗、对话框或浮层改变命中集合长度或节点结构时立即拒绝。raw `swipe` 永不返回 `ambiguous_point`：观察时命中超过 64 个节点则不做集合证明，只保留前台级校验；观察时命中为空时，新鲜帧同一点也必须仍为空，空白点被新节点或浮层覆盖同样拒绝。`tap`/`long_press`/`text` 对最深命中集合归约最近交互拥有者，≤1 个拥有者或恰 1 个满足请求动作能力的拥有者时直接消歧执行，否则返回 `422 ambiguous_point` 并附排序 `candidates`。`scroll` 不证明真实滚动方向、触摸消费者、业务安全或到达边界；设备事实仍只有 `Scrollable bool`，公开 `axis` 没有生产者。
 
 ### tap/long_press 的子树安全落点
 
@@ -219,12 +217,21 @@ raw `swipe` 永不返回 `ambiguous_point`（超过 64 个最深命中时降级�
 `ambiguous_point`、`no_safe_point`、`no_safe_trajectory`），有候选时附统一 `candidates`（至多 4 项，干跑计算 `executable`，
 不含文本/标签）与可选 `blocking_refs`（至多 3 项）。
 
-认领后 ref 目标使用有界 Tier 1–3 双向唯一匹配（L1 不比较祖先 bounds、Focused/Selected；Tier 1 保持目标
-bounds；Tier 2 允许受限微移；Tier 3 仅移除已知空透明层并要求非根强锚点），分别按直接目标、`coextensive_child`、
+认领后 ref 目标使用有界 Tier 1–4 双向唯一匹配（L1 不比较祖先 bounds、Focused/Selected；Tier 1 保持目标
+bounds；Tier 2 允许受限微移；Tier 3 仅移除已知空透明层并要求非根强锚点）。Tier 4 只在 Tier 1–3 全部零候选
+且观察到祖先链失配时进入：要求同显示、`sameStructure` 无已知冲突、矩形在屏内且双向面积覆盖均 ≥80%、
+尺寸差不超过 `max(8, 较大边/5)`、中心位移不超过 `max(16, 较大边/4)`，并满足任一强语义证据：E1 自身非空文案/描述精确相等；E2 同屏同包全树双向
+唯一的非空资源；E3 有界子树（每侧至多 64 个后代）可读文案指纹——点击/长按/输入目标要求两侧非空且排序后
+完全相等，滚动容器要求唯一资源或至少 1 项文案重合（或相同非空资源且双向覆盖 ≥85%）。正向与反向扫描都
+要求全树唯一；Tier 4 命中的点击/长按/输入执行目标实际落点还须通过全树最深命中与外部竞争交互拥有者检查（`tapFrameTier4OcclusionProven`），
+Tier 1–3 保持原有目标子树与双绑定关系边界。命中后分别按直接目标、`coextensive_child`、
 `bubble_ancestor`（禁止跨模式切回 `bubble_colocated`）或 `bubble_colocated` 双绑定复验原节点、关系守卫与安全点；
-实际 `tapFrame` 冻结新鲜坐标/载体供派发使用。重验失配返回 `409 target_changed` 并附封闭 `details.reason`
-（`text` 仍保持 `stage`/`reason=target_unconfirmed`/`dispatch` 专属结构）；预算耗尽、畸形树或投影损坏返回
-`503 hierarchy_unavailable`；撤权优先返回 `control_revoked`，不交付新 O。判据细节见[接口契约](interface.md)。
+实际 `tapFrame` 冻结新鲜坐标/载体供派发使用。重验失配返回 `409 target_changed` 并附封闭 `details.reason`；
+`reason=lineage_changed` 时可附可选 `changed_ref`，按原目标公开祖先链自近及远给出第一个与新鲜帧失配、
+且能唯一确定的非 `root` 祖先 ref。`bubble_ancestor` 的最近交互祖先变更时，该字段指向原先的交互祖先。
+无法唯一定位时省略 `changed_ref`。该字段不进入事件日志。`text` 重验失败仍保持 `stage`/`reason=target_unconfirmed`/
+`dispatch` 专属结构；预算耗尽、畸形树或投影损坏返回 `503 hierarchy_unavailable`；撤权优先返回
+`control_revoked`，不交付新 O。判据细节见[接口契约](interface.md)。
 
 该证明只覆盖公开树模型的目标子树，不覆盖子树外同级或跨窗口 z 序、未发布的透明触摸层、
 应用自定义事件拦截或私有业务回调。树证明与 `executed` 都不证明 Android 实际事件消费者或
@@ -232,29 +239,60 @@ bounds；Tier 2 允许受限微移；Tier 3 仅移除已知空透明层并要求
 
 ### text 的复合输入阶段
 
-`text` 在任何有效 `press_enter` 分支下，engine 都在成功认领 O 的同一状态锁内初始化私有
-`textStage`；仅有效 `press_enter=true` 另有公开不可变 `text_input:{write,enter}` 快照。
-`textStage` 保存累计 focus/write/enter 原语状态、三个原语的 dispatch 事实
-（`not_attempted`/`not_dispatched`/`dispatched`/`unknown`）、认领时的
-sessionEpoch/AppInstanceID/ModeGeneration/显示 ID 与 generation 不可变绑定，以及
-`currentStage`（target/focus/write/verify/enter）。焦点 tap、SetText 与 ENTER 各自在创建
+`text` 只在 `auto_submit` 有效为 `true` 时拥有公开的复合提交语义：engine 在成功认领 O 的同一状态锁内
+初始化私有 `textStage`，并发布公开不可变 `text_input:{write,submit}` 快照；`auto_submit=false` 只执行
+写入并读回，省略 `text_input`，提交语义与 `submit_ref` 一并忽略（`submit_ref` 的语法仍按接口校验）。`textStage` 保存累计
+focus/write/submit 原语状态、三个原语的 dispatch 事实（`not_attempted`/`not_dispatched`/`dispatched`/`unknown`）、
+认领时的 sessionEpoch/AppInstanceID/ModeGeneration/显示 ID 与 generation 不可变绑定，以及
+`currentStage`（target/focus/write/verify/submit）。焦点 tap、SetText 与提交原语各自在创建
 `may_dispatch` 令牌的同一短锁内把原语推进为 `uncertain`、dispatch 推进为 `unknown`；
 持久化与最终授权失败回退为确定未派发，回执返回后再按终止/确定未派发/不可用分别推进。
 ref 目标在新鲜帧中已聚焦且通过完整绑定时跳过焦点 tap，其他目标只做一次必要聚焦。
 
 写入完成证据是一次 SetText 的完整终止回执、`candidateCount=1`、`issued=true`，以及固定
 helper 对同一候选节点刷新后的完整 value 与请求精确相等；`accepted` 只是框架回执，不单独
-否决。engine 不再做写前 GetText，也不在写后重新采集/重绑定/GetText。候选成立后在同一短锁
-提交 `write=executed`；显式 false 同时提交 `KnownOutcome=executed`，复合分支保留 ENTER 的
-独立门禁。ENTER 只在 write 已确认、一次只读前台核对与一次同目标 GetText 均确认任务上下文与
-完整值后，经同一 work/P、同一显示绑定和最终归属门禁发送一次；两键均确认时在同一临界区写入
-`enter=executed` 与 `KnownOutcome=executed`。冻结从累计事实推导整体 outcome：全部原语未获
-派发许可才是 `not_executed`，两键 executed（或 false 的 write executed）才是 `executed`，
-其余（包括焦点 tap 已派发但两键未派发）均为 `uncertain`；`currentStage` 与 dispatch 快照
-随冻结错误一起投影，reason 为 `authorization_revoked` 或 `deadline_exceeded`。
-status(P)、重复 P 与冻结结果只复制最后一次已提交快照，迟到回执不能回补，也不持久化为普通
-动作历史。已认领 text 的恢复投影在只读结果副本上叠加实时会话/耐久/设备/忙覆盖；临时阻塞
-不写回原操作保存的语义入口。
+否决。engine 不做写前 GetText，也不以另一棵树的重新采集、重绑定或 GetText 证明写入。候选成立后
+在同一短锁提交 `write=executed`；`auto_submit=false` 同时提交 `KnownOutcome=executed`，复合分支
+保留提交的独立门禁。
+
+复合提交在 write 已确认后进入 `stage=submit`，至多执行一种提交原语：
+
+- `submit_ref="enter_key"`：先核对前台任务与观察时相同，再用写前目标做一次精确
+  `GetTextOnDisplay`；候选唯一且完整值相等时直接进入 ENTER 门禁。仅当传输无错且
+  `candidate_count=0` 时，允许一次写后 `Capture` 重绑定：新帧须同显示、同前台任务且拓扑完整；
+  候选须为同包同类、可见、可编辑、已知聚焦/启用且非密码的输入框，完整值等于请求文本。有资源或
+  描述锚点时，该锚点在写前帧与写后帧中都须唯一；无锚点时，全局满足安全条件且值相等的候选须唯一。
+  几何接受键盘顶起的同水平带、清除按钮导致的同垂直带内水平伸缩，或重叠率 ≥0.50。重绑定后须用
+  新目标再做一次精确读回，全部通过才发送至多一次 `ENTER`。
+- `submit_ref="n…"`：认领前按完整 `tap` 规划器（等效 `bubble=true`）静态验证提交节点，并允许该
+  节点在写前显式 `enabled=false`；其他结构、能力与安全落点判据不变。写后重新采集新鲜帧，核对同
+  显示与同前台任务，并对计划涉及的执行节点（含 `coextensive_child`、`bubble_ancestor`、
+  `bubble_colocated` 的委托节点）走 Tier 1–4 与安全落点重验；键盘顶起导致仅 Y 轴平移时允许同水平
+  带的唯一匹配回退。写前显式禁用的执行目标必须在新帧中显式启用。首次帧仍显示禁用或布局尚未落定
+  时，可在可中断等待 150ms 后复采一次；全部通过才发送至多一次 `Tap`。节点提交失败绝不补发 `ENTER`。
+
+`text_input` 的合法组合只有 `(not_executed, not_executed)`、`(uncertain, not_executed)`、
+`(executed, not_executed)`、`(executed, uncertain)`、`(executed, executed)`；`submit` 非
+`not_executed` 必须已有 `write=executed`。整体 outcome 由累计事实推导：写入已确认且无需提交或提交
+已确认时为 `executed`；写入已确认、自动提交确定未派发（`dispatch.submit` 为
+`not_attempted`/`not_dispatched`）且 focus/write 均无未知派发时为 `partial`；任一原语可能已到达
+Android 时为 `uncertain`；全部确定未派发时为 `not_executed`。`partial` 只表达“已确认写入、确定
+未提交、没有未知物理副作用”，不是降级的 `executed`。
+
+`partial` 使用 `409 text_submit_not_executed`。原会话仍活动时，engine 复用最后一次合法写后帧
+（无图时）或执行一次标准采集，发布一个新的 `ready O` 随结果返回；首次结果在该 O 有效时省略
+`recovery`。重复 P、`status(P)`、冻结结果与原帧不可交付时稳定投影 `observe(P, retired)`，并叠加
+实时会话/耐久/设备/忙覆盖；冻结、撤权与交付失败不发布新 O，交付失败的结果可带
+`observation.status=failed` 的占位材料而不带 O 编号。写入已确认但提交已派发而回执未知时
+保持 `uncertain`，绝不发布 `partial`。
+
+冻结从累计事实推导整体 outcome：全部原语未获派发许可才是 `not_executed`，写入确认且提交确定未
+派发为 `partial`，其余（包括焦点 tap 已派发但写入未派发、写入未确认或提交回执未知）为
+`uncertain`；原会话被撤销用 `409 control_revoked`，仅工作期限到期且原会话仍活动用
+`409 text_submit_not_executed`。`currentStage` 与 dispatch 快照随冻结错误一起投影，reason 为
+`authorization_revoked` 或 `deadline_exceeded`。status(P)、重复 P 与冻结结果只复制最后一次已提交
+快照，迟到回执不能回补，也不持久化为普通动作历史。已认领 text 的恢复投影在只读结果副本上叠加实时
+会话/耐久/设备/忙覆盖；临时阻塞不写回原操作保存的语义入口。
 
 ### 条件等待（wait_for）
 
@@ -262,7 +300,7 @@ status(P)、重复 P 与冻结结果只复制最后一次已提交快照，迟�
 工作位内做一次验证采集并发布一个新 `O`。
 
 - 准入在单一状态锁内完成：引用解析、已过期会话拦截（`409 session_expired`，绝不复活）、
-  普通屏障与工作位、工作记录、基线确认与 `SessionTTL=120s` 单调续租。已过期会话不被本次
+  普通屏障与工作位、工作记录、当前 `full` O 的基线确认与 `SessionTTL=120s` 单调续租。已过期会话不被本次
   调用续租，也不被推进成 `control_revoked`。
 - 等待期只采样、不发布：每帧读一次目标屏层级并用只读投影计算摘要，不发布、不推进 ref 连续号、
   不确认基线。`stable=true` 比较屏幕语境与公开树内容。摘要忽略所有节点的 `bounds` 与
@@ -356,21 +394,20 @@ status(P)、重复 P 与冻结结果只复制最后一次已提交快照，迟�
 且之后没有失败，复用该帧，否则只读一次终帧。它的 `observation.quality` 由等待比较得出
 （见 §3 条件等待）。
 
-公开 delta 相对已确认的 compact full 计算。规划先展开任何兼容输入中的历史链，再按原 ref
-比较节点。输出普通 `add`/`replace` 定义，并校验重建树的逻辑相等与规范 JSON 字节相等。
-70% 判据用有界整数关系
-`10×deltaBytes < 7×fullBytes`；等值退 full。构造器在投影阶段只产生候选，提交门禁通过后
-才推进 `prev` 与 ref 计数器；被拒绝的候选不改变下一次发布树的 ref。可读文本块使用
-`result v4` 的 `obs` 观察行、`tree v4` 普通树和 `inspect v3` 详细补看编码；`both`/`structured`
-的 JSON 保持完整 `Result`。普通角色与动作按文本语法恢复。full/delta 的选择按 JSON 字节计量。
-
 净化仅改变公开投影：默认空叶不发布，原始事实仍供动作重验使用；非目标 display 包装层不发布，
 目标后代按最近公开祖先挂接并保持 raw 先序。Source 与 ContextSource 互斥且完整覆盖公开 ref，
 context 只承载阅读祖先关系、不提供动作能力。五个状态保留来源三态，合成根使用已知默认。
 
-连续性在公开父索引上按五阶段运行：唯一匿名结构；六个局部/全局内容与身份 pass；基于完整、
-无冲突后代配对集合的父容器投票；新锚点下局部恢复（与投票交替）；最后一次零位移 ordinal
-恢复及局部收尾。ordinal 需要进入该阶段前已有的同 rank 独立强固定点，不能相互造证据。
+连续性在公开父索引上按六阶段运行：唯一匿名结构；六个局部/全局内容与身份 pass；基于完整、
+无冲突后代配对集合的父容器投票（3A 同锚定父优先、3B 经后代最近公共祖先自底向上跨重包裹锚定，
+不再要求容器匿名）；新锚点下局部恢复（与投票交替）；最后一次零位移 ordinal 恢复及局部收尾
+（ordinal 桶按 `role`/`actions`/`protected`/`hasRes`/`resource`/`label` 分组，可交互时含
+`class`/`pkg`，且需要进入该阶段前已有的同 rank 独立强固定点，不能相互造证据）；最后单次静止几何
+收尾，只处理同已锚定父下未匹配、非 `context`、非 `editable`、无公开子节点的叶子，要求同桶旧新
+数量相等且至少 2 个、四边差均不超过 4 像素、严格一对一且旧序对应当前序严格递增；桶键为
+`role`/`actions`/`protected`/`hasRes`/`resource`/`label`，可交互时另含 `class`/`pkg`。静止几何阶段
+不匹配容器或输入框，因此不会在列表整批换内容复用槽位时让新卡片偷走旧按钮 ref，也不会让两个
+无锚点输入框串号。
 resource 与非输入 label 同时参与内容身份；局部 resource-only 回退只在同一锚定父下双向唯一时
 退让文案。全局唯一性始终按完整两侧树统计，不能因先匹配/消耗重复项制造唯一。无锚点输入仅
 允许同父双向唯一匹配。未知/歧义/预算截断降低保号率并分配新号，不猜测目标。
@@ -401,20 +438,47 @@ O，图片成功也不单独发布；核心树有效而图片失败只把本次�
 - 图片与树都不进入账本；图片字节不参与 full/delta 编码与比例判断。
 - 图片只作为本次结果的附加材料交付，不保留历史图片，也不提供图片补取工具。
 
-full/delta 的选择（`useDelta`）：
+### full/delta 与基线池
 
-- `observe(P)` 强制 full；
-- 否则仅在“已有确认基线、基线属于同一会话、`revision - baseline.revision < 12`、
-  基线采集龄 `< 180s`”时尝试 delta；
-- 差分必须可编码，且编码长度 `< full 长度 × 70%`；否则退回 full。
-- delta 无法表达（同 ref 角色变化、根变化或非法最终图）时 `Diff` 返回错误，采集改用 full。
-- `act` 重验失败交付的观察按 `forceFull = !obs.Full` 决定，`obs` 为本次失败请求引用的观察：
-  引用 full O 时它在认领时已被确认为基线，满足上述条件时交付若为 delta，其 `base` 就是调用方
-  刚刚使用的那棵树；引用 delta O 时基线更早，改发 full，避免要求调用方把补丁应用到更早的树。
+公开 delta 相对基线池中任一已确认的 compact full 计算。基线池只保存同一会话 origin、同一目标
+显示 ID/代次、`revision - base.Revision <= 4` 且采集龄 `< 180s` 的完整观察，最多 4 条；条目按
+Revision 降序，超出窗口或容量的条目在发布新观察前清理。
 
-**基线的唯一确认入口**：只接受被接纳的 `observe(O)` 对该 O 的确认，或 `act` 对 full O 的
-认领确认。即：`start` 的首个 full 只是候选；`observe(O1)` 成功后才把 O1 升为基线，
-并把空差异 delta 返回给调用方。客户端必须保留基线树，按 `delta.base` 应用到本地副本。
+delta 选择分三步，全部在锁外读取池快照，提交时在短锁内重新校验：
+
+1. **主路径**：相对 `activeBaselineID` 指向的基线（为空时取池中最新条目）计算差分。差分可编码
+   且 `10×deltaBytes < 7×fullBytes` 时直接采用；成立时不再试探任何历史基线。
+2. **历史回返试探**：仅当调用允许历史回退、主路径未产出有效差分时，按 Revision 降序对其余仍在
+   窗口内的基线（主基线之外至多 3 条）逐一调用只读 `CandidateAgainst` 投影同一帧；只有
+   `10×deltaBytes < 5×candidateFullBytes` 的候选才可参与，取 delta 字节最小者（字节相同取
+   Revision 更大者）。试探使用独立候选，不推进连续性、不消耗 ref 高水位；STOP/取消立即终止；
+   任一候选超出公开或内部快照预算时只跳过该基线。主路径成功时绝不进入本步。
+3. **兜底 full**：两步均未命中时，按主路径的紧凑树发布 full。
+
+差分规划先展开任何兼容输入中的历史链，再按原 ref 比较节点；输出普通 `add`/`replace` 定义，
+并校验重建树的逻辑相等与规范 JSON 字节相等。构造器在投影阶段只产生候选，提交门禁通过后才
+推进 `prev` 与 ref 计数器；被拒绝的候选不改变下一次发布树的 ref。可读文本块使用 `result v4`
+的 `obs` 观察行、`tree v4` 普通树和 `inspect v3` 详细补看编码；`both`/`structured` 的 JSON
+保持完整 `Result`。普通角色与动作按文本语法恢复。full/delta 的选择按 JSON 字节计量。
+
+`activeBaselineID` 只在发布基于某基线的 delta 时设为该基线，发布 full 时置空；确认当前观察为
+基线时指向该观察。`act` 重验失败的交付观察固定不进入历史试探，只在引用 `full` O 时允许主路径
+delta；`start`、会话重建与收尾完成清空或过滤基线池。历史试探的 50% 判据只拒绝体积过大的差分，
+不证明两个页面相同；超过 4 个 revision 或 180 秒的旧基线已经退出池，不参与选择，也不承诺可
+区分窗口外的旧页面或同形页面。
+
+**基线的唯一确认入口**：只有被接纳的 `observe(O)`、`wait_for(O)` 或 `act` 对 `full` O 的认领确认
+可以把当前 `full` 观察加入基线池；`start` 的首个 `full`、`act` 后观察和重验失败交付的 `full` 只是
+候选。确认要求观察仍是当前留存观察、属于原会话 origin 与显示代次、在窗口内，并把它的 compact
+公开树与完整内部投影一并保存。池中所有活动基线在留存淘汰时受保护：凡可能作为 `delta.base` 发出
+的 O 都保留完整树，`inspect(reference=baseID)` 在其仍在池内时可读；被淘汰的基线不再参与选择，
+也不承诺历史补看。客户端必须保留基线树，按 `delta.base` 应用到本地副本。
+
+`observe(P)` 强制 full；其他普通采集才按上述步骤选择。delta 无法表达（同 ref 角色变化、根变化或
+非法最终图）时 `Diff` 返回错误，采集改用 full。`act` 重验失败交付的观察按 `forceFull = !obs.Full`
+决定，`obs` 为本次失败请求引用的观察：引用 `full` O 时它在认领时已被确认为基线，满足条件时交付若为
+delta，其 `base` 就是调用方刚刚使用的那棵树；引用 delta O 时基线更早，改发 `full`，避免要求
+调用方把补丁应用到更早的树。
 
 delta 的五类块：`set`（逐字段完整新值，显式保留 `false`/`0`/`""`/`[]`/`null`）、`add`、
 `remove`、`children`（完整子列表）、`replace`（整段替换）。空差异只含 `format`、`base`、`view`。
@@ -636,7 +700,7 @@ P 已无法定位时，`end(P)` 返回 `409 operation_unknown`、`phase=referenc
 
 | 层 | 字段 | 含义 |
 | --- | --- | --- |
-| 动作执行 | `outcome` | `executed` / `not_executed` / `uncertain`；只描述本次输入是否已派发并有完成证据 |
+| 动作执行 | `outcome` | `executed` / `not_executed` / `uncertain` / `partial`；只描述本次输入是否已派发并有完成证据。`partial` 只由复合 `text` 产生，表示写入已确认、提交确定未派发且没有未知物理副作用，不是降级的 `executed` |
 | 滚动效果 | `effect.state` | `observed` / `not_observed` / `unknown`；只在 `scroll` 结果与仍保留该原操作的 P 视图中出现，只表示是否观察到容器内内容位移，不表示动作因果、方向、距离或到达边界。`observed` 要求屏幕位移与容器相对位移同时成立且同号对达到门限，`not_observed` 用完整匹配集与容器四边不变判据，二者都不证明原始内容静止 |
 | 观察 | `observation.status` | `complete` / `partial` / `failed`；后观察失败不改写已确认的 `executed` |
 | 条件等待 | `wait.trigger` / `wait.matched` / `wait.elapsed_ms` | 等待因哪个分支退出、最终发布帧上成立哪些单帧条件、整次调用耗时；不表示页面之后不再变化，也不替代 `observation.status` |
@@ -648,9 +712,10 @@ P 已无法定位时，`end(P)` 返回 `409 operation_unknown`、`phase=referenc
 `outcome`、`effect`、`wait` 与 `observation.quality` 各自独立：`executed + effect=unknown`
 是合法结果；`unstable`/`unknown` 的观察仍可发布、仍可被认领，是否执行由动作自己的判据决定；
 `effect`、`wait` 与 `quality` 都不改写 `outcome`、`observation.status`、错误或恢复入口，也
-不改变 O 的 `status`、`actionable_until` 与基线确认。`wait` 在 `Result` 中固定位于 `shell`
-之后、`notification` 之前；`status(P)` 与重复 `P` 的视图保留已保存的 `wait`，并按既有规则
-省略 `observation`。
+不改变 O 的 `status`、`actionable_until` 与基线确认。`partial` 同样不改写后观察、`effect` 或
+`cleanup` 事实；只判 `executed` 的调用方必须把它当作未完成动作。`wait` 在 `Result` 中固定位于
+`shell` 之后、`notification` 之前；`status(P)` 与重复 `P` 的视图保留已保存的 `wait`，并按既有
+规则省略 `observation`。
 
 事件日志只记白名单键（ID、枚举、布尔、计数、时长），值经过单行截断；不记录树、差异、输入
 正文、命令、原始响应或异常文本。每个 UI 窗口关闭只记一条 `ui.window_closed`，
@@ -659,6 +724,9 @@ P 已无法定位时，`end(P)` 返回 `409 operation_unknown`、`phase=referenc
 标签或树；`scroll.revalidate` 的 `start_scope_proven`/`end_scope_proven` 只描述两端，
 整段证明由独立的 `proven` 布尔值表达；`scroll.effect` 的 `anchors`/`coverage` 仍按完整
 匹配集计数；观察质量事件只记可取得的 `operation_id`、`observation_id`、阶段与受控枚举/数值。
+目标重验与 delta 选择只允许记录命中层级 `tier`（1–4）和 `baseline_pool`（`primary`/`historical`/`full`）。
+text 完成事件记 `focus_dispatch`/`write_dispatch`/`submit_dispatch` 与受控 `stage`/`reason`/`count`；
+`changed_ref`、输入正文与读回值绝不进入日志。
 新增键必须先进入 `internal/eventlog` 的单一白名单，否则事件被静默丢弃。
 
 ## 10. 消息投递与发布边界
@@ -674,7 +742,7 @@ P 已无法定位时，`end(P)` 返回 `409 operation_unknown`、`phase=referenc
 ### 发布
 
 `release/versions.json` 是发行号、共同契约号与 Android versionCode 的唯一来源；当前为
-`release_version=0.28.0`、`contract_version=24`、`android_version_code=30`，构建生成
+`release_version=0.29.0`、`contract_version=25`、`android_version_code=31`，构建生成
 Go/Java 常量。`scripts/build-release.ps1` 产出整组产物与 `build/release/manifest.json`
 （源码提交、Go 版本、MCP SDK/协议、各产物 SHA-256/大小、Android 包名/版本、工具目录指纹）。
 工具目录固定为 `scripts/toolcatalog` 投影的 13 个工具，指纹是该目录注册顺序、名称、描述与

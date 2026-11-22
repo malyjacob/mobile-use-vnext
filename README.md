@@ -7,8 +7,8 @@ HTTP 协议配对。
 
 - 模块：`github.com/malyjacob/mobile-use-vnext`
 - Go：1.27.1，启用 `GOEXPERIMENT=jsonv2`
-- 契约：`contract_version = "24"`，服务、HTTP 客户端、控制 App 精确相等才做普通工作
-- 发行：`0.28.0`；`release/versions.json` 是发行号、契约号与 Android versionCode（30）的唯一
+- 契约：`contract_version = "25"`，服务、HTTP 客户端、控制 App 精确相等才做普通工作
+- 发行：`0.29.0`；`release/versions.json` 是发行号、契约号与 Android versionCode（31）的唯一
   来源，构建生成 Go/Java 常量
 
 ## 能力边界
@@ -33,10 +33,11 @@ HTTP 协议配对。
   `internal/client`；默认部署会把 linux/arm64 适配器安装到 chroot 并在手机
   `127.0.0.1:18882` 启动 HTTP 入口（主机转发 `18883`），主机自建适配器仍可选。见
   [MCP 入口](docs/mcp.md)、[Agent 接入指南](docs/integration.md) 与 [Go 客户端](docs/client.md)。
-  `text`/`both` 的结果文本是紧凑的 `result v4` 外壳：头行给 `ok`/`err` 与调用编号，观察合
-  并为单行 `obs`，可读块沿用 `tree v4`、`inspect v3`、`shell v1` 与 `timeline v1`
-  语法；`recovery` 行在可判定时直接给出精确 `O`/`P` 编号。`text` 按清单省略固定元信息，
-  `structured` 的 `structuredContent` 保留完整 `Result` JSON。
+  `text`/`both` 的结果文本是紧凑的 `result v4` 外壳：头行给 `ok`/`err`、调用编号与 outcome；
+  观察合并为单行 `obs`；复合 text 另带 `text_input write=… submit=…`，写入已确认而提交确定
+  未派发时 `outcome=partial` 并附新的 ready O；可读块沿用 `tree v4`、`inspect v3`、`shell v1`
+  与 `timeline v1` 语法；`recovery` 行在可判定时直接给出精确 `O`/`P` 编号。`text` 按清单省略
+  固定元信息，`structured` 的 `structuredContent` 保留完整 `Result` JSON。
 
 ## 目录
 
@@ -158,22 +159,22 @@ $env:GOEXPERIMENT = 'jsonv2'; go test ./...
 
 包内测试覆盖 `internal/protocol`、`internal/observation`、`internal/imaging`、`internal/engine`、
 `internal/android`（ADB/u2 走本地桩，不需要真机）、`internal/client`、`internal/httpapi`、
-`internal/mcp`、`internal/store`、`internal/device` 与 `scripts/mcp-probe`；`internal/eventlog`
-没有包内测试。Windows 上的通过不证明设备路径或账本耐久性。
+`internal/mcp`、`internal/store`、`internal/device`、`internal/eventlog` 与
+`scripts/mcp-probe`；Windows 上的通过不证明设备路径或账本耐久性。
 
 ## 接口
 
 Agent 工具（`POST /api/<tool>`，`Authorization: Bearer <agent_token>`，
-`X-Mobile-Use-Contract: 24`）：
+`X-Mobile-Use-Contract: 25`）：
 
 | 工具 | 说明 |
 | --- | --- |
 | `start` | 请求体必须为 `{}`；创建/绑定目标屏幕并发布首个 full 观察；初始化、激活与首观察成功发布使用五分钟租期 |
 | `status` | 无参数、`{"reference":"O…"}` 或 `{"reference":"P…"}`；只读查询 |
-| `observe` | `reference`（O/P）；按服务端基线返回 full 或 delta；`observe(P)` 与 `full=true` 强制 full；`image=true` 附加本次图片 |
+| `observe` | `reference`（O/P）；按服务端多基线池返回 full 或 delta（`revision - base.Revision <= 4`、采集龄 `< 180s`、最多 4 条近期已确认 full）；`observe(P)` 与 `full=true` 强制 full；`image=true` 附加本次图片 |
 | `snap` | `reference`（O/P）；立即读取当前屏的一张图，不读树、不发布观察；成功只含 `operation_id` 与顶层 `image` |
 | `wait_for` | `reference` + `timeout`（必填 1～40，`stable=true` 时至少 2）+ 可选 `query`/`absent_query`/`stable`/`full`/`image`；在唯一工作位上等待后发布一个新 `O` |
-| `act` | `reference` + `operation`：`tap`、`long_press`、`swipe`（可选 `duration_ms`）、`scroll`（`container`/`direction`/`amount`）、`key`、`text`；`tap`/`long_press` 的 ref 目标支持 4 级定位（含 3×3 网格）与同视口子容器委托，默认 `bubble=true` 时按视觉区锚定提升最近交互祖先或吸附唯一局部共位控件；`scroll` 支持双向同视口滚动栈、非滚动 ref 自动祖先提升、坐标最内层/回退/消歧与居中 3 轴线轨迹；`act` 目标解析与规划类静态 422 使用 `invalid_target`/`unsupported_node_action`/`ambiguous_point`/`no_safe_point`/`no_safe_trajectory`，有候选时附统一 `candidates`；`text` 默认 `press_enter=true`，一次完成聚焦、写入、精确读回和至多一次 ENTER；`image=true` 为后观察附图 |
+| `act` | `reference` + `operation`：`tap`、`long_press`、`swipe`（可选 `duration_ms`）、`scroll`（`container`/`direction`/`amount`）、`key`、`text`；`tap`/`long_press` 的 ref 目标支持 4 级定位（含 3×3 网格）与同视口子容器委托，默认 `bubble=true` 时按视觉区锚定提升最近交互祖先或吸附唯一局部共位控件；`scroll` 支持双向同视口滚动栈、非滚动 ref 自动祖先提升、坐标最内层/回退/消歧与居中 3 轴线轨迹；`act` 目标解析与规划类静态 422 使用 `invalid_target`/`unsupported_node_action`/`ambiguous_point`/`no_safe_point`/`no_safe_trajectory`，有候选时附统一 `candidates`；`text` 默认 `auto_submit=true`、`submit_ref="enter_key"`，一次完成聚焦、写入、精确读回和至多一次 ENTER；`submit_ref="n…"` 写后点击提交按钮且失败不补发 ENTER；`auto_submit=false` 只写不提；`text_input` 报告 `write`/`submit`，`write=executed` 且提交确定未派发时 `outcome=partial` 并附新的 ready O；`image=true` 为后观察附图 |
 | `inspect` | `reference` 可选 `node` 或 `query`；只读历史树 |
 | `keepalive` | `reference`（O/P）+ 可选 `duration_minutes`（1～120，默认 2）；从应用时重设当前活动会话租期，可延长或缩短；普通活动仅按两分钟取最大值 |
 | `end` | `reference`（O/P）；撤权并启动独立收尾 |

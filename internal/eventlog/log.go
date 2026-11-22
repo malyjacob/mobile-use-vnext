@@ -99,7 +99,12 @@ var allowedKeys = map[string]struct{}{
 	// pinned set RPC; the three dispatch fields are closed enums. No input,
 	// readback value, length or hash is ever whitelisted.
 	"issued": {}, "accepted": {}, "stage": {},
-	"focus_dispatch": {}, "write_dispatch": {}, "enter_dispatch": {},
+	"focus_dispatch": {}, "write_dispatch": {}, "submit_dispatch": {},
+	// Target revalidation and continuity facts. tier is the bounded integer
+	// match level (1-4) and baseline_pool is the closed enum
+	// primary/historical/full; a ref, a changed_ref, a text or a tree is never
+	// whitelisted here.
+	"tier": {}, "baseline_pool": {},
 }
 
 // Logger is a bounded, drop-counting event sink.

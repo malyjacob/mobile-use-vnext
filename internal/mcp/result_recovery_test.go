@@ -90,6 +90,21 @@ func TestRecoveryExactReferenceMatrix(t *testing.T) {
 			want: "recovery entry=status ref=P6_2",
 		},
 		{
+			name: "status P partial operation outranks session origin",
+			raw: `{"operation_id":"P6_9","outcome":"partial",` +
+				`"text_input":{"write":"executed","submit":"not_executed"},` +
+				`"session":{"origin":"P1_3","state":"active","mode":"virtual"},` +
+				`"recovery":{"entry":"status","reference":"P"}}`,
+			want: "recovery entry=status ref=P6_9",
+		},
+		{
+			name: "status P partial keeps live blocker priority",
+			raw: `{"operation_id":"P6_10","outcome":"partial",` +
+				`"blocking_operation_id":"P77_2","error":{"code":"device_busy","message":"忙"},` +
+				`"recovery":{"entry":"status","reference":"P"}}`,
+			want: "recovery entry=status ref=P77_2",
+		},
+		{
 			name: "status P executed_revoked operation outranks session origin",
 			raw: `{"operation_id":"P6_3","phase":"executed_revoked",` +
 				`"session":{"origin":"P1_2","state":"ended","mode":"virtual"},` +
@@ -172,6 +187,26 @@ func TestRecoveryExactReferenceMatrix(t *testing.T) {
 			name: "observe P uncertain",
 			raw:  `{"operation_id":"P21_2","outcome":"uncertain","recovery":{"entry":"observe","reference":"P"}}`,
 			want: "recovery entry=observe ref=P21_2",
+		},
+		{
+			name: "observe P partial outranks session origin",
+			raw: `{"operation_id":"P21_4","outcome":"partial",` +
+				`"text_input":{"write":"executed","submit":"not_executed"},` +
+				`"session":{"origin":"P2_2","state":"active","mode":"virtual"},` +
+				`"recovery":{"entry":"observe","reference":"P","input_state":"retired"}}`,
+			want: "recovery entry=observe ref=P21_4",
+		},
+		{
+			name: "observe P partial without ready observation",
+			raw: `{"operation_id":"P21_5","outcome":"partial",` +
+				`"error":{"code":"text_submit_not_executed","message":"写入已确认，提交未派发"},` +
+				`"recovery":{"entry":"observe","reference":"P","input_state":"retired"}}`,
+			want: "recovery entry=observe ref=P21_5",
+		},
+		{
+			name: "observe P partial without operation id falls back",
+			raw:  `{"outcome":"partial","recovery":{"entry":"observe","reference":"P","input_state":"retired"}}`,
+			want: "recovery entry=observe ref=P",
 		},
 		{
 			name: "red line 2 observation not found falls back",

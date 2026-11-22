@@ -1086,6 +1086,135 @@ func TestActCandidatesErrorDetailsOverHTTP(t *testing.T) {
 	}
 }
 
+// TestActTextSubmitBody proves the act(text) transport uses the renamed
+// auto_submit/submit_ref members and never publishes the retired press_enter.
+func TestActTextSubmitBody(t *testing.T) {
+	cases := []struct {
+		name string
+		op   protocol.Operation
+		body string
+	}{
+		{
+			name: "defaults omitted",
+			op: protocol.Operation{
+				Type: "text", Target: &protocol.Target{UseRef: true, Ref: "n1"}, Text: "x",
+			},
+			body: `{"reference":"O1","operation":{"type":"text","target":{"ref":"n1"},"text":"x"},"image":false}`,
+		},
+		{
+			name: "auto_submit false",
+			op: protocol.Operation{
+				Type: "text", Target: &protocol.Target{UseRef: true, Ref: "n1"}, Text: "x",
+				AutoSubmit: false, HasAutoSubmit: true,
+			},
+			body: `{"reference":"O1","operation":{"type":"text","target":{"ref":"n1"},"text":"x","auto_submit":false},"image":false}`,
+		},
+		{
+			name: "submit ref node",
+			op: protocol.Operation{
+				Type: "text", Target: &protocol.Target{UseRef: true, Ref: "n1"}, Text: "x",
+				SubmitRef: "n5", HasSubmitRef: true,
+			},
+			body: `{"reference":"O1","operation":{"type":"text","target":{"ref":"n1"},"text":"x","submit_ref":"n5"},"image":false}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			captures := make(chan requestCapture, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				captures <- captureRequest(t, request)
+				writeResponse(w, http.StatusOK,
+					`{"operation_id":"Ptext","outcome":"executed","text_input":{"write":"executed","submit":"executed"}}`)
+			}))
+			defer server.Close()
+
+			operation := tc.op
+			response, err := newTestClient(t, server.URL).Act(context.Background(),
+				&protocol.ActRequest{Reference: "O1", Operation: operation}, WithOperationID("Ptext"))
+			if err != nil {
+				t.Fatalf("Act() error: %v", err)
+			}
+			capture := <-captures
+			if capture.body != tc.body {
+				t.Fatalf("body = %s, want %s", capture.body, tc.body)
+			}
+			if strings.Contains(capture.body, "press_enter") {
+				t.Fatal("act body still publishes press_enter")
+			}
+			if response.Result == nil || response.Result.TextInput == nil ||
+				response.Result.TextInput.Write != protocol.TextInputExecuted ||
+				response.Result.TextInput.Submit != protocol.TextInputExecuted {
+				t.Fatalf("text_input = %+v", response.Result)
+			}
+		})
+	}
+}
+
+// TestActDecodesPartialTextSubmit pins the partial outcome: the closed
+// text_submit_not_executed code, the renamed write/submit snapshot and the
+// observe(P, retired) recovery survive the strict response decoder.
+func TestActDecodesPartialTextSubmit(t *testing.T) {
+	const body = `{"operation_id":"Ppartial","outcome":"partial",` +
+		`"text_input":{"write":"executed","submit":"not_executed"},` +
+		`"error":{"code":"text_submit_not_executed","message":"写入已确认，提交未派发","details":` +
+		`{"stage":"submit","reason":"submit_target_unconfirmed","candidate_count":0,` +
+		`"dispatch":{"focus":"not_attempted","write":"executed","submit":"not_attempted"}}},` +
+		`"observation":{"status":"complete","id":"O2"},` +
+		`"recovery":{"entry":"observe","reference":"P","input_state":"retired"}}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		writeResponse(w, http.StatusConflict, body)
+	}))
+	defer server.Close()
+
+	response, err := newTestClient(t, server.URL).Act(context.Background(),
+		&protocol.ActRequest{
+			Reference: "O1",
+			Operation: protocol.Operation{
+				Type: "text", Target: &protocol.Target{UseRef: true, Ref: "n1"}, Text: "x",
+			},
+		}, WithOperationID("Ppartial"))
+	if response == nil {
+		t.Fatal("partial response dropped")
+	}
+	if response.HTTPStatus != http.StatusConflict {
+		t.Fatalf("HTTP status = %d, want 409", response.HTTPStatus)
+	}
+	clientErr := requireClientError(t, err)
+	if clientErr.Code != protocol.CodeTextSubmitNotExecuted ||
+		clientErr.HTTPStatus != http.StatusConflict {
+		t.Fatalf("client error = %+v", clientErr)
+	}
+	result := response.Result
+	if result.Outcome != protocol.OutcomePartial {
+		t.Fatalf("outcome = %q, want partial", result.Outcome)
+	}
+	if result.TextInput == nil || result.TextInput.Write != protocol.TextInputExecuted ||
+		result.TextInput.Submit != protocol.TextInputNotExecuted {
+		t.Fatalf("text_input = %+v", result.TextInput)
+	}
+	if result.Error == nil || result.Error.Code != protocol.CodeTextSubmitNotExecuted {
+		t.Fatalf("error = %+v", result.Error)
+	}
+	details := result.Error.Details
+	if details["stage"] != "submit" || details["reason"] != "submit_target_unconfirmed" ||
+		details["candidate_count"] != float64(0) {
+		t.Fatalf("details = %#v", details)
+	}
+	dispatch, ok := details["dispatch"].(map[string]any)
+	if !ok || dispatch["focus"] != "not_attempted" || dispatch["write"] != "executed" ||
+		dispatch["submit"] != "not_attempted" {
+		t.Fatalf("dispatch = %#v", details["dispatch"])
+	}
+	if result.Observation == nil || result.Observation.ID != "O2" {
+		t.Fatalf("observation = %+v", result.Observation)
+	}
+	if result.Recovery == nil || result.Recovery.Entry != protocol.RecoveryEntryObserve ||
+		result.Recovery.Reference != protocol.RecoveryReferenceP ||
+		result.Recovery.InputState != protocol.RecoveryInputRetired {
+		t.Fatalf("recovery = %+v", result.Recovery)
+	}
+}
+
 func TestAppDecodesHandoffNullStatePreserved(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		writeResponse(w, http.StatusOK,

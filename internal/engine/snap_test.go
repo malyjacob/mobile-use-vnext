@@ -93,7 +93,7 @@ func TestSnapDeliversOneImageWithoutObservationChanges(t *testing.T) {
 	revisionBefore := h.engine.session.Revision
 	currentBefore := h.engine.current
 	expiresBefore := h.engine.session.ExpiresAt
-	baselineBefore := h.engine.baseline
+	baselineBefore := baselineWithID(h.engine.baselines, h.engine.activeBaselineID)
 	displayBefore := h.engine.session.Display
 	h.engine.mu.Unlock()
 
@@ -148,7 +148,7 @@ func TestSnapDeliversOneImageWithoutObservationChanges(t *testing.T) {
 	if !h.engine.session.ExpiresAt.Equal(expiresBefore) {
 		t.Errorf("session lease changed: %v -> %v", expiresBefore, h.engine.session.ExpiresAt)
 	}
-	if h.engine.baseline != baselineBefore {
+	if baselineWithID(h.engine.baselines, h.engine.activeBaselineID) != baselineBefore {
 		t.Error("baseline changed")
 	}
 	if observation := h.engine.observations[observationID]; observation == nil ||

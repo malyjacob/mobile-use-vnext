@@ -38,6 +38,14 @@ const (
 	tapStaticScopeAncestor = "ancestor"
 )
 
+// tapPlanOptions qualifies one static tap planning call. Its zero value is the
+// ordinary tap/long_press contract; allowInitiallyDisabled is only set by the
+// text submit_ref planner so a write-time greyed button can still be planned
+// without ever relaxing the normal tap/long_press gates.
+type tapPlanOptions struct {
+	allowInitiallyDisabled bool
+}
+
 // tapPlan is the immutable request-local result of static planning. It never
 // enters the public tree, the session or the recovery ledger.
 type tapPlan struct {
@@ -48,6 +56,7 @@ type tapPlan struct {
 	targetRaw         *device.RawNode
 	carrierRef        string
 	carrierRaw        *device.RawNode
+	bubbleAncestorRef string
 	bubbleAncestorRaw *device.RawNode
 	delegateRaw       *device.RawNode
 	colocatedRaw      *device.RawNode
@@ -920,11 +929,20 @@ func provesGuidancePoint(view *tapPublicView, ancestor *protocol.Node,
 }
 
 func validTapPublicTarget(node *protocol.Node, action protocol.Action) bool {
+	return validTapPublicTargetAllowed(node, action, false)
+}
+
+// validTapPublicTargetAllowed is the submit_ref static relaxation: a target
+// that is explicitly disabled before the write may still be planned. The
+// enabled gate is only skipped, never inverted: an explicitly enabled target is
+// unchanged and the fresh post-write frame still has to prove the transition.
+func validTapPublicTargetAllowed(node *protocol.Node, action protocol.Action,
+	allowInitiallyDisabled bool) bool {
 	if node == nil || node.Context || node.Role == protocol.RoleRoot ||
 		node.Bounds == nil || node.Bounds.Width() <= 0 || node.Bounds.Height() <= 0 {
 		return false
 	}
-	if node.Enabled != nil && !*node.Enabled {
+	if !allowInitiallyDisabled && node.Enabled != nil && !*node.Enabled {
 		return false
 	}
 	return hasAction(node, action)
@@ -1191,11 +1209,21 @@ func topLevelTapScopeBlockers(scope *tapScope, parent *protocol.Node) []*protoco
 
 func isTopLevelCoextensiveBlocker(scope *tapScope, view *tapPublicView,
 	parent, candidate *protocol.Node, screen device.Rect) bool {
+	return isTopLevelCoextensiveBlockerAllowed(scope, view, parent, candidate, screen, false)
+}
+
+// isTopLevelCoextensiveBlockerAllowed keeps the coextensive-child gate intact
+// while letting the submit_ref planner treat a pre-write disabled button as the
+// candidate. Every other structural condition (single top-level blocker,
+// coextensive clipped rect) is unchanged.
+func isTopLevelCoextensiveBlockerAllowed(scope *tapScope, view *tapPublicView,
+	parent, candidate *protocol.Node, screen device.Rect,
+	allowInitiallyDisabled bool) bool {
 	if scope == nil || view == nil || parent == nil || candidate == nil ||
 		parent == candidate || candidate.Context || candidate.Role == protocol.RoleRoot {
 		return false
 	}
-	if candidate.Enabled != nil && !*candidate.Enabled {
+	if !allowInitiallyDisabled && candidate.Enabled != nil && !*candidate.Enabled {
 		return false
 	}
 	blockers := topLevelTapScopeBlockers(scope, parent)
@@ -2042,7 +2070,7 @@ func collectDirectBlockingDiagnostics(view *tapPublicView, target *protocol.Node
 
 func planDirectTapRef(obs *observationState, view *tapPublicView,
 	operation *protocol.Operation, target *protocol.Node, action protocol.Action,
-	allowCoextensiveChild bool, started time.Time) (*pointCheck, *scrollPlan, *tapPlan, *protocol.APIError) {
+	allowCoextensiveChild bool, started time.Time, options tapPlanOptions) (*pointCheck, *scrollPlan, *tapPlan, *protocol.APIError) {
 	input, apiErr := buildTapInput(obs, view, target)
 	if apiErr != nil {
 		return nil, nil, nil, apiErr
@@ -2077,8 +2105,9 @@ func planDirectTapRef(obs *observationState, view *tapPublicView,
 		blockers := topLevelTapScopeBlockers(scope, target)
 		if len(blockers) == 1 {
 			delegate := blockers[0]
-			if validTapPublicTarget(delegate, action) &&
-				isTopLevelCoextensiveBlocker(scope, view, target, delegate, screen) {
+			if validTapPublicTargetAllowed(delegate, action, options.allowInitiallyDisabled) &&
+				isTopLevelCoextensiveBlockerAllowed(scope, view, target, delegate, screen,
+					options.allowInitiallyDisabled) {
 				if delegateInput, ok := tapInputFromValidatedView(view, input.topology, delegate); ok {
 					if delegateScope, scopeErr := collectTapScope(delegateInput); scopeErr == nil {
 						if delegatePlan, planErr := chooseTapPlan(delegateScope, delegateInput,
@@ -2125,7 +2154,7 @@ const (
 
 func planBubbleOrColocated(obs *observationState, view *tapPublicView,
 	operation *protocol.Operation, child *protocol.Node, action protocol.Action,
-	started time.Time) (*tapPlan, *protocol.APIError) {
+	started time.Time, options tapPlanOptions) (*tapPlan, *protocol.APIError) {
 	if obs == nil || view == nil || child == nil {
 		return nil, tapHierarchyError()
 	}
@@ -2136,7 +2165,8 @@ func planBubbleOrColocated(obs *observationState, view *tapPublicView,
 	status := bubbleStepANoAncestor
 	var ancestorScope *tapScope
 	if ancestor != nil {
-		if ancestor.Enabled != nil && !*ancestor.Enabled ||
+		if (!options.allowInitiallyDisabled &&
+			ancestor.Enabled != nil && !*ancestor.Enabled) ||
 			ancestor.Bounds == nil || ancestor.Bounds.Width() <= 0 || ancestor.Bounds.Height() <= 0 {
 			status = bubbleStepAAncestorInvalid
 		} else if !hasAction(ancestor, action) {
@@ -2172,6 +2202,7 @@ func planBubbleOrColocated(obs *observationState, view *tapPublicView,
 							action:            string(action),
 							targetRef:         child.Ref,
 							targetRaw:         &view.capture.Nodes[childInfo.rawIndex],
+							bubbleAncestorRef: ancestor.Ref,
 							bubbleAncestorRaw: ancestorInput.targetRaw,
 							took:              time.Since(started),
 						}
@@ -2206,7 +2237,8 @@ func planBubbleOrColocated(obs *observationState, view *tapPublicView,
 	centerX, centerY, hasCenter := tapSafeCenter(childRect)
 	if topology, ok := ensureTapViewTopology(obs, view); ok && hasChildRect {
 		for _, node := range view.nodes {
-			if node == nil || node == child || !validTapPublicTarget(node, action) {
+			if node == nil || node == child ||
+				!validTapPublicTargetAllowed(node, action, options.allowInitiallyDisabled) {
 				continue
 			}
 			if !colocatedMatchGuard(view, child, node, screen) {
@@ -2404,6 +2436,15 @@ func planBubbleOrColocated(obs *observationState, view *tapPublicView,
 
 func staticTapRefCheck(obs *observationState, operation *protocol.Operation) (
 	*pointCheck, *scrollPlan, *tapPlan, *protocol.APIError) {
+	return staticTapRefCheckWithOptions(obs, operation, tapPlanOptions{})
+}
+
+// staticTapRefCheckWithOptions is the one static tap planner. The ordinary
+// tap/long_press path passes the zero options; the text submit_ref planner
+// passes allowInitiallyDisabled so a write-time disabled button can still be
+// planned without changing any other gate.
+func staticTapRefCheckWithOptions(obs *observationState, operation *protocol.Operation,
+	options tapPlanOptions) (*pointCheck, *scrollPlan, *tapPlan, *protocol.APIError) {
 	started := time.Now()
 	view, apiErr := collectTapPublicView(obs)
 	if apiErr != nil {
@@ -2436,13 +2477,14 @@ func staticTapRefCheck(obs *observationState, operation *protocol.Operation) (
 		attachStaticCandidates(errOut, buildStaticCandidates(obs, view, operation, entries))
 		return nil, nil, nil, errOut
 	}
-	if target.Enabled != nil && !*target.Enabled {
+	if !options.allowInitiallyDisabled && target.Enabled != nil && !*target.Enabled {
 		return nil, nil, nil, protocol.NewError(409, protocol.CodeNodeDisabled, "目标节点已禁用")
 	}
 	targetActions := tapPublicActions(target)
 	if !hasAction(target, action) {
 		if operation.EffectiveBubble() && !isTouchInteractive(target) {
-			bubblePlan, bubbleErr := planBubbleOrColocated(obs, view, operation, target, action, started)
+			bubblePlan, bubbleErr := planBubbleOrColocated(obs, view, operation, target,
+				action, started, options)
 			return nil, nil, bubblePlan, bubbleErr
 		}
 		reason := tapStaticReasonTargetMissingAction
@@ -2455,7 +2497,7 @@ func staticTapRefCheck(obs *observationState, operation *protocol.Operation) (
 		attachStaticCandidates(errOut, buildStaticCandidates(obs, view, operation, entries))
 		return nil, nil, nil, errOut
 	}
-	return planDirectTapRef(obs, view, operation, target, action, true, started)
+	return planDirectTapRef(obs, view, operation, target, action, true, started, options)
 }
 
 // staticTextRefCheck validates topology, unified structural/geometry/disabled
@@ -2512,5 +2554,6 @@ func staticTextRefCheck(obs *observationState, operation *protocol.Operation) (
 		attachStaticCandidates(errOut, buildStaticCandidates(obs, view, operation, entries))
 		return nil, nil, nil, errOut
 	}
-	return planDirectTapRef(obs, view, operation, target, protocol.ActionTap, false, started)
+	return planDirectTapRef(obs, view, operation, target, protocol.ActionTap, false, started,
+		tapPlanOptions{})
 }

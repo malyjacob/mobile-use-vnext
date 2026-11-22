@@ -167,12 +167,14 @@ func TestContinuityReplacedNodeGetsNewRef(t *testing.T) {
 func TestContinuityAmbiguousDuplicatesGetNewRefs(t *testing.T) {
 	build := func(labels [2]string) *capBuilder {
 		// Two structurally identical buttons under one parent: same class,
-		// package, resource and label. The source offers no other evidence.
+		// package, resource, label and rectangle. The source offers no other
+		// evidence (not even a separating geometry), so both sides stay
+		// ambiguous and neither may steal the other's ref.
 		c := newCap(1080, 2400)
 		root := c.root()
 		bar := c.add(root, withClass(visible(rect(0, 0, 1080, 100)), "android.widget.LinearLayout"))
-		for i, label := range labels {
-			btn := clickable(withRes(withClass(visible(rect(i*100, 0, i*100+90, 90)), "android.widget.Button"), "app:id/action"))
+		for _, label := range labels {
+			btn := clickable(withRes(withClass(visible(rect(0, 0, 90, 90)), "android.widget.Button"), "app:id/action"))
 			c.add(bar, withText(btn, label))
 		}
 		return c

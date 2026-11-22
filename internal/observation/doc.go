@@ -35,14 +35,22 @@
 // Refs are n1, n2, ... allocated monotonically per Builder (one session/scope).
 // A ref is never reused for a different target; a full rebuild does not force
 // renumbering. Build matches the new tree against the Builder's previous
-// snapshot one-to-one through five deterministic stages:
+// snapshot one-to-one through six deterministic stages:
 //
 //  1. unique anonymous structure under already matched parents;
 //  2. six local/global content and identity passes;
-//  3. container matching from equal, conflict-free descendant-pair sets;
+//  3. container matching from equal, conflict-free descendant-pair sets, in two
+//     layers under one snapshot: (3A) the single unmatched direct child of an
+//     already anchored parent, and (3B) bottom-up through unique old/current
+//     container chains around the matched descendants' lowest common ancestor,
+//     so a rebuilt wrapper does not cascade into fresh refs;
 //  4. local recovery below newly anchored parents, alternating with stage 3;
-//  5. one zero-shift ordinal pass with an independent fixed point, followed
-//     only by local recovery.
+//  5. one zero-shift ordinal pass over generalized non-input container buckets
+//     with an independent fixed point, followed only by local recovery;
+//  6. one static-geometry pass for unmatched non-input leaves under the same
+//     anchored parent: equal bucket counts, a strict +-4px bijection on all four
+//     edges and order preservation. Context nodes, inputs and containers are
+//     excluded, so a recycled list slot never transfers a ref into new content.
 //
 // Identity evidence excludes input value, checked/focused/selected and bounds,
 // so those changes alone do not break reading identity. Non-input labels remain
@@ -51,7 +59,10 @@
 // matched parent. Global uniqueness uses complete trees, including matched
 // nodes. Ambiguity or budget exhaustion allocates new refs; incomplete batches
 // are discarded. Candidate/Preview leave continuity and its high-water mark
-// unchanged until an accepted candidate commits. Old snapshots stay immutable.
+// unchanged until an accepted candidate commits. CandidateAgainst projects
+// against an explicit earlier snapshot without touching continuity at all, so a
+// multi-baseline probe can try a historical page-return baseline and discard it
+// without polluting ref numbering. Old snapshots stay immutable.
 //
 // # Delta
 //
