@@ -278,19 +278,34 @@ func TestActCoordinatePointRejectsAmbiguousObservation(t *testing.T) {
 	start := h.startSession()
 	captures := h.device.captureCount()
 
-	for _, operation := range []protocol.Operation{
-		{Type: "tap", Target: &protocol.Target{X: 500, Y: 150}},
-		{Type: "swipe", From: &protocol.Point{X: 500, Y: 150}, To: &protocol.Point{X: 500, Y: 1000}},
+	result := h.actCoordinate(t, start.Observation.ID, protocol.Operation{
+		Type: "tap", Target: &protocol.Target{X: 500, Y: 150},
+	})
+	requireNotExecuted(t, result, ambiguousPointCode)
+	if result.Error == nil || result.Error.Details == nil {
+		t.Fatalf("ambiguous_point missing details: %+v", result.Error)
+	}
+	if result.Error.Details["reason"] != staticReasonCompetingTargets ||
+		result.Error.Details["scope"] != tapStaticScopePoint {
+		t.Fatalf("ambiguous_point details = %#v, want competing_targets/point", result.Error.Details)
+	}
+	candidates, ok := result.Error.Details["candidates"].([]map[string]any)
+	if !ok || len(candidates) != 2 {
+		t.Fatalf("ambiguous_point candidates = %#v, want 2 competing owners", result.Error.Details["candidates"])
+	}
+	for _, legacy := range []string{
+		"nearest_actionable_ref", "safe_point", "safe_carrier_ref",
+		"suggested_point", "suggested_carrier_ref", "occluding_refs",
+		"ambiguous_refs", "owner_refs",
 	} {
-		result := h.actCoordinate(t, start.Observation.ID, operation)
-		requireNotExecuted(t, result, ambiguousPointCode)
-		// The point is ambiguous for this O, but nothing was claimed or
-		// dispatched: the caller may retry with the same O and a new P.
-		requireRecovery(t, result, protocol.RecoveryEntryRetry, protocol.RecoveryReferenceO,
-			protocol.RecoveryInputEffective, "")
-		if status := observationStatus(h, start.Observation.ID); status != ObservationReady {
-			t.Fatalf("observation status = %q after static rejection, want ready", status)
+		if _, exists := result.Error.Details[legacy]; exists {
+			t.Fatalf("legacy key %q present in details: %#v", legacy, result.Error.Details)
 		}
+	}
+	requireRecovery(t, result, protocol.RecoveryEntryRetry, protocol.RecoveryReferenceO,
+		protocol.RecoveryInputEffective, "")
+	if status := observationStatus(h, start.Observation.ID); status != ObservationReady {
+		t.Fatalf("observation status = %q after static rejection, want ready", status)
 	}
 	if got := h.device.captureCount(); got != captures {
 		t.Fatalf("static rejection performed %d new capture(s)", got-captures)

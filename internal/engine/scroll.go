@@ -64,11 +64,36 @@ const (
 // tree. The static planner and the fresh revalidation both reduce exactly this
 // way; neither scans an ancestor chain per point.
 type scrollScopeSpace struct {
-	vertical bool
-	center   int
-	public   device.Rect // published rectangle of the selected container
-	base     scrollSpan  // axis interval of the raw clip intersected with public
-	spans    []scrollSpan
+	vertical            bool
+	center              int
+	public              device.Rect // published rectangle of the selected container
+	base                scrollSpan  // axis interval of the raw clip intersected with public
+	spans               []scrollSpan
+	usedCoextensive     bool
+	blockingScrollNodes []*protocol.Node
+	blockingRefs        []string
+}
+
+func scrollDirectionVertical(direction string) (bool, bool) {
+	switch direction {
+	case protocol.ScrollDirectionUp, protocol.ScrollDirectionDown:
+		return true, true
+	case protocol.ScrollDirectionLeft, protocol.ScrollDirectionRight:
+		return false, true
+	default:
+		return false, false
+	}
+}
+
+func normalizeScrollAmount(amount string) (string, bool) {
+	switch amount {
+	case "", protocol.ScrollAmountPage:
+		return protocol.ScrollAmountPage, true
+	case protocol.ScrollAmountHalf:
+		return protocol.ScrollAmountHalf, true
+	default:
+		return "", false
+	}
 }
 
 func rectFromBounds(bounds *protocol.Bounds) device.Rect {
@@ -161,7 +186,7 @@ func rawAncestorSet(capture *device.Capture, want int) (map[int]bool, bool) {
 	if capture == nil || want < 0 || want >= len(capture.Nodes) {
 		return nil, false
 	}
-	ancestors := make(map[int]bool, len(capture.Nodes))
+	ancestors := make(map[int]bool, 8)
 	for parent := capture.Nodes[want].Parent; parent >= 0; {
 		if parent >= len(capture.Nodes) || ancestors[parent] {
 			return nil, false
@@ -172,21 +197,61 @@ func rawAncestorSet(capture *device.Capture, want int) (map[int]bool, bool) {
 	return ancestors, true
 }
 
-// scrollSafeSpans reduces the whole public tree to the provable intervals of the
-// selected container's center line. The traversal updates the nearest scroll
-// scope on every node before testing that node as a geometric candidate, so a
-// scroll ancestor that does not cross the center line still owns its
-// descendants. It never prunes a subtree by the parent rectangle.
-func scrollSafeSpans(projection *Projection, want int, clipped device.Rect,
-	direction string) (*scrollScopeSpace, bool) {
-	space := &scrollScopeSpace{}
-	switch direction {
-	case protocol.ScrollDirectionUp, protocol.ScrollDirectionDown:
-		space.vertical = true
-	case protocol.ScrollDirectionLeft, protocol.ScrollDirectionRight:
-	default:
+func rawIsStrictDescendant(capture *device.Capture, ancestor, candidate int, state []uint8) (bool, bool) {
+	if capture == nil || ancestor < 0 || ancestor >= len(capture.Nodes) ||
+		candidate < 0 || candidate >= len(capture.Nodes) {
+		return false, false
+	}
+	if candidate == ancestor {
+		return false, true
+	}
+	var trail []int
+	current := candidate
+	for current >= 0 {
+		if current >= len(capture.Nodes) {
+			return false, false
+		}
+		switch state[current] {
+		case 1:
+			return false, false
+		case 2:
+			for _, visitedIndex := range trail {
+				state[visitedIndex] = 2
+			}
+			return false, true
+		case 3:
+			for _, visitedIndex := range trail {
+				state[visitedIndex] = 3
+			}
+			return true, true
+		}
+		if current == ancestor {
+			for _, visitedIndex := range trail {
+				state[visitedIndex] = 3
+			}
+			return true, true
+		}
+		state[current] = 1
+		trail = append(trail, current)
+		current = capture.Nodes[current].Parent
+	}
+	for _, visitedIndex := range trail {
+		state[visitedIndex] = 2
+	}
+	return false, true
+}
+
+// scrollSafeSpansAt reduces the whole public tree to the provable intervals of
+// the selected container along an explicit orthogonal coordinate. Coextensive
+// descendant scroll containers (>=85% mutual width and height overlap) do not
+// block the selected container.
+func scrollSafeSpansAt(projection *Projection, want int, clipped device.Rect,
+	direction string, orthogonalCoord int) (*scrollScopeSpace, bool) {
+	vertical, ok := scrollDirectionVertical(direction)
+	if !ok {
 		return nil, false
 	}
+	space := &scrollScopeSpace{vertical: vertical, center: orthogonalCoord}
 	if projection == nil || projection.Tree == nil || projection.Tree.Root == nil ||
 		projection.Capture == nil || want < 0 || want >= len(projection.Capture.Nodes) {
 		return nil, false
@@ -203,7 +268,6 @@ func scrollSafeSpans(projection *Projection, want int, clipped device.Rect,
 	if shared.Empty() {
 		return nil, false
 	}
-	space.center = orthogonalCenter(clipped, space.vertical)
 	if !orthogonalContains(shared, space.center, space.vertical) {
 		return nil, false
 	}
@@ -212,42 +276,144 @@ func scrollSafeSpans(projection *Projection, want int, clipped device.Rect,
 	if !ok {
 		return nil, false
 	}
+	screen := projection.Capture.Display.Bounds()
+	wantRect := space.public
+	if !screen.Empty() {
+		wantRect = clipRectToScreen(space.public, screen)
+	}
+	if wantRect.Empty() {
+		wantRect = shared
+	}
+	var coextensive map[int]bool
+	var descendantState []uint8
 	var blocked []scrollSpan
-	var walk func(node *protocol.Node, depth, nearest int)
-	walk = func(node *protocol.Node, depth, nearest int) {
-		if node == nil {
+	var blockingScrollSeen map[string]struct{}
+	var blockingRefSeen map[string]struct{}
+	visited := make(map[*protocol.Node]struct{})
+	nodeLimit := len(projection.Capture.Nodes) + 1
+	malformed := false
+	recordBlockingRef := func(ref string) {
+		if ref == "" {
 			return
 		}
+		if blockingRefSeen == nil {
+			blockingRefSeen = map[string]struct{}{}
+		}
+		if _, exists := blockingRefSeen[ref]; exists {
+			return
+		}
+		blockingRefSeen[ref] = struct{}{}
+		space.blockingRefs = append(space.blockingRefs, ref)
+	}
+	var walk func(node *protocol.Node, depth, nearest int, nearestNode *protocol.Node)
+	walk = func(node *protocol.Node, depth, nearest int, nearestNode *protocol.Node) {
+		if node == nil || malformed {
+			return
+		}
+		if _, seen := visited[node]; seen || len(visited) >= nodeLimit {
+			malformed = true
+			return
+		}
+		visited[node] = struct{}{}
 		scope := nearest
+		scopeNode := nearestNode
 		if isScrollContainer(node) {
 			if index, mapped := projection.Source[node.Ref]; mapped &&
 				index >= 0 && index < len(projection.Capture.Nodes) {
 				scope = index
+				scopeNode = node
+				if index != want && !ancestors[index] &&
+					(coextensive == nil || !coextensive[index]) {
+					descRect := rectFromBounds(node.Bounds)
+					if !screen.Empty() {
+						descRect = clipRectToScreen(descRect, screen)
+					}
+					if !descRect.Empty() && isCoextensiveRect(wantRect, descRect) {
+						if descendantState == nil {
+							descendantState = make([]uint8, len(projection.Capture.Nodes))
+						}
+						isDescendant, valid := rawIsStrictDescendant(
+							projection.Capture, want, index, descendantState)
+						if !valid {
+							malformed = true
+							return
+						}
+						if isDescendant {
+							if coextensive == nil {
+								coextensive = map[int]bool{}
+							}
+							coextensive[index] = true
+							space.usedCoextensive = true
+						}
+					}
+				}
 			} else {
 				scope = scrollScopeUnusable
+				scopeNode = node
 			}
 		}
 		if depth > 0 && !node.Context && node.Role != protocol.RoleRoot &&
 			node.Bounds != nil && node.Bounds.Width() > 0 && node.Bounds.Height() > 0 &&
 			orthogonalContains(rectFromBounds(node.Bounds), space.center, space.vertical) {
+			nodeSpan := axisSpan(rectFromBounds(node.Bounds), space.vertical)
+			overlapsBase := nodeSpan.end > space.base.start && nodeSpan.start < space.base.end
 			switch {
 			case scope == scrollScopeNone:
-				// No innermost scroll scope: it cannot contradict the selection.
 			case scope == scrollScopeUnusable:
-				blocked = append(blocked, axisSpan(rectFromBounds(node.Bounds), space.vertical))
-			case scope == want || ancestors[scope]:
-				// The selected container, or a raw ancestor that wraps it.
+				blocked = append(blocked, nodeSpan)
+				if overlapsBase {
+					blockerRef := node.Ref
+					if scopeNode != nil && scopeNode.Ref != "" {
+						blockerRef = scopeNode.Ref
+					}
+					recordBlockingRef(blockerRef)
+				}
+			case scope == want || ancestors[scope] || (coextensive != nil && coextensive[scope]):
 			default:
-				blocked = append(blocked, axisSpan(rectFromBounds(node.Bounds), space.vertical))
+				blocked = append(blocked, nodeSpan)
+				if overlapsBase {
+					if scopeNode != nil && isScrollContainer(scopeNode) {
+						if _, hasRect := publicNodeClippedRect(scopeNode, screen); hasRect {
+							if blockingScrollSeen == nil {
+								blockingScrollSeen = map[string]struct{}{}
+							}
+							if _, exists := blockingScrollSeen[scopeNode.Ref]; !exists {
+								blockingScrollSeen[scopeNode.Ref] = struct{}{}
+								space.blockingScrollNodes = append(space.blockingScrollNodes, scopeNode)
+							}
+						} else {
+							recordBlockingRef(scopeNode.Ref)
+						}
+					} else {
+						blockerRef := node.Ref
+						if scopeNode != nil && scopeNode.Ref != "" {
+							blockerRef = scopeNode.Ref
+						}
+						recordBlockingRef(blockerRef)
+					}
+				}
 			}
 		}
 		for _, child := range node.Children {
-			walk(child, depth+1, scope)
+			walk(child, depth+1, scope, scopeNode)
 		}
 	}
-	walk(projection.Tree.Root, 0, scrollScopeNone)
+	walk(projection.Tree.Root, 0, scrollScopeNone, nil)
+	if malformed {
+		return nil, false
+	}
 	space.spans = subtractScrollSpans(space.base, blocked)
 	return space, true
+}
+
+// scrollSafeSpans reduces the whole public tree along the container's center line.
+func scrollSafeSpans(projection *Projection, want int, clipped device.Rect,
+	direction string) (*scrollScopeSpace, bool) {
+	vertical, ok := scrollDirectionVertical(direction)
+	if !ok || clipped.Empty() {
+		return nil, false
+	}
+	return scrollSafeSpansAt(projection, want, clipped, direction, orthogonalCenter(clipped, vertical))
 }
 
 // longestSpan picks the longest provable interval. Equal lengths are ordered by
@@ -325,12 +491,14 @@ func (space *scrollScopeSpace) provesSegment(start, end scrollPoint, clipped, sc
 // scrollPlan is the static resolution of one controlled scroll attempt. It is
 // computed before the work position is taken and never carries device state.
 type scrollPlan struct {
-	containerIndex int
-	container      *device.RawNode
-	selector       string // "ref" or "point"
-	direction      string
-	amount         string // never empty: page or half
-	start, end     scrollPoint
+	containerIndex  int
+	container       *device.RawNode
+	selector        string // "ref" or "point"
+	direction       string
+	amount          string // never empty: page or half
+	start, end      scrollPoint
+	orthogonalCoord int
+	mode            string
 }
 
 // scrollFrame is the fresh revalidation result: the frame that was read, its
@@ -345,37 +513,14 @@ type scrollFrame struct {
 	start, end     scrollPoint
 }
 
-// scrollGeometry is the single trajectory predicate shared by the static check
-// and the fresh revalidation. It works on a rectangle already clipped to the
-// display and never clamps: an out-of-rectangle or out-of-screen end is a
-// rejection, not a shorter gesture.
-func scrollGeometry(rect, screen device.Rect, direction, amount string) (scrollPoint, scrollPoint, bool) {
-	var start, end scrollPoint
-	switch amount {
-	case "", protocol.ScrollAmountPage:
-		amount = protocol.ScrollAmountPage
-	case protocol.ScrollAmountHalf:
-	default:
-		return start, end, false
-	}
-	if rect.Empty() {
-		return start, end, false
+func scrollTravelForExtent(extent int, amount string) (int, bool) {
+	normalized, ok := normalizeScrollAmount(amount)
+	if !ok || extent <= 0 {
+		return 0, false
 	}
 	percent := scrollPagePercent
-	if amount == protocol.ScrollAmountHalf {
+	if normalized == protocol.ScrollAmountHalf {
 		percent = scrollHalfPercent
-	}
-	vertical := false
-	switch direction {
-	case protocol.ScrollDirectionUp, protocol.ScrollDirectionDown:
-		vertical = true
-	case protocol.ScrollDirectionLeft, protocol.ScrollDirectionRight:
-	default:
-		return start, end, false
-	}
-	extent := rect.Width()
-	if vertical {
-		extent = rect.Height()
 	}
 	margin := extent / scrollEdgeMarginDivisor
 	if margin < scrollEdgeMarginMin {
@@ -383,31 +528,55 @@ func scrollGeometry(rect, screen device.Rect, direction, amount string) (scrollP
 	}
 	usable := extent - 2*margin
 	if usable <= 0 {
-		return start, end, false
+		return 0, false
 	}
-	travel := usable * percent / 100
+	travel := int(int64(usable) * int64(percent) / 100)
 	if travel < minScrollTravel {
+		return 0, false
+	}
+	return travel, true
+}
+
+// scrollGeometryAt computes a centered symmetric trajectory on an explicit
+// orthogonal coordinate inside rect and screen without clamping.
+func scrollGeometryAt(rect, screen device.Rect, direction, amount string,
+	orthogonalCoord int) (scrollPoint, scrollPoint, bool) {
+	var start, end scrollPoint
+	if rect.Empty() {
 		return start, end, false
 	}
+	vertical, ok := scrollDirectionVertical(direction)
+	if !ok {
+		return start, end, false
+	}
+	safeStart, safeEnd := rect.Left, rect.Right
 	if vertical {
-		x := rect.Left + rect.Width()/2
+		safeStart, safeEnd = rect.Top, rect.Bottom
+	}
+	travel, ok := scrollTravelForExtent(safeEnd-safeStart, amount)
+	if !ok {
+		return start, end, false
+	}
+	mid := tapSafeAverage(safeStart, safeEnd)
+	low := mid - travel/2
+	high := low + travel
+	if vertical {
 		switch direction {
 		case protocol.ScrollDirectionDown:
-			start = scrollPoint{X: x, Y: rect.Bottom - margin}
-			end = scrollPoint{X: x, Y: start.Y - travel}
+			start = scrollPoint{X: orthogonalCoord, Y: high}
+			end = scrollPoint{X: orthogonalCoord, Y: low}
 		case protocol.ScrollDirectionUp:
-			start = scrollPoint{X: x, Y: rect.Top + margin}
-			end = scrollPoint{X: x, Y: start.Y + travel}
+			start = scrollPoint{X: orthogonalCoord, Y: low}
+			end = scrollPoint{X: orthogonalCoord, Y: high}
 		}
 	} else {
-		y := rect.Top + rect.Height()/2
 		switch direction {
 		case protocol.ScrollDirectionRight:
-			start = scrollPoint{X: rect.Right - margin, Y: y}
-			end = scrollPoint{X: start.X - travel, Y: y}
+			start = scrollPoint{X: high, Y: orthogonalCoord}
+			end = scrollPoint{X: low, Y: orthogonalCoord}
 		case protocol.ScrollDirectionLeft:
-			start = scrollPoint{X: rect.Left + margin, Y: y}
-			end = scrollPoint{X: start.X + travel, Y: y}
+			start = scrollPoint{X: low, Y: orthogonalCoord}
+			end = scrollPoint{X: high, Y: orthogonalCoord}
 		}
 	}
 	if !insideScrollRect(start, rect) || !insideScrollRect(end, rect) ||
@@ -415,6 +584,15 @@ func scrollGeometry(rect, screen device.Rect, direction, amount string) (scrollP
 		return scrollPoint{}, scrollPoint{}, false
 	}
 	return start, end, true
+}
+
+// scrollGeometry computes a centered symmetric trajectory on rect's center axis.
+func scrollGeometry(rect, screen device.Rect, direction, amount string) (scrollPoint, scrollPoint, bool) {
+	vertical, ok := scrollDirectionVertical(direction)
+	if !ok || rect.Empty() {
+		return scrollPoint{}, scrollPoint{}, false
+	}
+	return scrollGeometryAt(rect, screen, direction, amount, orthogonalCenter(rect, vertical))
 }
 
 func insideScrollRect(point scrollPoint, rect device.Rect) bool {
@@ -446,6 +624,178 @@ func isScrollContainer(node *protocol.Node) bool {
 		(node.Enabled == nil || *node.Enabled)
 }
 
+type scrollAxesFailure struct {
+	noGeometry          bool
+	reason              string
+	blockingScrollNodes []*protocol.Node
+	blockingRefs        []string
+}
+
+func scrollOrthogonalCoords(clipped, shared device.Rect, vertical bool) []int {
+	if clipped.Empty() || shared.Empty() {
+		return nil
+	}
+	var rawCoords [3]int
+	if vertical {
+		width := int64(clipped.Width())
+		rawCoords = [3]int{
+			clipped.Left + int(width/2),
+			clipped.Left + int(width/4),
+			clipped.Left + int(width*3/4),
+		}
+	} else {
+		height := int64(clipped.Height())
+		rawCoords = [3]int{
+			clipped.Top + int(height/2),
+			clipped.Top + int(height/4),
+			clipped.Top + int(height*3/4),
+		}
+	}
+	coords := make([]int, 0, 3)
+	for _, coord := range rawCoords {
+		if !orthogonalContains(shared, coord, vertical) {
+			continue
+		}
+		duplicate := false
+		for _, existing := range coords {
+			if existing == coord {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			coords = append(coords, coord)
+		}
+	}
+	return coords
+}
+
+func planScrollOnAxes(projection *Projection, wantIndex int, clipped device.Rect,
+	direction, amount, selector, baseMode string) (*scrollPlan, scrollAxesFailure) {
+	vertical, ok := scrollDirectionVertical(direction)
+	if !ok || projection == nil || projection.Capture == nil ||
+		wantIndex < 0 || wantIndex >= len(projection.Capture.Nodes) || clipped.Empty() {
+		return nil, scrollAxesFailure{noGeometry: true}
+	}
+	normalizedAmount, ok := normalizeScrollAmount(amount)
+	if !ok {
+		return nil, scrollAxesFailure{noGeometry: true}
+	}
+	public, ok := publicBoundsByRawIndex(projection, wantIndex)
+	if !ok {
+		return nil, scrollAxesFailure{noGeometry: true}
+	}
+	screen := projection.Capture.Display.Bounds()
+	shared := clipped.Intersect(rectFromBounds(public))
+	if shared.Empty() {
+		return nil, scrollAxesFailure{noGeometry: true}
+	}
+	coords := scrollOrthogonalCoords(clipped, shared, vertical)
+	hadPositiveSpan := false
+	allInsufficientTravel := true
+	var blockingScrollNodes []*protocol.Node
+	var blockingRefs []string
+	seenScroll := map[string]struct{}{}
+	seenRef := map[string]struct{}{}
+	for _, coord := range coords {
+		space, spaceOK := scrollSafeSpansAt(projection, wantIndex, clipped, direction, coord)
+		if !spaceOK {
+			allInsufficientTravel = false
+			continue
+		}
+		for _, blocker := range space.blockingScrollNodes {
+			if blocker == nil || blocker.Ref == "" {
+				continue
+			}
+			if _, exists := seenScroll[blocker.Ref]; !exists {
+				seenScroll[blocker.Ref] = struct{}{}
+				blockingScrollNodes = append(blockingScrollNodes, blocker)
+			}
+		}
+		for _, ref := range space.blockingRefs {
+			if ref == "" {
+				continue
+			}
+			if _, exists := seenRef[ref]; !exists {
+				seenRef[ref] = struct{}{}
+				blockingRefs = append(blockingRefs, ref)
+			}
+		}
+		span, hasSpan := space.longestSpan(direction)
+		if !hasSpan || span.length() <= 0 {
+			allInsufficientTravel = false
+			continue
+		}
+		hadPositiveSpan = true
+		if _, enoughTravel := scrollTravelForExtent(span.length(), normalizedAmount); !enoughTravel {
+			continue
+		}
+		safe := space.safeRect(clipped, span)
+		start, end, geometryOK := scrollGeometryAt(safe, screen, direction, normalizedAmount, coord)
+		if geometryOK && space.provesSegment(start, end, clipped, screen) {
+			mode := baseMode
+			if mode == scrollModeDirect && space.usedCoextensive {
+				mode = scrollModeCoextensive
+			}
+			return &scrollPlan{
+				containerIndex:  wantIndex,
+				container:       &projection.Capture.Nodes[wantIndex],
+				selector:        selector,
+				direction:       direction,
+				amount:          normalizedAmount,
+				start:           start,
+				end:             end,
+				orthogonalCoord: coord,
+				mode:            mode,
+			}, scrollAxesFailure{}
+		}
+		allInsufficientTravel = false
+	}
+	reason := staticReasonTrajectoryBlocked
+	if hadPositiveSpan && allInsufficientTravel {
+		reason = staticReasonInsufficientTravel
+	}
+	return nil, scrollAxesFailure{
+		reason:              reason,
+		blockingScrollNodes: blockingScrollNodes,
+		blockingRefs:        blockingRefs,
+	}
+}
+
+// tryPlanScrollBase evaluates one scroll container on the 3 centered axes
+// without triggering inner-scroll fallback or candidate dry-runs.
+func tryPlanScrollBase(obs *observationState, view *tapPublicView, node *protocol.Node,
+	direction string, amount string) bool {
+	if obs == nil || obs.Projection == nil || obs.Projection.Capture == nil ||
+		obs.Projection.Tree == nil || obs.Projection.Tree.Root == nil || node == nil {
+		return false
+	}
+	normalizedAmount, ok := normalizeScrollAmount(amount)
+	if !ok {
+		return false
+	}
+	if _, validDir := scrollDirectionVertical(direction); !validDir {
+		return false
+	}
+	if !isScrollContainer(node) {
+		return false
+	}
+	screen := obs.Projection.Capture.Display.Bounds()
+	if _, hasPublic := publicNodeClippedRect(node, screen); !hasPublic {
+		return false
+	}
+	index, mapped := obs.Projection.Source[node.Ref]
+	if !mapped || index < 0 || index >= len(obs.Projection.Capture.Nodes) {
+		return false
+	}
+	clipped := obs.Projection.Capture.Nodes[index].Bounds.Intersect(screen)
+	if clipped.Empty() {
+		return false
+	}
+	plan, _ := planScrollOnAxes(obs.Projection, index, clipped, direction, normalizedAmount, "", "")
+	return plan != nil
+}
+
 // resolveScrollPlan validates the scroll branch against the observation the
 // caller read and computes the initial trajectory. It performs no device I/O
 // and never claims; the returned plan is the only input of fresh revalidation.
@@ -464,126 +814,599 @@ func resolveScrollPlan(obs *observationState, operation *protocol.Operation) (*s
 	default:
 		return nil, protocol.Invalid("scroll direction 无效")
 	}
-	amount := operation.Amount
-	switch amount {
-	case "":
-		amount = protocol.ScrollAmountPage
-	case protocol.ScrollAmountPage, protocol.ScrollAmountHalf:
-	default:
+	amount, ok := normalizeScrollAmount(operation.Amount)
+	if !ok {
 		return nil, protocol.Invalid("scroll amount 无效")
 	}
-	if obs == nil || obs.Projection == nil || obs.Projection.Tree == nil ||
-		obs.Projection.Tree.Root == nil || obs.Projection.Capture == nil {
-		return nil, unsupportedScrollContainer("该观察没有可用的滚动容器")
+	view, apiErr := collectTapPublicView(obs)
+	if apiErr != nil {
+		return nil, apiErr
 	}
-	projection := obs.Projection
-	selector := "point"
-	var container *protocol.Node
+	if _, topoErr := validateTapRawTopology(obs.Projection.Capture); topoErr != nil {
+		return nil, topoErr
+	}
+	normalizedOp := protocol.Operation{
+		Type:      "scroll",
+		Direction: direction,
+		Amount:    amount,
+	}
 	if operation.Container.UseRef {
-		selector = "ref"
-		container = findPublicNode(projection.Tree.Root, operation.Container.Ref)
-		if container == nil {
-			return nil, protocol.NewError(409, protocol.CodeNodeNotFound, "目标节点不存在")
-		}
-		if !isScrollContainer(container) {
-			return nil, unsupportedScrollContainer("目标节点不是可滚动容器")
-		}
-	} else {
-		x, y := operation.Container.X, operation.Container.Y
-		if !inScreen(x, y, obs.Screen) {
-			return nil, protocol.NewError(422, protocol.CodeInvalidCoordinates, "坐标超出目标屏幕")
-		}
-		index, apiErr := scrollContainerAtPoint(projection, x, y)
-		if apiErr != nil {
-			return nil, apiErr
-		}
-		container = publicNodeByRawIndex(projection, index)
-		if container == nil || !isScrollContainer(container) {
-			return nil, unsupportedScrollContainer("该坐标没有可用的滚动容器")
-		}
+		return resolveScrollRefPlan(obs, view, &normalizedOp, operation.Container.Ref)
 	}
-	index, mapped := projection.Source[container.Ref]
-	if !mapped || index < 0 || index >= len(projection.Capture.Nodes) {
-		return nil, unsupportedScrollContainer("滚动容器来源不可用")
-	}
-	raw := &projection.Capture.Nodes[index]
-	screen := projection.Capture.Display.Bounds()
-	clipped := raw.Bounds.Intersect(screen)
-	if clipped.Empty() {
-		return nil, unsupportedScrollContainer("滚动容器没有可用几何")
-	}
-	// The static plan authorizes one attempt: the longest provable interval on
-	// the center line, then the geometry on it. Fresh revalidation preserves the
-	// segment while it remains proven and otherwise replans in the same scope.
-	space, ok := scrollSafeSpans(projection, index, clipped, direction)
-	if !ok {
-		return nil, unsupportedScrollContainer("滚动容器没有可用几何")
-	}
-	span, ok := space.longestSpan(direction)
-	if !ok {
-		return nil, unsupportedScrollTrajectory()
-	}
-	start, end, ok := scrollGeometry(space.safeRect(clipped, span), screen, direction, amount)
-	if !ok || !space.provesSegment(start, end, clipped, screen) {
-		return nil, unsupportedScrollTrajectory()
-	}
-	return &scrollPlan{
-		containerIndex: index, container: raw, selector: selector,
-		direction: direction, amount: amount, start: start, end: end,
-	}, nil
+	return resolveScrollPointPlan(obs, view, &normalizedOp,
+		operation.Container.X, operation.Container.Y)
 }
 
-// scrollContainerAtPoint reduces every public candidate containing the point to
-// its nearest self-or-ancestor scroll container and dedupes by raw source node.
-// Two distinct containers are ambiguous, never guessed.
-func scrollContainerAtPoint(projection *Projection, x, y int) (int, *protocol.APIError) {
-	scopes := map[int]struct{}{}
-	var walk func(node *protocol.Node, depth int, ancestors []*protocol.Node)
-	walk = func(node *protocol.Node, depth int, ancestors []*protocol.Node) {
-		if node == nil {
-			return
+func resolveScrollRefPlan(obs *observationState, view *tapPublicView,
+	operation *protocol.Operation, ref string) (*scrollPlan, *protocol.APIError) {
+	projection := obs.Projection
+	screen := screenRectFromDisplay(obs.Screen)
+	target, ok := findPublicNodeBounded(projection.Tree.Root, ref)
+	if !ok {
+		return nil, tapHierarchyError()
+	}
+	if target == nil {
+		return nil, protocol.NewError(409, protocol.CodeNodeNotFound, "目标节点不存在")
+	}
+	if target.Role == protocol.RoleRoot {
+		return nil, newScrollInvalidTargetError(tapStaticReasonRoot,
+			tapStaticScopeTarget, target.Ref, "")
+	}
+	if target.Context {
+		return nil, newScrollInvalidTargetError(tapStaticReasonContext,
+			tapStaticScopeTarget, target.Ref, "")
+	}
+	if _, hasPublic := publicNodeClippedRect(target, screen); !hasPublic {
+		apiErr := newScrollInvalidTargetError(tapStaticReasonNoGeometry,
+			tapStaticScopeTarget, target.Ref, "")
+		entries := collectScrollAncestorAndPageCandidates(obs, view, target)
+		attachStaticCandidates(apiErr, buildStaticCandidates(obs, view, operation, entries))
+		return nil, apiErr
+	}
+	if target.Enabled != nil && !*target.Enabled {
+		return nil, protocol.NewError(409, protocol.CodeNodeDisabled, "目标节点已禁用")
+	}
+	if isScrollContainer(target) {
+		return planScrollContainer(obs, view, operation, target, "ref", scrollModeDirect,
+			true, false)
+	}
+	targetActions := tapPublicActions(target)
+	if target.Role == protocol.RoleScroll {
+		apiErr := newScrollUnsupportedError(tapStaticReasonTargetMissingAction,
+			tapStaticScopeTarget, target.Ref, "", targetActions, nil)
+		entries := collectScrollAncestorAndPageCandidates(obs, view, target)
+		attachStaticCandidates(apiErr, buildStaticCandidates(obs, view, operation, entries))
+		return nil, apiErr
+	}
+	ancestor := nearestScrollAncestor(view, target)
+	if ancestor == nil {
+		apiErr := newScrollUnsupportedError(staticReasonNotScrollable,
+			tapStaticScopeTarget, target.Ref, "", targetActions, nil)
+		entries := collectPageScrollCandidates(obs, view, target.Ref)
+		attachStaticCandidates(apiErr, buildStaticCandidates(obs, view, operation, entries))
+		return nil, apiErr
+	}
+	ancestorActions := tapPublicActions(ancestor)
+	_, hasAncestorGeom := publicNodeClippedRect(ancestor, screen)
+	if (ancestor.Enabled != nil && !*ancestor.Enabled) || !hasAncestorGeom {
+		apiErr := newScrollUnsupportedError(tapStaticReasonAncestorInvalid,
+			tapStaticScopeAncestor, ancestor.Ref, ancestor.Ref, targetActions, ancestorActions)
+		entries := collectPageScrollCandidates(obs, view, ancestor.Ref)
+		attachStaticCandidates(apiErr, buildStaticCandidates(obs, view, operation, entries))
+		return nil, apiErr
+	}
+	if !hasAction(ancestor, protocol.ActionSwipe) {
+		apiErr := newScrollUnsupportedError(tapStaticReasonAncestorMissingAction,
+			tapStaticScopeAncestor, ancestor.Ref, ancestor.Ref, targetActions, ancestorActions)
+		entries := collectPageScrollCandidates(obs, view, ancestor.Ref)
+		attachStaticCandidates(apiErr, buildStaticCandidates(obs, view, operation, entries))
+		return nil, apiErr
+	}
+	return planScrollContainer(obs, view, operation, ancestor, "ref", scrollModeAncestorLift,
+		false, true)
+}
+
+func resolveScrollPointPlan(obs *observationState, view *tapPublicView,
+	operation *protocol.Operation, pointX, pointY int) (*scrollPlan, *protocol.APIError) {
+	if !inScreen(pointX, pointY, obs.Screen) {
+		return nil, protocol.NewError(422, protocol.CodeInvalidCoordinates, "坐标超出目标屏幕")
+	}
+	projection := obs.Projection
+	screen := screenRectFromDisplay(obs.Screen)
+	hitNodes := make([]*protocol.Node, 0)
+	hitSet := map[*protocol.Node]bool{}
+	for _, node := range view.nodes {
+		if !isScrollContainer(node) {
+			continue
 		}
-		path := append(ancestors, node)
-		if depth > 0 && !node.Context && node.Role != protocol.RoleRoot &&
-			node.Bounds != nil && node.Bounds.Contains(x, y) {
-			for i := len(path) - 1; i >= 0; i-- {
-				if !isScrollContainer(path[i]) {
-					continue
-				}
-				if index, mapped := projection.Source[path[i].Ref]; mapped {
-					scopes[index] = struct{}{}
-				}
+		clipped, ok := publicNodeClippedRect(node, screen)
+		if !ok || !clipped.Contains(pointX, pointY) {
+			continue
+		}
+		index, mapped := projection.Source[node.Ref]
+		if !mapped || index < 0 || index >= len(projection.Capture.Nodes) {
+			continue
+		}
+		hitNodes = append(hitNodes, node)
+		hitSet[node] = true
+	}
+	if len(hitNodes) == 0 {
+		apiErr := newScrollInvalidTargetError(staticReasonNoScrollContainer,
+			tapStaticScopePoint, "", "")
+		entries := collectPageScrollCandidates(obs, view, "")
+		attachStaticCandidates(apiErr, buildStaticCandidates(obs, view, operation, entries))
+		return nil, apiErr
+	}
+	innermost := make([]*protocol.Node, 0, len(hitNodes))
+	for _, candidate := range hitNodes {
+		hasDescendant := false
+		for _, other := range hitNodes {
+			if other != candidate && isPublicAncestor(view, candidate, other) {
+				hasDescendant = true
 				break
 			}
 		}
+		if !hasDescendant {
+			innermost = append(innermost, candidate)
+		}
+	}
+	if len(innermost) == 1 {
+		primary := innermost[0]
+		plan, primaryErr := planScrollContainer(obs, view, operation, primary, "point",
+			scrollModePointInnermost, false, false)
+		if primaryErr == nil {
+			return plan, nil
+		}
+		var fallbackTrajectoryErr *protocol.APIError
+		visited := map[*protocol.Node]struct{}{}
+		for current := view.info[primary]; current != nil && current.parent != nil; {
+			parent := current.parent
+			if _, seen := visited[parent]; seen {
+				break
+			}
+			visited[parent] = struct{}{}
+			if parent.Role == protocol.RoleRoot {
+				break
+			}
+			if hitSet[parent] {
+				fallbackPlan, fallbackErr := planScrollContainer(obs, view, operation, parent,
+					"point", scrollModePointFallback, false, false)
+				if fallbackErr == nil {
+					return fallbackPlan, nil
+				}
+				if fallbackTrajectoryErr == nil && fallbackErr.Code == protocol.CodeNoSafeTrajectory {
+					fallbackTrajectoryErr = fallbackErr
+				}
+			}
+			current = view.info[parent]
+		}
+		if primaryErr.Code != protocol.CodeNoSafeTrajectory && fallbackTrajectoryErr != nil {
+			return nil, fallbackTrajectoryErr
+		}
+		return nil, primaryErr
+	}
+	type pointCandidate struct {
+		node       *protocol.Node
+		area       int64
+		order      int
+		plan       *scrollPlan
+		executable bool
+	}
+	evaluated := make([]pointCandidate, 0, len(innermost))
+	var uniquePlan *scrollPlan
+	executableCount := 0
+	for _, candidate := range innermost {
+		clipped, _ := publicNodeClippedRect(candidate, screen)
+		index := projection.Source[candidate.Ref]
+		rawClipped := projection.Capture.Nodes[index].Bounds.Intersect(screen)
+		plan, _ := planScrollOnAxes(projection, index, rawClipped,
+			operation.Direction, operation.Amount, "point", scrollModePointDisambiguated)
+		executable := plan != nil
+		if executable {
+			executableCount++
+			uniquePlan = plan
+		}
+		evaluated = append(evaluated, pointCandidate{
+			node:       candidate,
+			area:       rectArea64(clipped),
+			order:      tapPublicOrder(view, candidate),
+			plan:       plan,
+			executable: executable,
+		})
+	}
+	if executableCount == 1 && uniquePlan != nil {
+		return uniquePlan, nil
+	}
+	sort.Slice(evaluated, func(left, right int) bool {
+		if evaluated[left].area != evaluated[right].area {
+			return evaluated[left].area < evaluated[right].area
+		}
+		return evaluated[left].order < evaluated[right].order
+	})
+	type scoredAncestor struct {
+		node  *protocol.Node
+		area  int64
+		order int
+	}
+	var commonAncestors []scoredAncestor
+	for _, node := range hitNodes {
+		isCommon := true
+		for _, leaf := range innermost {
+			if !isPublicAncestor(view, node, leaf) {
+				isCommon = false
+				break
+			}
+		}
+		if !isCommon {
+			continue
+		}
+		if !tryPlanScrollBase(obs, view, node, operation.Direction, operation.Amount) {
+			continue
+		}
+		clipped, ok := publicNodeClippedRect(node, screen)
+		if !ok {
+			continue
+		}
+		commonAncestors = append(commonAncestors, scoredAncestor{
+			node:  node,
+			area:  rectArea64(clipped),
+			order: tapPublicOrder(view, node),
+		})
+	}
+	sort.Slice(commonAncestors, func(left, right int) bool {
+		if commonAncestors[left].area != commonAncestors[right].area {
+			return commonAncestors[left].area < commonAncestors[right].area
+		}
+		return commonAncestors[left].order < commonAncestors[right].order
+	})
+	entries := make([]candidateEntry, 0, len(evaluated)+len(commonAncestors))
+	for _, item := range evaluated {
+		if item.executable {
+			entries = append(entries, candidateEntry{
+				node:     item.node,
+				relation: candidateRelationCompeting,
+			})
+		}
+	}
+	for _, item := range commonAncestors {
+		entries = append(entries, candidateEntry{
+			node:     item.node,
+			relation: candidateRelationAncestor,
+		})
+	}
+	for _, item := range evaluated {
+		if !item.executable {
+			entries = append(entries, candidateEntry{
+				node:     item.node,
+				relation: candidateRelationCompeting,
+			})
+		}
+	}
+	apiErr := newScrollAmbiguousPointError()
+	attachStaticCandidates(apiErr, buildStaticCandidates(obs, view, operation, entries))
+	return nil, apiErr
+}
+
+func planScrollContainer(obs *observationState, view *tapPublicView,
+	operation *protocol.Operation, want *protocol.Node, selector, baseMode string,
+	allowInnerFallback, liftedFromAncestor bool) (*scrollPlan, *protocol.APIError) {
+	projection := obs.Projection
+	screen := projection.Capture.Display.Bounds()
+	index, mapped := projection.Source[want.Ref]
+	if !mapped || index < 0 || index >= len(projection.Capture.Nodes) {
+		return nil, tapHierarchyError()
+	}
+	raw := &projection.Capture.Nodes[index]
+	clipped := raw.Bounds.Intersect(screen)
+	publicRect, hasPublic := publicNodeClippedRect(want, screen)
+	if !hasPublic || clipped.Empty() || clipped.Intersect(publicRect).Empty() {
+		if liftedFromAncestor {
+			apiErr := newScrollInvalidTargetError(tapStaticReasonNoGeometry,
+				tapStaticScopeAncestor, want.Ref, want.Ref)
+			entries := collectPageScrollCandidates(obs, view, want.Ref)
+			attachStaticCandidates(apiErr, buildStaticCandidates(obs, view, operation, entries))
+			return nil, apiErr
+		}
+		apiErr := newScrollInvalidTargetError(tapStaticReasonNoGeometry,
+			tapStaticScopeTarget, want.Ref, "")
+		entries := collectScrollAncestorAndPageCandidates(obs, view, want)
+		attachStaticCandidates(apiErr, buildStaticCandidates(obs, view, operation, entries))
+		return nil, apiErr
+	}
+	plan, failure := planScrollOnAxes(projection, index, clipped,
+		operation.Direction, operation.Amount, selector, baseMode)
+	if plan != nil {
+		return plan, nil
+	}
+	if failure.noGeometry {
+		if liftedFromAncestor {
+			apiErr := newScrollInvalidTargetError(tapStaticReasonNoGeometry,
+				tapStaticScopeAncestor, want.Ref, want.Ref)
+			entries := collectPageScrollCandidates(obs, view, want.Ref)
+			attachStaticCandidates(apiErr, buildStaticCandidates(obs, view, operation, entries))
+			return nil, apiErr
+		}
+		apiErr := newScrollInvalidTargetError(tapStaticReasonNoGeometry,
+			tapStaticScopeTarget, want.Ref, "")
+		entries := collectScrollAncestorAndPageCandidates(obs, view, want)
+		attachStaticCandidates(apiErr, buildStaticCandidates(obs, view, operation, entries))
+		return nil, apiErr
+	}
+	if allowInnerFallback {
+		if innerPlan := tryUniqueInnerScrollFallback(obs, view, operation, want, publicRect); innerPlan != nil {
+			return innerPlan, nil
+		}
+	}
+	apiErr := newScrollNoSafeTrajectoryError(failure.reason, want.Ref)
+	entries := collectNoSafeTrajectoryCandidates(obs, view, want, failure.blockingScrollNodes)
+	attachStaticCandidates(apiErr, buildStaticCandidates(obs, view, operation, entries))
+	attachStaticBlockingRefs(apiErr, failure.blockingRefs)
+	return nil, apiErr
+}
+
+func tryUniqueInnerScrollFallback(obs *observationState, view *tapPublicView,
+	operation *protocol.Operation, want *protocol.Node, wantRect device.Rect) *scrollPlan {
+	projection := obs.Projection
+	screen := projection.Capture.Display.Bounds()
+	type innerCandidate struct {
+		node *protocol.Node
+		rect device.Rect
+		plan *scrollPlan
+	}
+	var executable []innerCandidate
+	var walk func(node *protocol.Node)
+	walk = func(node *protocol.Node) {
+		if node == nil {
+			return
+		}
+		if isScrollContainer(node) {
+			if descRect, ok := publicNodeClippedRect(node, screen); ok &&
+				!isCoextensiveRect(wantRect, descRect) {
+				if index, mapped := projection.Source[node.Ref]; mapped &&
+					index >= 0 && index < len(projection.Capture.Nodes) {
+					rawClipped := projection.Capture.Nodes[index].Bounds.Intersect(screen)
+					if plan, _ := planScrollOnAxes(projection, index, rawClipped,
+						operation.Direction, operation.Amount, "ref",
+						scrollModeInnerFallback); plan != nil {
+						executable = append(executable, innerCandidate{
+							node: node,
+							rect: descRect,
+							plan: plan,
+						})
+					}
+				}
+			}
+		}
 		for _, child := range node.Children {
-			walk(child, depth+1, path)
+			walk(child)
 		}
 	}
-	walk(projection.Tree.Root, 0, nil)
-	switch len(scopes) {
-	case 0:
-		return -1, unsupportedScrollContainer("该坐标不落在可滚动容器内")
-	case 1:
-		for index := range scopes {
-			return index, nil
+	for _, child := range want.Children {
+		walk(child)
+	}
+	if len(executable) == 0 {
+		return nil
+	}
+	collapsed := make([]innerCandidate, 0, len(executable))
+	for _, candidate := range executable {
+		wrappedByDescendant := false
+		for _, other := range executable {
+			if other.node == candidate.node {
+				continue
+			}
+			if isPublicAncestor(view, candidate.node, other.node) &&
+				isCoextensiveRect(candidate.rect, other.rect) {
+				wrappedByDescendant = true
+				break
+			}
+		}
+		if !wrappedByDescendant {
+			collapsed = append(collapsed, candidate)
 		}
 	}
-	return -1, protocol.NewError(422, protocol.CodeAmbiguousPoint,
-		"坐标落在多个不同的滚动容器上，请使用 container.ref 指定容器")
+	if len(collapsed) == 1 {
+		return collapsed[0].plan
+	}
+	return nil
 }
 
-func unsupportedScrollContainer(message string) *protocol.APIError {
-	return protocol.NewError(422, protocol.CodeNodeUnsupported, message)
+func nearestScrollAncestor(view *tapPublicView, node *protocol.Node) *protocol.Node {
+	if view == nil || node == nil {
+		return nil
+	}
+	visited := map[*protocol.Node]struct{}{}
+	for current := view.info[node]; current != nil && current.parent != nil; {
+		parent := current.parent
+		if _, seen := visited[parent]; seen {
+			return nil
+		}
+		visited[parent] = struct{}{}
+		if parent.Role == protocol.RoleRoot {
+			return nil
+		}
+		if !parent.Context && parent.Role == protocol.RoleScroll {
+			return parent
+		}
+		current = view.info[parent]
+	}
+	return nil
 }
 
-// unsupportedScrollTrajectory is the static rejection of a container whose center
-// line has no provable trajectory for the requested amount. It deliberately does
-// not claim the container cannot scroll on the device: only the published tree is
-// proven.
-func unsupportedScrollTrajectory() *protocol.APIError {
-	return protocol.NewError(422, protocol.CodeNodeUnsupported,
-		"无法在该容器中心线上生成可证明的滚动轨迹")
+func collectScrollAncestorAndPageCandidates(obs *observationState, view *tapPublicView,
+	target *protocol.Node) []candidateEntry {
+	if obs == nil || view == nil || target == nil {
+		return nil
+	}
+	screen := screenRectFromDisplay(obs.Screen)
+	var entries []candidateEntry
+	visited := map[*protocol.Node]struct{}{}
+	for current := view.info[target]; current != nil && current.parent != nil; {
+		parent := current.parent
+		if _, seen := visited[parent]; seen {
+			break
+		}
+		visited[parent] = struct{}{}
+		if parent.Role == protocol.RoleRoot {
+			break
+		}
+		if isScrollContainer(parent) {
+			if _, ok := publicNodeClippedRect(parent, screen); ok {
+				entries = append(entries, candidateEntry{
+					node:     parent,
+					relation: candidateRelationAncestor,
+				})
+			}
+		}
+		current = view.info[parent]
+	}
+	entries = append(entries, collectPageScrollCandidates(obs, view, target.Ref)...)
+	return entries
+}
+
+func collectNoSafeTrajectoryCandidates(obs *observationState, view *tapPublicView,
+	want *protocol.Node, blockingScrollNodes []*protocol.Node) []candidateEntry {
+	if obs == nil || view == nil || want == nil {
+		return nil
+	}
+	screen := screenRectFromDisplay(obs.Screen)
+	type scoredCandidate struct {
+		node     *protocol.Node
+		relation string
+		area     int64
+		order    int
+	}
+	seen := map[string]struct{}{}
+	found := make([]scoredCandidate, 0)
+	var walk func(node *protocol.Node)
+	walk = func(node *protocol.Node) {
+		if node == nil {
+			return
+		}
+		if isScrollContainer(node) && node.Ref != "" {
+			if _, exists := seen[node.Ref]; !exists {
+				if clipped, ok := publicNodeClippedRect(node, screen); ok {
+					seen[node.Ref] = struct{}{}
+					found = append(found, scoredCandidate{
+						node:     node,
+						relation: candidateRelationChild,
+						area:     rectArea64(clipped),
+						order:    tapPublicOrder(view, node),
+					})
+				}
+			}
+		}
+		for _, child := range node.Children {
+			walk(child)
+		}
+	}
+	for _, child := range want.Children {
+		walk(child)
+	}
+	for _, blocker := range blockingScrollNodes {
+		if blocker == nil || blocker == want || blocker.Ref == "" || !isScrollContainer(blocker) {
+			continue
+		}
+		if _, exists := seen[blocker.Ref]; exists {
+			continue
+		}
+		if isPublicAncestor(view, want, blocker) {
+			continue
+		}
+		if clipped, ok := publicNodeClippedRect(blocker, screen); ok {
+			seen[blocker.Ref] = struct{}{}
+			found = append(found, scoredCandidate{
+				node:     blocker,
+				relation: candidateRelationOverlapping,
+				area:     rectArea64(clipped),
+				order:    tapPublicOrder(view, blocker),
+			})
+		}
+	}
+	sort.Slice(found, func(left, right int) bool {
+		if found[left].area != found[right].area {
+			return found[left].area > found[right].area
+		}
+		return found[left].order < found[right].order
+	})
+	entries := make([]candidateEntry, 0, len(found))
+	for _, item := range found {
+		entries = append(entries, candidateEntry{
+			node:     item.node,
+			relation: item.relation,
+		})
+	}
+	return entries
+}
+
+func newScrollInvalidTargetError(reason, scope, scopeRef, ancestorRef string) *protocol.APIError {
+	message := "目标节点没有可用几何"
+	switch reason {
+	case tapStaticReasonRoot:
+		message = "root 节点不能作为滚动目标"
+	case tapStaticReasonContext:
+		message = "context 节点不能作为滚动目标"
+	case staticReasonNoScrollContainer:
+		message = "该坐标不落在可滚动容器内"
+	case tapStaticReasonNoGeometry:
+		if scope == tapStaticScopeAncestor {
+			message = "滚动祖先没有可用几何"
+		}
+	}
+	apiErr := protocol.NewError(422, protocol.CodeInvalidTarget, message).
+		WithDetail("reason", reason).
+		WithDetail("scope", scope)
+	if scope != tapStaticScopePoint && scopeRef != "" {
+		apiErr.WithDetail("scope_ref", scopeRef)
+	}
+	if ancestorRef != "" {
+		apiErr.WithDetail("ancestor_ref", ancestorRef)
+	}
+	return apiErr
+}
+
+func newScrollUnsupportedError(reason, scope, scopeRef, ancestorRef string,
+	targetActions, ancestorActions []string) *protocol.APIError {
+	message := "目标节点不支持滚动操作"
+	switch reason {
+	case tapStaticReasonTargetMissingAction:
+		message = "滚动容器缺少滑动能力"
+	case staticReasonNotScrollable:
+		message = "目标节点及其祖先中不存在可滚动容器"
+	case tapStaticReasonAncestorInvalid:
+		message = "最近的滚动祖先不可用"
+	case tapStaticReasonAncestorMissingAction:
+		message = "最近的滚动祖先缺少滑动能力"
+	}
+	apiErr := protocol.NewError(422, protocol.CodeNodeUnsupported, message).
+		WithDetail("reason", reason).
+		WithDetail("scope", scope).
+		WithDetail("scope_ref", scopeRef).
+		WithDetail("target_actions", targetActions)
+	if ancestorRef != "" {
+		apiErr.WithDetail("ancestor_ref", ancestorRef)
+	}
+	if ancestorActions != nil {
+		apiErr.WithDetail("ancestor_actions", ancestorActions)
+	}
+	return apiErr
+}
+
+func newScrollAmbiguousPointError() *protocol.APIError {
+	return protocol.NewError(422, protocol.CodeAmbiguousPoint,
+		"坐标落在多个竞争的可滚动容器上，请使用 container.ref 指定容器").
+		WithDetail("reason", staticReasonCompetingScrollContainers).
+		WithDetail("scope", tapStaticScopePoint)
+}
+
+func newScrollNoSafeTrajectoryError(reason, scopeRef string) *protocol.APIError {
+	message := "滚动容器各探测轴线均被阻塞，无法生成可证明的滚动轨迹"
+	if reason == staticReasonInsufficientTravel {
+		message = "滚动容器安全区间不足，无法生成满足最小行程的滚动轨迹"
+	}
+	return protocol.NewError(422, protocol.CodeNoSafeTrajectory, message).
+		WithDetail("reason", reason).
+		WithDetail("scope", tapStaticScopeTarget).
+		WithDetail("scope_ref", scopeRef)
 }
 
 // publicNodeByRawIndex maps one raw capture node back to its published node.
@@ -595,7 +1418,11 @@ func publicNodeByRawIndex(projection *Projection, index int) *protocol.Node {
 	}
 	for ref, rawIndex := range projection.Source {
 		if rawIndex == index {
-			return findPublicNode(projection.Tree.Root, ref)
+			node, ok := findPublicNodeBounded(projection.Tree.Root, ref)
+			if !ok {
+				return nil
+			}
+			return node
 		}
 	}
 	return nil
@@ -682,6 +1509,9 @@ func (e *Engine) revalidateScrollTarget(work *workState, obs *observationState,
 	if err := foregroundMatches(obs.Foreground, capture.Foreground); err != nil {
 		return capture, nil, err
 	}
+	if _, topoErr := validateTapRawTopology(capture); topoErr != nil {
+		return capture, nil, topoErr
+	}
 	qualityState := protocol.QualityUnknown
 	if obs.Quality != nil && obs.Quality.State != "" {
 		qualityState = obs.Quality.State
@@ -697,8 +1527,10 @@ func (e *Engine) revalidateScrollTarget(work *workState, obs *observationState,
 		return capture, nil, protocol.NewError(503, protocol.CodeHierarchyFailed,
 			"实时目标重验失败")
 	case actProbeNone, actProbeAmbiguous:
-		e.logScrollRevalidate(work.OperationID, false, false, false, false, qualityState)
-		return capture, nil, targetChangedScroll()
+		changedErr := probeTargetChangedError(matchState, match, "滚动容器或实际轨迹已变化，本次未派发")
+		reason, _ := changedErr.Details["reason"].(string)
+		e.logScrollRevalidate(work.OperationID, false, false, false, false, qualityState, reason)
+		return capture, nil, changedErr
 	default:
 		return capture, nil, protocol.NewError(503, protocol.CodeHierarchyFailed,
 			"实时目标重验失败")
@@ -708,15 +1540,6 @@ func (e *Engine) revalidateScrollTarget(work *workState, obs *observationState,
 	if freshIndex < 0 {
 		return capture, nil, protocol.NewError(503, protocol.CodeHierarchyFailed,
 			"实时目标重验失败")
-	}
-	oldScreen := obs.Projection.Capture.Display.Bounds()
-	newScreen := capture.Display.Bounds()
-	freshClipped := freshContainer.Bounds.Intersect(newScreen)
-	if freshClipped.Empty() ||
-		!sameScrollScope(plan.container.Bounds, freshContainer.Bounds,
-			oldScreen, newScreen, plan.direction) {
-		e.logScrollRevalidate(work.OperationID, true, false, false, false, qualityState)
-		return capture, nil, targetChangedScroll()
 	}
 	projector := work.Projector
 	if projector == nil {
@@ -734,41 +1557,70 @@ func (e *Engine) revalidateScrollTarget(work *workState, obs *observationState,
 	if err != nil || projection == nil || projection.Tree == nil {
 		return capture, nil, protocol.NewError(503, protocol.CodeHierarchyFailed, "公开树构造失败")
 	}
-	containerPublic := publicNodeByRawIndex(projection, freshIndex)
-	if containerPublic == nil || containerPublic.Bounds == nil || !isScrollContainer(containerPublic) {
-		e.logScrollRevalidate(work.OperationID, true, false, false, false, qualityState)
-		return capture, nil, targetChangedScroll()
+	if _, viewErr := buildTapPublicView(projection.Tree, capture, projection.Source); viewErr != nil {
+		return capture, nil, viewErr
 	}
-	space, ok := scrollSafeSpans(projection, freshIndex, freshClipped, plan.direction)
-	if !ok {
-		e.logScrollRevalidate(work.OperationID, true, false, false, false, qualityState)
-		return capture, nil, targetChangedScroll()
+	containerPublic := publicNodeByRawIndex(projection, freshIndex)
+	if containerPublic == nil || containerPublic.Role != protocol.RoleScroll ||
+		containerPublic.Role == protocol.RoleRoot || containerPublic.Context ||
+		!hasAction(containerPublic, protocol.ActionSwipe) ||
+		(containerPublic.Enabled != nil && !*containerPublic.Enabled) {
+		e.logScrollRevalidate(work.OperationID, true, false, false, false,
+			qualityState, targetChangedReasonCapabilityChanged)
+		return capture, nil, targetChangedError(targetChangedReasonCapabilityChanged,
+			"滚动容器已失去滚动能力，本次未派发")
+	}
+	oldScreen := obs.Projection.Capture.Display.Bounds()
+	newScreen := capture.Display.Bounds()
+	freshClipped := freshContainer.Bounds.Intersect(newScreen)
+	if freshClipped.Empty() ||
+		!sameScrollScope(plan.container.Bounds, freshContainer.Bounds,
+			oldScreen, newScreen, plan.direction) {
+		e.logScrollRevalidate(work.OperationID, true, false, false, false,
+			qualityState, targetChangedReasonScrollScopeChanged)
+		return capture, nil, targetChangedError(targetChangedReasonScrollScopeChanged,
+			"滚动容器作用域已变化，本次未派发")
+	}
+	if containerPublic.Bounds == nil || !isScrollContainer(containerPublic) {
+		e.logScrollRevalidate(work.OperationID, true, false, false, false,
+			qualityState, targetChangedReasonCapabilityChanged)
+		return capture, nil, targetChangedError(targetChangedReasonCapabilityChanged,
+			"滚动容器已失去滚动能力，本次未派发")
 	}
 	start, end := plan.start, plan.end
-	startProven := space.provesPoint(start, freshClipped, newScreen)
-	endProven := space.provesPoint(end, freshClipped, newScreen)
-	proven := space.provesSegment(start, end, freshClipped, newScreen)
-	if !proven {
-		span, hasSpan := space.longestSpan(plan.direction)
-		if !hasSpan {
-			e.logScrollRevalidate(
-				work.OperationID, true, startProven, endProven, false, qualityState)
-			return capture, nil, targetChangedScroll()
-		}
-		safe := space.safeRect(freshClipped, span)
-		var geometryOK bool
-		start, end, geometryOK = scrollGeometry(
-			safe, newScreen, plan.direction, plan.amount)
-		if !geometryOK || !space.provesSegment(start, end, freshClipped, newScreen) {
-			e.logScrollRevalidate(
-				work.OperationID, true, startProven, endProven, false, qualityState)
-			return capture, nil, targetChangedScroll()
-		}
+	vertical, validDir := scrollDirectionVertical(plan.direction)
+	if !validDir {
+		e.logScrollRevalidate(work.OperationID, true, false, false, false,
+			qualityState, targetChangedReasonTrajectoryBlocked)
+		return capture, nil, targetChangedError(targetChangedReasonTrajectoryBlocked,
+			"滚动容器在最新界面上无可证明的安全轨迹，本次未派发")
+	}
+	probeCoord := plan.orthogonalCoord
+	if probeCoord == 0 && orthogonalCoordinate(start, vertical) != 0 {
+		probeCoord = orthogonalCoordinate(start, vertical)
+	}
+	startProven := false
+	endProven := false
+	proven := false
+	if space, ok := scrollSafeSpansAt(projection, freshIndex, freshClipped,
+		plan.direction, probeCoord); ok {
 		startProven = space.provesPoint(start, freshClipped, newScreen)
 		endProven = space.provesPoint(end, freshClipped, newScreen)
-		proven = true
+		proven = space.provesSegment(start, end, freshClipped, newScreen)
 	}
-	e.logScrollRevalidate(work.OperationID, true, startProven, endProven, proven, qualityState)
+	if !proven {
+		replanned, _ := planScrollOnAxes(projection, freshIndex, freshClipped,
+			plan.direction, plan.amount, plan.selector, plan.mode)
+		if replanned == nil {
+			e.logScrollRevalidate(work.OperationID, true, startProven, endProven, false,
+				qualityState, targetChangedReasonTrajectoryBlocked)
+			return capture, nil, targetChangedError(targetChangedReasonTrajectoryBlocked,
+				"滚动容器在最新界面上无可证明的安全轨迹，本次未派发")
+		}
+		start, end = replanned.start, replanned.end
+		startProven, endProven, proven = true, true, true
+	}
+	e.logScrollRevalidate(work.OperationID, true, startProven, endProven, proven, qualityState, "")
 	if e.workRevoked(work) || work.Ctx.Err() != nil {
 		return capture, nil, stoppedActRevalidation()
 	}
@@ -779,18 +1631,14 @@ func (e *Engine) revalidateScrollTarget(work *workState, obs *observationState,
 	}, nil
 }
 
-func targetChangedScroll() *protocol.APIError {
-	return protocol.NewError(409, protocol.CodeTargetChanged,
-		"滚动容器或实际轨迹已变化，本次未派发")
-}
-
 // dispatchScroll injects the fresh center-line trajectory. The physical
 // primitive and the ledger kind stay "swipe"; the semantic action is carried by
 // the operation fact. The outcome mapping is exactly the swipe mapping: nothing
 // dispatched is not_executed, anything unconfirmed after dispatch is uncertain.
 func (e *Engine) dispatchScroll(work *workState, frame *scrollFrame) (string, *protocol.APIError) {
 	if frame == nil {
-		return OutcomeNotExecuted, targetChangedScroll()
+		return OutcomeNotExecuted, targetChangedError(targetChangedReasonTrajectoryBlocked,
+			"滚动容器或实际轨迹已变化，本次未派发")
 	}
 	session := e.sessionForWork(work)
 	if session == nil || e.workRevoked(work) {
@@ -1310,27 +2158,37 @@ func (e *Engine) logScrollPlan(operationID string, plan *scrollPlan) {
 		return
 	}
 	startEdge, endEdge := scrollEdges(plan.direction)
-	e.log.Event(eventlog.Debug, "scroll.plan",
+	fields := []eventlog.Field{
 		eventlog.Str("operation_id", operationID),
 		eventlog.Str("direction", plan.direction),
 		eventlog.Str("amount", plan.amount),
 		eventlog.Str("container_role", string(protocol.RoleScroll)),
 		eventlog.Str("start_edge", startEdge),
-		eventlog.Str("end_edge", endEdge))
+		eventlog.Str("end_edge", endEdge),
+	}
+	if plan.mode != "" {
+		fields = append(fields, eventlog.Str("mode", plan.mode))
+	}
+	e.log.Event(eventlog.Debug, "scroll.plan", fields...)
 }
 
 // logScrollRevalidate records the container proof, both endpoint scope proofs and
 // the whole-segment proof. The endpoint flags never stand for the segment: a
 // segment rejection can carry proven endpoints.
 func (e *Engine) logScrollRevalidate(operationID string, containerProven, startProven,
-	endProven, proven bool, quality string) {
-	e.log.Event(eventlog.Debug, "scroll.revalidate",
+	endProven, proven bool, quality, reason string) {
+	fields := []eventlog.Field{
 		eventlog.Str("operation_id", operationID),
 		eventlog.Bool("container_proven", containerProven),
 		eventlog.Bool("start_scope_proven", startProven),
 		eventlog.Bool("end_scope_proven", endProven),
 		eventlog.Bool("proven", proven),
-		eventlog.Str("quality", quality))
+		eventlog.Str("quality", quality),
+	}
+	if reason != "" {
+		fields = append(fields, eventlog.Str("reason", reason))
+	}
+	e.log.Event(eventlog.Debug, "scroll.revalidate", fields...)
 }
 
 func (e *Engine) logScrollEffect(operationID string, result scrollEffectResult) {

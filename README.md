@@ -7,8 +7,8 @@ HTTP 协议配对。
 
 - 模块：`github.com/malyjacob/mobile-use-vnext`
 - Go：1.27.1，启用 `GOEXPERIMENT=jsonv2`
-- 契约：`contract_version = "21"`，服务、HTTP 客户端、控制 App 精确相等才做普通工作
-- 发行：`0.25.0`；`release/versions.json` 是发行号、契约号与 Android versionCode（27）的唯一
+- 契约：`contract_version = "22"`，服务、HTTP 客户端、控制 App 精确相等才做普通工作
+- 发行：`0.26.0`；`release/versions.json` 是发行号、契约号与 Android versionCode（28）的唯一
   来源，构建生成 Go/Java 常量
 
 ## 能力边界
@@ -164,7 +164,7 @@ $env:GOEXPERIMENT = 'jsonv2'; go test ./...
 ## 接口
 
 Agent 工具（`POST /api/<tool>`，`Authorization: Bearer <agent_token>`，
-`X-Mobile-Use-Contract: 21`）：
+`X-Mobile-Use-Contract: 22`）：
 
 | 工具 | 说明 |
 | --- | --- |
@@ -173,7 +173,7 @@ Agent 工具（`POST /api/<tool>`，`Authorization: Bearer <agent_token>`，
 | `observe` | `reference`（O/P）；按服务端基线返回 full 或 delta；`observe(P)` 与 `full=true` 强制 full；`image=true` 附加本次图片 |
 | `snap` | `reference`（O/P）；立即读取当前屏的一张图，不读树、不发布观察；成功只含 `operation_id` 与顶层 `image` |
 | `wait_for` | `reference` + `timeout`（必填 1～40，`stable=true` 时至少 2）+ 可选 `query`/`absent_query`/`stable`/`full`/`image`；在唯一工作位上等待后发布一个新 `O` |
-| `act` | `reference` + `operation`：`tap`、`long_press`、`swipe`（可选 `duration_ms`）、`scroll`（`container`/`direction`/`amount`）、`key`、`text`；`tap`/`long_press` 的 ref 目标默认 `bubble=true`，可向最近交互祖先提升一次；ref 静态拒绝按 `invalid_target`/`unsupported_node_action`/`no_safe_point` 分类；`text` 默认 `press_enter=true`，一次完成聚焦、写入、精确读回和至多一次 ENTER；`image=true` 为后观察附图 |
+| `act` | `reference` + `operation`：`tap`、`long_press`、`swipe`（可选 `duration_ms`）、`scroll`（`container`/`direction`/`amount`）、`key`、`text`；`tap`/`long_press` 的 ref 目标支持 4 级定位（含 3×3 网格）与同视口子容器委托，默认 `bubble=true` 时按视觉区锚定提升最近交互祖先或吸附唯一局部共位控件；`scroll` 支持双向同视口滚动栈、非滚动 ref 自动祖先提升、坐标最内层/回退/消歧与居中 3 轴线轨迹；`act` 目标解析与规划类静态 422 使用 `invalid_target`/`unsupported_node_action`/`ambiguous_point`/`no_safe_point`/`no_safe_trajectory`，有候选时附统一 `candidates`；`text` 默认 `press_enter=true`，一次完成聚焦、写入、精确读回和至多一次 ENTER；`image=true` 为后观察附图 |
 | `inspect` | `reference` 可选 `node` 或 `query`；只读历史树 |
 | `keepalive` | `reference`（O/P）+ 可选 `duration_minutes`（1～120，默认 2）；从应用时重设当前活动会话租期，可延长或缩短；普通活动仅按两分钟取最大值 |
 | `end` | `reference`（O/P）；撤权并启动独立收尾 |

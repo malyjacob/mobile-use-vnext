@@ -284,13 +284,20 @@ func tapCardExternalAtStep(bounds device.Rect) captureStep {
 	})
 }
 
+var (
+	tapCoverTopBounds    = device.Rect{Left: 0, Top: 303, Right: 1080, Bottom: 708}
+	tapCoverBottomBounds = device.Rect{Left: 0, Top: 708, Right: 1080, Bottom: 1114}
+)
+
 func tapCardFullyCoveredStep() captureStep {
 	return func(_ *fakeDevice, display device.Display) (device.Capture, error) {
 		card := tapRawNode(1, 0, 1, display.ID, tapCardBounds,
 			"android.widget.FrameLayout", "", true, true)
-		card.Children = []int{2}
-		cover := tapRawNode(2, 1, 2, display.ID, tapCardBounds,
-			"android.widget.ImageButton", "cover", true, true)
+		card.Children = []int{2, 3}
+		coverTop := tapRawNode(2, 1, 2, display.ID, tapCoverTopBounds,
+			"android.widget.ImageButton", "cover top", true, true)
+		coverBottom := tapRawNode(3, 1, 2, display.ID, tapCoverBottomBounds,
+			"android.widget.ImageButton", "cover bottom", true, true)
 		return device.Capture{
 			Display: display, Root: 0, CapturedAt: time.Now(),
 			Foreground: device.Foreground{
@@ -303,7 +310,7 @@ func tapCardFullyCoveredStep() captureStep {
 					Package: "com.example", ClassName: "android.widget.FrameLayout",
 					HasEnabled: true, Enabled: true,
 				},
-				card, cover,
+				card, coverTop, coverBottom,
 			},
 		}, nil
 	}
@@ -463,13 +470,15 @@ func tapContentNode(t *testing.T, h *harness) *protocol.Node {
 	return content
 }
 
-func tapCoverNode(t *testing.T, h *harness) *protocol.Node {
+func tapCoverNodes(t *testing.T, h *harness) (*protocol.Node, *protocol.Node) {
 	t.Helper()
-	cover := tapPublicNode(currentTree(t, h.engine).Root, protocol.RoleButton, tapCardBounds)
-	if cover == nil {
-		t.Fatal("covering button not found in the public tree")
+	root := currentTree(t, h.engine).Root
+	top := tapPublicNode(root, protocol.RoleButton, tapCoverTopBounds)
+	bottom := tapPublicNode(root, protocol.RoleButton, tapCoverBottomBounds)
+	if top == nil || bottom == nil {
+		t.Fatalf("covering buttons not found in the public tree: top=%v bottom=%v", top, bottom)
 	}
-	return cover
+	return top, bottom
 }
 
 // tapRefRequest pins the explicit bubble=false branch so the tap scope and
@@ -720,22 +729,14 @@ func actTapContentGuidance(t *testing.T, h *harness, p string) (*protocol.Result
 		t.Fatal("content tap rejection carried no error")
 	}
 	details := result.Error.Details
-	if got := details["nearest_actionable_ref"]; got != card.Ref {
-		t.Fatalf("nearest_actionable_ref = %#v, want %q", got, card.Ref)
+	if details["reason"] != tapStaticReasonTargetMissingAction ||
+		details["scope"] != tapStaticScopeTarget ||
+		details["scope_ref"] != content.Ref {
+		t.Fatalf("content guidance details = %#v, want target_missing_action/target/%q",
+			details, content.Ref)
 	}
-	if got := details["safe_carrier_ref"]; got != content.Ref {
-		t.Fatalf("safe_carrier_ref = %#v, want %q", got, content.Ref)
-	}
-	point, ok := details["safe_point"].(map[string]any)
-	if !ok {
-		t.Fatalf("safe_point = %#v, want a nested object", details["safe_point"])
-	}
-	if point["x"] != tapSafePoint[0] || point["y"] != tapSafePoint[1] {
-		t.Fatalf("safe_point = %#v, want (%d,%d)", point, tapSafePoint[0], tapSafePoint[1])
-	}
-	if _, exists := details["occluding_ref"]; exists {
-		t.Fatalf("guidance carried occluding_ref: %#v", details)
-	}
+	requireGuidanceCandidate(t, details, card.Ref, candidateRelationAncestor,
+		[]int{tapCardBounds.Left, tapCardBounds.Top, tapCardBounds.Right, tapCardBounds.Bottom}, true)
 	if len(h.device.taps) != 0 {
 		t.Fatalf("content guidance dispatched input: %v", h.device.taps)
 	}
@@ -768,17 +769,14 @@ func TestActTapContentGuidanceFallsBackToCenterSpan(t *testing.T) {
 		t.Fatal("content tap rejection carried no error")
 	}
 	details := result.Error.Details
-	if got := details["nearest_actionable_ref"]; got != card.Ref {
-		t.Fatalf("nearest_actionable_ref = %#v, want %q", got, card.Ref)
+	if details["reason"] != tapStaticReasonTargetMissingAction ||
+		details["scope"] != tapStaticScopeTarget ||
+		details["scope_ref"] != content.Ref {
+		t.Fatalf("content guidance details = %#v, want target_missing_action/target/%q",
+			details, content.Ref)
 	}
-	point, ok := details["safe_point"].(map[string]any)
-	if !ok || point["x"] != 540 || point["y"] != 427 {
-		t.Fatalf("safe_point = %#v, want the vertical center-span fallback (540,427)",
-			details["safe_point"])
-	}
-	if _, exists := details["safe_carrier_ref"]; exists {
-		t.Fatalf("center-span guidance carried safe_carrier_ref: %#v", details)
-	}
+	requireGuidanceCandidate(t, details, card.Ref, candidateRelationAncestor,
+		[]int{tapCardBounds.Left, tapCardBounds.Top, tapCardBounds.Right, tapCardBounds.Bottom}, true)
 	if len(h.device.taps) != 0 {
 		t.Fatalf("guidance rejection dispatched input: %v", h.device.taps)
 	}
@@ -943,15 +941,14 @@ func TestActLongPressContentGuidanceAndIndependentNextTurn(t *testing.T) {
 		t.Fatal("long_press content rejection carried no error")
 	}
 	details := guidance.Error.Details
-	if details["nearest_actionable_ref"] != card.Ref {
-		t.Fatalf("nearest_actionable_ref = %#v, want %q",
-			details["nearest_actionable_ref"], card.Ref)
+	if details["reason"] != tapStaticReasonTargetMissingAction ||
+		details["scope"] != tapStaticScopeTarget ||
+		details["scope_ref"] != content.Ref {
+		t.Fatalf("long_press guidance details = %#v, want target_missing_action/target/%q",
+			details, content.Ref)
 	}
-	if details["safe_carrier_ref"] != content.Ref {
-		t.Fatalf("safe_carrier_ref = %#v, want %q",
-			details["safe_carrier_ref"], content.Ref)
-	}
-	requireGuidanceDetails(t, details, tapSafePoint[0], tapSafePoint[1])
+	requireGuidanceCandidate(t, details, card.Ref, candidateRelationAncestor,
+		[]int{tapCardBounds.Left, tapCardBounds.Top, tapCardBounds.Right, tapCardBounds.Bottom}, true)
 	if len(h.device.taps) != 0 {
 		t.Fatalf("long_press guidance dispatched input: %v", h.device.taps)
 	}
@@ -976,7 +973,7 @@ func TestActTapFullyOccludedCardRejectsBeforeClaim(t *testing.T) {
 	h.device.scriptCaptures(tapCardFullyCoveredStep())
 	start := h.startSession()
 	card := tapCardNode(t, h)
-	cover := tapCoverNode(t, h)
+	coverTop, coverBottom := tapCoverNodes(t, h)
 	probes, captures := h.device.probeCount(), h.device.captureCount()
 
 	result := h.actWith(t, "Poccluded", tapRefRequest(start.Observation.ID, card.Ref))
@@ -989,13 +986,18 @@ func TestActTapFullyOccludedCardRejectsBeforeClaim(t *testing.T) {
 		details["scope_ref"] != card.Ref {
 		t.Fatalf("occluded details = %#v, want blocked/target/%q", details, card.Ref)
 	}
-	if refs, ok := details["occluding_refs"].([]string); !ok ||
-		len(refs) != 1 || refs[0] != cover.Ref {
-		t.Fatalf("occluding_refs = %#v, want [%q]", details["occluding_refs"], cover.Ref)
+	candidates, ok := details["candidates"].([]map[string]any)
+	if !ok || len(candidates) != 2 {
+		t.Fatalf("candidates = %#v, want 2 blocking child candidates", details["candidates"])
 	}
-	if _, exists := details["occluding_ref"]; exists {
-		t.Fatalf("legacy occluding_ref survived: %#v", details)
+	gotRefs := map[string]bool{
+		candidates[0]["ref"].(string): true,
+		candidates[1]["ref"].(string): true,
 	}
+	if !gotRefs[coverTop.Ref] || !gotRefs[coverBottom.Ref] {
+		t.Fatalf("candidate refs = %#v, want %q and %q", candidates, coverTop.Ref, coverBottom.Ref)
+	}
+	requireNoLegacyTapDetailKeys(t, details)
 	if len(h.device.taps) != 0 {
 		t.Fatalf("occluded card dispatched input: %v", h.device.taps)
 	}
@@ -1025,14 +1027,13 @@ func TestActTapAmbiguousCardRejectsWithoutOccludingRef(t *testing.T) {
 		details["scope_ref"] != card.Ref {
 		t.Fatalf("ambiguous details = %#v, want ambiguous/target/%q", details, card.Ref)
 	}
-	if refs, ok := details["ambiguous_refs"].([]string); !ok || len(refs) != 2 {
-		t.Fatalf("ambiguous_refs = %#v, want two tied nodes", details["ambiguous_refs"])
+	if refs, ok := details["blocking_refs"].([]string); !ok || len(refs) != 2 {
+		t.Fatalf("blocking_refs = %#v, want two tied nodes", details["blocking_refs"])
 	}
-	for _, key := range []string{"occluding_refs", "occluding_ref"} {
-		if _, exists := details[key]; exists {
-			t.Fatalf("ambiguity-only rejection claimed a blocker %q: %#v", key, details)
-		}
+	if _, exists := details["candidates"]; exists {
+		t.Fatalf("ambiguity-only rejection unexpectedly carried candidates: %#v", details)
 	}
+	requireNoLegacyTapDetailKeys(t, details)
 	if len(h.device.taps) != 0 {
 		t.Fatalf("ambiguous card dispatched input: %v", h.device.taps)
 	}
@@ -1222,11 +1223,12 @@ func TestActTapContextDescendantBlocksWithoutOwnBoundsOrSource(t *testing.T) {
 	if result.Error == nil || result.Error.Details["reason"] != "blocked" {
 		t.Fatalf("context descendant did not block the card: %+v", result.Error)
 	}
-	if refs, ok := result.Error.Details["occluding_refs"].([]string); !ok ||
+	if refs, ok := result.Error.Details["blocking_refs"].([]string); !ok ||
 		len(refs) != 1 || refs[0] != contextNode.Ref {
-		t.Fatalf("occluding_refs = %#v, want [%q]",
-			result.Error.Details["occluding_refs"], contextNode.Ref)
+		t.Fatalf("blocking_refs = %#v, want [%q]",
+			result.Error.Details["blocking_refs"], contextNode.Ref)
 	}
+	requireNoLegacyTapDetailKeys(t, result.Error.Details)
 	if len(h.device.taps) != 0 {
 		t.Fatalf("context-blocked card dispatched input: %v", h.device.taps)
 	}
@@ -1288,11 +1290,14 @@ func TestActTapCompetingDescendantCapabilitiesBlockBothActions(t *testing.T) {
 	for _, variant := range variants {
 		for _, operation := range []string{"tap", "long_press"} {
 			t.Run(variant.name+"/"+operation, func(t *testing.T) {
-				child := tapRawNode(0, 0, 0, 0, tapCardBounds,
-					"android.widget.ImageButton", "cover", true, true)
-				variant.mutate(&child)
+				topChild := tapRawNode(0, 0, 0, 0, tapCoverTopBounds,
+					"android.widget.ImageButton", "cover top", true, true)
+				bottomChild := tapRawNode(0, 0, 0, 0, tapCoverBottomBounds,
+					"android.widget.ImageButton", "cover bottom", true, true)
+				variant.mutate(&topChild)
+				variant.mutate(&bottomChild)
 				h := newTapScopeHarness(t)
-				h.device.scriptCaptures(tapCardWithChildrenStep(tapCardBounds, child))
+				h.device.scriptCaptures(tapCardWithChildrenStep(tapCardBounds, topChild, bottomChild))
 				start := h.startSession()
 				card := tapCardNode(t, h)
 				probes, captures := h.device.probeCount(), h.device.captureCount()
@@ -1605,35 +1610,40 @@ func TestActTapPreviewMissingCaptureIsHierarchyFailure(t *testing.T) {
 // first response, a duplicate P replay and status(P) must not share nested maps.
 func TestActTapGuidanceViewsOwnNestedDetails(t *testing.T) {
 	h := newTapScopeHarness(t)
-	first, _, _, request := actTapContentGuidance(t, h, "Powner")
+	first, card, _, request := actTapContentGuidance(t, h, "Powner")
+	wantBounds := []int{tapCardBounds.Left, tapCardBounds.Top, tapCardBounds.Right, tapCardBounds.Bottom}
 
-	point, ok := first.Error.Details["safe_point"].(map[string]any)
-	if !ok {
-		t.Fatalf("safe_point = %#v, want a nested object", first.Error.Details["safe_point"])
+	candidates, ok := first.Error.Details["candidates"].([]map[string]any)
+	if !ok || len(candidates) == 0 {
+		t.Fatalf("candidates = %#v, want non-empty slice", first.Error.Details["candidates"])
 	}
-	point["x"] = 99
-	first.Error.Details["nearest_actionable_ref"] = "mutated"
+	candidates[0]["ref"] = "mutated"
+	candidates[0]["bounds"].([]int)[0] = 99
+	candidates[0]["actions"].([]string)[0] = "mutated"
 
 	status, apiErr := h.engine.Status("agent", "Powner")
 	if apiErr != nil {
 		t.Fatalf("status rejected: %v", apiErr)
 	}
-	requireGuidanceDetails(t, status.Error.Details, 613, 501)
+	requireGuidanceCandidate(t, status.Error.Details, card.Ref, candidateRelationAncestor, wantBounds, true)
 
 	replay, apiErr := h.engine.Act(context.Background(), "agent", "Powner", request)
 	if apiErr != nil {
 		t.Fatalf("duplicate act rejected: %v", apiErr)
 	}
-	requireGuidanceDetails(t, replay.Error.Details, 613, 501)
-	replayPoint := replay.Error.Details["safe_point"].(map[string]any)
-	replayPoint["y"] = 0
-	requireGuidanceDetails(t, status.Error.Details, 613, 501)
+	requireGuidanceCandidate(t, replay.Error.Details, card.Ref, candidateRelationAncestor, wantBounds, true)
+	replayCandidates := replay.Error.Details["candidates"].([]map[string]any)
+	replayCandidates[0]["bounds"].([]int)[1] = 0
+	replayCandidates[0]["actions"].([]string)[0] = "polluted"
+	requireGuidanceCandidate(t, status.Error.Details, card.Ref, candidateRelationAncestor, wantBounds, true)
 
 	h.engine.mu.Lock()
 	stored := h.engine.operations["Powner"].Error
 	h.engine.mu.Unlock()
-	storedPoint := stored.Details["safe_point"].(map[string]any)
-	if storedPoint["x"] != 613 || storedPoint["y"] != 501 {
+	storedCandidates := stored.Details["candidates"].([]map[string]any)
+	if storedCandidates[0]["ref"] != card.Ref ||
+		!reflect.DeepEqual(storedCandidates[0]["bounds"], wantBounds) ||
+		!reflect.DeepEqual(storedCandidates[0]["actions"], []string{"tap", "long_press"}) {
 		t.Fatalf("stored operation details were polluted: %#v", stored.Details)
 	}
 }
@@ -1697,17 +1707,41 @@ func TestActTapGuidanceRetiredObservationReplayIsHistorical(t *testing.T) {
 	}
 }
 
-func requireGuidanceDetails(t *testing.T, details map[string]any, x, y int) {
+func requireNoLegacyTapDetailKeys(t *testing.T, details map[string]any) {
+	t.Helper()
+	for _, key := range []string{
+		"nearest_actionable_ref", "safe_point", "safe_carrier_ref",
+		"suggested_point", "suggested_carrier_ref",
+		"occluding_refs", "occluding_ref", "ambiguous_refs", "owner_refs",
+	} {
+		if value, exists := details[key]; exists {
+			t.Fatalf("legacy key %q survived with %#v in %#v", key, value, details)
+		}
+	}
+}
+
+func requireGuidanceCandidate(t *testing.T, details map[string]any,
+	wantRef, wantRelation string, wantBounds []int, wantExecutable bool) {
 	t.Helper()
 	if details == nil {
 		t.Fatal("missing guidance details")
 	}
-	point, ok := details["safe_point"].(map[string]any)
-	if !ok {
-		t.Fatalf("safe_point = %#v, want object", details["safe_point"])
+	requireNoLegacyTapDetailKeys(t, details)
+	candidates, ok := details["candidates"].([]map[string]any)
+	if !ok || len(candidates) == 0 {
+		t.Fatalf("candidates = %#v, want non-empty []map[string]any", details["candidates"])
 	}
-	if point["x"] != x || point["y"] != y {
-		t.Fatalf("safe_point = %#v, want (%d,%d)", point, x, y)
+	first := candidates[0]
+	if first["ref"] != wantRef || first["relation"] != wantRelation ||
+		first["executable"] != wantExecutable {
+		t.Fatalf("candidates[0] = %#v, want ref=%q relation=%q executable=%t",
+			first, wantRef, wantRelation, wantExecutable)
+	}
+	if !reflect.DeepEqual(first["bounds"], wantBounds) {
+		t.Fatalf("candidates[0].bounds = %#v, want %#v", first["bounds"], wantBounds)
+	}
+	if actions, ok := first["actions"].([]string); !ok || len(actions) == 0 {
+		t.Fatalf("candidates[0].actions = %#v, want non-empty []string", first["actions"])
 	}
 }
 

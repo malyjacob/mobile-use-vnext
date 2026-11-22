@@ -204,8 +204,7 @@ func TestScrollRefContainerAcceptedAndDispatched(t *testing.T) {
 	if len(calls) != 1 {
 		t.Fatalf("swipe count = %d, want exactly one dispatched scroll", len(calls))
 	}
-	// Full-screen container: margin 240, usable 1920, page travel floor(1152).
-	want := swipeCall{displayID: 12, x1: 540, y1: 2160, x2: 540, y2: 1008, durationMS: 400}
+	want := swipeCall{displayID: 12, x1: 540, y1: 1776, x2: 540, y2: 624, durationMS: 400}
 	if calls[0] != want {
 		t.Fatalf("swipe = %+v, want %+v", calls[0], want)
 	}
@@ -230,13 +229,15 @@ func TestScrollRejectsNonContainersWithoutClaim(t *testing.T) {
 			Class: "android.widget.FrameLayout", Hidden: true},
 		{Parent: 5, Bounds: device.Rect{Left: 0, Top: 2000, Right: 1080, Bottom: 2100},
 			Class: "android.widget.TextView", Text: "context-child"},
+		{Parent: 0, Bounds: device.Rect{Left: 0, Top: 2250, Right: 1080, Bottom: 2350},
+			Class: "android.widget.TextView", Text: "orphan"},
 	}
 	h.device.scriptCaptures(scrollPageStep(specs))
 	start := h.startSession()
 	root := currentTree(t, h.engine).Root
 
 	leaf := findPublic(root, func(node *protocol.Node) bool {
-		return node.Role == protocol.RoleText && len(node.Label) > 0 && node.Label[0] == "alpha"
+		return node.Role == protocol.RoleText && len(node.Label) > 0 && node.Label[0] == "orphan"
 	})
 	disabled := findPublic(root, func(node *protocol.Node) bool {
 		return node.Role == protocol.RoleScroll && node.Enabled != nil && !*node.Enabled
@@ -266,8 +267,13 @@ func TestScrollRejectsNonContainersWithoutClaim(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			code := protocol.CodeNodeUnsupported
-			if name == "missing" {
+			switch name {
+			case "missing":
 				code = protocol.CodeNodeNotFound
+			case "disabled":
+				code = protocol.CodeNodeDisabled
+			case "root", "no_bounds", "context":
+				code = protocol.CodeInvalidTarget
 			}
 			requireScrollRejected(t, h, start.Observation.ID, operation, code)
 		})
@@ -304,8 +310,9 @@ func TestScrollPointTwoScrollScopesAmbiguous(t *testing.T) {
 	h := newHarness(t)
 	specs := []rawNodeSpec{
 		{Parent: -1, Bounds: screenRect(), Class: "android.widget.FrameLayout"},
-		{Parent: 0, Bounds: screenRect(), Class: "android.widget.ScrollView", Scrollable: true},
-		{Parent: 1, Bounds: device.Rect{Left: 0, Top: 800, Right: 1080, Bottom: 1600},
+		{Parent: 0, Bounds: device.Rect{Left: 0, Top: 0, Right: 1080, Bottom: 1600},
+			Class: "android.widget.ScrollView", Scrollable: true},
+		{Parent: 0, Bounds: device.Rect{Left: 0, Top: 800, Right: 1080, Bottom: 2400},
 			Class: "androidx.recyclerview.widget.RecyclerView", Scrollable: true},
 		{Parent: 2, Bounds: device.Rect{Left: 0, Top: 1000, Right: 1080, Bottom: 1200},
 			Class: "android.widget.TextView", Text: "alpha"},
@@ -321,6 +328,13 @@ func TestScrollPointTwoScrollScopesAmbiguous(t *testing.T) {
 	requireNotExecuted(t, result, protocol.CodeAmbiguousPoint)
 	if result.Error == nil || !strings.Contains(result.Error.Message, "container.ref") {
 		t.Fatalf("ambiguous message is not actionable: %+v", result.Error)
+	}
+	if result.Error.Details["reason"] != staticReasonCompetingScrollContainers ||
+		result.Error.Details["scope"] != tapStaticScopePoint {
+		t.Fatalf("ambiguous scroll details = %#v, want competing_scroll_containers/point", result.Error.Details)
+	}
+	if candidates, ok := result.Error.Details["candidates"].([]map[string]any); !ok || len(candidates) != 2 {
+		t.Fatalf("ambiguous scroll candidates = %#v, want 2", result.Error.Details["candidates"])
 	}
 	if h.device.captureCount() != captures || swipeCount(h) != 0 {
 		t.Fatal("ambiguous static resolution performed device work")
@@ -345,7 +359,7 @@ func TestScrollPointWithoutContainerUnsupported(t *testing.T) {
 	requireScrollRejected(t, h, start.Observation.ID, protocol.Operation{
 		Type: "scroll", Container: &protocol.Target{X: 540, Y: 2300},
 		Direction: protocol.ScrollDirectionDown,
-	}, protocol.CodeNodeUnsupported)
+	}, protocol.CodeInvalidTarget)
 }
 
 func TestScrollTooSmallContainerRejectedBeforeClaim(t *testing.T) {
@@ -367,7 +381,7 @@ func TestScrollTooSmallContainerRejectedBeforeClaim(t *testing.T) {
 		requireScrollRejected(t, h, start.Observation.ID, protocol.Operation{
 			Type: "scroll", Container: &protocol.Target{UseRef: true, Ref: container},
 			Direction: protocol.ScrollDirectionDown, Amount: amount,
-		}, protocol.CodeNodeUnsupported)
+		}, protocol.CodeNoSafeTrajectory)
 	}
 
 	// The same observation is still usable by a later action.
@@ -420,7 +434,7 @@ func TestScrollDefensiveValidation(t *testing.T) {
 		Type: "scroll", Container: &protocol.Target{UseRef: true, Ref: root.Ref},
 		Direction: protocol.ScrollDirectionDown,
 	})
-	requireNotExecuted(t, rejected, protocol.CodeNodeUnsupported)
+	requireNotExecuted(t, rejected, protocol.CodeInvalidTarget)
 	h.engine.mu.Lock()
 	action := h.engine.operations["Pstaticfail"].ActAction
 	h.engine.mu.Unlock()
@@ -566,23 +580,23 @@ func TestScrollSafeSpanAvoidsTabBar(t *testing.T) {
 	}{
 		// Axis extent 1938: margin 193, usable 1552, page 931, half 465.
 		{"down_page", protocol.ScrollDirectionDown, protocol.ScrollAmountPage,
-			swipeCall{displayID: 12, x1: 540, y1: 2049, x2: 540, y2: 1118, durationMS: 400}},
+			swipeCall{displayID: 12, x1: 540, y1: 1739, x2: 540, y2: 808, durationMS: 400}},
 		{"up_page", protocol.ScrollDirectionUp, protocol.ScrollAmountPage,
-			swipeCall{displayID: 12, x1: 540, y1: 497, x2: 540, y2: 1428, durationMS: 400}},
+			swipeCall{displayID: 12, x1: 540, y1: 808, x2: 540, y2: 1739, durationMS: 400}},
 		{"down_half", protocol.ScrollDirectionDown, protocol.ScrollAmountHalf,
-			swipeCall{displayID: 12, x1: 540, y1: 2049, x2: 540, y2: 1584, durationMS: 400}},
+			swipeCall{displayID: 12, x1: 540, y1: 1506, x2: 540, y2: 1041, durationMS: 400}},
 		{"up_half", protocol.ScrollDirectionUp, protocol.ScrollAmountHalf,
-			swipeCall{displayID: 12, x1: 540, y1: 497, x2: 540, y2: 962, durationMS: 400}},
+			swipeCall{displayID: 12, x1: 540, y1: 1041, x2: 540, y2: 1506, durationMS: 400}},
 		// The tab bar is off the horizontal center line, so the full width stays
 		// provable: margin 108, usable 864, page 518, half 259.
 		{"right_page", protocol.ScrollDirectionRight, protocol.ScrollAmountPage,
-			swipeCall{displayID: 12, x1: 972, y1: 1121, x2: 454, y2: 1121, durationMS: 400}},
+			swipeCall{displayID: 12, x1: 799, y1: 1121, x2: 281, y2: 1121, durationMS: 400}},
 		{"left_page", protocol.ScrollDirectionLeft, protocol.ScrollAmountPage,
-			swipeCall{displayID: 12, x1: 108, y1: 1121, x2: 626, y2: 1121, durationMS: 400}},
+			swipeCall{displayID: 12, x1: 281, y1: 1121, x2: 799, y2: 1121, durationMS: 400}},
 		{"right_half", protocol.ScrollDirectionRight, protocol.ScrollAmountHalf,
-			swipeCall{displayID: 12, x1: 972, y1: 1121, x2: 713, y2: 1121, durationMS: 400}},
+			swipeCall{displayID: 12, x1: 670, y1: 1121, x2: 411, y2: 1121, durationMS: 400}},
 		{"left_half", protocol.ScrollDirectionLeft, protocol.ScrollAmountHalf,
-			swipeCall{displayID: 12, x1: 108, y1: 1121, x2: 367, y2: 1121, durationMS: 400}},
+			swipeCall{displayID: 12, x1: 411, y1: 1121, x2: 670, y2: 1121, durationMS: 400}},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -617,7 +631,9 @@ func scrollSpanLengthPage(length int) []rawNodeSpec {
 	return []rawNodeSpec{
 		{Parent: -1, Bounds: screenRect(), Class: "android.widget.FrameLayout"},
 		{Parent: 0, Bounds: screenRect(), Class: "android.widget.ScrollView", Scrollable: true},
-		{Parent: 1, Bounds: device.Rect{Right: 1080, Top: length, Bottom: 2400},
+		{Parent: 1, Bounds: device.Rect{Right: 1080, Top: length, Bottom: 1300},
+			Class: "androidx.recyclerview.widget.RecyclerView", Scrollable: true},
+		{Parent: 1, Bounds: device.Rect{Right: 1080, Top: 1300, Bottom: 2400},
 			Class: "androidx.recyclerview.widget.RecyclerView", Scrollable: true},
 	}
 }
@@ -636,14 +652,14 @@ func TestScrollSafeSpanTravelThresholds(t *testing.T) {
 		{length: 127, amount: protocol.ScrollAmountPage, ok: false},
 		{length: 127, amount: protocol.ScrollAmountHalf, ok: false},
 		// extent 128: usable 80, page 48 (the exact minimum), half 24.
-		{length: 128, amount: protocol.ScrollAmountPage, ok: true, start: 104, end: 56},
+		{length: 128, amount: protocol.ScrollAmountPage, ok: true, start: 88, end: 40},
 		{length: 128, amount: protocol.ScrollAmountHalf, ok: false},
 		// extent 207: usable 159, page 95, half 47.
-		{length: 207, amount: protocol.ScrollAmountPage, ok: true, start: 183, end: 88},
+		{length: 207, amount: protocol.ScrollAmountPage, ok: true, start: 151, end: 56},
 		{length: 207, amount: protocol.ScrollAmountHalf, ok: false},
 		// extent 208: usable 160, page 96, half 48.
-		{length: 208, amount: protocol.ScrollAmountPage, ok: true, start: 184, end: 88},
-		{length: 208, amount: protocol.ScrollAmountHalf, ok: true, start: 184, end: 136},
+		{length: 208, amount: protocol.ScrollAmountPage, ok: true, start: 152, end: 56},
+		{length: 208, amount: protocol.ScrollAmountHalf, ok: true, start: 128, end: 80},
 	}
 	for _, testCase := range cases {
 		t.Run(fmt.Sprintf("%d_%s", testCase.length, testCase.amount), func(t *testing.T) {
@@ -658,7 +674,7 @@ func TestScrollSafeSpanTravelThresholds(t *testing.T) {
 			}
 			if !testCase.ok {
 				requireScrollRejected(t, h, start.Observation.ID, operation,
-					protocol.CodeNodeUnsupported)
+					protocol.CodeNoSafeTrajectory)
 				return
 			}
 			h.device.scriptCaptures(page, page)
@@ -687,22 +703,22 @@ func TestScrollSafeSpanFullyBlockedRejectedBeforeClaim(t *testing.T) {
 	specs := []rawNodeSpec{
 		{Parent: -1, Bounds: screenRect(), Class: "android.widget.FrameLayout"},
 		{Parent: 0, Bounds: screenRect(), Class: "android.widget.ScrollView", Scrollable: true},
-		{Parent: 1, Bounds: screenRect(), Class: "androidx.recyclerview.widget.RecyclerView",
-			Scrollable: true},
-		{Parent: 2, Bounds: device.Rect{Right: 1080, Top: 1000, Bottom: 1200},
+		{Parent: 1, Bounds: device.Rect{Right: 1080, Top: 0, Bottom: 1200},
+			Class: "androidx.recyclerview.widget.RecyclerView", Scrollable: true},
+		{Parent: 1, Bounds: device.Rect{Right: 1080, Top: 1200, Bottom: 2400},
+			Class: "androidx.recyclerview.widget.RecyclerView", Scrollable: true},
+		{Parent: 2, Bounds: device.Rect{Right: 1080, Top: 1000, Bottom: 1150},
 			Class: "android.widget.TextView", Text: "inner"},
 	}
 	h.device.scriptCaptures(scrollPageStep(specs))
 	start := h.startSession()
-	// The outer container has the inner scope as its only child, so select it by
-	// its own rectangle rather than by role.
 	container := scrollContainerMatching(t, h, screenRect())
 
 	for _, amount := range []string{protocol.ScrollAmountPage, protocol.ScrollAmountHalf} {
 		requireScrollRejected(t, h, start.Observation.ID, protocol.Operation{
 			Type: "scroll", Container: &protocol.Target{UseRef: true, Ref: container},
 			Direction: protocol.ScrollDirectionDown, Amount: amount,
-		}, protocol.CodeNodeUnsupported)
+		}, protocol.CodeNoSafeTrajectory)
 	}
 }
 
@@ -735,7 +751,7 @@ func TestScrollSafeSpanKeepsOuterAncestorAndNestedSelection(t *testing.T) {
 		t.Fatalf("outer span outcome = %s error %+v", outerResult.Outcome, outerResult.Error)
 	}
 	// [2000,2400): extent 400, margin 40, usable 320, page 192.
-	want := swipeCall{displayID: 12, x1: 540, y1: 2360, x2: 540, y2: 2168, durationMS: 400}
+	want := swipeCall{displayID: 12, x1: 540, y1: 2296, x2: 540, y2: 2104, durationMS: 400}
 	if calls := swipeCalls(h); len(calls) != 1 || calls[0] != want {
 		t.Fatalf("outer swipe = %+v, want %+v", calls, want)
 	}
@@ -749,7 +765,7 @@ func TestScrollSafeSpanKeepsOuterAncestorAndNestedSelection(t *testing.T) {
 		t.Fatalf("nested span outcome = %s error %+v", nestedResult.Outcome, nestedResult.Error)
 	}
 	// [400,2000): extent 1600, margin 160, usable 1280, page 768.
-	nestedWant := swipeCall{displayID: 12, x1: 540, y1: 1840, x2: 540, y2: 1072, durationMS: 400}
+	nestedWant := swipeCall{displayID: 12, x1: 540, y1: 1584, x2: 540, y2: 816, durationMS: 400}
 	calls := swipeCalls(h)
 	if len(calls) != 2 || calls[1] != nestedWant {
 		t.Fatalf("nested swipe = %+v, want %+v", calls, nestedWant)
@@ -785,7 +801,7 @@ func TestScrollSafeSpanInheritsNonCrossingParentScope(t *testing.T) {
 		t.Fatalf("outcome = %s error %+v", result.Outcome, result.Error)
 	}
 	// Safe span [600,2400): extent 1800, margin 180, usable 1440, page 864.
-	want := swipeCall{displayID: 12, x1: 540, y1: 2220, x2: 540, y2: 1356, durationMS: 400}
+	want := swipeCall{displayID: 12, x1: 540, y1: 1932, x2: 540, y2: 1068, durationMS: 400}
 	calls := swipeCalls(h)
 	if len(calls) != 1 || calls[0] != want {
 		t.Fatalf("swipe = %+v, want %+v", calls, want)
@@ -808,9 +824,9 @@ func TestScrollSafeSpanTieBreak(t *testing.T) {
 		// [0,1000) and [1400,2400) are equally long: extent 1000, margin 100,
 		// usable 800, page 480.
 		{protocol.ScrollDirectionDown,
-			swipeCall{displayID: 12, x1: 540, y1: 2300, x2: 540, y2: 1820, durationMS: 400}},
+			swipeCall{displayID: 12, x1: 540, y1: 2140, x2: 540, y2: 1660, durationMS: 400}},
 		{protocol.ScrollDirectionUp,
-			swipeCall{displayID: 12, x1: 540, y1: 100, x2: 540, y2: 580, durationMS: 400}},
+			swipeCall{displayID: 12, x1: 540, y1: 260, x2: 540, y2: 740, durationMS: 400}},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.direction, func(t *testing.T) {
@@ -1070,9 +1086,9 @@ func TestScrollRevalidateLogSeparatesSegment(t *testing.T) {
 	container := scrollContainerRef(t, h)
 	fresh := scrollPageSpecs(screenRect(), device.Rect{Top: 1000})
 	for _, blocked := range []device.Rect{
-		{Right: 1080, Top: 0, Bottom: 1000},
-		{Right: 1080, Top: 1100, Bottom: 2100},
-		{Right: 1080, Top: 2200, Bottom: 2400},
+		{Right: 1080, Top: 0, Bottom: 580},
+		{Right: 1080, Top: 680, Bottom: 1720},
+		{Right: 1080, Top: 1820, Bottom: 2400},
 	} {
 		fresh = append(fresh, rawNodeSpec{
 			Parent: 1, Bounds: blocked,
@@ -1138,7 +1154,7 @@ func TestScrollSafeSpanIgnoresDisabledScrollScope(t *testing.T) {
 		t.Fatalf("outcome = %s error %+v", result.Outcome, result.Error)
 	}
 	// An unusable scope blocks nothing: the whole container stays provable.
-	want := swipeCall{displayID: 12, x1: 540, y1: 2160, x2: 540, y2: 1008, durationMS: 400}
+	want := swipeCall{displayID: 12, x1: 540, y1: 1776, x2: 540, y2: 624, durationMS: 400}
 	calls := swipeCalls(h)
 	if len(calls) != 1 || calls[0] != want {
 		t.Fatalf("swipe = %+v, want %+v", calls, want)

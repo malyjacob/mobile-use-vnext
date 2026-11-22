@@ -10,14 +10,16 @@ import (
 // Code is stable; Message is a short controlled sentence. Details may only
 // carry whitelisted controlled JSON facts: limit, budget, limit_ms, limit_s,
 // app_code, field, task_ids, allowed_kinds, allowed_scopes,
-// blocking_operation_id, start_operation_id, nearest_actionable_ref,
-// safe_carrier_ref, safe_point (x/y integers), occluding_ref,
-// reason, target_actions, ancestor_ref, ancestor_actions, scope, scope_ref,
-// occluding_refs, ambiguous_refs, owner_refs, suggested_point,
-// suggested_carrier_ref, stage, dispatch (focus/write/enter closed-state
-// object), candidate_count (non-negative integer). The reason/scope group
-// belongs to the tap/long_press ref static error taxonomy; the text action owns
-// stage/reason/dispatch/candidate_count and no other tool inherits either
+// blocking_operation_id, start_operation_id, reason, target_actions,
+// ancestor_ref, ancestor_actions, scope, scope_ref, candidates, blocking_refs,
+// stage, dispatch (focus/write/enter closed-state object), candidate_count
+// (non-negative integer). The act static rejection taxonomy owns reason,
+// target_actions, ancestor_ref, ancestor_actions, scope, scope_ref, candidates,
+// and blocking_refs. Non-text target_changed uses reason with its own closed
+// enum. candidates is fixed to []map[string]any whose objects contain ref,
+// role, actions ([]string), bounds ([]int [left, top, right, bottom]),
+// relation, and executable (bool); blocking_refs is []string. The text action
+// owns stage/reason/dispatch/candidate_count and no other tool inherits that
 // vocabulary. Details never carry user text, device output, trees, commands or
 // credentials.
 type APIError struct {
@@ -53,10 +55,10 @@ type Error struct {
 
 // CloneErrorDetails returns an independent copy of one error's controlled JSON
 // details. It recursively copies string-keyed maps, slices and arrays while
-// preserving concrete element types such as []int and []string; scalars are
-// copied by value. It deliberately avoids a JSON round trip, which would
-// change every decoded number to float64. Non-JSON containers are outside the
-// Details whitelist and are returned as-is.
+// preserving concrete element types such as []map[string]any, []string and
+// []int; scalars are copied by value. It deliberately avoids a JSON round trip,
+// which would change every decoded number to float64. Non-JSON containers are
+// outside the Details whitelist and are returned as-is.
 func CloneErrorDetails(details map[string]any) map[string]any {
 	if details == nil {
 		return nil
@@ -167,6 +169,7 @@ const (
 	CodeNodeUnsupported    = "unsupported_node_action"
 	CodeInvalidTarget      = "invalid_target"
 	CodeNoSafePoint        = "no_safe_point"
+	CodeNoSafeTrajectory   = "no_safe_trajectory"
 	CodeInvalidCoordinates = "invalid_coordinates"
 	CodeAmbiguousPoint     = "ambiguous_point"
 	CodeInvalidKey         = "unsupported_key"
@@ -245,7 +248,7 @@ func Status(code string) int {
 	switch code {
 	case CodeInvalidRequest, CodeReferenceInvalid, CodeInvalidCoordinates,
 		CodeAmbiguousPoint, CodeInvalidKey, CodeTextTooLong, CodeNodeUnsupported,
-		CodeInvalidTarget, CodeNoSafePoint:
+		CodeInvalidTarget, CodeNoSafePoint, CodeNoSafeTrajectory:
 		return http.StatusUnprocessableEntity
 	case CodeUnauthorized, CodeForbidden:
 		return http.StatusUnauthorized

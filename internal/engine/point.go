@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"sort"
 	"time"
 
 	"github.com/malyjacob/mobile-use-vnext/internal/device"
@@ -8,26 +9,29 @@ import (
 )
 
 // pointState is the fixed result of resolving one logical display point in a
-// public tree. The three values have distinct, pre-declared behaviors: a unique
-// node can be proven, an ambiguous point is rejected before claim, and a point
-// the tree does not describe keeps the foreground-only behavior.
+// public tree. Unique and set results prove the deepest hit set on the fresh
+// frame, an ambiguous point is rejected before claim, and none keeps the
+// foreground-only behavior.
 type pointState string
 
 const (
 	pointUnique    pointState = "unique"
+	pointSet       pointState = "set"
 	pointAmbiguous pointState = "ambiguous"
 	pointNone      pointState = "none"
 )
 
 // pointCheck is the immutable result of resolving a coordinate target in the
 // observation the caller actually read. It is computed before claim and carries
-// only the point, its resolution state, the resolved raw source index and the
-// pure-CPU cost of the proof; it never carries a ref or tree content.
+// only the point, its resolution state, the resolved raw source indices, mode
+// and the pure-CPU cost of the proof; it never carries a ref or tree content.
 type pointCheck struct {
-	x, y  int
-	state pointState
-	index int // raw index in obs.Projection.Capture.Nodes; -1 unless unique
-	took  time.Duration
+	x, y    int
+	state   pointState
+	index   int
+	indices []int
+	mode    string
+	took    time.Duration
 }
 
 // coordinatePoint returns the point a coordinate target must prove. tap,
@@ -51,29 +55,34 @@ func coordinatePoint(operation *protocol.Operation) (x, y int, ok bool) {
 	return 0, 0, false
 }
 
-// resolvePoint takes the deepest public node whose half-open bounds contain the
-// point. Root and context nodes are not candidates; their descendants still
-// are. Equally deep candidates cannot be ancestors of each other, so more than
-// one means the point did not identify a node and the result is ambiguous.
-func resolvePoint(tree *protocol.Node, x, y int) (string, pointState) {
+// resolvePointSet collects all non-root, non-context public nodes with
+// positive-area half-open bounds containing (x, y) at the maximum depth in
+// preorder. A visited guard prevents unbounded traversal on cyclic graphs.
+func resolvePointSet(tree *protocol.Node, x, y int) []*protocol.Node {
 	if tree == nil {
-		return "", pointNone
+		return nil
 	}
-	bestRef := ""
 	bestDepth := -1
-	bestCount := 0
+	var best []*protocol.Node
+	visited := make(map[*protocol.Node]struct{})
 	var walk func(node *protocol.Node, depth int)
 	walk = func(node *protocol.Node, depth int) {
 		if node == nil {
 			return
 		}
+		if _, seen := visited[node]; seen {
+			return
+		}
+		visited[node] = struct{}{}
 		if depth > 0 && !node.Context && node.Role != protocol.RoleRoot &&
-			node.Bounds != nil && node.Bounds.Contains(x, y) {
+			node.Bounds != nil && node.Bounds.Width() > 0 && node.Bounds.Height() > 0 &&
+			node.Bounds.Contains(x, y) {
 			switch {
 			case depth > bestDepth:
-				bestDepth, bestRef, bestCount = depth, node.Ref, 1
+				bestDepth = depth
+				best = []*protocol.Node{node}
 			case depth == bestDepth:
-				bestCount++
+				best = append(best, node)
 			}
 		}
 		for _, child := range node.Children {
@@ -81,13 +90,22 @@ func resolvePoint(tree *protocol.Node, x, y int) (string, pointState) {
 		}
 	}
 	walk(tree, 0)
-	switch {
-	case bestCount == 0:
+	return best
+}
+
+// resolvePoint takes the deepest public node whose half-open bounds contain the
+// point. Root and context nodes are not candidates; their descendants still
+// are. Equally deep candidates cannot be ancestors of each other, so more than
+// one means the point did not identify a node and the result is ambiguous.
+func resolvePoint(tree *protocol.Node, x, y int) (string, pointState) {
+	nodes := resolvePointSet(tree, x, y)
+	switch len(nodes) {
+	case 0:
 		return "", pointNone
-	case bestCount > 1:
-		return "", pointAmbiguous
+	case 1:
+		return nodes[0].Ref, pointUnique
 	default:
-		return bestRef, pointUnique
+		return "", pointAmbiguous
 	}
 }
 
@@ -95,41 +113,257 @@ func resolvePoint(tree *protocol.Node, x, y int) (string, pointState) {
 // observation projection the caller read. Ambiguity is rejected here, before
 // claim, capture or any device read; no node keeps the foreground-only path.
 func resolveObservedPoint(obs *observationState, operation *protocol.Operation) (*pointCheck, *protocol.APIError) {
-	if obs == nil || obs.Projection == nil || obs.Projection.Tree == nil ||
-		obs.Projection.Capture == nil {
-		return nil, nil
-	}
 	x, y, ok := coordinatePoint(operation)
 	if !ok {
 		return nil, nil
 	}
 	started := time.Now()
-	ref, state := resolvePoint(obs.Projection.Tree.Root, x, y)
-	check := &pointCheck{x: x, y: y, state: state, index: -1}
-	if state == pointUnique {
-		index, mapped := obs.Projection.Source[ref]
-		if !mapped || index < 0 || index >= len(obs.Projection.Capture.Nodes) {
-			// A published, non-root, non-context node always has a source
-			// mapping. Should that invariant ever break, the point has no
-			// provable node and keeps the foreground-only behavior instead of
-			// rejecting a point the caller may still be able to use.
-			check.state = pointNone
-		} else {
+	view, apiErr := collectTapPublicView(obs)
+	if apiErr != nil {
+		return nil, apiErr
+	}
+	if _, apiErr := validateTapRawTopology(obs.Projection.Capture); apiErr != nil {
+		return nil, apiErr
+	}
+	hits := resolvePointSet(obs.Projection.Tree.Root, x, y)
+	check := &pointCheck{x: x, y: y, state: pointNone, index: -1}
+	switch len(hits) {
+	case 0:
+		check.took = time.Since(started)
+		return check, nil
+	case 1:
+		index, mapped := obs.Projection.Source[hits[0].Ref]
+		if mapped && index >= 0 && index < len(obs.Projection.Capture.Nodes) {
+			check.state = pointUnique
 			check.index = index
+			check.indices = []int{index}
 		}
+		check.took = time.Since(started)
+		return check, nil
 	}
+
+	if operation != nil && operation.Type == "swipe" {
+		if len(hits) <= maxPointHitSet {
+			if indices, mapped := collectPointRawIndices(obs, hits); mapped {
+				check.state = pointSet
+				check.indices = indices
+				check.mode = pointModeSet
+			}
+		}
+		check.took = time.Since(started)
+		return check, nil
+	}
+
+	if len(hits) > maxPointHitSet {
+		owners := collectPointOwners(view, hits)
+		matching := filterMatchingPointOwners(owners, operation)
+		candidates := matching
+		if len(candidates) == 0 {
+			candidates = owners
+		}
+		if len(candidates) == 0 {
+			candidates = hits
+		}
+		check.state = pointAmbiguous
+		check.took = time.Since(started)
+		return check, newAmbiguousPointError(obs, view, operation, candidates)
+	}
+
+	owners := collectPointOwners(view, hits)
+	if len(owners) <= 1 {
+		if indices, mapped := collectPointRawIndices(obs, hits); mapped {
+			check.state = pointSet
+			check.indices = indices
+			check.mode = pointModeSet
+		}
+		check.took = time.Since(started)
+		return check, nil
+	}
+
+	matching := filterMatchingPointOwners(owners, operation)
+	if len(matching) == 1 {
+		if indices, mapped := collectPointRawIndices(obs, hits); mapped {
+			check.state = pointSet
+			check.indices = indices
+			check.mode = pointModeDisambiguated
+		}
+		check.took = time.Since(started)
+		return check, nil
+	}
+
+	candidates := matching
+	if len(candidates) == 0 {
+		candidates = owners
+	}
+	check.state = pointAmbiguous
 	check.took = time.Since(started)
-	if check.state == pointAmbiguous {
-		// The error code and behavior are unchanged; only the hint must be
-		// executable for the branch that saw it. Raw swipe accepts no ref, so
-		// it is pointed at its own adjustable start point or controlled scroll.
-		message := "坐标落在多个同级节点上，请改用 ref"
-		if operation != nil && operation.Type == "swipe" {
-			message = "起点落在多个同级节点上；raw swipe 请调整起点，或改用 scroll 的 container 指定容器"
-		}
-		return check, protocol.NewError(422, protocol.CodeAmbiguousPoint, message)
+	return check, newAmbiguousPointError(obs, view, operation, candidates)
+}
+
+func collectPointRawIndices(obs *observationState, nodes []*protocol.Node) ([]int, bool) {
+	if obs == nil || obs.Projection == nil || obs.Projection.Capture == nil || len(nodes) == 0 {
+		return nil, false
 	}
-	return check, nil
+	rawCount := len(obs.Projection.Capture.Nodes)
+	seen := make(map[int]struct{}, len(nodes))
+	indices := make([]int, 0, len(nodes))
+	for _, node := range nodes {
+		if node == nil || node.Ref == "" {
+			return nil, false
+		}
+		index, mapped := obs.Projection.Source[node.Ref]
+		if !mapped || index < 0 || index >= rawCount {
+			return nil, false
+		}
+		if _, duplicate := seen[index]; duplicate {
+			continue
+		}
+		seen[index] = struct{}{}
+		indices = append(indices, index)
+	}
+	if len(indices) == 0 {
+		return nil, false
+	}
+	return indices, true
+}
+
+func nearestPointInteractiveOwner(view *tapPublicView, node *protocol.Node) *protocol.Node {
+	if view == nil || node == nil {
+		return nil
+	}
+	visited := make(map[*protocol.Node]struct{})
+	for current := node; current != nil; {
+		if _, seen := visited[current]; seen {
+			return nil
+		}
+		visited[current] = struct{}{}
+		if current.Role == protocol.RoleRoot {
+			return nil
+		}
+		if !current.Context && isTouchInteractive(current) {
+			return current
+		}
+		info := view.info[current]
+		if info == nil {
+			return nil
+		}
+		current = info.parent
+	}
+	return nil
+}
+
+func collectPointOwners(view *tapPublicView, hits []*protocol.Node) []*protocol.Node {
+	seen := make(map[*protocol.Node]struct{}, len(hits))
+	owners := make([]*protocol.Node, 0, len(hits))
+	for _, node := range hits {
+		owner := nearestPointInteractiveOwner(view, node)
+		if owner == nil {
+			continue
+		}
+		if _, duplicate := seen[owner]; duplicate {
+			continue
+		}
+		seen[owner] = struct{}{}
+		owners = append(owners, owner)
+	}
+	return owners
+}
+
+func pointOwnerMatchesOperation(node *protocol.Node, operation *protocol.Operation) bool {
+	if node == nil || operation == nil {
+		return false
+	}
+	switch operation.Type {
+	case "tap":
+		return validTapPublicTarget(node, protocol.ActionTap)
+	case "long_press":
+		return validTapPublicTarget(node, protocol.ActionLongPress)
+	case "text":
+		if node.Context || node.Role != protocol.RoleInput ||
+			node.Bounds == nil || node.Bounds.Width() <= 0 || node.Bounds.Height() <= 0 {
+			return false
+		}
+		if node.Enabled != nil && !*node.Enabled {
+			return false
+		}
+		if node.Protected == nil || *node.Protected {
+			return false
+		}
+		return hasAction(node, protocol.ActionText)
+	default:
+		return false
+	}
+}
+
+func filterMatchingPointOwners(owners []*protocol.Node, operation *protocol.Operation) []*protocol.Node {
+	matching := make([]*protocol.Node, 0, len(owners))
+	for _, owner := range owners {
+		if pointOwnerMatchesOperation(owner, operation) {
+			matching = append(matching, owner)
+		}
+	}
+	return matching
+}
+
+func rankPointCandidateNodes(view *tapPublicView, nodes []*protocol.Node, screen device.Rect) []*protocol.Node {
+	type scoredNode struct {
+		node  *protocol.Node
+		area  int64
+		order int
+	}
+	seen := make(map[string]struct{}, len(nodes))
+	scored := make([]scoredNode, 0, len(nodes))
+	for _, node := range nodes {
+		if node == nil || node.Ref == "" || node.Role == protocol.RoleRoot || node.Context {
+			continue
+		}
+		if _, duplicate := seen[node.Ref]; duplicate {
+			continue
+		}
+		clipped, ok := publicNodeClippedRect(node, screen)
+		if !ok {
+			continue
+		}
+		seen[node.Ref] = struct{}{}
+		scored = append(scored, scoredNode{
+			node:  node,
+			area:  rectArea64(clipped),
+			order: tapPublicOrder(view, node),
+		})
+	}
+	sort.Slice(scored, func(left, right int) bool {
+		if scored[left].area != scored[right].area {
+			return scored[left].area < scored[right].area
+		}
+		return scored[left].order < scored[right].order
+	})
+	ranked := make([]*protocol.Node, 0, len(scored))
+	for _, item := range scored {
+		ranked = append(ranked, item.node)
+	}
+	return ranked
+}
+
+func newAmbiguousPointError(obs *observationState, view *tapPublicView,
+	operation *protocol.Operation, nodes []*protocol.Node) *protocol.APIError {
+	apiErr := protocol.NewError(422, protocol.CodeAmbiguousPoint,
+		"坐标落在多个竞争目标上，请改用候选 ref")
+	apiErr.WithDetail("reason", staticReasonCompetingTargets)
+	apiErr.WithDetail("scope", tapStaticScopePoint)
+	if obs == nil || view == nil || operation == nil || len(nodes) == 0 {
+		return apiErr
+	}
+	screen := screenRectFromDisplay(obs.Screen)
+	ranked := rankPointCandidateNodes(view, nodes, screen)
+	entries := make([]candidateEntry, 0, len(ranked))
+	for _, node := range ranked {
+		entries = append(entries, candidateEntry{
+			node:     node,
+			relation: candidateRelationCompeting,
+		})
+	}
+	attachStaticCandidates(apiErr, buildStaticCandidates(obs, view, operation, entries))
+	return apiErr
 }
 
 // indexOf returns the index of node in capture, or -1 when it is not a node of

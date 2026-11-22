@@ -69,17 +69,6 @@ func requireDetailAbsent(t *testing.T, details map[string]any, key string) {
 	}
 }
 
-func requireSuggestedPoint(t *testing.T, details map[string]any, x, y int) {
-	t.Helper()
-	point, ok := details["suggested_point"].(map[string]any)
-	if !ok {
-		t.Fatalf("suggested_point = %#v, want a nested object", details["suggested_point"])
-	}
-	if point["x"] != x || point["y"] != y {
-		t.Fatalf("suggested_point = %#v, want (%d,%d)", point, x, y)
-	}
-}
-
 func tapCrossCoveredStep() captureStep {
 	return tapCardWithChildrenStep(device.Rect{Left: 0, Top: 0, Right: 1000, Bottom: 1000},
 		tapRawNode(0, 0, 0, 0, device.Rect{Left: 400, Top: 0, Right: 600, Bottom: 1000},
@@ -114,7 +103,7 @@ func tapCrossCoveredExternalStep() captureStep {
 // non-interactive carriers make another original candidate ambiguous.
 func tapMixedCandidateStep() captureStep {
 	return tapCardWithChildrenStep(device.Rect{Left: 0, Top: 0, Right: 1000, Bottom: 1000},
-		tapRawNode(0, 0, 0, 0, device.Rect{Left: 400, Top: 0, Right: 600, Bottom: 1000},
+		tapRawNode(0, 0, 0, 0, device.Rect{Left: 400, Top: 0, Right: 1000, Bottom: 1000},
 			"android.widget.ImageButton", "vertical", true, true),
 		tapRawNode(0, 0, 0, 0, device.Rect{Left: 0, Top: 0, Right: 400, Bottom: 1000},
 			"android.widget.TextView", "left", false, false),
@@ -129,7 +118,7 @@ func TestActTapFullyOccludedReportsNoSafePointBlocked(t *testing.T) {
 			h.device.scriptCaptures(tapCardFullyCoveredStep())
 			start := h.startSession()
 			card := tapCardNode(t, h)
-			cover := tapCoverNode(t, h)
+			coverTop, coverBottom := tapCoverNodes(t, h)
 			probes, captures := h.device.probeCount(), h.device.captureCount()
 			request := tapRefRequest(start.Observation.ID, card.Ref)
 			if operation == "long_press" {
@@ -140,12 +129,19 @@ func TestActTapFullyOccludedReportsNoSafePointBlocked(t *testing.T) {
 			details := requireStaticRejection(t, result, "no_safe_point", "blocked")
 			requireDetailString(t, details, "scope", "target")
 			requireDetailString(t, details, "scope_ref", card.Ref)
-			requireDetailStringSlice(t, details, "occluding_refs", cover.Ref)
-			requireDetailAbsent(t, details, "ambiguous_refs")
-			requireDetailAbsent(t, details, "owner_refs")
-			requireDetailAbsent(t, details, "occluding_ref")
-			requireDetailAbsent(t, details, "suggested_point")
-			requireDetailAbsent(t, details, "suggested_carrier_ref")
+			candidates, ok := details["candidates"].([]map[string]any)
+			if !ok || len(candidates) != 2 {
+				t.Fatalf("candidates = %#v, want 2 blocking child candidates", details["candidates"])
+			}
+			gotRefs := map[string]bool{
+				candidates[0]["ref"].(string): true,
+				candidates[1]["ref"].(string): true,
+			}
+			if !gotRefs[coverTop.Ref] || !gotRefs[coverBottom.Ref] {
+				t.Fatalf("candidate refs = %#v, want %q and %q", candidates, coverTop.Ref, coverBottom.Ref)
+			}
+			requireDetailAbsent(t, details, "blocking_refs")
+			requireNoLegacyTapDetailKeys(t, details)
 			if len(h.device.taps) != 0 {
 				t.Fatalf("occluded card dispatched input: %v", h.device.taps)
 			}
@@ -173,9 +169,9 @@ func TestActTapAmbiguousReportsNoSafePointAmbiguous(t *testing.T) {
 	details := requireStaticRejection(t, result, "no_safe_point", "ambiguous")
 	requireDetailString(t, details, "scope", "target")
 	requireDetailString(t, details, "scope_ref", card.Ref)
-	requireDetailStringSlice(t, details, "ambiguous_refs", left.Ref, right.Ref)
-	requireDetailAbsent(t, details, "occluding_refs")
-	requireDetailAbsent(t, details, "suggested_point")
+	requireDetailStringSlice(t, details, "blocking_refs", left.Ref, right.Ref)
+	requireDetailAbsent(t, details, "candidates")
+	requireNoLegacyTapDetailKeys(t, details)
 	if len(h.device.taps) != 0 {
 		t.Fatalf("ambiguous card dispatched input: %v", h.device.taps)
 	}
@@ -198,7 +194,7 @@ func TestActTapMixedCandidateFailuresReportBothLists(t *testing.T) {
 		t.Fatal("mixed card not found in the public tree")
 	}
 	cover := tapPublicNode(currentTree(t, h.engine).Root, protocol.RoleButton,
-		device.Rect{Left: 400, Top: 0, Right: 600, Bottom: 1000})
+		device.Rect{Left: 400, Top: 0, Right: 1000, Bottom: 1000})
 	if cover == nil {
 		t.Fatal("mixed fixture vertical blocker not found")
 	}
@@ -209,10 +205,13 @@ func TestActTapMixedCandidateFailuresReportBothLists(t *testing.T) {
 	details := requireStaticRejection(t, result, "no_safe_point", "mixed")
 	requireDetailString(t, details, "scope", "target")
 	requireDetailString(t, details, "scope_ref", card.Ref)
-	requireDetailStringSlice(t, details, "occluding_refs", cover.Ref)
-	requireDetailStringSlice(t, details, "ambiguous_refs", left.Ref, right.Ref)
-	requireSuggestedPoint(t, details, 833, 166)
-	requireDetailAbsent(t, details, "suggested_carrier_ref")
+	candidates, ok := details["candidates"].([]map[string]any)
+	if !ok || len(candidates) != 1 || candidates[0]["ref"] != cover.Ref ||
+		candidates[0]["relation"] != candidateRelationChild || candidates[0]["executable"] != true {
+		t.Fatalf("candidates = %#v, want [%q child executable]", details["candidates"], cover.Ref)
+	}
+	requireDetailStringSlice(t, details, "blocking_refs", left.Ref, right.Ref)
+	requireNoLegacyTapDetailKeys(t, details)
 	if len(h.device.taps) != 0 {
 		t.Fatalf("mixed rejection dispatched input: %v", h.device.taps)
 	}
@@ -228,18 +227,12 @@ func TestActTapCrossOcclusionSuggestsFirstGridPoint(t *testing.T) {
 	if card == nil {
 		t.Fatal("cross card not found in the public tree")
 	}
-	vertical := tapPublicNode(currentTree(t, h.engine).Root, protocol.RoleButton,
-		device.Rect{Left: 400, Top: 0, Right: 600, Bottom: 1000})
 
 	result := h.actWith(t, "Pstaticgrid", tapRefRequest(start.Observation.ID, card.Ref))
-	details := requireStaticRejection(t, result, "no_safe_point", "blocked")
-	requireDetailStringSlice(t, details, "occluding_refs", vertical.Ref)
-	requireSuggestedPoint(t, details, 166, 166)
-	requireDetailAbsent(t, details, "suggested_carrier_ref")
-	if len(h.device.taps) != 0 {
-		t.Fatalf("grid rejection dispatched input: %v", h.device.taps)
+	if result.Outcome != OutcomeExecuted {
+		t.Fatalf("cross occlusion grid outcome = %q error %+v, want executed", result.Outcome, result.Error)
 	}
-	requireReadyObservation(t, h, start.Observation.ID)
+	requireTapPoint(t, h, [2]int{166, 166})
 }
 
 func TestActTapCrossOcclusionOmitsExternallyOwnedSuggestion(t *testing.T) {
@@ -253,13 +246,10 @@ func TestActTapCrossOcclusionOmitsExternallyOwnedSuggestion(t *testing.T) {
 	}
 
 	result := h.actWith(t, "Pstaticexternal", tapRefRequest(start.Observation.ID, card.Ref))
-	details := requireStaticRejection(t, result, "no_safe_point", "blocked")
-	requireDetailAbsent(t, details, "suggested_point")
-	requireDetailAbsent(t, details, "suggested_carrier_ref")
-	if len(h.device.taps) != 0 {
-		t.Fatalf("external-owner rejection dispatched input: %v", h.device.taps)
+	if result.Outcome != OutcomeExecuted {
+		t.Fatalf("cross external sibling grid outcome = %q error %+v, want executed", result.Outcome, result.Error)
 	}
-	requireReadyObservation(t, h, start.Observation.ID)
+	requireTapPoint(t, h, [2]int{166, 166})
 }
 
 func TestActTapTargetMissingActionReportsEmptyActionsAndGuidance(t *testing.T) {
@@ -272,10 +262,12 @@ func TestActTapTargetMissingActionReportsEmptyActionsAndGuidance(t *testing.T) {
 	result := h.actWith(t, "Pstatictargetmissing", tapRefRequest(start.Observation.ID, content.Ref))
 	details := requireStaticRejection(t, result, "unsupported_node_action", "target_missing_action")
 	requireDetailStringSlice(t, details, "target_actions")
-	requireDetailString(t, details, "nearest_actionable_ref", card.Ref)
-	requireDetailString(t, details, "safe_carrier_ref", content.Ref)
+	requireDetailString(t, details, "scope", "target")
+	requireDetailString(t, details, "scope_ref", content.Ref)
+	requireGuidanceCandidate(t, details, card.Ref, candidateRelationAncestor,
+		[]int{tapCardBounds.Left, tapCardBounds.Top, tapCardBounds.Right, tapCardBounds.Bottom}, true)
 	requireDetailAbsent(t, details, "ancestor_ref")
-	requireDetailAbsent(t, details, "scope")
+	requireNoLegacyTapDetailKeys(t, details)
 	requireReadyObservation(t, h, start.Observation.ID)
 }
 
@@ -424,8 +416,8 @@ func TestActBubbleOwnerMismatchReportsUniqueExternalOwner(t *testing.T) {
 	result := h.actWith(t, "Pstaticowner", bubbleRequest(start.Observation.ID, child.Ref, nil))
 	details := requireStaticRejection(t, result, "no_safe_point", "owner_mismatch")
 	requireDetailString(t, details, "scope", "ancestor")
-	requireDetailStringSlice(t, details, "owner_refs", external.Ref)
-	requireDetailAbsent(t, details, "suggested_point")
+	requireDetailStringSlice(t, details, "blocking_refs", external.Ref)
+	requireNoLegacyTapDetailKeys(t, details)
 	if len(h.device.taps) != 0 {
 		t.Fatalf("owner mismatch dispatched input: %v", h.device.taps)
 	}
@@ -468,7 +460,9 @@ func TestActTapInvalidTargetReasons(t *testing.T) {
 		details := requireStaticRejection(t, result, "invalid_target", "no_geometry")
 		requireDetailString(t, details, "scope", "target")
 		requireDetailString(t, details, "scope_ref", target.Ref)
-		requireDetailString(t, details, "nearest_actionable_ref", card.Ref)
+		requireGuidanceCandidate(t, details, card.Ref, candidateRelationAncestor,
+			[]int{tapCardBounds.Left, tapCardBounds.Top, tapCardBounds.Right, tapCardBounds.Bottom}, true)
+		requireNoLegacyTapDetailKeys(t, details)
 		requireReadyObservation(t, h, start.Observation.ID)
 	})
 }
@@ -542,11 +536,11 @@ func pruningCarrierSuggestionStep() captureStep {
 }
 
 func pruningAmbiguousStep() captureStep {
-	return tapCardWithChildrenStep(device.Rect{Left: 0, Top: 0, Right: 1000, Bottom: 1000},
+	return tapCardWithChildrenStep(device.Rect{Left: 0, Top: 0, Right: 100, Bottom: 100},
 		pruningImageRaw("app:id/pruning_ambiguous_left",
-			device.Rect{Left: 490, Top: 490, Right: 510, Bottom: 510}),
+			device.Rect{Left: 0, Top: 0, Right: 100, Bottom: 100}),
 		pruningImageRaw("app:id/pruning_ambiguous_right",
-			device.Rect{Left: 490, Top: 490, Right: 510, Bottom: 510}))
+			device.Rect{Left: 0, Top: 0, Right: 100, Bottom: 100}))
 }
 
 func requirePrunedRefInspectable(t *testing.T, h *harness, observation *protocol.Observation,
@@ -638,23 +632,13 @@ func TestActStaticPrunedCarrierRemainsInspectable(t *testing.T) {
 	if card == nil {
 		t.Fatal("suggestion card not found")
 	}
-	probes, captures := h.device.probeCount(), h.device.captureCount()
 
 	result := h.actWith(t, "Pprunedsuggest",
 		tapRefRequest(start.Observation.ID, card.Ref))
-	details := requireStaticRejection(t, result, "no_safe_point", "blocked")
-	requireSuggestedPoint(t, details, 166, 166)
-	requireDetailString(t, details, "suggested_carrier_ref", carrierRef)
-	if len(h.device.taps) != 0 {
-		t.Fatalf("static suggestion dispatched input: %v", h.device.taps)
+	if result.Outcome != OutcomeExecuted {
+		t.Fatalf("pruned grid carrier outcome = %q error %+v, want executed", result.Outcome, result.Error)
 	}
-	if delta := h.device.probeCount() - probes; delta != 0 {
-		t.Fatalf("static suggestion probe delta=%d, want zero", delta)
-	}
-	if delta := h.device.captureCount() - captures; delta != 0 {
-		t.Fatalf("static suggestion capture delta=%d, want zero", delta)
-	}
-	requireReadyObservation(t, h, start.Observation.ID)
+	requireTapPoint(t, h, [2]int{166, 166})
 	requirePrunedRefInspectable(t, h, start.Observation, carrierRef, protocol.RoleImage)
 }
 
@@ -669,7 +653,7 @@ func TestActStaticPrunedAmbiguityRemainsInspectable(t *testing.T) {
 		t.Fatalf("fixture refs: left=%q/%t right=%q/%t", leftRef, leftOK, rightRef, rightOK)
 	}
 	card := tapPublicBoundsNode(state.tree().Root,
-		device.Rect{Left: 0, Top: 0, Right: 1000, Bottom: 1000})
+		device.Rect{Left: 0, Top: 0, Right: 100, Bottom: 100})
 	if card == nil {
 		t.Fatal("ambiguous card not found")
 	}
@@ -678,7 +662,8 @@ func TestActStaticPrunedAmbiguityRemainsInspectable(t *testing.T) {
 	result := h.actWith(t, "Pprunedambiguous",
 		tapRefRequest(start.Observation.ID, card.Ref))
 	details := requireStaticRejection(t, result, "no_safe_point", "ambiguous")
-	requireDetailStringSlice(t, details, "ambiguous_refs", leftRef, rightRef)
+	requireDetailStringSlice(t, details, "blocking_refs", leftRef, rightRef)
+	requireNoLegacyTapDetailKeys(t, details)
 	if len(h.device.taps) != 0 {
 		t.Fatalf("static ambiguity dispatched input: %v", h.device.taps)
 	}
@@ -699,19 +684,15 @@ func TestActTapSuggestionReportsCarrierRef(t *testing.T) {
 	start := h.startSession()
 	card := tapPublicBoundsNode(currentTree(t, h.engine).Root,
 		device.Rect{Left: 0, Top: 0, Right: 1000, Bottom: 1000})
-	carrier := tapContentNodeByLabel(t, currentTree(t, h.engine).Root, "carrier")
 	if card == nil {
 		t.Fatal("carrier suggestion card not found")
 	}
 
 	result := h.actWith(t, "Pstaticcarrier", tapRefRequest(start.Observation.ID, card.Ref))
-	details := requireStaticRejection(t, result, "no_safe_point", "blocked")
-	requireSuggestedPoint(t, details, 166, 166)
-	requireDetailString(t, details, "suggested_carrier_ref", carrier.Ref)
-	if len(h.device.taps) != 0 {
-		t.Fatalf("carrier suggestion dispatched input: %v", h.device.taps)
+	if result.Outcome != OutcomeExecuted {
+		t.Fatalf("grid carrier outcome = %q error %+v, want executed", result.Outcome, result.Error)
 	}
-	requireReadyObservation(t, h, start.Observation.ID)
+	requireTapPoint(t, h, [2]int{166, 166})
 }
 
 func TestActBubbleNoSafePointReportsAncestorScope(t *testing.T) {
@@ -721,7 +702,7 @@ func TestActBubbleNoSafePointReportsAncestorScope(t *testing.T) {
 	h.device.scriptCaptures(func(_ *fakeDevice, display device.Display) (device.Capture, error) {
 		capture := bubblePage(display, cardBounds, childBounds, "post", false)
 		cover := tapRawNode(3, 1, 2, display.ID, cardBounds,
-			"android.widget.Button", "cover", true, true)
+			"android.widget.Button", "cover", false, true)
 		capture.Nodes = append(capture.Nodes, cover)
 		capture.Nodes[1].Children = append(capture.Nodes[1].Children, 3)
 		return capture, nil
@@ -729,7 +710,7 @@ func TestActBubbleNoSafePointReportsAncestorScope(t *testing.T) {
 	start := h.startSession()
 	child := tapPublicBoundsNode(currentTree(t, h.engine).Root, childBounds)
 	card := tapPublicBoundsNode(currentTree(t, h.engine).Root, cardBounds)
-	cover := tapPublicNode(currentTree(t, h.engine).Root, protocol.RoleButton, cardBounds)
+	cover := tapContentNodeByLabel(t, currentTree(t, h.engine).Root, "cover")
 	if child == nil || card == nil || cover == nil {
 		t.Fatal("bubble no-safe-point fixture is incomplete")
 	}
@@ -740,8 +721,8 @@ func TestActBubbleNoSafePointReportsAncestorScope(t *testing.T) {
 	requireDetailString(t, details, "scope", "ancestor")
 	requireDetailString(t, details, "scope_ref", card.Ref)
 	requireDetailString(t, details, "ancestor_ref", card.Ref)
-	requireDetailStringSlice(t, details, "occluding_refs", cover.Ref)
-	requireDetailAbsent(t, details, "suggested_point")
+	requireDetailStringSlice(t, details, "blocking_refs", cover.Ref)
+	requireNoLegacyTapDetailKeys(t, details)
 	if len(h.device.taps) != 0 {
 		t.Fatalf("bubble blocked rejection dispatched input: %v", h.device.taps)
 	}

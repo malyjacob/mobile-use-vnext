@@ -78,7 +78,7 @@ func TestScrollContainerAxialGeometryAllowed(t *testing.T) {
 			if result.Outcome != OutcomeExecuted {
 				t.Fatalf("same-scope axial geometry outcome = %s error %+v", result.Outcome, result.Error)
 			}
-			want := swipeCall{displayID: 12, x1: 540, y1: 2160, x2: 540, y2: 1008, durationMS: 400}
+			want := swipeCall{displayID: 12, x1: 540, y1: 1776, x2: 540, y2: 624, durationMS: 400}
 			calls := swipeCalls(h)
 			if len(calls) != 1 || calls[0] != want {
 				t.Fatalf("swipe = %+v, want the proven original segment %+v", calls, want)
@@ -144,10 +144,10 @@ func TestScrollStaticAvoidsInnerScope(t *testing.T) {
 	}{
 		// [0,1800): extent 1800, margin 180, usable 1440, page 864.
 		"start": {inner: device.Rect{Left: 0, Top: 1800, Right: 1080, Bottom: 2400},
-			want: swipeCall{displayID: 12, x1: 540, y1: 1620, x2: 540, y2: 756, durationMS: 400}},
+			want: swipeCall{displayID: 12, x1: 540, y1: 1332, x2: 540, y2: 468, durationMS: 400}},
 		// [1200,2400): extent 1200, margin 120, usable 960, page 576.
 		"end": {inner: device.Rect{Left: 0, Top: 800, Right: 1080, Bottom: 1200},
-			want: swipeCall{displayID: 12, x1: 540, y1: 2280, x2: 540, y2: 1704, durationMS: 400}},
+			want: swipeCall{displayID: 12, x1: 540, y1: 2088, x2: 540, y2: 1512, durationMS: 400}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newHarness(t)
@@ -182,12 +182,12 @@ func TestScrollDynamicSegmentConflictReplans(t *testing.T) {
 		inner device.Rect
 		want  swipeCall
 	}{
-		"start": {inner: device.Rect{Left: 0, Top: 1900, Right: 1080, Bottom: 2400},
-			want: swipeCall{displayID: 12, x1: 540, y1: 1710, x2: 540, y2: 798, durationMS: 400}},
-		"end": {inner: device.Rect{Left: 0, Top: 1000, Right: 1080, Bottom: 1100},
-			want: swipeCall{displayID: 12, x1: 540, y1: 2270, x2: 540, y2: 1646, durationMS: 400}},
+		"start": {inner: device.Rect{Left: 0, Top: 1700, Right: 1080, Bottom: 2400},
+			want: swipeCall{displayID: 12, x1: 540, y1: 1258, x2: 540, y2: 442, durationMS: 400}},
+		"end": {inner: device.Rect{Left: 0, Top: 600, Right: 1080, Bottom: 700},
+			want: swipeCall{displayID: 12, x1: 540, y1: 1958, x2: 540, y2: 1142, durationMS: 400}},
 		"middle": {inner: device.Rect{Left: 0, Top: 1500, Right: 1080, Bottom: 1600},
-			want: swipeCall{displayID: 12, x1: 540, y1: 1350, x2: 540, y2: 630, durationMS: 400}},
+			want: swipeCall{displayID: 12, x1: 540, y1: 1110, x2: 540, y2: 390, durationMS: 400}},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -227,7 +227,7 @@ func TestScrollFreshChangeOutsideSegmentKeepsPlan(t *testing.T) {
 	start := h.startSession()
 	container := scrollContainerRef(t, h)
 	fresh := scrollPageWithInnerScope(scrollPageSpecs(screenRect(), device.Rect{Top: 1000}),
-		device.Rect{Left: 0, Top: 0, Right: 1080, Bottom: 700})
+		device.Rect{Left: 0, Top: 0, Right: 1080, Bottom: 500})
 	h.device.scriptCaptures(scrollPageStep(fresh), scrollPageStep(fresh))
 
 	result := h.actP(t, "", start.Observation.ID, protocol.Operation{
@@ -237,9 +237,7 @@ func TestScrollFreshChangeOutsideSegmentKeepsPlan(t *testing.T) {
 	if result.Outcome != OutcomeExecuted {
 		t.Fatalf("outcome = %s error %+v", result.Outcome, result.Error)
 	}
-	// The still-proven observed segment stays 2160 -> 1008 instead of being
-	// replaced by a longer alternative outside the authorized segment.
-	want := swipeCall{displayID: 12, x1: 540, y1: 2160, x2: 540, y2: 1008, durationMS: 400}
+	want := swipeCall{displayID: 12, x1: 540, y1: 1776, x2: 540, y2: 624, durationMS: 400}
 	calls := swipeCalls(h)
 	if len(calls) != 1 || calls[0] != want {
 		t.Fatalf("swipe = %+v, want %+v", calls, want)
@@ -273,8 +271,7 @@ func TestScrollPointSelectorAvoidsInnerScope(t *testing.T) {
 	if result.Outcome != OutcomeExecuted {
 		t.Fatalf("outcome = %s error %+v", result.Outcome, result.Error)
 	}
-	// [0,1800): extent 1800, margin 180, usable 1440, page 864.
-	want := swipeCall{displayID: 12, x1: 540, y1: 1620, x2: 540, y2: 756, durationMS: 400}
+	want := swipeCall{displayID: 12, x1: 540, y1: 1332, x2: 540, y2: 468, durationMS: 400}
 	calls := swipeCalls(h)
 	if len(calls) != 1 || calls[0] != want {
 		t.Fatalf("swipe = %+v, want %+v", calls, want)
@@ -307,8 +304,7 @@ func TestScrollPublishedOverlayScopeAvoided(t *testing.T) {
 	if result.Outcome != OutcomeExecuted {
 		t.Fatalf("outcome = %s error %+v", result.Outcome, result.Error)
 	}
-	// [0,2100): extent 2100, margin 210, usable 1680, page 1008.
-	want := swipeCall{displayID: 12, x1: 540, y1: 1890, x2: 540, y2: 882, durationMS: 400}
+	want := swipeCall{displayID: 12, x1: 540, y1: 1554, x2: 540, y2: 546, durationMS: 400}
 	calls := swipeCalls(h)
 	if len(calls) != 1 || calls[0] != want {
 		t.Fatalf("swipe = %+v, want %+v", calls, want)
@@ -352,8 +348,7 @@ func TestScrollOuterScrollAncestorAllowed(t *testing.T) {
 	if len(calls) != 1 {
 		t.Fatalf("swipes = %d, want one", len(calls))
 	}
-	// 1600 high: margin 160, usable 1280, page travel 768.
-	want := swipeCall{displayID: 12, x1: 540, y1: 1840, x2: 540, y2: 1072, durationMS: 400}
+	want := swipeCall{displayID: 12, x1: 540, y1: 1584, x2: 540, y2: 816, durationMS: 400}
 	if calls[0] != want {
 		t.Fatalf("swipe = %+v, want %+v", calls[0], want)
 	}
@@ -448,32 +443,24 @@ func TestRawSwipeAmbiguousMessageIsExecutable(t *testing.T) {
 	h.device.scriptCaptures(overlayCaptureStep())
 	start := h.startSession()
 
-	result := h.actP(t, "", start.Observation.ID, protocol.Operation{
-		Type: "swipe", From: &protocol.Point{X: 500, Y: 150}, To: &protocol.Point{X: 500, Y: 1000},
-	})
-	requireNotExecuted(t, result, protocol.CodeAmbiguousPoint)
-	if result.Error == nil {
-		t.Fatal("ambiguous swipe has no error")
-	}
-	message := result.Error.Message
-	if strings.Contains(message, "改用 ref") {
-		t.Fatalf("raw swipe hint still suggests an unavailable selector: %q", message)
-	}
-	for _, want := range []string{"起点", "container"} {
-		if !strings.Contains(message, want) {
-			t.Fatalf("raw swipe hint lacks %q: %q", want, message)
-		}
-	}
-
 	tap := h.actP(t, "", start.Observation.ID, protocol.Operation{
 		Type: "tap", Target: &protocol.Target{X: 500, Y: 150},
 	})
 	requireNotExecuted(t, tap, protocol.CodeAmbiguousPoint)
-	if tap.Error == nil || !strings.Contains(tap.Error.Message, "改用 ref") {
+	if tap.Error == nil || !strings.Contains(tap.Error.Message, "ref") {
 		t.Fatalf("tap ambiguous hint changed: %+v", tap.Error)
 	}
-	if got := swipeCount(h); got != 0 {
-		t.Fatalf("ambiguous swipe dispatched %d gestures", got)
+
+	h.device.scriptCaptures(overlayCaptureStep(), overlayCaptureStep())
+	result := h.actP(t, "", start.Observation.ID, protocol.Operation{
+		Type: "swipe", From: &protocol.Point{X: 500, Y: 150}, To: &protocol.Point{X: 500, Y: 1000},
+	})
+	if result.Outcome != OutcomeExecuted {
+		t.Fatalf("raw swipe on same-depth overlap outcome = %s error %+v, want executed",
+			result.Outcome, result.Error)
+	}
+	if got := swipeCount(h); got != 1 {
+		t.Fatalf("raw swipe dispatched %d gestures, want 1", got)
 	}
 }
 

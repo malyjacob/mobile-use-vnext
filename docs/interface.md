@@ -15,7 +15,7 @@
 | 方法 | 所有业务端点只接受 `POST`；其他方法返回 `405`，错误码 `invalid_request` |
 | 认证 | `/api/*` 用 `agent_token`；`/v1/control/*` 用 `control_token`；`Authorization: Bearer <token>` |
 | 身份隔离 | agent token 不能访问 `/v1/control/*`，control token 不能访问 `/api/*`；错误为 `401 unauthorized` |
-| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 21`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
+| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 22`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
 | 预分配 P | `/api/*` 可带 `X-Mobile-Use-Operation: P…`；缺省由服务分配。`status` 不使用该头 |
 | 请求体 | 必须是一个 JSON 对象；大小上限：`start`/`status`/`end`/`wait_for` 16 KiB，`observe` 32 KiB，`snap` 8 KiB，`act` 64 KiB，`inspect`/`keepalive`/`diagnose`/`app` 8 KiB，`notify` 16 KiB，`shell` 32 KiB，`sync` 32 KiB，`stop` 8 KiB |
 | 响应 | `Content-Type: application/json; charset=utf-8`，`Cache-Control: no-store` |
@@ -82,23 +82,19 @@ app, shell, wait, notification, diagnosis, cleanup, error, recovery
 - `/api/*` 的 `details` 仅可能出现白名单事实：`limit`、`budget`、`limit_ms`、`limit_s`、
   `app_code`、`field`、
   `task_ids`、`allowed_kinds`、`allowed_scopes`、`blocking_operation_id`、`start_operation_id`、
-  `nearest_actionable_ref`、`safe_carrier_ref`、`safe_point`、`occluding_ref`、
   `reason`、`target_actions`、`ancestor_ref`、`ancestor_actions`、`scope`、`scope_ref`、
-  `occluding_refs`、`ambiguous_refs`、`owner_refs`、`suggested_point`、
-  `suggested_carrier_ref`、`stage`、`dispatch`、`candidate_count`；
-  `nearest_actionable_ref`、`safe_carrier_ref`、`occluding_ref`、`ancestor_ref`、`scope_ref`、
-  `suggested_carrier_ref` 与 `reason`/`scope`/`stage` 是字符串，`target_actions`、
-  `ancestor_actions`、`occluding_refs`、`ambiguous_refs`、`owner_refs` 是字符串数组，
-  `safe_point` 与 `suggested_point` 是只含非负整数 `x`、`y` 的 JSON 对象，
+  `candidates`、`blocking_refs`、`stage`、`dispatch`、`candidate_count`；
+  `ancestor_ref`、`scope_ref` 与 `reason`/`scope`/`stage` 是字符串，`target_actions`、
+  `ancestor_actions`、`blocking_refs` 是字符串数组，`candidates` 是至多 4 项的对象数组
+  （每项固定含 `ref`、`role`、`actions`、`bounds`、`relation`、`executable`，其中 `bounds`
+  为 `[left, top, right, bottom]` 4 整数数组、`executable` 为布尔，绝不含 `label`/
+  `value`/`text` 正文），
   `dispatch` 是只含 `focus`、`write`、`enter` 三个字符串成员的 JSON 对象，
-  `candidate_count` 是非负整数；均不得字符串化。`tap`/`long_press`
-  的祖先引导按原子组给出或整体省略：`nearest_actionable_ref` 与 `safe_point` 总是同时出现；
-  仅当该点来自引导候选的承载节点时再附 `safe_carrier_ref`。承载可以是原目标或候选祖先的
-  非阻塞后代，其 ref 只解释坐标来源，不表示它具备请求动作。`occluding_ref` 仅在基线文本
-  聚焦检查或其他仍使用基线规划的错误出口出现；`tap`/`long_press` 的 ref 静态候选耗尽改用
-  `occluding_refs`。新增 `reason`、作用域、动作数组与候选 ref 列表只属于该静态分支，具体
-  枚举见 §6。`stage`、`reason`、`dispatch`、`candidate_count` 的 text 取值只属于 `text`
-  错误，`tap`/`long_press` 不继承该组。没有可证事实时省略这些键，不以 `null` 或空字符串代替；
+  `candidate_count` 是非负整数；均不得字符串化。`act` 静态拒绝的 `reason`、`scope`、
+  `scope_ref`、`target_actions`、`ancestor_ref`、`ancestor_actions`、`candidates`、
+  `blocking_refs` 与非 `text` 重验 `409 target_changed` 的归因 `reason` 枚举见 §6。
+  `stage`、`reason`、`dispatch`、`candidate_count` 的 text 取值只属于 `text` 错误，其他动作
+  不继承该组。没有可证事实时省略可选键，不以 `null` 或空字符串代替；
   已声明必出的动作数组即使为空也输出 `[]`。`mcp.*` 是 [MCP 适配器](mcp.md) 的保留命名空间，
   仅由该适配器向结果投影注入，服务端 `/api/*` 永不产生这些键；
 - `recovery` 是下一个请求的投影：本次结果没有待恢复事实时整个对象省略；出现时 `entry` 与
@@ -156,7 +152,7 @@ HTTP 状态映射（默认由 `protocol.Status` 按 code 决定；认领前的 t
 | 200 | 成功；含 `end`/`status` 的同帧 `cleanup=pending`/`unconfirmed`（退休收尾事实不是 HTTP 错误） |
 | 401 | `unauthorized` |
 | 409 | `contract_mismatch`、`device_busy`、`session_*`、`reference_has_no_session`、`operation_*`、`observation_*`、`node_not_found`、`node_disabled`、`stale_screen`、`target_changed`、`foreground_changed`、`foreground_unknown`、`control_revoked`、`request_closed`、`control_unavailable`、`stop_unavailable`、`mode_not_selected`、`device_locked`、`device_not_interactive`、`recovering`、`no_ready_observation`、`display_unavailable`、`text_target_uncertain`、`text_result_uncertain`、`control_ui_on_virtual_display`、`app_not_found`、`application_moved`、`task_focus_unavailable`、`task_remove_unconfirmed`、`content_unavailable`、`inspection_too_large`、`root_unavailable`、`window_action_not_supported_on_primary_display`、`task_not_found`、`task_not_tracked`、`task_target_ambiguous`、`task_root_shared`、`task_move_unconfirmed`、`close_refused_borrowed`、`kill_refused_not_owned`、`kill_refused_task_elsewhere`、`kill_refused_foreground`、`kill_refused_playback`、`kill_refused_process_shared`、`kill_unconfirmed`、`app_capacity_exceeded`、`task_lifecycle_busy` |
-| 422 | `invalid_request`、`invalid_coordinates`、`ambiguous_point`、`unsupported_key`、`unsupported_node_action`、`invalid_target`、`no_safe_point`、`text_too_long`、`reference_invalid`；认领前的 text 静态输入能力/保护拒绝（`text_target_uncertain`，含首次结果、`status(P)` 与重复 P）；`app` 的未知 kind、分支外成员、`target` 形状错误与显式 `null` 也归入 `invalid_request` |
+| 422 | `invalid_request`、`invalid_coordinates`、`ambiguous_point`、`unsupported_key`、`unsupported_node_action`、`invalid_target`、`no_safe_point`、`no_safe_trajectory`、`text_too_long`、`reference_invalid`；认领前的 text 静态输入能力/保护拒绝（`text_target_uncertain`，含首次结果、`status(P)` 与重复 P）；`app` 的未知 kind、分支外成员、`target` 形状错误与显式 `null` 也归入 `invalid_request` |
 | 503 | `device_unavailable`、`display_create_failed`、`hierarchy_unavailable`、`tree_too_large`、`app_launch_failed`、`app_list_unavailable`、`shell_start_failed`、`delivery_unavailable`；以及 `observation.status=failed` 或没有新 O 的 `partial` 结果 |
 | 504 | `action_result_uncertain`（输入已派发但无法确认完成）、`app_launch_unconfirmed`、`shell_result_unconfirmed`；`app` 的 `app_launch_unconfirmed` 仅用于 `open` |
 | 500 | `internal_error`（接入层自身失败）；工具结果中的 500 会被改写为 409 |
@@ -453,77 +449,93 @@ STOP、原租期、请求与工作期限、会话绑定显示 ID/代次与几何
 `amount`；`duration_ms` 只在 `swipe` 上出现。`duration_ms` 的显式 `null`、0、负数、非整数与
 越界一律拒绝。`swipe` 仍是原始手势，不承诺滚动语义；表达滚动意图用 `scroll`。
 
-`tap`/`long_press` 的 `ref` 目标有效 `bubble=true`（省略或显式 true）时：原目标自身已有请求
-动作则仍走下述直接目标规划，不提升；原目标完全没有 `tap`、`long_press`、`text` 任一动作时，
-服务沿公开树父链找到第一个 touch-interactive 祖先 A，且只把动作交给 A 一次。A 必须支持请求
-动作、未明确禁用、bounds 有效，并能在 A 的作用域内产生唯一可证安全点；A 不存在、不可用或
-不支持该动作时返回 `422 unsupported_node_action`，A 支持动作但无安全点时返回
-`422 no_safe_point`，都不继续向更远祖先查找，也不认领 O。A 的公开 bounds 通过前置检查、
-但规划期 raw/屏幕/公开交集为空时返回 `422 invalid_target` 且 `reason=no_geometry`、
-`scope=ancestor`、`scope_ref=A`，不把子节点误报为几何错误对象。静态规划
-同时绑定原 child C 与 A。认领后必须重新唯一匹配 C 和 A，证明 A 仍是 fresh C 的祖先和最近
-交互祖先、C 的公开 Role 与完整 Label 未变、C 未新增任何 touch-interactive 能力、A 仍有请求
-动作与有效 bounds，并在 A 作用域内重算安全点。C 或 A 丢失/歧义、C 内容被替换、出现更近交互
-祖先或安全点落到另一独立交互目标时返回 `409 target_changed`，零派发；C 丢失时即使 A 仍唯一
-也不能把授权解绑为 A。有效 `bubble=false` 完全沿用下述直接目标算法与错误；坐标目标不进入该
-分支。
+`tap`/`long_press` 的 `ref` 目标自身已有请求动作时（无论 `bubble` 值）均走下述直接目标规划
+（含 `coextensive_child` 委托），不提升；原目标完全没有 `tap`、`long_press`、`text` 任一动作且
+有效 `bubble=true`（省略或显式 true）时，服务先沿公开树父链（遇 `context` 停止）寻找最近 touch-interactive 祖先 A，按两步解析：
 
-`tap`/`long_press` 的 `ref` 目标使用子树安全落点规划。服务以目标 `raw` 矩形、逻辑屏与
-公开 `bounds` 的非空交集为基础，只把目标子树内 `actions` 含 `tap`、`long_press`、`text`
-任一种的节点（无论 `enabled` 值）及其后代、以及 `context` 边界视为阻塞；仅含 `swipe` 的
-节点不自动成为阻塞边界。候选顺序固定为：
+- **视觉锚定祖先提升（`bubble_ancestor`）**：当 A 存在、未禁用、bounds 有效且支持请求动作时，
+  先计算原目标 C 与 A 基础矩形的交集 `cClip`（A 的公开 bounds 有效但规划期 raw/屏幕/公开交集
+  为空时返回 `422 invalid_target`，`reason=no_geometry`、`scope=ancestor`、`scope_ref=A`、
+  `ancestor_ref=A`）。服务优先在 `cClip` 内按中心、中心线、3×3 网格试探，并通过整树归属证明
+  命中 A 非阻塞作用域；若 `cClip` 非空、其中无通过点且没有任何竞争交互控件与 `cClip` 相交，
+  才允许按 A 自身的 4 级候选补测。若 `cClip` 为空或存在竞争交互控件相交，则立即中止 A 的其余
+  区域搜索，不向 A 的无关空白处漂移，直接转入局部共位吸附。
+- **局部共位可点击目标吸附（`bubble_colocated`）**：在整棵公开树中收集 `B != C`、非 C 祖先、
+  未禁用、具备请求动作的节点 B：非 C 后代须（包含 C 中心或与 C 重合率 ≥50%）且裁剪面积 <50%
+  屏幕；C 后代须与 C 满足双向 ≥85% 同视口，或（与 C 重合率 ≥50% 且裁剪面积 <50% 屏幕）；且 B
+  须先在 `rect(C) ∩ B.base` 内通过中心、中心线或 3×3 网格的局部视觉点证明，局部选点失败时再按 B
+  自身的直接 4 级候选证明。对匹配集合做双向同视口祖先-后代折叠（保留内层）后，恰有 1 个 B，或多个 B
+  中恰有 1 个包含 C 中心点（半开 bounds：左/上包含，右/下不包含）时，自动吸附 `C → B`；
+  多个冲突 B 无法以 C 中心唯一消歧时，静态返回 `422 no_safe_point`（`reason=colocated_ambiguous`、
+  `scope=target`、`scope_ref=C`）并在 `candidates` 中列出冲突项。无可用共位目标时，按 A 的失败
+  原因返回 `422 invalid_target`、`422 unsupported_node_action` 或 `422 no_safe_point`（有候选
+  时附 `candidates` 与可选 `blocking_refs`），不认领 O。
+
+`bubble_ancestor` 同时绑定 C 与 A，`bubble_colocated` 同时绑定 C 与 B。认领后均要求重新唯一
+匹配双对象、C 的公开 Role 与完整 Label 未变、C 未新增任何 touch-interactive 能力，且 A/B 仍
+具备请求动作与有效 bounds：`bubble_ancestor` 另须证明 A 仍是 fresh C 的最近交互祖先且不在重验
+阶段跨模式切到 `bubble_colocated`；`bubble_colocated` 另须证明 fresh B 非 fresh C 祖先且仍满
+足共位与反底板守卫。任一条件不成立时返回 `409 target_changed` 并附归因 `reason`，零派发；C
+丢失时即使 A 或 B 仍唯一也不能解绑授权。有效 `bubble=false` 禁用 `bubble_ancestor` 与
+`bubble_colocated`（原目标自身已有请求动作时仍走直接 4 级规划并可使用 `coextensive_child`），缺动作时
+返回 `422 unsupported_node_action` 并在 `candidates` 中附可用交互祖先与共位可点击候选；坐标
+目标不进入 `bubble` 分支。
+
+`tap`/`long_press` 的直接 `ref` 目标及 `text(ref)` 的焦点点击使用 4 级子树安全落点规划。服务以
+目标 `raw` 矩形、逻辑屏与公开 `bounds` 的非空交集为基础，只把目标子树内 `actions` 含 `tap`、
+`long_press`、`text` 任一种的节点（无论 `enabled` 值）及其后代、以及 `context` 边界视为阻塞；
+仅含 `swipe` 的节点不自动成为阻塞边界。候选顺序固定为：
 
 1. 原中心；仅当它在基础矩形外时改测基础矩形中心；
 2. 目标子树内的非阻塞承载节点中心，非匿名节点先于匿名节点，各自保持先序；中心越出基础
    矩形时改测该承载与基础矩形的非空交集中心；
 3. 先固定基础矩形横向中心线，取纵向包含该线的阻塞区间扣除后的最长剩余区间中点；未通过时
-   再固定纵向中心线，对称求横向区间。等长区间取起点较小者。
+   再固定纵向中心线，对称求横向区间。等长区间取起点较小者；
+4. 基础矩形 3×3 网格交点（y 外层、x 内层，各轴 `1/6`、`1/2`、`5/6` 位置），跳过前三级已测
+   坐标；首个通过安全谓词的点直接作为本次可执行落点派发。
 
 每个候选都必须避开阻塞区，并让目标子树内包含该点的最深非 root、非 `context` 节点唯一属于
-目标非阻塞作用域。服务选择第一个通过的候选；没有可证候选时在认领前返回
-`422 no_safe_point`，不采集、不派发，O 保持 `ready`。目标子树外同级节点不参与
-阻塞或候选排序。坐标目标、`text`、`swipe`、`scroll` 与 `key` 不使用这套规划。
+目标非阻塞作用域。仅对 `tap`/`long_press`：若 4 级候选均失败，且阻塞 C 的顶层交互边界中恰有
+1 个与 C 满足双向 ≥85% 同视口（交集宽与高均不少于双方宽高的 85%）、未禁用、具备请求动作且
+自身通过直接 4 级规划的子容器 B 时，自动委托 `C → B`（`coextensive_child`）并双绑定重验。
+`text(ref)` 不启用 `coextensive_child`：它先按统一规则检查 `root`/`context`/几何
+（`422 invalid_target`）与禁用状态（`409 node_disabled`），再检查 `role=input`、`actions` 含
+`text`、`protected=false`（失败保持 `422 text_target_uncertain` 并带 `stage`/`reason`/
+`dispatch`），随后复用上述 4 级直接 `tap` 规划（无 `tap` 返回 `422 unsupported_node_action`，
+无安全焦点返回 `422 no_safe_point`）。没有可证候选时在认领前返回 `422 no_safe_point`，不采集、
+不派发，O 保持 `ready`。目标子树外同级节点不参与直接目标的阻塞或候选排序。坐标目标、`swipe`、
+`scroll` 与 `key` 不使用这套规划。
 
-`tap`/`long_press` 的 `ref` 静态拒绝按认领前原因分成三个稳定 code，均为
-`outcome=not_executed`；静态拒绝自身不认领 O、不采集、不派发。并发 STOP、到期或其他工作
-消费仍按既有投影处理：
+除参数语法、节点存在/禁用及 `text` 自身输入能力/保护拒绝外，`act` 的认领前静态目标解析与规划拒绝统一收口为 5 个正交 `422` 错误码，均为 `outcome=not_executed`，
+不认领 O、不采集、不派发；并发 STOP、到期或其他工作消费仍按既有投影处理：
 
-| code | 条件 | `reason` |
-| --- | --- | --- |
-| `422 invalid_target` | 当前规划对象的结构或几何不可用 | `root` / `context` / `no_geometry` |
-| `422 unsupported_node_action` | 目标缺请求动作，且所选提升策略不能满足执行前提 | `target_missing_action` / `target_has_other_action` / `ancestor_missing_action` / `ancestor_invalid` / `no_interactive_ancestor` |
-| `422 no_safe_point` | C 或 A 支持请求动作，但原固定候选均未通过规划谓词 | `blocked` / `ambiguous` / `owner_mismatch` / `mixed` |
+| code | 适用分支 | 含义 | `reason` |
+| --- | --- | --- | --- |
+| `422 invalid_target` | `tap` / `long_press` / `text(ref)` / `scroll` | 目标自身或坐标位置在结构/几何上不可操作 | `root` / `context` / `no_geometry` / `no_scroll_container` |
+| `422 unsupported_node_action` | `tap` / `long_press` / `text(focus)` / `scroll` | 目标有效，但自身与合法关联对象均不具备本次动作能力 | `target_missing_action` / `target_has_other_action` / `not_scrollable` / `ancestor_missing_action` / `ancestor_invalid` / `no_interactive_ancestor` |
+| `422 ambiguous_point` | 坐标 `tap` / `long_press` / `text` / `scroll` | 坐标落在 ≥2 个竞争的可操作目标上且无法唯一消歧 | `competing_targets` / `competing_scroll_containers` |
+| `422 no_safe_point` | `tap` / `long_press` / `text(focus)` | 目标具备能力（或共位冲突），但未能证明安全落点 | `blocked` / `ambiguous` / `owner_mismatch` / `mixed` / `colocated_ambiguous` |
+| `422 no_safe_trajectory` | `scroll` | 滚动容器合法，但 3 条轴线均无满足最小行程的安全轨迹 | `trajectory_blocked` / `insufficient_travel` |
 
 `node_not_found`（409）、`node_disabled`（409）与 `hierarchy_unavailable`（503）语义不变，
-不附 `reason`。上述 `reason` 只属于 `tap`/`long_press` 的 ref 静态分支；其他工具的同名 code
-不继承该枚举。`invalid_target` 与 `no_safe_point` 用 `scope`（`target`/`ancestor`）和
-`scope_ref` 标明实际规划对象；`unsupported_node_action` 总是带 `target_actions`，
-`ancestor_missing_action`/`ancestor_invalid` 另带 `ancestor_ref` 与 `ancestor_actions`；
-`no_safe_point` 的 `scope=ancestor` 另带 `ancestor_ref`。动作数组按 `tap`、`long_press`、`text`、`swipe`
-排序去重；无动作时 wire 为 `[]`，不是省略或 `null`。
+不附上述静态 `reason`。`text` 自身的非可编辑/受保护拒绝继续使用 `422 text_target_uncertain`
+并保留 `stage`/`reason`/`dispatch` 契约。上述 5 码静态出口必出 `reason` 与 `scope`
+（`target`/`ancestor`/`point`）；`scope` 为 `target` 或 `ancestor` 时必出 `scope_ref`，
+`point` 时省略；`unsupported_node_action` 必出 `target_actions`，`ancestor_missing_action`/
+`ancestor_invalid` 另出 `ancestor_ref` 与 `ancestor_actions`；`scope=ancestor` 的
+`invalid_target` 与 `no_safe_point` 另出 `ancestor_ref`。动作数组按 `tap`、`long_press`、
+`text`、`swipe` 排序去重，空数组输出 `[]`。
 
-`no_safe_point` 的 `occluding_refs`、`ambiguous_refs` 与 `owner_refs` 各最多 3 项，只归集
-原规划实际测试过的候选；分别表示对候选点有实际阻塞证据的 owner、首个失败解析层上的最深
-并列节点、以及整树唯一命中但不在允许作用域的节点。多个类别同时出现时 `reason=mixed`，各
-列表按自身证据出现；无证据的列表省略，不用空数组充当事实。原候选全失败且作用域有效时，
-服务在基础矩形取固定 3×3 点（y 外层、x 内层，各轴 1/6、1/2、5/6 位置），跳过原候选坐标；
-只有同时通过原分支谓词与整树唯一归属/source 证明的第一个点才作为 `suggested_point` 返回，
-唯一 owner 是非阻塞承载节点时附 `suggested_carrier_ref`。建议点只是同一 O 上的提示，不是
-执行授权：原请求仍被拒绝，坐标重试必须使用新 P 并独立通过准入与 fresh 证明；找不到完整
-证明时建议组整体省略，不证明整个平面无解。
-
-在有效 `bubble=false`，或默认提升的最近祖先不存在/不可用/不支持请求动作而返回
-`422 unsupported_node_action` 的路径中，仅当目标不是 root/`context` 且不含 `tap`、
-`long_press`、`text` 任一动作时尝试祖先引导；目标含任一此类动作、即使不含
-请求动作，也视为交互边界，不跳过自身。服务沿唯一父链向上，遇到 `context` 即停止，并把第一个
-含上述任一动作的节点作为唯一候选祖先。该祖先未明确禁用、bounds 与 source 有效、支持请求
-动作且按同一规划能产生可证点时，才尝试引导；任一条件不满足即整组省略，不继续越过它寻找
-更外层节点。`safe_point` 还必须通过整树单点解析并证明命中该祖先或其非阻塞承载作用域；
-无法完整证明时整组省略。`safe_carrier_ref` 可指原目标或该祖先的非阻塞后代承载节点候选，只解释坐标
-来源，不是可直接点击的替代 ref。该引导自身不改派祖先；默认 `bubble=true` 的目标提升是
-上一段的独立契约，不是从该引导静默改写而来。`occluding_ref` 只指出目标原中心的
-一个可定位阻塞 owner，不表示整个目标表面不可点；`tap`/`long_press` 的 ref 静态候选耗尽
-出口不再产生该键，改由 `occluding_refs` 表达。
+当存在可操作或竞争替代对象时，静态 `422` 错误在 `error.details.candidates` 返回至多 4 个对象，
+每项固定包含 `ref`、`role`、`actions`、`bounds`（屏内裁剪后的 `[left, top, right, bottom]`）、
+`relation`（`child` / `ancestor` / `overlapping` / `competing` / `page_scroll`）与
+`executable`（布尔），绝不包含 `label`/`value`/`text` 正文。服务在同一 O 上先去重并按各自
+出口规则排序截取前 16 项，调用单目标基础规划器非递归干跑计算 `executable`，再按
+`executable=true` 优先截取前 4 项返回。当存在不具备请求动作的阻塞边界或同深并列节点时，另以
+`blocking_refs`（至多 3 项）说明阻塞或歧义来源；无事实时省略 `candidates` 与 `blocking_refs`。
+`candidates` 只对生成它的 O 有效：取其中首个 `executable=true` 的 `ref` 在同一 O 有效期内以
+新 P 重试必能通过静态准入，但仍须经正常准入与认领后实时重验；O 过期、被消费、替换或撤权后不
+能继续使用。
 
 `scroll` 是受控滚动尝试：`container` 与 `direction` 必填，`amount` 省略为 `page`；
 `direction` 是调用方声明的阅读/视口方向，不是服务证明的设备滚动轴。映射固定为：
@@ -542,46 +554,77 @@ STOP、原租期、请求与工作期限、会话绑定显示 ID/代次与几何
 
 `container` 是容器选择器：
 
-- `ref` 必须直接指向公开节点，且该节点 `role=scroll`、`actions` 含 `swipe`、非 root、非
-  context、有 bounds、`enabled` 不为已知 `false`。服务不做“叶 ref 向上晋升”：ref 不存在时按
-  既有 `node_not_found` 拒绝，存在但不是可滚动容器时返回 `422 unsupported_node_action`。
-- 坐标为 `{"x":1,"y":2}` 时，服务取包含该点的全部公开候选，逐个归约到最近的可滚动祖先
-  （含自身），按容器原始节点去重：恰好一个容器时使用它；出现多个不同容器时返回
-  `422 ambiguous_point`，要求调用方显式给 `container.ref`；没有容器时返回
-  `422 unsupported_node_action`。同一容器内的多个内容候选（例如同点同深度的 `view`/`text`）
-  不是歧义。服务不自动选择“最大的滚动容器”，也不校验滚动轴。
+- `ref` 必须指向公开节点（不存在返回 `409 node_not_found`，`root`/`context`/无有效几何返回
+  `422 invalid_target`，显式禁用返回 `409 node_disabled`）。节点本身为有效可滚动容器
+  （`role=scroll` 且 `actions` 含 `swipe`）时直接对其规划，并允许唯一可执行内层子滚动兜底；
+  节点为 `role=scroll` 但缺 `swipe` 时返回 `422 unsupported_node_action`
+  （`reason=target_missing_action`）；非滚动节点沿公开父链跳过 `context`、止于 `root` 之前
+  查找最近 `role=scroll` 祖先 A：A 有效时自动提升至 A（认领后仅重验 A，不绑定原列表项）；
+  不存在 A、A 不可用、A 缺 `swipe` 或 A 规划期 raw 裁剪交集为空时分别返回
+  `422 unsupported_node_action`（`not_scrollable`/`ancestor_invalid`/`ancestor_missing_action`）
+  或 `422 invalid_target`（`no_geometry`、`scope=ancestor`），并在 `candidates` 中列出页面可执行
+  滚动容器（`relation=page_scroll`）。
+- 坐标为 `{"x":1,"y":2}` 时，越界返回 `422 invalid_coordinates`；服务收集公开 bounds 包含该点
+  且 source 有效的全部可滚动容器集合 H，H 为空返回 `422 invalid_target`
+  （`reason=no_scroll_container`、`scope=point`，附页面可执行滚动 `candidates`）。服务对 H 做
+  父子链归约，移除已有严格后代在 H 中的祖先，仅保留最内层集合 I：
+  - `len(I)==1`：优先规划最内层容器 `I[0]`；若失败则沿 `I[0]` 在 H 中的滚动祖先由近及远自动
+    回退，全败返回 `422 no_safe_trajectory`（不触发内层旁支兜底）；
+  - `len(I)>=2`（互不为祖先的平级/交叉滚动容器）：统计对当前 `direction`/`amount` 可执行者
+    `I_exec`，恰有 1 个时唯一消歧选用；否则返回 `422 ambiguous_point`
+    （`reason=competing_scroll_containers`、`scope=point`），`candidates` 列出竞争容器
+    （`relation=competing`）及可选共同可执行滚动祖先（`relation=ancestor`）。
 
-容器 bounds 必须非空、可裁剪且有正面积。服务固定容器的正交中心坐标，在一维作用域区间中选出
-最长的可证子区间，再把 `page`/`half` 的留白与 60%/30% 幅度作用在该子区间上；因此局部滚动
-作用域即使不覆盖原起终点，也会缩短或移动本次轨迹，幅度不承诺整屏距离。`up`/`left` 在等长
-区间中取坐标较小者，`down`/`right` 取较大者。静态阶段不可执行（没有任何可证区间，或该区间
-产生的行程小于 `48px`）时，在认领前返回 `422 unsupported_node_action`，不采集、不认领，
-O 保持 `ready`。
+容器 bounds 必须非空、可裁剪且有正面积。服务沿容器裁剪矩形的正交边按 `50% → 25% → 75%`
+依次探测坐标（跳过不在裁剪与公开交集内或与前值重复的坐标），在每条轴线上选出最长的可证
+子区间（`up`/`left` 等长取坐标较小者，`down`/`right` 取较大者），计算 `margin = max(24, extent/10)`、
+`usable = extent - 2*margin` 与 `travel = usable * percent / 100`（`page=60%`、`half=30%`，
+须满足 `usable > 0` 且 `travel >= 48`），并围绕该安全区间中点对称展开起止点，选中第一条整段
+通过证明的轨迹。因此局部滚动作用域会缩短或平移本次轨迹，幅度不承诺整屏距离。仅当通过直接
+`container.ref` 进入且 3 条轴线均失败时，若目标子树内非同视口可执行后代滚动容器经双向同视口
+祖先-后代折叠后恰有 1 个，则自动委托该唯一内层子滚动容器；否则在认领前返回
+`422 no_safe_trajectory`（至少一条轴线存在正长度安全区间但行程不足为 `insufficient_travel`，
+否则为 `trajectory_blocked`），并附子树内/外部阻塞滚动 `candidates` 与可选 `blocking_refs`，
+不采集、不认领，O 保持 `ready`。
 
 可证区间这样得到：以容器 `raw` 矩形与显示屏的交集为裁剪矩形，与容器公开矩形相交后取其滚动轴
-区间作为基础区间；遍历整棵公开树，继承每个节点最近的公开滚动作用域（含自身），把不属于选定
-容器、也不属于其 `raw` 外层祖先的候选沿轴投影成阻塞区间并从基础区间中扣除。没有滚动祖先的
-候选不阻塞；最近作用域的来源缺失或越界时按阻塞处理，不回退到更外层。父矩形不跨越中心线时
-仍要检查其伸出的子节点。容器自身或其外层包裹祖先不阻塞。
+区间作为基础区间；遍历整棵公开树（含拓扑环与越界校验，损坏时返回 `503 hierarchy_unavailable`），
+继承每个节点最近的公开滚动作用域（含自身），仅把不属于选定容器、不属于其 `raw` 外层祖先、
+也不属于与选定容器满足双向 ≥85% 同视口的后代滚动容器的候选沿轴投影成阻塞区间并从基础区间中
+扣除。没有滚动祖先的候选不阻塞；最近作用域的来源缺失或越界时按阻塞处理，不回退到更外层。
+父矩形不跨越当前探测轴线时仍要检查其伸出的子节点。容器自身、外层包裹祖先以及双向同视口后代
+滚动栈不互相阻塞。
 
 静态检查（不认领、不派发）：会话必须 `active`；O 必须为 `ready` 且未过期；ref 节点存在、
 非 root、非 context、有 bounds、`enabled` 不为已知 `false`，并具备对应动作能力；`text` 还要
 求 `role=input`、`actions` 含 `text`、`protected` 明确为 `false`；坐标目标必须落在目标逻辑屏
 内；`HOME`/`APP_SWITCH` 仅在主屏（`display.ID==0`）可用。坐标目标（`tap`/`long_press`/`text`
-的 `target`、`swipe` 的 `from`）还要在观察的公开树中解析到唯一节点：取包含该点、有 bounds、
-非 root、非 context 的最深节点；同级并列候选返回 `422 ambiguous_point`，不认领、不采集；
-解析不到节点时维持前台级检查。`scroll` 不在此列：它以 `container` 的解析结果与中心线可证
-区间为静态授权，不要求起点叶节点可解析。
+的 `target`、`swipe` 的 `from`）在观察的公开树中解析最深命中节点集合 S（包含该点、有正面积
+bounds、非 root、非 context 且处于最大深度的全部公开节点）：
+
+- `len(S)==0` 时维持前台级检查；
+- `swipe` 的 `from` 永不返回 `422 ambiguous_point`（`len(S)<=64` 按命中集合证明，超过 64
+  降级前台级检查）；
+- `tap`/`long_press`/`text` 在 `len(S)>64` 时返回 `422 ambiguous_point`
+  （`reason=competing_targets`、`scope=point`）；否则将 S 中每个节点归约到最近
+  touch-interactive 拥有者（含自身，跳 `context`、止于 `root`）去重为集合 U：`len(U)<=1`
+  直接接受为命中集合；`len(U)>=2` 时过滤具备当前请求动作能力的拥有者集合 `U_match`，恰有 1 个
+  时唯一消歧通过，否则返回 `422 ambiguous_point`（`reason=competing_targets`、`scope=point`），
+  并在 `candidates` 中列出竞争拥有者。
+
+`scroll` 不使用该单点集合：它以 `container` 的解析结果与可证滚动区间为静态授权，不要求起点
+叶节点可解析。
 
 静态拒绝且 O 仍可用时（`node_not_found`、`node_disabled`、`unsupported_node_action`、
-`invalid_target`、`no_safe_point`、`invalid_coordinates`、`ambiguous_point`、
-`unsupported_key` 等），什么都没派发、O 未被认领，
+`invalid_target`、`no_safe_point`、`no_safe_trajectory`、`invalid_coordinates`、
+`ambiguous_point`、`unsupported_key` 等），什么都没派发、O 未被认领，
 `recovery` 为 `entry=retry`、`reference=O`、`input_state=effective`。
 
 通过后：取得唯一工作位置 → O 单向 `ready→claimed` → 普通活动续期（`max(expires_at, now+2分钟)`，
 不继承显式时长） → 实时重验（目标显示仍存在、
-重新采集、前台包/任务与观察时一致；ref 目标使用下面的分层重验；坐标目标解析到唯一节点时，
-仍要求完整内容身份、祖先链和原点解析一致）→ 派发本次动作所需的输入（`text` 为必要聚焦 +
+重新采集、原始拓扑完整、前台包/任务与观察时一致；ref 目标使用下面的分层重验；坐标目标绑定
+单节点或命中集合时，要求新鲜帧内对应对象全部通过匹配，且原点解析得到的最深命中集合与期望集合
+完全相等）→ 派发本次动作所需的输入（`text` 为必要聚焦 +
 显示绑定写入，并以写入调用内同节点刷新值确认；有效 `press_enter=true` 时在独立前台/读数
 门禁后再至多派发一次 ENTER，任何一步失败都不重放）。
 
@@ -595,24 +638,43 @@ Focused/Selected；Tier 2 在 L1 相同时允许受限目标微移（重叠率�
 `tap`/`long_press`/`text` 的 ref 在新鲜公开树中先证明原点，仍安全则保留；原点失效时可在
 已匹配载体内重算安全点。原载体失效后，只有目标自身的稳定非空 text/description 或双端唯一
 resource 能独立证明身份，才可在同一目标子树内重新选点/载体；共享祖先不是该身份证据。
-所有点均受同一子树安全谓词约束，不越过 blocker、不晋升到祖先。实际派发使用新鲜 frame
-给出的坐标。无候选/歧义为 `409 target_changed`；预算耗尽、畸形父链或投影损坏为
-`503 hierarchy_unavailable`。STOP 优先为 `control_revoked`，不交付重试 O、不再派发。
+`coextensive_child` 双绑定 C 与 B，要求 B 仍是 C 的顶层唯一阻塞边界且保持双向同视口；
+`bubble_ancestor` 与 `bubble_colocated` 各自只在其原模式下双绑定重验，不跨模式切换。所有点
+均受同一子树安全谓词约束，不越过 blocker、不越权晋升。实际派发使用新鲜 frame 给出的坐标。
+无候选、歧义、祖先链/能力/作用域/点集变化为 `409 target_changed`；预算耗尽、畸形父链、环路
+或投影损坏为 `503 hierarchy_unavailable`。STOP 优先为 `control_revoked`，不交付重试 O、不再派发。
 
 这组证明只覆盖公开树模型内的目标子树，不覆盖子树外同级或跨窗口 z 序、未发布的透明拦截层、
 应用自定义触摸代理或业务回调。子树外同级重叠不导致该 `ref` 规划自拒，也不在树模型中证明
 谁消费真实触摸；`executed` 只证明输入已派发，不证明 Android 实际事件消费者或应用业务结果。
-祖先与坐标引导只对生成它的 O 及同一观察有效；后续调用仍须新 P、正常准入与实时重验，O 过期、
-被消费、替换或撤权后不能继续使用。
 
 `scroll` 的授权单位是同一可证明的滚动容器，不要求起点叶身份不变。容器通过同一 Tier 1–3
 双向唯一匹配后，仍须有公开滚动能力、裁剪矩形和沿轴至少 0.50 的重叠；离轴两边变化不得超过
-`max(8px, min(旧宽/高, 新宽/高)/50)`。允许轴向伸缩，先证明原段仍安全；失效时只在该容器
-的新鲜安全区间中重算起终点，再证明整段。没有足够行程或安全区间则 `target_changed`。
+`max(8px, min(旧宽/高, 新宽/高)/50)`。允许轴向伸缩，先在原选定轴线以双向同视口规则证明原段
+仍安全；失效时只在该容器的新鲜安全区间中按 `50% → 25% → 75%` 居中重算起终点，再证明整段。
+失败按具体原因返回 `409 target_changed`。
 ref 与坐标容器选择器都按此处理，实际 Swipe 使用新鲜 frame 与受控滚动时长。
 
-raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms）；坐标 tap/text 保持原点
+raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms）；坐标 tap/long_press/text 保持原点
 授权，不因 ref 匹配获得改点能力。`scroll` 不证明真实滚动方向、触摸消费者或业务安全。
+
+非 `text` 动作在认领后实时重验返回 `409 target_changed` 时，固定在 `error.details.reason`
+给出封闭归因（原始/公开拓扑损坏先返回 `503 hierarchy_unavailable`）：
+
+| `reason` | 含义 |
+| --- | --- |
+| `child_changed` | `bubble_ancestor`/`bubble_colocated` 中触发子节点 C 丢失、歧义、Role/Label 变化、新增交互能力、缺失公开映射或与 B 失去共位/反底板守卫 |
+| `target_missing` | 目标或滚动容器在新鲜帧中零候选且非祖先链失配 |
+| `target_ambiguous` | 目标或滚动容器在新鲜帧中出现多候选歧义 |
+| `lineage_changed` | 目标仅因祖先链/强锚点失配被拒，或 `bubble_ancestor` 的最近交互祖先变更 |
+| `capability_changed` | 目标匹配成功但新鲜公开映射、动作/滚动能力、`role` 或同视口/非祖先关系失效 |
+| `scroll_scope_changed` | 滚动容器几何轴向重叠不足 `0.50`，或离轴边变化超过容差 |
+| `trajectory_blocked` | 滚动容器与作用域有效，但原轨迹失效且 3 条轴线均无法重规划出可证安全段 |
+| `scope_blocked` | 点击目标及能力有效，但原点、固定载体与兜底安全区均未通过安全谓词 |
+| `point_changed` | 坐标单节点或最深命中集合在新鲜帧中的映射或集合不再相等 |
+
+`text` 在重验阶段返回 `409 target_changed` 时仍保持 `text` 专属的 `stage=target`、
+`reason=target_unconfirmed`、`dispatch` 结构，不使用上述非 `text` 枚举。
 
 重验失败且已取得可用新帧并完成交付时，服务把该帧发布为新的 `ready` 观察随结果返回：
 `target_changed`、`foreground_changed` 与重验阶段的 `node_not_found` 返回 `409`，结果带
@@ -729,7 +791,7 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms）；
   `recovery` 为 `entry=observe`、`reference=P`、`input_state=retired`、
   `cause=post_observation_failed`；不能因后观察失败改判未执行。
 - 失败码：`node_not_found`、`node_disabled`、`unsupported_node_action`、`invalid_target`、
-  `no_safe_point`、`invalid_coordinates`、`ambiguous_point`、`unsupported_key`、
+  `no_safe_point`、`no_safe_trajectory`、`invalid_coordinates`、`ambiguous_point`、`unsupported_key`、
   `invalid_request`（含超长文本）、
   `text_target_uncertain`、`text_result_uncertain`、`action_result_uncertain`、
   `target_changed`、`foreground_changed`、`foreground_unknown`、
@@ -737,12 +799,12 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms）；
   `device_busy`、`session_ended`、`observation_retired`、`observation_expired`、
   `observation_claimed`、`control_revoked`。
 
-`scroll` 不新增错误码：`container.ref` 指向不存在的节点沿用 `node_not_found`；ref 存在但不是
-可滚动容器、点选择器找不到容器、中心线上没有任何可证区间或该区间行程不足返回
-`unsupported_node_action`；点选择器出现多个不同滚动作用域返回 `ambiguous_point`；容器在新鲜树
-中不成立，或无法证明/重算安全轨迹返回 `target_changed`。`ambiguous_point` 对 raw `swipe`
-的提示是可执行的：调整起点，或改用 `scroll` 的 `container` 显式指定容器；错误码与判定不变，
-raw `swipe` 仍不接受 `ref`。
+`scroll` 与其余 `act` 分支共享统一 5 个静态 `422` 错误码：`container.ref` 不存在为
+`409 node_not_found`，禁用为 `409 node_disabled`，结构/几何无效或坐标无滚动容器为
+`422 invalid_target`，缺滚动能力或无可用滚动祖先为 `422 unsupported_node_action`，多竞争滚动
+容器无法唯一消歧为 `422 ambiguous_point`，3 条轴线均无足够安全轨迹为
+`422 no_safe_trajectory`；认领后失配为 `409 target_changed` 并附归因 `reason`。raw `swipe`
+永不返回 `ambiguous_point`，且仍不接受 `ref`。
 
 ## 7. `POST /api/end`
 
@@ -783,7 +845,7 @@ raw `swipe` 仍不接受 `ref`。
 
 | 字段 | 必填 | 类型 | 说明 |
 | --- | --- | --- | --- |
-| `contract_version` | 是 | 字符串 | 必须为 `"21"`，否则 `409 contract_mismatch` |
+| `contract_version` | 是 | 字符串 | 必须为 `"22"`，否则 `409 contract_mismatch` |
 | `app_instance_id` | 是 | UUID | App 进程实例；变化会撤销旧归属 |
 | `app_version` | 否（App 应发送） | 字符串 | 仅发行标识 |
 | `selected_mode` | 是 | `virtual`/`primary` | 用户选择 |
@@ -810,7 +872,7 @@ raw `swipe` 仍不接受 `ref`。
 
 ```json
 {
-  "contract_version": "21",
+  "contract_version": "22",
   "service_instance_id": "…",
   "control": {
     "revision": 42,
@@ -846,7 +908,7 @@ raw `swipe` 仍不接受 `ref`。
 ## 9. `POST /v1/control/stop`
 
 ```json
-{"contract_version":"21","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
+{"contract_version":"22","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
 ```
 
 - **不校验普通契约**：`contract_version` 字段存在但不参与准入，服务与 App 契约版本
@@ -856,7 +918,7 @@ raw `swipe` 仍不接受 `ref`。
 - 重复或过期 `seq` 不报错，只返回 `state=duplicate`。
 
 ```json
-{"contract_version":"21","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
+{"contract_version":"22","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
 ```
 
 `accepted` 恒为 `true`；`state` 为 `revoked`（绑定时撤销了活动会话）、`recorded`
@@ -869,7 +931,7 @@ raw `swipe` 仍不接受 `ref`。
 无认证，只表示进程可应答，不代表设备就绪或资源干净：
 
 ```json
-{"status":"ok","contract_version":"21","service_instance_id":"…","release_version":"…"}
+{"status":"ok","contract_version":"22","service_instance_id":"…","release_version":"…"}
 ```
 
 ## 11. 数据对象
@@ -1124,7 +1186,7 @@ compact 几何策略是固定的服务策略，不是请求字段，按以下顺
 `node` 与 `query` 互斥。`inspect` 只读保留中的历史树，不采集、不续租、不确认基线、
 不认领 O，也不需要 O 仍可输入。`reference` 必须解析为保留中的历史 O；P 仍不可用，
 旧 `observation_id` 按未知成员拒绝。动作诊断中的节点编号可能只出现在完整快照中。
-例如 `error.details.suggested_carrier_ref` 指出建议坐标的承载节点，调用方可传入原 act
+例如 `error.details.candidates` 或 `error.details.blocking_refs` 指出候选或阻塞节点，调用方可传入原 act
 请求的 O 作为 `reference`，并用该诊断编号作为 `node` 查看子树。
 
 - 补看固定使用 `view=detailed`：逐节点展开、不折 `chain`、不隐藏已知几何；`tree` 作用域的

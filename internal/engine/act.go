@@ -133,7 +133,7 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 		return result, nil
 	}
 	tapProven = true
-	e.logActPoint(op.ID, point, point != nil && point.state == pointUnique)
+	e.logActPoint(op.ID, point, point != nil && (point.state == pointUnique || point.state == pointSet))
 
 	e.setOperationPhase(op, "dispatch")
 	var outcome string
@@ -290,12 +290,25 @@ func staticActContentCheck(obs *observationState, operation *protocol.Operation)
 			return nil, nil, protocol.Invalid("操作缺少 target")
 		}
 		if operation.Target.UseRef {
-			node := findPublicNode(obs.Projection.Tree.Root, operation.Target.Ref)
+			if obs == nil || obs.Projection == nil || obs.Projection.Tree == nil ||
+				obs.Projection.Tree.Root == nil {
+				return nil, nil, tapHierarchyError()
+			}
+			node, ok := findPublicNodeBounded(obs.Projection.Tree.Root, operation.Target.Ref)
+			if !ok {
+				return nil, nil, tapHierarchyError()
+			}
 			if node == nil {
 				return nil, nil, protocol.NewError(409, protocol.CodeNodeNotFound, "目标节点不存在")
 			}
-			if node.Role == protocol.RoleRoot || node.Context || node.Bounds == nil {
-				return nil, nil, protocol.NewError(422, protocol.CodeNodeUnsupported, "该节点不能作为操作目标")
+			if node.Role == protocol.RoleRoot {
+				return nil, nil, newStaticActInvalidTargetError("root", node.Ref, "根节点不能作为操作目标")
+			}
+			if node.Context {
+				return nil, nil, newStaticActInvalidTargetError("context", node.Ref, "上下文节点不能作为操作目标")
+			}
+			if node.Bounds == nil || node.Bounds.Width() <= 0 || node.Bounds.Height() <= 0 {
+				return nil, nil, newStaticActInvalidTargetError("no_geometry", node.Ref, "目标节点没有可用几何")
 			}
 			if node.Enabled != nil && !*node.Enabled {
 				return nil, nil, protocol.NewError(409, protocol.CodeNodeDisabled, "目标节点已禁用")
@@ -353,21 +366,30 @@ func staticActContentCheck(obs *observationState, operation *protocol.Operation)
 	return nil, nil, nil
 }
 
-// staticActContentCheckWithTap keeps the existing coordinate, text, swipe,
-// scroll and key branches unchanged while giving tap/long_press ref targets
-// their own bounded subtree planner.
+func newStaticActInvalidTargetError(reason, ref, message string) *protocol.APIError {
+	apiErr := protocol.NewError(422, protocol.CodeInvalidTarget, message)
+	apiErr.WithDetail("reason", reason)
+	apiErr.WithDetail("scope", "target")
+	if ref != "" {
+		apiErr.WithDetail("scope_ref", ref)
+	}
+	return apiErr
+}
+
+// staticActContentCheckWithTap routes tap, long_press and text ref targets to
+// their bounded planners while keeping coordinate, swipe, scroll and key
+// validation on staticActContentCheck.
 func staticActContentCheckWithTap(obs *observationState, operation *protocol.Operation) (
 	*pointCheck, *scrollPlan, *tapPlan, *protocol.APIError) {
-	if operation != nil && (operation.Type == "tap" || operation.Type == "long_press") &&
-		operation.Target != nil && operation.Target.UseRef {
-		return staticTapRefCheck(obs, operation)
+	if operation != nil && operation.Target != nil && operation.Target.UseRef {
+		switch operation.Type {
+		case "tap", "long_press":
+			return staticTapRefCheck(obs, operation)
+		case "text":
+			return staticTextRefCheck(obs, operation)
+		}
 	}
 	point, scroll, apiErr := staticActContentCheck(obs, operation)
-	if apiErr == nil && operation != nil && operation.Type == "text" &&
-		operation.Target != nil && operation.Target.UseRef {
-		_, _, plan, planErr := staticTextRefCheck(obs, operation)
-		return point, scroll, plan, planErr
-	}
 	return point, scroll, nil, apiErr
 }
 
@@ -474,8 +496,8 @@ func (e *Engine) revalidateActTarget(work *workState, obs *observationState,
 	if apiErr := foregroundMatches(obs.Foreground, capture.Foreground); apiErr != nil {
 		return capture, nil, 0, apiErr
 	}
-	if point != nil && point.state == pointUnique {
-		if apiErr := e.provePointTarget(capture, obs, point); apiErr != nil {
+	if point != nil && (point.state == pointUnique || point.state == pointSet) {
+		if apiErr := e.provePointTarget(work.Projector, capture, obs, point); apiErr != nil {
 			return capture, nil, 0, apiErr
 		}
 	}
@@ -495,7 +517,7 @@ func (e *Engine) revalidateActTarget(work *workState, obs *observationState,
 	}
 	if operation.Type == "text" {
 		if frame == nil || !freshTextTargetSafe(frame.raw) {
-			return capture, nil, took, tapTargetChanged()
+			return capture, nil, took, tapTargetChangedReason(targetChangedReasonCapabilityChanged)
 		}
 	}
 	if e.workRevoked(work) || work.Ctx.Err() != nil {
@@ -508,6 +530,152 @@ func freshTextTargetSafe(raw *device.RawNode) bool {
 	return raw != nil && raw.Visible && raw.Editable &&
 		raw.HasEnabled && raw.Enabled &&
 		raw.HasPassword && !raw.Password
+}
+
+const targetChangedMessage = "目标元素已变化，本次未派发"
+
+func tapTargetChangedReason(reason string) *protocol.APIError {
+	return targetChangedError(reason, targetChangedMessage)
+}
+
+func sameNonCapabilityStructure(leftNode, rightNode *device.RawNode) (sameIdentity, capabilityChanged bool) {
+	if leftNode == nil || rightNode == nil {
+		return false, false
+	}
+	if leftNode.DisplayID != rightNode.DisplayID ||
+		leftNode.Package != rightNode.Package ||
+		leftNode.ClassName != rightNode.ClassName {
+		return false, false
+	}
+	left := structureKeyOf(leftNode)
+	right := structureKeyOf(rightNode)
+	if compareOptional(left.Text, right.Text) == triMismatch ||
+		compareOptional(left.Description, right.Description) == triMismatch ||
+		compareOptional(left.Resource, right.Resource) == triMismatch {
+		return false, false
+	}
+	if compareTri(left.Checked, right.Checked) == triMismatch ||
+		compareTri(left.Checkable, right.Checkable) == triMismatch {
+		return false, false
+	}
+	if left.Editable != right.Editable {
+		return true, true
+	}
+	for _, pair := range [][2]tri{
+		{left.Clickable, right.Clickable},
+		{left.LongClickable, right.LongClickable},
+		{left.Scrollable, right.Scrollable},
+		{left.Enabled, right.Enabled},
+		{left.Password, right.Password},
+	} {
+		if compareTri(pair[0], pair[1]) == triMismatch {
+			return true, true
+		}
+	}
+	return true, false
+}
+
+func equalLineageEntries(left, right []lineageEntry) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index].root != right[index].root || left[index].key != right[index].key {
+			return false
+		}
+	}
+	return true
+}
+
+func sameRawLineageKeys(original *device.Capture, oldIndex int,
+	fresh *device.Capture, newIndex int, budget *matchBudget) bool {
+	if original == nil || fresh == nil || budget == nil ||
+		oldIndex < 0 || oldIndex >= len(original.Nodes) ||
+		newIndex < 0 || newIndex >= len(fresh.Nodes) {
+		return false
+	}
+	oldL1, ok := lineageL1(original, oldIndex, budget)
+	if !ok {
+		return false
+	}
+	newL1, ok := lineageL1(fresh, newIndex, budget)
+	if !ok {
+		return false
+	}
+	if equalLineageEntries(oldL1, newL1) {
+		return true
+	}
+	oldL2, ok := lineageL2(original, oldIndex, budget)
+	if !ok {
+		return false
+	}
+	newL2, ok := lineageL2(fresh, newIndex, budget)
+	if !ok {
+		return false
+	}
+	return equalLineageEntries(oldL2, newL2)
+}
+
+func hasCapabilityOnlyFreshNode(ctx context.Context, original, fresh *device.Capture,
+	want *device.RawNode) (bool, bool) {
+	if original == nil || fresh == nil || want == nil {
+		return false, false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	wantIndex := indexOf(original, want)
+	if wantIndex < 0 {
+		return false, false
+	}
+	screen := screenRectFromDisplay(fresh.Display)
+	limits := defaultActMatchLimits()
+	budget := &matchBudget{
+		ctx:            ctx,
+		candidateLimit: len(fresh.Nodes) + len(original.Nodes),
+		lineageLimit:   limits.lineageLimit,
+		lineageDepth:   limits.lineageDepth,
+	}
+	matchedCount := 0
+	for freshIndex := range fresh.Nodes {
+		if !budget.consumeCandidate() {
+			return false, budget.stop == matchCancelled
+		}
+		candidate := &fresh.Nodes[freshIndex]
+		sameIdentity, capChanged := sameNonCapabilityStructure(want, candidate)
+		if !sameIdentity || !capChanged {
+			continue
+		}
+		if want.Bounds != candidate.Bounds &&
+			!geometryCompatible(want.Bounds, candidate.Bounds, screen, actTier2MinOverlap) {
+			continue
+		}
+		if !sameRawLineageKeys(original, wantIndex, fresh, freshIndex, budget) {
+			if budget.stop != matchProceed {
+				return false, budget.stop == matchCancelled
+			}
+			continue
+		}
+		matchedCount++
+		if matchedCount > 1 {
+			return false, false
+		}
+	}
+	return matchedCount == 1, false
+}
+
+func probeTapTargetChangedError(ctx context.Context, original, fresh *device.Capture,
+	want *device.RawNode, state actProbeState, match actMatch) *protocol.APIError {
+	if state == actProbeNone && !match.lineageMismatch {
+		capChanged, cancelled := hasCapabilityOnlyFreshNode(ctx, original, fresh, want)
+		if cancelled {
+			return stoppedActRevalidation()
+		}
+		if capChanged {
+			return tapTargetChangedReason(targetChangedReasonCapabilityChanged)
+		}
+	}
+	return probeTargetChangedError(state, match, targetChangedMessage)
 }
 
 // revalidateBubbleTapFrame re-proves both identities of a C->A target lift on
@@ -535,7 +703,7 @@ func (e *Engine) revalidateBubbleTapFrame(ctx context.Context,
 	case actProbeBudgetExhausted, actProbeMalformed:
 		return nil, tapHierarchyError()
 	case actProbeNone, actProbeAmbiguous:
-		return nil, tapTargetChanged()
+		return nil, tapTargetChangedReason(targetChangedReasonChildChanged)
 	default:
 		return nil, tapHierarchyError()
 	}
@@ -548,7 +716,8 @@ func (e *Engine) revalidateBubbleTapFrame(ctx context.Context,
 	case actProbeBudgetExhausted, actProbeMalformed:
 		return nil, tapHierarchyError()
 	case actProbeNone, actProbeAmbiguous:
-		return nil, tapTargetChanged()
+		return nil, probeTapTargetChangedError(
+			ctx, obs.Projection.Capture, fresh, plan.bubbleAncestorRaw, ancestorState, matchAncestor)
 	default:
 		return nil, tapHierarchyError()
 	}
@@ -582,7 +751,7 @@ func (e *Engine) revalidateBubbleTapFrame(ctx context.Context,
 	}
 	switch checkTapSourceMapping(view, topology, childIndex) {
 	case tapSourceTargetMissing:
-		return nil, tapTargetChanged()
+		return nil, tapTargetChangedReason(targetChangedReasonChildChanged)
 	case tapSourceDamaged:
 		return nil, tapHierarchyError()
 	}
@@ -590,31 +759,38 @@ func (e *Engine) revalidateBubbleTapFrame(ctx context.Context,
 		return nil, stoppedActRevalidation()
 	}
 	childPublic := view.byRaw[childIndex]
-	ancestorPublic := view.byRaw[ancestorIndex]
-	if childPublic == nil || ancestorPublic == nil || view.byRaw[ancestorIndex] != ancestorPublic {
-		return nil, tapTargetChanged()
+	if childPublic == nil {
+		return nil, tapTargetChangedReason(targetChangedReasonChildChanged)
 	}
-	originalPublic := findPublicNode(obs.Projection.Tree.Root, plan.targetRef)
+	if obs.Projection.Tree == nil || obs.Projection.Tree.Root == nil {
+		return nil, tapHierarchyError()
+	}
+	originalPublic, ok := findPublicNodeBounded(obs.Projection.Tree.Root, plan.targetRef)
+	if !ok {
+		return nil, tapHierarchyError()
+	}
 	if originalPublic == nil {
-		return nil, tapTargetChanged()
+		return nil, tapTargetChangedReason(targetChangedReasonChildChanged)
 	}
 	if childPublic.Role != originalPublic.Role ||
 		!samePublicLabel(childPublic.Label, originalPublic.Label) {
-		return nil, tapTargetChanged()
+		return nil, tapTargetChangedReason(targetChangedReasonChildChanged)
 	}
-	// The child must still be non-interactive. Any new tap/long_press/text
-	// capability, including the requested one, invalidates the lift plan.
 	if isTouchInteractive(childPublic) {
-		return nil, tapTargetChanged()
+		return nil, tapTargetChangedReason(targetChangedReasonChildChanged)
 	}
-	if !validTapPublicTarget(ancestorPublic, protocol.Action(plan.action)) {
-		return nil, tapTargetChanged()
+	ancestorPublic := view.byRaw[ancestorIndex]
+	if ancestorPublic == nil {
+		return nil, tapTargetChangedReason(targetChangedReasonCapabilityChanged)
 	}
 	if !topology.isAncestor(ancestorIndex, childIndex) {
-		return nil, tapTargetChanged()
+		return nil, tapTargetChangedReason(targetChangedReasonLineageChanged)
 	}
 	if nearestInteractiveAncestor(view, childPublic) != ancestorPublic {
-		return nil, tapTargetChanged()
+		return nil, tapTargetChangedReason(targetChangedReasonLineageChanged)
+	}
+	if !validTapPublicTarget(ancestorPublic, protocol.Action(plan.action)) {
+		return nil, tapTargetChangedReason(targetChangedReasonCapabilityChanged)
 	}
 	ancestorInput := &tapInput{
 		view: view, capture: fresh, topology: topology,
@@ -628,11 +804,11 @@ func (e *Engine) revalidateBubbleTapFrame(ctx context.Context,
 		if apiErr.Code == protocol.CodeHierarchyFailed {
 			return nil, apiErr
 		}
-		return nil, tapTargetChanged()
+		return nil, tapTargetChangedReason(targetChangedReasonScopeBlocked)
 	}
 	x, y, strategy, carrier, ok := chooseBubbleTapPoint(scope, view, ancestorPublic, childPublic)
 	if !ok {
-		return nil, tapTargetChanged()
+		return nil, tapTargetChangedReason(targetChangedReasonScopeBlocked)
 	}
 	frame := &tapFrame{
 		capture: fresh, raw: matchAncestor.raw, x: x, y: y,
@@ -645,6 +821,301 @@ func (e *Engine) revalidateBubbleTapFrame(ctx context.Context,
 		return nil, stoppedActRevalidation()
 	}
 	return frame, nil
+}
+
+// revalidateCoextensiveChildFrame re-proves both identities of a C->B
+// coextensive child delegation on the fresh frame before tapping inside B.
+func (e *Engine) revalidateCoextensiveChildFrame(ctx context.Context,
+	revoked func() bool, workProjector Projector, obs *observationState,
+	fresh *device.Capture, plan *tapPlan) (*tapFrame, *protocol.APIError) {
+	stop := func() bool {
+		return ctx == nil || ctx.Err() != nil || (revoked != nil && revoked())
+	}
+	if stop() {
+		return nil, stoppedActRevalidation()
+	}
+	topology, apiErr := validateTapRawTopology(fresh)
+	if apiErr != nil {
+		return nil, apiErr
+	}
+	if stop() {
+		return nil, stoppedActRevalidation()
+	}
+	matchParent, parentState := e.probeActNode(
+		ctx, revoked, obs.Projection.Capture, fresh, plan.targetRaw)
+	switch parentState {
+	case actProbeUnique:
+	case actProbeCancelled:
+		return nil, stoppedActRevalidation()
+	case actProbeBudgetExhausted, actProbeMalformed:
+		return nil, tapHierarchyError()
+	case actProbeNone, actProbeAmbiguous:
+		return nil, probeTapTargetChangedError(
+			ctx, obs.Projection.Capture, fresh, plan.targetRaw, parentState, matchParent)
+	default:
+		return nil, tapHierarchyError()
+	}
+	matchDelegate, delegateState := e.probeActNode(
+		ctx, revoked, obs.Projection.Capture, fresh, plan.delegateRaw)
+	switch delegateState {
+	case actProbeUnique:
+	case actProbeCancelled:
+		return nil, stoppedActRevalidation()
+	case actProbeBudgetExhausted, actProbeMalformed:
+		return nil, tapHierarchyError()
+	case actProbeNone, actProbeAmbiguous:
+		return nil, probeTapTargetChangedError(
+			ctx, obs.Projection.Capture, fresh, plan.delegateRaw, delegateState, matchDelegate)
+	default:
+		return nil, tapHierarchyError()
+	}
+	if stop() {
+		return nil, stoppedActRevalidation()
+	}
+	projector := workProjector
+	if projector == nil {
+		projector = e.projector
+	}
+	if projector == nil {
+		return nil, tapHierarchyError()
+	}
+	projection, err := projector.Preview(fresh)
+	if stop() {
+		return nil, stoppedActRevalidation()
+	}
+	if err != nil || projection == nil || projection.Tree == nil ||
+		projection.Tree.Root == nil || projection.Source == nil ||
+		projection.Capture == nil {
+		return nil, tapHierarchyError()
+	}
+	view, apiErr := buildTapPublicView(projection.Tree, fresh, projection.Source)
+	if apiErr != nil {
+		return nil, apiErr
+	}
+	parentIndex := indexOf(fresh, matchParent.raw)
+	delegateIndex := indexOf(fresh, matchDelegate.raw)
+	if parentIndex < 0 || delegateIndex < 0 {
+		return nil, tapHierarchyError()
+	}
+	switch checkTapSourceMapping(view, topology, parentIndex) {
+	case tapSourceTargetMissing:
+		return nil, tapTargetChangedReason(targetChangedReasonCapabilityChanged)
+	case tapSourceDamaged:
+		return nil, tapHierarchyError()
+	}
+	if stop() {
+		return nil, stoppedActRevalidation()
+	}
+	freshParent := view.byRaw[parentIndex]
+	freshDelegate := view.byRaw[delegateIndex]
+	if freshParent == nil || freshDelegate == nil {
+		return nil, tapTargetChangedReason(targetChangedReasonCapabilityChanged)
+	}
+	action := protocol.Action(plan.action)
+	if !validTapPublicTarget(freshParent, action) || !validTapPublicTarget(freshDelegate, action) {
+		return nil, tapTargetChangedReason(targetChangedReasonCapabilityChanged)
+	}
+	parentInput := &tapInput{
+		view: view, capture: fresh, topology: topology,
+		target: freshParent, targetRaw: matchParent.raw, targetIndex: parentIndex,
+	}
+	parentScope, apiErr := collectTapScope(parentInput)
+	if stop() {
+		return nil, stoppedActRevalidation()
+	}
+	if apiErr != nil {
+		if apiErr.Code == protocol.CodeHierarchyFailed {
+			return nil, apiErr
+		}
+		return nil, tapTargetChangedReason(targetChangedReasonCapabilityChanged)
+	}
+	screen := screenRectFromDisplay(fresh.Display)
+	if !isTopLevelCoextensiveBlocker(parentScope, view, freshParent, freshDelegate, screen) {
+		return nil, tapTargetChangedReason(targetChangedReasonCapabilityChanged)
+	}
+	delegateInput := &tapInput{
+		view: view, capture: fresh, topology: topology,
+		target: freshDelegate, targetRaw: matchDelegate.raw, targetIndex: delegateIndex,
+	}
+	delegateScope, apiErr := collectTapScope(delegateInput)
+	if stop() {
+		return nil, stoppedActRevalidation()
+	}
+	if apiErr != nil {
+		if apiErr.Code == protocol.CodeHierarchyFailed {
+			return nil, apiErr
+		}
+		return nil, tapTargetChangedReason(targetChangedReasonScopeBlocked)
+	}
+	return e.resolveDirectTapScopeFrame(ctx, revoked, obs, fresh, topology, view,
+		plan, matchDelegate, freshDelegate, delegateIndex, delegateInput, delegateScope)
+}
+
+// revalidateColocatedTapFrame re-proves both identities and the co-location
+// guard of a C->B bubble_colocated plan on the fresh frame.
+func (e *Engine) revalidateColocatedTapFrame(ctx context.Context,
+	revoked func() bool, workProjector Projector, obs *observationState,
+	fresh *device.Capture, plan *tapPlan) (*tapFrame, *protocol.APIError) {
+	stop := func() bool {
+		return ctx == nil || ctx.Err() != nil || (revoked != nil && revoked())
+	}
+	if stop() {
+		return nil, stoppedActRevalidation()
+	}
+	topology, apiErr := validateTapRawTopology(fresh)
+	if apiErr != nil {
+		return nil, apiErr
+	}
+	if stop() {
+		return nil, stoppedActRevalidation()
+	}
+	matchChild, childState := e.probeActNode(
+		ctx, revoked, obs.Projection.Capture, fresh, plan.targetRaw)
+	switch childState {
+	case actProbeUnique:
+	case actProbeCancelled:
+		return nil, stoppedActRevalidation()
+	case actProbeBudgetExhausted, actProbeMalformed:
+		return nil, tapHierarchyError()
+	case actProbeNone, actProbeAmbiguous:
+		return nil, tapTargetChangedReason(targetChangedReasonChildChanged)
+	default:
+		return nil, tapHierarchyError()
+	}
+	matchColocated, colocatedState := e.probeActNode(
+		ctx, revoked, obs.Projection.Capture, fresh, plan.colocatedRaw)
+	switch colocatedState {
+	case actProbeUnique:
+	case actProbeCancelled:
+		return nil, stoppedActRevalidation()
+	case actProbeBudgetExhausted, actProbeMalformed:
+		return nil, tapHierarchyError()
+	case actProbeNone, actProbeAmbiguous:
+		return nil, probeTapTargetChangedError(
+			ctx, obs.Projection.Capture, fresh, plan.colocatedRaw, colocatedState, matchColocated)
+	default:
+		return nil, tapHierarchyError()
+	}
+	if stop() {
+		return nil, stoppedActRevalidation()
+	}
+	projector := workProjector
+	if projector == nil {
+		projector = e.projector
+	}
+	if projector == nil {
+		return nil, tapHierarchyError()
+	}
+	projection, err := projector.Preview(fresh)
+	if stop() {
+		return nil, stoppedActRevalidation()
+	}
+	if err != nil || projection == nil || projection.Tree == nil ||
+		projection.Tree.Root == nil || projection.Source == nil ||
+		projection.Capture == nil {
+		return nil, tapHierarchyError()
+	}
+	view, apiErr := buildTapPublicView(projection.Tree, fresh, projection.Source)
+	if apiErr != nil {
+		return nil, apiErr
+	}
+	childIndex := indexOf(fresh, matchChild.raw)
+	colocatedIndex := indexOf(fresh, matchColocated.raw)
+	if childIndex < 0 || colocatedIndex < 0 {
+		return nil, tapHierarchyError()
+	}
+	switch checkTapSourceMapping(view, topology, childIndex) {
+	case tapSourceTargetMissing:
+		return nil, tapTargetChangedReason(targetChangedReasonChildChanged)
+	case tapSourceDamaged:
+		return nil, tapHierarchyError()
+	}
+	if stop() {
+		return nil, stoppedActRevalidation()
+	}
+	freshChild := view.byRaw[childIndex]
+	if freshChild == nil {
+		return nil, tapTargetChangedReason(targetChangedReasonChildChanged)
+	}
+	if obs.Projection.Tree == nil || obs.Projection.Tree.Root == nil {
+		return nil, tapHierarchyError()
+	}
+	originalChild, ok := findPublicNodeBounded(obs.Projection.Tree.Root, plan.targetRef)
+	if !ok {
+		return nil, tapHierarchyError()
+	}
+	if originalChild == nil {
+		return nil, tapTargetChangedReason(targetChangedReasonChildChanged)
+	}
+	if freshChild.Role != originalChild.Role ||
+		!samePublicLabel(freshChild.Label, originalChild.Label) ||
+		isTouchInteractive(freshChild) {
+		return nil, tapTargetChangedReason(targetChangedReasonChildChanged)
+	}
+	freshColocated := view.byRaw[colocatedIndex]
+	if freshColocated == nil {
+		return nil, tapTargetChangedReason(targetChangedReasonCapabilityChanged)
+	}
+	if freshColocated == freshChild || isPublicAncestor(view, freshColocated, freshChild) ||
+		!validTapPublicTarget(freshColocated, protocol.Action(plan.action)) {
+		return nil, tapTargetChangedReason(targetChangedReasonCapabilityChanged)
+	}
+	screen := screenRectFromDisplay(fresh.Display)
+	if !colocatedMatchGuard(view, freshChild, freshColocated, screen) {
+		return nil, tapTargetChangedReason(targetChangedReasonChildChanged)
+	}
+	colocatedInput := &tapInput{
+		view: view, capture: fresh, topology: topology,
+		target: freshColocated, targetRaw: matchColocated.raw, targetIndex: colocatedIndex,
+	}
+	colocatedScope, apiErr := collectTapScope(colocatedInput)
+	if stop() {
+		return nil, stoppedActRevalidation()
+	}
+	if apiErr != nil {
+		if apiErr.Code == protocol.CodeHierarchyFailed {
+			return nil, apiErr
+		}
+		return nil, tapTargetChangedReason(targetChangedReasonScopeBlocked)
+	}
+	fixedPointOK := false
+	var fixedPointCarrier *tapCarrier
+	if carrier, ok := pointOwner(colocatedScope, plan.x, plan.y); ok {
+		fixedPointOK = true
+		fixedPointCarrier = carrier
+		if plan.colocatedInChild {
+			if freshChild.Bounds == nil {
+				fixedPointOK = false
+			} else {
+				childClip := rectFromBounds(freshChild.Bounds).Intersect(colocatedScope.base)
+				if childClip.Empty() || !childClip.Contains(plan.x, plan.y) {
+					fixedPointOK = false
+				}
+			}
+		}
+	}
+	if fixedPointOK {
+		if stop() {
+			return nil, stoppedActRevalidation()
+		}
+		return &tapFrame{
+			capture: fresh, raw: matchColocated.raw, x: plan.x, y: plan.y,
+			carrier: carrierRaw(fixedPointCarrier), tier: matchColocated.tier,
+			strategy: inputPlanStrategyForPoint(colocatedScope, fixedPointCarrier),
+		}, nil
+	}
+	x, y, strategy, carrier, _, ok := chooseColocatedTapPoint(
+		colocatedScope, view, freshChild, freshColocated, screen)
+	if stop() {
+		return nil, stoppedActRevalidation()
+	}
+	if !ok || !provesSubtreeTapPoint(colocatedScope, x, y) {
+		return nil, tapTargetChangedReason(targetChangedReasonScopeBlocked)
+	}
+	return &tapFrame{
+		capture: fresh, raw: matchColocated.raw, x: x, y: y,
+		carrier: carrierRaw(carrier), tier: matchColocated.tier, strategy: strategy,
+	}, nil
 }
 
 // revalidateTapTargetFrame proves one fresh ref target and computes the exact
@@ -666,6 +1137,12 @@ func (e *Engine) revalidateTapTargetFrame(ctx context.Context,
 	if plan.bubbleAncestorRaw != nil {
 		return e.revalidateBubbleTapFrame(ctx, revoked, workProjector, obs, fresh, plan)
 	}
+	if plan.colocatedRaw != nil {
+		return e.revalidateColocatedTapFrame(ctx, revoked, workProjector, obs, fresh, plan)
+	}
+	if plan.delegateRaw != nil {
+		return e.revalidateCoextensiveChildFrame(ctx, revoked, workProjector, obs, fresh, plan)
+	}
 	topology, apiErr := validateTapRawTopology(fresh)
 	if apiErr != nil {
 		return nil, apiErr
@@ -683,7 +1160,8 @@ func (e *Engine) revalidateTapTargetFrame(ctx context.Context,
 	case actProbeBudgetExhausted, actProbeMalformed:
 		return nil, tapHierarchyError()
 	case actProbeNone, actProbeAmbiguous:
-		return nil, tapTargetChanged()
+		return nil, probeTapTargetChangedError(
+			ctx, obs.Projection.Capture, fresh, plan.targetRaw, matchState, match)
 	default:
 		return nil, tapHierarchyError()
 	}
@@ -715,7 +1193,7 @@ func (e *Engine) revalidateTapTargetFrame(ctx context.Context,
 	}
 	switch checkTapSourceMapping(view, topology, targetIndex) {
 	case tapSourceTargetMissing:
-		return nil, tapTargetChanged()
+		return nil, tapTargetChangedReason(targetChangedReasonCapabilityChanged)
 	case tapSourceDamaged:
 		return nil, tapHierarchyError()
 	}
@@ -724,7 +1202,7 @@ func (e *Engine) revalidateTapTargetFrame(ctx context.Context,
 	}
 	targetPublic := view.byRaw[targetIndex]
 	if !validTapPublicTarget(targetPublic, protocol.Action(plan.action)) {
-		return nil, tapTargetChanged()
+		return nil, tapTargetChangedReason(targetChangedReasonCapabilityChanged)
 	}
 	input := &tapInput{
 		view: view, capture: fresh, topology: topology,
@@ -738,9 +1216,21 @@ func (e *Engine) revalidateTapTargetFrame(ctx context.Context,
 		if apiErr.Code == protocol.CodeHierarchyFailed {
 			return nil, apiErr
 		}
-		return nil, tapTargetChanged()
+		return nil, tapTargetChangedReason(targetChangedReasonScopeBlocked)
 	}
+	return e.resolveDirectTapScopeFrame(ctx, revoked, obs, fresh, topology, view,
+		plan, match, targetPublic, targetIndex, input, scope)
+}
 
+func (e *Engine) resolveDirectTapScopeFrame(ctx context.Context,
+	revoked func() bool, obs *observationState, fresh *device.Capture,
+	topology *tapRawTopology, view *tapPublicView, plan *tapPlan,
+	match actMatch, targetPublic *protocol.Node, targetIndex int,
+	input *tapInput, scope *tapScope) (*tapFrame, *protocol.APIError) {
+	stop := func() bool {
+		return ctx == nil || ctx.Err() != nil || (revoked != nil && revoked())
+	}
+	targetRaw := match.raw
 	originalPointCarrier, originalPointOK := pointOwner(scope, plan.x, plan.y)
 
 	var fixedCarrier *tapCarrier
@@ -767,8 +1257,6 @@ func (e *Engine) revalidateTapTargetFrame(ctx context.Context,
 		case actProbeBudgetExhausted, actProbeMalformed:
 			return nil, tapHierarchyError()
 		case actProbeNone, actProbeAmbiguous:
-			// A lost or ambiguous carrier may be unbound only after the
-			// independent target-content gate below.
 		default:
 			return nil, tapHierarchyError()
 		}
@@ -803,7 +1291,7 @@ func (e *Engine) revalidateTapTargetFrame(ctx context.Context,
 	}
 
 	if plan.carrierRaw != nil && !match.independentContent {
-		return nil, tapTargetChanged()
+		return nil, tapTargetChangedReason(targetChangedReasonScopeBlocked)
 	}
 	unbound, apiErr := chooseUnboundTapPlan(
 		scope, input, targetPublic, protocol.Action(plan.action), plan.x, plan.y)
@@ -811,10 +1299,10 @@ func (e *Engine) revalidateTapTargetFrame(ctx context.Context,
 		return nil, stoppedActRevalidation()
 	}
 	if apiErr != nil || unbound == nil || unbound.strategy == tapModeRejected {
-		return nil, tapTargetChanged()
+		return nil, tapTargetChangedReason(targetChangedReasonScopeBlocked)
 	}
 	if !provesSubtreeTapPoint(scope, unbound.x, unbound.y) {
-		return nil, tapTargetChanged()
+		return nil, tapTargetChangedReason(targetChangedReasonScopeBlocked)
 	}
 	if stop() {
 		return nil, stoppedActRevalidation()
@@ -825,43 +1313,137 @@ func (e *Engine) revalidateTapTargetFrame(ctx context.Context,
 	}, nil
 }
 
-// provePointTarget requires the observed node to match exactly one fresh node
-// by complete content identity and ancestry, and then requires the fresh public
-// tree to resolve the same point to that same source node. Any other result is
-// a rejection: ambiguity, a missing node and a different node are all "the
-// meaning of this point changed". The projection is pure CPU and never
-// advances ref continuity.
-func (e *Engine) provePointTarget(fresh *device.Capture, obs *observationState,
-	point *pointCheck) *protocol.APIError {
-	if point.index < 0 || point.index >= len(obs.Projection.Capture.Nodes) {
-		return targetChangedAtPoint()
-	}
-	original := &obs.Projection.Capture.Nodes[point.index]
-	matched, ok := matchFreshNode(fresh, obs.Projection.Capture, original)
-	if !ok {
+// provePointTarget requires every observed hit-set node to match a distinct
+// fresh node by complete content identity and ancestry, and requires the fresh
+// public tree's deepest hit set at (x, y) to map to that exact unordered raw
+// index set. The projection is pure CPU and never advances ref continuity.
+func (e *Engine) provePointTarget(workProjector Projector, fresh *device.Capture,
+	obs *observationState, point *pointCheck) *protocol.APIError {
+	if point == nil || obs == nil || obs.Projection == nil || obs.Projection.Capture == nil {
 		return targetChangedAtPoint()
 	}
 	started := time.Now()
-	// The proof maps a display point to a fresh raw node; it needs a projection
-	// with a correct source map, never the session's ref continuity.
-	projection, err := e.projector.Preview(fresh)
-	if err != nil {
+	if _, apiErr := validateTapRawTopology(fresh); apiErr != nil {
+		point.took += time.Since(started)
+		return apiErr
+	}
+	observedIndices := point.indices
+	if len(observedIndices) == 0 && point.index >= 0 {
+		observedIndices = []int{point.index}
+	}
+	if len(observedIndices) == 0 {
+		point.took += time.Since(started)
+		return targetChangedAtPoint()
+	}
+	wantSet, ok := matchFreshPointSet(fresh, obs.Projection.Capture, observedIndices)
+	if !ok {
+		point.took += time.Since(started)
+		return targetChangedAtPoint()
+	}
+	projector := workProjector
+	if projector == nil {
+		projector = e.projector
+	}
+	if projector == nil {
 		point.took += time.Since(started)
 		return protocol.NewError(503, protocol.CodeHierarchyFailed, "公开树构造失败")
 	}
-	ref, state := resolvePoint(projection.Tree.Root, point.x, point.y)
-	freshIndex, mapped := projection.Source[ref]
-	matchedIndex := indexOf(fresh, matched)
+	projection, err := projector.Preview(fresh)
+	if err != nil || projection == nil || projection.Tree == nil ||
+		projection.Tree.Root == nil || projection.Source == nil {
+		point.took += time.Since(started)
+		return protocol.NewError(503, protocol.CodeHierarchyFailed, "公开树构造失败")
+	}
+	freshNodes := resolvePointSet(projection.Tree.Root, point.x, point.y)
 	point.took += time.Since(started)
-	if state != pointUnique || !mapped || freshIndex != matchedIndex {
+	if len(freshNodes) != len(wantSet) {
+		return targetChangedAtPoint()
+	}
+	freshSet := make(map[int]struct{}, len(freshNodes))
+	for _, node := range freshNodes {
+		if node == nil || node.Ref == "" {
+			return targetChangedAtPoint()
+		}
+		freshIndex, mapped := projection.Source[node.Ref]
+		if !mapped || freshIndex < 0 || freshIndex >= len(fresh.Nodes) {
+			return targetChangedAtPoint()
+		}
+		if _, duplicate := freshSet[freshIndex]; duplicate {
+			return targetChangedAtPoint()
+		}
+		if _, wanted := wantSet[freshIndex]; !wanted {
+			return targetChangedAtPoint()
+		}
+		freshSet[freshIndex] = struct{}{}
+	}
+	if len(freshSet) != len(wantSet) {
 		return targetChangedAtPoint()
 	}
 	return nil
 }
 
+func matchFreshPointSet(fresh, original *device.Capture, observedIndices []int) (map[int]struct{}, bool) {
+	if fresh == nil || original == nil || len(observedIndices) == 0 {
+		return nil, false
+	}
+	type observedGroup struct {
+		identity rawIdentity
+		lineage  []rawIdentity
+		count    int
+	}
+	groups := make([]observedGroup, 0, len(observedIndices))
+	for _, obsIndex := range observedIndices {
+		if obsIndex < 0 || obsIndex >= len(original.Nodes) {
+			return nil, false
+		}
+		identity := identityOf(&original.Nodes[obsIndex])
+		lineage := lineageOf(original, obsIndex)
+		merged := false
+		for groupIndex := range groups {
+			if groups[groupIndex].identity == identity &&
+				sameLineage(groups[groupIndex].lineage, lineage) {
+				groups[groupIndex].count++
+				merged = true
+				break
+			}
+		}
+		if !merged {
+			groups = append(groups, observedGroup{
+				identity: identity,
+				lineage:  lineage,
+				count:    1,
+			})
+		}
+	}
+	wantSet := make(map[int]struct{}, len(observedIndices))
+	for groupIndex := range groups {
+		group := &groups[groupIndex]
+		matched := 0
+		for freshIndex := range fresh.Nodes {
+			if identityOf(&fresh.Nodes[freshIndex]) != group.identity {
+				continue
+			}
+			if !sameLineage(lineageOf(fresh, freshIndex), group.lineage) {
+				continue
+			}
+			matched++
+			if matched > group.count {
+				return nil, false
+			}
+			wantSet[freshIndex] = struct{}{}
+		}
+		if matched != group.count {
+			return nil, false
+		}
+	}
+	if len(wantSet) != len(observedIndices) {
+		return nil, false
+	}
+	return wantSet, true
+}
+
 func targetChangedAtPoint() *protocol.APIError {
-	return protocol.NewError(409, protocol.CodeTargetChanged,
-		"目标点上的节点已变化，本次未派发")
+	return targetChangedError(targetChangedReasonPointChanged, "目标点上的节点已变化，本次未派发")
 }
 
 // logActPoint records one coordinate-target decision. Only the operation, the
@@ -871,11 +1453,16 @@ func (e *Engine) logActPoint(operationID string, point *pointCheck, proven bool)
 	if point == nil {
 		return
 	}
-	e.log.Event(eventlog.Debug, "act.point",
+	fields := []eventlog.Field{
 		eventlog.Str("operation_id", operationID),
 		eventlog.Str("state", string(point.state)),
 		eventlog.Bool("proven", proven),
-		eventlog.Duration("ms", point.took))
+		eventlog.Duration("ms", point.took),
+	}
+	if point.mode != "" {
+		fields = append(fields, eventlog.Str("mode", point.mode))
+	}
+	e.log.Event(eventlog.Debug, "act.point", fields...)
 }
 
 // logTapPlan records one subtree-plan decision. The coordinates, refs, labels
@@ -936,7 +1523,7 @@ func (e *Engine) dispatchAct(work *workState, op *operationState, obs *observati
 	}
 	if operation.Target != nil && operation.Target.UseRef {
 		if frame == nil || (operation.Type == "tap" || operation.Type == "long_press") == false {
-			return OutcomeNotExecuted, tapTargetChanged()
+			return OutcomeNotExecuted, tapTargetChangedReason(targetChangedReasonTargetMissing)
 		}
 		x, y = frame.x, frame.y
 	}
@@ -1344,7 +1931,7 @@ func staticTextError(reason string) *protocol.APIError {
 // to failures that are explicitly about this text target or its revocation.
 // Public foreground, display and hierarchy errors keep their own contract.
 func (e *Engine) decorateTextRevalidateError(op *operationState, apiErr *protocol.APIError) {
-	if apiErr == nil || apiErr.Details != nil {
+	if apiErr == nil {
 		return
 	}
 	var reason string
@@ -1352,6 +1939,9 @@ func (e *Engine) decorateTextRevalidateError(op *operationState, apiErr *protoco
 	case protocol.CodeTargetChanged:
 		reason = textReasonTargetUnconfirmed
 	case protocol.CodeStopped:
+		if apiErr.Details != nil {
+			return
+		}
 		reason = textReasonAuthorizationRevoked
 	default:
 		return
@@ -1655,8 +2245,17 @@ func textTargetOf(node *device.RawNode, display device.Display) device.TextTarge
 // settle criterion must share exactly one identity function.
 
 func lineageOf(capture *device.Capture, index int) []rawIdentity {
+	if capture == nil || index < 0 || index >= len(capture.Nodes) {
+		return nil
+	}
 	var lineage []rawIdentity
+	visited := make(map[int]struct{})
+	visited[index] = struct{}{}
 	for parent := capture.Nodes[index].Parent; parent >= 0 && parent < len(capture.Nodes); parent = capture.Nodes[parent].Parent {
+		if _, seen := visited[parent]; seen {
+			break
+		}
+		visited[parent] = struct{}{}
 		lineage = append(lineage, identityOf(&capture.Nodes[parent]))
 	}
 	return lineage

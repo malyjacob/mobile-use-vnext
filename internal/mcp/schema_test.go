@@ -323,7 +323,17 @@ func TestServerInstructionsCarryCrossToolRules(t *testing.T) {
 		"device_busy",
 		"pending cleanup",
 		"no_safe_point",
-		"最近交互祖先一次",
+		"自动按 3×3 网格选点",
+		"竞争遮挡时停止外扩并自动吸附唯一局部共位可点击控件",
+		"最深命中集合",
+		"raw swipe 不报 ambiguous_point",
+		"同视口嵌套滚动栈",
+		"50%/25%/75%",
+		"no_safe_trajectory",
+		"error.details.candidates",
+		"第一个 executable=true 的 ref",
+		"同一 O 和新 P",
+		"无需重观察或手算坐标",
 		"session.origin",
 		"小型隐藏无标注 `image`",
 		"inspect({reference:原 act 的 O,node:诊断 ref})",
@@ -364,6 +374,121 @@ func TestServerInstructionsKeepContractBoundary(t *testing.T) {
 	} {
 		if !strings.Contains(instructions, required) {
 			t.Errorf("server instructions lack %q", required)
+		}
+	}
+}
+
+var retiredActDetailKeys = []string{
+	"nearest_actionable_ref",
+	"safe_point",
+	"suggested_point",
+	"suggested_carrier_ref",
+	"occluding_ref",
+	"occluding_refs",
+	"ambiguous_refs",
+	"owner_refs",
+	"safe_carrier_ref",
+}
+
+// containsRetiredActDetailKey matches a complete retired key, not a substring
+// of a current key such as no_safe_point.
+func containsRetiredActDetailKey(text string) bool {
+	for _, key := range retiredActDetailKeys {
+		for offset := 0; offset < len(text); {
+			index := strings.Index(text[offset:], key)
+			if index < 0 {
+				break
+			}
+			start := offset + index
+			end := start + len(key)
+			beforeBoundary := start == 0 || !isDetailKeyCharacter(text[start-1])
+			afterBoundary := end == len(text) || !isDetailKeyCharacter(text[end])
+			if beforeBoundary && afterBoundary {
+				return true
+			}
+			offset = start + 1
+		}
+	}
+	return false
+}
+
+func isDetailKeyCharacter(character byte) bool {
+	return character == '_' ||
+		character >= '0' && character <= '9' ||
+		character >= 'A' && character <= 'Z' ||
+		character >= 'a' && character <= 'z'
+}
+
+func actOperationParameterDescriptions(t *testing.T) map[string]string {
+	t.Helper()
+	var schema struct {
+		Properties map[string]struct {
+			Properties map[string]struct {
+				Description string `json:"description"`
+			} `json:"properties"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(testDefinitionByName(t, "act").schema, &schema); err != nil {
+		t.Fatalf("decode act schema: %v", err)
+	}
+	operation, ok := schema.Properties["operation"]
+	if !ok {
+		t.Fatal("act schema has no operation member")
+	}
+	out := make(map[string]string, len(operation.Properties))
+	for name, property := range operation.Properties {
+		out[name] = property.Description
+	}
+	return out
+}
+
+// TestActBranchDescriptionsPublishAutomaticResolution pins the caller-facing
+// automatic selection behavior and keeps the retired detail vocabulary out of
+// both branch parameters.
+func TestActBranchDescriptionsPublishAutomaticResolution(t *testing.T) {
+	descriptions := actOperationParameterDescriptions(t)
+	for _, required := range []string{
+		"省略按 true",
+		"3×3",
+		"视觉区",
+		"竞争遮挡时停止外扩",
+		"局部共位可点击控件",
+		"false 只点原目标",
+		"不做提升或吸附",
+	} {
+		if !strings.Contains(descriptions["bubble"], required) {
+			t.Errorf("bubble description lacks %q", required)
+		}
+	}
+	for _, required := range []string{
+		"同视口嵌套滚动栈",
+		"最近 role=scroll 祖先",
+		"最内层滚动容器",
+		"回退外层滚动祖先",
+	} {
+		if !strings.Contains(descriptions["container"], required) {
+			t.Errorf("container description lacks %q", required)
+		}
+	}
+	if containsRetiredActDetailKey(descriptions["bubble"]) ||
+		containsRetiredActDetailKey(descriptions["container"]) {
+		t.Fatal("act branch descriptions retain a retired detail key")
+	}
+}
+
+// TestActGuidanceDropsRetiredDetailKeys proves every caller-facing guidance
+// surface uses the candidates contract instead of the removed per-failure keys.
+func TestActGuidanceDropsRetiredDetailKeys(t *testing.T) {
+	descriptions := actOperationParameterDescriptions(t)
+	surfaces := map[string]string{
+		"server instructions": ServerInstructions(),
+		"act":                 testDefinitionByName(t, "act").description,
+		"bubble":              descriptions["bubble"],
+		"container":           descriptions["container"],
+	}
+	for name, text := range surfaces {
+		if containsRetiredActDetailKey(text) {
+			t.Errorf("%s retains a retired act detail key", name)
 		}
 	}
 }
@@ -444,19 +569,28 @@ func TestToolDescriptionsAreCallerOriented(t *testing.T) {
 			"unsupported_node_action",
 			"no_safe_point",
 			"reason",
-			"nearest_actionable_ref",
-			"suggested_carrier_ref",
-			"safe_point",
+			"no_safe_trajectory",
+			"candidates",
+			"blocking_refs",
+			"executable=true",
+			"3×3 网格选点",
+			"竞争控件遮挡时停止向祖先其他区域漂移",
+			"唯一的局部共位可点击控件",
+			"最深命中集合",
+			"raw swipe 不返回 ambiguous_point",
+			"同视口嵌套滚动栈",
+			"最近滚动祖先",
+			"最内层滚动容器",
+			"50%/25%/75%",
+			"同一 O、新 P",
 			"inspect({reference:原 O,node:诊断 ref})",
-			"建议坐标的来源",
 			"target_changed",
 			"`obs` 行",
 			"`!tap`/`!text`/`!swipe`",
 			"`@` 表示",
 			"uncertain",
 			"`recovery entry=observe ref=<P>`",
-			"operation.target={x,y}",
-			"独立通过准入和重验",
+			"无需重观察或手算坐标",
 		},
 		"inspect": {
 			"node 与 query 互斥",
@@ -599,6 +733,10 @@ func TestLiveToolDescriptionsClarifyWaitAndTextRecovery(t *testing.T) {
 			"避免原样重发",
 			"`!tap`/`!text`/`!swipe`",
 			"`@` 表示",
+			"3×3 网格选点",
+			"no_safe_trajectory",
+			"candidates",
+			"executable=true",
 		},
 		"inspect": {
 			"原 act 请求的 O",
@@ -642,6 +780,10 @@ func TestLiveToolDescriptionsClarifyWaitAndTextRecovery(t *testing.T) {
 		"`base=_72`",
 		"`@` 表示与同一串行化定义中最近一个有已知矩形的严格祖先同矩形",
 		"`!tap`、`!text` 或 `!swipe`",
+		"3×3 网格选点",
+		"同视口嵌套滚动栈",
+		"no_safe_trajectory",
+		"executable=true",
 	} {
 		if !strings.Contains(initialize.Instructions, fragment) {
 			t.Errorf("live server instructions lack %q", fragment)
@@ -677,6 +819,11 @@ func TestActDescriptionKeepsCallerRecovery(t *testing.T) {
 		"press_enter=false",
 		"text_input",
 		"bubble=true",
+		"3×3",
+		"no_safe_trajectory",
+		"candidates",
+		"executable=true",
+		"同一 O、新 P",
 		"用新 O 和新 P 重试",
 		"uncertain",
 		"避免原样重发",

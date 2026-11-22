@@ -316,6 +316,7 @@ type actMatch struct {
 	raw                *device.RawNode
 	tier               int
 	independentContent bool
+	lineageMismatch    bool
 	stats              actMatchStats
 }
 
@@ -348,6 +349,7 @@ const (
 type actProbeResult struct {
 	candidateIndex     int
 	independentContent bool
+	lineageMismatch    bool
 	state              actProbeState
 }
 
@@ -519,63 +521,63 @@ func (matcher *tierMatcher) hasStrongNonRootAnchorBudgeted(
 
 // edgeAtTier evaluates one old-to-fresh edge. complete=false preserves the
 // terminal category in budget.stop.
-func (matcher *tierMatcher) edgeAtTier(oldIndex, newIndex int) (matched, complete bool) {
+func (matcher *tierMatcher) edgeAtTier(oldIndex, newIndex int) (matched, lineageMismatch, complete bool) {
 	if !matcher.budget.consumeCandidate() {
-		return false, false
+		return false, false, false
 	}
 	oldNode := &matcher.original.Nodes[oldIndex]
 	newNode := &matcher.fresh.Nodes[newIndex]
 	if oldNode.DisplayID != newNode.DisplayID {
-		return false, true
+		return false, false, true
 	}
 	compatible, _ := sameStructure(oldNode, newNode)
 	if !compatible {
-		return false, true
+		return false, false, true
 	}
 
 	switch matcher.tier {
 	case 1:
 		if oldNode.Bounds != newNode.Bounds {
-			return false, true
+			return false, false, true
 		}
 	case 2:
 		if !geometryCompatible(
 			oldNode.Bounds, newNode.Bounds, matcher.screen, actTier2MinOverlap) {
-			return false, true
+			return false, false, true
 		}
 	case 3:
 		if !geometryCompatible(
 			oldNode.Bounds, newNode.Bounds, matcher.screen, actTier3MinOverlap) {
-			return false, true
+			return false, false, true
 		}
 	default:
-		return false, matcher.budget.failMalformed()
+		return false, false, matcher.budget.failMalformed()
 	}
 
 	oldLineage, ok := matcher.lineage(matcher.original, matcher.oldLines, oldIndex)
 	if !ok {
-		return false, false
+		return false, false, false
 	}
 	newLineage, ok := matcher.lineage(matcher.fresh, matcher.newLines, newIndex)
 	if !ok {
-		return false, false
+		return false, false, false
 	}
 	equal, complete := matcher.sameLineageKeysBudgeted(
 		newLineage.entries, oldLineage.entries)
 	if !complete {
-		return false, false
+		return false, false, false
 	}
 	if !equal {
-		return false, true
+		return false, true, true
 	}
 	if matcher.tier == 3 {
 		found, complete := matcher.hasStrongNonRootAnchorBudgeted(newLineage.entries)
 		if !complete {
-			return false, false
+			return false, false, false
 		}
-		return found, true
+		return found, !found, true
 	}
-	return true, true
+	return true, false, true
 }
 
 func stableNonEmptyContent(aSet bool, a string, bSet bool, b string) bool {
@@ -623,14 +625,18 @@ func (matcher *tierMatcher) probeWant(wantIndex int) actProbeResult {
 	}
 	newResourceCount := 0
 	candidate := -1
+	sawLineageMismatch := false
 	for newIndex := range matcher.fresh.Nodes {
 		if sameTargetResource(&matcher.fresh.Nodes[newIndex], want, resourceID) {
 			newResourceCount++
 		}
-		matched, complete := matcher.edgeAtTier(wantIndex, newIndex)
+		matched, lineageMismatch, complete := matcher.edgeAtTier(wantIndex, newIndex)
 		if !complete {
 			return actProbeResult{
 				state: matcher.budget.terminalState(), candidateIndex: -1}
+		}
+		if lineageMismatch {
+			sawLineageMismatch = true
 		}
 		if matched {
 			if candidate >= 0 {
@@ -640,7 +646,10 @@ func (matcher *tierMatcher) probeWant(wantIndex int) actProbeResult {
 		}
 	}
 	if candidate < 0 {
-		return actProbeResult{state: actProbeNone, candidateIndex: -1}
+		return actProbeResult{
+			state: actProbeNone, candidateIndex: -1,
+			lineageMismatch: sawLineageMismatch,
+		}
 	}
 
 	oldResourceCount := 0
@@ -650,7 +659,7 @@ func (matcher *tierMatcher) probeWant(wantIndex int) actProbeResult {
 		if sameTargetResource(&matcher.original.Nodes[oldIndex], want, resourceID) {
 			oldResourceCount++
 		}
-		matched, complete := matcher.edgeAtTier(oldIndex, candidate)
+		matched, _, complete := matcher.edgeAtTier(oldIndex, candidate)
 		if !complete {
 			return actProbeResult{
 				state: matcher.budget.terminalState(), candidateIndex: -1}
@@ -704,6 +713,7 @@ func matchActTargetWithLimits(ctx context.Context, revoked func() bool,
 	}
 
 	var stats actMatchStats
+	sawLineageMismatch := false
 	for tier := 1; tier <= 3; tier++ {
 		if ctx.Err() != nil || (revoked != nil && revoked()) {
 			return actMatch{stats: stats}, actProbeCancelled
@@ -718,6 +728,9 @@ func matchActTargetWithLimits(ctx context.Context, revoked func() bool,
 		}
 		switch probe.state {
 		case actProbeNone:
+			if probe.lineageMismatch {
+				sawLineageMismatch = true
+			}
 			continue
 		case actProbeUnique:
 			return actMatch{
@@ -734,7 +747,7 @@ func matchActTargetWithLimits(ctx context.Context, revoked func() bool,
 			return actMatch{stats: stats}, actProbeMalformed
 		}
 	}
-	return actMatch{stats: stats}, actProbeNone
+	return actMatch{stats: stats, lineageMismatch: sawLineageMismatch}, actProbeNone
 }
 
 func matchActTarget(ctx context.Context, revoked func() bool,

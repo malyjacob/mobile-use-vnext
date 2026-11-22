@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"encoding/json/v2"
+	"net/http"
 	"reflect"
 	"strings"
 	"testing"
@@ -533,15 +534,77 @@ func TestDecodeErrorResultWithDetails(t *testing.T) {
 	}
 }
 
-// TestDecodeErrorResultWithNestedDetails pins the strict response decoder's
-// generic details shape: safe_point stays an object, zero coordinates are not
-// dropped, arrays decode as generic JSON arrays, and unproven optional keys do
-// not appear. Re-encoding the decoded int-shaped source must preserve JSON
-// numeric equality even though generic any numbers are now float64.
-func TestDecodeErrorResultWithNestedDetails(t *testing.T) {
+// requireDecodedCandidate checks the fixed candidate object carried by an
+// error.details.candidates array after a generic JSON decode. Numeric bounds
+// are float64 on the in-memory side but must remain exact integers.
+func requireDecodedCandidate(t *testing.T, raw any, wantRef, wantRole string,
+	wantActions []string, wantBounds []int, wantRelation string, wantExecutable bool) {
+	t.Helper()
+	candidate, ok := raw.(map[string]any)
+	if !ok {
+		t.Fatalf("candidate = %T, want object", raw)
+	}
+	if len(candidate) != 6 {
+		t.Fatalf("candidate fields = %#v, want exactly ref/role/actions/bounds/relation/executable", candidate)
+	}
+	if candidate["ref"] != wantRef || candidate["role"] != wantRole ||
+		candidate["relation"] != wantRelation {
+		t.Fatalf("candidate identity = %#v", candidate)
+	}
+	actions, ok := candidate["actions"].([]any)
+	if !ok || actions == nil || len(actions) != len(wantActions) {
+		t.Fatalf("candidate actions = %#v, want %v", candidate["actions"], wantActions)
+	}
+	for index, want := range wantActions {
+		if actions[index] != want {
+			t.Fatalf("candidate actions = %#v, want %v", actions, wantActions)
+		}
+	}
+	bounds, ok := candidate["bounds"].([]any)
+	if !ok || bounds == nil || len(bounds) != len(wantBounds) {
+		t.Fatalf("candidate bounds = %#v, want %v", candidate["bounds"], wantBounds)
+	}
+	for index, want := range wantBounds {
+		if bounds[index] != float64(want) {
+			t.Fatalf("candidate bounds = %#v, want %v", bounds, wantBounds)
+		}
+	}
+	executable, ok := candidate["executable"].(bool)
+	if !ok || executable != wantExecutable {
+		t.Fatalf("candidate executable = %#v, want %t", candidate["executable"], wantExecutable)
+	}
+}
+
+// requireSameJSONValue asserts two wire values are semantically equal after
+// generic decoding, so integer-valued float64 bounds do not change the payload.
+func requireSameJSONValue(t *testing.T, want, got []byte) {
+	t.Helper()
+	var wantValue, gotValue any
+	if err := json.Unmarshal(want, &wantValue); err != nil {
+		t.Fatalf("decode want JSON: %v", err)
+	}
+	if err := json.Unmarshal(got, &gotValue); err != nil {
+		t.Fatalf("decode got JSON: %v", err)
+	}
+	if !reflect.DeepEqual(wantValue, gotValue) {
+		t.Fatalf("JSON value changed\nwant %#v\n got %#v", wantValue, gotValue)
+	}
+}
+
+// TestDecodeErrorResultWithCandidates pins the strict response decoder's
+// unified static rejection details: candidate objects and their nested arrays
+// stay intact, an empty action list stays [] rather than null, and blocking
+// refs retain their string values. Re-encoding preserves every value.
+func TestDecodeErrorResultWithCandidates(t *testing.T) {
 	body := []byte(`{"operation_id":"P15","operation_state":"finished","outcome":"not_executed",` +
-		`"error":{"code":"unsupported_node_action","message":"目标节点不支持点击","details":` +
-		`{"nearest_actionable_ref":"n516","safe_point":{"x":0,"y":0},"task_ids":[0,42]}}}`)
+		`"error":{"code":"no_safe_point","message":"共位目标冲突","details":` +
+		`{"reason":"colocated_ambiguous","scope":"target","scope_ref":"n5233",` +
+		`"candidates":[` +
+		`{"ref":"n5232","role":"button","actions":["tap"],"bounds":[915,1675,1028,1787],` +
+		`"relation":"overlapping","executable":true},` +
+		`{"ref":"n5231","role":"group","actions":[],"bounds":[0,1600,1080,1900],` +
+		`"relation":"child","executable":false}],` +
+		`"blocking_refs":["n5230","n5253"]}}}`)
 	var decoded Result
 	if err := json.Unmarshal(body, &decoded); err != nil {
 		t.Fatalf("decode nested details: %v", err)
@@ -549,37 +612,82 @@ func TestDecodeErrorResultWithNestedDetails(t *testing.T) {
 	if decoded.Error == nil {
 		t.Fatal("decoded error is nil")
 	}
-	safePoint, ok := decoded.Error.Details["safe_point"].(map[string]any)
-	if !ok {
-		t.Fatalf("safe_point = %T, want nested object", decoded.Error.Details["safe_point"])
+	details := decoded.Error.Details
+	if details["reason"] != "colocated_ambiguous" || details["scope"] != "target" ||
+		details["scope_ref"] != "n5233" {
+		t.Fatalf("static details = %#v", details)
 	}
-	if safePoint["x"] != float64(0) || safePoint["y"] != float64(0) {
-		t.Fatalf("zero coordinates changed: %#v", safePoint)
+	candidates, ok := details["candidates"].([]any)
+	if !ok || len(candidates) != 2 {
+		t.Fatalf("candidates = %#v, want two objects", details["candidates"])
 	}
-	taskIDs, ok := decoded.Error.Details["task_ids"].([]any)
-	if !ok || len(taskIDs) != 2 || taskIDs[0] != float64(0) || taskIDs[1] != float64(42) {
-		t.Fatalf("task_ids = %#v, want generic [0,42]", decoded.Error.Details["task_ids"])
-	}
-	for _, absent := range []string{"safe_carrier_ref", "occluding_ref"} {
-		if _, ok := decoded.Error.Details[absent]; ok {
-			t.Fatalf("unproven optional key %q was manufactured", absent)
-		}
+	requireDecodedCandidate(t, candidates[0], "n5232", "button",
+		[]string{"tap"}, []int{915, 1675, 1028, 1787}, "overlapping", true)
+	requireDecodedCandidate(t, candidates[1], "n5231", "group",
+		[]string{}, []int{0, 1600, 1080, 1900}, "child", false)
+	blockingRefs, ok := details["blocking_refs"].([]any)
+	if !ok || len(blockingRefs) != 2 ||
+		blockingRefs[0] != "n5230" || blockingRefs[1] != "n5253" {
+		t.Fatalf("blocking_refs = %#v", details["blocking_refs"])
 	}
 
 	reencoded, err := JSON(&decoded)
 	if err != nil {
 		t.Fatalf("re-encode nested details: %v", err)
 	}
-	var want, got any
-	if err := json.Unmarshal(body, &want); err != nil {
-		t.Fatalf("decode source JSON: %v", err)
+	requireSameJSONValue(t, body, reencoded)
+}
+
+// TestAPIErrorPublicCandidatesRoundTrip follows the production projection and
+// response-decoder path for a static scroll rejection. The fixed candidate
+// fields, optional blocking refs and integer bounds survive unchanged.
+func TestAPIErrorPublicCandidatesRoundTrip(t *testing.T) {
+	apiErr := NewError(http.StatusUnprocessableEntity, CodeNoSafeTrajectory, "无安全滚动轨迹").
+		WithDetail("reason", "trajectory_blocked").
+		WithDetail("scope", "target").
+		WithDetail("scope_ref", "n56").
+		WithDetail("candidates", []map[string]any{{
+			"ref":        "n66",
+			"role":       "scroll",
+			"actions":    []string{"swipe"},
+			"bounds":     []int{0, 363, 1080, 2265},
+			"relation":   "child",
+			"executable": true,
+		}}).
+		WithDetail("blocking_refs", []string{"n57"})
+
+	wire, err := JSON(&Result{
+		OperationID:    "P16",
+		OperationState: "finished",
+		Outcome:        "not_executed",
+		Error:          apiErr.Public(),
+	})
+	if err != nil {
+		t.Fatalf("encode public error: %v", err)
 	}
-	if err := json.Unmarshal(reencoded, &got); err != nil {
-		t.Fatalf("decode re-encoded JSON: %v", err)
+	var decoded Result
+	if err := json.Unmarshal(wire, &decoded); err != nil {
+		t.Fatalf("decode public error: %v", err)
 	}
-	if !reflect.DeepEqual(want, got) {
-		t.Fatalf("numeric JSON value changed\nwant %#v\n got %#v", want, got)
+	if decoded.Error == nil || decoded.Error.Code != CodeNoSafeTrajectory {
+		t.Fatalf("decoded error = %#v", decoded.Error)
 	}
+	details := decoded.Error.Details
+	candidates, ok := details["candidates"].([]any)
+	if !ok || len(candidates) != 1 {
+		t.Fatalf("candidates = %#v", details["candidates"])
+	}
+	requireDecodedCandidate(t, candidates[0], "n66", "scroll",
+		[]string{"swipe"}, []int{0, 363, 1080, 2265}, "child", true)
+	if refs, ok := details["blocking_refs"].([]any); !ok || len(refs) != 1 || refs[0] != "n57" {
+		t.Fatalf("blocking_refs = %#v", details["blocking_refs"])
+	}
+
+	reencoded, err := JSON(&decoded)
+	if err != nil {
+		t.Fatalf("re-encode decoded result: %v", err)
+	}
+	requireSameJSONValue(t, wire, reencoded)
 }
 
 func TestDecodeEndWithCleanupError(t *testing.T) {

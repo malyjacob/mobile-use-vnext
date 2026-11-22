@@ -33,6 +33,33 @@ type rmfFixture struct {
 	result protocol.Result
 }
 
+func rmfNoSafeTrajectoryDetails() map[string]any {
+	return map[string]any{
+		"reason":    "trajectory_blocked",
+		"scope":     "target",
+		"scope_ref": "n56",
+		"candidates": []map[string]any{
+			{
+				"ref":        "n66",
+				"role":       "scroll",
+				"actions":    []string{"swipe"},
+				"bounds":     []int{0, 363, 1080, 2265},
+				"relation":   "child",
+				"executable": true,
+			},
+			{
+				"ref":        "n57",
+				"role":       "scroll",
+				"actions":    []string{"swipe"},
+				"bounds":     []int{0, 363, 1080, 2265},
+				"relation":   "child",
+				"executable": false,
+			},
+		},
+		"blocking_refs": []string{"n57", "n58"},
+	}
+}
+
 var rmfKnownExclusions = map[string]string{
 	"protocol.Result.IncludeSession":          "presence flag",
 	"protocol.Foreground.HasTask":             "presence flag",
@@ -342,20 +369,9 @@ func TestCancellationDetailsParity(t *testing.T) {
 					OperationID: "P1",
 					Outcome:     "uncertain",
 					Error: &protocol.Error{
-						Code:    protocol.CodeUnauthorized,
-						Message: "服务错误",
-						Details: map[string]any{
-							"phase":                  "service_error",
-							"nearest_actionable_ref": "n516",
-							"safe_point":             map[string]any{"x": 0, "y": 0},
-							"task_ids":               []int{0, 42},
-							"reason":                 "target_missing_action",
-							"target_actions":         []string{},
-							"scope":                  "target",
-							"scope_ref":              "n2",
-							"occluding_refs":         []string{"n3", "n4"},
-							"suggested_point":        map[string]any{"x": 1, "y": 2},
-						},
+						Code:    protocol.CodeNoSafeTrajectory,
+						Message: "无法生成安全滚动轨迹",
+						Details: rmfNoSafeTrajectoryDetails(),
 					},
 				}
 			},
@@ -383,34 +399,33 @@ func TestCancellationDetailsParity(t *testing.T) {
 
 				code, message, details := rmfDecodeCanonicalError(t, canonical)
 				if base.serviceErr {
-					if code != protocol.CodeUnauthorized || message != "服务错误" {
+					if code != protocol.CodeNoSafeTrajectory || message != "无法生成安全滚动轨迹" {
 						t.Fatalf("canonical error = %s/%q, existing service error was not preserved", code, message)
 					}
-					if details["phase"] != "service_error" {
-						t.Fatalf("canonical details lost existing detail: %#v", details)
-					}
-					safePoint, ok := details["safe_point"].(map[string]any)
-					if !ok || safePoint["x"] != float64(0) || safePoint["y"] != float64(0) {
-						t.Fatalf("canonical details lost nested safe_point: %#v", details)
-					}
-					taskIDs, ok := details["task_ids"].([]any)
-					if !ok || len(taskIDs) != 2 || taskIDs[0] != float64(0) || taskIDs[1] != float64(42) {
-						t.Fatalf("canonical details lost numeric array: %#v", details)
-					}
-					if details["reason"] != "target_missing_action" || details["scope"] != "target" ||
-						details["scope_ref"] != "n2" {
+					if details["reason"] != "trajectory_blocked" || details["scope"] != "target" ||
+						details["scope_ref"] != "n56" {
 						t.Fatalf("canonical details lost static taxonomy facts: %#v", details)
 					}
-					if actions, ok := details["target_actions"].([]any); !ok || len(actions) != 0 {
-						t.Fatalf("canonical details lost empty target_actions: %#v", details)
+					candidates, ok := details["candidates"].([]any)
+					if !ok || len(candidates) != 2 {
+						t.Fatalf("canonical details lost candidates: %#v", details)
 					}
-					if refs, ok := details["occluding_refs"].([]any); !ok || len(refs) != 2 ||
-						refs[0] != "n3" || refs[1] != "n4" {
-						t.Fatalf("canonical details lost occluding_refs: %#v", details)
+					first, ok := candidates[0].(map[string]any)
+					if !ok || first["ref"] != "n66" || first["role"] != "scroll" ||
+						first["relation"] != "child" || first["executable"] != true {
+						t.Fatalf("canonical details lost first candidate: %#v", candidates[0])
 					}
-					suggested, ok := details["suggested_point"].(map[string]any)
-					if !ok || suggested["x"] != float64(1) || suggested["y"] != float64(2) {
-						t.Fatalf("canonical details lost suggested_point: %#v", details)
+					bounds, ok := first["bounds"].([]any)
+					if !ok || len(bounds) != 4 || bounds[0] != float64(0) || bounds[3] != float64(2265) {
+						t.Fatalf("canonical details lost candidate bounds: %#v", first["bounds"])
+					}
+					actions, ok := first["actions"].([]any)
+					if !ok || len(actions) != 1 || actions[0] != "swipe" {
+						t.Fatalf("canonical details lost candidate actions: %#v", first["actions"])
+					}
+					blocking, ok := details["blocking_refs"].([]any)
+					if !ok || len(blocking) != 2 || blocking[0] != "n57" || blocking[1] != "n58" {
+						t.Fatalf("canonical details lost blocking_refs: %#v", details)
 					}
 				} else {
 					if code != "call_cancelled" || message != "测试取消" {
@@ -1001,11 +1016,8 @@ func rmfResultFixtures() []rmfFixture {
 				Code:    protocol.CodeActionUnknown,
 				Message: "结果不确定",
 				Details: map[string]any{
-					"phase":                  "request",
-					"nearest_actionable_ref": "n516",
-					"safe_carrier_ref":       "n491",
-					"safe_point":             map[string]any{"x": 0, "y": 0},
-					"task_ids":               []int{0, 42},
+					"phase":    "request",
+					"task_ids": []int{0, 42},
 				},
 			},
 			Recovery: &protocol.Recovery{
@@ -1318,6 +1330,24 @@ func rmfResultFixtures() []rmfFixture {
 			},
 		},
 	}
+	staticNoSafeTrajectory := rmfFixture{
+		name: "static_no_safe_trajectory",
+		result: protocol.Result{
+			OperationID:    "P23",
+			OperationState: "finished",
+			Outcome:        "not_executed",
+			Error: &protocol.Error{
+				Code:    protocol.CodeNoSafeTrajectory,
+				Message: "无法生成安全滚动轨迹",
+				Details: rmfNoSafeTrajectoryDetails(),
+			},
+			Recovery: &protocol.Recovery{
+				Entry:      protocol.RecoveryEntryRetry,
+				Reference:  protocol.RecoveryReferenceO,
+				InputState: protocol.RecoveryInputEffective,
+			},
+		},
+	}
 	snap := rmfFixture{
 		name: "snap_image",
 		result: protocol.Result{
@@ -1341,6 +1371,7 @@ func rmfResultFixtures() []rmfFixture {
 		appFind, appList, appListUnknownForeground, appOpen, appClaim, appHandoff, appClose, appKill,
 		scrollNotObserved, scrollUnknownEffect, notSampled,
 		textInputWriteOnly, textInputNotDispatched, textInputEnterUncertain,
+		staticNoSafeTrajectory,
 	}
 }
 
@@ -1457,7 +1488,9 @@ func rmfDeterministicResult(iteration int) *protocol.Result {
 		children[key] = []string{"n1", "n2"}
 		replace[key] = rmfNode(key, protocol.RoleButton, false)
 	}
-	details["safe_point"] = map[string]any{"x": 0, "y": 0}
+	for key, value := range rmfNoSafeTrajectoryDetails() {
+		details[key] = value
+	}
 	return &protocol.Result{
 		OperationID: "P1",
 		Error: &protocol.Error{

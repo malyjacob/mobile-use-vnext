@@ -15,7 +15,7 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
   `snap`、`wait_for`、`act`、`inspect`、`keepalive`、`end`、`app`、`notify`、`shell`、
   `diagnose`。不注册 `/health`、认证初始化、旧工具别名或旧协议回退。
 - 目录指纹是工具数、注册顺序、名称、描述与入参 schema 的 canonical SHA-256。当前源码的
-  工具目录指纹为 `e42f9adb7e416e1962cbb43397f12407bb3d7f4d28d02396e32ab3c317427ba1`。
+  工具目录指纹为 `a18acde933ad4358ee0b6d5ec28ca2e4dcba643e33453de31c436763e561c54e`。
   发布清单中的指纹对应其记录的源码提交。发布时从目标提交重建并核验清单。
   探针按工具名比对实际 `tools/list` 的描述和入参 schema，并核对只读注解。传入 `-manifest`
   时，探针将清单中的工具数和目录 SHA-256 分别与源码目录的对应值比对。探针将
@@ -48,25 +48,11 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
 `container`、`direction`、`amount`、`duration_ms`、`bubble` 与 `press_enter`；服务端严格
 解码仍是权威。
 
-`tap`/`long_press` 的 `ref` 目标有效 `bubble=true`（省略或显式 true）时，原目标自身已有
-请求动作仍走直接目标规划；原目标完全没有 `tap`、`long_press`、`text` 动作时，只向最近的
-touch-interactive 祖先提升一次。该祖先不存在、不可用或不支持请求动作时返回
-`422 unsupported_node_action`，支持动作但没有可证安全点时返回 `422 no_safe_point`，都不
-继续向更远祖先查找。静态规划同时绑定原 child 与祖先；认领后重验两者、公开 Role 与完整
-Label、最近祖先关系及安全点，child 丢失或内容被替换返回 `409 target_changed`，零派发。
-有效 `bubble=false` 保持直接目标错误；坐标目标必须省略 `bubble`。该提升只在一次调用内
-派发一个动作，不模拟 DOM 多级事件传播。
+`tap`/`long_press` 的 `ref` 目标自身已有请求动作时（无论 `bubble` 值），均走直接目标规划（4 级选点含 3×3 网格；全败时若存在唯一双向同视口可点击子容器则自动委托并双绑定重验）。原目标完全没有 `tap`、`long_press`、`text` 动作且有效 `bubble=true`（省略或显式 true）时，先在原目标视觉区内按最近 touch-interactive 祖先 `A` 规划（`bubble_ancestor`；遇竞争交互控件重合即止漂）；若该路不可行，再吸附满足局部共位与反底板守卫的唯一可点击目标 `B`（`bubble_colocated`）。静态规划同时绑定原 child 与执行目标；认领后重验两者、公开 Role 与完整 Label、关系守卫及安全点，失配返回 `409 target_changed`（附封闭 `details.reason`），零派发。有效 `bubble=false` 禁用 `bubble_ancestor` 与 `bubble_colocated`（原目标自身已有请求动作时仍走直接规划并可使用 `coextensive_child`），坐标目标必须省略 `bubble`。该解析只在一次调用内派发一个动作，不模拟 DOM 多级事件传播。
 
-`tap`/`long_press` 的 ref 静态拒绝按 code 区分：`invalid_target` 表示目标结构或几何不可用，
-`unsupported_node_action` 表示请求动作或提升前提不满足（含祖先不可用），`no_safe_point` 表示有动作但
-固定候选都无法证明。`no_safe_point` 不是向祖先继续查找目标的指令；`error.details` 的
-`reason`、有界阻塞/歧义/归属 ref 列表与可选 `suggested_point` 描述同一 O 上的调用线索。
-三类静态拒绝都不认领 O，结果为 `not_executed`。诊断 ref 可能只出现在原 O 的完整快照中。
-`suggested_carrier_ref` 指出建议坐标的承载节点。原快照仍保留时，用
-`inspect({reference: 原 act 的 O, node: 诊断 ref})` 查看该子树，O 过期后仍可能可读。
-子树超出补看预算时服务返回 `inspection_too_large`。原 O 仍 ready 且得到
-`suggested_point` 时，可用同一 O 和 `operation.target={x,y}` 尝试坐标分支，省略 `bubble`。
-适配器分配新 P，该调用独立通过准入与重验。
+`scroll` 支持双向同视口（宽与高交集各 ≥85%）滚动栈直传不互阻、非滚动节点 `ref` 自动向上找最近滚动祖先提升、坐标选最内层并在不可行时沿命中祖先回退或唯一可执行消歧，以及在安全区间正中对称展开的 3 轴线（50%/25%/75%）居中轨迹。坐标 `tap`/`long_press`/`text` 使用最深命中集合证明并按请求动作唯一拥有者消歧，raw `swipe` 永不返回 `ambiguous_point`。
+
+除参数语法、`409 node_not_found`/`node_disabled` 及 `text` 的非可编辑/受保护拒绝（`422 text_target_uncertain`）外，全 `act` 静态目标解析与规划拒绝统一收口为 5 个正交 `422` 错误码：`invalid_target`、`unsupported_node_action`、`ambiguous_point`、`no_safe_point`、`no_safe_trajectory`。静态拒绝不认领 O，结果为 `not_executed`；`error.details` 携带封闭 `reason`、按出口约定的 `scope`/`scope_ref`，有候选时附至多 4 项经当前同一 O 干跑计算的 `candidates`（含 `ref`/`role`/`actions`/`bounds`/`relation`/`executable`），以及可选 `blocking_refs`（至多 3 项）。原 O 仍 ready 且 `candidates` 中存在 `executable=true` 的项时，可直接取首个 `executable=true` 的 `ref` 用同一 O 与新 P 重试，无需重观察或手算坐标；需要查看诊断子树时仍可用 `inspect({reference: 原 act 的 O, node: ref})` 补看。
 
 `text` 的 `press_enter` 省略或有效为 true 时，一次调用完成必要聚焦（已聚焦 ref 不重复点击）、
 将目标框全文设为 text、以同一次写入调用中同一节点的刷新值精确读回，并至多发送一次 ENTER；

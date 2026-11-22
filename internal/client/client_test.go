@@ -887,39 +887,132 @@ func TestAppDecodesClaimAmbiguity(t *testing.T) {
 	}
 }
 
-// TestActNestedErrorDetailsOverHTTP exercises the actual client transport and
-// strict response decoder. Nested JSON objects must stay objects, zero pixel
-// coordinates must survive, and the int values written by the service must be
-// numerically equal after decoding to float64 and re-encoding.
-func TestActNestedErrorDetailsOverHTTP(t *testing.T) {
+func requireClientCandidate(t *testing.T, raw any, wantRef, wantRole string,
+	wantActions []string, wantBounds []int, wantRelation string, wantExecutable bool) {
+	t.Helper()
+	candidate, ok := raw.(map[string]any)
+	if !ok || len(candidate) != 6 {
+		t.Fatalf("candidate = %#v, want the six fixed fields", raw)
+	}
+	if candidate["ref"] != wantRef || candidate["role"] != wantRole ||
+		candidate["relation"] != wantRelation {
+		t.Fatalf("candidate identity = %#v", candidate)
+	}
+	actions, ok := candidate["actions"].([]any)
+	if !ok || actions == nil || len(actions) != len(wantActions) {
+		t.Fatalf("candidate actions = %#v, want %v", candidate["actions"], wantActions)
+	}
+	for index, want := range wantActions {
+		if actions[index] != want {
+			t.Fatalf("candidate actions = %#v, want %v", actions, wantActions)
+		}
+	}
+	bounds, ok := candidate["bounds"].([]any)
+	if !ok || bounds == nil || len(bounds) != len(wantBounds) {
+		t.Fatalf("candidate bounds = %#v, want %v", candidate["bounds"], wantBounds)
+	}
+	for index, want := range wantBounds {
+		if bounds[index] != float64(want) {
+			t.Fatalf("candidate bounds = %#v, want %v", bounds, wantBounds)
+		}
+	}
+	executable, ok := candidate["executable"].(bool)
+	if !ok || executable != wantExecutable {
+		t.Fatalf("candidate executable = %#v, want %t", candidate["executable"], wantExecutable)
+	}
+}
+
+// TestActCandidatesErrorDetailsOverHTTP exercises the actual client transport
+// and strict response decoder for the unified static rejection contract. All
+// candidate fields, empty action arrays and optional blocking refs survive the
+// round trip, with integer bounds numerically exact after float64 decoding.
+func TestActCandidatesErrorDetailsOverHTTP(t *testing.T) {
 	cases := []struct {
-		name          string
-		withCarrier   bool
-		withOccluding bool
+		name         string
+		code         string
+		message      string
+		reason       string
+		scopeRef     string
+		candidates   []map[string]any
+		blockingRefs []string
+		request      *protocol.ActRequest
 	}{
-		{name: "all evidenced keys", withCarrier: true, withOccluding: true},
-		{name: "optional keys omitted"},
+		{
+			name:     "no safe point",
+			code:     protocol.CodeNoSafePoint,
+			message:  "存在多个共位目标，无法证明点击落点",
+			reason:   "colocated_ambiguous",
+			scopeRef: "n5233",
+			candidates: []map[string]any{
+				{
+					"ref":        "n5232",
+					"role":       "button",
+					"actions":    []string{"tap"},
+					"bounds":     []int{915, 1675, 1028, 1787},
+					"relation":   "overlapping",
+					"executable": true,
+				},
+				{
+					"ref":        "n5231",
+					"role":       "group",
+					"actions":    []string{},
+					"bounds":     []int{0, 1600, 1080, 1900},
+					"relation":   "child",
+					"executable": false,
+				},
+			},
+			blockingRefs: []string{"n5230", "n5253"},
+			request: &protocol.ActRequest{
+				Reference: "O1",
+				Operation: protocol.Operation{
+					Type:   "tap",
+					Target: &protocol.Target{UseRef: true, Ref: "n5233"},
+				},
+			},
+		},
+		{
+			name:     "no safe trajectory",
+			code:     protocol.CodeNoSafeTrajectory,
+			message:  "滚动容器在三条轴线上均无安全轨迹",
+			reason:   "trajectory_blocked",
+			scopeRef: "n56",
+			candidates: []map[string]any{{
+				"ref":        "n66",
+				"role":       "scroll",
+				"actions":    []string{"swipe"},
+				"bounds":     []int{0, 363, 1080, 2265},
+				"relation":   "child",
+				"executable": true,
+			}},
+			request: &protocol.ActRequest{
+				Reference: "O1",
+				Operation: protocol.Operation{
+					Type:      "scroll",
+					Container: &protocol.Target{UseRef: true, Ref: "n56"},
+					Direction: protocol.ScrollDirectionDown,
+					Amount:    protocol.ScrollAmountPage,
+				},
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			details := map[string]any{
-				"nearest_actionable_ref": "n516",
-				"safe_point":             map[string]any{"x": 0, "y": 0},
-				"task_ids":               []int{0, 42},
+				"reason":     tc.reason,
+				"scope":      "target",
+				"scope_ref":  tc.scopeRef,
+				"candidates": tc.candidates,
 			}
-			if tc.withCarrier {
-				details["safe_carrier_ref"] = "n491"
-			}
-			if tc.withOccluding {
-				details["occluding_ref"] = "n523"
+			if tc.blockingRefs != nil {
+				details["blocking_refs"] = tc.blockingRefs
 			}
 			source := &protocol.Result{
 				OperationID:    "Pactdetails",
 				OperationState: "finished",
 				Outcome:        "not_executed",
 				Error: &protocol.Error{
-					Code:    protocol.CodeNodeUnsupported,
-					Message: "目标节点不支持点击",
+					Code:    tc.code,
+					Message: tc.message,
 					Details: details,
 				},
 			}
@@ -933,35 +1026,46 @@ func TestActNestedErrorDetailsOverHTTP(t *testing.T) {
 			defer server.Close()
 
 			client := newTestClient(t, server.URL)
-			response, err := client.Act(context.Background(), &protocol.ActRequest{
-				Reference: "O1",
-				Operation: protocol.Operation{
-					Type:   "tap",
-					Target: &protocol.Target{UseRef: true, Ref: "n491"},
-				},
-			}, WithOperationID("Pactdetails"))
+			response, err := client.Act(context.Background(), tc.request, WithOperationID("Pactdetails"))
 			if response == nil {
 				t.Fatal("structured failure dropped the response")
 			}
 			clientErr := requireClientError(t, err)
-			if clientErr.Code != protocol.CodeNodeUnsupported ||
+			if clientErr.Code != tc.code ||
 				clientErr.HTTPStatus != http.StatusUnprocessableEntity ||
 				clientErr.Result == nil || clientErr.Result.Error == nil {
 				t.Fatalf("structured failure changed: %+v", clientErr)
 			}
 			gotDetails := clientErr.Result.Error.Details
-			safePoint, ok := gotDetails["safe_point"].(map[string]any)
-			if !ok {
-				t.Fatalf("safe_point decoded as %T, want nested object", gotDetails["safe_point"])
+			if gotDetails["reason"] != tc.reason || gotDetails["scope"] != "target" ||
+				gotDetails["scope_ref"] != tc.scopeRef {
+				t.Fatalf("details = %#v", gotDetails)
 			}
-			if safePoint["x"] != float64(0) || safePoint["y"] != float64(0) {
-				t.Fatalf("zero coordinates changed: %#v", safePoint)
+			candidates, ok := gotDetails["candidates"].([]any)
+			if !ok || len(candidates) != len(tc.candidates) {
+				t.Fatalf("candidates = %#v", gotDetails["candidates"])
 			}
-			if _, present := gotDetails["safe_carrier_ref"]; present != tc.withCarrier {
-				t.Fatalf("safe_carrier_ref presence = %t, want %t", present, tc.withCarrier)
+			for index, candidate := range candidates {
+				want := tc.candidates[index]
+				requireClientCandidate(t, candidate, want["ref"].(string), want["role"].(string),
+					want["actions"].([]string), want["bounds"].([]int),
+					want["relation"].(string), want["executable"].(bool))
 			}
-			if _, present := gotDetails["occluding_ref"]; present != tc.withOccluding {
-				t.Fatalf("occluding_ref presence = %t, want %t", present, tc.withOccluding)
+			blockingRefs, present := gotDetails["blocking_refs"]
+			if tc.blockingRefs == nil {
+				if present || strings.Contains(string(sourceJSON), `"blocking_refs"`) {
+					t.Fatalf("absent blocking_refs was emitted: %#v", blockingRefs)
+				}
+			} else {
+				refs, ok := blockingRefs.([]any)
+				if !ok || len(refs) != len(tc.blockingRefs) {
+					t.Fatalf("blocking_refs = %#v", blockingRefs)
+				}
+				for index, want := range tc.blockingRefs {
+					if refs[index] != want {
+						t.Fatalf("blocking_refs = %#v, want %v", refs, tc.blockingRefs)
+					}
+				}
 			}
 
 			roundTripped, err := protocol.JSON(clientErr.Result)

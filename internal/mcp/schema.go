@@ -125,8 +125,14 @@ const callerGuidance = "会话与推进：首次可直接 start({})。已有 act
 	"选择工具：observe 单次采集，snap 只看画面，wait_for 等公开树条件，inspect 补看历史树，diagnose 查健康。" +
 	"wait_for 以 wait.trigger 说明退出分支，以 wait.matched 说明终帧命中项；有新 O 就用它继续。" +
 	"`quality=unstable/unknown` 本身不阻止输入。\n\n" +
-	"输入：act 认领 ready O 才消费。ref 点按/长按默认 bubble=true，最多提升到最近交互祖先一次；" +
-	"operation.bubble=false 只点原目标，坐标省略 bubble。no_safe_point 按 act 给出的点提示调整，避免继续向更远祖先找目标。" +
+	"输入：act 认领 ready O 才消费。ref 点按/长按默认 bubble=true，自动按 3×3 网格选点；" +
+	"无动作目标按视觉区锚定最近交互祖先，竞争遮挡时停止外扩并自动吸附唯一局部共位可点击控件。" +
+	"operation.bubble=false 只点原目标，坐标省略 bubble。坐标 tap/long_press/text 使用最深命中集合，" +
+	"并仅在无法按请求动作唯一消歧时报 ambiguous_point；raw swipe 不报 ambiguous_point。" +
+	"scroll 可直接传同视口嵌套滚动栈任一层；非滚动节点自动找最近滚动祖先；坐标取最内层滚动容器，" +
+	"规划失败时回退外层祖先；轨迹在安全区间居中并尝试 50%/25%/75% 三条轴线避让。" +
+	"静态 422（invalid_target、unsupported_node_action、ambiguous_point、no_safe_point、no_safe_trajectory）不消费 O；" +
+	"取 error.details.candidates 中第一个 executable=true 的 ref，用同一 O 和新 P 重试，无需重观察或手算坐标。" +
 	"text 默认 press_enter=true，写入全文并精确读回后至多发送一次 ENTER。仅填字时显式 operation.press_enter=false，不发送 ENTER。" +
 	"text_input 分别报告 write 与 enter，业务结果用页面事实核对。\n\n" +
 	"恢复：优先直接使用 `recovery` 行给出的精确 `ref=` 编号调用对应 `entry`；" +
@@ -331,20 +337,25 @@ var toolCatalog = []toolDefinition{
 			"\n分支：tap/long_press 用 target；text 用 target 与 text；key 用 key 白名单。scroll 用 container/direction，可选 amount；swipe 用 from/to，可选 duration_ms。" +
 			"\n树中 `button`/`input`/`scroll` 省略的默认动作分别是既有 `tap`/`text`/`swipe`；" +
 			"`!tap`/`!text`/`!swipe` 表示该默认能力缺失。`@` 表示与最近已知祖先同矩形；需要坐标时沿该祖先读取。" +
-			"\n点按与长按：ref 默认 bubble=true。仅在原节点没有 tap、long_press、text 任一动作时，向最近的交互祖先提升一次。" +
-			"该祖先不支持本动作或无安全点时停止提升。显式 bubble=false 只点原目标，坐标目标省略 bubble。" +
-			"静态拒绝均为 not_executed：invalid_target 表示目标结构或几何不可用，unsupported_node_action 表示动作或提升前提不满足，no_safe_point 表示有动作但安全点无法证明。" +
-			"详情可给 reason、阻塞或歧义 refs、nearest_actionable_ref、suggested_carrier_ref 与 safe_point。" +
-			"诊断 ref 可能因 compact 裁剪不在普通树中；原 O 内容仍保留时用 " +
-			"inspect({reference:原 O,node:诊断 ref}) 补看详细子树。suggested_carrier_ref 说明建议坐标的来源。" +
-			"no_safe_point 带 error.details.suggested_point 且原 O 仍 ready 时，" +
-			"用同一 O、新 P 与 operation.target={x,y} 尝试坐标分支，省略 bubble，并独立通过准入和重验。" +
+			"\n点按与长按：ref 默认 bubble=true，自动按 3×3 网格选点。无动作目标先按视觉区锚定最近交互祖先；" +
+			"存在竞争控件遮挡时停止向祖先其他区域漂移，并自动吸附唯一的局部共位可点击控件。" +
+			"显式 bubble=false 只点原目标，不做提升或吸附；坐标目标省略 bubble。" +
+			"坐标 tap/long_press/text 使用最深命中集合，并仅在多个交互目标无法按请求动作唯一消歧时报 ambiguous_point；raw swipe 不返回 ambiguous_point。" +
+			"静态拒绝均为 not_executed：invalid_target 表示目标结构或几何不可用，unsupported_node_action 表示目标及合法关联对象缺少动作能力，" +
+			"ambiguous_point 表示坐标存在不可消歧的竞争目标，no_safe_point 表示点击安全点无法证明，no_safe_trajectory 表示滚动安全轨迹无法证明。" +
+			"error.details 提供 reason、scope/scope_ref、candidates 与可选 blocking_refs；" +
+			"candidates 项含 ref、role、actions、bounds、relation、executable。" +
+			"candidates 非空时，直接取第一个 executable=true 的 ref，用同一 O、新 P 重试，无需重观察或手算坐标。" +
+			"诊断 ref 可能因 compact 裁剪不在普通树中；原 O 内容仍保留时可用 " +
+			"inspect({reference:原 O,node:诊断 ref}) 补看详细子树。" +
 			"\n文本：默认 press_enter=true。必要聚焦（已聚焦 ref 跳过）、全文写入、同节点刷新精确读回，随后至多一次 ENTER。" +
 			"普通输入无需先 tap 或另发 ENTER。仅填字、草稿、多行、清空或逐字段编辑时显式 press_enter=false，只写入并读回。默认分支返回 text_input:{write,enter}，false 时省略。" +
 			"文本错误看 details.stage/reason/dispatch，区分 not_attempted/not_dispatched/dispatched/unknown。" +
 			"已认领 text 的整体 outcome=uncertain（也可能仅已派发聚焦），且实际结果给出 `recovery entry=observe ref=<P>` 时，" +
 			"直接 observe 核对当前框值/页面。reference 使用原活动会话的具体归属 P，如 session.origin 或属于该会话的 operation_id。避免原样重发。" +
-			"\n滚动：用 operation.type=scroll + container，嵌套时按想滚动的区域选对应容器 ref。swipe 是原始手势。树节点的 `swipe` 仅表示源能力，手势仍按当前 O 准入。" +
+			"\n滚动：用 operation.type=scroll + container。ref 可直接指向同视口嵌套滚动栈任一层；非滚动节点自动向上找最近滚动祖先。" +
+			"坐标容器自动选择该点所在最内层滚动容器，规划失败时回退外层滚动祖先。轨迹在安全区间居中起止，并依次尝试 50%/25%/75% 三条轴线避让。" +
+			"swipe 是原始手势；树节点的 `swipe` 仅表示源能力，手势仍按当前 O 准入。" +
 			"返回的 effect.state 以 observed/not_observed/unknown 报告内容位移证据；执行事实见 outcome。scroll 不承诺真实方向、触摸消费者或业务安全。" +
 			"\n恢复：重验目标变化可返回 target_changed；若附新观察，从 `obs` 行取得完整 O，直接用新 O 和新 P 重试。" +
 			"unstable/unknown 的 observation.quality 不阻止输入（文本 `obs` 行写作 `quality=`）。" +
@@ -391,14 +402,14 @@ var toolCatalog = []toolDefinition{
         },
         "bubble": {
           "type": "boolean",
-          "description": "仅 tap/long_press 且 target 为 ref 时适用；省略按 true 处理；false 只点原目标。坐标目标和其他动作须省略。"
+          "description": "仅 tap/long_press 且 target 为 ref 时适用；省略按 true 处理。true 自动 3×3 选点，按目标视觉区锚定最近交互祖先；竞争遮挡时停止外扩并自动吸附唯一的局部共位可点击控件。false 只点原目标，不做提升或吸附。坐标目标和其他动作须省略。"
         },
         "press_enter": {
           "type": "boolean",
           "description": "仅 text 适用；省略按 true 处理；false 禁止发送 ENTER，并省略 text_input。其他动作须省略。"
         },
         "container": {
-          "description": "scroll 的滚动容器选择器：ref 或 x/y 坐标，二选一。ref 必须直接指向 role=scroll 节点（不做祖先晋升）；x/y 选择该点所在的滚动容器。",
+          "description": "scroll 的滚动容器选择器：ref 或 x/y 坐标，二选一。ref 可为任意公开节点：自身为滚动容器时直接使用，否则自动向上找最近 role=scroll 祖先；同视口嵌套滚动栈可直接传任一层。x/y 自动选择该点所在最内层滚动容器，规划失败时回退外层滚动祖先。",
           "oneOf": [
             {
               "type": "object",

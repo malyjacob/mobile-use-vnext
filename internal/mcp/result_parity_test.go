@@ -34,14 +34,17 @@ func TestBothModeParity(t *testing.T) {
 
 // TestHTTPNestedErrorDetailsAcrossModes runs one real client HTTP decode and
 // then the three MCP projections of that same execution. It guards the full
-// service-result → client → canonical JSON path for tap guidance.
+// service-result → client → canonical JSON path for static candidates.
 func TestHTTPNestedErrorDetailsAcrossModes(t *testing.T) {
 	fake := newTestDeviceService(t)
 	fake.setHandler("act", func(w http.ResponseWriter, r *http.Request, body string) {
 		writeTestJSON(w, http.StatusUnprocessableEntity,
 			`{"operation_id":"P15","operation_state":"finished","outcome":"not_executed",`+
-				`"error":{"code":"unsupported_node_action","message":"目标节点不支持点击","details":`+
-				`{"nearest_actionable_ref":"n516","safe_carrier_ref":"n491","safe_point":{"x":0,"y":0},"task_ids":[0,42]}},`+
+				`"error":{"code":"no_safe_trajectory","message":"无法生成安全滚动轨迹","details":`+
+				`{"reason":"trajectory_blocked","scope":"target","scope_ref":"n56","candidates":[`+
+				`{"ref":"n66","role":"scroll","actions":["swipe"],"bounds":[0,363,1080,2265],"relation":"child","executable":true},`+
+				`{"ref":"n57","role":"scroll","actions":["swipe"],"bounds":[0,363,1080,2265],"relation":"child","executable":false}],`+
+				`"blocking_refs":["n57","n58"]}},`+
 				`"recovery":{"entry":"retry","reference":"O","input_state":"effective"}}`)
 	})
 	a := &adapter{client: newTestDeviceClient(t, fake)}
@@ -50,9 +53,22 @@ func TestHTTPNestedErrorDetailsAcrossModes(t *testing.T) {
 	if execution.result == nil || execution.result.Error == nil {
 		t.Fatalf("HTTP nested failure was not projected: %#v", execution)
 	}
-	safePoint, ok := execution.result.Error.Details["safe_point"].(map[string]any)
-	if !ok || safePoint["x"] != float64(0) || safePoint["y"] != float64(0) {
-		t.Fatalf("client lost nested safe_point: %#v", execution.result.Error.Details)
+	details := execution.result.Error.Details
+	candidates, ok := details["candidates"].([]any)
+	if !ok || len(candidates) != 2 {
+		t.Fatalf("client lost candidates: %#v", details)
+	}
+	first, ok := candidates[0].(map[string]any)
+	if !ok || first["ref"] != "n66" || first["executable"] != true {
+		t.Fatalf("client lost first executable candidate: %#v", candidates[0])
+	}
+	bounds, ok := first["bounds"].([]any)
+	if !ok || len(bounds) != 4 || bounds[0] != float64(0) || bounds[3] != float64(2265) {
+		t.Fatalf("client lost candidate bounds: %#v", first["bounds"])
+	}
+	blocking, ok := details["blocking_refs"].([]any)
+	if !ok || len(blocking) != 2 || blocking[0] != "n57" || blocking[1] != "n58" {
+		t.Fatalf("client lost blocking_refs: %#v", details)
 	}
 
 	canonical, err := canonicalResult(execution)
@@ -70,14 +86,19 @@ func TestHTTPNestedErrorDetailsAcrossModes(t *testing.T) {
 				t.Fatalf("mode %v: structuredContent differs from canonical", mode)
 			}
 			diagnostic := testTextContent(t, out)
-			requireTestContains(t, diagnostic, `"safe_carrier_ref":"n491"`)
-			requireTestContains(t, diagnostic, `"safe_point":{"x":0,"y":0}`)
+			requireTestContains(t, diagnostic, "error.code=no_safe_trajectory")
+			requireTestContains(t, diagnostic, `"candidates":[`)
+			requireTestContains(t, diagnostic, `"blocking_refs":["n57","n58"]`)
+			requireTestContains(t, diagnostic, `"executable":true`)
 			continue
 		}
-		decoded, flag, err := decodeResultText(t, testTextContent(t, out))
+		text := testTextContent(t, out)
+		decoded, flag, err := decodeResultText(t, text)
 		if err != nil || !flag || !sameJSONValue(want, decoded) {
 			t.Fatalf("mode %v text parity error=%v flag=%t", mode, err, flag)
 		}
+		requireTestContains(t, text, "no_safe_trajectory")
+		requireTestContains(t, text, `"executable":true`)
 	}
 }
 
@@ -240,21 +261,24 @@ func resultModeFixtures() []resultModeFixture {
 	for _, outcome := range []string{"executed", "not_executed", "uncertain"} {
 		add("act", outcome, `{"operation_id":"P1","outcome":"`+outcome+`","error":{"code":"target_changed","message":"目标变化"},"recovery":{"entry":"observe","reference":"P"}}`)
 	}
-	add("act", "unsupported_nested_details", `{"operation_id":"P15","operation_state":"finished","outcome":"not_executed",`+
-		`"error":{"code":"unsupported_node_action","message":"目标节点不支持点击","details":`+
-		`{"nearest_actionable_ref":"n516","safe_point":{"x":0,"y":0},"task_ids":[0,42]}},`+
+	add("act", "no_safe_trajectory_details", `{"operation_id":"P15","operation_state":"finished","outcome":"not_executed",`+
+		`"error":{"code":"no_safe_trajectory","message":"无法生成安全滚动轨迹","details":`+
+		`{"reason":"trajectory_blocked","scope":"target","scope_ref":"n56","candidates":[`+
+		`{"ref":"n66","role":"scroll","actions":["swipe"],"bounds":[0,363,1080,2265],"relation":"child","executable":true},`+
+		`{"ref":"n57","role":"scroll","actions":["swipe"],"bounds":[0,363,1080,2265],"relation":"child","executable":false}],`+
+		`"blocking_refs":["n57","n58"]}},`+
 		`"recovery":{"entry":"retry","reference":"O","input_state":"effective"}}`)
-	// The static taxonomy carries empty action arrays, bounded ref lists and an
-	// optional suggested point; all three result modes must preserve them.
+	// The static taxonomy carries empty action arrays, candidate maps and
+	// bounded blocking refs; all three result modes must preserve them.
 	add("act", "unsupported_empty_actions", `{"operation_id":"P16","operation_state":"finished","outcome":"not_executed",`+
 		`"error":{"code":"unsupported_node_action","message":"目标节点不含点击、长按或文本输入能力","details":`+
 		`{"reason":"target_missing_action","target_actions":[]}},`+
 		`"recovery":{"entry":"retry","reference":"O","input_state":"effective"}}`)
 	add("act", "no_safe_point_details", `{"operation_id":"P17","operation_state":"finished","outcome":"not_executed",`+
-		`"error":{"code":"no_safe_point","message":"未能从目标节点的固定候选中证明点击落点：存在多类失败","details":`+
+		`"error":{"code":"no_safe_point","message":"未能证明点击安全点","details":`+
 		`{"reason":"mixed","scope":"target","scope_ref":"n2",`+
-		`"occluding_refs":["n3","n4"],"ambiguous_refs":["n5"],`+
-		`"suggested_point":{"x":0,"y":0},"suggested_carrier_ref":"n6"}},`+
+		`"candidates":[{"ref":"n3","role":"button","actions":["tap"],"bounds":[10,20,30,40],"relation":"overlapping","executable":true}],`+
+		`"blocking_refs":["n4","n5"]}},`+
 		`"recovery":{"entry":"retry","reference":"O","input_state":"effective"}}`)
 	add("act", "scroll_effect_quality", `{"operation_id":"P1","outcome":"executed","phase":"completed","effect":{"state":"observed"},"target_reference":"O1","observation":{"status":"complete","id":"O2","origin":"P1","revision":2,"quality":{"state":"unstable","samples":5,"stop_reason":"max_samples"},"tree":`+testFullTreeJSON+`}}`)
 	add("act", "scroll_effect_unknown", `{"operation_id":"P1","outcome":"uncertain","effect":{"state":"unknown"},"observation":{"status":"complete","id":"O3","quality":{"state":"unknown","samples":0,"stop_reason":"not_sampled"}},"error":{"code":"action_unknown","message":"动作结果不确定"}}`)
@@ -321,13 +345,9 @@ func TestNestedErrorDetailsModeParity(t *testing.T) {
 		OperationState: "finished",
 		Outcome:        "not_executed",
 		Error: &protocol.Error{
-			Code:    protocol.CodeNodeUnsupported,
-			Message: "目标节点不支持点击",
-			Details: map[string]any{
-				"nearest_actionable_ref": "n516",
-				"safe_point":             map[string]any{"x": 0, "y": 0},
-				"task_ids":               []int{0, 42},
-			},
+			Code:    protocol.CodeNoSafeTrajectory,
+			Message: "无法生成安全滚动轨迹",
+			Details: rmfNoSafeTrajectoryDetails(),
 		},
 	}
 	before := rmfResultBytes(t, source)
@@ -352,9 +372,10 @@ func TestNestedErrorDetailsModeParity(t *testing.T) {
 		text := testTextContent(t, out)
 		if mode == ResultModeStructured {
 			requireTestContains(t, text, "diagnostic v1 is_error=true")
-			requireTestContains(t, text, `"safe_point":{"x":0,"y":0}`)
-			requireTestContains(t, text, `"task_ids":[0,42]`)
-			requireTestNotContains(t, text, "occluding_ref")
+			requireTestContains(t, text, "error.code=no_safe_trajectory")
+			requireTestContains(t, text, `"candidates":[`)
+			requireTestContains(t, text, `"blocking_refs":["n57","n58"]`)
+			requireTestContains(t, text, `"executable":true`)
 			continue
 		}
 		wantText := expectedResultV4(t, canonical, true)
@@ -363,8 +384,10 @@ func TestNestedErrorDetailsModeParity(t *testing.T) {
 			t.Fatalf("mode %v text parity error=%v flag=%t\nwant=%#v\ngot=%#v\n%s",
 				mode, err, flag, wantText, decoded, text)
 		}
-		requireTestContains(t, text, `"safe_point":{"x":0,"y":0}`)
-		requireTestNotContains(t, text, "occluding_ref")
+		requireTestContains(t, text, "no_safe_trajectory")
+		requireTestContains(t, text, `"candidates":[`)
+		requireTestContains(t, text, `"blocking_refs":["n57","n58"]`)
+		requireTestContains(t, text, `"executable":true`)
 	}
 	if got := rmfResultBytes(t, source); !bytes.Equal(got, before) {
 		t.Fatalf("mode projection mutated the source result\nbefore: %s\n after: %s", before, got)
@@ -493,8 +516,9 @@ func TestHTTPModesSelectProjectionPerCall(t *testing.T) {
 func TestCatalogFingerprintBaseline(t *testing.T) {
 	// The catalog has thirteen tools. This baseline covers the caller-oriented
 	// descriptions after result v4/tree v4 local guidance was added to start,
-	// observe, wait_for, act, app and inspect.
-	const baseline = "e42f9adb7e416e1962cbb43397f12407bb3d7f4d28d02396e32ab3c317427ba1"
+	// observe, wait_for, act, app and inspect, including act auto-resolution
+	// and candidate-based retry guidance.
+	const baseline = "a18acde933ad4358ee0b6d5ec28ca2e4dcba643e33453de31c436763e561c54e"
 	if got := CatalogFingerprint(); got != baseline {
 		t.Fatalf("catalog changed: %s", got)
 	}

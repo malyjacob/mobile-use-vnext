@@ -41,17 +41,17 @@ const (
 // tapPlan is the immutable request-local result of static planning. It never
 // enters the public tree, the session or the recovery ledger.
 type tapPlan struct {
-	x, y       int
-	strategy   string
-	action     string
-	targetRef  string
-	targetRaw  *device.RawNode
-	carrierRef string
-	carrierRaw *device.RawNode
-	// bubbleAncestorRaw is set only for a default-bubble ref target whose own
-	// node has no touch-interactive action. It binds the one nearest interactive
-	// ancestor that the action is planned against.
+	x, y              int
+	strategy          string
+	action            string
+	targetRef         string
+	targetRaw         *device.RawNode
+	carrierRef        string
+	carrierRaw        *device.RawNode
 	bubbleAncestorRaw *device.RawNode
+	delegateRaw       *device.RawNode
+	colocatedRaw      *device.RawNode
+	colocatedInChild  bool
 	took              time.Duration
 }
 
@@ -79,13 +79,15 @@ type tapPublicInfo struct {
 }
 
 type tapPublicView struct {
-	tree    *protocol.Tree
-	capture *device.Capture
-	source  map[string]int
-	byRef   map[string]*protocol.Node
-	info    map[*protocol.Node]*tapPublicInfo
-	byRaw   map[int]*protocol.Node
-	nodes   []*protocol.Node
+	tree            *protocol.Tree
+	capture         *device.Capture
+	source          map[string]int
+	byRef           map[string]*protocol.Node
+	info            map[*protocol.Node]*tapPublicInfo
+	byRaw           map[int]*protocol.Node
+	nodes           []*protocol.Node
+	topology        *tapRawTopology
+	sourceValidated bool
 }
 
 type tapInput struct {
@@ -126,12 +128,6 @@ type tapCandidate struct {
 	carrier  *tapCarrier
 }
 
-type tapGuidance struct {
-	ref        string
-	carrierRef string
-	x, y       int
-}
-
 type tapSourceCheck int
 
 const (
@@ -153,7 +149,7 @@ func tapTargetChanged() *protocol.APIError {
 }
 
 func tapTargetGeometryError() *protocol.APIError {
-	return protocol.NewError(422, protocol.CodeNodeUnsupported, "目标节点没有可用几何")
+	return protocol.NewError(422, protocol.CodeInvalidTarget, "目标节点没有可用几何")
 }
 
 func tapNoCandidateError(action protocol.Action) *protocol.APIError {
@@ -161,7 +157,7 @@ func tapNoCandidateError(action protocol.Action) *protocol.APIError {
 	if action == protocol.ActionLongPress {
 		message = "无法在该节点作用域内生成可证明的长按落点"
 	}
-	return protocol.NewError(422, protocol.CodeNodeUnsupported, message)
+	return protocol.NewError(422, protocol.CodeNoSafePoint, message)
 }
 
 // validateTapRawTopology bounds every parent and child lookup before the new
@@ -417,7 +413,7 @@ func buildTapInput(obs *observationState, view *tapPublicView,
 		return nil, tapHierarchyError()
 	}
 	if target.Context || target.Role == protocol.RoleRoot {
-		return nil, protocol.NewError(422, protocol.CodeNodeUnsupported, "该节点不能作为操作目标")
+		return nil, protocol.NewError(422, protocol.CodeInvalidTarget, "该节点不能作为操作目标")
 	}
 	index, mapped := obs.Projection.Source[target.Ref]
 	if !mapped || index < 0 || index >= len(obs.Projection.Capture.Nodes) {
@@ -436,11 +432,62 @@ func buildTapInput(obs *observationState, view *tapPublicView,
 	if view.byRaw[index] != target {
 		return nil, tapHierarchyError()
 	}
+	view.topology = topology
+	view.sourceValidated = true
 	return &tapInput{
 		view: view, capture: obs.Projection.Capture, topology: topology,
 		target: target, targetRaw: &obs.Projection.Capture.Nodes[index],
 		targetIndex: index,
 	}, nil
+}
+
+func ensureTapViewTopology(obs *observationState, view *tapPublicView) (*tapRawTopology, bool) {
+	if view == nil {
+		return nil, false
+	}
+	capture := view.capture
+	if capture == nil && obs != nil && obs.Projection != nil {
+		capture = obs.Projection.Capture
+	}
+	if capture == nil {
+		return nil, false
+	}
+	if view.sourceValidated && view.topology != nil && view.topology.capture == capture {
+		return view.topology, true
+	}
+	if view.source == nil && obs != nil && obs.Projection != nil {
+		view.source = obs.Projection.Source
+	}
+	topology, apiErr := validateTapRawTopology(capture)
+	if apiErr != nil {
+		return nil, false
+	}
+	if checkTapSourceMapping(view, topology, -1) != tapSourceValid {
+		return nil, false
+	}
+	view.topology = topology
+	view.sourceValidated = true
+	return topology, true
+}
+
+func tapInputFromValidatedView(view *tapPublicView, topology *tapRawTopology,
+	target *protocol.Node) (*tapInput, bool) {
+	if view == nil || topology == nil || topology.capture == nil || target == nil {
+		return nil, false
+	}
+	info := view.info[target]
+	if info == nil || !info.hasSource || info.rawIndex < 0 ||
+		info.rawIndex >= len(topology.capture.Nodes) {
+		return nil, false
+	}
+	if view.byRaw[info.rawIndex] != target {
+		return nil, false
+	}
+	return &tapInput{
+		view: view, capture: topology.capture, topology: topology,
+		target: target, targetRaw: &topology.capture.Nodes[info.rawIndex],
+		targetIndex: info.rawIndex,
+	}, true
 }
 
 // isTouchInteractive is the conservative public capability boundary. It does
@@ -637,14 +684,22 @@ func longestTapSpan(spans []scrollSpan) (scrollSpan, bool) {
 }
 
 func tapCenterLineSpan(scope *tapScope, vertical bool, coordinate int) (scrollSpan, bool) {
-	if scope == nil || scope.base.Empty() {
+	if scope == nil {
+		return scrollSpan{}, false
+	}
+	return tapRectCenterLineSpan(scope, scope.base, vertical, coordinate)
+}
+
+func tapRectCenterLineSpan(scope *tapScope, region device.Rect,
+	vertical bool, coordinate int) (scrollSpan, bool) {
+	if scope == nil || region.Empty() {
 		return scrollSpan{}, false
 	}
 	var base scrollSpan
 	if vertical {
-		base = scrollSpan{start: scope.base.Top, end: scope.base.Bottom}
+		base = scrollSpan{start: region.Top, end: region.Bottom}
 	} else {
-		base = scrollSpan{start: scope.base.Left, end: scope.base.Right}
+		base = scrollSpan{start: region.Left, end: region.Right}
 	}
 	var blocked []scrollSpan
 	for _, item := range scope.blocked {
@@ -674,13 +729,17 @@ func enumerateTapCandidates(scope *tapScope, raw *device.RawNode) []tapCandidate
 			x: x, y: y, strategy: strategy, carrier: carrier,
 		})
 	}
-	if x, y, ok := tapSafeCenter(raw.Bounds); ok {
-		if !scope.base.Contains(x, y) {
-			x, y, ok = tapSafeCenter(scope.base)
+	if raw != nil {
+		if x, y, ok := tapSafeCenter(raw.Bounds); ok {
+			if !scope.base.Contains(x, y) {
+				x, y, ok = tapSafeCenter(scope.base)
+			}
+			if ok {
+				add(x, y, tapModeDefaultCenter, nil)
+			}
 		}
-		if ok {
-			add(x, y, tapModeDefaultCenter, nil)
-		}
+	} else if x, y, ok := tapSafeCenter(scope.base); ok {
+		add(x, y, tapModeDefaultCenter, nil)
 	}
 	var named, anonymous []*tapCarrier
 	for _, carrier := range scope.carriers {
@@ -718,6 +777,9 @@ func enumerateTapCandidates(scope *tapScope, raw *device.RawNode) []tapCandidate
 			add(span.start+(span.end-span.start)/2, y, tapModeCenterSpan, nil)
 		}
 	}
+	for _, point := range tapStaticGridPoints(scope.base) {
+		add(point.x, point.y, tapModeGrid3x3, nil)
+	}
 	return candidates
 }
 
@@ -743,21 +805,6 @@ func tapBlockingOwnerAt(scope *tapScope, x, y int) (*protocol.Node, int, int) {
 	return best, bestDepth, bestOrder
 }
 
-func occludingTapRef(scope *tapScope, raw *device.RawNode) string {
-	if scope == nil || raw == nil {
-		return ""
-	}
-	x, y, ok := tapSafeCenter(raw.Bounds)
-	if !ok || !scope.base.Contains(x, y) {
-		return ""
-	}
-	best, _, _ := tapBlockingOwnerAt(scope, x, y)
-	if best == nil {
-		return ""
-	}
-	return best.Ref
-}
-
 func chooseTapPlan(scope *tapScope, input *tapInput, target *protocol.Node,
 	action protocol.Action, started time.Time) (*tapPlan, *protocol.APIError) {
 	plan := &tapPlan{
@@ -778,143 +825,71 @@ func chooseTapPlan(scope *tapScope, input *tapInput, target *protocol.Node,
 		return plan, nil
 	}
 	plan.took = time.Since(started)
-	apiErr := tapNoCandidateError(action)
-	if ref := occludingTapRef(scope, input.targetRaw); ref != "" {
-		apiErr.WithDetail("occluding_ref", ref)
-	}
-	return plan, apiErr
+	return plan, tapNoCandidateError(action)
 }
 
-func planTapTarget(obs *observationState, target *protocol.Node,
-	action protocol.Action) (*tapPlan, *protocol.APIError) {
-	started := time.Now()
-	view, apiErr := collectTapPublicView(obs)
-	if apiErr != nil {
-		return nil, apiErr
+func tryPlanTapDirectBase(obs *observationState, view *tapPublicView,
+	node *protocol.Node, action protocol.Action) bool {
+	if obs == nil || view == nil || !validTapPublicTarget(node, action) {
+		return false
 	}
-	input, apiErr := buildTapInput(obs, view, target)
-	if apiErr != nil {
-		return nil, apiErr
+	topology, ok := ensureTapViewTopology(obs, view)
+	if !ok {
+		return false
+	}
+	input, ok := tapInputFromValidatedView(view, topology, node)
+	if !ok {
+		return false
 	}
 	scope, apiErr := collectTapScope(input)
 	if apiErr != nil {
-		return nil, apiErr
+		return false
 	}
-	return chooseTapPlan(scope, input, target, action, started)
+	for _, candidate := range enumerateTapCandidates(scope, input.targetRaw) {
+		if provesSubtreeTapPoint(scope, candidate.x, candidate.y) {
+			return true
+		}
+	}
+	return false
 }
 
-func tapUnsupportedWithGuidance(obs *observationState, view *tapPublicView,
-	target *protocol.Node, action protocol.Action, message string) *protocol.APIError {
-	apiErr := protocol.NewError(422, protocol.CodeNodeUnsupported, message)
-	attachTapGuidance(apiErr, obs, view, target, action)
-	return apiErr
+func tryPlanTextDirectBase(obs *observationState, view *tapPublicView,
+	node *protocol.Node) bool {
+	if obs == nil || view == nil || node == nil || node.Context || node.Role != protocol.RoleInput {
+		return false
+	}
+	if !hasAction(node, protocol.ActionText) || !hasAction(node, protocol.ActionTap) {
+		return false
+	}
+	if node.Enabled != nil && !*node.Enabled {
+		return false
+	}
+	if node.Protected == nil || *node.Protected {
+		return false
+	}
+	return tryPlanTapDirectBase(obs, view, node, protocol.ActionTap)
 }
 
-// attachTapGuidance adds the legacy atomic ancestor group when the baseline
-// position attempted it. It never widens its search: a nil result omits the
-// whole group.
-func attachTapGuidance(apiErr *protocol.APIError, obs *observationState,
-	view *tapPublicView, target *protocol.Node, action protocol.Action) {
-	if apiErr == nil {
-		return
-	}
-	guidance := tapGuidanceFor(obs, view, target, action)
-	if guidance == nil {
-		return
-	}
-	apiErr.WithDetail("nearest_actionable_ref", guidance.ref)
-	apiErr.WithDetail("safe_point", map[string]any{"x": guidance.x, "y": guidance.y})
-	if guidance.carrierRef != "" {
-		apiErr.WithDetail("safe_carrier_ref", guidance.carrierRef)
-	}
-}
-
-func tapGuidanceFor(obs *observationState, view *tapPublicView,
-	target *protocol.Node, action protocol.Action) *tapGuidance {
-	if target == nil || target.Context || isTouchInteractive(target) {
+func externalInteractiveOwnersAt(view *tapPublicView, ancestor *protocol.Node,
+	x, y int) []*protocol.Node {
+	if view == nil || ancestor == nil {
 		return nil
 	}
-	info := view.info[target]
-	if info == nil {
-		return nil
-	}
-	for parent := info.parent; parent != nil; {
-		parentInfo := view.info[parent]
-		if parentInfo == nil {
-			return nil
-		}
-		if parent.Role == protocol.RoleRoot {
-			return nil
-		}
-		if parent.Context {
-			return nil
-		}
-		if !isTouchInteractive(parent) {
-			parent = parentInfo.parent
+	var owners []*protocol.Node
+	for _, node := range view.nodes {
+		if node == nil || node == ancestor || !isTouchInteractive(node) || node.Bounds == nil {
 			continue
 		}
-		if parent.Enabled != nil && !*parent.Enabled ||
-			parent.Bounds == nil || parent.Bounds.Width() <= 0 ||
-			parent.Bounds.Height() <= 0 || !hasAction(parent, action) {
-			return nil
+		rect := rectFromBounds(node.Bounds)
+		if rect.Width() <= 0 || rect.Height() <= 0 || !rect.Contains(x, y) {
+			continue
 		}
-		input, apiErr := buildTapInput(obs, view, parent)
-		if apiErr != nil {
-			return nil
+		if isPublicAncestor(view, ancestor, node) || isPublicAncestor(view, node, ancestor) {
+			continue
 		}
-		scope, apiErr := collectTapScope(input)
-		if apiErr != nil {
-			return nil
-		}
-		if plan, apiErr := chooseTapPlan(scope, input, parent, action, time.Now()); apiErr != nil || plan == nil || plan.strategy == tapModeRejected {
-			return nil
-		}
-		candidates := tapGuidanceCandidates(scope, input.targetRaw, target)
-		seen := map[[2]int]bool{}
-		for _, candidate := range candidates {
-			key := [2]int{candidate.x, candidate.y}
-			if seen[key] {
-				continue
-			}
-			seen[key] = true
-			if !provesGuidancePoint(view, parent, scope, candidate.x, candidate.y) {
-				continue
-			}
-			guidance := &tapGuidance{
-				ref: parent.Ref, x: candidate.x, y: candidate.y,
-			}
-			if candidate.carrier != nil {
-				guidance.carrierRef = candidate.carrier.node.Ref
-			}
-			return guidance
-		}
-		return nil
+		owners = append(owners, node)
 	}
-	return nil
-}
-
-func tapGuidanceCandidates(scope *tapScope, raw *device.RawNode,
-	target *protocol.Node) []tapCandidate {
-	var candidates []tapCandidate
-	if target != nil && target.Bounds != nil {
-		rect := rectFromBounds(target.Bounds)
-		if rect.Width() > 0 && rect.Height() > 0 {
-			if clip := rect.Intersect(scope.base); !clip.Empty() {
-				if x, y, ok := tapSafeCenter(rect); ok {
-					if !scope.base.Contains(x, y) {
-						x, y, ok = tapSafeCenter(clip)
-					}
-					if ok && scope.base.Contains(x, y) {
-						candidates = append(candidates, tapCandidate{
-							x: x, y: y, strategy: tapModeCarrierNode,
-							carrier: &tapCarrier{node: target},
-						})
-					}
-				}
-			}
-		}
-	}
-	return append(candidates, enumerateTapCandidates(scope, raw)...)
+	return owners
 }
 
 func provesGuidancePoint(view *tapPublicView, ancestor *protocol.Node,
@@ -935,11 +910,13 @@ func provesGuidancePoint(view *tapPublicView, ancestor *protocol.Node,
 	if info == nil || !info.hasSource {
 		return false
 	}
-	if hit == ancestor {
-		return true
+	if hit != ancestor {
+		carrier := scope.carrierByRef[ref]
+		if carrier == nil || carrier.node != hit {
+			return false
+		}
 	}
-	carrier := scope.carrierByRef[ref]
-	return carrier != nil && carrier.node == hit
+	return len(externalInteractiveOwnersAt(view, ancestor, x, y)) == 0
 }
 
 func validTapPublicTarget(node *protocol.Node, action protocol.Action) bool {
@@ -992,45 +969,248 @@ func samePublicLabel(a, b []string) bool {
 }
 
 // chooseBubbleTapPoint selects one fixed safe point inside the ancestor scope.
-// The original child's center is preferred; every accepted point must prove
-// through the full public tree that it lands on the ancestor or a
-// non-interactive carrier inside that ancestor, never on a sibling interactive
-// target or a farther ancestor.
+func tapVisualRegionPoints(scope *tapScope, childRect, region device.Rect) []tapStaticPoint {
+	if scope == nil || region.Empty() {
+		return nil
+	}
+	var points []tapStaticPoint
+	seen := map[[2]int]bool{}
+	add := func(x, y int) {
+		key := [2]int{x, y}
+		if !region.Contains(x, y) || !scope.base.Contains(x, y) || seen[key] {
+			return
+		}
+		seen[key] = true
+		points = append(points, tapStaticPoint{x: x, y: y})
+	}
+	if x, y, ok := tapSafeCenter(childRect); ok {
+		if !region.Contains(x, y) {
+			x, y, ok = tapSafeCenter(region)
+		}
+		if ok {
+			add(x, y)
+		}
+	} else if x, y, ok := tapSafeCenter(region); ok {
+		add(x, y)
+	}
+	if region.Width() > 0 && region.Height() > 0 {
+		midX := region.Left + region.Width()/2
+		if span, ok := tapRectCenterLineSpan(scope, region, true, midX); ok {
+			add(midX, span.start+(span.end-span.start)/2)
+		}
+		midY := region.Top + region.Height()/2
+		if span, ok := tapRectCenterLineSpan(scope, region, false, midY); ok {
+			add(span.start+(span.end-span.start)/2, midY)
+		}
+	}
+	for _, point := range tapStaticGridPoints(region) {
+		add(point.x, point.y)
+	}
+	return points
+}
+
+func hasCompetingControlOverlap(view *tapPublicView, scope *tapScope,
+	ancestor *protocol.Node, probeRect device.Rect) bool {
+	if view == nil || scope == nil || ancestor == nil || probeRect.Empty() {
+		return false
+	}
+	for _, blocked := range scope.blocked {
+		if !blocked.rect.Intersect(probeRect).Empty() {
+			return true
+		}
+	}
+	for _, node := range view.nodes {
+		if node == nil || node == ancestor || !isTouchInteractive(node) || node.Bounds == nil {
+			continue
+		}
+		rect := rectFromBounds(node.Bounds)
+		if rect.Width() <= 0 || rect.Height() <= 0 || rect.Intersect(probeRect).Empty() {
+			continue
+		}
+		if isPublicAncestor(view, ancestor, node) || isPublicAncestor(view, node, ancestor) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
 func chooseBubbleTapPoint(scope *tapScope, view *tapPublicView,
 	ancestor, child *protocol.Node) (int, int, string, *tapCarrier, bool) {
 	if scope == nil || view == nil || ancestor == nil || child == nil {
 		return 0, 0, "", nil, false
 	}
+	var childRect device.Rect
 	if child.Bounds != nil {
 		rect := rectFromBounds(child.Bounds)
 		if rect.Width() > 0 && rect.Height() > 0 {
-			x, y, ok := tapSafeCenter(rect)
-			if ok && !scope.base.Contains(x, y) {
-				if clip := rect.Intersect(scope.base); !clip.Empty() {
-					x, y, ok = tapSafeCenter(clip)
-				} else {
-					ok = false
-				}
-			}
-			if ok && scope.base.Contains(x, y) &&
-				provesGuidancePoint(view, ancestor, scope, x, y) {
-				return x, y, tapModeCarrierNode, nil, true
-			}
+			childRect = rect
 		}
 	}
-	ancestorInfo := view.info[ancestor]
+	cClip := childRect.Intersect(scope.base)
+	if cClip.Empty() {
+		return 0, 0, "", nil, false
+	}
+	tested := map[[2]int]bool{}
+	tryPoint := func(x, y int) (int, int, string, *tapCarrier, bool) {
+		key := [2]int{x, y}
+		if tested[key] || !scope.base.Contains(x, y) {
+			return 0, 0, "", nil, false
+		}
+		tested[key] = true
+		if !provesGuidancePoint(view, ancestor, scope, x, y) {
+			return 0, 0, "", nil, false
+		}
+		var carrier *tapCarrier
+		if ref, state := resolvePoint(view.tree.Root, x, y); state == pointUnique && ref != ancestor.Ref {
+			carrier = scope.carrierByRef[ref]
+		}
+		return x, y, tapModeBubbleAncestor, carrier, true
+	}
+	for _, point := range tapVisualRegionPoints(scope, childRect, cClip) {
+		if x, y, strategy, carrier, ok := tryPoint(point.x, point.y); ok {
+			return x, y, strategy, carrier, true
+		}
+	}
+	if hasCompetingControlOverlap(view, scope, ancestor, cClip) {
+		return 0, 0, "", nil, false
+	}
 	var ancestorRaw *device.RawNode
-	if ancestorInfo != nil && ancestorInfo.hasSource && ancestorInfo.rawIndex >= 0 &&
+	if ancestorInfo := view.info[ancestor]; ancestorInfo != nil && ancestorInfo.hasSource &&
+		ancestorInfo.rawIndex >= 0 && view.capture != nil &&
 		ancestorInfo.rawIndex < len(view.capture.Nodes) {
 		ancestorRaw = &view.capture.Nodes[ancestorInfo.rawIndex]
 	}
 	for _, candidate := range enumerateTapCandidates(scope, ancestorRaw) {
-		if !provesGuidancePoint(view, ancestor, scope, candidate.x, candidate.y) {
-			continue
+		if x, y, strategy, carrier, ok := tryPoint(candidate.x, candidate.y); ok {
+			return x, y, strategy, carrier, true
 		}
-		return candidate.x, candidate.y, candidate.strategy, candidate.carrier, true
 	}
 	return 0, 0, "", nil, false
+}
+
+func chooseColocatedTapPoint(scope *tapScope, view *tapPublicView,
+	child, candidate *protocol.Node, screen device.Rect) (x, y int, strategy string,
+	carrier *tapCarrier, inChild bool, ok bool) {
+	if scope == nil || view == nil || child == nil || candidate == nil || scope.base.Empty() {
+		return 0, 0, "", nil, false, false
+	}
+	var childRect device.Rect
+	if clipped, hasRect := publicNodeClippedRect(child, screen); hasRect {
+		childRect = clipped
+	} else if child.Bounds != nil {
+		rect := rectFromBounds(child.Bounds)
+		if rect.Width() > 0 && rect.Height() > 0 {
+			childRect = rect
+		}
+	}
+	if inter := childRect.Intersect(scope.base); !inter.Empty() {
+		for _, point := range tapVisualRegionPoints(scope, childRect, inter) {
+			if !provesSubtreeTapPoint(scope, point.x, point.y) {
+				continue
+			}
+			owner, _ := pointOwner(scope, point.x, point.y)
+			return point.x, point.y, tapModeBubbleColocated, owner, true, true
+		}
+	}
+	var candidateRaw *device.RawNode
+	if candidateInfo := view.info[candidate]; candidateInfo != nil && candidateInfo.hasSource &&
+		candidateInfo.rawIndex >= 0 && view.capture != nil &&
+		candidateInfo.rawIndex < len(view.capture.Nodes) {
+		candidateRaw = &view.capture.Nodes[candidateInfo.rawIndex]
+	}
+	for _, option := range enumerateTapCandidates(scope, candidateRaw) {
+		if !provesSubtreeTapPoint(scope, option.x, option.y) {
+			continue
+		}
+		return option.x, option.y, tapModeBubbleColocated, option.carrier, false, true
+	}
+	return 0, 0, "", nil, false, false
+}
+
+func subtreeIntersectsRect(root *protocol.Node, base device.Rect) bool {
+	if root == nil || base.Empty() {
+		return false
+	}
+	visited := make(map[*protocol.Node]struct{})
+	stack := []*protocol.Node{root}
+	for len(stack) > 0 {
+		current := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if current == nil {
+			continue
+		}
+		if _, seen := visited[current]; seen {
+			continue
+		}
+		visited[current] = struct{}{}
+		if !current.Context && current.Bounds != nil {
+			rect := rectFromBounds(current.Bounds)
+			if rect.Width() > 0 && rect.Height() > 0 && !rect.Intersect(base).Empty() {
+				return true
+			}
+		}
+		for _, child := range current.Children {
+			stack = append(stack, child)
+		}
+	}
+	return false
+}
+
+func topLevelTapScopeBlockers(scope *tapScope, parent *protocol.Node) []*protocol.Node {
+	if scope == nil || parent == nil || scope.base.Empty() {
+		return nil
+	}
+	var blockers []*protocol.Node
+	visited := make(map[*protocol.Node]struct{})
+	visited[parent] = struct{}{}
+	var walk func(node *protocol.Node)
+	walk = func(node *protocol.Node) {
+		if node == nil {
+			return
+		}
+		if _, seen := visited[node]; seen {
+			return
+		}
+		visited[node] = struct{}{}
+		if isTouchInteractive(node) || node.Context {
+			if subtreeIntersectsRect(node, scope.base) {
+				blockers = append(blockers, node)
+			}
+			return
+		}
+		for _, child := range node.Children {
+			walk(child)
+		}
+	}
+	for _, child := range parent.Children {
+		walk(child)
+	}
+	return blockers
+}
+
+func isTopLevelCoextensiveBlocker(scope *tapScope, view *tapPublicView,
+	parent, candidate *protocol.Node, screen device.Rect) bool {
+	if scope == nil || view == nil || parent == nil || candidate == nil ||
+		parent == candidate || candidate.Context || candidate.Role == protocol.RoleRoot {
+		return false
+	}
+	if candidate.Enabled != nil && !*candidate.Enabled {
+		return false
+	}
+	blockers := topLevelTapScopeBlockers(scope, parent)
+	if len(blockers) != 1 || blockers[0] != candidate {
+		return false
+	}
+	parentRect, ok := publicNodeClippedRect(parent, screen)
+	if !ok {
+		return false
+	}
+	candidateRect, ok := publicNodeClippedRect(candidate, screen)
+	if !ok {
+		return false
+	}
+	return isCoextensiveRect(candidateRect, parentRect)
 }
 
 // tapStaticPoint is one logical point tested by the static planner or by the
@@ -1053,15 +1233,13 @@ type tapStaticOwnerFact struct {
 }
 
 // tapStaticDiagnosis is the bounded failure summary of the original fixed
-// candidates plus the optional suggestion group. Ref lists are already
-// deduplicated, ordered and truncated.
+// candidates. Node slices are deduplicated and ordered for unified candidate
+// and blocking_refs construction.
 type tapStaticDiagnosis struct {
-	reason              string
-	occludingRefs       []string
-	ambiguousRefs       []string
-	ownerRefs           []string
-	suggestedPoint      *tapStaticPoint
-	suggestedCarrierRef string
+	reason         string
+	occludingNodes []*protocol.Node
+	ambiguousNodes []*protocol.Node
+	ownerNodes     []*protocol.Node
 }
 
 func tapPublicOrder(view *tapPublicView, node *protocol.Node) int {
@@ -1122,37 +1300,14 @@ func tapWholeTreePointOwners(view *tapPublicView, x, y int) (*protocol.Node, []*
 	if view == nil || view.tree == nil || view.tree.Root == nil {
 		return nil, nil, pointNone
 	}
-	bestDepth, bestCount := -1, 0
-	var best *protocol.Node
-	var ties []*protocol.Node
-	var walk func(node *protocol.Node, depth int)
-	walk = func(node *protocol.Node, depth int) {
-		if node == nil {
-			return
-		}
-		if depth > 0 && !node.Context && node.Role != protocol.RoleRoot &&
-			node.Bounds != nil && node.Bounds.Contains(x, y) {
-			switch {
-			case depth > bestDepth:
-				bestDepth, best, bestCount = depth, node, 1
-				ties = []*protocol.Node{node}
-			case depth == bestDepth:
-				bestCount++
-				ties = append(ties, node)
-			}
-		}
-		for _, child := range node.Children {
-			walk(child, depth+1)
-		}
-	}
-	walk(view.tree.Root, 0)
-	switch {
-	case bestCount == 0:
+	hits := resolvePointSet(view.tree.Root, x, y)
+	switch len(hits) {
+	case 0:
 		return nil, nil, pointNone
-	case bestCount > 1:
-		return nil, ties, pointAmbiguous
+	case 1:
+		return hits[0], nil, pointUnique
 	default:
-		return best, nil, pointUnique
+		return nil, hits, pointAmbiguous
 	}
 }
 
@@ -1193,15 +1348,20 @@ func classifyTapStaticPoint(view *tapPublicView, scope *tapScope,
 	if info := view.info[hit]; info == nil || !info.hasSource {
 		return tapStaticPointFailure{kind: tapStaticReasonAmbiguous}
 	}
-	if hit == object {
-		return tapStaticPointFailure{}
+	if hit != object {
+		carrier := scope.carrierByRef[hit.Ref]
+		if carrier == nil || carrier.node != hit {
+			return tapStaticPointFailure{
+				kind: tapStaticReasonOwnerMismatch, related: []*protocol.Node{hit},
+			}
+		}
 	}
-	if carrier := scope.carrierByRef[hit.Ref]; carrier != nil && carrier.node == hit {
-		return tapStaticPointFailure{}
+	if external := externalInteractiveOwnersAt(view, object, x, y); len(external) > 0 {
+		return tapStaticPointFailure{
+			kind: tapStaticReasonOwnerMismatch, related: external,
+		}
 	}
-	return tapStaticPointFailure{
-		kind: tapStaticReasonOwnerMismatch, related: []*protocol.Node{hit},
-	}
+	return tapStaticPointFailure{}
 }
 
 // tapStaticCandidatePoints replays exactly the direct-target candidates the
@@ -1216,33 +1376,32 @@ func tapStaticCandidatePoints(scope *tapScope, raw *device.RawNode) []tapStaticP
 }
 
 // tapStaticBubbleCandidatePoints replays the child center (including its clip
-// fallback) before the ancestor candidate sequence, preserving the original
-// order and duplicate behavior.
+// visual-region points and, when no competing control overlaps cClip, the
+// ancestor's 4-tier candidate sequence.
 func tapStaticBubbleCandidatePoints(scope *tapScope, view *tapPublicView,
 	ancestor, child *protocol.Node) []tapStaticPoint {
 	var points []tapStaticPoint
-	if scope == nil || view == nil {
+	if scope == nil || view == nil || ancestor == nil || child == nil {
 		return points
 	}
-	if child != nil && child.Bounds != nil {
+	var childRect device.Rect
+	if child.Bounds != nil {
 		rect := rectFromBounds(child.Bounds)
 		if rect.Width() > 0 && rect.Height() > 0 {
-			x, y, ok := tapSafeCenter(rect)
-			if ok && !scope.base.Contains(x, y) {
-				if clip := rect.Intersect(scope.base); !clip.Empty() {
-					x, y, ok = tapSafeCenter(clip)
-				} else {
-					ok = false
-				}
-			}
-			if ok && scope.base.Contains(x, y) {
-				points = append(points, tapStaticPoint{x: x, y: y})
-			}
+			childRect = rect
 		}
 	}
-	ancestorInfo := view.info[ancestor]
+	cClip := childRect.Intersect(scope.base)
+	if cClip.Empty() {
+		return points
+	}
+	points = append(points, tapVisualRegionPoints(scope, childRect, cClip)...)
+	if hasCompetingControlOverlap(view, scope, ancestor, cClip) {
+		return points
+	}
 	var ancestorRaw *device.RawNode
-	if ancestorInfo != nil && ancestorInfo.hasSource && ancestorInfo.rawIndex >= 0 &&
+	if ancestorInfo := view.info[ancestor]; ancestorInfo != nil && ancestorInfo.hasSource &&
+		ancestorInfo.rawIndex >= 0 && view.capture != nil &&
 		ancestorInfo.rawIndex < len(view.capture.Nodes) {
 		ancestorRaw = &view.capture.Nodes[ancestorInfo.rawIndex]
 	}
@@ -1326,51 +1485,55 @@ func tapStaticOccludingRefs(view *tapPublicView,
 }
 
 // tapSuggestStaticPoint probes at most nine new grid points. A point is
-// suggested only when it passes the full branch predicate, including the
-// whole-tree unique ownership and source checks required by the guidance
-// predicate. The original request is still rejected.
-func tapSuggestStaticPoint(view *tapPublicView, scope *tapScope,
-	object *protocol.Node, original []tapStaticPoint) (*tapStaticPoint, string) {
-	if view == nil || view.tree == nil || view.tree.Root == nil || scope == nil || object == nil {
-		return nil, ""
+func tapStaticOrderedNodes(nodes map[string]*protocol.Node, orders map[string]int) []*protocol.Node {
+	refs := make([]string, 0, len(nodes))
+	for ref := range nodes {
+		refs = append(refs, ref)
 	}
-	tested := map[[2]int]bool{}
-	for _, point := range original {
-		tested[[2]int{point.x, point.y}] = true
+	sort.Slice(refs, func(left, right int) bool {
+		if orders[refs[left]] != orders[refs[right]] {
+			return orders[refs[left]] < orders[refs[right]]
+		}
+		return refs[left] < refs[right]
+	})
+	out := make([]*protocol.Node, 0, len(refs))
+	for _, ref := range refs {
+		out = append(out, nodes[ref])
 	}
-	seen := map[[2]int]bool{}
-	for _, point := range tapStaticGridPoints(scope.base) {
-		key := [2]int{point.x, point.y}
-		if tested[key] || seen[key] {
-			continue
-		}
-		seen[key] = true
-		if !provesGuidancePoint(view, object, scope, point.x, point.y) {
-			continue
-		}
-		ref, state := resolvePoint(view.tree.Root, point.x, point.y)
-		if state != pointUnique || ref == "" {
-			continue
-		}
-		carrierRef := ""
-		if ref != object.Ref {
-			carrier := scope.carrierByRef[ref]
-			if carrier == nil || carrier.node == nil || carrier.node.Ref != ref {
-				continue
-			}
-			carrierRef = ref
-		}
-		suggested := point
-		return &suggested, carrierRef
+	return out
+}
+
+func tapStaticOccludingNodes(nodes map[string]*protocol.Node,
+	facts map[string]tapStaticOwnerFact) []*protocol.Node {
+	refs := make([]string, 0, len(nodes))
+	for ref := range nodes {
+		refs = append(refs, ref)
 	}
-	return nil, ""
+	sort.Slice(refs, func(left, right int) bool {
+		leftFact, rightFact := facts[refs[left]], facts[refs[right]]
+		if leftFact.depth != rightFact.depth {
+			return leftFact.depth > rightFact.depth
+		}
+		if leftFact.order != rightFact.order {
+			return leftFact.order < rightFact.order
+		}
+		return refs[left] < refs[right]
+	})
+	out := make([]*protocol.Node, 0, len(refs))
+	for _, ref := range refs {
+		out = append(out, nodes[ref])
+	}
+	return out
 }
 
 func diagnoseTapStaticFailure(view *tapPublicView, scope *tapScope,
 	object *protocol.Node, bubble bool, original []tapStaticPoint) *tapStaticDiagnosis {
 	occluding := map[string]tapStaticOwnerFact{}
+	occludingByRef := map[string]*protocol.Node{}
 	ambiguous := map[string]int{}
+	ambiguousByRef := map[string]*protocol.Node{}
 	owners := map[string]int{}
+	ownersByRef := map[string]*protocol.Node{}
 	categories := map[string]bool{}
 	for _, point := range original {
 		failure := classifyTapStaticPoint(view, scope, object, bubble, point.x, point.y)
@@ -1380,7 +1543,7 @@ func diagnoseTapStaticFailure(view *tapPublicView, scope *tapScope,
 		categories[failure.kind] = true
 		switch failure.kind {
 		case tapStaticReasonBlocked:
-			if failure.owner == nil {
+			if failure.owner == nil || failure.owner.Ref == "" {
 				continue
 			}
 			previous, exists := occluding[failure.owner.Ref]
@@ -1389,6 +1552,7 @@ func diagnoseTapStaticFailure(view *tapPublicView, scope *tapScope,
 				occluding[failure.owner.Ref] = tapStaticOwnerFact{
 					depth: failure.ownerDepth, order: failure.ownerOrder,
 				}
+				occludingByRef[failure.owner.Ref] = failure.owner
 			}
 		case tapStaticReasonAmbiguous:
 			for _, node := range failure.related {
@@ -1396,6 +1560,7 @@ func diagnoseTapStaticFailure(view *tapPublicView, scope *tapScope,
 					continue
 				}
 				ambiguous[node.Ref] = tapPublicOrder(view, node)
+				ambiguousByRef[node.Ref] = node
 			}
 		case tapStaticReasonOwnerMismatch:
 			for _, node := range failure.related {
@@ -1403,6 +1568,7 @@ func diagnoseTapStaticFailure(view *tapPublicView, scope *tapScope,
 					continue
 				}
 				owners[node.Ref] = tapPublicOrder(view, node)
+				ownersByRef[node.Ref] = node
 			}
 		}
 	}
@@ -1420,15 +1586,12 @@ func diagnoseTapStaticFailure(view *tapPublicView, scope *tapScope,
 		// Keep the closed enum and do not invent a success for this path.
 		reason = tapStaticReasonMixed
 	}
-	diagnosis := &tapStaticDiagnosis{
-		reason:        reason,
-		occludingRefs: tapStaticOccludingRefs(view, occluding),
-		ambiguousRefs: tapStaticOrderedRefs(view, ambiguous),
-		ownerRefs:     tapStaticOrderedRefs(view, owners),
+	return &tapStaticDiagnosis{
+		reason:         reason,
+		occludingNodes: tapStaticOccludingNodes(occludingByRef, occluding),
+		ambiguousNodes: tapStaticOrderedNodes(ambiguousByRef, ambiguous),
+		ownerNodes:     tapStaticOrderedNodes(ownersByRef, owners),
 	}
-	diagnosis.suggestedPoint, diagnosis.suggestedCarrierRef =
-		tapSuggestStaticPoint(view, scope, object, original)
-	return diagnosis
 }
 
 func tapStaticScopeNoun(scope string) string {
@@ -1496,14 +1659,19 @@ func newTapInvalidTargetError(reason, scope, scopeRef string) *protocol.APIError
 	case tapStaticReasonContext:
 		message = "context 节点不能作为操作目标"
 	}
-	return protocol.NewError(422, protocol.CodeInvalidTarget, message).
+	apiErr := protocol.NewError(422, protocol.CodeInvalidTarget, message).
 		WithDetail("reason", reason).
 		WithDetail("scope", scope).
 		WithDetail("scope_ref", scopeRef)
+	if scope == tapStaticScopeAncestor && scopeRef != "" {
+		apiErr.WithDetail("ancestor_ref", scopeRef)
+	}
+	return apiErr
 }
 
 func newTapStaticUnsupportedError(reason string, action protocol.Action,
-	targetActions, ancestorActions []string, ancestorRef string) *protocol.APIError {
+	scope, scopeRef string, targetActions, ancestorActions []string,
+	ancestorRef string) *protocol.APIError {
 	message := "目标节点不含点击、长按或文本输入能力"
 	switch reason {
 	case tapStaticReasonTargetHasOtherAction:
@@ -1519,6 +1687,8 @@ func newTapStaticUnsupportedError(reason string, action protocol.Action,
 	}
 	apiErr := protocol.NewError(422, protocol.CodeNodeUnsupported, message).
 		WithDetail("reason", reason).
+		WithDetail("scope", scope).
+		WithDetail("scope_ref", scopeRef).
 		WithDetail("target_actions", targetActions)
 	if ancestorRef != "" {
 		apiErr.WithDetail("ancestor_ref", ancestorRef)
@@ -1530,19 +1700,29 @@ func newTapStaticUnsupportedError(reason string, action protocol.Action,
 }
 
 func newTapNoSafePointError(action protocol.Action, scope, scopeRef,
-	ancestorRef string, diagnosis *tapStaticDiagnosis) *protocol.APIError {
-	reason := tapStaticReasonMixed
+	ancestorRef, reason string) *protocol.APIError {
+	if reason == "" {
+		reason = tapStaticReasonMixed
+	}
 	suffix := "存在多类失败"
-	if diagnosis != nil {
-		reason = diagnosis.reason
-		switch reason {
-		case tapStaticReasonBlocked:
-			suffix = "候选点均受阻塞"
-		case tapStaticReasonAmbiguous:
-			suffix = "候选点均有归属歧义"
-		case tapStaticReasonOwnerMismatch:
-			suffix = "候选点归属不符"
+	switch reason {
+	case tapStaticReasonBlocked:
+		suffix = "候选点均受阻塞"
+	case tapStaticReasonAmbiguous:
+		suffix = "候选点均有归属歧义"
+	case tapStaticReasonOwnerMismatch:
+		suffix = "候选点归属不符"
+	case staticReasonColocatedAmbiguous:
+		message := fmt.Sprintf("目标位置存在多个可%s的共位候选，无法唯一确定落点",
+			tapStaticActionLabel(action))
+		apiErr := protocol.NewError(422, protocol.CodeNoSafePoint, message).
+			WithDetail("reason", reason).
+			WithDetail("scope", scope).
+			WithDetail("scope_ref", scopeRef)
+		if ancestorRef != "" {
+			apiErr.WithDetail("ancestor_ref", ancestorRef)
 		}
+		return apiErr
 	}
 	message := fmt.Sprintf("未能从%s的固定候选中证明%s落点：%s",
 		tapStaticScopeNoun(scope), tapStaticActionLabel(action), suffix)
@@ -1553,73 +1733,673 @@ func newTapNoSafePointError(action protocol.Action, scope, scopeRef,
 	if ancestorRef != "" {
 		apiErr.WithDetail("ancestor_ref", ancestorRef)
 	}
-	if diagnosis != nil {
-		if len(diagnosis.occludingRefs) > 0 {
-			apiErr.WithDetail("occluding_refs", diagnosis.occludingRefs)
-		}
-		if len(diagnosis.ambiguousRefs) > 0 {
-			apiErr.WithDetail("ambiguous_refs", diagnosis.ambiguousRefs)
-		}
-		if len(diagnosis.ownerRefs) > 0 {
-			apiErr.WithDetail("owner_refs", diagnosis.ownerRefs)
-		}
-		if diagnosis.suggestedPoint != nil {
-			apiErr.WithDetail("suggested_point", map[string]any{
-				"x": diagnosis.suggestedPoint.x, "y": diagnosis.suggestedPoint.y,
-			})
-			if diagnosis.suggestedCarrierRef != "" {
-				apiErr.WithDetail("suggested_carrier_ref", diagnosis.suggestedCarrierRef)
-			}
-		}
-	}
 	return apiErr
 }
 
-// planBubbleTapTarget plans the one C->A target lift. A is the first
-// touch-interactive ancestor; the plan carries both raw identities so the
-// claim-time frame can re-prove both before any dispatch.
-func planBubbleTapTarget(obs *observationState, view *tapPublicView,
-	child, ancestor *protocol.Node, action protocol.Action, started time.Time) (*tapPlan, *protocol.APIError) {
-	if obs == nil || view == nil || child == nil || ancestor == nil {
+func pointDistSq64(x1, y1, x2, y2 int) int64 {
+	dx := int64(x1) - int64(x2)
+	dy := int64(y1) - int64(y2)
+	return dx*dx + dy*dy
+}
+
+func nearestActionableTapAncestor(view *tapPublicView, target *protocol.Node,
+	action protocol.Action) *protocol.Node {
+	if view == nil || target == nil {
+		return nil
+	}
+	info := view.info[target]
+	if info == nil {
+		return nil
+	}
+	visited := make(map[*protocol.Node]struct{})
+	for parent := info.parent; parent != nil; {
+		if _, seen := visited[parent]; seen {
+			return nil
+		}
+		visited[parent] = struct{}{}
+		parentInfo := view.info[parent]
+		if parentInfo == nil || parent.Role == protocol.RoleRoot {
+			return nil
+		}
+		if !parent.Context && validTapPublicTarget(parent, action) {
+			return parent
+		}
+		parent = parentInfo.parent
+	}
+	return nil
+}
+
+func isValidTextPublicTarget(node *protocol.Node) bool {
+	if node == nil || node.Context || node.Role != protocol.RoleInput {
+		return false
+	}
+	if node.Bounds == nil || node.Bounds.Width() <= 0 || node.Bounds.Height() <= 0 {
+		return false
+	}
+	if node.Enabled != nil && !*node.Enabled {
+		return false
+	}
+	if node.Protected == nil || *node.Protected {
+		return false
+	}
+	return hasAction(node, protocol.ActionText) && hasAction(node, protocol.ActionTap)
+}
+
+func collectTapFallbackCandidates(view *tapPublicView, target *protocol.Node,
+	action protocol.Action, screen device.Rect, includeAncestor bool) []candidateEntry {
+	if view == nil || target == nil || screen.Empty() {
+		return nil
+	}
+	var entries []candidateEntry
+	if includeAncestor {
+		if ancestor := nearestActionableTapAncestor(view, target, action); ancestor != nil {
+			entries = append(entries, candidateEntry{
+				node:     ancestor,
+				relation: candidateRelationAncestor,
+			})
+		}
+	}
+	targetRect, hasTargetRect := publicNodeClippedRect(target, screen)
+	centerX, centerY, hasCenter := tapSafeCenter(targetRect)
+	type scored struct {
+		node           *protocol.Node
+		relation       string
+		containsCenter bool
+		overlapArea    int64
+		area           int64
+		order          int
+	}
+	var nearby []scored
+	for _, node := range view.nodes {
+		if node == nil || node == target || !validTapPublicTarget(node, action) {
+			continue
+		}
+		if isPublicAncestor(view, node, target) {
+			continue
+		}
+		clipped, ok := publicNodeClippedRect(node, screen)
+		if !ok {
+			continue
+		}
+		isChild := isPublicAncestor(view, target, node)
+		var overlapArea int64
+		contains := false
+		if hasTargetRect {
+			inter := clipped.Intersect(targetRect)
+			if inter.Empty() {
+				continue
+			}
+			overlapArea = rectArea64(inter)
+			contains = hasCenter && clipped.Contains(centerX, centerY)
+		} else if !isChild {
+			continue
+		}
+		relation := candidateRelationOverlapping
+		if isChild {
+			relation = candidateRelationChild
+		}
+		nearby = append(nearby, scored{
+			node:           node,
+			relation:       relation,
+			containsCenter: contains,
+			overlapArea:    overlapArea,
+			area:           rectArea64(clipped),
+			order:          tapPublicOrder(view, node),
+		})
+	}
+	sort.Slice(nearby, func(left, right int) bool {
+		if nearby[left].containsCenter != nearby[right].containsCenter {
+			return nearby[left].containsCenter
+		}
+		if nearby[left].overlapArea != nearby[right].overlapArea {
+			return nearby[left].overlapArea > nearby[right].overlapArea
+		}
+		if nearby[left].area != nearby[right].area {
+			return nearby[left].area < nearby[right].area
+		}
+		return nearby[left].order < nearby[right].order
+	})
+	for _, item := range nearby {
+		entries = append(entries, candidateEntry{
+			node:     item.node,
+			relation: item.relation,
+		})
+	}
+	return entries
+}
+
+func collectTextFallbackCandidates(view *tapPublicView, target *protocol.Node,
+	screen device.Rect) []candidateEntry {
+	if view == nil || target == nil || screen.Empty() {
+		return nil
+	}
+	var entries []candidateEntry
+	if info := view.info[target]; info != nil {
+		visited := make(map[*protocol.Node]struct{})
+		for parent := info.parent; parent != nil; {
+			if _, seen := visited[parent]; seen {
+				break
+			}
+			visited[parent] = struct{}{}
+			parentInfo := view.info[parent]
+			if parentInfo == nil || parent.Role == protocol.RoleRoot {
+				break
+			}
+			if isValidTextPublicTarget(parent) {
+				entries = append(entries, candidateEntry{
+					node:     parent,
+					relation: candidateRelationAncestor,
+				})
+				break
+			}
+			parent = parentInfo.parent
+		}
+	}
+	targetRect, hasTargetRect := publicNodeClippedRect(target, screen)
+	centerX, centerY, hasCenter := tapSafeCenter(targetRect)
+	type scored struct {
+		node           *protocol.Node
+		relation       string
+		containsCenter bool
+		overlapArea    int64
+		area           int64
+		order          int
+	}
+	var nearby []scored
+	for _, node := range view.nodes {
+		if node == nil || node == target || !isValidTextPublicTarget(node) {
+			continue
+		}
+		if isPublicAncestor(view, node, target) {
+			continue
+		}
+		clipped, ok := publicNodeClippedRect(node, screen)
+		if !ok {
+			continue
+		}
+		isChild := isPublicAncestor(view, target, node)
+		var overlapArea int64
+		contains := false
+		if hasTargetRect {
+			inter := clipped.Intersect(targetRect)
+			if inter.Empty() {
+				continue
+			}
+			overlapArea = rectArea64(inter)
+			contains = hasCenter && clipped.Contains(centerX, centerY)
+		} else if !isChild {
+			continue
+		}
+		relation := candidateRelationOverlapping
+		if isChild {
+			relation = candidateRelationChild
+		}
+		nearby = append(nearby, scored{
+			node:           node,
+			relation:       relation,
+			containsCenter: contains,
+			overlapArea:    overlapArea,
+			area:           rectArea64(clipped),
+			order:          tapPublicOrder(view, node),
+		})
+	}
+	sort.Slice(nearby, func(left, right int) bool {
+		if nearby[left].containsCenter != nearby[right].containsCenter {
+			return nearby[left].containsCenter
+		}
+		if nearby[left].overlapArea != nearby[right].overlapArea {
+			return nearby[left].overlapArea > nearby[right].overlapArea
+		}
+		if nearby[left].area != nearby[right].area {
+			return nearby[left].area < nearby[right].area
+		}
+		return nearby[left].order < nearby[right].order
+	})
+	for _, item := range nearby {
+		entries = append(entries, candidateEntry{
+			node:     item.node,
+			relation: item.relation,
+		})
+	}
+	return entries
+}
+
+func collectDirectBlockingDiagnostics(view *tapPublicView, target *protocol.Node,
+	action protocol.Action, screen device.Rect, diagnosis *tapStaticDiagnosis) ([]candidateEntry, []string) {
+	if view == nil || target == nil || diagnosis == nil {
+		return nil, nil
+	}
+	targetRect, _ := publicNodeClippedRect(target, screen)
+	targetCenterX, targetCenterY, hasCenter := tapSafeCenter(targetRect)
+	type scoredChild struct {
+		node  *protocol.Node
+		dist2 int64
+		area  int64
+		order int
+	}
+	var childCandidates []scoredChild
+	var blockingRefs []string
+	seenCandidate := map[string]struct{}{}
+	for _, owner := range diagnosis.occludingNodes {
+		if owner == nil || owner.Ref == "" || owner == target {
+			continue
+		}
+		if validTapPublicTarget(owner, action) {
+			if _, dup := seenCandidate[owner.Ref]; dup {
+				continue
+			}
+			clipped, ok := publicNodeClippedRect(owner, screen)
+			if !ok {
+				blockingRefs = append(blockingRefs, owner.Ref)
+				continue
+			}
+			seenCandidate[owner.Ref] = struct{}{}
+			var dist2 int64
+			if hasCenter {
+				if ownerCenterX, ownerCenterY, ok := tapSafeCenter(clipped); ok {
+					dist2 = pointDistSq64(ownerCenterX, ownerCenterY, targetCenterX, targetCenterY)
+				}
+			}
+			childCandidates = append(childCandidates, scoredChild{
+				node:  owner,
+				dist2: dist2,
+				area:  rectArea64(clipped),
+				order: tapPublicOrder(view, owner),
+			})
+		} else {
+			blockingRefs = append(blockingRefs, owner.Ref)
+		}
+	}
+	sort.Slice(childCandidates, func(left, right int) bool {
+		if childCandidates[left].dist2 != childCandidates[right].dist2 {
+			return childCandidates[left].dist2 < childCandidates[right].dist2
+		}
+		if childCandidates[left].area != childCandidates[right].area {
+			return childCandidates[left].area < childCandidates[right].area
+		}
+		return childCandidates[left].order < childCandidates[right].order
+	})
+	entries := make([]candidateEntry, 0, len(childCandidates))
+	for _, item := range childCandidates {
+		entries = append(entries, candidateEntry{
+			node:     item.node,
+			relation: candidateRelationChild,
+		})
+	}
+	for _, node := range diagnosis.ambiguousNodes {
+		if node == nil || node.Ref == "" || node == target {
+			continue
+		}
+		if _, isCand := seenCandidate[node.Ref]; isCand {
+			continue
+		}
+		if !validTapPublicTarget(node, action) {
+			blockingRefs = append(blockingRefs, node.Ref)
+		}
+	}
+	return entries, blockingRefs
+}
+
+func planDirectTapRef(obs *observationState, view *tapPublicView,
+	operation *protocol.Operation, target *protocol.Node, action protocol.Action,
+	allowCoextensiveChild bool, started time.Time) (*pointCheck, *scrollPlan, *tapPlan, *protocol.APIError) {
+	input, apiErr := buildTapInput(obs, view, target)
+	if apiErr != nil {
+		return nil, nil, nil, apiErr
+	}
+	screen := screenRectFromDisplay(obs.Screen)
+	scope, apiErr := collectTapScope(input)
+	if apiErr != nil {
+		if apiErr.HTTPStatus == 422 {
+			plan := &tapPlan{
+				strategy: tapModeRejected, action: string(action),
+				targetRef: target.Ref, targetRaw: input.targetRaw,
+				took: time.Since(started),
+			}
+			errOut := newTapInvalidTargetError(
+				tapStaticReasonNoGeometry, tapStaticScopeTarget, target.Ref)
+			if operation != nil && operation.Type == "text" {
+				attachStaticCandidates(errOut, buildStaticCandidates(obs, view, operation,
+					collectTextFallbackCandidates(view, target, screen)))
+			} else {
+				attachStaticCandidates(errOut, buildStaticCandidates(obs, view, operation,
+					collectTapFallbackCandidates(view, target, action, screen, true)))
+			}
+			return nil, nil, plan, errOut
+		}
+		return nil, nil, nil, apiErr
+	}
+	plan, apiErr := chooseTapPlan(scope, input, target, action, started)
+	if apiErr == nil {
+		return nil, nil, plan, nil
+	}
+	if allowCoextensiveChild {
+		blockers := topLevelTapScopeBlockers(scope, target)
+		if len(blockers) == 1 {
+			delegate := blockers[0]
+			if validTapPublicTarget(delegate, action) &&
+				isTopLevelCoextensiveBlocker(scope, view, target, delegate, screen) {
+				if delegateInput, ok := tapInputFromValidatedView(view, input.topology, delegate); ok {
+					if delegateScope, scopeErr := collectTapScope(delegateInput); scopeErr == nil {
+						if delegatePlan, planErr := chooseTapPlan(delegateScope, delegateInput,
+							delegate, action, started); planErr == nil && delegatePlan != nil &&
+							delegatePlan.strategy != tapModeRejected {
+							delegated := &tapPlan{
+								x:           delegatePlan.x,
+								y:           delegatePlan.y,
+								strategy:    tapModeCoextensiveChild,
+								action:      string(action),
+								targetRef:   target.Ref,
+								targetRaw:   input.targetRaw,
+								carrierRef:  delegatePlan.carrierRef,
+								carrierRaw:  delegatePlan.carrierRaw,
+								delegateRaw: delegateInput.targetRaw,
+								took:        time.Since(started),
+							}
+							return nil, nil, delegated, nil
+						}
+					}
+				}
+			}
+		}
+	}
+	original := tapStaticCandidatePoints(scope, input.targetRaw)
+	diagnosis := diagnoseTapStaticFailure(view, scope, target, false, original)
+	plan.took = time.Since(started)
+	errOut := newTapNoSafePointError(action, tapStaticScopeTarget, target.Ref, "", diagnosis.reason)
+	entries, blockingRefs := collectDirectBlockingDiagnostics(view, target, action, screen, diagnosis)
+	attachStaticCandidates(errOut, buildStaticCandidates(obs, view, operation, entries))
+	attachStaticBlockingRefs(errOut, blockingRefs)
+	return nil, nil, plan, errOut
+}
+
+type bubbleStepAStatus int
+
+const (
+	bubbleStepANoAncestor bubbleStepAStatus = iota
+	bubbleStepAAncestorInvalid
+	bubbleStepAAncestorMissingAction
+	bubbleStepAAncestorNoGeometry
+	bubbleStepANoSafePoint
+)
+
+func planBubbleOrColocated(obs *observationState, view *tapPublicView,
+	operation *protocol.Operation, child *protocol.Node, action protocol.Action,
+	started time.Time) (*tapPlan, *protocol.APIError) {
+	if obs == nil || view == nil || child == nil {
 		return nil, tapHierarchyError()
 	}
-	// buildTapInput validates the full source map and fills view.byRaw for every
-	// public node, so the child lookup below has its raw index.
-	ancestorInput, apiErr := buildTapInput(obs, view, ancestor)
-	if apiErr != nil {
-		return nil, apiErr
-	}
-	childInfo := view.info[child]
-	if childInfo == nil || !childInfo.hasSource || childInfo.rawIndex < 0 ||
-		childInfo.rawIndex >= len(view.capture.Nodes) {
-		return nil, tapTargetSourceMissing()
-	}
-	scope, apiErr := collectTapScope(ancestorInput)
-	if apiErr != nil {
-		if apiErr.Code == protocol.CodeNodeUnsupported {
-			return nil, newTapInvalidTargetError(tapStaticReasonNoGeometry,
-				tapStaticScopeAncestor, ancestor.Ref)
+	screen := screenRectFromDisplay(obs.Screen)
+	targetActions := tapPublicActions(child)
+
+	ancestor := nearestInteractiveAncestor(view, child)
+	status := bubbleStepANoAncestor
+	var ancestorScope *tapScope
+	if ancestor != nil {
+		if ancestor.Enabled != nil && !*ancestor.Enabled ||
+			ancestor.Bounds == nil || ancestor.Bounds.Width() <= 0 || ancestor.Bounds.Height() <= 0 {
+			status = bubbleStepAAncestorInvalid
+		} else if !hasAction(ancestor, action) {
+			status = bubbleStepAAncestorMissingAction
+		} else {
+			ancestorInput, apiErr := buildTapInput(obs, view, ancestor)
+			if apiErr != nil {
+				if apiErr.Code == protocol.CodeHierarchyFailed ||
+					apiErr.Code == protocol.CodeNodeNotFound {
+					return nil, apiErr
+				}
+				status = bubbleStepAAncestorNoGeometry
+			} else {
+				childInfo := view.info[child]
+				if childInfo == nil || !childInfo.hasSource || childInfo.rawIndex < 0 ||
+					childInfo.rawIndex >= len(view.capture.Nodes) {
+					return nil, tapTargetSourceMissing()
+				}
+				scope, scopeErr := collectTapScope(ancestorInput)
+				if scopeErr != nil {
+					if scopeErr.Code == protocol.CodeHierarchyFailed {
+						return nil, scopeErr
+					}
+					status = bubbleStepAAncestorNoGeometry
+				} else {
+					ancestorScope = scope
+					if x, y, strategy, carrier, ok := chooseBubbleTapPoint(
+						scope, view, ancestor, child); ok {
+						plan := &tapPlan{
+							x:                 x,
+							y:                 y,
+							strategy:          strategy,
+							action:            string(action),
+							targetRef:         child.Ref,
+							targetRaw:         &view.capture.Nodes[childInfo.rawIndex],
+							bubbleAncestorRaw: ancestorInput.targetRaw,
+							took:              time.Since(started),
+						}
+						if carrier != nil {
+							plan.carrierRef = carrier.node.Ref
+							plan.carrierRaw = carrier.raw
+						}
+						return plan, nil
+					}
+					status = bubbleStepANoSafePoint
+				}
+			}
 		}
-		return nil, apiErr
 	}
-	x, y, strategy, carrier, ok := chooseBubbleTapPoint(scope, view, ancestor, child)
-	if !ok {
-		original := tapStaticBubbleCandidatePoints(scope, view, ancestor, child)
-		diagnosis := diagnoseTapStaticFailure(view, scope, ancestor, true, original)
-		return nil, newTapNoSafePointError(action, tapStaticScopeAncestor,
-			ancestor.Ref, ancestor.Ref, diagnosis)
+
+	// Step B: co-located local clickable control absorption.
+	type colocatedMatch struct {
+		node           *protocol.Node
+		input          *tapInput
+		x, y           int
+		strategy       string
+		carrier        *tapCarrier
+		inChild        bool
+		clipped        device.Rect
+		containsCenter bool
+		overlapArea    int64
+		area           int64
+		order          int
 	}
-	plan := &tapPlan{
-		x: x, y: y, strategy: strategy, action: string(action),
-		targetRef: child.Ref, targetRaw: &view.capture.Nodes[childInfo.rawIndex],
-		bubbleAncestorRaw: ancestorInput.targetRaw,
-		took:              time.Since(started),
+	var matched []colocatedMatch
+	childRect, hasChildRect := publicNodeClippedRect(child, screen)
+	centerX, centerY, hasCenter := tapSafeCenter(childRect)
+	if topology, ok := ensureTapViewTopology(obs, view); ok && hasChildRect {
+		for _, node := range view.nodes {
+			if node == nil || node == child || !validTapPublicTarget(node, action) {
+				continue
+			}
+			if !colocatedMatchGuard(view, child, node, screen) {
+				continue
+			}
+			candInput, ok := tapInputFromValidatedView(view, topology, node)
+			if !ok {
+				continue
+			}
+			candScope, scopeErr := collectTapScope(candInput)
+			if scopeErr != nil {
+				continue
+			}
+			x, y, strategy, carrier, inChild, ok := chooseColocatedTapPoint(
+				candScope, view, child, node, screen)
+			if !ok {
+				continue
+			}
+			candRect, _ := publicNodeClippedRect(node, screen)
+			matched = append(matched, colocatedMatch{
+				node:           node,
+				input:          candInput,
+				x:              x,
+				y:              y,
+				strategy:       strategy,
+				carrier:        carrier,
+				inChild:        inChild,
+				clipped:        candRect,
+				containsCenter: hasCenter && candRect.Contains(centerX, centerY),
+				overlapArea:    rectArea64(candRect.Intersect(childRect)),
+				area:           rectArea64(candRect),
+				order:          tapPublicOrder(view, node),
+			})
+		}
 	}
-	if carrier != nil {
-		plan.carrierRef = carrier.node.Ref
-		plan.carrierRaw = carrier.raw
+	folded := make([]colocatedMatch, 0, len(matched))
+	for idx, candidate := range matched {
+		superseded := false
+		for otherIdx, other := range matched {
+			if idx == otherIdx {
+				continue
+			}
+			if isPublicAncestor(view, candidate.node, other.node) &&
+				isCoextensiveRect(other.clipped, candidate.clipped) {
+				superseded = true
+				break
+			}
+		}
+		if !superseded {
+			folded = append(folded, candidate)
+		}
 	}
-	return plan, nil
+
+	buildColocatedPlan := func(chosen colocatedMatch) (*tapPlan, *protocol.APIError) {
+		childInfo := view.info[child]
+		if childInfo == nil || !childInfo.hasSource || childInfo.rawIndex < 0 ||
+			childInfo.rawIndex >= len(view.capture.Nodes) {
+			return nil, tapTargetSourceMissing()
+		}
+		plan := &tapPlan{
+			x:                chosen.x,
+			y:                chosen.y,
+			strategy:         tapModeBubbleColocated,
+			action:           string(action),
+			targetRef:        child.Ref,
+			targetRaw:        &view.capture.Nodes[childInfo.rawIndex],
+			colocatedRaw:     chosen.input.targetRaw,
+			colocatedInChild: chosen.inChild,
+			took:             time.Since(started),
+		}
+		if chosen.carrier != nil {
+			plan.carrierRef = chosen.carrier.node.Ref
+			plan.carrierRaw = chosen.carrier.raw
+		}
+		return plan, nil
+	}
+
+	if len(folded) == 1 {
+		return buildColocatedPlan(folded[0])
+	}
+	if len(folded) >= 2 {
+		centerWinnerIndex := -1
+		centerCount := 0
+		for idx, candidate := range folded {
+			if candidate.containsCenter {
+				centerWinnerIndex = idx
+				centerCount++
+			}
+		}
+		if centerCount == 1 {
+			return buildColocatedPlan(folded[centerWinnerIndex])
+		}
+		sort.Slice(folded, func(left, right int) bool {
+			if folded[left].containsCenter != folded[right].containsCenter {
+				return folded[left].containsCenter
+			}
+			if folded[left].overlapArea != folded[right].overlapArea {
+				return folded[left].overlapArea > folded[right].overlapArea
+			}
+			if folded[left].area != folded[right].area {
+				return folded[left].area < folded[right].area
+			}
+			return folded[left].order < folded[right].order
+		})
+		entries := make([]candidateEntry, 0, len(folded))
+		for _, candidate := range folded {
+			relation := candidateRelationOverlapping
+			if isPublicAncestor(view, child, candidate.node) {
+				relation = candidateRelationChild
+			}
+			entries = append(entries, candidateEntry{
+				node:     candidate.node,
+				relation: relation,
+			})
+		}
+		errOut := newTapNoSafePointError(action, tapStaticScopeTarget, child.Ref, "",
+			staticReasonColocatedAmbiguous)
+		attachStaticCandidates(errOut, buildStaticCandidates(obs, view, operation, entries))
+		return nil, errOut
+	}
+
+	// Step B found no match: report Step A failure with unified error details.
+	fallback := collectTapFallbackCandidates(view, child, action, screen, false)
+	switch status {
+	case bubbleStepANoAncestor:
+		errOut := newTapStaticUnsupportedError(tapStaticReasonNoInteractiveAncestor,
+			action, tapStaticScopeTarget, child.Ref, targetActions, nil, "")
+		attachStaticCandidates(errOut, buildStaticCandidates(obs, view, operation, fallback))
+		return nil, errOut
+	case bubbleStepAAncestorInvalid:
+		errOut := newTapStaticUnsupportedError(tapStaticReasonAncestorInvalid,
+			action, tapStaticScopeAncestor, ancestor.Ref, targetActions,
+			tapPublicActions(ancestor), ancestor.Ref)
+		attachStaticCandidates(errOut, buildStaticCandidates(obs, view, operation, fallback))
+		return nil, errOut
+	case bubbleStepAAncestorMissingAction:
+		errOut := newTapStaticUnsupportedError(tapStaticReasonAncestorMissingAction,
+			action, tapStaticScopeAncestor, ancestor.Ref, targetActions,
+			tapPublicActions(ancestor), ancestor.Ref)
+		attachStaticCandidates(errOut, buildStaticCandidates(obs, view, operation, fallback))
+		return nil, errOut
+	case bubbleStepAAncestorNoGeometry:
+		errOut := newTapInvalidTargetError(tapStaticReasonNoGeometry,
+			tapStaticScopeAncestor, ancestor.Ref)
+		attachStaticCandidates(errOut, buildStaticCandidates(obs, view, operation, fallback))
+		return nil, errOut
+	default:
+		original := tapStaticBubbleCandidatePoints(ancestorScope, view, ancestor, child)
+		diagnosis := diagnoseTapStaticFailure(view, ancestorScope, ancestor, true, original)
+		errOut := newTapNoSafePointError(action, tapStaticScopeAncestor,
+			ancestor.Ref, ancestor.Ref, diagnosis.reason)
+		entries := append([]candidateEntry(nil), fallback...)
+		var blockingRefs []string
+		for _, owner := range diagnosis.occludingNodes {
+			if owner == nil || owner.Ref == "" || owner == child || owner == ancestor {
+				continue
+			}
+			if validTapPublicTarget(owner, action) {
+				relation := candidateRelationOverlapping
+				if isPublicAncestor(view, child, owner) || isPublicAncestor(view, ancestor, owner) {
+					relation = candidateRelationChild
+				}
+				entries = append(entries, candidateEntry{node: owner, relation: relation})
+			} else {
+				blockingRefs = append(blockingRefs, owner.Ref)
+			}
+		}
+		for _, owner := range diagnosis.ownerNodes {
+			if owner == nil || owner.Ref == "" || owner == child || owner == ancestor {
+				continue
+			}
+			if validTapPublicTarget(owner, action) {
+				relation := candidateRelationOverlapping
+				if isPublicAncestor(view, child, owner) {
+					relation = candidateRelationChild
+				}
+				entries = append(entries, candidateEntry{node: owner, relation: relation})
+			} else {
+				blockingRefs = append(blockingRefs, owner.Ref)
+			}
+		}
+		for _, node := range diagnosis.ambiguousNodes {
+			if node == nil || node.Ref == "" || node == child || node == ancestor {
+				continue
+			}
+			if !validTapPublicTarget(node, action) {
+				blockingRefs = append(blockingRefs, node.Ref)
+			}
+		}
+		attachStaticCandidates(errOut, buildStaticCandidates(obs, view, operation, entries))
+		attachStaticBlockingRefs(errOut, blockingRefs)
+		return nil, errOut
+	}
 }
 
 func staticTapRefCheck(obs *observationState, operation *protocol.Operation) (
@@ -1629,6 +2409,9 @@ func staticTapRefCheck(obs *observationState, operation *protocol.Operation) (
 	if apiErr != nil {
 		return nil, nil, nil, apiErr
 	}
+	if _, apiErr := validateTapRawTopology(obs.Projection.Capture); apiErr != nil {
+		return nil, nil, nil, apiErr
+	}
 	target := view.byRef[operation.Target.Ref]
 	if target == nil {
 		return nil, nil, nil, protocol.NewError(409, protocol.CodeNodeNotFound, "目标节点不存在")
@@ -1637,8 +2420,7 @@ func staticTapRefCheck(obs *observationState, operation *protocol.Operation) (
 	if operation.Type == "long_press" {
 		action = protocol.ActionLongPress
 	}
-	// Keep the baseline order: root, context, missing bounds, disabled,
-	// action/lift, then the planner-owned source and geometry checks.
+	screen := screenRectFromDisplay(obs.Screen)
 	if target.Role == protocol.RoleRoot {
 		return nil, nil, nil, newTapInvalidTargetError(tapStaticReasonRoot,
 			tapStaticScopeTarget, target.Ref)
@@ -1647,11 +2429,12 @@ func staticTapRefCheck(obs *observationState, operation *protocol.Operation) (
 		return nil, nil, nil, newTapInvalidTargetError(tapStaticReasonContext,
 			tapStaticScopeTarget, target.Ref)
 	}
-	if target.Bounds == nil {
-		apiErr := newTapInvalidTargetError(tapStaticReasonNoGeometry,
+	if target.Bounds == nil || target.Bounds.Width() <= 0 || target.Bounds.Height() <= 0 {
+		errOut := newTapInvalidTargetError(tapStaticReasonNoGeometry,
 			tapStaticScopeTarget, target.Ref)
-		attachTapGuidance(apiErr, obs, view, target, action)
-		return nil, nil, nil, apiErr
+		entries := collectTapFallbackCandidates(view, target, action, screen, true)
+		attachStaticCandidates(errOut, buildStaticCandidates(obs, view, operation, entries))
+		return nil, nil, nil, errOut
 	}
 	if target.Enabled != nil && !*target.Enabled {
 		return nil, nil, nil, protocol.NewError(409, protocol.CodeNodeDisabled, "目标节点已禁用")
@@ -1659,178 +2442,75 @@ func staticTapRefCheck(obs *observationState, operation *protocol.Operation) (
 	targetActions := tapPublicActions(target)
 	if !hasAction(target, action) {
 		if operation.EffectiveBubble() && !isTouchInteractive(target) {
-			ancestor := nearestInteractiveAncestor(view, target)
-			if ancestor == nil {
-				apiErr := newTapStaticUnsupportedError(tapStaticReasonNoInteractiveAncestor,
-					action, targetActions, nil, "")
-				attachTapGuidance(apiErr, obs, view, target, action)
-				return nil, nil, nil, apiErr
-			}
-			if ancestorActions := tapPublicActions(ancestor); ancestor.Enabled != nil && !*ancestor.Enabled ||
-				ancestor.Bounds == nil || ancestor.Bounds.Width() <= 0 || ancestor.Bounds.Height() <= 0 {
-				apiErr := newTapStaticUnsupportedError(tapStaticReasonAncestorInvalid,
-					action, targetActions, ancestorActions, ancestor.Ref)
-				attachTapGuidance(apiErr, obs, view, target, action)
-				return nil, nil, nil, apiErr
-			} else if !hasAction(ancestor, action) {
-				apiErr := newTapStaticUnsupportedError(tapStaticReasonAncestorMissingAction,
-					action, targetActions, ancestorActions, ancestor.Ref)
-				attachTapGuidance(apiErr, obs, view, target, action)
-				return nil, nil, nil, apiErr
-			}
-			bubblePlan, bubbleErr := planBubbleTapTarget(obs, view, target, ancestor, action, started)
+			bubblePlan, bubbleErr := planBubbleOrColocated(obs, view, operation, target, action, started)
 			return nil, nil, bubblePlan, bubbleErr
 		}
 		reason := tapStaticReasonTargetMissingAction
 		if isTouchInteractive(target) {
 			reason = tapStaticReasonTargetHasOtherAction
 		}
-		apiErr := newTapStaticUnsupportedError(reason, action, targetActions, nil, "")
-		attachTapGuidance(apiErr, obs, view, target, action)
-		return nil, nil, nil, apiErr
+		errOut := newTapStaticUnsupportedError(reason, action, tapStaticScopeTarget,
+			target.Ref, targetActions, nil, "")
+		entries := collectTapFallbackCandidates(view, target, action, screen, true)
+		attachStaticCandidates(errOut, buildStaticCandidates(obs, view, operation, entries))
+		return nil, nil, nil, errOut
 	}
-	input, apiErr := buildTapInput(obs, view, target)
-	if apiErr != nil {
-		return nil, nil, nil, apiErr
-	}
-	scope, apiErr := collectTapScope(input)
-	if apiErr != nil {
-		if apiErr.HTTPStatus == 422 {
-			plan := &tapPlan{
-				strategy: tapModeRejected, action: string(action),
-				targetRef: target.Ref, targetRaw: input.targetRaw,
-				took: time.Since(started),
-			}
-			return nil, nil, plan, newTapInvalidTargetError(
-				tapStaticReasonNoGeometry, tapStaticScopeTarget, target.Ref)
-		}
-		return nil, nil, nil, apiErr
-	}
-	plan, apiErr := chooseTapPlan(scope, input, target, action, started)
-	if apiErr != nil {
-		original := tapStaticCandidatePoints(scope, input.targetRaw)
-		diagnosis := diagnoseTapStaticFailure(view, scope, target, false, original)
-		plan.took = time.Since(started)
-		return nil, nil, plan, newTapNoSafePointError(action,
-			tapStaticScopeTarget, target.Ref, "", diagnosis)
-	}
-	return nil, nil, plan, nil
+	return planDirectTapRef(obs, view, operation, target, action, true, started)
 }
 
-// staticTapRefCheckLegacy preserves the pre-taxonomy static tap behavior for
-// the text focus tap. Text errors are outside the tap/long_press taxonomy.
-func staticTapRefCheckLegacy(obs *observationState, operation *protocol.Operation) (
-	*pointCheck, *scrollPlan, *tapPlan, *protocol.APIError) {
-	started := time.Now()
-	view, apiErr := collectTapPublicView(obs)
-	if apiErr != nil {
-		return nil, nil, nil, apiErr
-	}
-	target := view.byRef[operation.Target.Ref]
-	if target == nil {
-		return nil, nil, nil, protocol.NewError(409, protocol.CodeNodeNotFound, "目标节点不存在")
-	}
-	if target.Role == protocol.RoleRoot {
-		return nil, nil, nil, protocol.NewError(422, protocol.CodeNodeUnsupported,
-			"该节点不能作为操作目标")
-	}
-	action := protocol.ActionTap
-	unsupported := "目标节点不支持点击"
-	if operation.Type == "long_press" {
-		action = protocol.ActionLongPress
-		unsupported = "目标节点不支持长按"
-	}
-	if target.Context || target.Bounds == nil {
-		return nil, nil, nil, tapUnsupportedWithGuidance(obs, view, target, action,
-			"该节点不能作为操作目标")
-	}
-	if target.Enabled != nil && !*target.Enabled {
-		return nil, nil, nil, protocol.NewError(409, protocol.CodeNodeDisabled, "目标节点已禁用")
-	}
-	if !hasAction(target, action) {
-		if operation.EffectiveBubble() && !isTouchInteractive(target) {
-			ancestor := nearestInteractiveAncestor(view, target)
-			if ancestor == nil || !validTapPublicTarget(ancestor, action) {
-				return nil, nil, nil, tapUnsupportedWithGuidance(obs, view, target, action,
-					unsupported)
-			}
-			bubblePlan, bubbleErr := planBubbleTapTargetLegacy(obs, view, target, ancestor, action, started)
-			return nil, nil, bubblePlan, bubbleErr
-		}
-		return nil, nil, nil, tapUnsupportedWithGuidance(obs, view, target, action, unsupported)
-	}
-	input, apiErr := buildTapInput(obs, view, target)
-	if apiErr != nil {
-		return nil, nil, nil, apiErr
-	}
-	scope, apiErr := collectTapScope(input)
-	if apiErr != nil {
-		if apiErr.HTTPStatus == 422 {
-			plan := &tapPlan{
-				strategy: tapModeRejected, action: string(action),
-				targetRef: target.Ref, targetRaw: input.targetRaw,
-				took: time.Since(started),
-			}
-			return nil, nil, plan, apiErr
-		}
-		return nil, nil, nil, apiErr
-	}
-	plan, apiErr := chooseTapPlan(scope, input, target, action, started)
-	return nil, nil, plan, apiErr
-}
-
-func planBubbleTapTargetLegacy(obs *observationState, view *tapPublicView,
-	child, ancestor *protocol.Node, action protocol.Action, started time.Time) (*tapPlan, *protocol.APIError) {
-	if obs == nil || view == nil || child == nil || ancestor == nil {
-		return nil, tapHierarchyError()
-	}
-	ancestorInput, apiErr := buildTapInput(obs, view, ancestor)
-	if apiErr != nil {
-		return nil, apiErr
-	}
-	childInfo := view.info[child]
-	if childInfo == nil || !childInfo.hasSource || childInfo.rawIndex < 0 ||
-		childInfo.rawIndex >= len(view.capture.Nodes) {
-		return nil, tapTargetSourceMissing()
-	}
-	scope, apiErr := collectTapScope(ancestorInput)
-	if apiErr != nil {
-		return nil, apiErr
-	}
-	x, y, strategy, carrier, ok := chooseBubbleTapPoint(scope, view, ancestor, child)
-	if !ok {
-		return nil, tapNoCandidateError(action)
-	}
-	plan := &tapPlan{
-		x: x, y: y, strategy: strategy, action: string(action),
-		targetRef: child.Ref, targetRaw: &view.capture.Nodes[childInfo.rawIndex],
-		bubbleAncestorRaw: ancestorInput.targetRaw,
-		took:              time.Since(started),
-	}
-	if carrier != nil {
-		plan.carrierRef = carrier.node.Ref
-		plan.carrierRaw = carrier.raw
-	}
-	return plan, nil
-}
-
-// staticTextRefCheck keeps the text capability checks in the shared static
-// content pass and plans the focus tap with the same target-subtree planner as
-// tap. The returned plan carries the focus action; the text target itself is
-// rechecked by the dispatch binder after the tap.
+// staticTextRefCheck validates topology, unified structural/geometry/disabled
+// rejections, text editability/protection checks, and direct 4-tier focus tap
+// planning without coextensive-child delegation.
 func staticTextRefCheck(obs *observationState, operation *protocol.Operation) (
 	*pointCheck, *scrollPlan, *tapPlan, *protocol.APIError) {
 	if operation == nil || operation.Type != "text" ||
 		operation.Target == nil || !operation.Target.UseRef {
 		return nil, nil, nil, protocol.Invalid("文字操作缺少 ref target")
 	}
-	point, scroll, apiErr := staticActContentCheck(obs, operation)
+	started := time.Now()
+	view, apiErr := collectTapPublicView(obs)
 	if apiErr != nil {
-		return point, scroll, nil, apiErr
+		return nil, nil, nil, apiErr
 	}
-	focus := *operation
-	focus.Type = "tap"
-	focus.PressEnter, focus.HasPressEnter = false, false
-	focus.Bubble, focus.HasBubble = false, true
-	return staticTapRefCheckLegacy(obs, &focus)
+	if _, apiErr := validateTapRawTopology(obs.Projection.Capture); apiErr != nil {
+		return nil, nil, nil, apiErr
+	}
+	target := view.byRef[operation.Target.Ref]
+	if target == nil {
+		return nil, nil, nil, protocol.NewError(409, protocol.CodeNodeNotFound, "目标节点不存在")
+	}
+	screen := screenRectFromDisplay(obs.Screen)
+	if target.Role == protocol.RoleRoot {
+		return nil, nil, nil, newTapInvalidTargetError(tapStaticReasonRoot,
+			tapStaticScopeTarget, target.Ref)
+	}
+	if target.Context {
+		return nil, nil, nil, newTapInvalidTargetError(tapStaticReasonContext,
+			tapStaticScopeTarget, target.Ref)
+	}
+	if target.Bounds == nil || target.Bounds.Width() <= 0 || target.Bounds.Height() <= 0 {
+		errOut := newTapInvalidTargetError(tapStaticReasonNoGeometry,
+			tapStaticScopeTarget, target.Ref)
+		entries := collectTextFallbackCandidates(view, target, screen)
+		attachStaticCandidates(errOut, buildStaticCandidates(obs, view, operation, entries))
+		return nil, nil, nil, errOut
+	}
+	if target.Enabled != nil && !*target.Enabled {
+		return nil, nil, nil, protocol.NewError(409, protocol.CodeNodeDisabled, "目标节点已禁用")
+	}
+	if target.Role != protocol.RoleInput || !hasAction(target, protocol.ActionText) {
+		return nil, nil, nil, staticTextError(textReasonTargetNotEditable)
+	}
+	if target.Protected == nil || *target.Protected {
+		return nil, nil, nil, staticTextError(textReasonTargetProtected)
+	}
+	if !hasAction(target, protocol.ActionTap) {
+		errOut := newTapStaticUnsupportedError(tapStaticReasonTargetHasOtherAction,
+			protocol.ActionTap, tapStaticScopeTarget, target.Ref,
+			tapPublicActions(target), nil, "")
+		entries := collectTextFallbackCandidates(view, target, screen)
+		attachStaticCandidates(errOut, buildStaticCandidates(obs, view, operation, entries))
+		return nil, nil, nil, errOut
+	}
+	return planDirectTapRef(obs, view, operation, target, protocol.ActionTap, false, started)
 }

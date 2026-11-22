@@ -1255,12 +1255,18 @@ func TestScrollDynamicRevalidation(t *testing.T) {
 		listNode := mustFindFirstNodeWithAction(t, currentTree(t, h.engine).Root, protocol.ActionSwipe)
 
 		h.device.scriptCaptures(func(_ *fakeDevice, display device.Display) (device.Capture, error) {
-			// Leaves only [200, 280) above inner scrollable blocker -> travel too short.
-			blocker := transparentNode(3, 1, 2, display.ID, device.Rect{Left: 0, Top: 280, Right: 1080, Bottom: 2200})
-			blocker.ClassName = "android.widget.HorizontalScrollView"
-			blocker.Scrollable = true
-			blocker.ResourceID = "inner_overlay"
-			return buildScrollList(display, device.Rect{Left: 0, Top: 200, Right: 1080, Bottom: 2200}, &blocker), nil
+			blockerTop := transparentNode(3, 1, 2, display.ID, device.Rect{Left: 0, Top: 280, Right: 1080, Bottom: 1240})
+			blockerTop.ClassName = "android.widget.HorizontalScrollView"
+			blockerTop.Scrollable = true
+			blockerTop.ResourceID = "inner_overlay_top"
+			blockerBottom := transparentNode(4, 1, 2, display.ID, device.Rect{Left: 0, Top: 1240, Right: 1080, Bottom: 2200})
+			blockerBottom.ClassName = "android.widget.HorizontalScrollView"
+			blockerBottom.Scrollable = true
+			blockerBottom.ResourceID = "inner_overlay_bottom"
+			cap := buildScrollList(display, device.Rect{Left: 0, Top: 200, Right: 1080, Bottom: 2200}, &blockerTop)
+			cap.Nodes[1].Children = append(cap.Nodes[1].Children, 4)
+			cap.Nodes = append(cap.Nodes, blockerBottom)
+			return cap, nil
 		})
 		res, apiErr := h.engine.Act(context.Background(), "agent", "", &protocol.ActRequest{
 			Reference: start.Observation.ID,
@@ -1272,6 +1278,9 @@ func TestScrollDynamicRevalidation(t *testing.T) {
 		})
 		if apiErr != nil || res.Outcome != OutcomeNotExecuted || res.Error == nil || res.Error.Code != protocol.CodeTargetChanged {
 			t.Fatalf("fragmented scroll must reject: err=%+v res=%+v", apiErr, res)
+		}
+		if res.Error.Details["reason"] != targetChangedReasonTrajectoryBlocked {
+			t.Fatalf("fragmented scroll reason = %#v, want %q", res.Error.Details["reason"], targetChangedReasonTrajectoryBlocked)
 		}
 		if len(rec.recordedSwipes()) != 0 {
 			t.Fatalf("fragmented scroll must dispatch zero swipes")
