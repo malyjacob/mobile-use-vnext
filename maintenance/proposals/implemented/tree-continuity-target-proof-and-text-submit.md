@@ -1,6 +1,7 @@
 # 提案：统一树连续性多基线、抗重构目标重验与文本受控提交
 
-状态：提案，未实现。
+状态：已实现，0.29.0 / 契约 25 / Android versionCode 31 已覆盖部署，双入口探针与虚拟屏回归已执行。实机证据边界见 §11.2。
+实现提交：`758f2e59e2f925814ce867decf90932b728d4d5e`。
 基线提交：`9245067183fede385d04ddc832de5d5514efed94`（分支 `master`，`2026-11-23`）。
 适用范围：`internal/observation` 保号连续性、引擎有界多基线 delta 选择与留存保护、`act` 的 ref/坐标/裸 `swipe` 实时目标重验与 `target_changed` 归因、`act(text)` 的 `auto_submit`/`submit_ref` 接入、写后重绑定与提交重验、`outcome="partial"` 事实分层、现场观察交付及 MCP/客户端/探针契约。
 影响范围：`internal/observation`（`match.go`、`build.go` 及测试）、`internal/engine`（`engine.go`、`capture.go`、`delivery.go`、`observe.go`、`operations.go`、`act.go`、`act_revalidation_policy.go`、`act_target_shared.go`、`point.go`、`scroll.go`、`tap_scope.go`、`text_stage.go`、`text_recovery.go`、`ui_execution.go`、`recovery.go`、`retirement.go`、`cleanup.go`、`start.go` 及测试）、`internal/protocol`（`requests.go`、`encode.go`、`responses.go`、`decode_response.go`、`errors.go` 及测试）、`internal/eventlog`（`log.go` 及测试）、`internal/httpapi`（测试）、`internal/client`（测试）、`internal/mcp`（`schema.go`、`result_text.go`、`server.go` 及测试）、`cmd/device-service`（`main.go`）、`scripts/mcp-probe`（`checks.go`、`result.go`、`result_v4.go`、`result_semantics.go`、`probe_test.go` 等）、受影响的正式文档（`docs/architecture.md`、`docs/interface.md`、`docs/mcp.md`、`docs/client.md`、`docs/control-protocol.md`、`docs/integration.md`、`docs/phone-operations.md`、`docs/release.md`、`docs/runbook.md`、`README.md`）；实施发布时涉及 `release/versions.json` 及版本生成物、手机整组构建/清单/覆盖部署、主机 `build/device-mcp.exe` 与 `build/mcp-probe.exe` 及 `maintenance/verification/`。固定 `u2.jar` 与 Android 控制 App 业务逻辑不变。
@@ -12,7 +13,7 @@
 5. 复合 `text` 的 `text_input`、错误详情 `stage`/`dispatch` 与原因枚举由 `enter` 统一更名为 `submit`，新增错误码 `409 text_submit_not_executed`。
 共同契约拟从 `24` 升级为 `25`（配套建议 `release_version="0.29.0"`、`android_version_code=31`）；本提案落盘不修改版本源。
 
-本文引用的函数名、行号、常量与默认值均以该基线提交为准；实现落地前若代码已前进，须按当时的 `HEAD` 重新核对（重点：[match.go](../../internal/observation/match.go)、[build.go](../../internal/observation/build.go)、[capture.go](../../internal/engine/capture.go)、[act_revalidation_policy.go](../../internal/engine/act_revalidation_policy.go)、[act.go](../../internal/engine/act.go)、[point.go](../../internal/engine/point.go)、[tap_scope.go](../../internal/engine/tap_scope.go)、[text_stage.go](../../internal/engine/text_stage.go)、[text_recovery.go](../../internal/engine/text_recovery.go)、[ui_execution.go](../../internal/engine/ui_execution.go)、[recovery.go](../../internal/engine/recovery.go)、[retirement.go](../../internal/engine/retirement.go)、[requests.go](../../internal/protocol/requests.go)、[responses.go](../../internal/protocol/responses.go)、[schema.go](../../internal/mcp/schema.go)、[result_text.go](../../internal/mcp/result_text.go)、[versions.json](../../release/versions.json)）。
+本文引用的函数名、行号、常量与默认值均以该基线提交为准；实现落地前若代码已前进，须按当时的 `HEAD` 重新核对（重点：[match.go](../../../internal/observation/match.go)、[build.go](../../../internal/observation/build.go)、[capture.go](../../../internal/engine/capture.go)、[act_revalidation_policy.go](../../../internal/engine/act_revalidation_policy.go)、[act.go](../../../internal/engine/act.go)、[point.go](../../../internal/engine/point.go)、[tap_scope.go](../../../internal/engine/tap_scope.go)、[text_stage.go](../../../internal/engine/text_stage.go)、[text_recovery.go](../../../internal/engine/text_recovery.go)、[ui_execution.go](../../../internal/engine/ui_execution.go)、[recovery.go](../../../internal/engine/recovery.go)、[retirement.go](../../../internal/engine/retirement.go)、[requests.go](../../../internal/protocol/requests.go)、[responses.go](../../../internal/protocol/responses.go)、[schema.go](../../../internal/mcp/schema.go)、[result_text.go](../../../internal/mcp/result_text.go)、[versions.json](../../../release/versions.json)）。
 
 ---
 
@@ -56,34 +57,34 @@
 #### 通路一：观察保号连续性与单基线模型（#29）
 | 断言 | 代码落点 |
 | --- | --- |
-| 无文案但可点击的节点因 `needsResourceHint` 发布 `resource`，导致 `publicSignature` 置 `hasRes=true`，进而 `hasPublicIdentity(pk)==true` | [build.go:452-457](../../internal/observation/build.go#L452-L457)、[match.go:144-164](../../internal/observation/match.go#L144-L164)、[match.go:1740-1742](../../internal/observation/match.go#L1740-L1742) |
-| `isStructurallyMatchable` 要求 `!hasPublicIdentity(pk) && k.label == ""`，导致带模板 `resource-id`（如 17 个 `search_find` 行）的容器被 `curAnonymousContainer`/`prevAnonymousContainer` 排除 | [match.go:438-457](../../internal/observation/match.go#L438-L457)、[match.go:488-490](../../internal/observation/match.go#L488-L490) |
-| Stage 2 桶匹配因 17 行签名完全相同（`len != 1`）全部跳过；Stage 3（`matchContainersByDescendants`）与 Stage 5（`matchOrdinalContainersZeroShift`）又因 `curAnonymousContainer==false` 全部跳过，尽管其文本子节点已在 Stage 2 全部保号 | [match.go:1006-1038](../../internal/observation/match.go#L1006-L1038)、[match.go:1163](../../internal/observation/match.go#L1163)、[match.go:1412](../../internal/observation/match.go#L1412)、[match.go:1579-1595](../../internal/observation/match.go#L1579-L1595) |
-| Stage 3 强制要求 `parentOf(cur)` 必须已先锚定（`st.matchedOld(st.idx.parentOf(cur))`）；任何靠近根部的容器失锚或包装层变动都会阻断下方全部容器的后代投票与 Stage 4 局部恢复，级联换号导致 delta 超过 70% 退化为 `full` | [match.go:1415-1418](../../internal/observation/match.go#L1415-L1418)、[capture.go:267](../../internal/engine/capture.go#L267) |
-| 全流水线无静止几何收尾阶段，同父下两个位置分离且纹丝未动的相同按钮/图标每帧必重发新号（由既有保守测试钉死） | [match.go:22-23](../../internal/observation/match.go#L22-L23)、[continuity_test.go:167-201](../../internal/observation/continuity_test.go#L167-L201)、[continuity_pipeline_test.go:494-511](../../internal/observation/continuity_pipeline_test.go#L494-L511) |
-| 引擎仅保留单一 `e.baseline` 与单一 `Builder.prev`，窗口固定为 `revision-baseline.Revision < 12` 与 `180s`；离开 A 页进入 B 页再 `BACK` 回 A 页时，B 页已覆盖 `prev` 与 `baseline`，必然整树换号并重发 `full` | [engine.go:383](../../internal/engine/engine.go#L383)、[capture.go:251-273](../../internal/engine/capture.go#L251-L273)、[capture.go:775-783](../../internal/engine/capture.go#L775-L783)、[build.go:43-49](../../internal/observation/build.go#L43-L49) |
-| `inspect` 本就支持按 ID 读取 `e.observations` 中任意仍留存的历史观察（含 `retired`/`claimed`/`expired`），且 `planRetentionLocked`/`pruneObservationsLocked` 已有 `protected` 集合保护基线不被淘汰 | [inspect.go:88-103](../../internal/engine/inspect.go#L88-L103)、[capture.go:374-385](../../internal/engine/capture.go#L374-L385)、[capture.go:742-753](../../internal/engine/capture.go#L742-L753) |
+| 无文案但可点击的节点因 `needsResourceHint` 发布 `resource`，导致 `publicSignature` 置 `hasRes=true`，进而 `hasPublicIdentity(pk)==true` | [build.go:452-457](../../../internal/observation/build.go#L452-L457)、[match.go:144-164](../../../internal/observation/match.go#L144-L164)、[match.go:1740-1742](../../../internal/observation/match.go#L1740-L1742) |
+| `isStructurallyMatchable` 要求 `!hasPublicIdentity(pk) && k.label == ""`，导致带模板 `resource-id`（如 17 个 `search_find` 行）的容器被 `curAnonymousContainer`/`prevAnonymousContainer` 排除 | [match.go:438-457](../../../internal/observation/match.go#L438-L457)、[match.go:488-490](../../../internal/observation/match.go#L488-L490) |
+| Stage 2 桶匹配因 17 行签名完全相同（`len != 1`）全部跳过；Stage 3（`matchContainersByDescendants`）与 Stage 5（`matchOrdinalContainersZeroShift`）又因 `curAnonymousContainer==false` 全部跳过，尽管其文本子节点已在 Stage 2 全部保号 | [match.go:1006-1038](../../../internal/observation/match.go#L1006-L1038)、[match.go:1163](../../../internal/observation/match.go#L1163)、[match.go:1412](../../../internal/observation/match.go#L1412)、[match.go:1579-1595](../../../internal/observation/match.go#L1579-L1595) |
+| Stage 3 强制要求 `parentOf(cur)` 必须已先锚定（`st.matchedOld(st.idx.parentOf(cur))`）；任何靠近根部的容器失锚或包装层变动都会阻断下方全部容器的后代投票与 Stage 4 局部恢复，级联换号导致 delta 超过 70% 退化为 `full` | [match.go:1415-1418](../../../internal/observation/match.go#L1415-L1418)、[capture.go:267](../../../internal/engine/capture.go#L267) |
+| 全流水线无静止几何收尾阶段，同父下两个位置分离且纹丝未动的相同按钮/图标每帧必重发新号（由既有保守测试钉死） | [match.go:22-23](../../../internal/observation/match.go#L22-L23)、[continuity_test.go:167-201](../../../internal/observation/continuity_test.go#L167-L201)、[continuity_pipeline_test.go:494-511](../../../internal/observation/continuity_pipeline_test.go#L494-L511) |
+| 引擎仅保留单一 `e.baseline` 与单一 `Builder.prev`，窗口固定为 `revision-baseline.Revision < 12` 与 `180s`；离开 A 页进入 B 页再 `BACK` 回 A 页时，B 页已覆盖 `prev` 与 `baseline`，必然整树换号并重发 `full` | [engine.go:383](../../../internal/engine/engine.go#L383)、[capture.go:251-273](../../../internal/engine/capture.go#L251-L273)、[capture.go:775-783](../../../internal/engine/capture.go#L775-L783)、[build.go:43-49](../../../internal/observation/build.go#L43-L49) |
+| `inspect` 本就支持按 ID 读取 `e.observations` 中任意仍留存的历史观察（含 `retired`/`claimed`/`expired`），且 `planRetentionLocked`/`pruneObservationsLocked` 已有 `protected` 集合保护基线不被淘汰 | [inspect.go:88-103](../../../internal/engine/inspect.go#L88-L103)、[capture.go:374-385](../../../internal/engine/capture.go#L374-L385)、[capture.go:742-753](../../../internal/engine/capture.go#L742-L753) |
 
 #### 通路二：Ref 目标重验与 `lineage_changed`（#36 正文 + 补充 A）
 | 断言 | 代码落点 |
 | --- | --- |
-| `matchActTargetWithLimits` 仅有 Tier 1–3，显式无 Tier 4；每个 Tier 的 `edgeAtTier` 都必须通过 `sameLineageKeysBudgeted(newLineage, oldLineage)` 要求祖先链长度与每个祖先的 `structureKey` 逐字段全等 | [act_revalidation_policy.go:493-507](../../internal/engine/act_revalidation_policy.go#L493-L507)、[act_revalidation_policy.go:557-581](../../internal/engine/act_revalidation_policy.go#L557-L581)、[act_revalidation_policy.go:701-751](../../internal/engine/act_revalidation_policy.go#L701-L751) |
-| Tier 3 的 `lineageL2` 始终保留 raw 根节点（`entry.root`），且 `transparentWrapper` 只剥离文本/描述/资源全显式为空且全部交互与状态标志均显式为默认值的包装层；任意带 `resource-id`、交互标志或未上报属性的祖先重建、或根容器重建（`n4064→n3989`）与父级兄弟重排导致祖先属性变化时，Tier 1–3 全部返回 `lineageMismatch=true` | [act_revalidation_policy.go:170-266](../../internal/engine/act_revalidation_policy.go#L170-L266) |
-| 拒绝出口 `probeTargetChangedError` 仅写 `reason=lineage_changed`，无 `changed_ref` 定位具体变化祖先；紧接着 `deliverRejectedObservation` 投影同一帧却常证明目标自身未出现在 delta 变更集内 | [act_target_shared.go:83-91](../../internal/engine/act_target_shared.go#L83-L91)、[act.go:121-132](../../internal/engine/act.go#L121-L132)、[delivery.go:25-71](../../internal/engine/delivery.go#L25-L71) |
+| `matchActTargetWithLimits` 仅有 Tier 1–3，显式无 Tier 4；每个 Tier 的 `edgeAtTier` 都必须通过 `sameLineageKeysBudgeted(newLineage, oldLineage)` 要求祖先链长度与每个祖先的 `structureKey` 逐字段全等 | [act_revalidation_policy.go:493-507](../../../internal/engine/act_revalidation_policy.go#L493-L507)、[act_revalidation_policy.go:557-581](../../../internal/engine/act_revalidation_policy.go#L557-L581)、[act_revalidation_policy.go:701-751](../../../internal/engine/act_revalidation_policy.go#L701-L751) |
+| Tier 3 的 `lineageL2` 始终保留 raw 根节点（`entry.root`），且 `transparentWrapper` 只剥离文本/描述/资源全显式为空且全部交互与状态标志均显式为默认值的包装层；任意带 `resource-id`、交互标志或未上报属性的祖先重建、或根容器重建（`n4064→n3989`）与父级兄弟重排导致祖先属性变化时，Tier 1–3 全部返回 `lineageMismatch=true` | [act_revalidation_policy.go:170-266](../../../internal/engine/act_revalidation_policy.go#L170-L266) |
+| 拒绝出口 `probeTargetChangedError` 仅写 `reason=lineage_changed`，无 `changed_ref` 定位具体变化祖先；紧接着 `deliverRejectedObservation` 投影同一帧却常证明目标自身未出现在 delta 变更集内 | [act_target_shared.go:83-91](../../../internal/engine/act_target_shared.go#L83-L91)、[act.go:121-132](../../../internal/engine/act.go#L121-L132)、[delivery.go:25-71](../../../internal/engine/delivery.go#L25-L71) |
 
 #### 通路三：坐标与裸 `swipe` 重验（#36 补充 B）
 | 断言 | 代码落点 |
 | --- | --- |
-| `provePointTarget` 与 `matchFreshPointSet` 不区分裸 `swipe` 与坐标点击/输入，统一用 19 字段全等 `identityOf`（含 `Bounds`、`Text`、`Description`、`Focused`、`Selected`）和完整原始祖先链 `lineageOf` 要求无序最深命中集合逐字段相等 | [act.go:1320-1443](../../internal/engine/act.go#L1320-L1443)、[act.go:2247-2274](../../internal/engine/act.go#L2247-L2274)、[identity.go:8-34](../../internal/engine/identity.go#L8-L34) |
-| 视频播放器中只要命中节点或其祖先存在秒跳进度文本（如 `n1486` `"11.0"→"26.0"`）、1px 动画或焦点翻转，`matchFreshPointSet` 立即失配返回 `409 target_changed (reason=point_changed)` | [act.go:1422-1437](../../internal/engine/act.go#L1422-L1437)、[act.go:1445-1447](../../internal/engine/act.go#L1445-L1447) |
+| `provePointTarget` 与 `matchFreshPointSet` 不区分裸 `swipe` 与坐标点击/输入，统一用 19 字段全等 `identityOf`（含 `Bounds`、`Text`、`Description`、`Focused`、`Selected`）和完整原始祖先链 `lineageOf` 要求无序最深命中集合逐字段相等 | [act.go:1320-1443](../../../internal/engine/act.go#L1320-L1443)、[act.go:2247-2274](../../../internal/engine/act.go#L2247-L2274)、[identity.go:8-34](../../../internal/engine/identity.go#L8-L34) |
+| 视频播放器中只要命中节点或其祖先存在秒跳进度文本（如 `n1486` `"11.0"→"26.0"`）、1px 动画或焦点翻转，`matchFreshPointSet` 立即失配返回 `409 target_changed (reason=point_changed)` | [act.go:1422-1437](../../../internal/engine/act.go#L1422-L1437)、[act.go:1445-1447](../../../internal/engine/act.go#L1445-L1447) |
 
 #### 通路四：`act(text)` 写后 ENTER 确认与复合事实分层（#30）
 | 断言 | 代码落点 |
 | --- | --- |
-| `SetTextOnDisplay` 前按写前 `bound.raw` 冻结 `target`（含精确 `Bounds` 与 `Description`）；固定 `u2.jar` 的 `DisplayBoundTextService` 对 `getTextOnDisplay` 要求 `focused`/`editable`/`visible`/`enabled`/`!password` 且 `package`/`resourceId`/`class`/`description`/`bounds.toShortString()` 全部精确相等 | [act.go:1618](../../internal/engine/act.go#L1618)、[act.go:2236-2242](../../internal/engine/act.go#L2236-L2242)、[text.go:14-36](../../internal/android/text.go#L14-L36)、[u2 README:80-83](../../third_party/uiautomator/README.md#L80-L83) |
-| `SetTextOnDisplay` 成功确认 `write=executed` 后，搜索框内联出现 `×` 清除按钮或软键盘顶起导致 `EditText.Bounds` 变化，`dispatchTextEnter` 复用旧 `target` 调 `GetTextOnDisplay` 必然得到 `candidate_count=0`，且无重绑定回退，直接返回 `OutcomeUncertain` + `enter_target_unconfirmed` | [act.go:1700-1709](../../internal/engine/act.go#L1700-L1709)、[act.go:1850-1859](../../internal/engine/act.go#L1850-L1859) |
-| `textOverallOutcome` 只要未全部完成且任一原语已派发就一律判 `OutcomeUncertain`；`Act` 收到 `OutcomeUncertain` 后执行 `markDispatchUnknown(work)`、**跳过后观察**、按 `recovery.go:100-108` 返回 `entry=observe, ref=P, input=retired` | [text_stage.go:123-140](../../internal/engine/text_stage.go#L123-L140)、[act.go:146-159](../../internal/engine/act.go#L146-L159)、[recovery.go:100-108](../../internal/engine/recovery.go#L100-L108) |
-| 请求参数仅支持 `press_enter`（无 `submit_ref`），`text_input`、错误详情 `stage`/`dispatch`、原语回退 [ui_execution.go:172-185](../../internal/engine/ui_execution.go#L172-L185)、冻结逻辑 [retirement.go:247-282](../../internal/engine/retirement.go#L247-L282)、日志白名单 [log.go:101-102](../../internal/eventlog/log.go#L101-L102)、MCP 文本与恢复解析 [result_text.go:529-545, 1735, 1773](../../internal/mcp/result_text.go#L529-L545) 及探针 [result.go:378-393](../../scripts/mcp-probe/result.go#L378-L393)、[result_semantics.go:627, 659](../../scripts/mcp-probe/result_semantics.go#L627) 均硬编码为 `enter` 与 3 态 `outcome` | [requests.go:130-177](../../internal/protocol/requests.go#L130-L177)、[responses.go:670-725](../../internal/protocol/responses.go#L670-L725)、[decode_response.go:466-492](../../internal/protocol/decode_response.go#L466-L492)、[schema.go:349-407](../../internal/mcp/schema.go#L349-L407) |
+| `SetTextOnDisplay` 前按写前 `bound.raw` 冻结 `target`（含精确 `Bounds` 与 `Description`）；固定 `u2.jar` 的 `DisplayBoundTextService` 对 `getTextOnDisplay` 要求 `focused`/`editable`/`visible`/`enabled`/`!password` 且 `package`/`resourceId`/`class`/`description`/`bounds.toShortString()` 全部精确相等 | [act.go:1618](../../../internal/engine/act.go#L1618)、[act.go:2236-2242](../../../internal/engine/act.go#L2236-L2242)、[text.go:14-36](../../../internal/android/text.go#L14-L36)、[u2 README:80-83](../../../third_party/uiautomator/README.md#L80-L83) |
+| `SetTextOnDisplay` 成功确认 `write=executed` 后，搜索框内联出现 `×` 清除按钮或软键盘顶起导致 `EditText.Bounds` 变化，`dispatchTextEnter` 复用旧 `target` 调 `GetTextOnDisplay` 必然得到 `candidate_count=0`，且无重绑定回退，直接返回 `OutcomeUncertain` + `enter_target_unconfirmed` | [act.go:1700-1709](../../../internal/engine/act.go#L1700-L1709)、[act.go:1850-1859](../../../internal/engine/act.go#L1850-L1859) |
+| `textOverallOutcome` 只要未全部完成且任一原语已派发就一律判 `OutcomeUncertain`；`Act` 收到 `OutcomeUncertain` 后执行 `markDispatchUnknown(work)`、**跳过后观察**、按 `recovery.go:100-108` 返回 `entry=observe, ref=P, input=retired` | [text_stage.go:123-140](../../../internal/engine/text_stage.go#L123-L140)、[act.go:146-159](../../../internal/engine/act.go#L146-L159)、[recovery.go:100-108](../../../internal/engine/recovery.go#L100-L108) |
+| 请求参数仅支持 `press_enter`（无 `submit_ref`），`text_input`、错误详情 `stage`/`dispatch`、原语回退 [ui_execution.go:172-185](../../../internal/engine/ui_execution.go#L172-L185)、冻结逻辑 [retirement.go:247-282](../../../internal/engine/retirement.go#L247-L282)、日志白名单 [log.go:101-102](../../../internal/eventlog/log.go#L101-L102)、MCP 文本与恢复解析 [result_text.go:529-545, 1735, 1773](../../../internal/mcp/result_text.go#L529-L545) 及探针 [result.go:378-393](../../../scripts/mcp-probe/result.go#L378-L393)、[result_semantics.go:627, 659](../../../scripts/mcp-probe/result_semantics.go#L627) 均硬编码为 `enter` 与 3 态 `outcome` | [requests.go:130-177](../../../internal/protocol/requests.go#L130-L177)、[responses.go:670-725](../../../internal/protocol/responses.go#L670-L725)、[decode_response.go:466-492](../../../internal/protocol/decode_response.go#L466-L492)、[schema.go:349-407](../../../internal/mcp/schema.go#L349-L407) |
 
 ### 1.3 为什么直觉会出错
 
@@ -162,7 +163,7 @@ Stage 5（`matchOrdinalContainersZeroShift`）同步解除“仅限匿名容器�
 在 Stage 1–5 与 post-ordinal 局部恢复全部完成后，若 `budget` 未耗尽，执行**单次** `matchStaticGeometrySiblings`（不回触发 Stage 3/5 或局部容器恢复）：
 - 遍历所有已锚定配对的父节点 `(anchor, parentCur)`；
 - **硬范围限定**：仅纳入两侧未匹配、**非 `context`、非 `editable`（排除输入框）、无公开子节点（`len(children) == 0`，仅限叶子，绝不匹配容器）**且具有正面积屏幕内 `Bounds` 的直接公开子节点；
-  - 由此严格守住两项既有防串号不变式：① 列表整批换内容复用槽位坐标时，卡片容器绝不会借几何锚定并导致内部按钮偷号（[continuity_pipeline_test.go:599-625](../../internal/observation/continuity_pipeline_test.go#L599-L625)）；② 同父双无锚点输入框值变化时绝不串号（[continuity_pipeline_test.go:80-101](../../internal/observation/continuity_pipeline_test.go#L80-L101)）。
+  - 由此严格守住两项既有防串号不变式：① 列表整批换内容复用槽位坐标时，卡片容器绝不会借几何锚定并导致内部按钮偷号（[continuity_pipeline_test.go:599-625](../../../internal/observation/continuity_pipeline_test.go#L599-L625)）；② 同父双无锚点输入框值变化时绝不串号（[continuity_pipeline_test.go:80-101](../../../internal/observation/continuity_pipeline_test.go#L80-L101)）。
 - 按 `staticLeafBucket(k, pk)`（`role`, `actions`, `protected`, `hasRes`, `resource`, `label`；`actions != 0` 时追加 `class`, `pkg`）分组；
 - **硬条件（全部 AND）**：
   1. 同桶旧新未匹配数量相等且 `k >= 2`（数量不等立即跳过，保护增删歧义测试 `TestContinuityNewDuplicateDoesNotStealRef`）；
@@ -218,7 +219,7 @@ Stage 5（`matchOrdinalContainersZeroShift`）同步解除“仅限匿名容器�
 
 ### 4.3 坐标目标与裸 `swipe` 重验（#36 补充 B）
 
-`provePointTarget`（[act.go:1320-1383](../../internal/engine/act.go#L1320-L1383)）保留前置有界拓扑校验（`validateTapRawTopology(fresh)`）、`work.Projector.Preview(fresh)` 与 `resolvePointSet(freshTree.Root, x, y)`，按 `operation.Type` 分两条明确判据（不再调用 19 字段 `identityOf` + 完整 `lineageOf`）；两条路径的集合匹配均使用**有界二分图最大匹配（Kuhn 增广路，顶点数 `N <= maxPointHitSet = 64`）**检验是否存在大小为 `N` 的完备 1-to-1 匹配，避免同一坐标上两个相同被动装饰叶子因存在对称边而被逐边度=1 策略误拒：
+`provePointTarget`（[act.go:1320-1383](../../../internal/engine/act.go#L1320-L1383)）保留前置有界拓扑校验（`validateTapRawTopology(fresh)`）、`work.Projector.Preview(fresh)` 与 `resolvePointSet(freshTree.Root, x, y)`，按 `operation.Type` 分两条明确判据（不再调用 19 字段 `identityOf` + 完整 `lineageOf`）；两条路径的集合匹配均使用**有界二分图最大匹配（Kuhn 增广路，顶点数 `N <= maxPointHitSet = 64`）**检验是否存在大小为 `N` 的完备 1-to-1 匹配，避免同一坐标上两个相同被动装饰叶子因存在对称边而被逐边度=1 策略误拒：
 
 1. **裸 `swipe`（`operation.Type == "swipe"`）——区域结构与防新遮挡证明**：
    - 要求 `len(freshNodes) == len(observedIndices)` 且所有 `freshNodes` 均映射至互异有效 raw 索引（任何新增更深层弹窗、对话框、浮层遮住 `from=(x,y)` 均会改变最深命中集合长度或节点结构，立即拦截 `point_changed`）。
@@ -259,8 +260,8 @@ Stage 5（`matchOrdinalContainersZeroShift`）同步解除“仅限匿名容器�
 
 #### 2. `submit_ref` 节点静态规划（认领前）
 仅当 `EffectiveAutoSubmit() && op.IsSubmitTap()` 运行，**同时适用于 ref `text` 与坐标 `text`**（在 `staticActContentCheckWithTap` 统一汇合，零设备 I/O、失败不认领 `O`）：
-- 复用 [tap_scope.go](../../internal/engine/tap_scope.go) 的完整 `tap` 静态规划体系（**等效 `bubble=true`**，支持直接 4 级安全点 + `coextensive_child` + `bubble_ancestor` + `bubble_colocated`），并通过显式配置项 `allowInitiallyDisabled=true`（绝不改变普通 `tap`/`long_press` 行为）作以下专门扩展：
-  1. **放行写前灰置按钮（`enabled=false`）**：`allowInitiallyDisabled` 须穿透 `tap_scope.go` 全部四处禁用门禁——`staticTapRefCheck`（[L2439](../../internal/engine/tap_scope.go#L2439)）、`planBubbleOrColocated` 步 A（[L2139](../../internal/engine/tap_scope.go#L2139)）、`validTapPublicTarget`（[L927](../../internal/engine/tap_scope.go#L927)）与 `isTopLevelCoextensiveBlocker`（[L1198](../../internal/engine/tap_scope.go#L1198)）；静态阶段不报 `409 node_disabled`，正常完成几何、动作能力与安全落点规划，并在 `submitPlan` 上记录 `initiallyDisabled`（写前实际执行目标是否显式 `enabled=false`）；
+- 复用 [tap_scope.go](../../../internal/engine/tap_scope.go) 的完整 `tap` 静态规划体系（**等效 `bubble=true`**，支持直接 4 级安全点 + `coextensive_child` + `bubble_ancestor` + `bubble_colocated`），并通过显式配置项 `allowInitiallyDisabled=true`（绝不改变普通 `tap`/`long_press` 行为）作以下专门扩展：
+  1. **放行写前灰置按钮（`enabled=false`）**：`allowInitiallyDisabled` 须穿透 `tap_scope.go` 全部四处禁用门禁——`staticTapRefCheck`（[L2439](../../../internal/engine/tap_scope.go#L2439)）、`planBubbleOrColocated` 步 A（[L2139](../../../internal/engine/tap_scope.go#L2139)）、`validTapPublicTarget`（[L927](../../../internal/engine/tap_scope.go#L927)）与 `isTopLevelCoextensiveBlocker`（[L1198](../../../internal/engine/tap_scope.go#L1198)）；静态阶段不报 `409 node_disabled`，正常完成几何、动作能力与安全落点规划，并在 `submitPlan` 上记录 `initiallyDisabled`（写前实际执行目标是否显式 `enabled=false`）；
   2. **静态错误归因清晰**：`submit_ref` 自身不存在报 `409 node_not_found`，结构/能力/无安全点沿用既有 5 码 `422` 体系（`invalid_target`/`unsupported_node_action`/`no_safe_point` + `candidates`），并在 `details` 中保留准确 `scope_ref`（指向 `submit_ref` 或其祖先）。
 
 #### 3. 写后提交确认判据（`write=executed` 提交之后）
@@ -303,7 +304,7 @@ Stage 5（`matchOrdinalContainersZeroShift`）同步解除“仅限匿名容器�
   - 新增封闭错误码：**`text_submit_not_executed`**（HTTP `409`），用于非撤销下的 `outcome="partial"`；
   - `submit` 阶段封闭 `reason` 枚举：`submit_target_unconfirmed`、`submit_context_unconfirmed`、`submit_disabled`、`submit_scope_blocked`、`submit_not_sent`、`submit_unconfirmed`（以及冻结时的 `authorization_revoked`、`deadline_exceeded`）。
 - **`partial` 的 `op.Recovery` 持久化与实时投影规则（统一首次、重放与冻结）**：
-  - `planRecoveryFor` 对已认领 `text` 且 `Outcome == OutcomePartial` **始终持久化基础语义恢复 `observe(P, retired)`**（写入 `op.Recovery`，绝不存 `nil`），保证 `applyLiveTextRecoveryLocked`（[text_recovery.go:34-37](../../internal/engine/text_recovery.go#L34-L37)）永不因 `base == nil` 早退，Priority 1–6 的实时会话/耐久/设备/忙覆盖对首次响应与重放一律生效；
+  - `planRecoveryFor` 对已认领 `text` 且 `Outcome == OutcomePartial` **始终持久化基础语义恢复 `observe(P, retired)`**（写入 `op.Recovery`，绝不存 `nil`），保证 `applyLiveTextRecoveryLocked`（[text_recovery.go:34-37](../../../internal/engine/text_recovery.go#L34-L37)）永不因 `base == nil` 早退，Priority 1–6 的实时会话/耐久/设备/忙覆盖对首次响应与重放一律生效；
   - 仅在 `applyLiveTextRecoveryLocked` 走到 **Priority 7（会话健康且无任何实时阻塞）** 时：若 `op.Outcome == OutcomePartial` 且本次返回视图**确实附带了已发布的有效 `ready O`**（`result.Observation != nil && result.Observation.ID != "" && result.Observation.Status != "failed"`），将本次返回副本的 `result.Recovery` 置为 `nil`（省略）；
   - 其余所有情形——包括首次响应后观察失败（无有效 `Observation.ID`）、重复 `P`、`status(P)` 与冻结重放（`result.Observation == nil`）——在 Priority 7 均自然输出 `observe(P, retired)`，并由 MCP/Probe 的 `resolveObserveRecoveryP`/`resolveStatusRecoveryP` 按 `outcome == "partial"` 解析为具体 `operation_id`。
 
@@ -491,7 +492,7 @@ Act() handling of OutcomePartial:
 ```
 
 **冻结与 STOP 交互**：
-- `freezeWorkLocked` / `freezeTextLocked`（[retirement.go:202-282](../../internal/engine/retirement.go#L202-L282)）调用更新后的 `textOverallOutcome(op.TextStage)`：
+- `freezeWorkLocked` / `freezeTextLocked`（[retirement.go:202-282](../../../internal/engine/retirement.go#L202-L282)）调用更新后的 `textOverallOutcome(op.TextStage)`：
   - 若写入已确认且 `dispatchSubmit ∈ {not_attempted, not_dispatched}`：冻结为 `OutcomePartial`——原会话被撤销用 `409 control_revoked` + `reason=authorization_revoked`；原会话活动且仅工作期限到期用 **`409 text_submit_not_executed`** + `reason=deadline_exceeded`（不再硬编码 `CodeTextResultUnknown`），不发布观察；
   - 若 `dispatchSubmit == unknown` 或写入未确认：保持 `OutcomeUncertain`（超时用 `CodeTextResultUnknown`）；
   - `details.dispatch` 输出 `{"focus":..., "write":..., "submit":...}`；
@@ -684,20 +685,28 @@ Act() handling of OutcomePartial:
 
 ---
 
-## 11. 实现结果（归档时补写）
+## 11. 实现结果
 
-实现提交：`<hash>`。实现与验证记录：`../../verification/tree-continuity-target-proof-and-text-submit.md`
-（本节在归档移动之后补写，届时文件在 `implemented/` 下，故链接比新建时多一层）。
+实现提交 `758f2e59e2f925814ce867decf90932b728d4d5e`。命令、产物与实机事实见 [验证记录](../../verification/tree-continuity-target-proof-and-text-submit.md)。
 
 ### 11.1 已落地
 
 | 提案条目 | 落点 |
 | --- | --- |
+| 树保号与多基线 | [保号流水线](../../../internal/observation/match.go) 泛化后代投票、跨包装锚定、序位配对和紧几何收尾。[多基线提交](../../../internal/engine/capture.go) 使用同一提交时快照判定基线资格与留存保护。历史试探保留原 ref 高水位，成功提交后才写入连续性状态。 |
+| 目标证明与归因 | [Ref 证明](../../../internal/engine/act_revalidation_policy.go) 增加 Tier 4。[共享重验](../../../internal/engine/act_target_shared.go) 在允许时归因 `changed_ref`。[坐标和裸手势](../../../internal/engine/point.go) 使用各自的匹配判据与有界双射。 |
+| 文本受控提交与部分完成 | [提交路径](../../../internal/engine/text_submit.go) 实现默认 ENTER 的单次重绑定和指定节点点击。[部分完成](../../../internal/engine/text_partial.go) 按原授权交付现场 O，[实时恢复](../../../internal/engine/text_recovery.go) 统一处理首次响应与重放。 |
+| 契约与发布 | [版本源](../../../release/versions.json) 升至 `0.29.0 / 25 / 31`。HTTP、Go client、MCP schema/`result v4` 与探针同步，手机整组覆盖部署及 Windows 双工具替换通过同源清单核验。 |
 
 ### 11.2 与提案不同或未执行
 
 | 项 | 结论与理由 |
 | --- | --- |
+| #29 原附件跨 5 个修订 | 保留已确认的 4 revision 上限。原 `O85 → O90` 回返仍交付 `full`。本次知乎与 B 站回返均跨 3 个修订并命中历史基线。 |
+| Tier 4 最终防遮挡 | 采纳独立审阅意见，Tier 4 实际落点补做全树最深命中和竞争拥有者检查。实机知乎回答连续点击命中 Tier 1。祖先重建后的 Tier 4 命中与外部遮挡拒绝由定向测试覆盖。 |
+| 网易云写后几何重绑定 | 默认 ENTER、显式 `submit_ref`、仅写入均在实机成功。默认 ENTER 的日志能确认一次提交，未区分快路径与零候选后的重绑定。控件缩框、重绑定唯一性、再次精确读回、`partial` 与撤权时序由 Go 测试覆盖。 |
+| 依赖方 MCP 宿主 | 主机磁盘与独立探针已切换。部署检测到依赖方仍运行旧 stdio 进程。按 §8.2 由用户处理宿主重启和重连。 |
+| 正式文档审计 | 独立只读审计发现三处差异，分别统一动态祖先归因 `changed_ref`、按提案限定基线确认入口、明确留存保护只覆盖窗口内基线。修正后复检 clean。 |
 
 ---
 

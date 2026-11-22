@@ -1,5 +1,7 @@
 # 项目实施状态
 
+2026-11-23，0.29.0（契约 25）交付树多基线、抗重构目标证明与文本受控提交。手机整组覆盖部署、Windows 双工具替换与双入口独立探针均通过。知乎静止搜索列表两次零差分，知乎与 B 站均在 3 个修订内命中可补看的历史基线。知乎裸滑、回答底栏连续点击和网易云三类文本操作均实测成功。Tier 4 与写后重绑定的精确分支由单测覆盖。 [验证记录](verification/tree-continuity-target-proof-and-text-submit.md) · [归档提案](proposals/implemented/tree-continuity-target-proof-and-text-submit.md)
+
 2026-11-22，0.27.0（契约 23）交付 `wait_for` 内容稳定与 MCP 文本省略。手机整组覆盖部署、Windows 双工具替换、双入口探针、网易云播放页三次稳定等待及 B 站滚动双投影均通过（[记录](verification/wait-content-stability-and-text-omit.md)）。
 状态：2026-11-22，0.26.0（契约 22）完成 `act` 静态目标解析策略与错误返回契约统一（#27、#28、#31）：新增 `422 no_safe_trajectory`、以统一 `candidates`/`blocking_refs` 取代 9 个历史引导/诊断键、升级 `scroll` 同视口栈/祖先提升/居中 3 轴线、`tap`/`long_press` 4 级规划与视觉锚定冒泡/共位吸附、坐标 `pointSet` 与 raw `swipe` 豁免及非 `text` `409 target_changed` 9 项封闭 `reason`；手机整组覆盖部署（保留 App 私有数据）、Windows 主机两件产物磁盘替换、双入口独立探针与双入口虚拟屏实机最小闭环均 PASS（[记录](verification/act-target-resolution-and-error-contract.md)）。
 2026-11-22，0.25.0（契约 21）完成 `result v4` 紧凑结果外壳、短 `O`/`P` 标识、精确 `recovery` 引用与 1024 截屏长边上限；手机整组覆盖部署（保留 App 私有数据）、Windows 主机两件产物磁盘替换、双入口独立探针与虚拟屏实机 `result v4` 文本闭环均 PASS（[记录](verification/compact-result-envelope-and-image-sizing.md)）。
