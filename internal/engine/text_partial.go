@@ -17,11 +17,10 @@ const textPartialPhase = "act.partial"
 // the fresh ready observation of a confirmed-partial text action. The write and
 // its absence of submission are already confirmed, so this is an ordinary
 // post-observation: it uses the same projector, the same publish commit gate and
-// the same bounded pool fallback as every other acquisition, with
-// allowPoolFallback=true and forceFull=false regardless of the original O's
-// shape. It never runs for an image request and never reuses a frame that the
-// delivery guards no longer accept; those cases fall back to one standard
-// acquisition.
+// the same full baseline pool as every other ordinary acquisition, regardless
+// of the original O's shape. It never runs for an image request and never reuses
+// a frame that the delivery guards no longer accept; those cases fall back to
+// one standard acquisition.
 func (e *Engine) deliverTextPartialObservation(work *workState, session *sessionState,
 	partial *device.Capture, wantImage bool) (*protocol.Observation, *protocol.APIError) {
 	if !wantImage && partial != nil && partialForegroundUsable(partial.Foreground) {
@@ -91,7 +90,7 @@ func (e *Engine) publishTextPartialCapture(work *workState, session *sessionStat
 		StopReason: protocol.QualityStopNotSampled,
 	}
 	public, _, publishErr := e.publishTreeAttempt(work, session, textPartialPhase, tree,
-		tree.capture.CapturedAt, true, false, "complete", nil, quality)
+		tree.capture.CapturedAt, treeSelection{}, "complete", nil, quality)
 	e.logQuality(work.OperationID, textPartialPhase, public, quality)
 	if publishErr != nil {
 		if publishErr.Code == protocol.CodeStopped {

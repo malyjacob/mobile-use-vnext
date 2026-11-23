@@ -146,6 +146,49 @@ func TestActRevalidationDeliveryUsesFullForDeltaReference(t *testing.T) {
 		protocol.RecoveryInputEffective, "")
 }
 
+// TestActRevalidationDeliveryUsesOnlyClaimedFull proves a rejected act that
+// referenced a full observation cannot deliver against a shorter pooled
+// baseline the caller did not just claim.
+func TestActRevalidationDeliveryUsesOnlyClaimedFull(t *testing.T) {
+	h := newHarness(t)
+	h.device.scriptCaptures(markerCapture("page-a"))
+	start := h.startSession()
+	requireFullTree(t, start.Observation, 1)
+
+	h.device.scriptCaptures(markerCapture("page-b"))
+	pageB, apiErr := h.engine.Observe(context.Background(), "agent", "PpageB",
+		&protocol.ObserveRequest{Reference: start.Observation.ID, Full: true})
+	if apiErr != nil {
+		t.Fatalf("publish page B: %v", apiErr)
+	}
+	requireFullTree(t, pageB.Observation, 2)
+
+	h.device.scriptCaptures(markerCapture("page-a"))
+	claimed, apiErr := h.engine.Observe(context.Background(), "agent", "PpageA",
+		&protocol.ObserveRequest{Reference: pageB.Observation.ID, Full: true})
+	if apiErr != nil {
+		t.Fatalf("publish claimed page A: %v", apiErr)
+	}
+	requireFullTree(t, claimed.Observation, 3)
+	button := findRole(currentTree(t, h.engine).Root, protocol.RoleButton)
+	if button == nil {
+		t.Fatal("button not found in claimed page")
+	}
+
+	h.device.scriptCaptures(markerCapture("page-b"))
+	result := h.actWith(t, "PclaimedFullDelivery",
+		h.tapRefRequest(t, claimed.Observation.ID, button.Ref))
+	requireNotExecuted(t, result, protocol.CodeTargetChanged)
+	if result.Observation == nil || result.Observation.Tree == nil ||
+		result.Observation.Tree.Delta == nil {
+		t.Fatalf("claimed-full delivery = %+v, want a tree delta", result.Observation)
+	}
+	if got := result.Observation.Tree.Delta.Base; got != claimed.Observation.ID {
+		t.Fatalf("delivered delta base = %q, want claimed full %q (page B pool %q)",
+			got, claimed.Observation.ID, pageB.Observation.ID)
+	}
+}
+
 // TestActRevalidationSkipsDeliveryForUnreadableForeground is T14: a frame whose
 // foreground cannot be established is not delivered, and the projection stays
 // the pre-change observe/P/retired.

@@ -14,6 +14,7 @@ import (
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	mcpsource "github.com/malyjacob/mobile-use-vnext/internal/mcp"
+	"github.com/malyjacob/mobile-use-vnext/internal/protocol"
 )
 
 func sourceCatalogTools(t *testing.T) []*sdk.Tool {
@@ -339,8 +340,14 @@ func TestCatalogFingerprint(t *testing.T) {
 }
 
 func writeCatalogManifest(t *testing.T, count int, hash string) string {
+	return writeReleaseManifest(t, protocol.ReleaseVersion, protocol.ContractVersion, count, hash)
+}
+
+func writeReleaseManifest(t *testing.T, release, contract string, count int, hash string) string {
 	t.Helper()
-	body := `{"format":"test","tool_catalog":{"count":` + strconv.Itoa(count) +
+	body := `{"format":"test","release_version":` + strconv.Quote(release) +
+		`,"contract_version":` + contract +
+		`,"tool_catalog":{"count":` + strconv.Itoa(count) +
 		`,"sha256":"` + hash + `"}}`
 	path := filepath.Join(t.TempDir(), "manifest.json")
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
@@ -351,15 +358,49 @@ func writeCatalogManifest(t *testing.T, count int, hash string) string {
 
 func TestCatalogManifestIdentity(t *testing.T) {
 	fingerprint := mcpsource.CatalogFingerprint()
-	good := writeCatalogManifest(t, 13, fingerprint)
+	goodRelease := writeCatalogManifest(t, 13, fingerprint)
+	goodHost := writeCatalogManifest(t, 13, fingerprint)
 
 	var output bytes.Buffer
-	runner := &probe{reporter: newReporter(&output), manifests: []string{good}}
+	runner := &probe{
+		reporter:  newReporter(&output),
+		manifests: []string{goodRelease, goodHost},
+	}
 	if !runner.catalogIdentityCheck() {
 		t.Fatalf("good manifest rejected:\n%s", output.String())
 	}
-	if !strings.Contains(output.String(), "PASS catalog_manifest") {
-		t.Fatalf("missing manifest pass:\n%s", output.String())
+	if count := strings.Count(output.String(), "PASS catalog_manifest"); count != 2 {
+		t.Fatalf("manifest pass count = %d, want 2:\n%s", count, output.String())
+	}
+	if !strings.Contains(output.String(), "release="+protocol.ReleaseVersion) ||
+		!strings.Contains(output.String(), "contract="+protocol.ContractVersion) {
+		t.Fatalf("manifest identity missing from pass:\n%s", output.String())
+	}
+
+	badRelease := writeReleaseManifest(
+		t, protocol.ReleaseVersion+"-stale", protocol.ContractVersion, 13, fingerprint)
+	output.Reset()
+	runner = &probe{reporter: newReporter(&output), manifests: []string{badRelease}}
+	if runner.catalogIdentityCheck() {
+		t.Fatalf("release mismatch accepted:\n%s", output.String())
+	}
+	if !strings.Contains(output.String(), "manifest_release_mismatch") {
+		t.Fatalf("missing release failure:\n%s", output.String())
+	}
+
+	wantContract, err := strconv.Atoi(protocol.ContractVersion)
+	if err != nil {
+		t.Fatalf("source contract %q: %v", protocol.ContractVersion, err)
+	}
+	badContract := writeReleaseManifest(
+		t, protocol.ReleaseVersion, strconv.Itoa(wantContract+1), 13, fingerprint)
+	output.Reset()
+	runner = &probe{reporter: newReporter(&output), manifests: []string{badContract}}
+	if runner.catalogIdentityCheck() {
+		t.Fatalf("contract mismatch accepted:\n%s", output.String())
+	}
+	if !strings.Contains(output.String(), "manifest_contract_mismatch") {
+		t.Fatalf("missing contract failure:\n%s", output.String())
 	}
 
 	badCount := writeCatalogManifest(t, 12, fingerprint)

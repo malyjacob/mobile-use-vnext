@@ -441,44 +441,59 @@ O，图片成功也不单独发布；核心树有效而图片失败只把本次�
 ### full/delta 与基线池
 
 公开 delta 相对基线池中任一已确认的 compact full 计算。基线池只保存同一会话 origin、同一目标
-显示 ID/代次、`revision - base.Revision <= 4` 且采集龄 `< 180s` 的完整观察，最多 4 条；条目按
-Revision 降序，超出窗口或容量的条目在发布新观察前清理。
+显示 ID/代次且采集龄严格小于 `180s` 的完整观察，最多 4 条。令
+`span = 本次待发布 revision - full.revision`。当前基线在 `span=1..10` 时可用，其他备用 full
+仅在 `span=1..4` 时可用；无当前基线时至多保留 3 条备用，为下一次确认留出位置。成功确认一份
+full，或成功发布引用某份 full 的 delta 后，该 full 成为当前基线。成功发布 full 清空当前指针。
+本次因备用窗口而选回的 full 仍受 `span<=4` 限制，提交成功后从下一次发布起按当前基线的
+`span<=10` 使用。
 
-delta 选择分三步，全部在锁外读取池快照，提交时在短锁内重新校验：
+普通 observation 发布在锁外读取池快照，对每份合格 full 独立构造候选，提交时在短锁内重验：
 
-1. **主路径**：相对 `activeBaselineID` 指向的基线（为空时取池中最新条目）计算差分。差分可编码
-   且 `10×deltaBytes < 7×fullBytes` 时直接采用；成立时不再试探任何历史基线。
-2. **历史回返试探**：仅当调用允许历史回退、主路径未产出有效差分时，按 Revision 降序对其余仍在
-   窗口内的基线（主基线之外至多 3 条）逐一调用只读 `CandidateAgainst` 投影同一帧；只有
-   `10×deltaBytes < 5×candidateFullBytes` 的候选才可参与，取 delta 字节最小者（字节相同取
-   Revision 更大者）。试探使用独立候选，不推进连续性、不消耗 ref 高水位；STOP/取消立即终止；
-   任一候选超出公开或内部快照预算时只跳过该基线。主路径成功时绝不进入本步。
-3. **兜底 full**：两步均未命中时，按主路径的紧凑树发布 full。
+1. 按上一棵已发布树投影本次采集，作为默认 full。默认 full 不推进正式连续性，只保存提交所需的
+   候选状态。
+2. 对每份窗口合格 full，用该 full 的内部投影对同一份采集重新匹配节点号，调用只读
+   `CandidateAgainst` 生成候选 compact full，再从该 full 计算 delta，并完成重建校验。最终发布
+   的内部快照、公开树、差分与编号状态必须全部来自同一候选。
+3. 对候选 full 和 delta 分别使用正式的 `tree v4` 普通树编码，计量从 `tree v4 ...` 块头到
+   `end tree` 行末换行的 UTF-8 字节；实际短 base、字段转义、缩进与换行都计入，`result` 信封
+   与图片不计入。只有 `10×deltaBytes < 7×candidateFullBytes` 的候选合格，精确等于 70% 也不合格。
+4. 合格候选按 delta 树块绝对字节数升序排列，长度相同优先当前基线，再优先 revision 较大的
+   full。按该顺序尝试可留存的方案；没有合格 delta 可提交时发布默认 full。
+
+任一候选超出公开树或内部快照预算时只跳过该候选。普通历史淘汰仍不能容纳所选方案时，报告超预算
+的未选备用基线可以退出池，其观察进入普通历史淘汰集合后重新做有界留存规划；仍放不下则尝试下一
+候选，最后尝试默认 full。提交门保护当前观察、认领中的观察、所选 delta 引用的 full 和提交成功后
+仍在池内的全部 full。每次成功提交后，池按新的当前基线、revision 窗口、采集龄与显示归属裁剪；
+容量仍超出时按 revision 淘汰最旧的未选备用。池退出与普通历史淘汰分别记账，退出池的观察仍可能
+作为普通历史保留并供 `inspect` 读取，但该 full 不再参与 full/delta 选择。
+
+候选投影、差分、文本编码和排序在锁外完成。引擎在提交短锁内规划有界留存预算，并重新核对原
+会话、显示代次、工作拥有者、STOP/终态、期限、采集时效、预览 O 与候选基线；STOP 后到达的候选
+不得发布。一次提交原子应用所选方案的留存淘汰、基线池、revision、O 与连续性状态。构造器在投影
+阶段只产生候选，提交门禁通过后才推进 `prev` 与 ref 计数器；被拒绝的候选不改变下一次发布树的
+ref。
+
+`start`、强制 full 的 app 后观察、`observe(P)`、`wait_for(P)` 与 `full=true` 走强制 full 路径。
+普通 `observe`、`wait_for`、`act` 后观察和文本 partial 交付使用全池选择。`act` 重验失败的交付
+观察固定不进入全池选择：引用的 `obs` 是 `full` O 时只能使用该次认领的 full，引用的 `obs` 是
+delta O 时交付 full。`start`、会话重建与收尾完成清空或过滤基线池。
 
 差分规划先展开任何兼容输入中的历史链，再按原 ref 比较节点；输出普通 `add`/`replace` 定义，
-并校验重建树的逻辑相等与规范 JSON 字节相等。构造器在投影阶段只产生候选，提交门禁通过后才
-推进 `prev` 与 ref 计数器；被拒绝的候选不改变下一次发布树的 ref。可读文本块使用 `result v4`
-的 `obs` 观察行、`tree v4` 普通树和 `inspect v3` 详细补看编码；`both`/`structured` 的 JSON
-保持完整 `Result`。普通角色与动作按文本语法恢复。full/delta 的选择按 JSON 字节计量。
-
-`activeBaselineID` 只在发布基于某基线的 delta 时设为该基线，发布 full 时置空；确认当前观察为
-基线时指向该观察。`act` 重验失败的交付观察固定不进入历史试探，只在引用 `full` O 时允许主路径
-delta；`start`、会话重建与收尾完成清空或过滤基线池。历史试探的 50% 判据只拒绝体积过大的差分，
-不证明两个页面相同；超过 4 个 revision 或 180 秒的旧基线已经退出池，不参与选择，也不承诺可
-区分窗口外的旧页面或同形页面。
+并校验重建树的逻辑相等与规范 JSON 字节相等。可读文本块使用 `result v4` 的 `obs` 观察行、
+`tree v4` 普通树和 `inspect v3` 详细补看编码；`both`/`structured` 的 JSON 保持完整 `Result`。
+普通角色与动作按文本语法恢复。full/delta 候选选择按实际 `tree v4` 树块 UTF-8 字节计量，公开
+树与内部快照仍按各自的 JSON 容量预算校验。
 
 **基线的唯一确认入口**：只有被接纳的 `observe(O)`、`wait_for(O)` 或 `act` 对 `full` O 的认领确认
 可以把当前 `full` 观察加入基线池；`start` 的首个 `full`、`act` 后观察和重验失败交付的 `full` 只是
 候选。确认要求观察仍是当前留存观察、属于原会话 origin 与显示代次、在窗口内，并把它的 compact
-公开树与完整内部投影一并保存。池中所有活动基线在留存淘汰时受保护：凡可能作为 `delta.base` 发出
-的 O 都保留完整树，`inspect(reference=baseID)` 在其仍在池内时可读；被淘汰的基线不再参与选择，
-也不承诺历史补看。客户端必须保留基线树，按 `delta.base` 应用到本地副本。
+公开树与完整内部投影一并保存。凡仍可能作为 `delta.base` 发出的 O 都保留完整树，
+`inspect(reference=baseID)` 在其仍在池内时可读。客户端必须保留所有被引用的基线树，按
+`delta.base` 应用到本地副本。
 
-`observe(P)` 强制 full；其他普通采集才按上述步骤选择。delta 无法表达（同 ref 角色变化、根变化或
-非法最终图）时 `Diff` 返回错误，采集改用 full。`act` 重验失败交付的观察按 `forceFull = !obs.Full`
-决定，`obs` 为本次失败请求引用的观察：引用 `full` O 时它在认领时已被确认为基线，满足条件时交付若为
-delta，其 `base` 就是调用方刚刚使用的那棵树；引用 delta O 时基线更早，改发 `full`，避免要求
-调用方把补丁应用到更早的树。
+delta 无法表达（同 ref 角色变化、根变化或非法最终图）时 `Diff` 返回错误，该候选跳过；默认
+full 仍可发布。基线与 delta 只证明两者可重建且差分满足文本门槛，不证明两个页面身份相同。
 
 delta 的五类块：`set`（逐字段完整新值，显式保留 `false`/`0`/`""`/`[]`/`null`）、`add`、
 `remove`、`children`（完整子列表）、`replace`（整段替换）。空差异只含 `format`、`base`、`view`。
@@ -725,6 +740,8 @@ P 已无法定位时，`end(P)` 返回 `409 operation_unknown`、`phase=referenc
 整段证明由独立的 `proven` 布尔值表达；`scroll.effect` 的 `anchors`/`coverage` 仍按完整
 匹配集计数；观察质量事件只记可取得的 `operation_id`、`observation_id`、阶段与受控枚举/数值。
 目标重验与 delta 选择只允许记录命中层级 `tier`（1–4）和 `baseline_pool`（`primary`/`historical`/`full`）。
+`primary` 表示当前基线候选胜出，`historical` 表示备用 full 候选胜出，`full` 表示未选 delta；
+该事件只在成功提交后记录，不包含候选 ID、树或差分。
 text 完成事件记 `focus_dispatch`/`write_dispatch`/`submit_dispatch` 与受控 `stage`/`reason`/`count`；
 `changed_ref`、输入正文与读回值绝不进入日志。
 新增键必须先进入 `internal/eventlog` 的单一白名单，否则事件被静默丢弃。
@@ -742,7 +759,7 @@ text 完成事件记 `focus_dispatch`/`write_dispatch`/`submit_dispatch` 与受�
 ### 发布
 
 `release/versions.json` 是发行号、共同契约号与 Android versionCode 的唯一来源；当前为
-`release_version=0.29.0`、`contract_version=25`、`android_version_code=31`，构建生成
+`release_version=0.30.0`、`contract_version=26`、`android_version_code=32`，构建生成
 Go/Java 常量。`scripts/build-release.ps1` 产出整组产物与 `build/release/manifest.json`
 （源码提交、Go 版本、MCP SDK/协议、各产物 SHA-256/大小、Android 包名/版本、工具目录指纹）。
 工具目录固定为 `scripts/toolcatalog` 投影的 13 个工具，指纹是该目录注册顺序、名称、描述与

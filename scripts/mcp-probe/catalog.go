@@ -12,6 +12,7 @@ import (
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	mcpsource "github.com/malyjacob/mobile-use-vnext/internal/mcp"
+	"github.com/malyjacob/mobile-use-vnext/internal/protocol"
 )
 
 // checkLiveCatalog proves that the live tools/list is the same catalog the
@@ -225,7 +226,9 @@ func isLowerHex64(value string) bool {
 
 // catalogManifest is the shared fragment of both release manifests.
 type catalogManifest struct {
-	ToolCatalog struct {
+	ReleaseVersion  string `json:"release_version"`
+	ContractVersion int    `json:"contract_version"`
+	ToolCatalog     struct {
 		Count  int    `json:"count"`
 		SHA256 string `json:"sha256"`
 	} `json:"tool_catalog"`
@@ -244,8 +247,9 @@ func readCatalogManifest(path string) (catalogManifest, error) {
 }
 
 // catalogIdentityCheck verifies the source fingerprint and, when the operator
-// supplies manifests, that every manifest publishes the same count and hash. A
-// live catalog that only passes a count check cannot reach this point.
+// supplies manifests, that every manifest publishes this build's release,
+// contract and catalog. A live catalog that only passes a count check cannot
+// reach this point.
 func (p *probe) catalogIdentityCheck() bool {
 	fingerprint := mcpsource.CatalogFingerprint()
 	if !isLowerHex64(fingerprint) {
@@ -261,10 +265,23 @@ func (p *probe) catalogIdentityCheck() bool {
 		p.reporter.fail("catalog_fingerprint", "fingerprint_snapshot_mismatch")
 		return false
 	}
+	wantContract, err := strconv.Atoi(protocol.ContractVersion)
+	if err != nil {
+		p.reporter.fail("catalog_fingerprint", "source_contract_invalid")
+		return false
+	}
 	for _, path := range p.manifests {
 		manifest, err := readCatalogManifest(path)
 		if err != nil {
 			p.reporter.fail("catalog_manifest", "manifest_unreadable", field("file", path))
+			return false
+		}
+		if manifest.ReleaseVersion != protocol.ReleaseVersion {
+			p.reporter.fail("catalog_manifest", "manifest_release_mismatch", field("file", path))
+			return false
+		}
+		if manifest.ContractVersion != wantContract {
+			p.reporter.fail("catalog_manifest", "manifest_contract_mismatch", field("file", path))
 			return false
 		}
 		if manifest.ToolCatalog.Count != len(toolNames) {
@@ -278,6 +295,8 @@ func (p *probe) catalogIdentityCheck() bool {
 		}
 		p.reporter.pass("catalog_manifest",
 			field("file", path), field("count", strconv.Itoa(manifest.ToolCatalog.Count)),
+			field("release", manifest.ReleaseVersion),
+			field("contract", strconv.Itoa(manifest.ContractVersion)),
 			"sha256=match")
 	}
 	p.reporter.pass("catalog_fingerprint",

@@ -18,7 +18,7 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
   工具目录指纹为 `6bf61b2727acf0adc0850b7b790534ec4fee8a159fa8266ada0c9fb74eb1eef6`。
   发布清单中的指纹对应其记录的源码提交。发布时从目标提交重建并核验清单。
   探针按工具名比对实际 `tools/list` 的描述和入参 schema，并核对只读注解。传入 `-manifest`
-  时，探针将清单中的工具数和目录 SHA-256 分别与源码目录的对应值比对。探针将
+  时，探针对每份清单核对构建发行号、契约号、工具数和工具目录 SHA-256。探针将
   `server/discover` 返回的 server instructions 与构建内的固定说明源逐字节比较，并附加兼容
   `initialize` 检查。
 - stdio 模式的 stdout 只承载 MCP 协议帧；日志与诊断一律写 stderr。
@@ -101,7 +101,7 @@ text 失败（含 `outcome=partial` 与 `outcome=uncertain`）的 `error.details
 返回同一份说明，包含一份完整树图例，以及会话推进、O/P、`reference`、租期和跨工具恢复。
 工具描述给出用途、关键参数分流、动作边界及独立理解该工具所需的恢复提示。
 `start` 描述简述 O/P 和 full/delta。每条 delta 都单独应用到 `base` 指向的完整树；`base` 可
-指向服务端基线池中近期任一已确认 full，而不是只能指向上一帧。
+指向服务端基线池中的当前基线（跨度 1–10）或备用 full（跨度 1–4），而不是只能指向上一帧。
 图例以 `tree v4`、`inspect v3` 标识普通树与详细补看的独立语法，并说明普通节点在
 `n<ref>` 后按首列恢复角色：
 不带引号的合法角色词是显式角色，JSON 字符串字面量默认为 `text`，几何、`value=`、`hint=`、
@@ -682,11 +682,18 @@ defaults 行。
 delta 块头为 `tree v4 delta base=<O|_<序号>> changes=<n>`，正文按
 `set → add → remove → children → replace` 顺序输出。当前 O 来自同一结果的 `obs` 行，
 不在块头重复。`base` 指向服务端基线池中的近期任一已确认 `full`：同一会话 origin、同一目标
-显示 ID/代次、`revision - base.Revision <= 4` 且采集龄 `< 180s`，池中最多保留 4 条。主路径
-差分要求小于 full 的 70%；主路径无有效差分时才按更严格的 50% 阈值试探历史基线，以支持
-`A → B → BACK 回 A` 的跨页回返。`observe(P)` 与 `full=true` 强制 full；凡作为 `base` 发出的
-O 都在池内受留存保护，`inspect(reference=base)` 可回看。客户端必须保留这些完整树，按
-`base` 独立应用。只有当前 O 与真实 base 都能在最后一个下划线处分成逐字节相同的
+显示 ID/代次且采集龄 `< 180s`，池中最多保留 4 条。当前基线可在跨度 1–10 内作为 base，
+其他备用 full 仅可在跨度 1–4 内作为 base；备用 full 被成功选回后，从下一次发布起成为当前
+基线。服务对每份合格 full 使用该 full 自己的节点编号重新匹配同一采集，再将候选 full 与 delta
+分别按本节的正式 `tree v4` 普通树块编码。比较范围是 `tree v4 ...` 块头至 `end tree` 行末
+换行的 UTF-8 字节，包含实际短 base、转义、缩进和换行，不包含 `obs`、`result` 信封或图片。
+只有 `10×deltaBytes < 7×candidateFullBytes` 的候选合格，精确等于 70% 不合格；合格候选取
+delta 树块字节最少者，长度相同优先当前基线，再取 revision 较大的 full。
+
+`observe(P)` 与 `full=true` 强制 full；凡作为 `base` 发出的 O 都在池内受留存保护，
+`inspect(reference=base)` 可回看。客户端必须保留所有被引用的完整树，不能在第 4 个修订后
+立即淘汰仍为当前基线的 full；当前基线可在跨度 5–10 继续成为 base。按 `base` 独立应用，
+不能叠加在上一份 delta 上。只有当前 O 与真实 base 都能在最后一个下划线处分成逐字节相同的
 `O<实例>` 前缀和规范正十进制序号时，base 才写成 `_<序号>`；否则写完整 O。短 base 只用于
 读树，不能作为调用引用。`changes` 是五个块的顶层声明条数之和：一个 `set` 条目即使改了
 多个字段也只计 1。零变化 delta 仍保留 `base` 与 `changes=0`，正文为空。
@@ -709,7 +716,7 @@ end tree
 end result
 ```
 
-历史基线回返命中时，同一个列表页可以只输出零变化差分：
+备用 full 被成功选回时，同一个列表页可以只输出零变化差分：
 
 ```text
 result v4 ok op=P7391_15

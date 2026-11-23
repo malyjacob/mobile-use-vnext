@@ -41,7 +41,7 @@ adb forward          主机 18881 → 服务；主机 18883 → 手机 MCP
    `adb forward`，也不需要 Agent token。
 
 只需要直连 HTTP 的 Agent 则使用 `http://127.0.0.1:18881/api/<tool>`、`agent_token` 与
-`X-Mobile-Use-Contract: 25`。
+`X-Mobile-Use-Contract: 26`。
 
 ## 1. 默认部署后的网络与进程
 
@@ -196,8 +196,9 @@ MCP 服务在 `server/discover` 与兼容 `initialize` 响应中发布同一份 
 包括完整树图例及会话、O/P、引用和恢复等跨工具规则。宿主应将该说明提供给模型。说明同时
 给出 `result v4` 外壳、`obs` 单行、`app_items`/`app_tasks` 块与 `recovery ref=`
 的语法。各工具描述提供本工具的关键分流和恢复提示，`start` 也简述 O/P 与 full/delta。
-用 `base` 指向的 full 和本次 delta 重建当前树；`base` 可指向近期 4 个 revision、采集龄小于
-180 秒的任一已确认 full（基线池最多 4 条），客户端必须保留这些完整树并逐条应用。
+用 `base` 指向的 full 和本次 delta 重建当前树。基线池最多 4 条，均要求采集龄小于 180 秒；
+当前基线可覆盖跨度 1–10，其他备用 full 覆盖跨度 1–4。客户端必须保留所有可能被引用的完整树，
+不能在第 4 个修订后立即淘汰仍为当前基线的 full，并逐条按 `base` 应用。
 
 ### 4.5 结果模式
 
@@ -248,11 +249,14 @@ obs [<O>] [status=…] [fg=…] [at=HH:MM:SS] [screen=<W>x<H>[@<display_id>]] [r
 且无实时阻塞时给出 `observe(P, retired)`，撤权或实时阻塞按 `recovery` 的覆盖规则处理。
 
 普通观察树由 `tree v4` 标识，完整块头只写 `nodes`，差分块头写 `base` 与 `changes`。`base`
-指向基线池中的近期任一已确认 full（同一会话 origin、同一目标显示 ID/代次、
-`revision - base.Revision <= 4`、采集龄 `< 180s`，最多 4 条）；主路径阈值 70%，历史回返试探
-阈值 50%。指向同一个完整 base 的多条差分分别应用到该整树，不能叠加在上一份 delta 上。`base=_72` 是文本读树简写，
-不能作为后续工具调用的引用。`observe(P)` 与 `full=true` 强制 full；`inspect(base)` 在基线
-仍在池内时可回看。需要操作当前观察时使用 `obs` 行的完整 O，需要看历史树时使用完整历史 O。
+指向基线池中的已确认 full，要求同一会话 origin、同一目标显示 ID/代次及采集龄 `< 180s`，
+池中最多 4 条。当前基线可用跨度 1–10，其他备用 full 为 1–4；备用 full 成功选回后，从下一次
+发布起成为当前基线。服务拿每份 full 自己的节点编号重新匹配同一采集，再按实际 `tree v4`
+普通树块计量 UTF-8 字节。只有 `10×deltaBytes < 7×candidateFullBytes` 的候选合格，取最短
+delta，平手优先当前基线、再取较新 revision。指向同一个完整 base 的多条差分分别应用到该整树，
+不能叠加在上一份 delta 上。`base=_72` 是文本读树简写，不能作为后续工具调用的引用。
+`observe(P)` 与 `full=true` 强制 full；`inspect(base)` 在基线仍在池内时可回看。需要操作当前
+观察时使用 `obs` 行的完整 O，需要看历史树时使用完整历史 O。
 
 `inspect` 继续使用 `inspect v3` 的两格缩进、方括号矩形和显式动作词。`tree v4` 的默认动作、
 `@` 同矩形引用与短 base 不适用于补看块。未知或无法无损表达的字段继续在文本中使用绝对
@@ -317,7 +321,7 @@ HTTP 宿主在原有 `Authorization` 头之外按需添加：
 
 ```text
 Authorization: Bearer <agent_token>
-X-Mobile-Use-Contract: 25
+X-Mobile-Use-Contract: 26
 Content-Type: application/json; charset=utf-8
 ```
 
@@ -325,7 +329,7 @@ Content-Type: application/json; charset=utf-8
 $deploy = Get-Content .state/deploy.json -Raw | ConvertFrom-Json
 $headers = @{
     Authorization           = "Bearer $($deploy.agent_token)"
-    'X-Mobile-Use-Contract' = '25'
+    'X-Mobile-Use-Contract' = '26'
 }
 Invoke-RestMethod http://127.0.0.1:18881/api/status -Method Post `
   -Headers $headers -ContentType 'application/json' -Body '{}'
@@ -570,7 +574,7 @@ Header: Authorization: Bearer <mcp_token>
 两种选择：
 
 ```text
-直连 HTTP:  http://127.0.0.1:18880/api/<tool>   + agent_token + X-Mobile-Use-Contract: 25
+直连 HTTP:  http://127.0.0.1:18880/api/<tool>   + agent_token + X-Mobile-Use-Contract: 26
 MCP HTTP:   http://127.0.0.1:18882/mcp          + mcp_token
 ```
 
@@ -757,7 +761,7 @@ GET 判断工具是否可用。
 $deploy = Get-Content .state/deploy.json -Raw | ConvertFrom-Json
 $headers = @{
     Authorization           = "Bearer $($deploy.agent_token)"
-    'X-Mobile-Use-Contract' = '25'
+    'X-Mobile-Use-Contract' = '26'
 }
 $start = Invoke-RestMethod http://127.0.0.1:18881/api/start -Method Post `
   -Headers $headers -ContentType 'application/json' -Body '{}'

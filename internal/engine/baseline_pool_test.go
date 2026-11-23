@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -55,9 +56,13 @@ func baselinePageStep(specs []rawNodeSpec) captureStep {
 // baselineObserve performs one admitted observe and returns the published
 // observation.
 func baselineObserve(t *testing.T, h *harness, p, reference string) *protocol.Observation {
+	return baselineObserveRequest(t, h, p, &protocol.ObserveRequest{Reference: reference})
+}
+
+func baselineObserveRequest(t *testing.T, h *harness, p string,
+	request *protocol.ObserveRequest) *protocol.Observation {
 	t.Helper()
-	result, apiErr := h.engine.Observe(context.Background(), "agent", p,
-		&protocol.ObserveRequest{Reference: reference})
+	result, apiErr := h.engine.Observe(context.Background(), "agent", p, request)
 	if apiErr != nil {
 		t.Fatalf("observe %s rejected: %v", p, apiErr)
 	}
@@ -104,34 +109,26 @@ func readNodeByLabel(root *protocol.ReadNode, label string) *protocol.ReadNode {
 	return nil
 }
 
-func containsString(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
+func publicNodeByLabel(root *protocol.Node, label string) *protocol.Node {
+	if root == nil {
+		return nil
+	}
+	for _, value := range root.Label {
+		if value == label {
+			return root
 		}
 	}
-	return false
-}
-
-// findAddedLabel returns the ref of one added node carrying the exact label.
-func findAddedLabel(nodes []*protocol.ReadNode, label string) string {
-	for _, node := range nodes {
-		if node == nil {
-			continue
-		}
-		for _, value := range node.Label {
-			if value == label {
-				return node.Ref
-			}
+	for _, child := range root.Children {
+		if found := publicNodeByLabel(child, label); found != nil {
+			return found
 		}
 	}
-	return ""
+	return nil
 }
 
-// TestBaselinePoolPageReturnWindow covers the bounded confirmed-full pool: a
-// page return inside the four-step window is an empty delta against the page's
-// own baseline, the same page keeps that base, and the fifth step slides the
-// anchor out of the window and falls back to a full tree.
+// TestBaselinePoolPageReturnWindow covers the split confirmed-full windows: a
+// backup page return inside four revisions becomes current, then that same full
+// remains available through revision span ten. Span eleven falls back to full.
 func TestBaselinePoolPageReturnWindow(t *testing.T) {
 	h := newHarness(t)
 	h.engine.cfg.MaxObservations = 3
@@ -183,26 +180,63 @@ func TestBaselinePoolPageReturnWindow(t *testing.T) {
 	o5 := baselineObserve(t, h, "PbaselineSpanFour", o4.ID)
 	requireBaselineDelta(t, o5, 5, o1.ID)
 
-	// Revision 6 is outside the four-step window: page A can no longer anchor a
-	// delta and the attempt publishes a full tree.
+	last := o5
+	for revision := 6; revision <= 11; revision++ {
+		h.device.scriptCaptures(baselinePageStep(pageAChanged))
+		last = baselineObserve(t, h, fmt.Sprintf("PbaselineCurrentSpan%d", revision), last.ID)
+		requireBaselineDelta(t, last, revision, o1.ID)
+	}
+
+	// Span eleven is outside the extended current window.
 	h.device.scriptCaptures(baselinePageStep(pageA))
-	o6 := baselineObserve(t, h, "PbaselineSpanFive", o5.ID)
-	requireFullTree(t, o6, 6)
+	o12 := baselineObserve(t, h, "PbaselineSpanEleven", last.ID)
+	requireFullTree(t, o12, 12)
 
 	// The discarded probes never shifted the ref high-water mark: after the new
 	// full is confirmed, the same page is again an empty delta.
 	h.device.scriptCaptures(baselinePageStep(pageA))
-	o7 := baselineObserve(t, h, "PbaselineAfterFull", o6.ID)
-	after := requireBaselineDelta(t, o7, 7, o6.ID)
+	o13 := baselineObserve(t, h, "PbaselineAfterFull", o12.ID)
+	after := requireBaselineDelta(t, o13, 13, o12.ID)
 	if !after.IsEmpty() {
 		t.Fatalf("post-full continuity was polluted: %+v", after)
 	}
 }
 
-// TestBaselinePoolPrimaryPathDoesNotResurrectBanner is the reverse control: a
-// primary delta below 70% never enters the historical probe, so a temporary
-// banner that disappears and reappears gets a fresh ref instead of its old one.
-func TestBaselinePoolPrimaryPathDoesNotResurrectBanner(t *testing.T) {
+func TestBaselinePoolBackupReturnBecomesCurrentAtSpanFour(t *testing.T) {
+	h := newHarness(t)
+	pageA := baselineRows("alpha", 8)
+	pageB := baselineRows("beta", 4)
+
+	h.device.scriptCaptures(baselinePageStep(pageA))
+	start := h.startSession()
+	pageAFull := start.Observation
+	requireFullTree(t, pageAFull, 1)
+
+	h.device.scriptCaptures(baselinePageStep(pageB))
+	pageBFull := baselineObserve(t, h, "PbackupB2", pageAFull.ID)
+	requireFullTree(t, pageBFull, 2)
+	h.device.scriptCaptures(baselinePageStep(pageB))
+	pageBFull = baselineObserveRequest(t, h, "PbackupB3",
+		&protocol.ObserveRequest{Reference: pageBFull.ID, Full: true})
+	requireFullTree(t, pageBFull, 3)
+	h.device.scriptCaptures(baselinePageStep(pageB))
+	pageBFull = baselineObserveRequest(t, h, "PbackupB4",
+		&protocol.ObserveRequest{Reference: pageBFull.ID, Full: true})
+	requireFullTree(t, pageBFull, 4)
+
+	h.device.scriptCaptures(baselinePageStep(pageA))
+	returned := baselineObserve(t, h, "PbackupA5", pageBFull.ID)
+	requireBaselineDelta(t, returned, 5, pageAFull.ID)
+
+	h.device.scriptCaptures(baselinePageStep(pageA))
+	extended := baselineObserve(t, h, "PbackupA6", returned.ID)
+	requireBaselineDelta(t, extended, 6, pageAFull.ID)
+}
+
+// TestBaselinePoolAllPoolMayReuseBannerRef pins the selected shortest-delta
+// behavior: when the banner returns, its original full is the shortest match and
+// the old banner ref is intentionally reused.
+func TestBaselinePoolAllPoolMayReuseBannerRef(t *testing.T) {
 	h := newHarness(t)
 	withBanner := baselineBannerRows()
 	withoutBanner := baselineRows("row", 12)
@@ -226,18 +260,12 @@ func TestBaselinePoolPrimaryPathDoesNotResurrectBanner(t *testing.T) {
 	h.device.scriptCaptures(baselinePageStep(withBanner))
 	o3 := baselineObserve(t, h, "PbannerBack", o2.ID)
 	back := requireBaselineDelta(t, o3, 3, o1.ID)
-	if back.IsEmpty() {
-		t.Fatal("banner reappearance matched the primary baseline")
+	if !back.IsEmpty() {
+		t.Fatalf("banner return did not select the original full: %+v", back)
 	}
-	if !containsString(back.Remove, banner.Ref) {
-		t.Fatalf("old banner ref %q was not removed: %+v", banner.Ref, back)
-	}
-	fresh := findAddedLabel(back.Add, "temporary-banner")
-	if fresh == "" {
-		t.Fatalf("reappeared banner was not added: %+v", back)
-	}
-	if fresh == banner.Ref {
-		t.Fatalf("banner ref %q was resurrected instead of allocated fresh", banner.Ref)
+	reused := publicNodeByLabel(currentTree(t, h.engine).Root, "temporary-banner")
+	if reused == nil || reused.Ref != banner.Ref {
+		t.Fatalf("banner ref = %+v, want reused %q", reused, banner.Ref)
 	}
 }
 
@@ -329,11 +357,18 @@ func TestBaselinePoolRejectedPublicationKeepsCurrentBase(t *testing.T) {
 	}
 
 	// A certain commit for revision 6 does prune the out-of-window entry; the
-	// retained observation itself stays readable.
+	// retained observation itself stays readable. The current ten-revision
+	// window keeps this base through revision eleven.
 	h.engine.cfg = DefaultConfig(h.engine.cfg.ServiceInstanceID, h.engine.cfg.AgentName)
+	last := o5
+	for revision := 6; revision <= 11; revision++ {
+		h.device.scriptCaptures(baselinePageStep(pageA))
+		last = baselineObserve(t, h, fmt.Sprintf("PrejectCommitted%d", revision), last.ID)
+		requireBaselineDelta(t, last, revision, o1.ID)
+	}
 	h.device.scriptCaptures(baselinePageStep(pageA))
-	o6 := baselineObserve(t, h, "PrejectCommitted", o5.ID)
-	requireFullTree(t, o6, 6)
+	o12 := baselineObserve(t, h, "PrejectWindowExpired", last.ID)
+	requireFullTree(t, o12, 12)
 	h.engine.mu.Lock()
 	pruned := true
 	for _, entry := range h.engine.baselines {
@@ -446,10 +481,23 @@ func (p *candidateAgainstCounter) CandidateAgainst(prev *Projection,
 	return p.Projector.CandidateAgainst(prev, capture)
 }
 
-// TestBaselinePoolPrimaryPathSkipsHistoricalProbe proves the direct main path:
-// a primary delta below 70% never enters the historical probe, while a page
-// return that the primary cannot anchor does probe.
-func TestBaselinePoolPrimaryPathSkipsHistoricalProbe(t *testing.T) {
+type blockingCandidateAgainstProjector struct {
+	Projector
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (p *blockingCandidateAgainstProjector) CandidateAgainst(prev *Projection,
+	capture *device.Capture) (*Projection, func(), error) {
+	p.once.Do(func() { close(p.entered) })
+	<-p.release
+	return p.Projector.CandidateAgainst(prev, capture)
+}
+
+// TestBaselinePoolProbesEveryEligibleFull proves the unified path: even a
+// qualifying current delta does not suppress matching the other pooled full.
+func TestBaselinePoolProbesEveryEligibleFull(t *testing.T) {
 	h := newHarness(t)
 	counter := &candidateAgainstCounter{Projector: h.engine.projector}
 	h.engine.projector = counter
@@ -462,22 +510,31 @@ func TestBaselinePoolPrimaryPathSkipsHistoricalProbe(t *testing.T) {
 	h.device.scriptCaptures(baselinePageStep(pageA))
 	o2 := baselineObserve(t, h, "PshortPrimary", o1.ID)
 	requireBaselineDelta(t, o2, 2, o1.ID)
-	if counter.calls != 0 {
-		t.Fatalf("primary delta probed %d historical baselines", counter.calls)
+	if counter.calls != 1 {
+		t.Fatalf("one-entry pool probed %d baselines, want 1", counter.calls)
 	}
 
 	h.device.scriptCaptures(baselinePageStep(pageB))
 	o3 := baselineObserve(t, h, "PshortFull", o2.ID)
 	requireFullTree(t, o3, 3)
-	if counter.calls != 0 {
-		t.Fatalf("full fallback probed %d historical baselines", counter.calls)
+	h.engine.mu.Lock()
+	h.engine.confirmBaselineLocked(h.engine.current)
+	poolSize := len(h.engine.baselines)
+	activeID := h.engine.activeBaselineID
+	h.engine.mu.Unlock()
+	if poolSize != 2 || activeID != o3.ID {
+		t.Fatalf("confirmed full left pool=%d active=%q, want two entries and %q",
+			poolSize, activeID, o3.ID)
+	}
+	if counter.calls != 2 {
+		t.Fatalf("full fallback probed %d baselines, want 2", counter.calls)
 	}
 
 	h.device.scriptCaptures(baselinePageStep(pageA))
 	o4 := baselineObserve(t, h, "PshortHistorical", o3.ID)
 	requireBaselineDelta(t, o4, 4, o1.ID)
-	if counter.calls != 1 {
-		t.Fatalf("historical page return probed %d baselines, want 1", counter.calls)
+	if counter.calls != 4 {
+		t.Fatalf("two-entry page return probed %d baselines, want 4", counter.calls)
 	}
 }
 
@@ -543,5 +600,358 @@ func TestBaselinePoolAdmitsOnlyConfirmedFull(t *testing.T) {
 	h.engine.mu.Unlock()
 	if !pooled {
 		t.Fatal("confirmed full observation did not enter the pool")
+	}
+}
+
+func TestBaselinePoolSplitRevisionWindows(t *testing.T) {
+	h := newHarness(t)
+	start := h.startSession()
+
+	h.engine.mu.Lock()
+	session := h.engine.session
+	tree := start.Observation.Tree.Full
+	currentID := "Owindow_current"
+	backupID := "Owindow_backup"
+	common := func(id string, revision int) *baselineState {
+		return &baselineState{
+			ObservationID: id, Origin: session.Origin, Revision: revision,
+			CapturedAt: time.Now(), DisplayID: session.Display.ID,
+			DisplayGeneration: session.Display.Generation, Tree: tree,
+		}
+	}
+	h.engine.baselines = []*baselineState{
+		common(currentID, session.Revision+5),
+		common(backupID, session.Revision+11),
+	}
+	nextRevision := session.Revision + 15
+	pool := h.engine.baselinePoolForActiveLocked(nextRevision, currentID, time.Now())
+	h.engine.mu.Unlock()
+	if baselineWithID(pool, currentID) == nil || baselineWithID(pool, backupID) == nil {
+		t.Fatalf("exact ten/four windows excluded a baseline: %+v", pool)
+	}
+
+	h.engine.mu.Lock()
+	nextRevision++
+	pool = h.engine.baselinePoolForActiveLocked(nextRevision, currentID, time.Now())
+	withoutCurrent := h.engine.baselinePoolForActiveLocked(nextRevision, "", time.Now())
+	h.engine.mu.Unlock()
+	if len(pool) != 0 {
+		t.Fatalf("span eleven/five kept baselines: %+v", pool)
+	}
+	if len(withoutCurrent) != 0 {
+		t.Fatalf("a five-span full remained a backup: %+v", withoutCurrent)
+	}
+}
+
+func TestBaselinePoolPostSelectionPrunesOldCurrent(t *testing.T) {
+	h := newHarness(t)
+	start := h.startSession()
+	h.engine.mu.Lock()
+	session := h.engine.session
+	tree := start.Observation.Tree.Full
+	oldCurrent := &baselineState{
+		ObservationID: "Oold_current", Origin: session.Origin,
+		Revision: session.Revision + 1, CapturedAt: time.Now(),
+		DisplayID: session.Display.ID, DisplayGeneration: session.Display.Generation,
+		Tree: tree,
+	}
+	selected := &baselineState{
+		ObservationID: "Oselected", Origin: session.Origin,
+		Revision: session.Revision + 6, CapturedAt: time.Now(),
+		DisplayID: session.Display.ID, DisplayGeneration: session.Display.Generation,
+		Tree: tree,
+	}
+	h.engine.baselines = []*baselineState{selected, oldCurrent}
+	nextRevision := session.Revision + 8
+	before := h.engine.baselinePoolForActiveLocked(nextRevision,
+		oldCurrent.ObservationID, time.Now())
+	after := h.engine.baselinePoolForActiveLocked(nextRevision,
+		selected.ObservationID, time.Now())
+	h.engine.mu.Unlock()
+	if baselineWithID(before, oldCurrent.ObservationID) == nil ||
+		baselineWithID(before, selected.ObservationID) == nil {
+		t.Fatalf("selection pool omitted current or backup: %+v", before)
+	}
+	if len(after) != 1 || after[0].ObservationID != selected.ObservationID {
+		t.Fatalf("post-selection pool = %+v, want only %q", after, selected.ObservationID)
+	}
+}
+
+func TestBaselinePoolKeepsOneCurrentAndThreeBackups(t *testing.T) {
+	h := newHarness(t)
+	h.engine.mu.Lock()
+	h.engine.baselines = []*baselineState{
+		{ObservationID: "Ob4", Revision: 4},
+		{ObservationID: "Ob3", Revision: 3},
+		{ObservationID: "Ob2", Revision: 2},
+		{ObservationID: "Ob1", Revision: 1},
+	}
+	h.engine.activeBaselineID = ""
+	h.engine.truncateBaselinesLocked()
+	if len(h.engine.baselines) != maxBackupBaselines {
+		t.Fatalf("backup-only pool length = %d, want %d",
+			len(h.engine.baselines), maxBackupBaselines)
+	}
+	h.engine.baselines = []*baselineState{
+		{ObservationID: "Ob4", Revision: 4},
+		{ObservationID: "Ob3", Revision: 3},
+		{ObservationID: "Ob2", Revision: 2},
+		{ObservationID: "Ob1", Revision: 1},
+	}
+	h.engine.activeBaselineID = "Ob4"
+	h.engine.truncateBaselinesLocked()
+	length := len(h.engine.baselines)
+	h.engine.mu.Unlock()
+	if length != maxBaselines {
+		t.Fatalf("current plus backups pool length = %d, want %d", length, maxBaselines)
+	}
+}
+
+func TestBaselineDeltaCandidateTieOrder(t *testing.T) {
+	candidates := []baselineDeltaCandidate{
+		{baseline: &baselineState{ObservationID: "Onew", Revision: 30}, deltaBytes: 5},
+		{baseline: &baselineState{ObservationID: "Ocurrent", Revision: 1},
+			deltaBytes: 5, current: true},
+		{baseline: &baselineState{ObservationID: "Oshort", Revision: 2}, deltaBytes: 4},
+	}
+	sortBaselineDeltaCandidates(candidates)
+	got := []string{
+		candidates[0].baseline.ObservationID,
+		candidates[1].baseline.ObservationID,
+		candidates[2].baseline.ObservationID,
+	}
+	want := []string{"Oshort", "Ocurrent", "Onew"}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Fatalf("candidate order = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestBaselinePoolForceFullBypassesBaselineMatching(t *testing.T) {
+	h := newHarness(t)
+	counter := &candidateAgainstCounter{Projector: h.engine.projector}
+	h.engine.projector = counter
+	h.device.scriptCaptures(baselinePageStep(baselineRows("row", 6)))
+	start := h.startSession()
+	delta := baselineObserve(t, h, "PbypassDelta", start.Observation.ID)
+	requireBaselineDelta(t, delta, 2, start.Observation.ID)
+	before := counter.calls
+
+	h.device.scriptCaptures(baselinePageStep(baselineRows("row", 6)))
+	forced, apiErr := h.engine.Observe(context.Background(), "agent", "PbypassP",
+		&protocol.ObserveRequest{Reference: start.OperationID})
+	if apiErr != nil {
+		t.Fatalf("observe(P) rejected: %v", apiErr)
+	}
+	requireFullTree(t, forced.Observation, 3)
+	if counter.calls != before {
+		t.Fatalf("force-full path matched %d baselines", counter.calls-before)
+	}
+}
+
+func TestBaselinePoolStopDuringMatchingPublishesNothing(t *testing.T) {
+	h := newHarness(t)
+	page := baselineRows("row", 6)
+	h.device.scriptCaptures(baselinePageStep(page))
+	start := h.startSession()
+	h.device.scriptCaptures(baselinePageStep(page))
+	ack := baselineObserve(t, h, "PstopBaselineAck", start.Observation.ID)
+	requireBaselineDelta(t, ack, 2, start.Observation.ID)
+
+	blocking := &blockingCandidateAgainstProjector{
+		Projector: h.engine.projector,
+		entered:   make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+	h.engine.projector = blocking
+	h.engine.mu.Lock()
+	nextBefore := h.engine.nextObservation
+	h.engine.mu.Unlock()
+
+	done := make(chan callResult, 1)
+	go func() {
+		result, apiErr := h.engine.Observe(context.Background(), "agent", "PstopBaseline",
+			&protocol.ObserveRequest{Reference: ack.ID})
+		done <- callResult{result, apiErr}
+	}()
+	awaitSignal(t, blocking.entered)
+	stopNow(t, h)
+	close(blocking.release)
+	result := awaitCall(t, done)
+	if result.Observation != nil && result.Observation.ID != "" {
+		t.Fatalf("STOP published a late observation: %+v", result.Observation)
+	}
+	h.engine.mu.Lock()
+	nextAfter := h.engine.nextObservation
+	h.engine.mu.Unlock()
+	if nextAfter != nextBefore {
+		t.Fatalf("STOP path consumed an observation ID: %d -> %d", nextBefore, nextAfter)
+	}
+}
+
+func TestBaselinePoolExpiredDuringMatchingFallsBackToFull(t *testing.T) {
+	h := newHarness(t)
+	page := baselineRows("row", 6)
+	h.device.scriptCaptures(baselinePageStep(page))
+	start := h.startSession()
+	h.device.scriptCaptures(baselinePageStep(page))
+	ack := baselineObserve(t, h, "PexpireBaselineAck", start.Observation.ID)
+	requireBaselineDelta(t, ack, 2, start.Observation.ID)
+
+	blocking := &blockingCandidateAgainstProjector{
+		Projector: h.engine.projector,
+		entered:   make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+	h.engine.projector = blocking
+	done := make(chan callResult, 1)
+	go func() {
+		result, apiErr := h.engine.Observe(context.Background(), "agent", "PexpireBaseline",
+			&protocol.ObserveRequest{Reference: ack.ID})
+		done <- callResult{result, apiErr}
+	}()
+	awaitSignal(t, blocking.entered)
+	h.engine.mu.Lock()
+	for _, entry := range h.engine.baselines {
+		entry.CapturedAt = time.Now().Add(-maxBaselineAge - time.Second)
+	}
+	h.engine.mu.Unlock()
+	close(blocking.release)
+	result := awaitCall(t, done)
+	requireFullTree(t, result.Observation, 3)
+}
+
+func TestBaselinePoolExpiredDuringRetentionPlanningTriesNextCandidate(t *testing.T) {
+	h := newHarness(t)
+	page := baselineRows("row", 6)
+	h.device.scriptCaptures(baselinePageStep(page))
+	start := h.startSession()
+
+	h.device.scriptCaptures(baselinePageStep(page))
+	secondFull := baselineObserveRequest(t, h, "PpostPlanSecondFull",
+		&protocol.ObserveRequest{Reference: start.Observation.ID, Full: true})
+	h.device.scriptCaptures(baselinePageStep(page))
+	delta := baselineObserve(t, h, "PpostPlanDelta", secondFull.ID)
+
+	h.engine.mu.Lock()
+	session := h.engine.session
+	firstObs := h.engine.observations[start.Observation.ID]
+	secondObs := h.engine.observations[secondFull.ID]
+	if session == nil || firstObs == nil || secondObs == nil {
+		h.engine.mu.Unlock()
+		t.Fatal("post-plan fixture observations are missing")
+	}
+	nextRevision := session.Revision + 1
+	first := &baselineState{
+		ObservationID: firstObs.ID, Origin: session.Origin, Revision: firstObs.Revision,
+		CapturedAt: time.Now(), DisplayID: session.Display.ID,
+		DisplayGeneration: session.Display.Generation,
+		Tree:              firstObs.Compact, Projection: firstObs.Projection,
+	}
+	second := &baselineState{
+		ObservationID: secondObs.ID, Origin: session.Origin, Revision: secondObs.Revision,
+		CapturedAt: time.Now(), DisplayID: session.Display.ID,
+		DisplayGeneration: session.Display.Generation,
+		Tree:              secondObs.Compact, Projection: secondObs.Projection,
+	}
+	h.engine.baselines = []*baselineState{first, second}
+	h.engine.activeBaselineID = first.ObservationID
+	h.engine.mu.Unlock()
+
+	original := planPublicationRetention
+	t.Cleanup(func() { planPublicationRetention = original })
+	expired := false
+	planPublicationRetention = func(e *Engine, cost int, pool []*baselineState,
+		selectedBaseID string) ([]*observationState, []*baselineState, bool) {
+		victims, finalPool, fits := original(e, cost, pool, selectedBaseID)
+		if !expired && selectedBaseID == first.ObservationID {
+			first.CapturedAt = time.Now().Add(-maxBaselineAge - time.Second)
+			expired = true
+		}
+		return victims, finalPool, fits
+	}
+
+	h.device.scriptCaptures(baselinePageStep(page))
+	selected := baselineObserve(t, h, "PpostPlanExpiry", delta.ID)
+	requireBaselineDelta(t, selected, nextRevision, second.ObservationID)
+	if !expired {
+		t.Fatal("retention planning never exercised the first baseline")
+	}
+	h.engine.mu.Lock()
+	defer h.engine.mu.Unlock()
+	if baselineWithID(h.engine.baselines, first.ObservationID) != nil {
+		t.Fatalf("expired baseline survived the committed pool: %+v", h.engine.baselines)
+	}
+	if h.engine.activeBaselineID != second.ObservationID {
+		t.Fatalf("active baseline = %q, want %q",
+			h.engine.activeBaselineID, second.ObservationID)
+	}
+}
+
+func TestBaselinePoolRechecksAfterRetentionPlanning(t *testing.T) {
+	t.Run("cancel", func(t *testing.T) {
+		h := newHarness(t)
+		start := h.startSession()
+		h.device.scriptCaptures(replayCurrentCapture(t, h.engine))
+		installPostPlanMutation(t, func(e *Engine) { e.work.Cancel() })
+
+		result, apiErr := h.engine.Observe(context.Background(), "agent", "PpostPlanCancel",
+			&protocol.ObserveRequest{Reference: start.OperationID})
+		requirePostPlanRejection(t, result, apiErr, protocol.CodeStopped)
+	})
+
+	t.Run("work deadline", func(t *testing.T) {
+		h := newHarness(t)
+		start := h.startSession()
+		h.device.scriptCaptures(replayCurrentCapture(t, h.engine))
+		installPostPlanMutation(t, func(e *Engine) {
+			e.work.Deadline = time.Now().Add(-time.Second)
+		})
+
+		result, apiErr := h.engine.Observe(context.Background(), "agent", "PpostPlanDeadline",
+			&protocol.ObserveRequest{Reference: start.OperationID})
+		requirePostPlanRejection(t, result, apiErr, protocol.CodeStopped)
+	})
+
+	t.Run("capture age", func(t *testing.T) {
+		h := newHarness(t)
+		start := h.startSession()
+		h.device.scriptCaptures(replayCurrentCapture(t, h.engine))
+		installPostPlanMutation(t, func(e *Engine) {
+			e.cfg.CaptureMaxAge = -time.Nanosecond
+		})
+
+		result, apiErr := h.engine.Observe(context.Background(), "agent", "PpostPlanAge",
+			&protocol.ObserveRequest{Reference: start.OperationID})
+		requirePostPlanRejection(t, result, apiErr, protocol.CodeStaleScreen)
+	})
+}
+
+func installPostPlanMutation(t *testing.T, mutate func(*Engine)) {
+	t.Helper()
+	original := planPublicationRetention
+	t.Cleanup(func() { planPublicationRetention = original })
+	mutated := false
+	planPublicationRetention = func(e *Engine, cost int, pool []*baselineState,
+		selectedBaseID string) ([]*observationState, []*baselineState, bool) {
+		victims, finalPool, fits := original(e, cost, pool, selectedBaseID)
+		if !mutated {
+			mutate(e)
+			mutated = true
+		}
+		return victims, finalPool, fits
+	}
+}
+
+func requirePostPlanRejection(t *testing.T, result *protocol.Result, apiErr *protocol.APIError,
+	code string) {
+	t.Helper()
+	if apiErr != nil {
+		t.Fatalf("post-plan rejection was fail-fast instead of a result: %v", apiErr)
+	}
+	if result == nil || result.Observation == nil || result.Observation.ID != "" ||
+		result.Observation.Error == nil || result.Observation.Error.Code != code {
+		t.Fatalf("post-plan result = %+v, want failed observation %s", result, code)
 	}
 }

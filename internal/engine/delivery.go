@@ -54,14 +54,15 @@ func (e *Engine) deliverRejectedObservation(work *workState, session *sessionSta
 		State: protocol.QualityUnknown, Samples: 0,
 		StopReason: protocol.QualityStopNotSampled,
 	}
-	// forceFull keeps every delivered delta's base equal to the observation this
-	// rejected request actually used: a full reference was just confirmed as the
-	// baseline at claim time, while a delta reference would silently fall back to
-	// an older base the caller did not just read. The delivery frame never
-	// probes historical baselines: it is read-only material for the next
-	// request, so only the primary path may produce its delta.
+	// A full reference was confirmed at claim time, so its delivery may only use
+	// that exact base. A delta reference already carried its full base in the
+	// result; the delivered frame must not select a different historical base.
+	selection := treeSelection{forceFull: !obs.Full}
+	if obs.Full {
+		selection = treeSelection{allowedBaseID: obs.ID}
+	}
 	public, _, publishErr := e.publishTreeAttempt(work, session, "act.delivery", tree,
-		tree.capture.CapturedAt, false, !obs.Full, "complete", nil, quality)
+		tree.capture.CapturedAt, selection, "complete", nil, quality)
 	if publishErr != nil {
 		e.logQuality(work.OperationID, "act.delivery", nil, quality)
 		e.logDelivery(work, "failed", publishErr.Code, "")

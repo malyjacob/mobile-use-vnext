@@ -15,7 +15,7 @@
 | 方法 | 所有业务端点只接受 `POST`；其他方法返回 `405`，错误码 `invalid_request` |
 | 认证 | `/api/*` 用 `agent_token`；`/v1/control/*` 用 `control_token`；`Authorization: Bearer <token>` |
 | 身份隔离 | agent token 不能访问 `/v1/control/*`，control token 不能访问 `/api/*`；错误为 `401 unauthorized` |
-| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 25`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
+| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 26`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
 | 预分配 P | `/api/*` 可带 `X-Mobile-Use-Operation: P…`；缺省由服务分配。`status` 不使用该头 |
 | 请求体 | 必须是一个 JSON 对象；大小上限：`start`/`status`/`end`/`wait_for` 16 KiB，`observe` 32 KiB，`snap` 8 KiB，`act` 64 KiB，`inspect`/`keepalive`/`diagnose`/`app` 8 KiB，`notify` 16 KiB，`shell` 32 KiB，`sync` 32 KiB，`stop` 8 KiB |
 | 响应 | `Content-Type: application/json; charset=utf-8`，`Cache-Control: no-store` |
@@ -307,10 +307,12 @@ HTTP 状态映射（默认由 `protocol.Status` 按 code 决定；认领前的 t
 
 输出由服务端基线状态决定：
 
-- `observe(O1)`：若 O1 是 `ready` 的 full 候选，先把它确认为基线，然后执行一次新采集。
-  新采集通常相对 O1 返回 delta；页面未变时是空差异（只有 `format`、`base`、`view`）。
-  若 O1 之后发生主路径未命中的变化（如跨页回返），`base` 也可能是池中另一条仍在 4 个 revision、
-  180 秒窗口内的已确认 full；只有历史候选的差分小于该候选 full 的 50% 时才会这样选择。
+- `observe(O1)`：若 O1 是 `ready` 的 full 候选，先把它确认为当前基线，然后执行一次新采集。
+  新采集可相对 O1 返回 delta；页面未变时是空差异（只有 `format`、`base`、`view`）。当前基线
+  在跨度 1–10 内可用，其他备用 full 在跨度 1–4 内可用，所有候选都要求同一会话 origin、同一
+  显示 ID/代次且采集龄严格小于 180 秒。服务用每份完整 full 自己的节点编号重新匹配同一采集，
+  按实际 `tree v4` 树块字节选择最短合格 delta；备用 full 的跨度 5–10 不参与，成功的备用候选
+  从下一次发布起成为当前基线。
 - `observe(P…)`：强制 full。P 必须属于本 Agent 且其原会话仍活动。
 - 引用已结束会话的 `O` → `409 session_ended`；O 不存在或不属于本 Agent →
   `409 observation_not_found`；P 已封闭 → `409 request_closed`；P 不存在 →
@@ -911,7 +913,7 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms），
 
 | 字段 | 必填 | 类型 | 说明 |
 | --- | --- | --- | --- |
-| `contract_version` | 是 | 字符串 | 必须为 `"25"`，否则 `409 contract_mismatch` |
+| `contract_version` | 是 | 字符串 | 必须为 `"26"`，否则 `409 contract_mismatch` |
 | `app_instance_id` | 是 | UUID | App 进程实例；变化会撤销旧归属 |
 | `app_version` | 否（App 应发送） | 字符串 | 仅发行标识 |
 | `selected_mode` | 是 | `virtual`/`primary` | 用户选择 |
@@ -938,7 +940,7 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms），
 
 ```json
 {
-  "contract_version": "25",
+  "contract_version": "26",
   "service_instance_id": "…",
   "control": {
     "revision": 42,
@@ -974,7 +976,7 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms），
 ## 9. `POST /v1/control/stop`
 
 ```json
-{"contract_version":"25","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
+{"contract_version":"26","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
 ```
 
 - **不校验普通契约**：`contract_version` 字段存在但不参与准入，服务与 App 契约版本
@@ -984,7 +986,7 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms），
 - 重复或过期 `seq` 不报错，只返回 `state=duplicate`。
 
 ```json
-{"contract_version":"25","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
+{"contract_version":"26","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
 ```
 
 `accepted` 恒为 `true`；`state` 为 `revoked`（绑定时撤销了活动会话）、`recorded`
@@ -997,7 +999,7 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms），
 无认证，只表示进程可应答，不代表设备就绪或资源干净：
 
 ```json
-{"status":"ok","contract_version":"25","service_instance_id":"…","release_version":"…"}
+{"status":"ok","contract_version":"26","service_instance_id":"…","release_version":"…"}
 ```
 
 ## 11. 数据对象
@@ -1190,10 +1192,14 @@ compact 几何策略是固定的服务策略，不是请求字段，按以下顺
   新的 full 与 delta 的 `add`/`replace` 只含普通节点定义。读取历史 full、`add` 或
   `replace` 时，先展开其中的历史 `chain`，链内 ref 可作差分引用，应用结果为展开的 full；
 - 最终图必须单父、无环且全部可达；根变化或同 ref 角色变化退 full。仅跨父移动或增删包装层
-  不强制 full。`delta.base` 必须是仍在池内、满足 `revision - base.Revision <= 4` 且采集龄
-  `< 180s` 的已确认 full；主路径差分只有 `10×deltaBytes < 7×fullBytes` 才发送，历史回返候选
-  只有 `10×deltaBytes < 5×candidateFullBytes` 且主路径未命中时才可发送。历史 50% 规则只限制
-  差分体积，不证明两帧属于同一页面；超过窗口的旧基线不再参与；
+  不强制 full。`delta.base` 必须是仍在池内、满足下列窗口且采集龄 `< 180s` 的已确认 full：
+  当前基线跨度为 1–10，其他备用 full 为 1–4。成功发布引用备用 full 的 delta 后，该 full
+  从下一次发布起成为当前基线。
+- 全池候选分别按候选 full 和 delta 的正式 `tree v4` 普通树块计量 UTF-8 字节，块头至
+  `end tree` 行末换行均计入，`result` 信封与图片不计入。只有
+  `10×deltaBytes < 7×candidateFullBytes` 才合格，精确等于 70% 不合格。合格候选取 delta 树块
+  字节最少者，长度相同优先当前基线，再取 revision 较大的 full；没有合格候选时发送 full。
+  该门槛不证明两帧属于同一页面，调用方仍按 O 与动作授权的现行判据使用引用；
 - 公共 full 超过 128 KiB、单个内部快照超过 4 MiB，或该快照连同受保护历史仍超过 32 MiB 的
   留存额度时，服务返回 `503 tree_too_large`，`details.budget` 分别取 `public_full`、
   `internal_snapshot`、`retained_snapshots`，`details.limit` 为对应字节上限；错误不携带
@@ -1260,9 +1266,10 @@ compact 几何策略是固定的服务策略，不是请求字段，按以下顺
 例如 `error.details.candidates` 或 `error.details.blocking_refs` 指出候选或阻塞节点，调用方可传入原 act
 请求的 O 作为 `reference`，并用该诊断编号作为 `node` 查看子树。
 
-基线池内的活动基线 O 受留存淘汰保护，因此凡仍可能作为 `delta.base` 发出的 O，
-`inspect(reference=baseID)` 在池窗口内可读；基线退出池后不再承诺补看。`inspect` 仍受本节
-128 KiB/32 KiB 大小预算，不因它是基线而放宽；预算不足或树已被淘汰分别返回
+基线池内的当前基线与备用 full 受留存淘汰保护，因此凡仍可能作为 `delta.base` 发出的 O，
+`inspect(reference=baseID)` 在其实际池窗口内可读；当前基线可覆盖跨度 1–10，其他备用 full
+覆盖跨度 1–4。基线退出池后不再承诺补看。`inspect` 仍受本节 128 KiB/32 KiB 大小预算，
+不因它是基线而放宽；预算不足或树已被淘汰分别返回
 `inspection_too_large` 与 `content_unavailable`，不回退到 compact 或旧树。
 
 - 补看固定使用 `view=detailed`：逐节点展开、不折 `chain`、不隐藏已知几何；`tree` 作用域的

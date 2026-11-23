@@ -19,17 +19,20 @@ instance, err := c.Discover(ctx)
 `POST /api/status {}` 取得当前准入事实（`can_start`、`blocking_code`、本 Agent 的
 `session`、`start_operation_id` 与 `cleanup`）。它不生成 P、不续租、不创建会话。
 
-当前共同契约为 `"25"`。契约版本不等时返回 `contract_mismatch`；客户端不刷新版本、不重发
+当前共同契约为 `"26"`。契约版本不等时返回 `contract_mismatch`；客户端不刷新版本、不重发
 业务动作。端口可应答、`/health` 正常都不等于 `can_start=true`。
 
 公开树与 detailed inspection 使用相同的完整节点布尔默认/unknown 规则，不携带 defaults。
 delta 的 set 保留显式 false/空值/null；应用器将五块作为固定基线的原子最终图声明，支持
-存续节点迁移与新增组装父。服务端维护至多 4 条近期已确认 full 基线（同一会话 origin 与同一
-目标显示 ID/代次，`revision - base.Revision <= 4` 且采集龄 `< 180s`），`delta.base` 可指向其中任一
-条；跨页回返使用更严格的历史差分阈值。调用方必须保留所有可能被引用的已确认 full 树，并逐条
-按 `delta.base` 应用到对应完整树，不能叠加在上一份 delta 结果上；`observe(P)` 与
-`full=true` 强制 full，基线仍在池内时可经 `inspect(reference=base)` 回看。阅读 ref 连续性
-不代替服务端输入授权。格式见[接口契约](interface.md)。
+存续节点迁移与新增组装父。服务端维护至多 4 条已确认 full 基线（同一会话 origin 与同一目标
+显示 ID/代次，采集龄 `< 180s`）。当前基线可在跨度 1–10 内成为 `delta.base`，其他备用 full
+仅可使用跨度 1–4；备用 full 被成功选回后，从下一次发布起成为当前基线。调用方必须保留所有
+可能被引用的已确认 full 树，不能在第 4 个修订后立即淘汰仍为当前基线的 full，并逐条按
+`delta.base` 应用到对应完整树，不能叠加在上一份 delta 结果上。服务从同一采集的全池候选中
+按实际 `tree v4` 树块 UTF-8 字节选择最短合格差分，合格条件是严格小于对应 full 的 70%。
+同一字节数优先当前基线，再取较新 revision。`observe(P)` 与 `full=true` 强制 full，基线仍在
+池内时可经 `inspect(reference=base)` 回看。阅读 ref 连续性不代替服务端输入授权。格式见
+[接口契约](interface.md)。
 
 ## 2. 操作编号 P
 

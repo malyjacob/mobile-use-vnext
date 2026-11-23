@@ -541,7 +541,10 @@ func TestRetainedSnapshotFailureLeavesHistoryUnchanged(t *testing.T) {
 		readonlyTree(readonlyNode("n4", protocol.RoleRoot)))
 
 	currentCost := newCost
-	protectedCost := baseline.Cost + currentCost + claimedOld.Cost + claimedNew.Cost
+	// An expired baseline is no longer a permanent admission or retention
+	// barrier. Even after pool pressure, the current observation and both claims
+	// remain protected and make this limit impossible.
+	protectedCost := currentCost + claimedOld.Cost + claimedNew.Cost
 	limit := protectedCost + newCost - 1
 	if protectedCost+newCost <= limit {
 		t.Fatalf("fixture does not exceed the retained budget")
@@ -569,4 +572,151 @@ func TestRetainedSnapshotFailureLeavesHistoryUnchanged(t *testing.T) {
 		t.Fatalf("details.limit = %v, want %d", got, limit)
 	}
 	requireEngineHistoryUnchanged(t, h.engine, before)
+}
+
+func TestBaselinePoolPressureEvictsOldestUnselectedBackup(t *testing.T) {
+	h := newHarness(t)
+	h.startSession()
+	base := time.Now().Add(-time.Minute)
+	h.engine.mu.Lock()
+	current := h.engine.current
+	current.Cost = 10
+	tree := current.Compact
+	h.engine.mu.Unlock()
+
+	selected := installRetainedSnapshot(t, h.engine, "Opressure_selected",
+		ObservationRetired, 20, base, readonlyTree(readonlyNode("n2", protocol.RoleRoot)))
+	oldest := installRetainedSnapshot(t, h.engine, "Opressure_oldest",
+		ObservationRetired, 50, base.Add(time.Second),
+		readonlyTree(readonlyNode("n3", protocol.RoleRoot)))
+	newer := installRetainedSnapshot(t, h.engine, "Opressure_newer",
+		ObservationRetired, 10, base.Add(2*time.Second),
+		readonlyTree(readonlyNode("n4", protocol.RoleRoot)))
+
+	h.engine.mu.Lock()
+	pool := []*baselineState{
+		{ObservationID: selected.ID, Revision: 5, Tree: tree},
+		{ObservationID: newer.ID, Revision: 4, Tree: tree},
+		{ObservationID: oldest.ID, Revision: 3, Tree: tree},
+	}
+	h.engine.cfg.MaxRetainedSnapshotCostBytes = 60
+	victims, finalPool, fits := h.engine.planRetentionWithPoolPressureLocked(
+		20, pool, selected.ID)
+	h.engine.mu.Unlock()
+	if !fits {
+		t.Fatal("pool pressure did not make the retained budget fit")
+	}
+	if baselineWithID(finalPool, oldest.ID) != nil {
+		t.Fatalf("oldest unselected backup survived pool pressure: %+v", finalPool)
+	}
+	if baselineWithID(finalPool, selected.ID) == nil ||
+		baselineWithID(finalPool, newer.ID) == nil {
+		t.Fatalf("pressure removed the selected or newer backup: %+v", finalPool)
+	}
+	foundVictim := false
+	for _, victim := range victims {
+		if victim == nil || victim == current || victim.ID == selected.ID {
+			t.Fatalf("protected observation became a pressure victim: %+v", victim)
+		}
+		if victim.ID == oldest.ID {
+			foundVictim = true
+		}
+	}
+	if !foundVictim {
+		t.Fatalf("pool exit could not release its snapshot: %+v", victims)
+	}
+}
+
+func TestFullFallbackWithoutCurrentKeepsThreeBackups(t *testing.T) {
+	t.Run("success trims oldest", func(t *testing.T) {
+		h := newHarness(t)
+		start := h.startSession()
+		h.engine.cfg.CaptureMaxAge = time.Minute
+		h.device.scriptCaptures(replayCurrentCapture(t, h.engine))
+		oldest := installFullFallbackPool(t, h, start)
+
+		result, apiErr := h.engine.Observe(context.Background(), "agent", "PfallbackTrim",
+			&protocol.ObserveRequest{Reference: start.OperationID})
+		if apiErr != nil {
+			t.Fatalf("forced full fallback: %v", apiErr)
+		}
+		if result.Observation == nil || result.Observation.Error != nil ||
+			result.Observation.Tree == nil || result.Observation.Tree.Full == nil {
+			t.Fatalf("forced full fallback did not publish a full tree: %+v", result.Observation)
+		}
+
+		h.engine.mu.Lock()
+		defer h.engine.mu.Unlock()
+		if len(h.engine.baselines) != maxBackupBaselines {
+			t.Fatalf("backup-only pool length = %d, want %d",
+				len(h.engine.baselines), maxBackupBaselines)
+		}
+		if h.engine.activeBaselineID != "" {
+			t.Fatalf("full fallback kept active baseline %q", h.engine.activeBaselineID)
+		}
+		if baselineWithID(h.engine.baselines, oldest.ObservationID) != nil {
+			t.Fatalf("oldest backup survived full fallback: %+v", h.engine.baselines)
+		}
+	})
+
+	t.Run("failure has no side effects", func(t *testing.T) {
+		h := newHarness(t)
+		start := h.startSession()
+		h.engine.cfg.CaptureMaxAge = time.Minute
+		h.device.scriptCaptures(replayCurrentCapture(t, h.engine))
+		installFullFallbackPool(t, h, start)
+
+		before := fingerprintEngineHistory(h.engine)
+		h.engine.mu.Lock()
+		nextObservation := h.engine.nextObservation
+		revision := h.engine.session.Revision
+		h.engine.cfg.MaxRetainedSnapshotCostBytes = -1
+		h.engine.mu.Unlock()
+
+		result, apiErr := h.engine.Observe(context.Background(), "agent", "PfallbackFail",
+			&protocol.ObserveRequest{Reference: start.OperationID})
+		if apiErr != nil {
+			t.Fatalf("forced full fallback: %v", apiErr)
+		}
+		if result.Observation == nil || result.Observation.Error == nil ||
+			result.Observation.Error.Code != protocol.CodeTreeTooLarge {
+			t.Fatalf("forced full fallback = %+v, want retained budget failure",
+				result.Observation)
+		}
+		requireEngineHistoryUnchanged(t, h.engine, before)
+		h.engine.mu.Lock()
+		defer h.engine.mu.Unlock()
+		if h.engine.nextObservation != nextObservation ||
+			h.engine.session.Revision != revision {
+			t.Fatalf("failed fallback changed identity state: O %d->%d revision %d->%d",
+				nextObservation, h.engine.nextObservation, revision, h.engine.session.Revision)
+		}
+	})
+}
+
+func installFullFallbackPool(t *testing.T, h *harness, start *protocol.Result) *baselineState {
+	t.Helper()
+	h.engine.mu.Lock()
+	defer h.engine.mu.Unlock()
+	session := h.engine.session
+	tree := start.Observation.Tree.Full
+	nextRevision := session.Revision + 1
+	entries := []*baselineState{
+		newFullFallbackBaseline("Obackup_middle", session, nextRevision-2, tree),
+		newFullFallbackBaseline("Obackup_oldest", session, nextRevision-4, tree),
+		newFullFallbackBaseline("Obackup_newest", session, nextRevision-1, tree),
+		newFullFallbackBaseline("Obackup_newer", session, nextRevision-3, tree),
+	}
+	h.engine.baselines = entries
+	h.engine.activeBaselineID = entries[2].ObservationID
+	return entries[1]
+}
+
+func newFullFallbackBaseline(id string, session *sessionState, revision int,
+	tree *protocol.ReadTree) *baselineState {
+	return &baselineState{
+		ObservationID: id, Origin: session.Origin, Revision: revision,
+		CapturedAt: time.Now(), DisplayID: session.Display.ID,
+		DisplayGeneration: session.Display.Generation, Tree: tree,
+	}
 }

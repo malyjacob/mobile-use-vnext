@@ -14,6 +14,7 @@ import (
 
 	"github.com/malyjacob/mobile-use-vnext/internal/observation"
 	"github.com/malyjacob/mobile-use-vnext/internal/protocol"
+	"github.com/malyjacob/mobile-use-vnext/internal/treetext"
 )
 
 func testBoolPtr(value bool) *bool { return &value }
@@ -269,6 +270,41 @@ func TestTreeTextDeltaGolden(t *testing.T) {
 	}}
 	if block := mustRenderTreeText(t, result); block != testTreeTextDeltaGolden {
 		t.Fatalf("delta block mismatch:\n--- got ---\n%s\n--- want ---\n%s", block, testTreeTextDeltaGolden)
+	}
+}
+
+func TestTreeTextUsesExtractedEncoderByteForByte(t *testing.T) {
+	full := &protocol.Result{Observation: &protocol.Observation{
+		ID: "O3", Tree: &protocol.ReadTreeValue{Full: testFullTree()},
+	}}
+	delta := &protocol.Result{Observation: &protocol.Observation{
+		ID: "O4", Tree: &protocol.ReadTreeValue{Delta: testDelta()},
+	}}
+
+	gotFull, ok := renderTreeText(full)
+	if !ok {
+		t.Fatal("MCP full tree text is not representable")
+	}
+	wantFull, ok := treetext.EncodeFull("O3", testFullTree())
+	if !ok {
+		t.Fatal("extracted full tree text is not representable")
+	}
+	if gotFull != wantFull {
+		t.Fatalf("MCP and extracted full bytes differ:\n--- MCP ---\n%s\n--- treetext ---\n%s",
+			gotFull, wantFull)
+	}
+
+	gotDelta, ok := renderTreeText(delta)
+	if !ok {
+		t.Fatal("MCP delta text is not representable")
+	}
+	wantDelta, ok := treetext.EncodeDelta("O4", testDelta())
+	if !ok {
+		t.Fatal("extracted delta text is not representable")
+	}
+	if gotDelta != wantDelta {
+		t.Fatalf("MCP and extracted delta bytes differ:\n--- MCP ---\n%s\n--- treetext ---\n%s",
+			gotDelta, wantDelta)
 	}
 }
 

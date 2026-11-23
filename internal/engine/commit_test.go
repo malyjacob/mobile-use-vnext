@@ -10,6 +10,7 @@ import (
 	"github.com/malyjacob/mobile-use-vnext/internal/device"
 	"github.com/malyjacob/mobile-use-vnext/internal/observation"
 	"github.com/malyjacob/mobile-use-vnext/internal/protocol"
+	"github.com/malyjacob/mobile-use-vnext/internal/treetext"
 )
 
 type hookedProjector struct {
@@ -166,6 +167,29 @@ func TestObserveFullForcesFullAfterBaselineAcknowledgement(t *testing.T) {
 	}
 }
 
+func TestTreeTextPreviewDoesNotAllocateObservationID(t *testing.T) {
+	h := newHarness(t)
+	start := h.startSession()
+	h.engine.mu.Lock()
+	before := h.engine.nextObservation
+	preview := h.engine.previewObservationIDLocked()
+	after := h.engine.nextObservation
+	h.engine.mu.Unlock()
+	if before != after {
+		t.Fatalf("preview allocated an observation: %d -> %d", before, after)
+	}
+
+	h.device.scriptCaptures(replayCurrentCapture(t, h.engine))
+	result, err := h.engine.Observe(context.Background(), "agent", "Ppreview",
+		&protocol.ObserveRequest{Reference: start.Observation.ID, Full: true})
+	if err != nil {
+		t.Fatalf("observe after preview: %v", err)
+	}
+	if result.Observation == nil || result.Observation.ID != preview {
+		t.Fatalf("published observation = %+v, want preview %q", result.Observation, preview)
+	}
+}
+
 // TestObserveFullFlagAndDeltaCostGate covers the full flag and the encoding
 // cost gate together: after a confirmed baseline an unchanged tree yields a
 // delta with full=false, full=true forces a full tree for that same baseline,
@@ -253,9 +277,9 @@ func thresholdReadTree(changedBytes, stableBytes int) *protocol.ReadTree {
 }
 
 // thresholdDeltaFixture uses two independent label lengths. The changed label
-// contributes to both the delta and full encodings. The unchanged public label
-// contributes only to the full, which makes an exact 70% boundary constructible
-// without padding or changing topology.
+// contributes to both tree v4 blocks. The unchanged public label contributes
+// only to the full block, which makes an exact 70% boundary constructible
+// without changing topology.
 func thresholdDeltaFixture(t *testing.T) (
 	base, belowTree, equalTree *protocol.ReadTree,
 	belowDelta, equalDelta *protocol.ReadDelta) {
@@ -267,17 +291,18 @@ func thresholdDeltaFixture(t *testing.T) (
 		if err != nil {
 			t.Fatalf("probe threshold delta: %v", err)
 		}
-		probeFull, err := protocol.JSON(probe)
-		if err != nil {
-			t.Fatal(err)
+		probeFullText, ok := treetext.EncodeFull("Osynthetic", probe)
+		if !ok {
+			t.Fatal("encode threshold full as tree v4")
 		}
-		probeDeltaBytes, err := protocol.JSON(probeDelta)
-		if err != nil {
-			t.Fatal(err)
+		probeDeltaText, ok := treetext.EncodeDelta("Osynthetic", probeDelta)
+		if !ok {
+			t.Fatal("encode threshold delta as tree v4")
 		}
 		// Increasing the changed label by one byte raises 10*delta by ten and
 		// 7*full by seven, closing this gap by three.
-		gap := 7*len(probeFull) - 10*len(probeDeltaBytes)
+		gap := baselineDeltaNumerator*len(probeFullText) -
+			baselineDeltaDenominator*len(probeDeltaText)
 		if gap < 0 || gap%3 != 0 {
 			continue
 		}
@@ -292,91 +317,32 @@ func thresholdDeltaFixture(t *testing.T) (
 		if err != nil {
 			t.Fatalf("build equal-boundary delta: %v", err)
 		}
-		belowFull, err := protocol.JSON(belowTree)
-		if err != nil {
-			t.Fatal(err)
+		belowFullText, ok := treetext.EncodeFull("Osynthetic", belowTree)
+		if !ok {
+			t.Fatal("encode below-boundary full as tree v4")
 		}
-		belowBytes, err := protocol.JSON(belowDelta)
-		if err != nil {
-			t.Fatal(err)
+		belowDeltaText, ok := treetext.EncodeDelta("Osynthetic", belowDelta)
+		if !ok {
+			t.Fatal("encode below-boundary delta as tree v4")
 		}
-		equalFull, err := protocol.JSON(equalTree)
-		if err != nil {
-			t.Fatal(err)
+		equalFullText, ok := treetext.EncodeFull("Osynthetic", equalTree)
+		if !ok {
+			t.Fatal("encode boundary full as tree v4")
 		}
-		equalBytes, err := protocol.JSON(equalDelta)
-		if err != nil {
-			t.Fatal(err)
+		equalDeltaText, ok := treetext.EncodeDelta("Osynthetic", equalDelta)
+		if !ok {
+			t.Fatal("encode boundary delta as tree v4")
 		}
-		if 10*len(belowBytes) >= 7*len(belowFull) ||
-			10*len(equalBytes) != 7*len(equalFull) {
+		if baselineDeltaDenominator*len(belowDeltaText) >=
+			baselineDeltaNumerator*len(belowFullText) ||
+			baselineDeltaDenominator*len(equalDeltaText) !=
+				baselineDeltaNumerator*len(equalFullText) {
 			continue
 		}
 		return base, belowTree, equalTree, belowDelta, equalDelta
 	}
 	t.Fatal("could not construct exact 70% delta/full boundary")
 	return nil, nil, nil, nil, nil
-}
-
-func publishThresholdCandidate(t *testing.T, h *harness, base *protocol.ReadTree,
-	current *protocol.ReadTree, delta *protocol.ReadDelta, operationID string) *protocol.Observation {
-	t.Helper()
-	h.engine.mu.Lock()
-	if h.engine.session == nil {
-		h.engine.mu.Unlock()
-		t.Fatal("threshold fixture has no active session")
-	}
-	h.engine.baselines = []*baselineState{{
-		ObservationID: "Osynthetic", Origin: h.engine.session.Origin,
-		Revision: h.engine.session.Revision, CapturedAt: time.Now(),
-		DisplayID:         h.engine.session.Display.ID,
-		DisplayGeneration: h.engine.session.Display.Generation,
-		Tree:              base,
-	}}
-	h.engine.activeBaselineID = "Osynthetic"
-	h.engine.mu.Unlock()
-	h.engine.differ = fixedReadDiffer{delta: delta}
-
-	op, duplicate, apiErr := h.engine.registerOperation(operationID, "agent", "observe")
-	if apiErr != nil {
-		t.Fatalf("register threshold operation: %v", apiErr)
-	}
-	if duplicate != nil || op == nil {
-		t.Fatalf("threshold operation was not admitted: op=%+v duplicate=%+v", op, duplicate)
-	}
-	work, apiErr := h.engine.acquireWork(op, WorkObserve)
-	if apiErr != nil {
-		t.Fatalf("acquire threshold work: %v", apiErr)
-	}
-	defer h.engine.releaseWork(work)
-	session := h.engine.sessionForWork(work)
-	if session == nil {
-		t.Fatal("threshold work has no authorized session")
-	}
-
-	compactBytes, err := protocol.JSON(current)
-	if err != nil {
-		t.Fatalf("encode threshold full: %v", err)
-	}
-	capture := *h.engine.current.Projection.Capture
-	capture.CapturedAt = time.Now()
-	attempt := &treeAttempt{
-		capture:      capture,
-		projection:   h.engine.current.Projection,
-		compact:      current,
-		compactBytes: compactBytes,
-		cost:         1,
-		commit:       func() {},
-	}
-	published, _, apiErr := h.engine.publishTreeAttempt(work, session, "test.boundary", attempt,
-		time.Now(), false, false, ObservationReady, nil, nil)
-	if apiErr != nil {
-		t.Fatalf("publish threshold candidate: %v", apiErr)
-	}
-	if published == nil || published.Tree == nil {
-		t.Fatalf("threshold candidate published no observation: %+v", published)
-	}
-	return published
 }
 
 func TestDeltaCostGateIsStrictlyBelowSeventyPercent(t *testing.T) {
@@ -391,23 +357,24 @@ func TestDeltaCostGateIsStrictlyBelowSeventyPercent(t *testing.T) {
 		{name: "equal", tree: equalTree, delta: equalDelta, wantFull: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			h := newHarness(t)
-			h.startSession()
-			published := publishThresholdCandidate(t, h, base, test.tree, test.delta,
-				"PdeltaBoundary"+test.name)
+			engine := &Engine{differ: fixedReadDiffer{delta: test.delta}}
+			baseline := &baselineState{ObservationID: "Osynthetic", Tree: base}
+			selected, deltaBytes, ok := engine.treeTextBaselineDelta(
+				"Osynthetic", baseline, test.tree)
 			if test.wantFull {
-				if published.Tree.Delta != nil || published.Tree.Full == nil {
-					t.Fatalf("equal-cost delta was not rejected: %+v", published.Tree)
-				}
-				if !observation.ReadEqual(published.Tree.Full, test.tree) {
-					t.Fatal("full fallback changed the current compact tree")
+				if ok || selected != nil || deltaBytes != 0 {
+					t.Fatalf("equal-cost delta was accepted: %+v bytes=%d", selected, deltaBytes)
 				}
 				return
 			}
-			if published.Tree.Delta == nil || published.Tree.Full != nil {
-				t.Fatalf("strictly smaller delta was not selected: %+v", published.Tree)
+			if !ok || selected == nil {
+				t.Fatal("strictly smaller delta was rejected")
 			}
-			applied, err := observation.ReadApply(base, published.Tree.Delta)
+			encoded, encodedOK := treetext.EncodeDelta("Osynthetic", selected)
+			if !encodedOK || len(encoded) != deltaBytes {
+				t.Fatalf("measured delta bytes = %d, encoded = %d", deltaBytes, len(encoded))
+			}
+			applied, err := observation.ReadApply(base, selected)
 			if err != nil {
 				t.Fatalf("apply selected delta: %v", err)
 			}
@@ -415,6 +382,36 @@ func TestDeltaCostGateIsStrictlyBelowSeventyPercent(t *testing.T) {
 				t.Fatal("selected delta did not reconstruct the current compact tree")
 			}
 		})
+	}
+}
+
+func TestTreeTextDeltaMeasurementUsesUTF8BlockBytes(t *testing.T) {
+	stable := strings.Repeat("界", 64)
+	base := thresholdReadTree(1, 0)
+	current := thresholdReadTree(2, 0)
+	base.Root.Children[1].Label = []string{stable}
+	current.Root.Children[1].Label = []string{stable}
+	delta, err := observation.ReadDiff("Osynthetic", base, current)
+	if err != nil {
+		t.Fatalf("build UTF-8 delta: %v", err)
+	}
+	engine := &Engine{differ: fixedReadDiffer{delta: delta}}
+	selected, deltaBytes, ok := engine.treeTextBaselineDelta("Osynthetic",
+		&baselineState{ObservationID: "Osynthetic", Tree: base}, current)
+	if !ok || selected == nil {
+		t.Fatal("cheap UTF-8 candidate was rejected")
+	}
+	fullText, fullOK := treetext.EncodeFull("Osynthetic", current)
+	deltaText, deltaOK := treetext.EncodeDelta("Osynthetic", selected)
+	if !fullOK || !deltaOK {
+		t.Fatal("encode UTF-8 tree-v4 blocks")
+	}
+	if !strings.HasSuffix(fullText, "end tree\n") || len(deltaText) != deltaBytes {
+		t.Fatalf("tree-v4 block measurement lost its trailer: full=%q deltaBytes=%d",
+			fullText[len(fullText)-min(len(fullText), 16):], deltaBytes)
+	}
+	if !strings.Contains(fullText, stable) {
+		t.Fatal("full block did not retain the UTF-8 label bytes")
 	}
 }
 

@@ -39,8 +39,8 @@ func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
-// manifestPaths collects -manifest flags; the same release/host-tools manifest
-// fragment can be supplied more than once and every one must agree.
+// manifestPaths collects -manifest flags; every supplied release/host-tools
+// manifest must agree with the probe build's release, contract and catalog.
 type manifestPaths []string
 
 func (m *manifestPaths) String() string { return strings.Join(*m, ",") }
@@ -66,7 +66,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	appTarget := flags.String("app-target", controlledAppPackage, "controlled test package for app-lifecycle")
 	timeoutSeconds := flags.Int("timeout", 180, "overall probe timeout in seconds")
 	var manifests manifestPaths
-	flags.Var(&manifests, "manifest", "release or host-tools manifest to compare the catalog fingerprint (repeatable)")
+	flags.Var(&manifests, "manifest", "release or host-tools manifest to compare release, contract and catalog identity (repeatable)")
 	if err := flags.Parse(args); err != nil {
 		return 1
 	}
