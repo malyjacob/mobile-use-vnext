@@ -1,6 +1,6 @@
 # 提案：延长当前 full 基线并统一按 tree v4 选择差分
 
-状态：提案，未实现。
+状态：已落地。实现提交 `d80341be36e5d1100abed132d1cfdff54134e97a`。
 基线提交：`2cccde86af29de95beaf9c10e51584fe919456be`（分支 `master`，`2026-11-23`）。
 适用范围：设备服务发布观察时的 full/delta 选择、已确认 full 的留存与 `inspect` 补看。
 影响范围：`internal/engine`、普通树文本编码、MCP 投影与探针、README、正式契约和发布版本源。
@@ -28,13 +28,13 @@
 
 | 事实 | 基线证据 |
 | --- | --- |
-| 普通候选按刚发布的上一棵树给节点编号。每份已确认 full 保存公开树和内部投影 | [默认投影](../../internal/observation/build.go#L88)、[full 保存](../../internal/engine/capture.go#L1057) |
-| 首选基线失效时取最新有效条目。首选用默认候选算差分，其余条目在首选失败后调用 `CandidateAgainst`，并跳过已作为首选的条目 | [引擎选择](../../internal/engine/capture.go#L281) |
-| 所有基线共用跨度 4、年龄 180 秒、池上限 4。JSON 主路径门槛为 70%，备用试探为 50% | [常量](../../internal/engine/capture.go#L229)、[资格](../../internal/engine/capture.go#L483)、[字节门槛](../../internal/engine/capture.go#L540) |
-| 当前基线过期导致整树。现行主路径优先也会让同页消失、重现的横幅拿到新编号 | [跨度边界](../../internal/engine/baseline_pool_test.go#L182)、[横幅对照](../../internal/engine/baseline_pool_test.go#L226) |
-| 知乎列表修订 26 → 29 命中旧 full，差分为零。B 站列表修订 13 → 16 命中旧 full，差分为一条 | [知乎实机记录](../verification/tree-continuity-target-proof-and-text-submit.md#L38)、[B 站实机记录](../verification/tree-continuity-target-proof-and-text-submit.md#L39) |
-| MCP 已有确定性的普通树文本编码。delta 块头中的 base 可按当前 O 缩写 | [树块编码](../../internal/mcp/tree_text.go#L67)、[短 base](../../internal/mcp/tree_text.go#L114) |
-| 留存预算先保护当前 O、认领 O 和池内基线，排除后按采集时间淘汰普通记录。提交失败保留池及旧观察 | [提交](../../internal/engine/capture.go#L338)、[留存计划](../../internal/engine/capture.go#L589)、[条数淘汰](../../internal/engine/capture.go#L988) |
+| 普通候选按刚发布的上一棵树给节点编号。每份已确认 full 保存公开树和内部投影 | [默认投影](../../../internal/observation/build.go#L88)、[full 保存](../../../internal/engine/capture.go#L1057) |
+| 首选基线失效时取最新有效条目。首选用默认候选算差分，其余条目在首选失败后调用 `CandidateAgainst`，并跳过已作为首选的条目 | [引擎选择](../../../internal/engine/capture.go#L281) |
+| 所有基线共用跨度 4、年龄 180 秒、池上限 4。JSON 主路径门槛为 70%，备用试探为 50% | [常量](../../../internal/engine/capture.go#L229)、[资格](../../../internal/engine/capture.go#L483)、[字节门槛](../../../internal/engine/capture.go#L540) |
+| 当前基线过期导致整树。现行主路径优先也会让同页消失、重现的横幅拿到新编号 | [跨度边界](../../../internal/engine/baseline_pool_test.go#L182)、[横幅对照](../../../internal/engine/baseline_pool_test.go#L226) |
+| 知乎列表修订 26 → 29 命中旧 full，差分为零。B 站列表修订 13 → 16 命中旧 full，差分为一条 | [知乎实机记录](../../verification/tree-continuity-target-proof-and-text-submit.md#L38)、[B 站实机记录](../../verification/tree-continuity-target-proof-and-text-submit.md#L39) |
+| MCP 已有确定性的普通树文本编码。delta 块头中的 base 可按当前 O 缩写 | [树块编码](../../../internal/mcp/tree_text.go#L67)、[短 base](../../../internal/mcp/tree_text.go#L114) |
+| 留存预算先保护当前 O、认领 O 和池内基线，排除后按采集时间淘汰普通记录。提交失败保留池及旧观察 | [提交](../../../internal/engine/capture.go#L338)、[留存计划](../../../internal/engine/capture.go#L589)、[条数淘汰](../../../internal/engine/capture.go#L988) |
 
 ### 1.3 为什么直觉会出错
 
@@ -78,9 +78,9 @@ R3 把延长期给正在用的底稿，并用一次采集后的实际匹配结�
 5. **路径限制。** `start`、强制 full 的 app 后观察、`observe(P)`、`wait_for(P)` 和 `full=true` 走原强制 full 路径。
    普通 `observe`、`wait_for`、`act` 后观察及文本 partial 交付使用全池选择。
    `act` 重验失败交付若引用 full O，仅能用这次认领的那个 full，引用 delta O 时交付 full。
-   [普通入口](../../internal/engine/observe.go#L68) · [条件等待](../../internal/engine/wait_for.go#L504) ·
-   [动作后观察](../../internal/engine/act.go#L207) · [文本 partial](../../internal/engine/text_partial.go#L93) ·
-   [限制入口](../../internal/engine/delivery.go#L57) · [app 强制 full](../../internal/engine/app.go#L208)
+   [普通入口](../../../internal/engine/observe.go#L68) · [条件等待](../../../internal/engine/wait_for.go#L504) ·
+   [动作后观察](../../../internal/engine/act.go#L207) · [文本 partial](../../../internal/engine/text_partial.go#L93) ·
+   [限制入口](../../../internal/engine/delivery.go#L57) · [app 强制 full](../../../internal/engine/app.go#L208)
 
 ## 5. 算法
 
@@ -103,7 +103,7 @@ R3 把延长期给正在用的底稿，并用一次采集后的实际匹配结�
 - **预览和提交。** 文本编码复用下一次真实 O 的格式，只读预览序号。现行 O 由 `nextObservationIDLocked`
   递增生成。提交门内核对预览 O 与待分配 O 一致，成功才消费编号。树匹配、差分、编码、排序均在锁外。
   失效基线在提交候选中剔除，再按已算的顺序选。预览 O 失效时丢弃相应文本计量结果，默认 full 仍须通过全部提交门禁。
-  [O 分配](../../internal/engine/engine.go#L1073)
+  [O 分配](../../../internal/engine/engine.go#L1073)
 - **池与容量。** 池最多 4 份，当前基线占一个位置，备用最多 3 份。无当前基线时保留至多 3 份备用，
   为下一次确认留出位置。成功提交后按新当前基线和本次修订裁剪年龄、跨度与显示归属，再按修订先淘汰最旧备用。
   池退出与历史观察淘汰分别记账，普通观察留存仍能让退出池的树供 `inspect` 读取。
@@ -121,11 +121,11 @@ R3 把延长期给正在用的底稿，并用一次采集后的实际匹配结�
 
 | 文件 | 改动 |
 | --- | --- |
-| [引擎发布与基线池](../../internal/engine/capture.go)、[状态](../../internal/engine/engine.go) | 当前与备用窗口、只读候选排序、预览 O、原子发布与留存规划 |
-| [动作重验交付](../../internal/engine/delivery.go) | 传入本次所认领的 full O 作为唯一允许的 base，复用文本门槛 |
-| [MCP 树块](../../internal/mcp/tree_text.go)、[MCP 结果](../../internal/mcp/result_text.go) | 提取可供引擎与 MCP 共用的纯 `tree v4` 普通树编码入口，候选与最终输出使用同一实现，保持 `inspect v3` 的输出字节 |
-| [差分](../../internal/observation/read_diff.go)、[候选投影](../../internal/observation/build.go) | 复用现有重建检查和 `CandidateAgainst` |
-| [引擎测试](../../internal/engine/baseline_pool_test.go)、[MCP 文本测试](../../internal/mcp/tree_text_test.go)、[探针入口](../../scripts/mcp-probe/main.go) | 更新选树边界、文本一致性和发布检查 |
+| [引擎发布与基线池](../../../internal/engine/capture.go)、[状态](../../../internal/engine/engine.go) | 当前与备用窗口、只读候选排序、预览 O、原子发布与留存规划 |
+| [动作重验交付](../../../internal/engine/delivery.go) | 传入本次所认领的 full O 作为唯一允许的 base，复用文本门槛 |
+| [MCP 树块](../../../internal/mcp/tree_text.go)、[MCP 结果](../../../internal/mcp/result_text.go) | 提取可供引擎与 MCP 共用的纯 `tree v4` 普通树编码入口，候选与最终输出使用同一实现，保持 `inspect v3` 的输出字节 |
+| [差分](../../../internal/observation/read_diff.go)、[候选投影](../../../internal/observation/build.go) | 复用现有重建检查和 `CandidateAgainst` |
+| [引擎测试](../../../internal/engine/baseline_pool_test.go)、[MCP 文本测试](../../../internal/mcp/tree_text_test.go)、[探针入口](../../../scripts/mcp-probe/main.go) | 更新选树边界、文本一致性和发布检查 |
 
 ### 6.2 配置与取值
 
@@ -148,15 +148,15 @@ R3 把延长期给正在用的底稿，并用一次采集后的实际匹配结�
 
 ### 6.5 契约与文档影响
 
-更新 [架构](../../docs/architecture.md) §4、[接口](../../docs/interface.md) 的观察、树与补看条款、
-[MCP](../../docs/mcp.md) 的树文本说明及 [README](../../README.md) 的工具表。同步
-[客户端](../../docs/client.md#L28) 与 [集成指引](../../docs/integration.md#L199) 的基线留存口径，
+更新 [架构](../../../docs/architecture.md) §4、[接口](../../../docs/interface.md) 的观察、树与补看条款、
+[MCP](../../../docs/mcp.md) 的树文本说明及 [README](../../../README.md) 的工具表。同步
+[客户端](../../../docs/client.md#L28) 与 [集成指引](../../../docs/integration.md#L199) 的基线留存口径，
 使调用方可以按 `delta.base` 找到跨度为 5 至 10 的当前 full，并更新集成指引的选树门槛。
 
-按 [版本规则](../../docs/release.md#L51) 将选树默认行为的变更写入共同契约，版本由
-[唯一版本源](../../release/versions.json) 生成。全仓检索跨度、旧双门槛、现行契约版本和版本示例，
-逐处核对当前工具说明与运行指引，覆盖 [发布](../../docs/release.md)、[运行手册](../../docs/runbook.md)、
-[手机操作](../../docs/phone-operations.md) 和 [控制协议](../../docs/control-protocol.md) 的版本引用。
+按 [版本规则](../../../docs/release.md#L51) 将选树默认行为的变更写入共同契约，版本由
+[唯一版本源](../../../release/versions.json) 生成。全仓检索跨度、旧双门槛、现行契约版本和版本示例，
+逐处核对当前工具说明与运行指引，覆盖 [发布](../../../docs/release.md)、[运行手册](../../../docs/runbook.md)、
+[手机操作](../../../docs/phone-operations.md) 和 [控制协议](../../../docs/control-protocol.md) 的版本引用。
 实现阶段单独执行正式文档审计。
 
 ## 7. 预期效果与能力边界
@@ -236,16 +236,16 @@ R3 把延长期给正在用的底稿，并用一次采集后的实际匹配结�
    用新探针跑主机 stdio 和手机 HTTP MCP。
 5. 写验证记录与 §11，归档并修正相对链接，以独立提交落盘。
 
-## 11. 实现结果（归档时补写）
+## 11. 实现结果
 
 ### 11.1 已落地
 
-归档时填写实现提交、验证记录与代码落点。
+引擎在 [capture.go](../../../internal/engine/capture.go) 选择、规划并提交观察，文本计量与 MCP 共用 [编码器](../../../internal/treetext/encode.go)。契约 26 已在手机与 Windows 发布工具上验证。见[验证记录](../../verification/active-full-baseline-and-tree-v4-delta.md)。
 
 ### 11.2 与提案不同或未执行
 
 提案审阅采纳了两项建议。补齐客户端留存和集成说明的实施范围，以免调用方在第 4 个修订后提前丢弃
-仍可引用的 full。将证据链接移到对应的实现、断言和实机样本行，便于复核。归档时补录实施偏离及理由。
+仍可引用的 full。将证据链接移到对应的实现、断言和实机样本行，便于复核。实现审查的两项提交门修正及两项集成测试均采纳。文档审计三项修正后复检 clean。实机分别使用设置列表和受控双页，耗时为端到端样本，未隔离候选算法的增量 CPU 开销。依赖方切换由用户处理。
 
 ## 附：本提案不改变的事项
 
