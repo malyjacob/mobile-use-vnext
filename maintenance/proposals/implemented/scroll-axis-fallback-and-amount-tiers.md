@@ -1,12 +1,13 @@
 # 提案：受控滚动轴向兼容选择、父级自动回退与四档精细幅度
 
-状态：提案，未实现。
+状态：已实现（实现提交 `38c7b8258d30398cd5e5bfb016fb6964b091eee2`，`2026-11-23`）。
+实现与验证记录：[scroll-axis-fallback-and-amount-tiers.md](../../verification/scroll-axis-fallback-and-amount-tiers.md)。
 基线提交：`8c494a35179cb6d27e139c5d60e98f37d4229505`（分支 `master`，`2026-11-23`）。
 适用范围：`observation` 公开树构建中 `role=scroll` 节点的 `axis` 投影、`act` 的 `scroll` 分支静态容器轴向兼容判定、父级自动回退与唯一内层兼容兜底、认领后实时重验的轴向兼容守卫、`scroll.amount` 四档幅度枚举与联动手势时长，以及 MCP 工具描述与发现说明同步。
 影响范围：`internal/observation`（`build.go` 及测试）、`internal/protocol`（`requests.go`、`encode.go` 及测试）、`internal/engine`（`scroll.go`、`act_target_shared.go` 及测试）、`internal/mcp`（`schema.go`、`schema_test.go`）、`scripts/mcp-probe`（`catalog.go` 及测试）、受影响的正式文档（`docs/interface.md`、`docs/architecture.md`、`docs/mcp.md`、`docs/integration.md`、`docs/client.md`、`docs/release.md`、`docs/runbook.md`、`docs/control-protocol.md`、`docs/phone-operations.md`、`README.md`）；实施发布时涉及 `release/versions.json` 及版本生成物、手机整组构建/清单/覆盖部署、主机侧 `build/device-mcp.exe` 与 `build/mcp-probe.exe` 及 `maintenance/verification/`。Android 控制 App 业务逻辑与固定 `uiautomator` JAR 不变。
 契约（`/api/*` 字段与 `contract_version`）：改变——`act.operation.amount` 枚举由 `page|half` 扩充为 `step|half|page|full`（省略仍默认 `page`），并按档位联动手势时长（`500ms`/`450ms`/`400ms`/`300ms`）与 `step` 最小行程（`32px`）；公开树 `role=scroll` 节点在满足确定性类名或子项单轴展布证据时自动投影 `axis`（`"x"`/`"y"`）；`scroll` 静态解析引入 A+C 轴向兼容判定与向兼容父滚动容器的自动回退，无可回退兼容容器时返回 `422 unsupported_node_action`（新增封闭 `reason="axis_mismatch"`）并附可执行 `candidates`；共同 `contract_version` 拟由 `26` 前进至 `27`（配套建议 `release_version="0.31.0"`、`android_version_code=33`）；本提案落盘不修改版本源。
 
-本文引用的函数名、行号、常量与默认值均以该基线提交为准；实现落地前若代码已前进，须按当时的 `HEAD` 重新核对（重点：[build.go](../../internal/observation/build.go)、[scroll.go](../../internal/engine/scroll.go)、[act_target_shared.go](../../internal/engine/act_target_shared.go)、[requests.go](../../internal/protocol/requests.go)、[encode.go](../../internal/protocol/encode.go)、[schema.go](../../internal/mcp/schema.go)、[catalog.go](../../scripts/mcp-probe/catalog.go)、[interface.md](../../docs/interface.md)、[versions.json](../../release/versions.json)）。
+本文引用的函数名、行号、常量与默认值均以该基线提交为准；实现落地前若代码已前进，须按当时的 `HEAD` 重新核对（重点：[build.go](../../../internal/observation/build.go)、[scroll.go](../../../internal/engine/scroll.go)、[act_target_shared.go](../../../internal/engine/act_target_shared.go)、[requests.go](../../../internal/protocol/requests.go)、[encode.go](../../../internal/protocol/encode.go)、[schema.go](../../../internal/mcp/schema.go)、[catalog.go](../../../scripts/mcp-probe/catalog.go)、[interface.md](../../../docs/interface.md)、[versions.json](../../../release/versions.json)）。
 
 ---
 
@@ -26,41 +27,41 @@
 
 ### 1.1 现象与代价
 
-分诊为**取舍**：现行契约（[docs/interface.md:565-612](../../docs/interface.md#L565-L612)）明确规定“`direction` 是调用方声明的阅读/视口方向，不是服务证明的设备滚动轴”且“`ref` 节点本身为有效可滚动容器时直接对其规划”，当前行为符合现行规范，但在嵌套异轴滚动页面与精细滚动场景中产生显著的空转代价：
+分诊为**取舍**：现行契约（[docs/interface.md:565-612](../../../docs/interface.md#L565-L612)）明确规定“`direction` 是调用方声明的阅读/视口方向，不是服务证明的设备滚动轴”且“`ref` 节点本身为有效可滚动容器时直接对其规划”，当前行为符合现行规范，但在嵌套异轴滚动页面与精细滚动场景中产生显著的空转代价：
 
 1. **Issue #42（横向滚动条上请求纵向 `down` 静默空转）**：
    - 在 `1080×2400` 虚拟屏实机测试中，页面顶部为短横向 Tab 滚动条 `n194`，外层为纵向内容主列表 `n188`（二者呈嵌套父子关系）。调用方发起 `{"type":"scroll","container":{"ref":"n194"},"direction":"down","amount":"page"}` 时，服务返回 `outcome=executed`，但页面内容完全未移动（`tree v4 delta ... changes=0`）；随后调用方手动改为外层 `n188` 才正常滚动。
-   - **触发门槛低**：对 `amount="page"`（`60%`），现行 `scrollTravelForExtent`（[scroll.go:516-538](../../internal/engine/scroll.go#L516-L538)）要求 `usable = extent - 2*max(24, extent/10)` 且 `usable * 60 / 100 >= 48`。只要横向 Tab 条或横向轮播带的高度 **≥ `128px`**（`128 - 48 = 80`，`80 * 60 / 100 = 48px`），就能在纵向算出一条 `48px+` 的迷你轨迹并直接派发！
+   - **触发门槛低**：对 `amount="page"`（`60%`），现行 `scrollTravelForExtent`（[scroll.go:516-538](../../../internal/engine/scroll.go#L516-L538)）要求 `usable = extent - 2*max(24, extent/10)` 且 `usable * 60 / 100 >= 48`。只要横向 Tab 条或横向轮播带的高度 **≥ `128px`**（`128 - 48 = 80`，`80 * 60 / 100 = 48px`），就能在纵向算出一条 `48px+` 的迷你轨迹并直接派发！
    - **三条通路同时受影响**：
      - 显式 `container.ref` 指向横向容器 `n194`：直接对 `n194` 派发纵向迷你滑动；
      - 显式 `container.ref` 指向 `n194` 内的普通文本节点（如某个 Tab 标题）：`nearestScrollAncestor` 找到 `n194` 即停止，同样对 `n194` 派发纵向迷你滑动；
      - 坐标 `container={x,y}` 落在 `n194` 区域：最内层容器 `I[0]` 为 `n194`，只要 `n194` 高度 ≥ `128px` 能算出轨迹，就不会触发 `resolveScrollPointPlan` 的父链回退。
-   - **模型视角代价更隐蔽**：自 `0.27.0`（[wait-content-stability-and-text-omit.md](implemented/wait-content-stability-and-text-omit.md)）起，MCP `text`/`both` 文本结果已将 `effect` 显式过滤（`v4Omitted`）。调用方在 `text` 模式下只能看到 `result v4 ok` 与 `changes=0` 的空 delta，无法区分“是当前容器已经滚到底了”还是“选错了横向容器根本没滚起来”，往往需要多花 1～2 轮额外调用甚至误以为页面到底。
+   - **模型视角代价更隐蔽**：自 `0.27.0`（[wait-content-stability-and-text-omit.md](wait-content-stability-and-text-omit.md)）起，MCP `text`/`both` 文本结果已将 `effect` 显式过滤（`v4Omitted`）。调用方在 `text` 模式下只能看到 `result v4 ok` 与 `changes=0` 的空 delta，无法区分“是当前容器已经滚到底了”还是“选错了横向容器根本没滚起来”，往往需要多花 1～2 轮额外调用甚至误以为页面到底。
 2. **滚动幅度粒度粗糙且时长单一**：
-   - 目前 `amount` 仅支持 `page`（`60%`）和 `half`（`30%`），手势时长恒为 `400ms`（[scroll.go:16-21](../../internal/engine/scroll.go#L16-L21)）。
+   - 目前 `amount` 仅支持 `page`（`60%`）和 `half`（`30%`），手势时长恒为 `400ms`（[scroll.go:16-21](../../../internal/engine/scroll.go#L16-L21)）。
    - 在需要微调（如滚出被底部栏挡住半截的按钮、调整日期/时间滚轮 Picker、小高度浮层列表）时，即使是 `half`（全屏约 `576px`）也经常一次滚过头；而在长文或长评论区快速拉到底时，`page`（`60%`）又偏慢。此外，固定 `400ms` 在大跨度下与小跨度下速度差异大，小跨度微调需要更慢的手势（`500ms`）抑制松手后的惯性抛滑（fling），大跨度快翻（`85%`、`300ms`）则需要更干脆的推进。
 
 ### 1.2 证据链
 
 #### 通路一：`Node.Axis` 已有协议定义但无生产者，`scroll` 规划完全忽略轴向
-1. **协议与呈现层已支持 `Axis`，但投影层恒留空**：[internal/protocol/node.go:59-72, 141](../../internal/protocol/node.go#L59-L72) 定义了 `Axis`（`AxisX="x"`、`AxisY="y"`、`AxisBoth="both"`），`ReadNode`、`ReadDelta`、`treetext`（[internal/treetext/encode.go:442-445](../../internal/treetext/encode.go#L442-L445)）均已支持序列化 `axis=`；但设备采集 `device.RawNode` 只有 `HasScrollable`/`Scrollable bool`（[internal/device/types.go:109-110](../../internal/device/types.go#L109-L110)），且 [internal/observation/build.go:406-455](../../internal/observation/build.go#L406-L455) 的 `newPublicNode` 从未对 `node.Axis` 赋值。因此运行时所有公开节点的 `Axis` 均为 `""`。
-2. **`resolveScrollRefPlan` 不检查轴向也不回退父容器**：[internal/engine/scroll.go:869-871](../../internal/engine/scroll.go#L869-L871) 只要 `isScrollContainer(target)` 为真，立即调用 `planScrollContainer(obs, view, operation, target, "ref", scrollModeDirect, true, false)`；[scroll.go:1090-1145](../../internal/engine/scroll.go#L1090-L1145) 的 `planScrollContainer` 仅在 3 条轴线均失败时尝试内层后代 `tryUniqueInnerScrollFallback`，绝不向上查找父级滚动容器。
-3. **非滚动节点祖先提升只看最近一层 `role=scroll`**：[internal/engine/scroll.go:881-906](../../internal/engine/scroll.go#L881-L906) 调用 `nearestScrollAncestor(view, target)`（[scroll.go:1213-1233](../../internal/engine/scroll.go#L1213-L1233)），遇到第一个 `parent.Role == protocol.RoleScroll` 即返回，不检查该祖先是否支持当前 `direction` 对应的滚动轴。
-4. **`planScrollOnAxes` 与 `tryPlanScrollBase` 只看请求方向，不看容器轴向或正交扁平比**：[internal/engine/scroll.go:673-763](../../internal/engine/scroll.go#L673-L763) 的 `planScrollOnAxes` 仅由 `scrollDirectionVertical(direction)` 决定轨迹方向；[scroll.go:767-797](../../internal/engine/scroll.go#L767-L797) 的 `tryPlanScrollBase`（用于 `buildStaticCandidates` 计算 `executable` 及坐标公共祖先评分）同样不检查容器轴向，导致报错返回的 `candidates` 里也可能把横向 Tab 条标成对 `down` 请求 `executable=true`。
+1. **协议与呈现层已支持 `Axis`，但投影层恒留空**：[internal/protocol/node.go:59-72, 141](../../../internal/protocol/node.go#L59-L72) 定义了 `Axis`（`AxisX="x"`、`AxisY="y"`、`AxisBoth="both"`），`ReadNode`、`ReadDelta`、`treetext`（[internal/treetext/encode.go:442-445](../../../internal/treetext/encode.go#L442-L445)）均已支持序列化 `axis=`；但设备采集 `device.RawNode` 只有 `HasScrollable`/`Scrollable bool`（[internal/device/types.go:109-110](../../../internal/device/types.go#L109-L110)），且 [internal/observation/build.go:406-455](../../../internal/observation/build.go#L406-L455) 的 `newPublicNode` 从未对 `node.Axis` 赋值。因此运行时所有公开节点的 `Axis` 均为 `""`。
+2. **`resolveScrollRefPlan` 不检查轴向也不回退父容器**：[internal/engine/scroll.go:869-871](../../../internal/engine/scroll.go#L869-L871) 只要 `isScrollContainer(target)` 为真，立即调用 `planScrollContainer(obs, view, operation, target, "ref", scrollModeDirect, true, false)`；[scroll.go:1090-1145](../../../internal/engine/scroll.go#L1090-L1145) 的 `planScrollContainer` 仅在 3 条轴线均失败时尝试内层后代 `tryUniqueInnerScrollFallback`，绝不向上查找父级滚动容器。
+3. **非滚动节点祖先提升只看最近一层 `role=scroll`**：[internal/engine/scroll.go:881-906](../../../internal/engine/scroll.go#L881-L906) 调用 `nearestScrollAncestor(view, target)`（[scroll.go:1213-1233](../../../internal/engine/scroll.go#L1213-L1233)），遇到第一个 `parent.Role == protocol.RoleScroll` 即返回，不检查该祖先是否支持当前 `direction` 对应的滚动轴。
+4. **`planScrollOnAxes` 与 `tryPlanScrollBase` 只看请求方向，不看容器轴向或正交扁平比**：[internal/engine/scroll.go:673-763](../../../internal/engine/scroll.go#L673-L763) 的 `planScrollOnAxes` 仅由 `scrollDirectionVertical(direction)` 决定轨迹方向；[scroll.go:767-797](../../../internal/engine/scroll.go#L767-L797) 的 `tryPlanScrollBase`（用于 `buildStaticCandidates` 计算 `executable` 及坐标公共祖先评分）同样不检查容器轴向，导致报错返回的 `candidates` 里也可能把横向 Tab 条标成对 `down` 请求 `executable=true`。
 
 #### 通路二：滚动幅度常量、时长与协议/MCP 校验链
-1. **引擎幅度与时长写死两档**：[internal/engine/scroll.go:15-21](../../internal/engine/scroll.go#L15-L21) 硬编码 `scrollPagePercent = 60`、`scrollHalfPercent = 30`、`minScrollTravel = 48`、`scrollDurationMS = 400`；[scroll.go:88-97](../../internal/engine/scroll.go#L88-L97) 的 `normalizeScrollAmount` 与 [scroll.go:516-538](../../internal/engine/scroll.go#L516-L538) 的 `scrollTravelForExtent` 只处理 `page` 和 `half`；[scroll.go:1657-1658](../../internal/engine/scroll.go#L1657-L1658) 的 `dispatchScroll` 固定传入 `scrollDurationMS`。
-2. **协议解码与编码锁死两档**：[internal/protocol/requests.go:87-90, 744-759](../../internal/protocol/requests.go#L87-L90) 的 `parseScrollAmount` 与 [internal/protocol/encode.go:342-344](../../internal/protocol/encode.go#L342-L344) 仅允许 `page` 或 `half`。
-3. **MCP Schema、工具说明与探针检查**：[internal/mcp/schema.go:455-460](../../internal/mcp/schema.go#L455-L460) 定义 `amount.enum` 为 `["page", "half"]`；[internal/mcp/schema_test.go:27, 354-396](../../internal/mcp/schema_test.go#L27) 设有 `baselineDiscoveryBytes = 37500` 体积上限与 `TestDiscoveryOmitsObservationInternals`（严禁出现 `quality`/`effect`/`观察质量`/`滚动效果`/`observed`/`not_observed`/`unstable` 等词）；[scripts/mcp-probe/catalog.go:130-170](../../scripts/mcp-probe/catalog.go#L130-L170) 的 `checkActScrollSchema` 校验 live `act` 工具的 `scroll` 属性结构。
+1. **引擎幅度与时长写死两档**：[internal/engine/scroll.go:15-21](../../../internal/engine/scroll.go#L15-L21) 硬编码 `scrollPagePercent = 60`、`scrollHalfPercent = 30`、`minScrollTravel = 48`、`scrollDurationMS = 400`；[scroll.go:88-97](../../../internal/engine/scroll.go#L88-L97) 的 `normalizeScrollAmount` 与 [scroll.go:516-538](../../../internal/engine/scroll.go#L516-L538) 的 `scrollTravelForExtent` 只处理 `page` 和 `half`；[scroll.go:1657-1658](../../../internal/engine/scroll.go#L1657-L1658) 的 `dispatchScroll` 固定传入 `scrollDurationMS`。
+2. **协议解码与编码锁死两档**：[internal/protocol/requests.go:87-90, 744-759](../../../internal/protocol/requests.go#L87-L90) 的 `parseScrollAmount` 与 [internal/protocol/encode.go:342-344](../../../internal/protocol/encode.go#L342-L344) 仅允许 `page` 或 `half`。
+3. **MCP Schema、工具说明与探针检查**：[internal/mcp/schema.go:455-460](../../../internal/mcp/schema.go#L455-L460) 定义 `amount.enum` 为 `["page", "half"]`；[internal/mcp/schema_test.go:27, 354-396](../../../internal/mcp/schema_test.go#L27) 设有 `baselineDiscoveryBytes = 37500` 体积上限与 `TestDiscoveryOmitsObservationInternals`（严禁出现 `quality`/`effect`/`观察质量`/`滚动效果`/`observed`/`not_observed`/`unstable` 等词）；[scripts/mcp-probe/catalog.go:130-170](../../../scripts/mcp-probe/catalog.go#L130-L170) 的 `checkActScrollSchema` 校验 live `act` 工具的 `scroll` 属性结构。
 
 ### 1.3 为什么直觉会出错
 
 - **“在一次 `act(scroll)` 里如果发现 `effect=not_observed`（没滚起来），再自动去滑一次父容器”**：
-  1. 违反现行架构“每次派发只有一个 UI 派发窗口”（[docs/interface.md:754](../../docs/interface.md#L754)、[scroll.go:1654-1668](../../internal/engine/scroll.go#L1654-L1668) `beginUIDispatch` → `confirmDispatch`）；
+  1. 违反现行架构“每次派发只有一个 UI 派发窗口”（[docs/interface.md:754](../../../docs/interface.md#L754)、[scroll.go:1654-1668](../../../internal/engine/scroll.go#L1654-L1668) `beginUIDispatch` → `confirmDispatch`）；
   2. 计算 `effect` 必须等第一次滑动做完完整的 `post-observation` 收敛采样（最坏 `2s`），二次派发+二次收敛采样会让单次 `act` 时延翻倍；
   3. 更致命的是，当一个正常的纵向内层列表**真的已经滑到底部边界**时，Android XML 没有任何可靠属性区分“到底了”与“滑错了容器”，派发后回退会把外层页面误滑走，直接违背 Issue #42 验收方向第 4 条（“纵向列表已到底后再次 `down`：不回退到页面外层容器”）。必须在**静态规划阶段（派发前）**完成轴向兼容判断与父级回退！
 - **“在 `Result` JSON 里新增 `requested_ref`/`used_ref`/`selection`/`movement`/`attempts` 等字段”**：
-  违反 [process.md](../../maintenance/process.md) §6 最小侵入原则，且 MCP `text` 模式为节省上下文 Token 已经过滤了 `effect` 与 `quality`；当静态阶段自动回退到兼容父容器并成功滚动后，调用方直接从返回的 `tree v4 delta` 中就能看到滚出的新列表项（与现有的 `scroll_ancestor_lift`、`scroll_inner_fallback`、`coextensive_child` 完全一致，均不污染 `Result` 顶层字段）。
+  违反 [process.md](../../../maintenance/process.md) §6 最小侵入原则，且 MCP `text` 模式为节省上下文 Token 已经过滤了 `effect` 与 `quality`；当静态阶段自动回退到兼容父容器并成功滚动后，调用方直接从返回的 `tree v4 delta` 中就能看到滚出的新列表项（与现有的 `scroll_ancestor_lift`、`scroll_inner_fallback`、`coextensive_child` 完全一致，均不污染 `Result` 顶层字段）。
 - **“只靠 `ClassName` 判断 `Axis`，或只靠容器高宽比判断 `Axis`”**：
   现代 Android 应用大量使用 `androidx.recyclerview.widget.RecyclerView` 或自定义 `ViewGroup` 承载横向 Tab 和纵向列表，单看类名区分不出 `RecyclerView` 的方向；反之，正方形横向轮播图（如 `1080×900`）高宽比并不扁平，单看容器外框高宽比也拦不住。必须把 **A（类名 + 子项排布走势 → 公开 `Node.Axis`）** 与 **C（嵌套正交扁平几何守卫）** 结合起来。
 - **“把所有 `role=scroll` 节点都强行猜一个 `axis=x` 或 `axis=y`”**：
@@ -79,7 +80,7 @@
   - 显式 `container.ref`（直接滚动容器或非滚动节点祖先提升）遇到轴向不兼容时，**自动沿公开父链向上回退到最近一个轴向兼容且可生成安全轨迹的父滚动容器**（`mode="scroll_axis_fallback"`）；若父链无解，直接容器仍可尝试唯一内层轴向兼容子容器兜底；若均无解，认领前静态返回 `422 unsupported_node_action`（`reason="axis_mismatch"`），并在 `error.details.candidates` 中附页面上对当前方向可执行的滚动容器（`executable=true`）。
   - 坐标 `container={x,y}` 与 `buildStaticCandidates` 的 `tryPlanScrollBase` 统一接入同一轴向兼容门禁。
 - **G3（四档精细滚动幅度与时长联动）**：将 `scroll.amount` 扩充为 `step`（`15%`、`500ms`、最小行程 `32px`）、`half`（`30%`、`450ms`、`48px`）、`page`（默认，`60%`、`400ms`、`48px`）、`full`（`85%`、`300ms`、`48px`）。
-- **G4（工具说明、探针与文档同步）**：同步更新 [internal/mcp/schema.go](../../internal/mcp/schema.go) 的 `callerGuidance`、`act` 工具描述及 `container`/`amount` 参数说明，更新 [scripts/mcp-probe/catalog.go](../../scripts/mcp-probe/catalog.go) 的 `checkActScrollSchema`（校验 `amount.enum` 四档），更新正式文档并通过独立只读文档审计。
+- **G4（工具说明、探针与文档同步）**：同步更新 [internal/mcp/schema.go](../../../internal/mcp/schema.go) 的 `callerGuidance`、`act` 工具描述及 `container`/`amount` 参数说明，更新 [scripts/mcp-probe/catalog.go](../../../scripts/mcp-probe/catalog.go) 的 `checkActScrollSchema`（校验 `amount.enum` 四档），更新正式文档并通过独立只读文档审计。
 - **G5（契约升级与整组发布交付）**：推进 `contract_version 26 → 27`，完成全量测试、手机整组覆盖部署、最小实机闭环、Windows 主机 `device-mcp.exe` 与 `mcp-probe.exe` 替换及双入口独立探针验证；推送后回复并关闭 Issue #42。
 
 ### 非目标
@@ -110,7 +111,7 @@
 
 ### 4.1 方案 A：公开树 `role=scroll` 节点的 `Axis` 确定性推断
 
-在 [internal/observation/build.go](../../internal/observation/build.go) 的 `buildAgainst` 组装完公开树父子连接（`148-163` 行）之后、生成 `Snapshot` 之前，对公开树中每个满足 `!node.Context && node.Role == protocol.RoleScroll && node.Bounds != nil` 的节点 `node`（对应原始节点 `raw = &cap.Nodes[i]`），按以下两级确定性规则推断 `node.Axis`：
+在 [internal/observation/build.go](../../../internal/observation/build.go) 的 `buildAgainst` 组装完公开树父子连接（`148-163` 行）之后、生成 `Snapshot` 之前，对公开树中每个满足 `!node.Context && node.Role == protocol.RoleScroll && node.Bounds != nil` 的节点 `node`（对应原始节点 `raw = &cap.Nodes[i]`），按以下两级确定性规则推断 `node.Axis`：
 
 1. **第 1 级：原生类名强特征（`inferScrollAxisFromClass(raw.ClassName)`）**：
    - 若 `strings.Contains(class, "HorizontalScrollView")` → 返回 `protocol.AxisX`（`"x"`）；
@@ -127,8 +128,8 @@
      - **纵向单轴判据（`AxisY`）**：当 `spanY >= 24`、`sumDY >= 2 * sumDX`、`spanY >= 2 * spanX`，且 `overlapXCount * 2 >= pairs`（至少半数相邻子项处于同一垂直列）时 → 判定为 `protocol.AxisY`（`"y"`）。
    - 若第 2 级命中明确单轴，使用第 2 级结果；否则沿用第 1 级结果；两级均未命中时保持 `node.Axis = ""`（未知，不在公开树输出 `axis` 字段）。
 3. **对保守保号（`match.go`）与 compact 裁剪（`read.go`）的兼容性核查**：
-   - [internal/observation/match.go:59-85](../../internal/observation/match.go#L59-L85) 的 `matchKey` 与 `publicKey` 比较的是 `role`/`class`/`pkg`/`resource`/`label`/`anchor`/`actions`/`editable`/`protected`，`Axis` 不改变保号签名，不会引起既有 ref 断号；
-   - [internal/observation/read.go:19-37](../../internal/observation/read.go#L19-L37) 的 `AnonymousPlain` 仅针对 `RoleView` 和 `RoleGroup`（`RoleScroll` 本身带有 `ActionSwipe`，不是匿名普通壳），因此为 `RoleScroll` 填充 `Axis` 不会影响匿名容器折叠或几何隐藏。
+   - [internal/observation/match.go:59-85](../../../internal/observation/match.go#L59-L85) 的 `matchKey` 与 `publicKey` 比较的是 `role`/`class`/`pkg`/`resource`/`label`/`anchor`/`actions`/`editable`/`protected`，`Axis` 不改变保号签名，不会引起既有 ref 断号；
+   - [internal/observation/read.go:19-37](../../../internal/observation/read.go#L19-L37) 的 `AnonymousPlain` 仅针对 `RoleView` 和 `RoleGroup`（`RoleScroll` 本身带有 `ActionSwipe`，不是匿名普通壳），因此为 `RoleScroll` 填充 `Axis` 不会影响匿名容器折叠或几何隐藏。
 
 ### 4.2 方案 A+C：滚动容器轴向兼容判定（`scrollContainerAxisCompatible`）
 
@@ -158,12 +159,12 @@
 ### 4.3 轴向失配时的父级自动回退、子容器兜底与静态 `422 axis_mismatch`
 
 1. **基础单目标干跑 `tryPlanScrollBase` 接入轴向兼容守卫**：
-   - 在 [internal/engine/scroll.go:767-797](../../internal/engine/scroll.go#L767-L797) 的 `tryPlanScrollBase(obs, view, node, direction, amount)` 中，在 `isScrollContainer(node)` 之后立即检查 `scrollContainerAxisCompatible(obs, view, node, direction)`：不兼容直接返回 `false`。
+   - 在 [internal/engine/scroll.go:767-797](../../../internal/engine/scroll.go#L767-L797) 的 `tryPlanScrollBase(obs, view, node, direction, amount)` 中，在 `isScrollContainer(node)` 之后立即检查 `scrollContainerAxisCompatible(obs, view, node, direction)`：不兼容直接返回 `false`。
    - 这样 `buildStaticCandidates` 计算 `executable` 以及坐标模式的公共祖先筛选，都会自动将轴向不兼容的容器标为 `executable=false`。
 2. **显式 `container.ref` 指向可滚动容器 `target`（`isScrollContainer(target) == true`）**：
    - **情况 1：`target` 与 `operation.Direction` 轴向兼容**：
      - 保持现有行为：调用 `planScrollContainer(obs, view, operation, target, "ref", scrollModeDirect, true, false)`；
-     - 在 `tryUniqueInnerScrollFallback`（[scroll.go:1147-1211](../../internal/engine/scroll.go#L1147-L1211)）扫描子树内后代滚动容器时，增加 `scrollContainerAxisCompatible(obs, view, node, operation.Direction)` 过滤，确保内层兜底只考虑轴向兼容的后代容器。
+     - 在 `tryUniqueInnerScrollFallback`（[scroll.go:1147-1211](../../../internal/engine/scroll.go#L1147-L1211)）扫描子树内后代滚动容器时，增加 `scrollContainerAxisCompatible(obs, view, node, operation.Direction)` 过滤，确保内层兜底只考虑轴向兼容的后代容器。
    - **情况 2：`target` 与 `operation.Direction` 轴向不兼容（Issue #42 核心路径）**：
      - **第 1 步（沿公开父链自动回退 `scroll_axis_fallback`）**：从 `target` 沿公开父链向上（跳过 `context`、止于 `root` 之前）依次检查每个满足 `isScrollContainer(parent)` 且 `scrollContainerAxisCompatible(obs, view, parent, operation.Direction)` 的滚动祖先 `parent`；对首个能通过 `planScrollContainer(obs, view, operation, parent, "ref", scrollModeAxisFallback, false, false)` 生成可证明安全轨迹的兼容祖先，**直接选用该祖先返回 `scrollPlan`**（认领后重验该选定祖先 `parent`，不绑定原横向子条 `target`）。若父链上存在兼容祖先进入 `planScrollContainer` 但均规划失败，记录首个兼容祖先的规划错误 `firstCompatErr`（如 `422 no_safe_trajectory`）。
      - **第 2 步（唯一内层兼容子容器兜底）**：若父链上没有成功规划的兼容滚动祖先，尝试在 `target` 子树内调用带轴向兼容过滤的 `tryUniqueInnerScrollFallback`（覆盖外层是横向 ViewPager、内层唯一可见页是纵向 RecyclerView 且调用方传了外层 ViewPager ref 请求 `down` 的常见场景！）。若恰有 1 个折叠后唯一的轴向兼容可执行内层子滚动容器，自动委托给它（`mode="scroll_inner_fallback"`）。
@@ -190,7 +191,7 @@
    - 当 `len(I) >= 2`（平级竞争滚动容器）时：仅对满足 `scrollContainerAxisCompatible` 的候选运行 `planScrollOnAxes` 统计可执行者 `I_exec`；若恰有 1 个轴向兼容且可执行的容器（例如同一点上横向轮播与纵向列表交叉，请求 `down` 时只有纵向列表兼容可执行），则唯一消歧直接选用（`scroll_point_disambiguated`）！
 5. **认领后实时重验（`revalidateScrollTarget`）**：
    - `plan.container` 在静态阶段已绑定为实际选定的执行容器（例如回退后的外层 `n188`）。
-   - 在 [internal/engine/scroll.go:1570-1596](../../internal/engine/scroll.go#L1570-L1596) 校验新鲜帧公开容器 `containerPublic` 时，除现有的 `isScrollContainer(containerPublic)` 与 `sameScrollScope` 外，若新鲜帧上 `containerPublic.Axis` 变为与 `plan.direction` 显式冲突（例如 `vertical && containerPublic.Axis == protocol.AxisX` 或 `!vertical && containerPublic.Axis == protocol.AxisY`；因 `sameScrollScope` 已锁定容器几何未突变，重验期仅检查 `containerPublic.Axis` 显式冲突），则按 `409 target_changed`（`reason="capability_changed"`, `"滚动容器已失去请求方向的滚动能力，本次未派发"`）拒绝并按既有规则交付新帧，绝不向已改变轴向的容器派发手势。
+   - 在 [internal/engine/scroll.go:1570-1596](../../../internal/engine/scroll.go#L1570-L1596) 校验新鲜帧公开容器 `containerPublic` 时，除现有的 `isScrollContainer(containerPublic)` 与 `sameScrollScope` 外，若新鲜帧上 `containerPublic.Axis` 变为与 `plan.direction` 显式冲突（例如 `vertical && containerPublic.Axis == protocol.AxisX` 或 `!vertical && containerPublic.Axis == protocol.AxisY`；因 `sameScrollScope` 已锁定容器几何未突变，重验期仅检查 `containerPublic.Axis` 显式冲突），则按 `409 target_changed`（`reason="capability_changed"`, `"滚动容器已失去请求方向的滚动能力，本次未派发"`）拒绝并按既有规则交付新帧，绝不向已改变轴向的容器派发手势。
 
 ### 4.4 四档精细滚动幅度与联动时长（`scroll.amount`）
 
@@ -347,7 +348,7 @@ T5  后观察收敛采样与发布：
 
 ### 6.3 日志与可观测性
 
-- 复用现有 `scroll.plan` 事件的 `mode` 白名单字段（[scroll.go:2176-2178](../../internal/engine/scroll.go#L2176-L2178)），新增枚举值 `"scroll_axis_fallback"`，表示因原目标或近层祖先轴向不兼容而自动回退到兼容外层滚动祖先。
+- 复用现有 `scroll.plan` 事件的 `mode` 白名单字段（[scroll.go:2176-2178](../../../internal/engine/scroll.go#L2176-L2178)），新增枚举值 `"scroll_axis_fallback"`，表示因原目标或近层祖先轴向不兼容而自动回退到兼容外层滚动祖先。
 - `scroll.plan` 的 `amount` 字段自然记录 `"step"` / `"half"` / `"page"` / `"full"`。
 - 不新增任何日志键，不记录节点文案、坐标或树结构（符合硬约束第 10 条）。
 
@@ -369,7 +370,7 @@ T5  后观察收敛采样与发布：
    - §11 `Node`：说明 `role=scroll` 节点的 `axis` 由服务端按确定性类名与子项单轴排布投影为 `x` 或 `y`（未知或双向时省略）。
 2. `docs/architecture.md`：同步观察投影的 `axis` 推断与 `scroll` 轴向兼容回退、四档幅度策略及契约号 `27`。
 3. `docs/mcp.md`、`docs/integration.md`、`docs/client.md`、`docs/release.md`、`docs/runbook.md`、`docs/control-protocol.md`、`docs/phone-operations.md`、`README.md`：同步四档 `amount`、轴向回退说明与版本/契约号 `27`。
-4. 所有 `docs/` 变更在提交前必须通过 [AGENTS.md](../../AGENTS.md) 第 15 条的独立只读文档审计 subagent 审核并取得 CLEAN 结论。
+4. 所有 `docs/` 变更在提交前必须通过 [AGENTS.md](../../../AGENTS.md) 第 15 条的独立只读文档审计 subagent 审核并取得 CLEAN 结论。
 
 ---
 
@@ -420,7 +421,7 @@ T5  后观察收敛采样与发布：
 
 ### 8.2 实机/系统级
 
-按 [AGENTS.md](../../AGENTS.md) 第 19、24 条由主代理亲自执行：
+按 [AGENTS.md](../../../AGENTS.md) 第 19、24 条由主代理亲自执行：
 1. **手机整组覆盖部署**：干净源码提交构建发布包，通过 `scripts/verify-manifest.ps1` 核验 `build/release/manifest.json`，执行手机整组覆盖部署（含手机端服务、APK 与手机 HTTP MCP 适配器，保留 App 私有数据）。
 2. **Windows 主机二进制替换**：用同一源码提交构建并替换 `build/device-mcp.exe` 与 `build/mcp-probe.exe`，核验 `build/release/host-manifest.json`。
 3. **双入口独立探针验证**：运行 `build/mcp-probe.exe` 分别验证主机 stdio MCP 与手机 HTTP MCP，确认 `contract_version=27`、13 工具目录指纹匹配、`act_scroll_schema`（含四档 `amount`）及全部常规检查 PASS。
@@ -467,22 +468,42 @@ T5  后观察收敛采样与发布：
 
 ---
 
-## 11. 实现结果（归档时补写）
+## 11. 实现结果
 
-实现提交：`<待实现提交后填写>`。实现与验证记录：`../../verification/scroll-axis-fallback-and-amount-tiers.md`
-（本节在归档移动之后补写，届时文件在 `implemented/` 下，故链接比新建时多一层）。
+实现提交：`38c7b8258d30398cd5e5bfb016fb6964b091eee2`（`2026-11-23`，分支 `master`）。
+实现与验证记录：[scroll-axis-fallback-and-amount-tiers.md](../../verification/scroll-axis-fallback-and-amount-tiers.md)。
 
 ### 11.1 已落地
 
 | 提案条目 | 落点 |
 | --- | --- |
-| 待实现后填写 | 待实现后填写 |
+| G1 公开 `Node.Axis` 确定性投影（§4.1、§5.1） | `internal/observation/build.go`：`populateScrollAxes`、`inferScrollAxisFromClass`、`inferScrollAxisFromChildren`，在 `buildAgainst` 组装父子连接后、构造 `Snapshot` 前调用；`internal/observation/scroll_axis_test.go` |
+| G2 A+C 轴向兼容判定（§4.2） | `internal/engine/scroll.go`：`scrollContainerAxisCompatible`、`nearestNonCoextensiveScrollAncestorRect` |
+| G2 `ref` 直连容器的父链回退、唯一内层兜底与静态 `422 axis_mismatch`（§4.3.2、§5.2） | `internal/engine/scroll.go`：`resolveScrollRefPlan` |
+| G2 非滚动 `ref` 的祖先提升跳过不兼容近层祖先（§4.3.3） | `internal/engine/scroll.go`：`scrollRoleAncestors`（替代 `nearestScrollAncestor`）、`resolveScrollRefPlan` |
+| G2 坐标路径的轴向过滤、回退与唯一消歧（§4.3.4） | `internal/engine/scroll.go`：`resolveScrollPointPlan` |
+| G2 `candidates.executable` 与坐标公共祖先筛选接入同一门禁 | `internal/engine/scroll.go`：`tryPlanScrollBase`；`internal/engine/act_target_shared.go`：`buildStaticCandidates` 复用 |
+| G2 唯一内层兼容过滤 | `internal/engine/scroll.go`：`tryUniqueInnerScrollFallback` |
+| G2 认领后实时轴向重验（§4.3.5） | `internal/engine/scroll.go`：`revalidateScrollTarget`（`409 target_changed`、`reason=capability_changed`，零派发） |
+| G2 `axis_mismatch` 封闭 reason、`scroll_axis_fallback` mode 与错误文案 | `internal/engine/act_target_shared.go`：`staticReasonAxisMismatch`、`scrollModeAxisFallback`；`internal/engine/scroll.go`：`newScrollUnsupportedError` |
+| G3 四档幅度、行程与联动手势时长（§4.4） | `internal/protocol/requests.go`：`ScrollAmountStep/Full`、`parseScrollAmount`；`internal/protocol/encode.go`；`internal/engine/scroll.go`：`scrollStepPercent`、`scrollFullPercent`、`minScrollStepTravel`、四档时长常量、`normalizeScrollAmount`、`scrollTravelForExtent`、`scrollDurationForAmount`、`dispatchScroll` |
+| G4 MCP schema、工具说明与发现面（§6.1） | `internal/mcp/schema.go`（`amount.enum` 四档、`container`/`amount` 描述、`callerGuidance`、`act` 描述）、`internal/mcp/schema_test.go`、`internal/mcp/server_test.go`、`internal/mcp/result_parity_test.go`（目录指纹基线） |
+| G4 探针四档校验 | `scripts/mcp-probe/catalog.go`：`checkActScrollSchema`（`act_amount_enum_mismatch`）；`scripts/mcp-probe/catalog_test.go` 负向用例 |
+| G5 契约升级、整组发布与实机闭环 | `release/versions.json`（`0.31.0`/`27`/`33`）与生成物；`docs/*`、`README.md`；验证记录“发布与实机” |
+| 测试 | `internal/engine/scroll_axis_amount_test.go`（实现者单测）、`internal/engine/scroll_axis_issue42_test.go`（独立作者端到端回归）、`internal/observation/scroll_axis_test.go`、`internal/protocol/{protocol,encode}_test.go`、`internal/mcp/schema_test.go`、`scripts/mcp-probe/catalog_test.go` |
 
 ### 11.2 与提案不同或未执行
 
 | 项 | 结论与理由 |
 | --- | --- |
-| 待实现后填写 | 待实现后填写 |
+| `ServerInstructions` 用“scroll 不接受时长参数”而非字面 `duration_ms` | `internal/mcp` 的 stdio 帧泄漏守卫把 initialize 帧中含 `duration_ms` 的文本判为诊断泄漏；字面 `duration_ms` 保留在 `amount` 参数说明与 `act` 工具描述（`tools/list`）。`TestStdioFramingCarriesOnlyMCPFrames` 与 `TestDiscoveryByteBudget` 均通过，行为无差异。 |
+| 探针 `checkActScrollSchema` 用集合相等（`sameStringSet`）而非有序逐值比较 | 与既有 `direction` 校验一致；`enum` 顺序由 `internal/mcp` 的 `TestActAmountSchemaPublishesFourTiers` 钉死；集合相等在长度相同且期望值互异时等价于精确四档集合。 |
+| 多最内层全部轴向不兼容时的错误 | 提案未点名；实现统一返回 `422 unsupported_node_action`（`reason=axis_mismatch`、`scope=point`），`target_actions` 取 `innermost[0]`，与 `unsupported_node_action` 必出 `target_actions` 的细节契约一致。 |
+| 唯一内层兜底保留既有 `!isCoextensiveRect` 过滤 | 与目标同视口的内层容器不被委托；沿用既有语义，未按轴向放宽。 |
+| 既有引擎测试的 8 处最小修正 | `full` 由“非法值”样例变为合法档（改 `wide`）；`half` 期望注入时长 400→450ms；两处竞争容器 fixture 改为显式轴/未知轴以保留原覆盖意图；`trajectory_blocked` 的三条并排 blocker 改为单条宽 blocker（否则子项排布被投影为 `AxisX` 并抢先命中 `capability_changed`）。断言意图未变。 |
+| 发现面压缩既有措辞 | 加入四档与轴向回退后为守住 `baselineDiscoveryBytes=37500`（未提高），对 `callerGuidance`/`act` 描述做同义压缩；`docs/mcp.md` 的工具目录指纹随 schema 文本更新为 `3a9ad87c…b98b`。 |
+| 实机闭环方向覆盖 | 实机只执行 `down`/`right`（含坐标、候选重试与 step/full 幅度对比）；`up`/`left`、多层连续跳级与 `firstCompatErr` 分支由对称逻辑单测覆盖，未做实机。 |
+| 文档审计修正 | 独立只读审计发现 `docs/interface.md` 对 `candidates` 附加范围的断言过强（`root`/`context`、`409` 与越界不附候选；`no_safe_trajectory`/`ambiguous_point` 关系不同），已按最小修正收窄并复检 CLEAN。 |
 
 ---
 

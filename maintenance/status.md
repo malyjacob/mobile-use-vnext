@@ -1,5 +1,7 @@
 # 项目实施状态
 
+2026-11-23，0.31.0（契约 27）交付受控滚动轴向兼容回退与四档幅度（Issue #42）：公开树为 `role=scroll` 节点投影 `axis`；`act(scroll)` 引入 A+C 轴向兼容判定、父链自动回退（`scroll_axis_fallback`）、唯一轴向兼容内层兜底与认领前 `422 unsupported_node_action`（`reason=axis_mismatch`）+ 候选；认领后轴冲突按 `409 target_changed`（`capability_changed`）零派发；`amount` 扩充为 `step`/`half`/`page`/`full`（15/30/60/85%，500/450/400/300ms）。手机整组覆盖部署（保留 App 私有数据）、Windows 双工具替换、主机 stdio 与手机 HTTP 独立探针、B 站与知乎 `axis` 投影及回退/候选/step-full 实机闭环均 PASS；`docs/` 独立审计 CLEAN。[验证记录](verification/scroll-axis-fallback-and-amount-tiers.md) · [归档提案](proposals/implemented/scroll-axis-fallback-and-amount-tiers.md)
+
 2026-11-23，0.29.0（契约 25）交付树多基线、抗重构目标证明与文本受控提交。手机整组覆盖部署、Windows 双工具替换与双入口独立探针均通过。知乎静止搜索列表两次零差分，知乎与 B 站均在 3 个修订内命中可补看的历史基线。知乎裸滑、回答底栏连续点击和网易云三类文本操作均实测成功。Tier 4 与写后重绑定的精确分支由单测覆盖。 [验证记录](verification/tree-continuity-target-proof-and-text-submit.md) · [归档提案](proposals/implemented/tree-continuity-target-proof-and-text-submit.md)
 
 2026-11-22，0.27.0（契约 23）交付 `wait_for` 内容稳定与 MCP 文本省略。手机整组覆盖部署、Windows 双工具替换、双入口探针、网易云播放页三次稳定等待及 B 站滚动双投影均通过（[记录](verification/wait-content-stability-and-text-omit.md)）。
