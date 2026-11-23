@@ -13,12 +13,24 @@ import (
 // Controlled-scroll policy. These are service constants, never request fields;
 // the static check and the fresh revalidation call the same geometry function.
 const (
-	scrollPagePercent       = 60
+	scrollStepPercent       = 15
 	scrollHalfPercent       = 30
+	scrollPagePercent       = 60
+	scrollFullPercent       = 85
 	scrollEdgeMarginMin     = 24
 	scrollEdgeMarginDivisor = 10
 	minScrollTravel         = 48
-	scrollDurationMS        = 400
+	minScrollStepTravel     = 32
+)
+
+// The four travel-amount tiers drive one service-controlled gesture duration:
+// a short step is deliberately slow so a released finger does not fling, and a
+// full-page push is deliberately quick. The request never supplies a duration.
+const (
+	scrollDurationStepMS = 500
+	scrollDurationHalfMS = 450
+	scrollDurationPageMS = 400
+	scrollDurationFullMS = 300
 )
 
 // Effect inference policy. coverage is an integer percent and consensus is an
@@ -89,8 +101,8 @@ func normalizeScrollAmount(amount string) (string, bool) {
 	switch amount {
 	case "", protocol.ScrollAmountPage:
 		return protocol.ScrollAmountPage, true
-	case protocol.ScrollAmountHalf:
-		return protocol.ScrollAmountHalf, true
+	case protocol.ScrollAmountStep, protocol.ScrollAmountHalf, protocol.ScrollAmountFull:
+		return amount, true
 	default:
 		return "", false
 	}
@@ -495,7 +507,7 @@ type scrollPlan struct {
 	container       *device.RawNode
 	selector        string // "ref" or "point"
 	direction       string
-	amount          string // never empty: page or half
+	amount          string // never empty: one of step, half, page, full
 	start, end      scrollPoint
 	orthogonalCoord int
 	mode            string
@@ -509,7 +521,7 @@ type scrollFrame struct {
 	container      *device.RawNode
 	containerIndex int
 	direction      string
-	amount         string
+	amount         string // never empty: one of step, half, page, full
 	start, end     scrollPoint
 }
 
@@ -519,8 +531,14 @@ func scrollTravelForExtent(extent int, amount string) (int, bool) {
 		return 0, false
 	}
 	percent := scrollPagePercent
-	if normalized == protocol.ScrollAmountHalf {
+	minTravel := minScrollTravel
+	switch normalized {
+	case protocol.ScrollAmountStep:
+		percent, minTravel = scrollStepPercent, minScrollStepTravel
+	case protocol.ScrollAmountHalf:
 		percent = scrollHalfPercent
+	case protocol.ScrollAmountFull:
+		percent = scrollFullPercent
 	}
 	margin := extent / scrollEdgeMarginDivisor
 	if margin < scrollEdgeMarginMin {
@@ -531,10 +549,30 @@ func scrollTravelForExtent(extent int, amount string) (int, bool) {
 		return 0, false
 	}
 	travel := int(int64(usable) * int64(percent) / 100)
-	if travel < minScrollTravel {
+	if travel < minTravel {
 		return 0, false
 	}
 	return travel, true
+}
+
+// scrollDurationForAmount is the only mapping from one normalized travel amount
+// to the injected gesture duration. An unknown amount keeps the page default so
+// the caller never depends on the decimal value of an unvalidated string.
+func scrollDurationForAmount(amount string) int {
+	normalized, ok := normalizeScrollAmount(amount)
+	if !ok {
+		return scrollDurationPageMS
+	}
+	switch normalized {
+	case protocol.ScrollAmountStep:
+		return scrollDurationStepMS
+	case protocol.ScrollAmountHalf:
+		return scrollDurationHalfMS
+	case protocol.ScrollAmountFull:
+		return scrollDurationFullMS
+	default:
+		return scrollDurationPageMS
+	}
 }
 
 // scrollGeometryAt computes a centered symmetric trajectory on an explicit
@@ -622,6 +660,91 @@ func isScrollContainer(node *protocol.Node) bool {
 	return node != nil && node.Role == protocol.RoleScroll && node.Role != protocol.RoleRoot &&
 		!node.Context && node.Bounds != nil && hasAction(node, protocol.ActionSwipe) &&
 		(node.Enabled == nil || *node.Enabled)
+}
+
+// scrollContainerAxisCompatible decides whether one published scroll container
+// can carry the requested direction. It combines the explicit published axis
+// (A) with the nested orthogonal flat-strip guard (C) that only applies while the
+// axis is unknown. An explicit axis that proves the requested axis is never
+// second-guessed by geometry, so a short vertical wheel stays usable.
+func scrollContainerAxisCompatible(obs *observationState, view *tapPublicView,
+	node *protocol.Node, direction string) bool {
+	vertical, ok := scrollDirectionVertical(direction)
+	if !ok || node == nil {
+		return false
+	}
+	// A: an explicit axis is decisive. A conflict is rejected; an explicit match
+	// is accepted without the C guard, so a short vertical wheel never fails the
+	// flat-strip geometry rule.
+	if node.Axis == protocol.AxisX || node.Axis == protocol.AxisY || node.Axis == protocol.AxisBoth {
+		if vertical {
+			return node.Axis == protocol.AxisY || node.Axis == protocol.AxisBoth
+		}
+		return node.Axis == protocol.AxisX || node.Axis == protocol.AxisBoth
+	}
+	// C: only the unknown axis is checked against nested orthogonal flat strips.
+	if obs == nil || obs.Projection == nil || obs.Projection.Capture == nil ||
+		view == nil || view.info == nil {
+		return true
+	}
+	screen := obs.Projection.Capture.Display.Bounds()
+	if screen.Empty() {
+		return true
+	}
+	nodeRect, hasNodeRect := publicNodeClippedRect(node, screen)
+	if !hasNodeRect {
+		return true
+	}
+	outerRect, hasOuter := nearestNonCoextensiveScrollAncestorRect(view, node, nodeRect, screen)
+	if !hasOuter {
+		// A standalone scroll container is never rejected by its own flat ratio.
+		return true
+	}
+	if vertical {
+		if int64(nodeRect.Width()) >= 2*int64(nodeRect.Height()) &&
+			int64(nodeRect.Height())*4 < int64(max(outerRect.Height(), screen.Height())) {
+			return false
+		}
+		return true
+	}
+	if int64(nodeRect.Height()) >= 2*int64(nodeRect.Width()) &&
+		int64(nodeRect.Width())*4 < int64(max(outerRect.Width(), screen.Width())) {
+		return false
+	}
+	return true
+}
+
+// nearestNonCoextensiveScrollAncestorRect returns the clipping rectangle of the
+// nearest published scroll-role ancestor that is not coextensive with node.
+// Context nodes and the synthetic root are never candidates.
+func nearestNonCoextensiveScrollAncestorRect(view *tapPublicView, node *protocol.Node,
+	nodeRect, screen device.Rect) (device.Rect, bool) {
+	if view == nil || node == nil || view.info == nil || nodeRect.Empty() {
+		return device.Rect{}, false
+	}
+	visited := map[*protocol.Node]struct{}{node: {}}
+	current := node
+	for {
+		info := view.info[current]
+		if info == nil || info.parent == nil {
+			return device.Rect{}, false
+		}
+		parent := info.parent
+		if _, seen := visited[parent]; seen {
+			return device.Rect{}, false
+		}
+		visited[parent] = struct{}{}
+		if parent.Role == protocol.RoleRoot {
+			return device.Rect{}, false
+		}
+		if !parent.Context && isScrollContainer(parent) {
+			if outerRect, ok := publicNodeClippedRect(parent, screen); ok &&
+				!isCoextensiveRect(nodeRect, outerRect) {
+				return outerRect, true
+			}
+		}
+		current = parent
+	}
 }
 
 type scrollAxesFailure struct {
@@ -780,6 +903,9 @@ func tryPlanScrollBase(obs *observationState, view *tapPublicView, node *protoco
 	if !isScrollContainer(node) {
 		return false
 	}
+	if !scrollContainerAxisCompatible(obs, view, node, direction) {
+		return false
+	}
 	screen := obs.Projection.Capture.Display.Bounds()
 	if _, hasPublic := publicNodeClippedRect(node, screen); !hasPublic {
 		return false
@@ -866,11 +992,52 @@ func resolveScrollRefPlan(obs *observationState, view *tapPublicView,
 	if target.Enabled != nil && !*target.Enabled {
 		return nil, protocol.NewError(409, protocol.CodeNodeDisabled, "目标节点已禁用")
 	}
-	if isScrollContainer(target) {
-		return planScrollContainer(obs, view, operation, target, "ref", scrollModeDirect,
-			true, false)
-	}
 	targetActions := tapPublicActions(target)
+	targetRect, _ := publicNodeClippedRect(target, screen)
+	if isScrollContainer(target) {
+		if scrollContainerAxisCompatible(obs, view, target, operation.Direction) {
+			return planScrollContainer(obs, view, operation, target, "ref", scrollModeDirect,
+				true, false)
+		}
+		// Step 1: fall back to the nearest axis-compatible parent scroll
+		// container. The first container that proves a safe trajectory wins.
+		var firstCompatErr *protocol.APIError
+		for _, parent := range scrollRoleAncestors(view, target) {
+			if !isScrollContainer(parent) {
+				continue
+			}
+			if _, hasParentGeom := publicNodeClippedRect(parent, screen); !hasParentGeom {
+				continue
+			}
+			if !scrollContainerAxisCompatible(obs, view, parent, operation.Direction) {
+				continue
+			}
+			plan, planErr := planScrollContainer(obs, view, operation, parent, "ref",
+				scrollModeAxisFallback, false, false)
+			if planErr == nil {
+				return plan, nil
+			}
+			if firstCompatErr == nil {
+				firstCompatErr = planErr
+			}
+		}
+		// Step 2: one uniquely executable axis-compatible inner container may
+		// take over (for example a vertical list inside a horizontal pager).
+		if innerPlan := tryUniqueInnerScrollFallback(obs, view, operation, target,
+			targetRect); innerPlan != nil {
+			return innerPlan, nil
+		}
+		// Step 3: a compatible container that entered planning keeps its error.
+		// Otherwise the mismatch is rejected before any claim.
+		if firstCompatErr != nil {
+			return nil, firstCompatErr
+		}
+		apiErr := newScrollUnsupportedError(staticReasonAxisMismatch,
+			tapStaticScopeTarget, target.Ref, "", targetActions, nil)
+		entries := collectScrollAncestorAndPageCandidates(obs, view, target)
+		attachStaticCandidates(apiErr, buildStaticCandidates(obs, view, operation, entries))
+		return nil, apiErr
+	}
 	if target.Role == protocol.RoleScroll {
 		apiErr := newScrollUnsupportedError(tapStaticReasonTargetMissingAction,
 			tapStaticScopeTarget, target.Ref, "", targetActions, nil)
@@ -878,32 +1045,65 @@ func resolveScrollRefPlan(obs *observationState, view *tapPublicView,
 		attachStaticCandidates(apiErr, buildStaticCandidates(obs, view, operation, entries))
 		return nil, apiErr
 	}
-	ancestor := nearestScrollAncestor(view, target)
-	if ancestor == nil {
+	ancestors := scrollRoleAncestors(view, target)
+	if len(ancestors) == 0 {
 		apiErr := newScrollUnsupportedError(staticReasonNotScrollable,
 			tapStaticScopeTarget, target.Ref, "", targetActions, nil)
 		entries := collectPageScrollCandidates(obs, view, target.Ref)
 		attachStaticCandidates(apiErr, buildStaticCandidates(obs, view, operation, entries))
 		return nil, apiErr
 	}
-	ancestorActions := tapPublicActions(ancestor)
-	_, hasAncestorGeom := publicNodeClippedRect(ancestor, screen)
-	if (ancestor.Enabled != nil && !*ancestor.Enabled) || !hasAncestorGeom {
+	nearest := ancestors[0]
+	ancestorActions := tapPublicActions(nearest)
+	_, hasAncestorGeom := publicNodeClippedRect(nearest, screen)
+	if (nearest.Enabled != nil && !*nearest.Enabled) || !hasAncestorGeom {
 		apiErr := newScrollUnsupportedError(tapStaticReasonAncestorInvalid,
-			tapStaticScopeAncestor, ancestor.Ref, ancestor.Ref, targetActions, ancestorActions)
-		entries := collectPageScrollCandidates(obs, view, ancestor.Ref)
+			tapStaticScopeAncestor, nearest.Ref, nearest.Ref, targetActions, ancestorActions)
+		entries := collectPageScrollCandidates(obs, view, nearest.Ref)
 		attachStaticCandidates(apiErr, buildStaticCandidates(obs, view, operation, entries))
 		return nil, apiErr
 	}
-	if !hasAction(ancestor, protocol.ActionSwipe) {
+	if !hasAction(nearest, protocol.ActionSwipe) {
 		apiErr := newScrollUnsupportedError(tapStaticReasonAncestorMissingAction,
-			tapStaticScopeAncestor, ancestor.Ref, ancestor.Ref, targetActions, ancestorActions)
-		entries := collectPageScrollCandidates(obs, view, ancestor.Ref)
+			tapStaticScopeAncestor, nearest.Ref, nearest.Ref, targetActions, ancestorActions)
+		entries := collectPageScrollCandidates(obs, view, nearest.Ref)
 		attachStaticCandidates(apiErr, buildStaticCandidates(obs, view, operation, entries))
 		return nil, apiErr
 	}
-	return planScrollContainer(obs, view, operation, ancestor, "ref", scrollModeAncestorLift,
-		false, true)
+	// Ancestor promotion: an axis-incompatible nearer ancestor is skipped
+	// instead of stopping the walk, so the nearest compatible one still runs.
+	var firstCompatErr *protocol.APIError
+	for index, ancestor := range ancestors {
+		if !isScrollContainer(ancestor) {
+			continue
+		}
+		if _, hasGeom := publicNodeClippedRect(ancestor, screen); !hasGeom {
+			continue
+		}
+		if !scrollContainerAxisCompatible(obs, view, ancestor, operation.Direction) {
+			continue
+		}
+		mode := scrollModeAncestorLift
+		if index > 0 {
+			mode = scrollModeAxisFallback
+		}
+		plan, planErr := planScrollContainer(obs, view, operation, ancestor, "ref", mode,
+			false, true)
+		if planErr == nil {
+			return plan, nil
+		}
+		if firstCompatErr == nil {
+			firstCompatErr = planErr
+		}
+	}
+	if firstCompatErr != nil {
+		return nil, firstCompatErr
+	}
+	apiErr := newScrollUnsupportedError(staticReasonAxisMismatch,
+		tapStaticScopeAncestor, nearest.Ref, nearest.Ref, targetActions, ancestorActions)
+	entries := collectPageScrollCandidates(obs, view, nearest.Ref)
+	attachStaticCandidates(apiErr, buildStaticCandidates(obs, view, operation, entries))
+	return nil, apiErr
 }
 
 func resolveScrollPointPlan(obs *observationState, view *tapPublicView,
@@ -952,10 +1152,16 @@ func resolveScrollPointPlan(obs *observationState, view *tapPublicView,
 	}
 	if len(innermost) == 1 {
 		primary := innermost[0]
-		plan, primaryErr := planScrollContainer(obs, view, operation, primary, "point",
-			scrollModePointInnermost, false, false)
-		if primaryErr == nil {
-			return plan, nil
+		var primaryErr *protocol.APIError
+		compatibleAttempted := false
+		if scrollContainerAxisCompatible(obs, view, primary, operation.Direction) {
+			compatibleAttempted = true
+			plan, planErr := planScrollContainer(obs, view, operation, primary, "point",
+				scrollModePointInnermost, false, false)
+			if planErr == nil {
+				return plan, nil
+			}
+			primaryErr = planErr
 		}
 		var fallbackTrajectoryErr *protocol.APIError
 		visited := map[*protocol.Node]struct{}{}
@@ -968,7 +1174,9 @@ func resolveScrollPointPlan(obs *observationState, view *tapPublicView,
 			if parent.Role == protocol.RoleRoot {
 				break
 			}
-			if hitSet[parent] {
+			if hitSet[parent] &&
+				scrollContainerAxisCompatible(obs, view, parent, operation.Direction) {
+				compatibleAttempted = true
 				fallbackPlan, fallbackErr := planScrollContainer(obs, view, operation, parent,
 					"point", scrollModePointFallback, false, false)
 				if fallbackErr == nil {
@@ -977,13 +1185,29 @@ func resolveScrollPointPlan(obs *observationState, view *tapPublicView,
 				if fallbackTrajectoryErr == nil && fallbackErr.Code == protocol.CodeNoSafeTrajectory {
 					fallbackTrajectoryErr = fallbackErr
 				}
+				if primaryErr == nil {
+					primaryErr = fallbackErr
+				}
 			}
 			current = view.info[parent]
 		}
-		if primaryErr.Code != protocol.CodeNoSafeTrajectory && fallbackTrajectoryErr != nil {
+		if !compatibleAttempted {
+			// No compatible container ever reached trajectory planning: the
+			// point only sits on an axis-conflicting scroll stack.
+			apiErr := newScrollUnsupportedError(staticReasonAxisMismatch,
+				tapStaticScopePoint, "", "", tapPublicActions(primary), nil)
+			entries := collectPageScrollCandidates(obs, view, primary.Ref)
+			attachStaticCandidates(apiErr, buildStaticCandidates(obs, view, operation, entries))
+			return nil, apiErr
+		}
+		if primaryErr != nil &&
+			primaryErr.Code != protocol.CodeNoSafeTrajectory && fallbackTrajectoryErr != nil {
 			return nil, fallbackTrajectoryErr
 		}
-		return nil, primaryErr
+		if primaryErr != nil {
+			return nil, primaryErr
+		}
+		return nil, newScrollNoSafeTrajectoryError(staticReasonTrajectoryBlocked, primary.Ref)
 	}
 	type pointCandidate struct {
 		node       *protocol.Node
@@ -995,12 +1219,20 @@ func resolveScrollPointPlan(obs *observationState, view *tapPublicView,
 	evaluated := make([]pointCandidate, 0, len(innermost))
 	var uniquePlan *scrollPlan
 	executableCount := 0
+	compatibleCount := 0
 	for _, candidate := range innermost {
 		clipped, _ := publicNodeClippedRect(candidate, screen)
-		index := projection.Source[candidate.Ref]
-		rawClipped := projection.Capture.Nodes[index].Bounds.Intersect(screen)
-		plan, _ := planScrollOnAxes(projection, index, rawClipped,
-			operation.Direction, operation.Amount, "point", scrollModePointDisambiguated)
+		compatible := scrollContainerAxisCompatible(obs, view, candidate, operation.Direction)
+		if compatible {
+			compatibleCount++
+		}
+		var plan *scrollPlan
+		if compatible {
+			index := projection.Source[candidate.Ref]
+			rawClipped := projection.Capture.Nodes[index].Bounds.Intersect(screen)
+			plan, _ = planScrollOnAxes(projection, index, rawClipped,
+				operation.Direction, operation.Amount, "point", scrollModePointDisambiguated)
+		}
 		executable := plan != nil
 		if executable {
 			executableCount++
@@ -1013,6 +1245,15 @@ func resolveScrollPointPlan(obs *observationState, view *tapPublicView,
 			plan:       plan,
 			executable: executable,
 		})
+	}
+	if compatibleCount == 0 {
+		// Every competing innermost container conflicts with the request axis, so
+		// no disambiguation or common-ancestor planning is meaningful.
+		apiErr := newScrollUnsupportedError(staticReasonAxisMismatch,
+			tapStaticScopePoint, "", "", tapPublicActions(innermost[0]), nil)
+		entries := collectPageScrollCandidates(obs, view, "")
+		attachStaticCandidates(apiErr, buildStaticCandidates(obs, view, operation, entries))
+		return nil, apiErr
 	}
 	if executableCount == 1 && uniquePlan != nil {
 		return uniquePlan, nil
@@ -1159,7 +1400,8 @@ func tryUniqueInnerScrollFallback(obs *observationState, view *tapPublicView,
 		if node == nil {
 			return
 		}
-		if isScrollContainer(node) {
+		if isScrollContainer(node) &&
+			scrollContainerAxisCompatible(obs, view, node, operation.Direction) {
 			if descRect, ok := publicNodeClippedRect(node, screen); ok &&
 				!isCoextensiveRect(wantRect, descRect) {
 				if index, mapped := projection.Source[node.Ref]; mapped &&
@@ -1210,26 +1452,33 @@ func tryUniqueInnerScrollFallback(obs *observationState, view *tapPublicView,
 	return nil
 }
 
-func nearestScrollAncestor(view *tapPublicView, node *protocol.Node) *protocol.Node {
-	if view == nil || node == nil {
+// scrollRoleAncestors lists every published scroll-role ancestor of node,
+// nearest first. Context subtrees and the synthetic root are never included; the
+// walk is bounded by a visited set so a malformed parent cycle cannot loop.
+func scrollRoleAncestors(view *tapPublicView, node *protocol.Node) []*protocol.Node {
+	if view == nil || node == nil || view.info == nil {
 		return nil
 	}
-	visited := map[*protocol.Node]struct{}{}
-	for current := view.info[node]; current != nil && current.parent != nil; {
-		parent := current.parent
+	var ancestors []*protocol.Node
+	visited := map[*protocol.Node]struct{}{node: {}}
+	for current := node; ; {
+		info := view.info[current]
+		if info == nil || info.parent == nil {
+			return ancestors
+		}
+		parent := info.parent
 		if _, seen := visited[parent]; seen {
-			return nil
+			return ancestors
 		}
 		visited[parent] = struct{}{}
 		if parent.Role == protocol.RoleRoot {
-			return nil
+			return ancestors
 		}
 		if !parent.Context && parent.Role == protocol.RoleScroll {
-			return parent
+			ancestors = append(ancestors, parent)
 		}
-		current = view.info[parent]
+		current = parent
 	}
-	return nil
 }
 
 func collectScrollAncestorAndPageCandidates(obs *observationState, view *tapPublicView,
@@ -1376,12 +1625,16 @@ func newScrollUnsupportedError(reason, scope, scopeRef, ancestorRef string,
 		message = "最近的滚动祖先不可用"
 	case tapStaticReasonAncestorMissingAction:
 		message = "最近的滚动祖先缺少滑动能力"
+	case staticReasonAxisMismatch:
+		message = "滚动容器轴向与请求方向不匹配"
 	}
 	apiErr := protocol.NewError(422, protocol.CodeNodeUnsupported, message).
 		WithDetail("reason", reason).
 		WithDetail("scope", scope).
-		WithDetail("scope_ref", scopeRef).
 		WithDetail("target_actions", targetActions)
+	if scopeRef != "" {
+		apiErr.WithDetail("scope_ref", scopeRef)
+	}
 	if ancestorRef != "" {
 		apiErr.WithDetail("ancestor_ref", ancestorRef)
 	}
@@ -1594,6 +1847,18 @@ func (e *Engine) revalidateScrollTarget(work *workState, obs *observationState,
 		return capture, nil, targetChangedError(targetChangedReasonCapabilityChanged,
 			"滚动容器已失去滚动能力，本次未派发")
 	}
+	// The fresh published axis may now explicitly conflict with the planned
+	// direction. sameScrollScope already pinned the container geometry, so only
+	// the explicit axis conflict is checked here and nothing is dispatched.
+	if vertical, validDir := scrollDirectionVertical(plan.direction); validDir {
+		if (vertical && containerPublic.Axis == protocol.AxisX) ||
+			(!vertical && containerPublic.Axis == protocol.AxisY) {
+			e.logScrollRevalidate(work.OperationID, true, false, false, false,
+				qualityState, targetChangedReasonCapabilityChanged)
+			return capture, nil, targetChangedError(targetChangedReasonCapabilityChanged,
+				"滚动容器已失去请求方向的滚动能力，本次未派发")
+		}
+	}
 	start, end := plan.start, plan.end
 	vertical, validDir := scrollDirectionVertical(plan.direction)
 	if !validDir {
@@ -1655,7 +1920,8 @@ func (e *Engine) dispatchScroll(work *workState, frame *scrollFrame) (string, *p
 		return OutcomeNotExecuted, apiErr
 	}
 	receipt, dispatchErr := e.dev.Swipe(work.Ctx, session.Display.ID,
-		frame.start.X, frame.start.Y, frame.end.X, frame.end.Y, scrollDurationMS)
+		frame.start.X, frame.start.Y, frame.end.X, frame.end.Y,
+		scrollDurationForAmount(frame.amount))
 	e.recordUIReceipt(work, receipt)
 	if receipt == device.DispatchNotDispatched {
 		return OutcomeNotExecuted, protocol.NewError(503, protocol.CodeDeviceUnavailable, "输入未派发")

@@ -86,17 +86,14 @@ func proposalPointScrollPage(display device.Display, bounds device.Rect,
 	if !withAxisBlockers {
 		return revalCapture(display, root, container)
 	}
-	container.Children = []int{2, 3, 4}
-	leftBlocker := proposalScrollNode(2, 1, 2, display, device.Rect{
-		Left: 230, Top: bounds.Top, Right: 310, Bottom: bounds.Bottom,
+	// One broad blocker crosses every probe axis (50%/25%/75%). Keeping exactly
+	// one scroll child leaves the container's published axis on the class rule,
+	// so this frame still proves trajectory_blocked instead of an axis change.
+	container.Children = []int{2}
+	blocker := proposalScrollNode(2, 1, 2, display, device.Rect{
+		Left: 230, Top: bounds.Top, Right: 850, Bottom: bounds.Bottom,
 	}, "androidx.recyclerview.widget.RecyclerView")
-	centerBlocker := proposalScrollNode(3, 1, 2, display, device.Rect{
-		Left: 500, Top: bounds.Top, Right: 580, Bottom: bounds.Bottom,
-	}, "androidx.recyclerview.widget.RecyclerView")
-	rightBlocker := proposalScrollNode(4, 1, 2, display, device.Rect{
-		Left: 770, Top: bounds.Top, Right: 850, Bottom: bounds.Bottom,
-	}, "androidx.recyclerview.widget.RecyclerView")
-	return revalCapture(display, root, container, leftBlocker, centerBlocker, rightBlocker)
+	return revalCapture(display, root, container, blocker)
 }
 
 func proposalPointCoveredTargetPage(display device.Display,

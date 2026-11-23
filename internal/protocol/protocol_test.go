@@ -125,8 +125,9 @@ func actBody(operation string) string {
 }
 
 // TestDecodeActScrollSchema is the strict schema matrix for the scroll branch:
-// valid container selectors, all four directions, the page/half amount and the
-// page default; every unknown, missing, null or foreign member is rejected.
+// valid container selectors, all four directions, the four-tier
+// step/half/page/full amount and the page default; every unknown, missing, null
+// or foreign member is rejected.
 func TestDecodeActScrollSchema(t *testing.T) {
 	cases := []struct {
 		name          string
@@ -135,6 +136,7 @@ func TestDecodeActScrollSchema(t *testing.T) {
 		wantContainer *Target
 		wantDirection string
 		wantAmount    string
+		wantMessage   string
 	}{
 		{
 			name:          "ref container page",
@@ -143,6 +145,22 @@ func TestDecodeActScrollSchema(t *testing.T) {
 			wantContainer: &Target{UseRef: true, Ref: "n372"},
 			wantDirection: ScrollDirectionDown,
 			wantAmount:    ScrollAmountPage,
+		},
+		{
+			name:          "ref container step",
+			operation:     `{"type":"scroll","container":{"ref":"n1"},"direction":"down","amount":"step"}`,
+			ok:            true,
+			wantContainer: &Target{UseRef: true, Ref: "n1"},
+			wantDirection: ScrollDirectionDown,
+			wantAmount:    ScrollAmountStep,
+		},
+		{
+			name:          "ref container full",
+			operation:     `{"type":"scroll","container":{"ref":"n1"},"direction":"down","amount":"full"}`,
+			ok:            true,
+			wantContainer: &Target{UseRef: true, Ref: "n1"},
+			wantDirection: ScrollDirectionDown,
+			wantAmount:    ScrollAmountFull,
 		},
 		{
 			name:          "point container default amount",
@@ -180,9 +198,22 @@ func TestDecodeActScrollSchema(t *testing.T) {
 			ok:        false,
 		},
 		{
-			name:      "unknown amount",
-			operation: `{"type":"scroll","container":{"ref":"n1"},"direction":"down","amount":"full"}`,
-			ok:        false,
+			name:        "unknown amount",
+			operation:   `{"type":"scroll","container":{"ref":"n1"},"direction":"down","amount":"tiny"}`,
+			ok:          false,
+			wantMessage: "amount 只接受 step、half、page 或 full",
+		},
+		{
+			name:        "percentage amount",
+			operation:   `{"type":"scroll","container":{"ref":"n1"},"direction":"down","amount":"50%"}`,
+			ok:          false,
+			wantMessage: "amount 只接受 step、half、page 或 full",
+		},
+		{
+			name:        "upper case amount",
+			operation:   `{"type":"scroll","container":{"ref":"n1"},"direction":"down","amount":"Page"}`,
+			ok:          false,
+			wantMessage: "amount 只接受 step、half、page 或 full",
 		},
 		{
 			name:      "missing container",
@@ -205,9 +236,10 @@ func TestDecodeActScrollSchema(t *testing.T) {
 			ok:        false,
 		},
 		{
-			name:      "null amount",
-			operation: `{"type":"scroll","container":{"ref":"n1"},"direction":"down","amount":null}`,
-			ok:        false,
+			name:        "null amount",
+			operation:   `{"type":"scroll","container":{"ref":"n1"},"direction":"down","amount":null}`,
+			ok:          false,
+			wantMessage: "amount 不接受 null",
 		},
 		{
 			name:      "numeric direction",
@@ -215,9 +247,10 @@ func TestDecodeActScrollSchema(t *testing.T) {
 			ok:        false,
 		},
 		{
-			name:      "numeric amount",
-			operation: `{"type":"scroll","container":{"ref":"n1"},"direction":"down","amount":1}`,
-			ok:        false,
+			name:        "numeric amount",
+			operation:   `{"type":"scroll","container":{"ref":"n1"},"direction":"down","amount":1}`,
+			ok:          false,
+			wantMessage: "amount 必须是字符串",
 		},
 		{
 			name:      "container ref and point",
@@ -274,6 +307,9 @@ func TestDecodeActScrollSchema(t *testing.T) {
 				}
 				if err.Code != CodeInvalidRequest {
 					t.Fatalf("expected invalid_request, got %v", err)
+				}
+				if tc.wantMessage != "" && err.Message != tc.wantMessage {
+					t.Fatalf("message = %q, want %q", err.Message, tc.wantMessage)
 				}
 				return
 			}

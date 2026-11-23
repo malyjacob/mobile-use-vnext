@@ -170,27 +170,45 @@ engine 的状态锁只做有限内存检查与转换：锁内不等待 ADB、u2 
 `act.operation.type=scroll` 是受控滚动尝试：调用方声明阅读方向与幅度，服务在几何合法且作用域
 可证明的容器内选择起止点。授权单位是同一可证明的滚动容器与新鲜轨迹，不是起点叶节点：
 
+- 公开树构建期为每个非 `context`、有公开几何的 `role=scroll` 节点投影 `axis`：先按子项单轴排布
+  （取非 `context`、正面积的直接子项，唯一非滚动子项时向内展开一层，至多采样前 16 项；主轴中心
+  跨度至少 24px、主轴位移与跨度都不少于交轴 2 倍，且至少半数相邻子项在交轴有区间重叠），未判定
+  时回退类名强特征（`HorizontalScrollView` 为 `x`；`NestedScrollView`/`ListView`/`AbsListView`
+  或非横向 `ScrollView` 为 `y`；`ViewPager` 默认 `x`，含 `Vertical` 为 `y`）；子项证据优先于
+  类名，证据不足或双向时省略。该投影只登记公开轴向事实，不改变 ref 保号签名；
 - 静态与新鲜重验前均执行有界公开视图与原始拓扑校验，结构或映射损坏返回 `503 hierarchy_unavailable`；
-- 容器在观察的公开树中解析：`container.ref` 若自身是有效 `role=scroll`（含 `swipe`）则直接作为锚点，
-  若自身是 `role=scroll` 但缺 `swipe` 报 `422 unsupported_node_action`；若为非滚动节点则沿公开父链
-  跳过 `context` 止于 `root` 查找最近 `role=scroll` 祖先并自动提升（认领后仅重验滚动容器本身）。
-  坐标 `container={x,y}` 收集命中点上的全部有效滚动容器并归约父子链保留最内层集合 `I`：唯一最内层
-  先规划，失败时沿命中祖先由近及远回退；多个互不为祖先的平级容器仅在恰 1 个可执行时唯一消歧，
-  否则返回 `422 ambiguous_point` 并附 `candidates`；
+- 容器选择先做轴向兼容判定：`up`/`down` 需纵向能力、`left`/`right` 需横向能力；公开 `axis`
+  与请求轴冲突为不兼容，显式支持请求轴（含 `both`）为兼容且豁免扁平几何判据；`axis` 未知时，
+  处于非同视口外层滚动祖先内、正交边不短于请求轴边 2 倍、请求轴跨度严格小于该祖先与屏幕同轴
+  跨度较大者 25% 的极端扁平条带为不兼容；独立滚动容器不因自身外框比例自拒；
+- 容器在观察的公开树中解析：`container.ref` 若自身是有效 `role=scroll`（含 `swipe`）则直接作为锚点
+  （轴向不兼容时沿公开父链回退到最近兼容且可规划的外层滚动祖先，父链无解时尝试唯一轴向兼容的
+  内层子滚动容器，仍无解返回 `422 unsupported_node_action`（`reason=axis_mismatch`）并附
+  `candidates`；兼容祖先进入规划但均失败时返回其规划错误），若自身是 `role=scroll` 但缺 `swipe` 报
+  `422 unsupported_node_action`；若为非滚动
+  节点则沿公开父链跳过 `context` 止于 `root` 查找最近 `role=scroll` 祖先并自动提升，最近祖先轴向
+  不兼容时继续向更外层兼容祖先提升，整条链无兼容祖先时返回 `422 unsupported_node_action`
+  （`reason=axis_mismatch`、`scope=ancestor`）。坐标 `container={x,y}` 收集命中点上的全部有效滚动
+  容器并归约父子链保留最内层集合 `I`：最内层轴向不兼容或轨迹被阻时沿命中祖先由近及远回退兼容
+  容器，全部不兼容返回 `422 unsupported_node_action`（`reason=axis_mismatch`、`scope=point`）；
+  多个互不为祖先的平级容器只在轴向兼容且恰 1 个可执行时唯一消歧，否则返回 `422 ambiguous_point`
+  并附 `candidates`；
 - 静态规划按 `50% → 25% → 75%` 固定顺序探测 3 条正交轴线：将自身、`raw` 外层祖先及满足双向同视口
   （双方宽与高交集均 ≥85%）的嵌套滚动子容器豁免阻塞，其余具有独立滚动作用域或未知来源的节点投影成
-  轴上阻塞区间；在最长安全区间正中对称展开 `page`/`half` 轨迹（`scrollGeometry` 显式接收选定轴线坐标，
-  不回弹中点）。仅直接 `container.ref` 3 轴全败时检查唯一可执行非同视口内层子滚动兜底；否则返回
+  轴上阻塞区间；在最长安全区间正中对称展开四档轨迹（`scrollGeometry` 显式接收选定轴线坐标，不回弹
+  中点）：`step`/`half`/`page`/`full` 取可用跨度的 15%/30%/60%/85%，最小行程
+  32px/48px/48px/48px，注入时长固定为 500/450/400/300ms；`scroll` 不接受 `duration_ms`。仅直接
+  `container.ref` 3 轴全败时检查唯一可执行非同视口内层子滚动兜底；否则返回
   `422 no_safe_trajectory`（`trajectory_blocked` / `insufficient_travel`）并附 `candidates` 与可选 `blocking_refs`；
-- 认领后容器走 Tier 1–4 双向唯一匹配，校验新鲜 `isScrollContainer` 与 `sameScrollScope`（轴向重叠与离轴容差）；Tier 4 的滚动容器证据要求唯一资源，或两侧可读文案存在交集（或相同非空资源且双向覆盖 ≥85%），不要求容器内全部文案不变；
+- 认领后容器走 Tier 1–4 双向唯一匹配，校验新鲜 `isScrollContainer`、`sameScrollScope`（轴向重叠与离轴容差）及公开 `axis` 未与请求方向显式冲突（冲突按 `409 target_changed`、`reason=capability_changed` 零派发）；Tier 4 的滚动容器证据要求唯一资源，或两侧可读文案存在交集（或相同非空资源且双向覆盖 ≥85%），不要求容器内全部文案不变；
   新鲜树按相同双向同视口规则先证明原段，失效时在同一容器内按 3 轴线与居中规则重规划；失败返回
   `409 target_changed` 并附封闭归因 `details.reason`（`target_missing`/`target_ambiguous`/`lineage_changed`/`capability_changed`/`scroll_scope_changed`/`trajectory_blocked`）；
-- 静态不可执行在认领前拒绝，新鲜不成立走重验失败的交付路径。
+- 静态不可执行在认领前拒绝，新鲜不成立走重验失败的交付路径。单次 `act(scroll)` 最多派发一次手势，不按派发后观察补滑。
 
 坐标 `tap`/`long_press`/`text` 与 raw `swipe` 都以最深命中集合为授权单位：认领前在观察公开树中解析原点，认领后在新鲜帧重新取得命中集合，并按动作类型分别证明。集合匹配使用有界二分图最大匹配（Kuhn 增广路，命中集合顶点数上限 64），不要求逐边一一对应。
 
 - **坐标 `tap`/`long_press`/`text`**：单边兼容要求目标自身源结构（包、类、文案、描述、资源与全部能力/启用/密码/可编辑三态）无已知冲突，新矩形在屏内且仍包含原点。匹配分两级：优先要求几何相交（重叠率至少 0.50）且原始祖先链 L1 或 L2 对齐；祖先链重建时，允许以双向面积覆盖均 ≥80% 的紧几何，加 E1 自身非空可读文案/描述、E2 全树双向唯一的非空资源、或 E3 有界子树可读文案指纹（输入/点击目标要求两侧指纹非空且排序后完全相等）之一作为抗重建回退。通过后还要在新鲜命中集合上重新归约最近交互拥有者，确认原点未引入新的竞争交互目标；任一条件不成立返回 `409 target_changed`（`reason=point_changed`）。
-- **raw `swipe`**：只证明起点区域的源结构与防新遮挡，不要求无动作被动叶子的文案不变。新帧命中集合必须与旧集合等大且全部映射到互异有效节点；每个旧节点与新节点须同显示、同包、同类、同可编辑性，资源与点击/长按/滚动/启用/密码/勾选三态无冲突；任一侧具备动作能力时，文案与描述也不得冲突，两侧均为无动作被动叶子时忽略其文案与描述。新矩形必须在屏内、仍包含起点，且与旧矩形尺寸兼容、重叠率 ≥0.60、面积比不超过 4 倍。`Focused`、`Selected`、`Checked` 与祖先包装层差异不参与判定。任何新增更深层弹窗、对话框或浮层改变命中集合长度或节点结构时立即拒绝。raw `swipe` 永不返回 `ambiguous_point`：观察时命中超过 64 个节点则不做集合证明，只保留前台级校验；观察时命中为空时，新鲜帧同一点也必须仍为空，空白点被新节点或浮层覆盖同样拒绝。`tap`/`long_press`/`text` 对最深命中集合归约最近交互拥有者，≤1 个拥有者或恰 1 个满足请求动作能力的拥有者时直接消歧执行，否则返回 `422 ambiguous_point` 并附排序 `candidates`。`scroll` 不证明真实滚动方向、触摸消费者、业务安全或到达边界；设备事实仍只有 `Scrollable bool`，公开 `axis` 没有生产者。
+- **raw `swipe`**：只证明起点区域的源结构与防新遮挡，不要求无动作被动叶子的文案不变。新帧命中集合必须与旧集合等大且全部映射到互异有效节点；每个旧节点与新节点须同显示、同包、同类、同可编辑性，资源与点击/长按/滚动/启用/密码/勾选三态无冲突；任一侧具备动作能力时，文案与描述也不得冲突，两侧均为无动作被动叶子时忽略其文案与描述。新矩形必须在屏内、仍包含起点，且与旧矩形尺寸兼容、重叠率 ≥0.60、面积比不超过 4 倍。`Focused`、`Selected`、`Checked` 与祖先包装层差异不参与判定。任何新增更深层弹窗、对话框或浮层改变命中集合长度或节点结构时立即拒绝。raw `swipe` 永不返回 `ambiguous_point`：观察时命中超过 64 个节点则不做集合证明，只保留前台级校验；观察时命中为空时，新鲜帧同一点也必须仍为空，空白点被新节点或浮层覆盖同样拒绝。`tap`/`long_press`/`text` 对最深命中集合归约最近交互拥有者，≤1 个拥有者或恰 1 个满足请求动作能力的拥有者时直接消歧执行，否则返回 `422 ambiguous_point` 并附排序 `candidates`。`scroll` 不证明真实滚动方向、触摸消费者、业务安全或到达边界；设备事实仍只有 `Scrollable bool`，公开 `axis` 只是类名与子项排布得到的投影，不证明设备真实滚动轴。
 
 ### tap/long_press 的子树安全落点
 
@@ -368,8 +386,8 @@ Android 时为 `uncertain`；全部确定未派发时为 `not_executed`。`parti
    `unknown`/`0`/`not_sampled`。质量是观察材料事实，不改变 O 状态、输入授权与提交门禁；
 5. 采集龄超过 `CaptureMaxAge=15s` → `stale_screen`；
 6. 虚拟屏上出现控制 App 的可见节点 → `control_ui_on_virtual_display`，采集失败；
-7. `observation.Builder` 构造完整的内部公开树（合成根、必要祖先、保守保号）。动作规划、
-   重验与详细补看读取完整快照。compact 投影、序列化与计量都在锁外完成；
+7. `observation.Builder` 构造完整的内部公开树（合成根、必要祖先、保守保号、`role=scroll` 节点的
+   `axis` 投影）。动作规划、重验与详细补看读取完整快照。compact 投影、序列化与计量都在锁外完成；
 8. compact 投影先按[几何策略](interface.md#node)决定每个节点的交付几何，再省略符合条件
    的小型无标注图片，清理因此变空的匿名容器，并绕过裁剪后恰有一个孩子的隐藏匿名容器。
    留存节点沿用裁剪前的公开几何。输出普通节点定义并按规范 JSON 计量，
@@ -759,7 +777,7 @@ text 完成事件记 `focus_dispatch`/`write_dispatch`/`submit_dispatch` 与受�
 ### 发布
 
 `release/versions.json` 是发行号、共同契约号与 Android versionCode 的唯一来源；当前为
-`release_version=0.30.0`、`contract_version=26`、`android_version_code=32`，构建生成
+`release_version=0.31.0`、`contract_version=27`、`android_version_code=33`，构建生成
 Go/Java 常量。`scripts/build-release.ps1` 产出整组产物与 `build/release/manifest.json`
 （源码提交、Go 版本、MCP SDK/协议、各产物 SHA-256/大小、Android 包名/版本、工具目录指纹）。
 工具目录固定为 `scripts/toolcatalog` 投影的 13 个工具，指纹是该目录注册顺序、名称、描述与

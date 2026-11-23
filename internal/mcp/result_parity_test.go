@@ -542,9 +542,10 @@ func TestCatalogFingerprintBaseline(t *testing.T) {
 	// guidance and omission of the two structured evidence objects. It also
 	// covers app kill stating that a virtual-display foreground task is
 	// terminated together with its task window container, while the same app
-	// still having a task on the primary or another display refuses, and the
-	// act(text) auto_submit/submit_ref contract with outcome=partial.
-	const baseline = "6bf61b2727acf0adc0850b7b790534ec4fee8a159fa8266ada0c9fb74eb1eef6"
+	// still having a task on the primary or another display refuses, the
+	// act(text) auto_submit/submit_ref contract with outcome=partial, and the
+	// four-tier scroll amount with scroll axis-fallback guidance.
+	const baseline = "3a9ad87c7af904226731f9fec90b0def7b2d8233487fdf7435041e365211b98b"
 	if got := CatalogFingerprint(); got != baseline {
 		t.Fatalf("catalog changed: %s", got)
 	}

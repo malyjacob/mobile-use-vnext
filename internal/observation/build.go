@@ -162,6 +162,11 @@ func (b *Builder) buildAgainst(prev *Snapshot, cap *device.Capture, nextRef int)
 		public[parent].Children = append(public[parent].Children, public[i])
 	}
 
+	// The parent/child links are complete now, so every scroll container sees
+	// its published children. Axis evidence is projected before the snapshot is
+	// handed out because published nodes are immutable.
+	populateScrollAxes(cap, public, order)
+
 	snap := &Snapshot{
 		Capture:       cap,
 		Source:        make(map[string]int),
@@ -536,6 +541,178 @@ func collectRefs(n *protocol.Node, out *[]string) {
 	for _, child := range n.Children {
 		collectRefs(child, out)
 	}
+}
+
+// Scroll axis projection bounds. The child-layout evidence is deliberately
+// small and bounded: at most scrollAxisMaxSamples leading children are sampled,
+// the main axis must span at least scrollAxisMinSpan pixels and dominate the
+// cross axis by scrollAxisDominance, and at least half of the adjacent pairs
+// must overlap on the cross axis.
+const (
+	scrollAxisMinItems   = 2
+	scrollAxisMaxSamples = 16
+	scrollAxisMinSpan    = 24
+	scrollAxisDominance  = 2
+)
+
+// populateScrollAxes projects the scroll axis of every public scroll container
+// in preorder.
+//
+// The projection is deterministic: it uses only the source class name and the
+// layout of the container's published children, so the same capture always
+// yields the same axis and no extra device read is involved. Child layout
+// evidence wins over the class name; when neither proves a single axis the
+// field stays empty (unknown) and the tree omits it.
+func populateScrollAxes(cap *device.Capture, public []*protocol.Node, order []int) {
+	if cap == nil {
+		return
+	}
+	for _, rawIdx := range order {
+		if rawIdx < 0 || rawIdx >= len(cap.Nodes) || rawIdx >= len(public) {
+			continue
+		}
+		node := public[rawIdx]
+		if node == nil || node.Context || node.Role != protocol.RoleScroll || node.Bounds == nil {
+			continue
+		}
+		if axis := inferScrollAxisFromChildren(node); axis != "" {
+			node.Axis = axis
+			continue
+		}
+		node.Axis = inferScrollAxisFromClass(cap.Nodes[rawIdx].ClassName)
+	}
+}
+
+// inferScrollAxisFromClass maps native scroll container class names to their
+// fixed scroll axis. The order matters: HorizontalScrollView must be recognized
+// before the generic ScrollView rule, and a ViewPager defaults to horizontal
+// paging unless its class name marks a vertical variant.
+func inferScrollAxisFromClass(class string) protocol.Axis {
+	switch {
+	case strings.Contains(class, "HorizontalScrollView"):
+		return protocol.AxisX
+	case strings.Contains(class, "NestedScrollView"),
+		strings.Contains(class, "ListView"),
+		strings.Contains(class, "AbsListView"):
+		return protocol.AxisY
+	case strings.Contains(class, "ScrollView") && !strings.Contains(class, "Horizontal"):
+		return protocol.AxisY
+	case strings.Contains(class, "ViewPager"):
+		if strings.Contains(class, "Vertical") {
+			return protocol.AxisY
+		}
+		return protocol.AxisX
+	}
+	return ""
+}
+
+// inferScrollAxisFromChildren infers the scroll axis from how the published
+// children are laid out. A single non-scroll child is treated as a content
+// wrapper and its own children are sampled instead, which covers the common
+// "scroll container > one root content group > items" structure. Fewer than two
+// samples, a layout that is not dominated by one axis (a grid or a
+// two-dimensional canvas) and inconsistent cross-axis overlaps leave the axis
+// unknown.
+func inferScrollAxisFromChildren(node *protocol.Node) protocol.Axis {
+	if node == nil {
+		return ""
+	}
+	items := scrollAxisSamples(node.Children)
+	if len(items) == 1 && items[0].Role != protocol.RoleScroll {
+		items = scrollAxisSamples(items[0].Children)
+	}
+	if len(items) < scrollAxisMinItems {
+		return ""
+	}
+	if len(items) > scrollAxisMaxSamples {
+		items = items[:scrollAxisMaxSamples]
+	}
+
+	prev := items[0].Bounds
+	prevX, prevY := boundsCenterX(prev), boundsCenterY(prev)
+	minX, maxX, minY, maxY := prevX, prevX, prevY, prevY
+	var sumDX, sumDY int64
+	overlapX, overlapY := 0, 0
+	for _, item := range items[1:] {
+		cur := item.Bounds
+		curX, curY := boundsCenterX(cur), boundsCenterY(cur)
+		sumDX += absInt64(curX - prevX)
+		sumDY += absInt64(curY - prevY)
+		minX, maxX = min(minX, curX), max(maxX, curX)
+		minY, maxY = min(minY, curY), max(maxY, curY)
+		if halfOpenIntersects(int64(prev.Left), int64(prev.Right), int64(cur.Left), int64(cur.Right)) {
+			overlapX++
+		}
+		if halfOpenIntersects(int64(prev.Top), int64(prev.Bottom), int64(cur.Top), int64(cur.Bottom)) {
+			overlapY++
+		}
+		prev, prevX, prevY = cur, curX, curY
+	}
+	pairs := int64(len(items) - 1)
+	spanX, spanY := maxX-minX, maxY-minY
+
+	if spanX >= scrollAxisMinSpan &&
+		sumDX >= scrollAxisDominance*sumDY &&
+		spanX >= scrollAxisDominance*spanY &&
+		int64(overlapY)*2 >= pairs {
+		return protocol.AxisX
+	}
+	if spanY >= scrollAxisMinSpan &&
+		sumDY >= scrollAxisDominance*sumDX &&
+		spanY >= scrollAxisDominance*spanX &&
+		int64(overlapX)*2 >= pairs {
+		return protocol.AxisY
+	}
+	return ""
+}
+
+// scrollAxisSamples returns the children that can witness a layout direction:
+// public, non-context and with positive-area geometry.
+func scrollAxisSamples(children []*protocol.Node) []*protocol.Node {
+	items := make([]*protocol.Node, 0, len(children))
+	for _, child := range children {
+		if child == nil || child.Context || child.Bounds == nil {
+			continue
+		}
+		if child.Bounds.Width() <= 0 || child.Bounds.Height() <= 0 {
+			continue
+		}
+		items = append(items, child)
+	}
+	return items
+}
+
+// boundsCenterX returns the half-open center column of the rectangle.
+func boundsCenterX(b *protocol.Bounds) int64 {
+	return (int64(b.Left) + int64(b.Right)) / 2
+}
+
+// boundsCenterY returns the half-open center row of the rectangle.
+func boundsCenterY(b *protocol.Bounds) int64 {
+	return (int64(b.Top) + int64(b.Bottom)) / 2
+}
+
+// halfOpenIntersects reports whether [aStart, aEnd) and [bStart, bEnd) share
+// positive length.
+func halfOpenIntersects(aStart, aEnd, bStart, bEnd int64) bool {
+	start, end := aStart, aEnd
+	if bStart > start {
+		start = bStart
+	}
+	if bEnd < end {
+		end = bEnd
+	}
+	return end > start
+}
+
+// absInt64 returns the absolute value of v. Centers are far below the int64
+// range, but the sampled sums and ratios are computed in int64 so a hostile
+// capture can never overflow them.
+func absInt64(v int64) int64 {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
 
 // formatRef formats an allocated ref number.

@@ -19,7 +19,7 @@ instance, err := c.Discover(ctx)
 `POST /api/status {}` 取得当前准入事实（`can_start`、`blocking_code`、本 Agent 的
 `session`、`start_operation_id` 与 `cleanup`）。它不生成 P、不续租、不创建会话。
 
-当前共同契约为 `"26"`。契约版本不等时返回 `contract_mismatch`；客户端不刷新版本、不重发
+当前共同契约为 `"27"`。契约版本不等时返回 `contract_mismatch`；客户端不刷新版本、不重发
 业务动作。端口可应答、`/health` 正常都不等于 `can_start=true`。
 
 公开树与 detailed inspection 使用相同的完整节点布尔默认/unknown 规则，不携带 defaults。
@@ -138,15 +138,17 @@ MCP 适配器的严格解码拒绝；两个条件折叠后相同则是引擎准�
 
 `Act` 仍接收 `*protocol.ActRequest`，编码器只写所选分支的成员：`scroll` 的
 `container`/`direction`/`amount` 与 `swipe` 的 `from`/`to`/`duration_ms` 互斥，缺成员、
-混用或 `duration_ms` 为负数、1–49/2001 以上都会在发送前被拒绝；`duration_ms=0` 表示省略并
+混用或 `duration_ms` 为负数、1–49/2001 以上都会在发送前被拒绝；`scroll` 的 `amount` 只接受
+闭合四档 `step`/`half`/`page`/`full`（省略为 `page`），不接受数字、百分比、未知词与大小写
+变体；`scroll` 不接受 `duration_ms`，注入时长由服务端按档位固定；`duration_ms=0` 表示省略并
 使用服务端默认 300，不表示一个显式的零时长。请求引用字段是 `reference`；`operation.bubble`
 与 `operation.auto_submit` 使用 presence-aware 结构，省略时不写成员，显式 `false` 必须写成
 `false`，不能按 Go bool 零值省略。`operation.submit_ref` 只适用于 `text`，省略时不写成员，
 出现时必须是 `"enter_key"` 或 `^n[1-9][0-9]*$` 且不超过 64 个字符。编码器与 HTTP 解码共用
 同一分支校验：坐标目标或其他动作携带 `bubble`、非 text 携带 `auto_submit`/`submit_ref`
 都在发送前拒绝；已废除的 `press_enter` 按未知成员拒绝。`auto_submit=false` 时 `submit_ref`
-只做类型与语法校验，随后忽略提交语义。客户端不新增滚动、质量或效果参数，也不在本地选择容器
-或起止点；`status(P)` 与重复 P 视图中的 `effect` 只按服务返回值读取，不重算。
+只做类型与语法校验，随后忽略提交语义。客户端不新增滚动、质量或效果参数，也不在本地选择容器、
+轴向或起止点；`status(P)` 与重复 P 视图中的 `effect` 只按服务返回值读取，不重算。
 `Result.text_input` 出现时 `write` 与 `submit` 都必须存在且属于固定枚举，合法组合受响应
 解码器约束；客户端不补 `not_executed`、不根据 `phase` 推导阶段，也不在本地改写快照。
 `outcome=partial` 时快照固定为 `write=executed`、`submit=not_executed`，客户端把

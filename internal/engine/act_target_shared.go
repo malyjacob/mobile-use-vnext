@@ -28,6 +28,7 @@ const (
 	scrollModeDirect             = "scroll_direct"
 	scrollModeCoextensive        = "scroll_coextensive"
 	scrollModeAncestorLift       = "scroll_ancestor_lift"
+	scrollModeAxisFallback       = "scroll_axis_fallback"
 	scrollModePointInnermost     = "scroll_point_innermost"
 	scrollModePointFallback      = "scroll_point_fallback"
 	scrollModePointDisambiguated = "scroll_point_disambiguated"
@@ -47,6 +48,7 @@ const (
 	staticReasonColocatedAmbiguous        = "colocated_ambiguous"
 	staticReasonTrajectoryBlocked         = "trajectory_blocked"
 	staticReasonInsufficientTravel        = "insufficient_travel"
+	staticReasonAxisMismatch              = "axis_mismatch"
 )
 
 const (

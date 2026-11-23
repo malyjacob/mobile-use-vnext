@@ -339,8 +339,8 @@ func encodeOperation(enc *jsontext.Encoder, op *Operation) error {
 		if !validScrollDirection(op.Direction) {
 			return errors.New("scroll requires a valid direction")
 		}
-		if op.Amount != "" && op.Amount != ScrollAmountPage && op.Amount != ScrollAmountHalf {
-			return errors.New("scroll amount must be page or half")
+		if op.Amount != "" && !validScrollAmount(op.Amount) {
+			return errors.New("scroll amount must be step, half, page or full")
 		}
 		if err := writeTargetOrPoint(enc, "container", op.Container, nil); err != nil {
 			return err

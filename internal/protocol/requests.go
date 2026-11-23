@@ -83,11 +83,25 @@ const (
 	ScrollDirectionRight = "right"
 )
 
-// Scroll amount values bound one controlled scroll attempt.
+// Scroll amount values bound one controlled scroll attempt. The set is closed:
+// no percentage string and no number is ever accepted.
 const (
-	ScrollAmountPage = "page"
+	ScrollAmountStep = "step"
 	ScrollAmountHalf = "half"
+	ScrollAmountPage = "page"
+	ScrollAmountFull = "full"
 )
+
+// validScrollAmount reports whether amount belongs to the closed travel-amount
+// set. The empty string is the decode default and is not a member.
+func validScrollAmount(amount string) bool {
+	switch amount {
+	case ScrollAmountStep, ScrollAmountHalf, ScrollAmountPage, ScrollAmountFull:
+		return true
+	default:
+		return false
+	}
+}
 
 // Swipe duration bounds in milliseconds. An omitted duration means
 // DefaultSwipeDurationMS; zero is not a valid explicit duration.
@@ -123,8 +137,9 @@ type Operation struct {
 	// Direction is the scroll-only reading direction; it is one of the
 	// ScrollDirection* values.
 	Direction string
-	// Amount is the scroll-only travel amount: ScrollAmountPage (the decode
-	// default) or ScrollAmountHalf.
+	// Amount is the scroll-only travel amount: ScrollAmountStep,
+	// ScrollAmountHalf, ScrollAmountPage (the decode default) or
+	// ScrollAmountFull.
 	Amount string
 	// DurationMS is the swipe-only gesture duration. An omitted wire duration
 	// decodes to DefaultSwipeDurationMS; the encoder omits it when zero.
@@ -741,7 +756,7 @@ func parseScrollDirection(raw jsontext.Value) (string, *APIError) {
 	}
 }
 
-// parseScrollAmount admits the bounded page/half travel amounts.
+// parseScrollAmount admits the closed four-tier travel amounts.
 func parseScrollAmount(raw jsontext.Value) (string, *APIError) {
 	if isJSONNull(raw) {
 		return "", Invalid("amount 不接受 null")
@@ -750,12 +765,10 @@ func parseScrollAmount(raw jsontext.Value) (string, *APIError) {
 	if err := json.Unmarshal(raw, &amount); err != nil {
 		return "", Invalid("amount 必须是字符串")
 	}
-	switch amount {
-	case ScrollAmountPage, ScrollAmountHalf:
-		return amount, nil
-	default:
-		return "", Invalid("amount 只接受 page 或 half")
+	if !validScrollAmount(amount) {
+		return "", Invalid("amount 只接受 step、half、page 或 full")
 	}
+	return amount, nil
 }
 
 // parseSwipeDuration admits one integer duration inside the fixed bounds.

@@ -355,7 +355,10 @@ func TestProposalScrollCoordCompetingContainersDisambiguateAndReject(
 		pageStep := scrollPageStep([]rawNodeSpec{
 			{Parent: -1, Bounds: screenRect(), Class: "android.widget.FrameLayout"},
 			{Parent: 0, Bounds: screenRect(), Class: "android.widget.ScrollView", Scrollable: true},
-			{Parent: 1, Bounds: containerBounds, Class: "androidx.recyclerview.widget.RecyclerView",
+			// The crossing container is explicitly vertical, so the axis rule keeps
+			// it executable for "down"; the short strip is explicitly horizontal and
+			// drops out of the competing executable set.
+			{Parent: 1, Bounds: containerBounds, Class: "android.widget.ScrollView",
 				Scrollable: true},
 			{Parent: 1, Bounds: shortBounds, Class: "android.widget.HorizontalScrollView",
 				Scrollable: true},
@@ -387,10 +390,13 @@ func TestProposalScrollCoordCompetingContainersDisambiguateAndReject(
 		pageStep := scrollPageStep([]rawNodeSpec{
 			{Parent: -1, Bounds: screenRect(), Class: "android.widget.FrameLayout"},
 			{Parent: 0, Bounds: screenRect(), Class: "android.widget.ScrollView", Scrollable: true},
+			// Both crossing containers carry no axis evidence, so "down" stays
+			// genuinely ambiguous; an explicit horizontal axis would instead
+			// disambiguate before this rejection path is reached.
 			{Parent: 1, Bounds: containerABounds,
 				Class: "androidx.recyclerview.widget.RecyclerView", Scrollable: true},
 			{Parent: 1, Bounds: containerBBounds,
-				Class: "android.widget.HorizontalScrollView", Scrollable: true},
+				Class: "android.view.ViewGroup", Scrollable: true},
 		})
 		const coordX = 540
 		const coordY = 1100

@@ -409,7 +409,7 @@ func TestScrollDefensiveValidation(t *testing.T) {
 	for name, operation := range map[string]protocol.Operation{
 		"missing_container": {Type: "scroll", Direction: protocol.ScrollDirectionDown},
 		"bad_direction":     {Type: "scroll", Container: container, Direction: "sideways"},
-		"bad_amount":        {Type: "scroll", Container: container, Direction: protocol.ScrollDirectionDown, Amount: "full"},
+		"bad_amount":        {Type: "scroll", Container: container, Direction: protocol.ScrollDirectionDown, Amount: "wide"},
 		"target": {Type: "scroll", Container: container, Direction: protocol.ScrollDirectionDown,
 			Target: &protocol.Target{UseRef: true, Ref: "n1"}},
 		"from": {Type: "scroll", Container: container, Direction: protocol.ScrollDirectionDown,
@@ -542,11 +542,13 @@ func TestScrollPlanRecordsControlledFacts(t *testing.T) {
 // ---------------------------------------------------------------- safe span
 
 // scrollTabPageSpecs is the synthetic geometry of the field report: a main list
-// container whose upper part is covered by a same-level scrollable tab bar.
+// container whose upper part is covered by a same-level scrollable tab bar. The
+// main container has no native axis evidence so both request axes stay plannable;
+// this test isolates the safe-span selection, not the axis compatibility rule.
 func scrollTabPageSpecs() []rawNodeSpec {
 	return []rawNodeSpec{
 		{Parent: -1, Bounds: screenRect(), Class: "android.widget.FrameLayout"},
-		{Parent: 0, Bounds: device.Rect{Right: 1080, Bottom: 2242}, Class: "android.widget.ScrollView", Scrollable: true},
+		{Parent: 0, Bounds: device.Rect{Right: 1080, Bottom: 2242}, Class: "android.view.ViewGroup", Scrollable: true},
 		{Parent: 0, Bounds: device.Rect{Left: 23, Top: 169, Right: 1058, Bottom: 304},
 			Class: "androidx.recyclerview.widget.RecyclerView", Scrollable: true},
 	}
@@ -584,9 +586,9 @@ func TestScrollSafeSpanAvoidsTabBar(t *testing.T) {
 		{"up_page", protocol.ScrollDirectionUp, protocol.ScrollAmountPage,
 			swipeCall{displayID: 12, x1: 540, y1: 808, x2: 540, y2: 1739, durationMS: 400}},
 		{"down_half", protocol.ScrollDirectionDown, protocol.ScrollAmountHalf,
-			swipeCall{displayID: 12, x1: 540, y1: 1506, x2: 540, y2: 1041, durationMS: 400}},
+			swipeCall{displayID: 12, x1: 540, y1: 1506, x2: 540, y2: 1041, durationMS: 450}},
 		{"up_half", protocol.ScrollDirectionUp, protocol.ScrollAmountHalf,
-			swipeCall{displayID: 12, x1: 540, y1: 1041, x2: 540, y2: 1506, durationMS: 400}},
+			swipeCall{displayID: 12, x1: 540, y1: 1041, x2: 540, y2: 1506, durationMS: 450}},
 		// The tab bar is off the horizontal center line, so the full width stays
 		// provable: margin 108, usable 864, page 518, half 259.
 		{"right_page", protocol.ScrollDirectionRight, protocol.ScrollAmountPage,
@@ -594,9 +596,9 @@ func TestScrollSafeSpanAvoidsTabBar(t *testing.T) {
 		{"left_page", protocol.ScrollDirectionLeft, protocol.ScrollAmountPage,
 			swipeCall{displayID: 12, x1: 281, y1: 1121, x2: 799, y2: 1121, durationMS: 400}},
 		{"right_half", protocol.ScrollDirectionRight, protocol.ScrollAmountHalf,
-			swipeCall{displayID: 12, x1: 670, y1: 1121, x2: 411, y2: 1121, durationMS: 400}},
+			swipeCall{displayID: 12, x1: 670, y1: 1121, x2: 411, y2: 1121, durationMS: 450}},
 		{"left_half", protocol.ScrollDirectionLeft, protocol.ScrollAmountHalf,
-			swipeCall{displayID: 12, x1: 411, y1: 1121, x2: 670, y2: 1121, durationMS: 400}},
+			swipeCall{displayID: 12, x1: 411, y1: 1121, x2: 670, y2: 1121, durationMS: 450}},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -686,8 +688,13 @@ func TestScrollSafeSpanTravelThresholds(t *testing.T) {
 			if len(calls) != 1 {
 				t.Fatalf("swipes = %d, want one", len(calls))
 			}
+			// The half tier injects the slower 450ms gesture; page keeps 400ms.
+			wantDuration := 400
+			if testCase.amount == protocol.ScrollAmountHalf {
+				wantDuration = 450
+			}
 			want := swipeCall{displayID: 12, x1: 540, y1: testCase.start, x2: 540,
-				y2: testCase.end, durationMS: 400}
+				y2: testCase.end, durationMS: wantDuration}
 			if calls[0] != want {
 				t.Fatalf("swipe = %+v, want %+v", calls[0], want)
 			}

@@ -500,7 +500,7 @@ func TestActScrollSchema(t *testing.T) {
 	if err := json.Unmarshal(operation.Properties["amount"], &amount); err != nil {
 		t.Fatalf("amount schema: %v", err)
 	}
-	if !reflect.DeepEqual(amount.Enum, []string{"page", "half"}) || amount.Default != "page" {
+	if !reflect.DeepEqual(amount.Enum, []string{"step", "half", "page", "full"}) || amount.Default != "page" {
 		t.Fatalf("amount schema = %+v", amount)
 	}
 	var duration struct {

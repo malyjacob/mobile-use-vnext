@@ -108,50 +108,46 @@ const treeTextGuide = "结果文本：text/both 以 `result v4 <ok|err> [op=…]
 // constraints stay in the tool descriptions.
 const callerGuidance = "会话与推进：首次可直接 start({})。已有 active 会话时沿用，只有会话状态不明才 status({})。" +
 	"active/starting 或 can_start=false 时不要 start；会话失效先按 recovery 处理。\n" +
-	"有可用 O 时直接 act；text/both 的 act 或 wait_for 返回新 O 时从 `obs` 行的完整 `O` 取得，" +
-	"structured JSON 中为 `observation.id`，随后直接使用该 O。" +
-	"没有可用 O、需要查看外部变化或 `recovery entry=observe` 时才 observe。\n\n" +
-	"O 与 P：O 是观察，默认约 60 秒输入期限（以会话租期截断），文本省略该字段，" +
-	"精确截止时间见 structured JSON 或以服务端过期反馈为准。P 是调用的幂等/查询编号，新工作另有新 P。" +
+	"有可用 O 时直接 act；act 或 wait_for 返回新 O 时从 `obs` 行取完整 `O`（structured 中为 `observation.id`）。" +
+	"无可用 O、要看外部变化或 `recovery entry=observe` 时才 observe。\n\n" +
+	"O 与 P：O 是观察，默认约 60 秒输入期限（以会话租期截断），精确截止时间见 structured JSON。" +
+	"P 是调用的幂等/查询编号，新工作另有新 P。" +
 	"app.find 与 notify 可脱离会话，notify 无 reference。请求引用统一用 reference。\n" +
 	"- 当前 ready O：act、app 的五个变更 kind。保留中的历史 O：inspect。\n" +
 	"- 活动原会话的 O/P：observe、snap、wait_for、keepalive、shell。app.list 接受 ready O 或可定位活动原会话的 P。\n" +
 	"- end 的 O/P 定位原会话。status、diagnose 可用 O/P 查原事实，省略时查自身。\n" +
-	"- act 静态拒绝引用的诊断节点若不在 compact，原 O 内容仍保留时用 " +
+	"- 静态拒绝的 ref 若不在 compact，可用 " +
 	"inspect({reference:原 act 的 O,node:诊断 ref}) 补看；O 过期后仍可能可读。\n" +
 	"start 租期五分钟；普通活动在续期点只增不减，至少续至两分钟后。" +
 	"status、inspect、diagnose、snap、app 查询不续租。keepalive 可重设并缩短租期，不延长 O。\n\n" +
-	"选择工具：observe 单次采集，snap 只看画面，wait_for 等公开树条件，inspect 补看历史树，diagnose 查健康。" +
-	"wait_for 以 wait.trigger 说明退出分支，以 wait.matched 说明终帧命中项；有新 O 就用它继续。\n\n" +
-	"输入：act 认领 ready O 才消费。ref 点按/长按默认 bubble=true，自动按 3×3 网格选点；" +
+	"选择工具：observe 单次采集、snap 只看画面、wait_for 等公开树条件、inspect 补看历史树、diagnose 查健康。" +
+	"wait_for 以 wait.trigger/wait.matched 说明退出分支与终帧命中项；有新 O 就用它继续。\n\n" +
+	"输入：act 认领 ready O 才消费。点按/长按默认 bubble=true，自动按 3×3 网格选点；" +
 	"无动作目标按视觉区锚定最近交互祖先，竞争遮挡时停止外扩并自动吸附唯一局部共位可点击控件。" +
-	"operation.bubble=false 只点原目标，坐标省略 bubble。坐标 tap/long_press/text 使用最深命中集合，" +
-	"并仅在无法按请求动作唯一消歧时报 ambiguous_point；raw swipe 不报 ambiguous_point。" +
-	"scroll 可直接传同视口嵌套滚动栈任一层；非滚动节点自动找最近滚动祖先；坐标取最内层滚动容器，" +
-	"规划失败时回退外层祖先；轨迹在安全区间居中并尝试 50%/25%/75% 三条轴线避让。" +
+	"operation.bubble=false 只点原目标，坐标省略 bubble。坐标目标用最深命中集合，" +
+	"仅在无法按请求动作唯一消歧时报 ambiguous_point；raw swipe 不报 ambiguous_point。" +
+	"scroll 可直接传同视口嵌套滚动栈任一层，非滚动节点自动找最近滚动祖先，坐标取最内层滚动容器；" +
+	"轨迹居中并尝试 50%/25%/75% 三条轴线避让；amount 四档 step 15%/500ms、half 30%/450ms、page 60%/400ms（默认）、full 85%/300ms，scroll 不接受时长参数；" +
+	"轴向不兼容时自动回退兼容外层滚动祖先，无解报 422 unsupported_node_action（reason=axis_mismatch）。" +
 	"静态 422（invalid_target、unsupported_node_action、ambiguous_point、no_safe_point、no_safe_trajectory）不消费 O；" +
 	"取 error.details.candidates 中第一个 executable=true 的 ref，用同一 O 和新 P 重试，无需重观察或手算坐标。" +
-	"text 默认 auto_submit=true、submit_ref=\"enter_key\"：写入全文并精确读回后至多发送一次 ENTER。" +
-	"仅填字时显式 operation.auto_submit=false，只写入并读回，不发送 ENTER（submit_ref 一并忽略）。" +
-	"已知页面提交按钮时用 operation.submit_ref=\"n<ref>\"，写后点击该按钮，一次调用完成填写与提交；" +
-	"提交失败不会补发 ENTER（单次调用至多一种提交原语）。" +
-	"text_input 分别报告 write 与 submit；write=executed 且 submit 确定未派发时整体 outcome=partial" +
-	"（error.code=text_submit_not_executed，并当场交付新 ready O）。业务结果用页面事实核对。\n\n" +
-	"恢复：优先直接使用 `recovery` 行给出的精确 `ref=` 编号调用对应 `entry`；" +
-	"当 `ref=` 是抽象词 `O`/`P` 时，再按场景取观察 `O`、`op`、`blocking_operation_id`、`start_operation_id` 或 `session.origin`。" +
-	"retry/O 表示尚未派发，用新观察的完整 O 或仍适用的原 O 发起新调用。" +
-	"observe/P 用原活动会话的具体归属 P，可用 session.origin 或同会话 operation_id。请求中的 reference 使用实际编号。" +
-	"status/P 按目标取编号：当前动作用 operation_id，忙用 blocking_operation_id，" +
-	"自身恢复用 start_operation_id，收尾用 target_reference 或刚查询的 P。" +
+	"text 默认 auto_submit=true、submit_ref=\"enter_key\"：写入全文并读回后至多一次 ENTER；" +
+	"仅填字时 operation.auto_submit=false，不发送 ENTER。" +
+	"已知提交按钮用 operation.submit_ref=\"n<ref>\"，一次调用完成填写与提交。" +
+	"text_input 报告 write 与 submit；write=executed 且 submit 未派发时 outcome=partial（text_submit_not_executed）。" +
+	"业务结果用页面事实核对。\n\n" +
+	"恢复：优先用 `recovery` 行给出的精确 `ref=` 编号调用对应 `entry`；" +
+	"`ref=` 是抽象词 `O`/`P` 时按场景取 `op`、`blocking_operation_id`、`start_operation_id` 或 `session.origin`。" +
+	"retry/O 表示尚未派发，用新观察的完整 O 或仍适用的原 O 重发。" +
+	"observe/P 用原活动会话的具体归属 P（session.origin 或同会话 operation_id）；请求中的 reference 用实际编号。" +
+	"status/P 的编号：当前动作用 operation_id，忙用 blocking_operation_id，自身恢复用 start_operation_id，收尾用 target_reference 或刚查询的 P。" +
 	"status(O) 撤销时对同一 O 调 end；end/reference=P 用原会话的归属 P。user 处理阻塞，update 配套升级，两者均不传引用。\n" +
-	"已认领 text 的整体 outcome=uncertain 或 partial，且结果给出 `recovery entry=observe ref=<P>` 时，" +
-	"直接 observe 核对当前框值/页面。" +
-	"partial 表示写入已确认、提交确定未派发：结果附带有效新 O 时直接用它继续（必要时读回框值）；" +
-	"现场观察发布失败或未附带 O 时按 `recovery` 的 P 观察。" +
-	"text_input.submit=uncertain 时先观察；write=executed、submit=not_executed 且原会话活动时，取新 O 后可按需单发 ENTER。" +
+	"已认领 text 的整体 outcome=uncertain 或 partial，且给出 `recovery entry=observe ref=<P>` 时直接 observe 核对当前框值/页面。" +
+	"partial 表示写入已确认、提交未派发：结果附带新 O 时直接用它继续；否则按 `recovery` 的 P 观察。" +
+	"text_input.submit=uncertain 时先观察；write=executed、submit=not_executed 且原会话活动时取新 O 后可按需单发 ENTER。" +
 	"不要原样重发，也不要自动 end/restart。\n" +
-	"通常 uncertain 先用 status 跟踪原 P，running 时继续跟踪，finished 且会话活动时再 observe。避免原样重发或自动 end/restart。" +
-	"not_executed 表示未派发；executed 后如仅观察、图片或清理失败，保留执行事实。device_busy 时跟随阻塞 P 串行。" +
+	"通常 uncertain 先用 status 跟踪原 P，running 继续跟踪，finished 且会话活动时再 observe。" +
+	"not_executed 表示未派发；executed 后仅观察、图片或清理失败保留执行事实。device_busy 时跟随阻塞 P 串行。" +
 	"任务完成后 end，pending cleanup 按 recovery 查询。"
 
 // serverInstructions is the complete public caller guidance: the fixed tree
@@ -339,7 +335,7 @@ var toolCatalog = []toolDefinition{
 	{
 		name: "act",
 		description: "对当前 ready O 执行交互。reference 必填且用当前 ready O 的完整 `O`；节点目标用 `n<ref>`。" +
-			"静态拒绝不认领 O，认领即消费原 O。image=true 可随动作后观察附加 ImageContent。" +
+			"静态拒绝不认领 O，认领即消费原 O。image=true 随观察附加 ImageContent。" +
 			"\n分支：tap/long_press 用 target；text 用 target 与 text；key 用 key 白名单。scroll 用 container/direction，可选 amount；swipe 用 from/to，可选 duration_ms。" +
 			"\n树中 `button`/`input`/`scroll` 省略的默认动作分别是既有 `tap`/`text`/`swipe`；" +
 			"`!tap`/`!text`/`!swipe` 表示该默认能力缺失。`@` 表示与最近已知祖先同矩形；需要坐标时沿该祖先读取。" +
@@ -352,20 +348,21 @@ var toolCatalog = []toolDefinition{
 			"error.details 提供 reason、scope/scope_ref、candidates 与可选 blocking_refs；" +
 			"candidates 项含 ref、role、actions、bounds、relation、executable。" +
 			"candidates 非空时，直接取第一个 executable=true 的 ref，用同一 O、新 P 重试，无需重观察或手算坐标。" +
-			"诊断 ref 可能因 compact 裁剪不在普通树中；原 O 内容仍保留时可用 " +
-			"inspect({reference:原 O,node:诊断 ref}) 补看详细子树。" +
-			"\n文本：默认 auto_submit=true、submit_ref=\"enter_key\"。必要聚焦（已聚焦 ref 跳过）、全文写入、同节点刷新精确读回，随后至多一次 ENTER；" +
-			"写后提交失败不会补发 ENTER。" +
-			"普通输入无需先 tap 或另发 ENTER。仅填字、草稿、多行、清空或逐字段编辑时显式 operation.auto_submit=false，只写入并读回，submit_ref 一并忽略。" +
-			"已知页面提交按钮时用 operation.submit_ref=\"n<ref>\"：认领前按 tap 同一静态规划校验该按钮（写前灰置也接受），写后重验按钮的启用状态与点击安全点，再至多点击一次。" +
+			"诊断 ref 若因 compact 不在普通树中，可用 inspect({reference:原 O,node:诊断 ref}) 补看详细子树。" +
+			"\n文本：默认 auto_submit=true、submit_ref=\"enter_key\"。聚焦、全文写入、同节点精确读回，随后至多一次 ENTER；写后提交失败不补发 ENTER。" +
+			"普通输入无需先 tap 或另发 ENTER。仅填字、草稿、多行、清空或逐字段编辑时显式 operation.auto_submit=false，只写入并读回，submit_ref 忽略。" +
+			"已知提交按钮用 operation.submit_ref=\"n<ref>\"：认领前按 tap 同一静态规划校验（写前灰置也接受），写后重验启用与点击安全点，再至多点击一次。" +
 			"默认分支返回 text_input:{write,submit}，auto_submit=false 时省略。" +
-			"write=executed 且提交确定未派发时整体 outcome=partial，错误码 text_submit_not_executed，并当场交付新 ready O 供继续观察；" +
-			"现场观察发布失败时不附带 O，按 recovery 的 P 观察；提交已派发但回执未知保持 outcome=uncertain。" +
-			"文本错误看 details.stage（target/focus/write/verify/submit）与 reason、dispatch（focus/write/submit），区分 not_attempted/not_dispatched/dispatched/unknown。" +
-			"已认领 text 的整体 outcome=uncertain（也可能仅已派发聚焦）或 outcome=partial（写入确认、提交未派发），且实际结果给出 `recovery entry=observe ref=<P>` 时，" +
-			"直接 observe 核对当前框值/页面。reference 使用原活动会话的具体归属 P，如 session.origin 或属于该会话的 operation_id。避免原样重发。" +
-			"\n滚动：用 operation.type=scroll + container。ref 可直接指向同视口嵌套滚动栈任一层；非滚动节点自动向上找最近滚动祖先。" +
-			"坐标容器自动选择该点所在最内层滚动容器，规划失败时回退外层滚动祖先。轨迹在安全区间居中起止，并依次尝试 50%/25%/75% 三条轴线避让。" +
+			"write=executed 且提交确定未派发时整体 outcome=partial，错误码 text_submit_not_executed，当场交付新 ready O；" +
+			"发布失败时不附带 O，按 recovery 的 P 观察；提交已派发但回执未知为 outcome=uncertain。" +
+			"文本错误看 details.stage（target/focus/write/verify/submit）、reason 与 dispatch（focus/write/submit），区分 not_attempted/not_dispatched/dispatched/unknown。" +
+			"已认领 text 的整体 outcome=uncertain（也可能仅已派发聚焦）或 partial（写入确认、提交未派发），且给出 `recovery entry=observe ref=<P>` 时，" +
+			"直接 observe 核对当前框值/页面。reference 使用原活动会话的具体归属 P（session.origin 或属于该会话的 operation_id）。避免原样重发。" +
+			"\n滚动：用 operation.type=scroll + container。amount 四档 step 15%/500ms（最小 32px）、half 30%/450ms、page 60%/400ms（默认）、full 85%/300ms，scroll 不接受 duration_ms。" +
+			"ref 可直接指向同视口嵌套滚动栈任一层；非滚动节点自动向上找最近滚动祖先。" +
+			"坐标容器自动选择该点所在最内层滚动容器，规划失败时回退外层滚动祖先；" +
+			"轴向不兼容时自动回退兼容外层滚动祖先，没有则返回 422 unsupported_node_action（reason=axis_mismatch）。" +
+			"轨迹在安全区间居中起止，并依次尝试 50%/25%/75% 三条轴线避让。" +
 			"swipe 是原始手势；树节点的 `swipe` 仅表示源能力，手势仍按当前 O 准入。" +
 			"执行事实见 outcome。scroll 不承诺真实方向、触摸消费者或业务安全。" +
 			"\n恢复：重验目标变化可返回 target_changed；若附新观察，从 `obs` 行取得完整 O，直接用新 O 和新 P 重试。" +
@@ -426,7 +423,7 @@ var toolCatalog = []toolDefinition{
           "description": "仅 text 且 auto_submit=true 时适用；省略按 \"enter_key\" 处理。\"enter_key\" 表示至多按一次 ENTER；n<ref> 表示写后点击该提交按钮，至多一次且失败不补发 ENTER。其他动作须省略。"
         },
         "container": {
-          "description": "scroll 的滚动容器选择器：ref 或 x/y 坐标，二选一。ref 可为任意公开节点：自身为滚动容器时直接使用，否则自动向上找最近 role=scroll 祖先；同视口嵌套滚动栈可直接传任一层。x/y 自动选择该点所在最内层滚动容器，规划失败时回退外层滚动祖先。",
+          "description": "scroll 的容器选择器：ref 或 x/y 坐标，二选一。ref 可为任意公开节点：自身为滚动容器时直接使用，否则自动向上找最近 role=scroll 祖先；同视口嵌套滚动栈可直接传任一层。x/y 取该点最内层滚动容器，规划失败时回退外层滚动祖先；容器轴向与请求方向不兼容时自动回退兼容外层滚动祖先，无则返回 422 unsupported_node_action（reason=axis_mismatch）。",
           "oneOf": [
             {
               "type": "object",
@@ -454,9 +451,9 @@ var toolCatalog = []toolDefinition{
         },
         "amount": {
           "type": "string",
-          "enum": ["page", "half"],
+          "enum": ["step", "half", "page", "full"],
           "default": "page",
-          "description": "scroll 可选幅度：page（默认）或 half；不接受其他值。"
+          "description": "scroll 可选幅度：step（15%，500ms，最小行程 32px）、half（30%，450ms）、page（默认，60%，400ms）、full（85%，300ms）；不接受其他值，scroll 不接受 duration_ms。"
         },
         "from": {
           "type": "object",

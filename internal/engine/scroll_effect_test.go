@@ -68,7 +68,7 @@ func TestScrollGeometryTable(t *testing.T) {
 			scrollPoint{}, scrollPoint{}, false},
 		{"unknown_direction", full, full, "sideways", protocol.ScrollAmountPage,
 			scrollPoint{}, scrollPoint{}, false},
-		{"unknown_amount", full, full, protocol.ScrollDirectionDown, "full",
+		{"unknown_amount", full, full, protocol.ScrollDirectionDown, "wide",
 			scrollPoint{}, scrollPoint{}, false},
 	}
 	for _, testCase := range cases {

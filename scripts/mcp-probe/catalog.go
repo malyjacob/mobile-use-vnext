@@ -122,11 +122,12 @@ type actToolSchema struct {
 	Properties map[string]actSchemaProperty `json:"properties"`
 }
 
-// checkActScrollSchema asserts the live act tool declares the contract-10
-// scroll surface: operation.type includes scroll, all four scroll members are
-// published, direction is exactly up/down/left/right and duration_ms is bounded
-// by 50/2000. The whole-schema semantic equality and the 13-tool count are
-// proven by the caller before this focused check runs.
+// checkActScrollSchema asserts the live act tool declares the scroll surface:
+// operation.type includes scroll, all four scroll members are published,
+// direction is exactly up/down/left/right, amount is exactly the
+// step/half/page/full tiers and duration_ms is bounded by 50/2000. The
+// whole-schema semantic equality and the 13-tool count are proven by the caller
+// before this focused check runs.
 func checkActScrollSchema(tool *sdk.Tool) *checkError {
 	if tool == nil {
 		return failf("act_tool_missing")
@@ -158,6 +159,11 @@ func checkActScrollSchema(tool *sdk.Tool) *checkError {
 	if !sameStringSet(operation.Properties["direction"].Enum,
 		[]string{"up", "down", "left", "right"}) {
 		return failf("act_direction_enum_mismatch")
+	}
+	if !sameStringSet(operation.Properties["amount"].Enum,
+		[]string{"step", "half", "page", "full"}) {
+		return failf("act_amount_enum_mismatch",
+			field("amount", strings.Join(operation.Properties["amount"].Enum, "|")))
 	}
 	duration := operation.Properties["duration_ms"]
 	if duration.Minimum == nil || duration.Maximum == nil ||

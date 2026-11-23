@@ -237,10 +237,11 @@ func actOperationSchema(t *testing.T, tool *sdk.Tool) (map[string]any, map[strin
 	return schema, operationProperties
 }
 
-// TestCheckActScrollSchema pins the contract-10 act surface the probe requires
-// from the live tool: scroll declared, all scroll members present, exact
-// direction enum and duration bounds. Each subtest is a reverse control that
-// removes or changes one member and expects the matching distinct reason.
+// TestCheckActScrollSchema pins the act surface the probe requires from the live
+// tool: scroll declared, all scroll members present, the exact direction enum,
+// the exact step/half/page/full amount tiers and duration bounds. Each subtest
+// is a reverse control that removes or changes one member and expects the
+// matching distinct reason.
 func TestCheckActScrollSchema(t *testing.T) {
 	t.Run("source act schema passes", func(t *testing.T) {
 		if failure := checkActScrollSchema(actToolFrom(t, sourceCatalogTools(t))); failure != nil {
@@ -297,6 +298,34 @@ func TestCheckActScrollSchema(t *testing.T) {
 		act.InputSchema = schema
 		if failure := checkActScrollSchema(act); failure == nil ||
 			failure.reason != "act_direction_enum_mismatch" {
+			t.Fatalf("failure = %v", failure)
+		}
+	})
+	t.Run("amount enum two tiers", func(t *testing.T) {
+		act := actToolFrom(t, sourceCatalogTools(t))
+		schema, operation := actOperationSchema(t, act)
+		amount, ok := operation["amount"].(map[string]any)
+		if !ok {
+			t.Fatal("operation.amount missing")
+		}
+		amount["enum"] = []any{"page", "half"}
+		act.InputSchema = schema
+		if failure := checkActScrollSchema(act); failure == nil ||
+			failure.reason != "act_amount_enum_mismatch" {
+			t.Fatalf("failure = %v", failure)
+		}
+	})
+	t.Run("amount enum unknown tier", func(t *testing.T) {
+		act := actToolFrom(t, sourceCatalogTools(t))
+		schema, operation := actOperationSchema(t, act)
+		amount, ok := operation["amount"].(map[string]any)
+		if !ok {
+			t.Fatal("operation.amount missing")
+		}
+		amount["enum"] = []any{"step", "half", "page", "tiny"}
+		act.InputSchema = schema
+		if failure := checkActScrollSchema(act); failure == nil ||
+			failure.reason != "act_amount_enum_mismatch" {
 			t.Fatalf("failure = %v", failure)
 		}
 	})

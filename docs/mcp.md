@@ -15,7 +15,7 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
   `snap`、`wait_for`、`act`、`inspect`、`keepalive`、`end`、`app`、`notify`、`shell`、
   `diagnose`。不注册 `/health`、认证初始化、旧工具别名或旧协议回退。
 - 目录指纹是工具数、注册顺序、名称、描述与入参 schema 的 canonical SHA-256。当前源码的
-  工具目录指纹为 `6bf61b2727acf0adc0850b7b790534ec4fee8a159fa8266ada0c9fb74eb1eef6`。
+  工具目录指纹为 `3a9ad87c7af904226731f9fec90b0def7b2d8233487fdf7435041e365211b98b`。
   发布清单中的指纹对应其记录的源码提交。发布时从目标提交重建并核验清单。
   探针按工具名比对实际 `tools/list` 的描述和入参 schema，并核对只读注解。传入 `-manifest`
   时，探针对每份清单核对构建发行号、契约号、工具数和工具目录 SHA-256。探针将
@@ -45,18 +45,20 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
 可能被误读为全类型生效的通用 `default`。
 
 `act` 的滚动与手势输入与 [接口契约](interface.md) §6 一致：`scroll` 用 `container`（ref 或
-坐标）与 `direction`（`up`/`down`/`left`/`right`）表达，可选 `amount`（`page` 默认或
-`half`）；`swipe` 仍以 `from`/`to` 表达原始手势，并接受可选 `duration_ms`（50–2000，默认
-300）。分支成员互斥：`scroll` 不接受 `target`/`from`/`to`/`key`/`text`/`duration_ms`，其他
-分支也不接受 `container`/`direction`/`amount`。`operation` schema 因此暴露 `scroll`、
-`container`、`direction`、`amount`、`duration_ms`、`bubble`、`auto_submit` 与 `submit_ref`；
-服务端严格解码仍是权威。
+坐标）与 `direction`（`up`/`down`/`left`/`right`）表达，可选 `amount` 为闭合四档
+`step`/`half`/`page`/`full`（可用跨度 15%/30%/60%/85%，注入时长 500/450/400/300ms，最小行程
+32/48/48/48px，省略为 `page`，其他值不接受）；
+`swipe` 仍以 `from`/`to` 表达原始手势，并接受可选 `duration_ms`（50–2000，默认 300）。
+分支成员互斥：`scroll` 不接受 `target`/`from`/`to`/`key`/`text`/`duration_ms`（滚动时长由
+服务端按档位固定），其他分支也不接受 `container`/`direction`/`amount`。`operation` schema
+因此暴露 `scroll`、`container`、`direction`、`amount`、`duration_ms`、`bubble`、`auto_submit`
+与 `submit_ref`；服务端严格解码仍是权威。
 
 `tap`/`long_press` 的 `ref` 目标自身已有请求动作时（无论 `bubble` 值），均走直接目标规划（4 级选点含 3×3 网格；全败时若存在唯一双向同视口可点击子容器则自动委托并双绑定重验）。原目标完全没有 `tap`、`long_press`、`text` 动作且有效 `bubble=true`（省略或显式 true）时，先在原目标视觉区内按最近 touch-interactive 祖先 `A` 规划（`bubble_ancestor`；遇竞争交互控件重合即止漂）；若该路不可行，再吸附满足局部共位与反底板守卫的唯一可点击目标 `B`（`bubble_colocated`）。静态规划同时绑定原 child 与执行目标；认领后重验两者、公开 Role 与完整 Label、关系守卫及安全点，失配返回 `409 target_changed`（附封闭 `details.reason`），零派发。有效 `bubble=false` 禁用 `bubble_ancestor` 与 `bubble_colocated`（原目标自身已有请求动作时仍走直接规划并可使用 `coextensive_child`），坐标目标必须省略 `bubble`。该解析只在一次调用内派发一个动作，不模拟 DOM 多级事件传播。
 
-`scroll` 支持双向同视口（宽与高交集各 ≥85%）滚动栈直传不互阻、非滚动节点 `ref` 自动向上找最近滚动祖先提升、坐标选最内层并在不可行时沿命中祖先回退或唯一可执行消歧，以及在安全区间正中对称展开的 3 轴线（50%/25%/75%）居中轨迹。坐标 `tap`/`long_press`/`text` 使用最深命中集合证明并按请求动作唯一拥有者消歧，raw `swipe` 永不返回 `ambiguous_point`。
+`scroll` 支持双向同视口（宽与高交集各 ≥85%）滚动栈直传不互阻、非滚动节点 `ref` 自动向上找最近滚动祖先提升、坐标选最内层并在不可行时沿命中祖先回退或唯一可执行消歧，以及在安全区间正中对称展开的 3 轴线（50%/25%/75%）居中轨迹。容器公开 `axis` 与请求方向冲突，或未知轴向的嵌套极端扁平条带与请求轴不兼容时，服务沿公开父链自动回退到兼容外层滚动祖先；父链无解时尝试唯一轴向兼容的内层容器，仍无解才返回 `422 unsupported_node_action`（`reason=axis_mismatch`），若有兼容容器进入规划但均失败则返回其规划错误。坐标 `tap`/`long_press`/`text` 使用最深命中集合证明并按请求动作唯一拥有者消歧，raw `swipe` 永不返回 `ambiguous_point`。
 
-除参数语法、`409 node_not_found`/`node_disabled` 及 `text` 的非可编辑/受保护拒绝（`422 text_target_uncertain`）外，全 `act` 静态目标解析与规划拒绝统一收口为 5 个正交 `422` 错误码：`invalid_target`、`unsupported_node_action`、`ambiguous_point`、`no_safe_point`、`no_safe_trajectory`。静态拒绝不认领 O，结果为 `not_executed`；`error.details` 携带封闭 `reason`、按出口约定的 `scope`/`scope_ref`，有候选时附至多 4 项经当前同一 O 干跑计算的 `candidates`（含 `ref`/`role`/`actions`/`bounds`/`relation`/`executable`），以及可选 `blocking_refs`（至多 3 项）。原 O 仍 ready 且 `candidates` 中存在 `executable=true` 的项时，可直接取首个 `executable=true` 的 `ref` 用同一 O 与新 P 重试，无需重观察或手算坐标；需要查看诊断子树时仍可用 `inspect({reference: 原 act 的 O, node: ref})` 补看。
+除参数语法、`409 node_not_found`/`node_disabled` 及 `text` 的非可编辑/受保护拒绝（`422 text_target_uncertain`）外，全 `act` 静态目标解析与规划拒绝统一收口为 5 个正交 `422` 错误码：`invalid_target`、`unsupported_node_action`、`ambiguous_point`、`no_safe_point`、`no_safe_trajectory`（`scroll` 的轴向失配为 `unsupported_node_action` + `reason=axis_mismatch`）。静态拒绝不认领 O，结果为 `not_executed`；`error.details` 携带封闭 `reason`、按出口约定的 `scope`/`scope_ref`，有候选时附至多 4 项经当前同一 O 干跑计算的 `candidates`（含 `ref`/`role`/`actions`/`bounds`/`relation`/`executable`），以及可选 `blocking_refs`（至多 3 项）。原 O 仍 ready 且 `candidates` 中存在 `executable=true` 的项时，可直接取首个 `executable=true` 的 `ref` 用同一 O 与新 P 重试，无需重观察或手算坐标；需要查看诊断子树时仍可用 `inspect({reference: 原 act 的 O, node: ref})` 补看。
 
 非 `text` 动作在认领后重验因祖先链失配返回 `409 target_changed (reason=lineage_changed)` 时，
 `error.details.changed_ref` 可给出原目标公开祖先链中第一个与新鲜帧失配且能唯一确定的公开祖先
@@ -657,7 +659,11 @@ end result
 
 标志为 `enabled=false|null`、
 `focused`/`selected`/`protected` 的 `true|null`、`checked=true|null`、
-`axis=x|y|both`、`resource="…"` 与 `context`。设备来源字符串按 JSON 字符串字面量转义，
+`axis=x|y|both`、`resource="…"` 与 `context`。`axis` 由服务端投影：非 `context`、有公开几何的
+`role=scroll` 节点按类名强特征（横向 `ScrollView`、`NestedScrollView`/`ListView`/`AbsListView`、
+`ViewPager` 等）与子项单轴排布（至多前 16 项、主轴中心跨度 ≥24px、主轴位移与跨度都不少于交轴
+2 倍、至少半数相邻子项在交轴重叠）判为 `x` 或 `y`，子项证据优先；证据不足或双向时不输出该
+标志。设备来源字符串按 JSON 字符串字面量转义，
 `<`、`>`、`&` 保持原样；缺省值按协议省略规则不输出。
 
 几何列与节点定义一一对应：已知矩形写无括号的 `l,t,r,b`，四边均为有符号十进制整数并满足

@@ -23,7 +23,8 @@ const compatibilityProtocolVersion = "2025-11-25"
 // plus the complete tools/list JSON. The deduplicated instructions and
 // descriptions must stay strictly below it. The current ceiling covers the
 // text auto_submit/submit_ref contract (result v4 partial, write/submit
-// snapshot and text_submit_not_executed).
+// snapshot and text_submit_not_executed), the four-tier scroll amount and the
+// scroll axis-fallback guidance.
 const baselineDiscoveryBytes = 37500
 
 // TestTreeTextGuideStatesTriStateOmission pins the shared tree legend to the
@@ -492,6 +493,100 @@ func actOperationParameterDescriptions(t *testing.T) map[string]string {
 	return out
 }
 
+// actOperationPropertySchema decodes one act operation member schema so a test
+// can assert published enum and default values instead of description prose.
+func actOperationPropertySchema(t *testing.T, member string) map[string]any {
+	t.Helper()
+	var schema struct {
+		Properties map[string]map[string]any `json:"properties"`
+	}
+	if err := json.Unmarshal(testDefinitionByName(t, "act").schema, &schema); err != nil {
+		t.Fatalf("decode act schema: %v", err)
+	}
+	operation, ok := schema.Properties["operation"]
+	if !ok {
+		t.Fatal("act schema has no operation member")
+	}
+	properties, ok := operation["properties"].(map[string]any)
+	if !ok {
+		t.Fatal("act operation schema has no properties")
+	}
+	property, ok := properties[member].(map[string]any)
+	if !ok {
+		t.Fatalf("act operation has no %s member", member)
+	}
+	return property
+}
+
+// TestActAmountSchemaPublishesFourTiers pins the closed four-tier travel amount
+// contract: the exact enum order, the page default and every tier's travel and
+// duration. scroll never accepts a caller-supplied duration.
+func TestActAmountSchemaPublishesFourTiers(t *testing.T) {
+	property := actOperationPropertySchema(t, "amount")
+	enum, ok := property["enum"].([]any)
+	if !ok {
+		t.Fatal("amount enum missing")
+	}
+	want := []string{"step", "half", "page", "full"}
+	if len(enum) != len(want) {
+		t.Fatalf("amount enum = %v, want %v", enum, want)
+	}
+	for index, value := range enum {
+		if value != want[index] {
+			t.Fatalf("amount enum = %v, want %v", enum, want)
+		}
+	}
+	if property["default"] != "page" {
+		t.Fatalf("amount default = %v, want page", property["default"])
+	}
+	description, ok := property["description"].(string)
+	if !ok {
+		t.Fatal("amount description missing")
+	}
+	for _, required := range []string{
+		"step（15%，500ms，最小行程 32px）",
+		"half（30%，450ms）",
+		"page（默认，60%，400ms）",
+		"full（85%，300ms）",
+		"scroll 不接受 duration_ms",
+	} {
+		if !strings.Contains(description, required) {
+			t.Errorf("amount description lacks %q", required)
+		}
+	}
+}
+
+// TestActScrollDescriptionsPublishFourTiersAndAxisFallback proves the act tool
+// description and the published server instructions repeat the four-tier amount
+// and the axis-compatibility fallback the input schema declares.
+func TestActScrollDescriptionsPublishFourTiersAndAxisFallback(t *testing.T) {
+	act := testDefinitionByName(t, "act").description
+	for _, required := range []string{
+		"amount 四档 step 15%/500ms（最小 32px）",
+		"half 30%/450ms",
+		"page 60%/400ms（默认）",
+		"full 85%/300ms",
+		"scroll 不接受 duration_ms",
+		"轴向不兼容时自动回退兼容外层滚动祖先",
+		"422 unsupported_node_action（reason=axis_mismatch）",
+	} {
+		if !strings.Contains(act, required) {
+			t.Errorf("act description lacks %q", required)
+		}
+	}
+	instructions := ServerInstructions()
+	for _, required := range []string{
+		"amount 四档 step 15%/500ms、half 30%/450ms、page 60%/400ms（默认）、full 85%/300ms",
+		"scroll 不接受时长参数",
+		"轴向不兼容时自动回退兼容外层滚动祖先",
+		"422 unsupported_node_action（reason=axis_mismatch）",
+	} {
+		if !strings.Contains(instructions, required) {
+			t.Errorf("server instructions lack %q", required)
+		}
+	}
+}
+
 // TestActBranchDescriptionsPublishAutomaticResolution pins the caller-facing
 // automatic selection behavior and keeps the retired detail vocabulary out of
 // both branch parameters.
@@ -515,6 +610,8 @@ func TestActBranchDescriptionsPublishAutomaticResolution(t *testing.T) {
 		"最近 role=scroll 祖先",
 		"最内层滚动容器",
 		"回退外层滚动祖先",
+		"轴向与请求方向不兼容时自动回退兼容外层滚动祖先",
+		"422 unsupported_node_action（reason=axis_mismatch）",
 	} {
 		if !strings.Contains(descriptions["container"], required) {
 			t.Errorf("container description lacks %q", required)
