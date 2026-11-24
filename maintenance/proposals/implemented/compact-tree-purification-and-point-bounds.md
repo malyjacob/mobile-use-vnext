@@ -1,6 +1,7 @@
 # 提案：紧凑读树内容净体、轻量视觉提示与非根/滚动节点二元中心坐标（契约 28）
 
-状态：提案，未实现。
+状态：已实现（实现提交 `9e3f0190dd36046803a501dfe21824c810d7bf39`，`2026-11-24`）。
+实现与验证记录：[compact-tree-purification-and-point-bounds.md](../../verification/compact-tree-purification-and-point-bounds.md)。
 基线提交：`efe3180069bd0352cff78c78ee4b7ca02566e491`（分支 `master`，`2026-11-24`）。
 适用范围：公开树构造（`internal/observation`）、紧凑观察树与固定基线差分（`compact` `ReadTree`/`ReadDelta`）、观察视觉特征提示（`Observation.visual`）、普通树紧凑文本编码（`tree v5`）、MCP `result v4` 文本投影、发现说明与工具描述，以及发布包与双入口探针。
 影响范围：`release/versions.json`、生成的版本文件、`internal/protocol`、`internal/observation`、`internal/engine`、`internal/treetext`、`internal/mcp`、`scripts/mcp-probe` 及正式文档 `docs/`。
@@ -418,20 +419,40 @@ device.Capture (不可变原值)
 
 ---
 
-## 11. 实现结果（归档时补写）
+## 11. 实现结果
 
-实现提交：`<hash>`。实现与验证记录：`../../verification/compact-tree-purification-and-point-bounds.md`
-（本节在归档移动之后补写，届时文件在 `implemented/` 下，故链接比新建时多一层）。
+实现提交：`9e3f0190dd36046803a501dfe21824c810d7bf39`（`2026-11-24`，分支 `master`）。
+实现与验证记录：[compact-tree-purification-and-point-bounds.md](../../verification/compact-tree-purification-and-point-bounds.md)。
 
 ### 11.1 已落地
 
 | 提案条目 | 落点 |
 | --- | --- |
+| G1 公开可读标签净化（§4.1） | `internal/observation/build.go`：`cleanReadableText`、`labelParts`、`hasSemantics`、`retainsIntrinsicLeafRole`；`internal/observation/match.go`：`signature`/`publicSignature` 的输入框描述锚点净化；`internal/observation/build_purification_test.go` |
+| X2/G5 四态几何与中心点（§4.2） | `internal/protocol/read_tree.go`：`GeometryPoint`、`PointBounds`、`ReadBounds` 编解码与 `ReadTree.Validate`；`internal/observation/read.go`：`compactDeliveredBounds`、`compactCenter`、`compactMidpoint`、`compactSliverCanPrune`；`read_bounds_test.go`、`geometry_visual_test.go` |
+| G3/A3c/A1a/G2b/A5a compact 净体（§4.3、§5.1） | `internal/observation/read.go`：`projectCompactNode`、`compactImageLeafCanPrune`、`isPlainPassiveTextLeaf`、`compactLabelCovered`、`compactHoistsTextChildren`、`compactResourceTail`；`read_purification_test.go`、`compact_pruning_test.go` |
+| 四重口径视觉提示与 full/delta 去重（§4.4） | `internal/observation/visual.go`：`InferVisualHint`、`visualImageHeavy`、`collectVisualStats`、`unionRectArea`；`internal/engine/capture.go`：`visualHint`、`publicCandidate`、`publishTreeAttempt`、`observationVisual`、`previousVisualKindLocked`；`internal/engine/engine.go`：`observationState.VisualKind`；`internal/observation/visual_test.go`、`internal/engine/visual_test.go` |
+| `Observation.visual` 编解码与顺序 | `internal/protocol/responses.go`、`decode_response.go`（`foreground` 后、`tree` 前）；`geometry_visual_test.go`、`decode_response_test.go` |
+| `tree v5` 编码（§4.2） | `internal/treetext/encode.go`：v5 头、点/矩形/`@`、`~ bounds=[x,y]`；`internal/treetext/encode_test.go` |
+| MCP 投影、工具说明与发现面 | `internal/mcp/result_text.go`（注册并渲染 `obs` 行 `visual=`）、`internal/mcp/schema.go`（`treeTextGuide`、工具描述、v5/点坐标/净体说明）、`internal/mcp/tree_text.go`（点几何）；`internal/mcp/*_test.go` |
+| 独立探针 v5/visual/正文一致性 | `scripts/mcp-probe/result_text.go`、`result_v4.go`、`result_semantics.go`、`tree_body_consistency.go`；`result_v5_test.go`、`tree_body_consistency_test.go`、`geometry_columns_test.go` |
+| 版本源、正式文档与 README | `release/versions.json` 与生成的 Go/Java/XML 常量（`0.32.0`/`28`/`34`）；九份 `docs/` 文件与 `README.md`；独立只读文档审计首次 3 项修正及示例/指南校正后 CLEAN |
+| 发布、部署与双入口验证（§8.2、§10） | `scripts/build-release.ps1`、`verify-manifest.ps1`、`build-host-tools.ps1`、`build-host-tools.ps1 -VerifyOnly`、`deploy.ps1 -SkipBuild -Manifest build/release/manifest.json -McpAllowedOrigins http://127.0.0.1:3000`；手机整组覆盖部署、主机 stdio `both`/`text`/`structured`、手机 HTTP `both` 探针均 PASS，详见验证记录 |
 
 ### 11.2 与提案不同或未执行
 
 | 项 | 结论与理由 |
 | --- | --- |
+| `Hint` 净化 | 未新增清洗路径：`build.go` 说明当前没有 capture 字段映射到公开 `Hint`；既有 `ReadNode.Hint` 仅由差分/历史载入保留，故未为无来源字段构造 producer，wire 兼容不变。 |
+| `Point` 类型 | 未新增独立类型，复用 `internal/protocol/requests.go` 既有 `Point`；只在 `read_tree.go` 增加 `PointBounds`/`GeometryPoint`，避免维护两套坐标类型。 |
+| 中心点计算 | 提案写 `midpoint(left,right)` 与 `Contains` 不变量；实现 `compactCenter`/`compactMidpoint` 对混合符号边使用截断中点并夹逼到 `[left,right-1]`/`[top,bottom-1]`，与 tap 安全平均一致且避免溢出；输出仍是半开中心点。 |
+| 空行折叠 | 提案写 `\n[ \t]*\n+`；实现 `\n(?:[ \t]*\n)+`，单遍折叠 `\n \n\t\n` 等混合空行残余，避免只处理一种空行形状。 |
+| `read_diff.go` | 未改动：既有 `ReadDiff` 已对同 `ref` 角色变化返回 `ErrNotRepresentable`，中心点/矩形同 `Kind` 比较由 `ReadBounds.Equal` 覆盖；`TestCompactPurificationDeltaRoleFlipIsNotRepresentable` 固定该回退。 |
+| `resource` 短尾名 | 按“含非 `0`–`9` 字符的最后一段”实现（`allASCIIDigits` 判定）；提案括注的“非 ASCII 数字字符（即不全为 `0`–`9`）”按此释义，全部为纯数字时取最后一段。 |
+| 提交顺序 | 为使发布清单与主机清单引用同一干净源码，先提交实现取得 `9e3f0190dd36046803a501dfe21824c810d7bf39`，随后完成全量回归、文档审计复检、发布构建/部署与双入口探针；最终两清单 `source_commit=9e3f0190dd36046803a501dfe21824c810d7bf39`、`source_dirty=false`。 |
+| MCP 发现说明/测试/探针一致性 | 按最终 `tree v5` 与 `visual` 收紧 `schema.go` 说明、发现面字节预算断言及 probe 的正文/JSON 回退、双清单/发现说明逐字节比对；属实现细节，不改变提案契约。 |
+| `-race` 竞态检查 | 未执行：Windows 宿主无 C 编译器、cgo 不可用；验证记录如实注明，未以普通测试替代竞态结论。 |
+| `budget_cutoff` 与 `verify-m6` | 既有非门禁 `budget_cutoff` 基准场景与 `scripts/verify-m6.ps1` 未改、未执行；发布门禁采用双清单核验、整组部署与独立探针。 |
 
 ---
 
