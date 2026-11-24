@@ -236,6 +236,94 @@ end tree
 	}
 }
 
+// TestEncodeFullTruncatedColumnOrder pins the compact truncation column: the
+// true flag stays between resource and context, the default false is omitted,
+// and a chain definition follows the same column order.
+func TestEncodeFullTruncatedColumnOrder(t *testing.T) {
+	root := testNode("n1", protocol.RoleRoot, testRect(0, 0, 1080, 2400))
+
+	truncated := testNode("n2", protocol.RoleButton, testPoint(540, 120))
+	truncated.Label = []string{"很长的标题"}
+	truncated.Actions = []protocol.Action{protocol.ActionTap}
+	truncated.Resource = testStringPtr("app:id/title")
+	truncated.Truncated = true
+
+	untruncated := testNode("n3", protocol.RoleButton, testPoint(540, 200))
+	untruncated.Label = []string{"短标题"}
+	untruncated.Actions = []protocol.Action{protocol.ActionTap}
+	untruncated.Resource = testStringPtr("app:id/title")
+
+	contextNode := testNode("n4", protocol.RoleText, testPoint(540, 280))
+	contextNode.Label = []string{"说明"}
+	contextNode.Resource = testStringPtr("app:id/desc")
+	contextNode.Context = true
+
+	chain := testNode("", protocol.RoleGroup, protocol.HiddenBounds())
+	chain.Chain = []string{"n5", "n6"}
+	chain.Label = []string{"折叠标题"}
+	chain.Resource = testStringPtr("app:id/row")
+	chain.Truncated = true
+
+	child := testNode("n7", protocol.RoleButton, testPoint(540, 360))
+	child.Label = []string{"继续"}
+	child.Actions = []protocol.Action{protocol.ActionTap}
+	chain.Children = []*protocol.ReadNode{child}
+
+	root.Children = []*protocol.ReadNode{truncated, untruncated, contextNode, chain}
+	tree := &protocol.ReadTree{
+		Format: "full", Scope: protocol.Scope,
+		View: protocol.ViewCompact, Root: root,
+	}
+	if err := tree.Validate(); err != nil {
+		t.Fatalf("truncation fixture is invalid: %v", err)
+	}
+	block, ok := EncodeFull("O1", tree)
+	if !ok {
+		t.Fatal("tree with truncated labels is not encodable")
+	}
+	const want = `tree v5 full nodes=7
+
+n1 root 0,0,1080,2400
+ n2 button 540,120 "很长的标题" resource="app:id/title" truncated=true
+ n3 button 540,200 "短标题" resource="app:id/title"
+ n4 text 540,280 "说明" resource="app:id/desc" context
+ chain [n5 n6] group "折叠标题" resource="app:id/row" truncated=true
+  n7 button 540,360 "继续"
+end tree
+`
+	if block != want {
+		t.Fatalf("full block mismatch:\n--- got ---\n%s\n--- want ---\n%s",
+			block, want)
+	}
+	// The flag sits after the resource value on both an ordinary and a chain
+	// definition, and a false fact never leaks into a full node line.
+	for _, marker := range []string{
+		`"app:id/title" truncated=true`,
+		`"app:id/row" truncated=true`,
+	} {
+		if !strings.Contains(block, marker) {
+			t.Fatalf("block misses %q:\n%s", marker, block)
+		}
+	}
+	if strings.Contains(block, "truncated=false") {
+		t.Fatalf("full node line must omit a false truncation flag:\n%s", block)
+	}
+
+	// A truncated context node is refused at the public entry, so the fixed
+	// resource -> truncated -> context order is pinned on the column writer
+	// itself to keep the contract testable.
+	contextColumns := testNode("n9", protocol.RoleText, testPoint(1, 2))
+	contextColumns.Resource = testStringPtr("app:id/x")
+	contextColumns.Truncated = true
+	contextColumns.Context = true
+	var body textBuffer
+	writeNodeColumns(&body, contextColumns, false, false)
+	const wantColumns = ` 1,2 resource="app:id/x" truncated=true context`
+	if got := string(body.store); got != wantColumns {
+		t.Fatalf("node columns = %q, want %q", got, wantColumns)
+	}
+}
+
 // TestEncodeDeltaSetBoundsForms covers the four explicit ReadBounds forms on a
 // set line: hidden, unknown, point and rectangle.
 func TestEncodeDeltaSetBoundsForms(t *testing.T) {
@@ -258,6 +346,84 @@ func TestEncodeDeltaSetBoundsForms(t *testing.T) {
 ~ n3 bounds=null
 ~ n4 bounds=[10,20]
 ~ n5 bounds=[1,2,3,4]
+end tree
+`
+	if block != want {
+		t.Fatalf("delta block mismatch:\n--- got ---\n%s\n--- want ---\n%s",
+			block, want)
+	}
+}
+
+// TestEncodeDeltaSetTruncatedThreeStates keeps the set assignment three-state:
+// an unset member stays omitted, while an explicit false and true are both
+// written after resource.
+func TestEncodeDeltaSetTruncatedThreeStates(t *testing.T) {
+	delta := &protocol.ReadDelta{
+		Format: "delta", Base: "O1", View: protocol.ViewCompact,
+		Set: map[string]protocol.ReadSetNode{
+			"n2": {Truncated: protocol.Field[bool]{Set: true, Value: true}},
+			"n3": {Truncated: protocol.Field[bool]{Set: true, Value: false}},
+			"n4": {
+				Label:    protocol.Field[[]string]{Set: true, Value: []string{"标题"}},
+				Resource: protocol.Field[*string]{Set: true, Value: testStringPtr("app:id/title")},
+			},
+			"n5": {
+				Resource:  protocol.Field[*string]{Set: true, Value: testStringPtr("app:id/row")},
+				Truncated: protocol.Field[bool]{Set: true, Value: true},
+			},
+		},
+	}
+	block, ok := EncodeDelta("O2", delta)
+	if !ok {
+		t.Fatal("delta with truncation assignment is not encodable")
+	}
+	const want = `tree v5 delta base=O1 changes=4
+
+~ n2 truncated=true
+~ n3 truncated=false
+~ n4 label=["标题"] resource="app:id/title"
+~ n5 resource="app:id/row" truncated=true
+end tree
+`
+	if block != want {
+		t.Fatalf("delta block mismatch:\n--- got ---\n%s\n--- want ---\n%s",
+			block, want)
+	}
+	// An unset truncation member must not fabricate a value, and the set line
+	// never spells the unrepresentable null form.
+	if strings.Contains(block, "~ n4 label=[\"标题\"] resource=\"app:id/title\" truncated=") {
+		t.Fatalf("unset truncation member leaked into the set line:\n%s", block)
+	}
+	if strings.Contains(block, "truncated=null") {
+		t.Fatalf("set line must never write truncated=null:\n%s", block)
+	}
+}
+
+// TestEncodeDeltaTruncatedDefinitions covers the same truncation column on the
+// add and replace definition lines, which share the node column writer.
+func TestEncodeDeltaTruncatedDefinitions(t *testing.T) {
+	add := testNode("n2", protocol.RoleButton, testPoint(10, 20))
+	add.Label = []string{"很长的标题"}
+	add.Actions = []protocol.Action{protocol.ActionTap}
+	add.Resource = testStringPtr("app:id/title")
+	add.Truncated = true
+
+	replace := testNode("n4", protocol.RoleGroup, protocol.HiddenBounds())
+	replace.Truncated = true
+
+	delta := &protocol.ReadDelta{
+		Format: "delta", Base: "O1", View: protocol.ViewCompact,
+		Add:     []*protocol.ReadNode{add},
+		Replace: map[string]*protocol.ReadNode{"n4": replace},
+	}
+	block, ok := EncodeDelta("O2", delta)
+	if !ok {
+		t.Fatal("delta definitions with truncation are not encodable")
+	}
+	const want = `tree v5 delta base=O1 changes=2
+
++ n2 button 10,20 "很长的标题" resource="app:id/title" truncated=true
+= n4 group truncated=true
 end tree
 `
 	if block != want {
@@ -357,4 +523,94 @@ func TestEncodeRejectsInvalidGeometry(t *testing.T) {
 			t.Fatalf("unknown geometry state encoding = (%q, %t), want rejection", block, ok)
 		}
 	})
+}
+
+// testTruncationTree builds a compact tree whose actionable button is truncated
+// and whose context node truncation is selectable, so the root and context
+// positions of the flag can be rejected independently.
+func testTruncationTree(rootTruncated, contextTruncated bool) *protocol.ReadTree {
+	root := testNode("n1", protocol.RoleRoot, testRect(0, 0, 100, 200))
+	root.Truncated = rootTruncated
+
+	button := testNode("n2", protocol.RoleButton, testPoint(10, 20))
+	button.Label = []string{"很长的标题"}
+	button.Actions = []protocol.Action{protocol.ActionTap}
+	button.Truncated = true
+
+	contextNode := testNode("n3", protocol.RoleText, testPoint(10, 40))
+	contextNode.Label = []string{"说明"}
+	contextNode.Context = true
+	contextNode.Truncated = contextTruncated
+
+	root.Children = []*protocol.ReadNode{button, contextNode}
+	return &protocol.ReadTree{
+		Format: "full", Scope: protocol.Scope,
+		View: protocol.ViewCompact, Root: root,
+	}
+}
+
+// TestEncodeRejectsTruncatedRootOrContext keeps full text on the compact root
+// and on every context node: both positions refuse the truncation fact at the
+// public encoding entry, for a full tree and for delta add/replace definitions.
+func TestEncodeRejectsTruncatedRootOrContext(t *testing.T) {
+	t.Run("full root", func(t *testing.T) {
+		if block, ok := EncodeFull("O1", testTruncationTree(true, false)); ok || block != "" {
+			t.Fatalf("truncated root encoding = (%q, %t), want rejection", block, ok)
+		}
+	})
+	t.Run("full context child", func(t *testing.T) {
+		if block, ok := EncodeFull("O1", testTruncationTree(false, true)); ok || block != "" {
+			t.Fatalf("truncated context encoding = (%q, %t), want rejection", block, ok)
+		}
+	})
+	t.Run("delta context definition", func(t *testing.T) {
+		delta := testDelta()
+		contextNode := testNode("n30", protocol.RoleText, testPoint(10, 40))
+		contextNode.Label = []string{"说明"}
+		contextNode.Context = true
+		contextNode.Truncated = true
+		delta.Add = []*protocol.ReadNode{contextNode}
+		if block, ok := EncodeDelta("O3", delta); ok || block != "" {
+			t.Fatalf("truncated delta context encoding = (%q, %t), want rejection", block, ok)
+		}
+	})
+	t.Run("delta root role definition", func(t *testing.T) {
+		delta := testDelta()
+		rootRole := testNode("n30", protocol.RoleRoot, testPoint(10, 40))
+		rootRole.Truncated = true
+		delta.Add = []*protocol.ReadNode{rootRole}
+		if block, ok := EncodeDelta("O3", delta); ok || block != "" {
+			t.Fatalf("truncated delta root encoding = (%q, %t), want rejection", block, ok)
+		}
+	})
+}
+
+// TestValidReadNodeTreeDetailsKeepsTruncationInScope is the direct reverse
+// control for the treetext-side gate. The public entry already refuses these
+// shapes through protocol.ReadTree.Validate, so the local rule is asserted on
+// its own: removing it must turn this test red even though the entry stays
+// closed.
+func TestValidReadNodeTreeDetailsKeepsTruncationInScope(t *testing.T) {
+	if !validReadNodeTreeDetails(testTruncationTree(false, false).Root, true, false) {
+		t.Fatal("truncated actionable nodes must stay encodable")
+	}
+	if validReadNodeTreeDetails(testTruncationTree(true, false).Root, true, false) {
+		t.Fatal("truncated compact root must be rejected")
+	}
+	if validReadNodeTreeDetails(testTruncationTree(false, true).Root, true, false) {
+		t.Fatal("truncated context node must be rejected")
+	}
+
+	// Delta add and replace definitions validate without a required root, so a
+	// root-role definition root is refused here as well.
+	rootRole := testNode("n30", protocol.RoleRoot, testPoint(10, 40))
+	rootRole.Truncated = true
+	if validDeltaNodeTree(rootRole) {
+		t.Fatal("truncated root-role delta definition must be rejected")
+	}
+	// The same definition without the flag stays a plain valid subtree.
+	rootRole.Truncated = false
+	if !validDeltaNodeTree(rootRole) {
+		t.Fatal("untruncated definition must stay valid")
+	}
 }

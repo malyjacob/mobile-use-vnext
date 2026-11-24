@@ -188,7 +188,7 @@ func measureBaselineSelectionCandidate(
 	delta, textBytes, ok := h.engine.treeTextBaselineDelta(
 		previewObservationID, baseline, compact)
 	if !ok {
-		t.Fatalf("candidate against %s did not pass the tree-v4 gate", baseline.ObservationID)
+		t.Fatalf("candidate against %s did not pass the tree-v5 gate", baseline.ObservationID)
 	}
 	encoded, err := json.Marshal(delta)
 	if err != nil {
@@ -232,12 +232,16 @@ func baselineSelectionCurrentBaseline(t *testing.T, h *harness) *baselineState {
 
 // TestBaselineSelectionUsesTextOrderWhenJSONOrderIsOpposite drives Start and
 // Observe through the real publication path. Candidate A has fewer JSON bytes,
-// while candidate B has fewer tree-v4 bytes and must become delta.base.
+// while candidate B has fewer tree-v5 bytes and must become delta.base.
 func TestBaselineSelectionUsesTextOrderWhenJSONOrderIsOpposite(t *testing.T) {
 	h := newHarness(t)
 	const count = 12
 
 	targetNodes := baselineSelectionNodes(count)
+	// The long label must stay passive: the compact projection truncates long
+	// actionable labels, which would shrink candidate A's delta below candidate
+	// B's context-only add and invert the fixture's intended byte order.
+	targetNodes[2].clickable = false
 	targetNodes[2].label = strings.Repeat("x", 740)
 	targetContexts := []baselineSelectionContext{
 		{
@@ -305,7 +309,7 @@ func TestBaselineSelectionUsesTextOrderWhenJSONOrderIsOpposite(t *testing.T) {
 			baselineSelectionDeltaJSON(t, candidateB))
 	}
 	if candidateA.textBytes <= candidateB.textBytes {
-		t.Fatalf("fixture tree-v4 order is not B < A: A(json=%d text=%d) B(json=%d text=%d)\nA=%s\nB=%s",
+		t.Fatalf("fixture tree-v5 order is not B < A: A(json=%d text=%d) B(json=%d text=%d)\nA=%s\nB=%s",
 			candidateA.jsonBytes, candidateA.textBytes,
 			candidateB.jsonBytes, candidateB.textBytes,
 			baselineSelectionDeltaJSON(t, candidateA),
@@ -318,7 +322,7 @@ func TestBaselineSelectionUsesTextOrderWhenJSONOrderIsOpposite(t *testing.T) {
 }
 
 // TestBaselineSelectionFallsBackWhenShortestHasNoRetentionPlan uses the real
-// Observe commit path. Candidate A has the shortest tree-v4 delta but cannot
+// Observe commit path. Candidate A has the shortest tree-v5 delta but cannot
 // fit even after pool pressure. Candidate B, which can evict backup A and fit,
 // must be published instead of a full fallback.
 func TestBaselineSelectionFallsBackWhenShortestHasNoRetentionPlan(t *testing.T) {

@@ -99,9 +99,9 @@ var rmfCompositeInventory = map[string]string{
 	"Foreground":      "State Package TaskID HasTask Reason",
 	"ImageMeta":       "CapturedAt Width Height MediaType ReadOnly Screen Error Base64",
 	"ReadTree":        "Format Scope View Root",
-	"ReadNode":        "Ref Chain Role Bounds Label Actions Enabled Focused Selected Protected Checked Value Hint Axis Resource Context Children",
+	"ReadNode":        "Ref Chain Role Bounds Label Actions Enabled Focused Selected Protected Checked Value Hint Axis Resource Truncated Context Children",
 	"ReadDelta":       "Format Base View Set Add Remove Children Replace",
-	"ReadSetNode":     "Label Actions Bounds Enabled Focused Selected Checked Value Hint Protected Axis Resource",
+	"ReadSetNode":     "Label Actions Bounds Enabled Focused Selected Checked Value Hint Protected Axis Resource Truncated",
 	"ReadBounds":      "Kind Rect Point",
 	"Point":           "X Y",
 	"AppItem":         "Name Package",
@@ -315,6 +315,20 @@ func TestCanonicalJSONCoversManifest(t *testing.T) {
 			canonicalOutputs = append(canonicalOutputs, bytes.Clone(value))
 			rmfCollectJSONPaths(t, value, paths)
 		})
+	}
+
+	// The truncation member only appears when true, and the legal compact
+	// positions it can occupy (delta add/replace) are already covered above.
+	// A compact full-tree root and every inspection position must stay
+	// untruncated in legal material, so their wire member is pinned with
+	// wire-shape-only documents instead of a renderable fixture.
+	for _, result := range rmfTruncatedWireResults() {
+		value, err := canonicalResult(&execution{result: result})
+		if err != nil {
+			t.Fatalf("truncated wire fixture canonicalResult: %v", err)
+		}
+		canonicalOutputs = append(canonicalOutputs, bytes.Clone(value))
+		rmfCollectJSONPaths(t, value, paths)
 	}
 
 	missing := make([]string, 0)
@@ -1518,7 +1532,62 @@ func rmfFullTreeValue(ref string) *protocol.ReadTreeValue {
 	return &protocol.ReadTreeValue{Full: rmfFullTree(ref)}
 }
 
+// rmfTruncatedWireResults pins the read-node truncation member on wire
+// positions that no legal traversal material can occupy: a compact full-tree
+// root and the three inspection scopes (inspect v3 is always the detailed view,
+// which must keep every label complete). They are wire-shape documents only and
+// stay out of rmfResultFixtures so the text parity oracle never has to render an
+// illegal detailed inspection.
+func rmfTruncatedWireResults() []*protocol.Result {
+	truncatedNode := func(ref string, role protocol.Role) *protocol.ReadNode {
+		node := rmfNode(ref, role, true)
+		node.Context = false
+		node.Truncated = true
+		return node
+	}
+	full := &protocol.ReadTreeValue{Full: &protocol.ReadTree{
+		Format: "full", Scope: protocol.Scope, View: protocol.ViewCompact,
+		Root: truncatedNode("n1", protocol.RoleRoot),
+	}}
+	subtree := &protocol.InspectionView{
+		ObservationID: "O3", Origin: "inspect", Revision: 1,
+		CapturedAt: "2026-11-10T00:00:05Z", Scope: "subtree", View: protocol.ViewDetailed,
+		Root: truncatedNode("n5", protocol.RoleButton),
+	}
+	query := &protocol.InspectionView{
+		ObservationID: "O4", Origin: "inspect", Revision: 1,
+		CapturedAt: "2026-11-10T00:00:05Z", Scope: "query", View: protocol.ViewDetailed,
+		Matches: []protocol.InspectionMatch{{Node: truncatedNode("n6", protocol.RoleButton), Path: []string{"n1"}}},
+		Total:   1, HasTotal: true,
+	}
+	tree := &protocol.InspectionView{
+		ObservationID: "O5", Origin: "inspect", Revision: 1,
+		CapturedAt: "2026-11-10T00:00:05Z", Scope: "tree",
+		Tree: &protocol.ReadTree{
+			Format: "full", Scope: protocol.Scope, View: protocol.ViewDetailed,
+			Root: truncatedNode("n7", protocol.RoleRoot),
+		},
+	}
+	return []*protocol.Result{
+		{OperationID: "P24", Observation: &protocol.Observation{ID: "O8", Tree: full}},
+		{OperationID: "P25", Inspection: subtree},
+		{OperationID: "P26", Inspection: query},
+		{OperationID: "P27", Inspection: tree},
+	}
+}
+
 func rmfDelta(base string) *protocol.ReadDelta {
+	// Add and replace definitions are valid compact positions for the
+	// truncation fact: they are neither context nor root nodes. A second pair
+	// keeps the context member covered on the same definition paths.
+	add := rmfNode("n4", protocol.RoleButton, true)
+	add.Context = false
+	add.Truncated = true
+	replace := rmfNode("n3", protocol.RoleGroup, true)
+	replace.Context = false
+	replace.Truncated = true
+	addContext := rmfNode("n10", protocol.RoleButton, false)
+	replaceContext := rmfNode("n11", protocol.RoleGroup, false)
 	return &protocol.ReadDelta{
 		Format: "delta",
 		Base:   base,
@@ -1527,13 +1596,14 @@ func rmfDelta(base string) *protocol.ReadDelta {
 			"n1": rmfSetNode(),
 			"n2": rmfSetNode(),
 		},
-		Add:    []*protocol.ReadNode{rmfNode("n4", protocol.RoleButton, true)},
+		Add:    []*protocol.ReadNode{add, addContext},
 		Remove: []string{"n9"},
 		Children: map[string][]string{
 			"n1": {"n2"},
 		},
 		Replace: map[string]*protocol.ReadNode{
-			"n3": rmfNode("n3", protocol.RoleGroup, true),
+			"n3":  replace,
+			"n11": replaceContext,
 		},
 	}
 }
@@ -1552,6 +1622,8 @@ func rmfSetNode() protocol.ReadSetNode {
 		Protected: protocol.Field[*bool]{Set: true, Value: nil},
 		Axis:      protocol.Field[*protocol.Axis]{Set: true, Value: rmfPtr(protocol.AxisY)},
 		Resource:  protocol.Field[*string]{Set: true, Value: rmfPtr("")},
+		// An explicit false must stay distinguishable from an omitted member.
+		Truncated: protocol.Field[bool]{Set: true, Value: false},
 	}
 }
 

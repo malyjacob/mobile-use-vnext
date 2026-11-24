@@ -34,9 +34,9 @@ import (
 //  5. single-pass zero-shift ordinal container recovery over every non-input
 //     container bucket with an independent fixed point, followed by local-only
 //     recovery;
-//  6. single static-geometry pass over unmatched non-input leaves under the
-//     same anchored parent (equal bucket counts, +-4px bijection, order
-//     preserving).
+//  6. single static-geometry pass over unmatched non-input leaves and
+//     decorative icon containers under the same anchored parent (equal bucket
+//     counts, +-4px bijection, order preserving).
 //
 // All passes work against snapshots and charge a deterministic work budget;
 // exhaustion aborts the incomplete batch without partial application.
@@ -272,6 +272,51 @@ func (w *workBudget) charge(work uint64) bool {
 	return true
 }
 
+const maxTransparentWrapperDepth = 8
+
+// matchNodeFlags are evaluated bottom-up on the complete published hierarchy.
+// singleChild uses the same node indices as the corresponding children slice.
+type matchNodeFlags struct {
+	isDecorativeImageLeaf         bool
+	isAnonymousPlain              bool
+	isPureDecorativeSubtree       bool
+	isTransparentSingleWrapper    bool
+	singleChild                   int
+	isStaticIconContainer         bool
+	isStaticIconGroupMember       bool
+	isTransparentWrapperForStage6 bool
+}
+
+func classifyMatchNode(
+	flags matchNodeFlags, staticIcon bool, children []int, flagsOf func(int) matchNodeFlags,
+) matchNodeFlags {
+	nonDecorative := 0
+	allIconBranches := true
+	for _, child := range children {
+		childFlags := flagsOf(child)
+		if childFlags.isPureDecorativeSubtree {
+			continue
+		}
+		nonDecorative++
+		flags.singleChild = child
+		allIconBranches = allIconBranches && (childFlags.isStaticIconGroupMember || childFlags.isTransparentWrapperForStage6)
+	}
+	allDecorative := len(children) > 0 && nonDecorative == 0
+	flags.isPureDecorativeSubtree = flags.isDecorativeImageLeaf || (flags.isAnonymousPlain && allDecorative)
+	flags.isTransparentSingleWrapper = flags.isAnonymousPlain && nonDecorative == 1
+	if !flags.isTransparentSingleWrapper {
+		flags.singleChild = -1
+	}
+	flags.isStaticIconContainer = staticIcon && allDecorative
+	flags.isStaticIconGroupMember = staticIcon && (len(children) == 0 || flags.isStaticIconContainer)
+	flags.isTransparentWrapperForStage6 = flags.isAnonymousPlain && nonDecorative > 0 && allIconBranches
+	return flags
+}
+
+func isAnonymousRole(role protocol.Role) bool {
+	return role == protocol.RoleView || role == protocol.RoleGroup
+}
+
 // publicMatchIndex captures both the previous published snapshot and the current
 // capture's published hierarchy with public-preorder Euler intervals.
 type publicMatchIndex struct {
@@ -287,6 +332,7 @@ type publicMatchIndex struct {
 	prevPub      []publicKey
 	prevContext  []bool
 	prevBounds   []*protocol.Bounds
+	prevFlags    []matchNodeFlags
 
 	root        int
 	curCount    int
@@ -300,7 +346,12 @@ type publicMatchIndex struct {
 	curPub      []publicKey
 	curContext  []bool
 	curBounds   []*protocol.Bounds
+	curFlags    []matchNodeFlags
 }
+
+func (idx *publicMatchIndex) prevFlagsOf(pos int) matchNodeFlags { return idx.prevFlags[pos] }
+
+func (idx *publicMatchIndex) curFlagsOf(cur int) matchNodeFlags { return idx.curFlags[idx.curPos[cur]] }
 
 func buildPublicMatchIndex(prevSnap *Snapshot, cap *device.Capture, units []unit) *publicMatchIndex {
 	idx := &publicMatchIndex{
@@ -330,6 +381,7 @@ func buildPublicMatchIndex(prevSnap *Snapshot, cap *device.Capture, units []unit
 		idx.prevPub = make([]publicKey, prevCount)
 		idx.prevContext = make([]bool, prevCount)
 		idx.prevBounds = make([]*protocol.Bounds, prevCount)
+		idx.prevFlags = make([]matchNodeFlags, prevCount)
 
 		cursor := 0
 		var walkPrev func(node *protocol.Node, parentPos int)
@@ -358,6 +410,19 @@ func buildPublicMatchIndex(prevSnap *Snapshot, cap *device.Capture, units []unit
 				walkPrev(child, pos)
 			}
 			idx.prevTout[pos] = cursor - 1
+			if pos != idx.prevRoot && !node.Context {
+				k := idx.prevKey[pos]
+				defaultState := visualKnownDefaultState(node)
+				noContent := len(node.Label) == 0 && node.Value == nil && node.Hint == nil && node.Axis == ""
+				flags := matchNodeFlags{
+					isDecorativeImageLeaf: !k.editable && visualImageLeaf(node),
+					isAnonymousPlain: isAnonymousRole(node.Role) && noContent && defaultState &&
+						len(node.Actions) == 0 && !k.hasRes && node.Resource == nil,
+				}
+				staticIcon := node.Role != protocol.RoleInput && !k.editable && len(node.Actions) != 0 &&
+					len(node.Label) == 0 && defaultState && positiveBounds(node.Bounds)
+				idx.prevFlags[pos] = classifyMatchNode(flags, staticIcon, idx.prevChildren[pos], idx.prevFlagsOf)
+			}
 		}
 		walkPrev(prevSnap.Tree.Root, -1)
 	}
@@ -417,8 +482,12 @@ func buildPublicMatchIndex(prevSnap *Snapshot, cap *device.Capture, units []unit
 	idx.curPub = make([]publicKey, curCount)
 	idx.curContext = make([]bool, curCount)
 	idx.curBounds = make([]*protocol.Bounds, curCount)
+	idx.curFlags = make([]matchNodeFlags, curCount)
 
-	for rank, cur := range order {
+	// Reverse public preorder visits children before their parents, regardless
+	// of where the capture stores each raw node.
+	for rank := len(order) - 1; rank >= 0; rank-- {
+		cur := order[rank]
 		idx.curParent[rank] = curParentByRaw[cur]
 		idx.curChildren[rank] = tempChildren[cur]
 		if cur == cap.Root {
@@ -430,9 +499,27 @@ func buildPublicMatchIndex(prevSnap *Snapshot, cap *device.Capture, units []unit
 			idx.curKey[rank] = contextSignature(raw)
 			continue
 		}
-		idx.curKey[rank] = signature(raw, units[cur].role)
-		idx.curPub[rank] = publicSignature(raw, units[cur].role)
-		idx.curBounds[rank] = displayBounds(cap, raw)
+		role := units[cur].role
+		k, pk := signature(raw, role), publicSignature(raw, role)
+		bounds := displayBounds(cap, raw)
+		idx.curKey[rank], idx.curPub[rank], idx.curBounds[rank] = k, pk, bounds
+
+		// Match newPublicNode's published fields: Value is input-only, Hint
+		// has no source, and Axis is scroll-only. The public resource hint
+		// may be absent even when a decorative ImageView has a raw ID.
+		defaultState := raw.HasEnabled && raw.Enabled && raw.HasFocused && !raw.Focused &&
+			raw.HasSelected && !raw.Selected && raw.HasPassword && !raw.Password && raw.HasChecked && !raw.Checked
+		noContent := pk.label == "" && role != protocol.RoleInput && role != protocol.RoleScroll
+		children := idx.curChildren[rank]
+		flags := matchNodeFlags{
+			isDecorativeImageLeaf: role == protocol.RoleImage && len(children) == 0 && !pk.editable &&
+				noContent && pk.actions == 0 && !pk.hasRes && defaultState,
+			isAnonymousPlain: isAnonymousRole(role) && noContent && pk.actions == 0 &&
+				!k.hasRes && !pk.hasRes && defaultState,
+		}
+		staticIcon := role != protocol.RoleInput && !pk.editable && pk.actions != 0 &&
+			pk.label == "" && defaultState && positiveBounds(bounds)
+		idx.curFlags[rank] = classifyMatchNode(flags, staticIcon, children, idx.curFlagsOf)
 	}
 
 	return idx
@@ -517,32 +604,32 @@ func (idx *publicMatchIndex) prevAncestorOf(candidate, node int) bool {
 
 // prevStaticLeaf reports whether prevPos is eligible for the static-geometry
 // closing pass: an unmatched check is the caller's job, but the node itself
-// must be a non-context, non-editable public leaf with a known positive
-// rectangle.
+// must be a non-context, non-input public leaf or a decorative icon container
+// with a known positive rectangle.
 func (idx *publicMatchIndex) prevStaticLeaf(prevPos int) bool {
 	if prevPos <= idx.prevRoot || prevPos >= idx.prevCount {
 		return false
 	}
-	if idx.prevIsContext(prevPos) || idx.prevKey[prevPos].editable {
+	if idx.prevIsContext(prevPos) || idx.prevEditable(prevPos) || idx.prevKey[prevPos].role == protocol.RoleInput {
 		return false
 	}
-	if len(idx.prevChildren[prevPos]) != 0 {
+	if len(idx.prevChildren[prevPos]) != 0 && !idx.prevFlagsOf(prevPos).isStaticIconContainer {
 		return false
 	}
 	return positiveBounds(idx.prevBounds[prevPos])
 }
 
 // curStaticLeaf reports whether cur is eligible for the static-geometry closing
-// pass: a non-context, non-editable public leaf with known positive bounds.
+// pass, using the same requirements as prevStaticLeaf.
 func (idx *publicMatchIndex) curStaticLeaf(cur int) bool {
 	pos := idx.curPos[cur]
 	if pos <= 0 || cur == idx.root {
 		return false
 	}
-	if idx.curIsContext(cur) || idx.curKey[pos].editable {
+	if idx.curIsContext(cur) || idx.curEditable(cur) || idx.curKey[pos].role == protocol.RoleInput {
 		return false
 	}
-	if len(idx.curChildren[pos]) != 0 {
+	if len(idx.curChildren[pos]) != 0 && !idx.curFlagsOf(cur).isStaticIconContainer {
 		return false
 	}
 	return positiveBounds(idx.curBounds[pos])
@@ -844,8 +931,9 @@ type bucketKey struct {
 	// pubHasRes and pubResource keep the published resource hint separate from
 	// the raw resource id. Buckets that decide container or leaf identity use
 	// both so an unpublished difference can never be silently ignored.
-	pubHasRes   bool
-	pubResource string
+	pubHasRes           bool
+	pubResource         string
+	decorativeContainer bool
 }
 
 func unitBucket(k matchKey, _ publicKey) bucketKey {
@@ -948,13 +1036,12 @@ func containerOrdinalBucket(k matchKey, pk publicKey) bucketKey {
 	return bk
 }
 
-// staticLeafBucket groups unmatched leaves for the static-geometry closing pass
-// (design §4.1.2). It uses the same identity evidence as the ordinal container
-// bucket, minus geometry, so only genuinely indistinguishable siblings can ever
-// be considered.
-func staticLeafBucket(k matchKey, pk publicKey) bucketKey {
+// staticLeafBucket uses ordinal identity evidence and keeps decorative icon
+// containers separate from true leaves, even when the two have identical keys.
+func staticLeafBucket(k matchKey, pk publicKey, decorativeContainer bool) bucketKey {
 	bk := containerOrdinalBucket(k, pk)
 	bk.kind = bucketStaticLeaf
+	bk.decorativeContainer = decorativeContainer
 	return bk
 }
 
@@ -1073,7 +1160,7 @@ func (b *Builder) matchRefs(
 
 	// Stage 3 finds container anchors via descendant vote (3A under anchored
 	// parents, 3B bottom-up through rebuilt wrappers);
-	// Stage 4 recovers direct children only below anchored parents.
+	// Stage 4 recovers direct children and single-branch identities under anchors.
 	for !budget.exhausted() {
 		before := st.matchCount()
 		matchContainersByDescendants(st, budget, dirty)
@@ -1389,31 +1476,35 @@ func matchParentScopedStructurallyUniqueContainers(
 	return offers, true
 }
 
+type localMatchScope struct {
+	oldChildren, curChildren []int
+}
+
 func matchParentScopedUniqueBuckets(
 	st *matchState,
-	scope []int,
+	scope []localMatchScope,
 	pass contentPass,
 	baseR pairSnapshot,
 	budget *workBudget,
+	transparent bool,
 ) ([]pairProposal, bool) {
+	eligible := func(k matchKey, pk publicKey) bool {
+		return (!transparent || !k.editable || k.hasRes || k.anchor != "") && pass.eligible(k, pk)
+	}
 	var offers []pairProposal
-	for _, curParent := range scope {
-		anchor, anchored := st.matchedOld(curParent)
-		if !anchored {
-			continue
-		}
+	for _, children := range scope {
 		oldBuckets := make(map[bucketKey][]int)
 		curBuckets := make(map[bucketKey][]int)
 		var keyOrder []bucketKey
 		seen := make(map[bucketKey]bool)
 
-		for _, oldPos := range st.idx.prevChildren[anchor] {
+		for _, oldPos := range children.oldChildren {
 			if !budget.charge(1) {
 				return nil, false
 			}
 			budget.visitCandidate()
 			k, pk := st.idx.prevKey[oldPos], st.idx.prevPub[oldPos]
-			if baseR.oldUsed(oldPos) || !pass.eligible(k, pk) {
+			if baseR.oldUsed(oldPos) || !eligible(k, pk) {
 				continue
 			}
 			key := pass.key(k, pk)
@@ -1423,13 +1514,13 @@ func matchParentScopedUniqueBuckets(
 				keyOrder = append(keyOrder, key)
 			}
 		}
-		for _, cur := range st.idx.childrenOf(curParent) {
+		for _, cur := range children.curChildren {
 			if !budget.charge(1) {
 				return nil, false
 			}
 			budget.visitCandidate()
 			k, pk := st.idx.curMatchKey(cur), st.idx.curPubKey(cur)
-			if baseR.curUsed(cur) || !pass.eligible(k, pk) {
+			if baseR.curUsed(cur) || !eligible(k, pk) {
 				continue
 			}
 			key := pass.key(k, pk)
@@ -1444,6 +1535,38 @@ func matchParentScopedUniqueBuckets(
 		}
 	}
 	return offers, true
+}
+
+// collectLocalFrontier follows the single non-decorative branch of an
+// unmatched wrapper. Ordinary direct candidates share the same identity
+// buckets as reached descendants, so a wrapper cannot hide a duplicate.
+func collectLocalFrontier(
+	children []int, isUsed func(int) bool, flagsOf func(int) matchNodeFlags, budget *workBudget,
+) (frontier []int, traversed bool) {
+	for _, child := range children {
+		if !budget.charge(1) {
+			return nil, false
+		}
+		if isUsed(child) || flagsOf(child).isPureDecorativeSubtree {
+			continue
+		}
+		node := child
+		for depth := 0; depth < maxTransparentWrapperDepth && flagsOf(node).isTransparentSingleWrapper; depth++ {
+			if !budget.charge(1) {
+				return nil, false
+			}
+			node = flagsOf(node).singleChild
+			if isUsed(node) {
+				node = -1
+				break
+			}
+		}
+		if node >= 0 {
+			frontier = append(frontier, node)
+			traversed = traversed || node != child
+		}
+	}
+	return frontier, traversed
 }
 
 type snapshotIntervals struct {
@@ -1843,6 +1966,39 @@ func matchLocalUnderAnchoredParents(
 		}
 		return src
 	}
+	passes := []contentPass{
+		{localUnmatchedUniverse, resolveSource(sourceLocalExact), unitBucket, hasIdentityMatch},
+		{localUnmatchedUniverse, resolveSource(sourceLocalResource), resourceOnlyBucket, isResourceOnlyEligible},
+		{localUnmatchedUniverse, resolveSource(sourceLocalInput), inputAnchorBucket, isInputAnchorEligible},
+		{localUnmatchedUniverse, resolveSource(sourceLocalPublicPost), publicBucket, hasPublicNonInputIdentity},
+	}
+	matchContents := func(scopes []localMatchScope, transparent bool) bool {
+		for _, pass := range passes {
+			if budget.exhausted() {
+				return false
+			}
+			passBase := st.snapshotPairs()
+			offers, complete := matchParentScopedUniqueBuckets(st, scopes, pass, passBase, budget, transparent)
+			if !complete {
+				return false
+			}
+			accepted, ok := st.chooseBatchIfBidirectionallyUnique(offers, passBase, budget)
+			if !ok {
+				return false
+			}
+			if len(accepted) == 0 {
+				continue
+			}
+			st.applyBatch(accepted)
+			changed = true
+			for _, pr := range accepted {
+				if st.idx.hasPublicChildren(pr.cur) {
+					dirty.push(pr.cur)
+				}
+			}
+		}
+		return true
+	}
 	for {
 		scope := dirty.drainInPublicOrder()
 		if len(scope) == 0 || budget.exhausted() {
@@ -1870,35 +2026,32 @@ func matchLocalUnderAnchoredParents(
 			}
 		}
 
-		passes := []contentPass{
-			{localUnmatchedUniverse, resolveSource(sourceLocalExact), unitBucket, hasIdentityMatch},
-			{localUnmatchedUniverse, resolveSource(sourceLocalResource), resourceOnlyBucket, isResourceOnlyEligible},
-			{localUnmatchedUniverse, resolveSource(sourceLocalInput), inputAnchorBucket, isInputAnchorEligible},
-			{localUnmatchedUniverse, resolveSource(sourceLocalPublicPost), publicBucket, hasPublicNonInputIdentity},
+		direct := make([]localMatchScope, 0, len(scope))
+		for _, curParent := range scope {
+			if anchor, anchored := st.matchedOld(curParent); anchored {
+				direct = append(direct, localMatchScope{st.idx.prevChildren[anchor], st.idx.childrenOf(curParent)})
+			}
 		}
-		for _, pass := range passes {
+		if !matchContents(direct, false) {
+			return changed
+		}
+
+		// Only content passes see the filtered frontier. Structural uniqueness
+		// above deliberately includes every direct sibling, even used ones.
+		baseR = st.snapshotPairs()
+		var frontiers []localMatchScope
+		for _, children := range direct {
+			oldFrontier, oldTraversed := collectLocalFrontier(children.oldChildren, baseR.oldUsed, st.idx.prevFlagsOf, budget)
+			curFrontier, curTraversed := collectLocalFrontier(children.curChildren, baseR.curUsed, st.idx.curFlagsOf, budget)
 			if budget.exhausted() {
 				return changed
 			}
-			passBase := st.snapshotPairs()
-			offers, complete := matchParentScopedUniqueBuckets(st, scope, pass, passBase, budget)
-			if !complete {
-				return changed
+			if oldTraversed || curTraversed {
+				frontiers = append(frontiers, localMatchScope{oldFrontier, curFrontier})
 			}
-			accepted, ok := st.chooseBatchIfBidirectionallyUnique(offers, passBase, budget)
-			if !ok {
-				return changed
-			}
-			if len(accepted) == 0 {
-				continue
-			}
-			st.applyBatch(accepted)
-			changed = true
-			for _, pr := range accepted {
-				if st.idx.hasPublicChildren(pr.cur) {
-					dirty.push(pr.cur)
-				}
-			}
+		}
+		if len(frontiers) > 0 && !matchContents(frontiers, true) {
+			return changed
 		}
 	}
 }
@@ -2043,16 +2196,43 @@ func matchOrdinalContainersZeroShift(st *matchState, budget *workBudget, dirty *
 	return true
 }
 
+// visitStaticFrontier walks in public preorder, bounded by the wrapper limit.
+// An anchored node owns its descendants. Decorations inside a traversed
+// wrapper are skipped, while direct decorative leaves remain candidates.
+func visitStaticFrontier(
+	children []int, depth int, childrenOf func(int) []int, isUsed func(int) bool,
+	flagsOf func(int) matchNodeFlags, staticLeaf func(int) bool, visit func(int), budget *workBudget,
+) bool {
+	for _, child := range children {
+		if !budget.charge(1) {
+			return false
+		}
+		budget.visitCandidate()
+		flags := flagsOf(child)
+		if isUsed(child) || (depth > 0 && flags.isPureDecorativeSubtree) {
+			continue
+		}
+		if staticLeaf(child) {
+			visit(child)
+		} else if depth < maxTransparentWrapperDepth && flags.isTransparentWrapperForStage6 {
+			if !visitStaticFrontier(childrenOf(child), depth+1, childrenOf, isUsed, flagsOf, staticLeaf, visit, budget) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // matchStaticGeometrySiblings closes the last continuity gap for truly
 // stationary screens (design §4.1.2). Under one already anchored parent, two
 // identical non-input leaves that sit apart and did not move are otherwise
 // permanently indistinguishable, so every frame would renumber them.
 //
 // The pass is deliberately narrow and runs at most once:
-//   - only direct public children of an anchored parent pair,
-//   - never context nodes, never editable units and never containers (a public
-//     leaf only), so a list that recycles slot coordinates cannot hand a card
-//     container's ref to a new card's inner button,
+//   - only under an anchored parent pair, with bounded traversal through
+//     anonymous wrappers whose non-decorative branches lead to static icons,
+//   - eligible candidates are non-context, non-input leaves and interactive
+//     icons with purely decorative descendants, in separate buckets,
 //   - buckets must hold the same unmatched count k >= 2 on both sides,
 //   - every old leaf needs exactly one current leaf within +-4px on all four
 //     edges, every current leaf is hit exactly once (strict 1-to-1 bijection),
@@ -2078,35 +2258,29 @@ func matchStaticGeometrySiblings(st *matchState, budget *workBudget) bool {
 		var keyOrder []bucketKey
 		seen := make(map[bucketKey]bool)
 
-		for _, oldPos := range st.idx.prevChildren[anchor] {
-			if !budget.charge(1) {
-				return false
-			}
-			budget.visitCandidate()
-			if baseR.oldUsed(oldPos) || !st.idx.prevStaticLeaf(oldPos) {
-				continue
-			}
-			key := staticLeafBucket(st.idx.prevKey[oldPos], st.idx.prevPub[oldPos])
+		idx := st.idx
+		oldChildrenOf := func(pos int) []int { return idx.prevChildren[pos] }
+		collectOld := func(oldPos int) {
+			key := staticLeafBucket(idx.prevKey[oldPos], idx.prevPub[oldPos], idx.prevFlagsOf(oldPos).isStaticIconContainer)
 			oldBuckets[key] = append(oldBuckets[key], oldPos)
 			if !seen[key] {
 				seen[key] = true
 				keyOrder = append(keyOrder, key)
 			}
 		}
-		for _, cur := range st.idx.childrenOf(parentCur) {
-			if !budget.charge(1) {
-				return false
-			}
-			budget.visitCandidate()
-			if baseR.curUsed(cur) || !st.idx.curStaticLeaf(cur) {
-				continue
-			}
-			key := staticLeafBucket(st.idx.curMatchKey(cur), st.idx.curPubKey(cur))
+		if !visitStaticFrontier(oldChildrenOf(anchor), 0, oldChildrenOf, baseR.oldUsed, idx.prevFlagsOf, idx.prevStaticLeaf, collectOld, budget) {
+			return false
+		}
+		collectCur := func(cur int) {
+			key := staticLeafBucket(idx.curMatchKey(cur), idx.curPubKey(cur), idx.curFlagsOf(cur).isStaticIconContainer)
 			curBuckets[key] = append(curBuckets[key], cur)
 			if !seen[key] {
 				seen[key] = true
 				keyOrder = append(keyOrder, key)
 			}
+		}
+		if !visitStaticFrontier(idx.childrenOf(parentCur), 0, idx.childrenOf, baseR.curUsed, idx.curFlagsOf, idx.curStaticLeaf, collectCur, budget) {
+			return false
 		}
 
 		for _, key := range keyOrder {

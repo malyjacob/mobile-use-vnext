@@ -163,8 +163,43 @@ type ReadNode struct {
 	Hint      *string
 	Axis      Axis
 	Resource  *string
+	Truncated bool
 	Context   bool
 	Children  []*ReadNode
+}
+
+// readNodeTruncationError reports a truncation flag that the current view or
+// node position does not allow. Truncated labels are a compact-only delivery
+// fact of actionable nodes; the detailed view and the compact root/context
+// positions must always carry full text.
+func readNodeTruncationError(view string, n *ReadNode) error {
+	if !n.Truncated {
+		return nil
+	}
+	if view == ViewDetailed {
+		return fmt.Errorf("detailed view must not deliver truncated labels")
+	}
+	if n.Context || n.Role == RoleRoot {
+		return fmt.Errorf("compact view must not truncate context or root labels")
+	}
+	return nil
+}
+
+// validateReadNodeTruncation checks one definition subtree against the view
+// and position rules of the truncation flag.
+func validateReadNodeTruncation(view string, n *ReadNode) error {
+	if n == nil {
+		return nil
+	}
+	if err := readNodeTruncationError(view, n); err != nil {
+		return err
+	}
+	for _, child := range n.Children {
+		if err := validateReadNodeTruncation(view, child); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // IsChain reports whether the definition folds more than one ref.
@@ -377,6 +412,15 @@ func (n *ReadNode) MarshalJSONTo(enc *jsontext.Encoder) error {
 			return err
 		}
 	}
+	// truncated: default false; only the true fact is written.
+	if n.Truncated {
+		if err := writeName(enc, "truncated"); err != nil {
+			return err
+		}
+		if err := writeBool(enc, true); err != nil {
+			return err
+		}
+	}
 	if n.Context {
 		if err := writeName(enc, "context"); err != nil {
 			return err
@@ -422,6 +466,7 @@ type readNodeWire struct {
 	Protected jsontext.Value `json:"protected"`
 	Axis      jsontext.Value `json:"axis"`
 	Resource  jsontext.Value `json:"resource"`
+	Truncated jsontext.Value `json:"truncated"`
 	Context   bool           `json:"context"`
 	Children  []*ReadNode    `json:"children"`
 }
@@ -525,6 +570,14 @@ func (n *ReadNode) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 			return fmt.Errorf("invalid axis %q", *axis)
 		}
 	}
+	if len(wire.Truncated) > 0 {
+		if isJSONNull(wire.Truncated) {
+			return fmt.Errorf("truncated must be a boolean")
+		}
+		if err := json.Unmarshal(wire.Truncated, &n.Truncated); err != nil {
+			return fmt.Errorf("truncated must be a boolean")
+		}
+	}
 	return nil
 }
 
@@ -619,6 +672,9 @@ func (t *ReadTree) Validate() error {
 	if t == nil || t.Root == nil {
 		return fmt.Errorf("read tree requires a root")
 	}
+	if err := validateReadNodeTruncation(t.View, t.Root); err != nil {
+		return err
+	}
 	seen := make(map[string]bool)
 	var walk func(n *ReadNode, isRoot bool) error
 	walk = func(n *ReadNode, isRoot bool) error {
@@ -687,13 +743,132 @@ type ReadSetNode struct {
 	Protected Field[*bool]      `json:"protected,omitzero"`
 	Axis      Field[*Axis]      `json:"axis,omitzero"`
 	Resource  Field[*string]    `json:"resource,omitzero"`
+	Truncated Field[bool]       `json:"truncated,omitzero"`
 }
 
 // IsZero reports whether no member is set.
 func (s ReadSetNode) IsZero() bool {
 	return !s.Label.Set && !s.Actions.Set && !s.Bounds.Set && !s.Enabled.Set &&
 		!s.Focused.Set && !s.Selected.Set && !s.Checked.Set && !s.Value.Set &&
-		!s.Hint.Set && !s.Protected.Set && !s.Axis.Set && !s.Resource.Set
+		!s.Hint.Set && !s.Protected.Set && !s.Axis.Set && !s.Resource.Set &&
+		!s.Truncated.Set
+}
+
+// readSetNodeWire mirrors ReadSetNode for decoding: every member keeps its raw
+// JSON so absence stays distinguishable from an explicit value, and the
+// truncation flag can reject JSON null before the generic Field decode would
+// silently record a zero boolean.
+type readSetNodeWire struct {
+	Label     jsontext.Value `json:"label"`
+	Actions   jsontext.Value `json:"actions"`
+	Bounds    jsontext.Value `json:"bounds"`
+	Enabled   jsontext.Value `json:"enabled"`
+	Focused   jsontext.Value `json:"focused"`
+	Selected  jsontext.Value `json:"selected"`
+	Checked   jsontext.Value `json:"checked"`
+	Value     jsontext.Value `json:"value"`
+	Hint      jsontext.Value `json:"hint"`
+	Protected jsontext.Value `json:"protected"`
+	Axis      jsontext.Value `json:"axis"`
+	Resource  jsontext.Value `json:"resource"`
+	Truncated jsontext.Value `json:"truncated"`
+}
+
+// UnmarshalJSONFrom decodes one delta set entry. Absent members stay unset, an
+// explicit value of every other member (including null) is preserved, and
+// truncated only accepts true or false.
+func (s *ReadSetNode) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	var wire readSetNodeWire
+	if err := json.UnmarshalDecode(dec, &wire, json.RejectUnknownMembers(true)); err != nil {
+		return err
+	}
+	var out ReadSetNode
+	if len(wire.Label) > 0 {
+		var value []string
+		if err := json.Unmarshal(wire.Label, &value); err != nil {
+			return fmt.Errorf("label: %w", err)
+		}
+		out.Label = Field[[]string]{Set: true, Value: value}
+	}
+	if len(wire.Actions) > 0 {
+		var value []Action
+		if err := json.Unmarshal(wire.Actions, &value); err != nil {
+			return fmt.Errorf("actions: %w", err)
+		}
+		out.Actions = Field[[]Action]{Set: true, Value: value}
+	}
+	if len(wire.Bounds) > 0 {
+		var value ReadBounds
+		if err := value.decodeValue(wire.Bounds); err != nil {
+			return fmt.Errorf("bounds: %w", err)
+		}
+		out.Bounds = Field[ReadBounds]{Set: true, Value: value}
+	}
+	for _, field := range []struct {
+		name string
+		raw  jsontext.Value
+		dst  *Field[*bool]
+	}{
+		{"enabled", wire.Enabled, &out.Enabled},
+		{"focused", wire.Focused, &out.Focused},
+		{"selected", wire.Selected, &out.Selected},
+		{"checked", wire.Checked, &out.Checked},
+		{"protected", wire.Protected, &out.Protected},
+	} {
+		if len(field.raw) == 0 {
+			continue
+		}
+		var value *bool
+		if !isJSONNull(field.raw) {
+			if err := json.Unmarshal(field.raw, &value); err != nil {
+				return fmt.Errorf("%s: %w", field.name, err)
+			}
+		}
+		*field.dst = Field[*bool]{Set: true, Value: value}
+	}
+	for _, field := range []struct {
+		name string
+		raw  jsontext.Value
+		dst  *Field[*string]
+	}{
+		{"value", wire.Value, &out.Value},
+		{"hint", wire.Hint, &out.Hint},
+		{"resource", wire.Resource, &out.Resource},
+	} {
+		if len(field.raw) == 0 {
+			continue
+		}
+		var value *string
+		if !isJSONNull(field.raw) {
+			if err := json.Unmarshal(field.raw, &value); err != nil {
+				return fmt.Errorf("%s: %w", field.name, err)
+			}
+		}
+		*field.dst = Field[*string]{Set: true, Value: value}
+	}
+	if len(wire.Axis) > 0 {
+		var value *Axis
+		if !isJSONNull(wire.Axis) {
+			var decoded Axis
+			if err := json.Unmarshal(wire.Axis, &decoded); err != nil {
+				return fmt.Errorf("axis: %w", err)
+			}
+			value = &decoded
+		}
+		out.Axis = Field[*Axis]{Set: true, Value: value}
+	}
+	if len(wire.Truncated) > 0 {
+		if isJSONNull(wire.Truncated) {
+			return fmt.Errorf("truncated must be a boolean")
+		}
+		var value bool
+		if err := json.Unmarshal(wire.Truncated, &value); err != nil {
+			return fmt.Errorf("truncated must be a boolean")
+		}
+		out.Truncated = Field[bool]{Set: true, Value: value}
+	}
+	*s = out
+	return nil
 }
 
 // ReadDelta is the fixed-baseline difference between two read trees.
@@ -740,6 +915,9 @@ func (d *ReadDelta) Validate() error {
 		if node == nil || node.IsChain() || !ValidPublicRef(node.Ref) {
 			return fmt.Errorf("add requires an ordinary definition root")
 		}
+		if err := validateReadNodeTruncation(d.View, node); err != nil {
+			return err
+		}
 	}
 	for _, ref := range d.Remove {
 		if !ValidPublicRef(ref) {
@@ -759,6 +937,9 @@ func (d *ReadDelta) Validate() error {
 	for ref, node := range d.Replace {
 		if node == nil || node.IsChain() || node.Ref != ref {
 			return fmt.Errorf("replace %q must define that ordinary ref", ref)
+		}
+		if err := validateReadNodeTruncation(d.View, node); err != nil {
+			return err
 		}
 	}
 	return nil

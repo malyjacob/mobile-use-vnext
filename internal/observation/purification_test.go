@@ -173,11 +173,15 @@ func TestEmptyLeafPurification(t *testing.T) {
 		emptyShell := builder.add(rootIdx, defaultEmptyRaw(rect(0, 100, 300, 200), "android.widget.FrameLayout"))
 		emptyNested := builder.add(emptyShell, defaultEmptyRaw(rect(10, 110, 200, 180), "android.view.View"))
 
-		// Retained nodes:
-		// 4) Non-empty whitespace text (exact non-empty preservation).
+		// 4) Default leaves whose only text or description is whitespace.
 		wsText := defaultEmptyRaw(rect(0, 210, 100, 250), "android.widget.TextView")
-		wsText.Text = " "
+		wsText.Text = "\u00a0"
 		builder.add(rootIdx, wsText)
+		wsDesc := defaultEmptyRaw(rect(100, 210, 200, 250), "android.view.View")
+		wsDesc.Description = "\n "
+		builder.add(rootIdx, wsDesc)
+
+		// Retained nodes:
 		// 5) Non-empty description.
 		descOnly := defaultEmptyRaw(rect(0, 260, 100, 300), "android.view.View")
 		descOnly.Description = "说明"
@@ -215,8 +219,14 @@ func TestEmptyLeafPurification(t *testing.T) {
 		keptLeaf.Text = "容器子项"
 		builder.add(keptShell, keptLeaf)
 
-		snap := buildOne(t, NewBuilder(), builder.capture())
-		const wantKeptTop = 14
+		b := NewBuilder()
+		snap := buildOne(t, b, builder.capture())
+		const wantKeptTop = 13
+		// The only remaining non-top-level nodes are the synthetic root and
+		// the kept shell's text. Filtered leaves must not consume refs.
+		if want := wantKeptTop + 3; b.nextRef != want {
+			t.Fatalf("next ref = %d, want %d", b.nextRef, want)
+		}
 		if len(snap.Tree.Root.Children) != wantKeptTop {
 			t.Fatalf("kept top-level children = %d, want %d\n%s", len(snap.Tree.Root.Children), wantKeptTop, dump(snap.Tree))
 		}

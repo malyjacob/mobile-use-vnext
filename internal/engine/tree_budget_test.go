@@ -9,6 +9,7 @@ import (
 	"github.com/malyjacob/mobile-use-vnext/internal/device"
 	"github.com/malyjacob/mobile-use-vnext/internal/observation"
 	"github.com/malyjacob/mobile-use-vnext/internal/protocol"
+	"github.com/malyjacob/mobile-use-vnext/internal/treetext"
 )
 
 // TestTreeBudgetsNameTheirBudget proves that all three delivery budgets fail
@@ -584,22 +585,35 @@ func TestBaselinePoolPressureEvictsOldestUnselectedBackup(t *testing.T) {
 	tree := current.Compact
 	h.engine.mu.Unlock()
 
+	// The fixture fills every pool slot: one selected base plus the four newest
+	// backups. Only the oldest backup may be released to satisfy the retained
+	// snapshot budget.
 	selected := installRetainedSnapshot(t, h.engine, "Opressure_selected",
-		ObservationRetired, 20, base, readonlyTree(readonlyNode("n2", protocol.RoleRoot)))
-	oldest := installRetainedSnapshot(t, h.engine, "Opressure_oldest",
-		ObservationRetired, 50, base.Add(time.Second),
+		ObservationRetired, 10, base, readonlyTree(readonlyNode("n2", protocol.RoleRoot)))
+	newest := installRetainedSnapshot(t, h.engine, "Opressure_newest",
+		ObservationRetired, 10, base.Add(time.Second),
 		readonlyTree(readonlyNode("n3", protocol.RoleRoot)))
 	newer := installRetainedSnapshot(t, h.engine, "Opressure_newer",
 		ObservationRetired, 10, base.Add(2*time.Second),
 		readonlyTree(readonlyNode("n4", protocol.RoleRoot)))
+	older := installRetainedSnapshot(t, h.engine, "Opressure_older",
+		ObservationRetired, 10, base.Add(3*time.Second),
+		readonlyTree(readonlyNode("n5", protocol.RoleRoot)))
+	oldest := installRetainedSnapshot(t, h.engine, "Opressure_oldest",
+		ObservationRetired, 20, base.Add(4*time.Second),
+		readonlyTree(readonlyNode("n6", protocol.RoleRoot)))
 
 	h.engine.mu.Lock()
 	pool := []*baselineState{
-		{ObservationID: selected.ID, Revision: 5, Tree: tree},
+		{ObservationID: selected.ID, Revision: 6, Tree: tree},
+		{ObservationID: newest.ID, Revision: 5, Tree: tree},
 		{ObservationID: newer.ID, Revision: 4, Tree: tree},
-		{ObservationID: oldest.ID, Revision: 3, Tree: tree},
+		{ObservationID: older.ID, Revision: 3, Tree: tree},
+		{ObservationID: oldest.ID, Revision: 2, Tree: tree},
 	}
-	h.engine.cfg.MaxRetainedSnapshotCostBytes = 60
+	// Retained snapshots total 70 bytes (current 10 plus the five pool entries);
+	// publishing 20 more needs exactly the oldest 20-byte backup released.
+	h.engine.cfg.MaxRetainedSnapshotCostBytes = 70
 	victims, finalPool, fits := h.engine.planRetentionWithPoolPressureLocked(
 		20, pool, selected.ID)
 	h.engine.mu.Unlock()
@@ -609,9 +623,14 @@ func TestBaselinePoolPressureEvictsOldestUnselectedBackup(t *testing.T) {
 	if baselineWithID(finalPool, oldest.ID) != nil {
 		t.Fatalf("oldest unselected backup survived pool pressure: %+v", finalPool)
 	}
-	if baselineWithID(finalPool, selected.ID) == nil ||
-		baselineWithID(finalPool, newer.ID) == nil {
-		t.Fatalf("pressure removed the selected or newer backup: %+v", finalPool)
+	for _, retainedID := range []string{selected.ID, newest.ID, newer.ID, older.ID} {
+		if baselineWithID(finalPool, retainedID) == nil {
+			t.Fatalf("pool pressure removed a protected backup %s: %+v",
+				retainedID, finalPool)
+		}
+	}
+	if len(finalPool) != maxBackupBaselines {
+		t.Fatalf("pressure pool length = %d, want %d", len(finalPool), maxBackupBaselines)
 	}
 	foundVictim := false
 	for _, victim := range victims {
@@ -627,7 +646,102 @@ func TestBaselinePoolPressureEvictsOldestUnselectedBackup(t *testing.T) {
 	}
 }
 
-func TestFullFallbackWithoutCurrentKeepsThreeBackups(t *testing.T) {
+// exactRatioDeltaFixture builds one base/target pair and its structural delta
+// whose canonical tree v5 blocks are exactly deltaBytes and fullBytes. The
+// changed label appears in both blocks, so one more byte lengthens both alike;
+// the unchanged sibling label appears only in the full block and can absorb the
+// remaining difference at codepoint granularity. deltaBase fixes the one
+// delta-block-only constant (the delta header's base spelling) that makes an exact
+// even ratio constructible without changing the node shape. The measured lengths
+// are asserted, so a tree-v5 encoding change cannot silently move the boundary.
+func exactRatioDeltaFixture(t *testing.T, previewID, deltaBase string,
+	deltaBytes, fullBytes int) (*protocol.ReadTree, *protocol.ReadTree, *protocol.ReadDelta) {
+	t.Helper()
+	probeBase := thresholdReadTree(1, 0)
+	probeTree := thresholdReadTree(2, 0)
+	probeDelta, err := observation.ReadDiff(deltaBase, probeBase, probeTree)
+	if err != nil {
+		t.Fatalf("build ratio probe: %v", err)
+	}
+	probeDeltaText, ok := treetext.EncodeDelta(previewID, probeDelta)
+	if !ok {
+		t.Fatal("encode ratio probe delta")
+	}
+	changedBytes := 2 + deltaBytes - len(probeDeltaText)
+	if changedBytes < 1 {
+		t.Fatalf("ratio target %d is smaller than the fixed delta block", deltaBytes)
+	}
+	for stableBytes := 0; stableBytes <= 512; stableBytes++ {
+		target := thresholdReadTree(changedBytes, stableBytes)
+		fullText, ok := treetext.EncodeFull(previewID, target)
+		if !ok {
+			t.Fatal("encode ratio full")
+		}
+		if len(fullText) != fullBytes {
+			continue
+		}
+		base := thresholdReadTree(1, stableBytes)
+		delta, err := observation.ReadDiff(deltaBase, base, target)
+		if err != nil {
+			t.Fatalf("build exact ratio delta: %v", err)
+		}
+		deltaText, ok := treetext.EncodeDelta(previewID, delta)
+		if !ok {
+			t.Fatal("encode exact ratio delta")
+		}
+		if len(deltaText) != deltaBytes {
+			t.Fatalf("delta block = %d bytes, want %d", len(deltaText), deltaBytes)
+		}
+		return base, target, delta
+	}
+	t.Fatalf("could not construct exact %d/%d tree v5 blocks", deltaBytes, fullBytes)
+	return nil, nil, nil
+}
+
+// TestDeltaCostGateExactByteRatioBoundary pins the strict "< 80%" comparison with
+// the exact 799/1000 and 800/1000 tree v5 blocks from the proposal: 7990 < 8000
+// publishes the delta, while 8000 >= 8000 must fall back to the full block. The
+// previous 7/10 gate rejects the 799/1000 case and a non-strict `<=` comparator
+// publishes the 800/1000 case, so this pair is the reverse control for both.
+func TestDeltaCostGateExactByteRatioBoundary(t *testing.T) {
+	const deltaBase = "OsyntheticAB"
+	for _, test := range []struct {
+		name       string
+		deltaBytes int
+		wantDelta  bool
+	}{
+		{name: "seven_nine_nine_over_one_thousand", deltaBytes: 799, wantDelta: true},
+		{name: "eight_hundred_over_one_thousand", deltaBytes: 800, wantDelta: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			base, target, delta := exactRatioDeltaFixture(
+				t, "Osynthetic", deltaBase, test.deltaBytes, 1000)
+			fullText, ok := treetext.EncodeFull("Osynthetic", target)
+			if !ok || len(fullText) != 1000 {
+				t.Fatalf("full block = %d bytes, want 1000", len(fullText))
+			}
+			engine := &Engine{differ: fixedReadDiffer{delta: delta}}
+			selected, deltaBytes, accepted := engine.treeTextBaselineDelta(
+				"Osynthetic", &baselineState{ObservationID: deltaBase, Tree: base}, target)
+			if accepted != test.wantDelta {
+				t.Fatalf("delta accepted=%t, want %t (%d/1000 tree v5 blocks)",
+					accepted, test.wantDelta, test.deltaBytes)
+			}
+			if !test.wantDelta {
+				if selected != nil || deltaBytes != 0 {
+					t.Fatalf("equal-boundary delta was measured: %+v bytes=%d",
+						selected, deltaBytes)
+				}
+				return
+			}
+			if selected == nil || deltaBytes != test.deltaBytes {
+				t.Fatalf("selected delta bytes = %d, want %d", deltaBytes, test.deltaBytes)
+			}
+		})
+	}
+}
+
+func TestFullFallbackWithoutCurrentKeepsFourBackups(t *testing.T) {
 	t.Run("success trims oldest", func(t *testing.T) {
 		h := newHarness(t)
 		start := h.startSession()
@@ -701,15 +815,19 @@ func installFullFallbackPool(t *testing.T, h *harness, start *protocol.Result) *
 	session := h.engine.session
 	tree := start.Observation.Tree.Full
 	nextRevision := session.Revision + 1
+	// A full pool: one current baseline plus four backups. The full fallback
+	// clears the active pointer, so the fourth backup slot must stay available
+	// and the oldest of the five entries has to be trimmed.
 	entries := []*baselineState{
-		newFullFallbackBaseline("Obackup_middle", session, nextRevision-2, tree),
-		newFullFallbackBaseline("Obackup_oldest", session, nextRevision-4, tree),
 		newFullFallbackBaseline("Obackup_newest", session, nextRevision-1, tree),
-		newFullFallbackBaseline("Obackup_newer", session, nextRevision-3, tree),
+		newFullFallbackBaseline("Obackup_newer", session, nextRevision-2, tree),
+		newFullFallbackBaseline("Obackup_middle", session, nextRevision-3, tree),
+		newFullFallbackBaseline("Obackup_older", session, nextRevision-4, tree),
+		newFullFallbackBaseline("Obackup_oldest", session, nextRevision-5, tree),
 	}
 	h.engine.baselines = entries
-	h.engine.activeBaselineID = entries[2].ObservationID
-	return entries[1]
+	h.engine.activeBaselineID = entries[0].ObservationID
+	return entries[len(entries)-1]
 }
 
 func newFullFallbackBaseline(id string, session *sessionState, revision int,

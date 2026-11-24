@@ -7,8 +7,8 @@ HTTP 协议配对。
 
 - 模块：`github.com/malyjacob/mobile-use-vnext`
 - Go：1.27.1，启用 `GOEXPERIMENT=jsonv2`
-- 契约：`contract_version = "28"`，服务、HTTP 客户端、控制 App 精确相等才做普通工作
-- 发行：`0.32.0`；`release/versions.json` 是发行号、契约号与 Android versionCode（34）的唯一
+- 契约：`contract_version = "29"`，服务、HTTP 客户端、控制 App 精确相等才做普通工作
+- 发行：`0.33.0`；`release/versions.json` 是发行号、契约号与 Android versionCode（35）的唯一
   来源，构建生成 Go/Java 常量
 
 ## 能力边界
@@ -24,9 +24,18 @@ HTTP 协议配对。
   其余已交付节点为可见区域中心点 `[x,y]`；省略几何的节点包括无动作 `text`、匿名普通
   `view`/`group`，以及其余无动作节点中与父链最近交付矩形完全相同或裁屏后小于屏幕面积 1% 的
   节点。普通树还会剪除无标注非交互 `image` 叶、被祖先复合标签覆盖的纯被动 `text` 叶和
-  `<=4px` 露边 `view` 细条，合并无字可点击 `view` 的纯文本子叶为 `button`，去重 `input`
-  的重复标签/值并截短 `resource` 尾名；清理因此变空的匿名容器，并提升隐藏匿名容器的唯一
-  孩子。`inspect` 的 `detailed` 视图仍交付保留快照的全部节点与已知四元矩形。
+  `<=4px` 露边 `view` 细条，按裁剪后孩子的原顺序扁平化隐藏匿名容器（单子与多子一致）后再把无字
+  可点击 `view` 的纯文本子叶合并为 `button`，去重 `input` 的重复标签/值并截短 `resource`
+  尾名；清理因此变空的匿名容器。公开 label 仅在含固定零宽与占位码点时剔除这些码点并把残留
+  连续空行折叠为单个换行，随后无条件去掉
+  首尾空白（纯空白与 `U+00A0` 归空，内部非占位换行保留）；有动作、非 `input`、非 `context`
+  节点中超过 250 个 Unicode 码点的 label 段前置截取前 250 个码点，并在 `resource=` 之后标记
+  `truncated=true`；未超过的段不截断、不置位，无动作正文与 `input.value` 保留全文，被动文本
+  提升为 `button` 的 label 也不再二次截断。同一候选
+  的保号在静止页面上按纯装饰
+  图子树识别等价静态图标容器并按真叶/图标容器分桶，透明匿名包装层限深穿透，列表回收与同
+  坐标换卡仍分配新号。`inspect` 的 `detailed` 视图仍交付保留快照的全部节点、完整未截断的
+  label 与已知四元矩形，节点定义不出现 `truncated`。
 - 观察可带可选 `visual` 提示（`image_heavy(<pct>%)` 或 `sparse_tree`）：`full` 给出本次值
   （空则省略），`delta` 仅在非空分类相较上一帧变化时给出，用于提示按需 `snap`；普通树文本块
   为 `tree v5`。
@@ -171,13 +180,13 @@ $env:GOEXPERIMENT = 'jsonv2'; go test ./...
 ## 接口
 
 Agent 工具（`POST /api/<tool>`，`Authorization: Bearer <agent_token>`，
-`X-Mobile-Use-Contract: 28`）：
+`X-Mobile-Use-Contract: 29`）：
 
 | 工具 | 说明 |
 | --- | --- |
 | `start` | 请求体必须为 `{}`；创建/绑定目标屏幕并发布首个 full 观察；初始化、激活与首观察成功发布使用五分钟租期 |
 | `status` | 无参数、`{"reference":"O…"}` 或 `{"reference":"P…"}`；只读查询 |
-| `observe` | `reference`（O/P）；按服务端基线池返回 full 或 delta。当前基线跨度为 1–10，其他备用 full 为 1–4，采集龄 `< 180s`，池最多 4 条；合格候选按实际 `tree v5` 树块字节数取最短 delta，平手优先当前基线、再取较新修订，默认差分必须严格小于对应 full 的 70%；`observe(P)` 与 `full=true` 强制 full；`image=true` 附加本次图片 |
+| `observe` | `reference`（O/P）；按服务端基线池返回 full 或 delta。当前基线跨度为 1–12，其他备用 full 为 1–10，采集龄 `< 180s`，池为 1 条当前基线加至多 4 条备用 full（容量 5）；合格候选按实际 `tree v5` 树块字节数取最短 delta，平手优先当前基线、再取较新修订，默认差分必须严格小于对应 full 的 80%；`observe(P)` 与 `full=true` 强制 full；`image=true` 附加本次图片 |
 | `snap` | `reference`（O/P）；立即读取当前屏的一张图，不读树、不发布观察；成功只含 `operation_id` 与顶层 `image` |
 | `wait_for` | `reference` + `timeout`（必填 1～40，`stable=true` 时至少 2）+ 可选 `query`/`absent_query`/`stable`/`full`/`image`；在唯一工作位上等待后发布一个新 `O` |
 | `act` | `reference` + `operation`：`tap`、`long_press`、`swipe`（可选 `duration_ms`）、`scroll`（`container`/`direction`/`amount`）、`key`、`text`；`tap`/`long_press` 的 ref 目标支持 4 级定位（含 3×3 网格）与同视口子容器委托，默认 `bubble=true` 时按视觉区锚定提升最近交互祖先或吸附唯一局部共位控件；`scroll` 的 `amount` 为闭合四档 `step`/`half`/`page`/`full`（可用跨度 15%/30%/60%/85%，注入 500/450/400/300ms，省略为 `page`，不接受 `duration_ms`）；支持双向同视口滚动栈、非滚动 ref 自动祖先提升、坐标最内层/回退/消歧与居中 3 轴线轨迹；容器轴向与请求方向不兼容时自动回退兼容外层滚动祖先，无解返回 `422 unsupported_node_action`（`reason=axis_mismatch`）；`act` 目标解析与规划类静态 422 使用 `invalid_target`/`unsupported_node_action`/`ambiguous_point`/`no_safe_point`/`no_safe_trajectory`，有候选时附统一 `candidates`；`text` 默认 `auto_submit=true`、`submit_ref="enter_key"`，一次完成聚焦、写入、精确读回和至多一次 ENTER；`submit_ref="n…"` 写后点击提交按钮且失败不补发 ENTER；`auto_submit=false` 只写不提；`text_input` 报告 `write`/`submit`，`write=executed` 且提交确定未派发时 `outcome=partial` 并附新的 ready O；`image=true` 为后观察附图 |

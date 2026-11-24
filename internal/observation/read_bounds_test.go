@@ -164,8 +164,8 @@ func TestCompactGeometryDuplicateRules(t *testing.T) {
 	cover := nodeT("n11", protocol.RoleGroup, rectT(50, 50, 250, 250), "cover")
 
 	tree := ProjectCompactTree(rootT(direct, wrapper, unknownWrapper, inner, action, cover))
+	requireImmediateRefs(t, tree.Root, "n2", "n4", "n12", "n6", "n8", "n10", "n11")
 	requireBoundsKind(t, tree.Root, "n2", protocol.GeometryHidden)
-	requireBoundsKind(t, tree.Root, "n3", protocol.GeometryHidden)
 	requireBoundsKind(t, tree.Root, "n4", protocol.GeometryPoint)
 	requireBoundsKind(t, tree.Root, "n5", protocol.GeometryHidden)
 	requireBoundsKind(t, tree.Root, "n6", protocol.GeometryUnknown)

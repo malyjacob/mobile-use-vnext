@@ -265,17 +265,19 @@ func (e *Engine) captureAndPublish(ctx context.Context, work *workState, session
 	return public, obs, publishErr
 }
 
-// Baseline pool policy. The current baseline stays eligible for ten revisions,
-// while every backup and every page-return probe stays inside four. The pool
-// keeps at most one current plus three backups, and all entries share the same
-// strict age and tree-v4 size rules.
+// Baseline pool policy. The current baseline stays eligible for twelve
+// revisions, while every backup and every page-return probe stays inside ten.
+// The pool keeps at most one current plus four backups, and all entries share
+// the same strict age and tree-v5 size rules. A backup selected back into
+// service becomes the current baseline and inherits the longer window from the
+// next revision on; its selection itself still has to satisfy the backup span.
 const (
-	currentBaselineRevisionSpan = 10
-	backupBaselineRevisionSpan  = 4
-	maxBaselines                = 4
+	currentBaselineRevisionSpan = 12
+	backupBaselineRevisionSpan  = 10
+	maxBaselines                = 5
 	maxBackupBaselines          = maxBaselines - 1
 	maxBaselineAge              = 180 * time.Second
-	baselineDeltaNumerator      = 7
+	baselineDeltaNumerator      = 8
 	baselineDeltaDenominator    = 10
 )
 
@@ -290,8 +292,8 @@ const (
 //
 // Delta selection projects the same capture against every eligible confirmed
 // full, without publishing continuity state. Each matching full/delta pair is
-// encoded as tree v4 text and a delta is eligible only when it is strictly below
-// 70% of the matching full block. The smallest eligible delta wins, with the
+// encoded as tree v5 text and a delta is eligible only when it is strictly below
+// 80% of the matching full block. The smallest eligible delta wins, with the
 // current baseline and then the newer full breaking ties. If no candidate
 // qualifies, the default full tree is published.
 func (e *Engine) publishTreeAttempt(work *workState, session *sessionState, phase string,
@@ -451,7 +453,7 @@ func (e *Engine) publishTreeAttempt(work *workState, session *sessionState, phas
 	}
 	if !fits {
 		// The default full is numbered from the projector's previous published
-		// tree. A full commit clears the active pointer and leaves at most three
+		// tree. A full commit clears the active pointer and leaves at most four
 		// backups for the next confirmation.
 		postPool := e.baselinePoolForActiveLocked(nextRevision, "", now)
 		postPool = boundedBackupBaselinePool(postPool)
@@ -657,8 +659,8 @@ func (e *Engine) sortBaselinesLocked() {
 }
 
 // baselineEligibleLocked reports whether one pool entry may back a delta of
-// the observation at nextRevision. The active baseline keeps a ten-revision
-// window. Every backup has the four-revision return window, so a baseline first
+// the observation at nextRevision. The active baseline keeps a twelve-revision
+// window. Every backup has the ten-revision return window, so a baseline first
 // has to be selected as a backup before it can inherit the longer window.
 func (e *Engine) baselineEligibleLocked(b *baselineState, nextRevision int,
 	activeBaselineID string, now time.Time) bool {
@@ -714,8 +716,8 @@ func (e *Engine) pruneBaselinesLocked(nextRevision int) {
 	e.truncateBaselinesLocked()
 }
 
-// truncateBaselinesLocked keeps at most one current and three backups. With no
-// current baseline the fourth slot stays empty for the next confirmation. The
+// truncateBaselinesLocked keeps at most one current and four backups. With no
+// current baseline the fifth slot stays empty for the next confirmation. The
 // dropped tail references are cleared so a removed snapshot cannot stay
 // reachable through the pool's backing array.
 func (e *Engine) truncateBaselinesLocked() {
@@ -733,9 +735,10 @@ func (e *Engine) truncateBaselinesLocked() {
 }
 
 // treeTextBaselineDelta computes the fixed-baseline delta and measures the two
-// exact tree v4 blocks the caller would receive. Both blocks use the live
+// exact tree v5 blocks the caller would receive. Both blocks use the live
 // preview observation ID, so short-base spelling and every UTF-8 byte count are
-// represented by the final selector.
+// represented by the final selector. A delta is eligible only while it is
+// strictly below 80% of the full block; the exactly-80% case falls back to full.
 func (e *Engine) treeTextBaselineDelta(previewObservationID string, b *baselineState,
 	compact *protocol.ReadTree) (*protocol.ReadDelta, int, bool) {
 	if b == nil || b.Tree == nil || compact == nil {
@@ -913,7 +916,7 @@ func baselineIDsMissingFrom(before, after []*baselineState) int {
 }
 
 // boundedBackupBaselinePool applies the backup-only capacity without touching
-// the live pool. It keeps the three newest revisions, so a later failed commit
+// the live pool. It keeps the four newest revisions, so a later failed commit
 // cannot partially trim the authoritative pool.
 func boundedBackupBaselinePool(pool []*baselineState) []*baselineState {
 	if len(pool) <= maxBackupBaselines {

@@ -3,6 +3,7 @@ package observation
 import (
 	"math"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/malyjacob/mobile-use-vnext/internal/device"
 	"github.com/malyjacob/mobile-use-vnext/internal/protocol"
@@ -16,7 +17,7 @@ import (
 // anonymous-plain predicate: an ordinary view/group with no action, no readable
 // content and only known default state. The compact geometry policy hides its
 // known rectangle and uses this predicate when pruning empty containers and
-// bypassing single-child wrappers.
+// flattening their children into the parent.
 func AnonymousPlain(n *protocol.ReadNode) bool {
 	if n == nil || n.Context {
 		return false
@@ -28,6 +29,9 @@ func AnonymousPlain(n *protocol.ReadNode) bool {
 }
 
 func compactNoReadableContent(n *protocol.ReadNode) bool {
+	if n.Truncated {
+		return false
+	}
 	if len(n.Label) != 0 || len(n.Actions) != 0 {
 		return false
 	}
@@ -54,17 +58,15 @@ func compactKnownDefaultState(n *protocol.ReadNode) bool {
 //
 // One recursive traversal decides geometry before descending and then reduces
 // bottom-up. On the way down it removes viewport-edge sliver views, de-duplicates
-// an input label that repeats its value and decides geometry: a delivered root
-// or scroll container keeps its four-sided rectangle, every other delivered node
-// keeps only the center point of its visible rectangle. On the way back it prunes
-// unlabeled non-interactive image leaves, prunes passive text leaves already
-// covered by an ancestor composite label, removes anonymous containers left empty
-// by those removals, bypasses hidden anonymous singleton wrappers, hoists the
-// passive text children of a labeled-clickable view into one button and shortens a
-// remaining source resource id to its semantic tail. The result contains only
-// ordinary node definitions. The synthetic root rectangle is the screen
-// denominator of the remaining rectangle rules; when it is missing or
-// degenerate, only those rules are skipped.
+// an input label that repeats its value, truncates long actionable labels on
+// non-input nodes, and decides geometry. The root and scroll containers keep
+// their rectangles. Other delivered nodes keep the center point of their visible
+// rectangle. On the way back it prunes decorative image leaves and passive text
+// leaves covered by delivered ancestor labels, removes anonymous containers left
+// empty by pruning, and flattens hidden anonymous wrappers. It then hoists
+// passive text children of an unlabeled tappable view into a button and shortens
+// remaining resource IDs. A missing or degenerate root rectangle skips the rules
+// that need a screen rectangle.
 func ProjectCompactTree(t *protocol.Tree) *protocol.ReadTree {
 	if t == nil || t.Root == nil {
 		return nil
@@ -72,7 +74,7 @@ func ProjectCompactTree(t *protocol.Tree) *protocol.ReadTree {
 	screen := newCompactProjection(t.Root)
 	return &protocol.ReadTree{
 		Format: "full", Scope: protocol.Scope, View: protocol.ViewCompact,
-		Root: projectCompactNode(t.Root, screen, nil, nil),
+		Root: projectCompactNodes(t.Root, screen, nil, nil)[0],
 	}
 }
 
@@ -85,27 +87,12 @@ func ProjectDetailedTree(t *protocol.Tree) *protocol.ReadTree {
 	}
 	return &protocol.ReadTree{
 		Format: "full", Scope: protocol.Scope, View: protocol.ViewDetailed,
-		Root: projectReadNode(t.Root, false),
+		Root: projectDetailedNode(t.Root),
 	}
 }
 
 // ProjectDetailedNode builds the detailed definition of one internal subtree.
 func ProjectDetailedNode(n *protocol.Node) *protocol.ReadNode {
-	return projectReadNode(n, false)
-}
-
-// projectReadNode copies every public field of one internal node. In the
-// detailed view every known rectangle is delivered and a missing source
-// rectangle stays explicitly unknown. A compact projection of one standalone
-// node applies the compact geometry and content rules without a screen
-// denominator.
-func projectReadNode(n *protocol.Node, compact bool) *protocol.ReadNode {
-	if n == nil {
-		return nil
-	}
-	if compact {
-		return projectCompactNode(n, compactProjection{}, nil, nil)
-	}
 	return projectDetailedNode(n)
 }
 
@@ -155,21 +142,14 @@ func projectDetailedNode(n *protocol.Node) *protocol.ReadNode {
 // pixels wide or high cannot be read or aimed at and only adds a row.
 const compactSliverMaxEdge = 4
 
-// projectCompactNode copies one internal node, decides its delivered geometry
-// from its original rectangle, processes children, and then reduces the result
-// bottom-up.
-//
-// The downward pass removes sliver views, de-duplicates an input label equal to
-// its value and decides geometry against the nearest delivered ancestor
-// rectangle. Geometry keeps the plain internal state machine for hidden
-// geometry; a delivered root or scroll container keeps its four-sided rectangle
-// while every other delivered node keeps the center point of its visible
-// rectangle. The upward pass then applies the fixed order: unlabeled
-// non-interactive image leaves, ancestor-covered passive text leaves, anonymous
-// containers made empty by those removals, hidden anonymous singleton wrappers,
-// labeled-clickable view hoisting and source-resource shortening.
-func projectCompactNode(n *protocol.Node, screen compactProjection,
-	ancestors [][]string, reference *protocol.Bounds) *protocol.ReadNode {
+// compactActionableLabelMaxRunes limits each label part on an actionable source
+// node in compact view, excluding inputs and text hoisted during projection.
+const compactActionableLabelMaxRunes = 250
+
+// projectCompactNodes returns the compact definitions contributed by one source
+// node. A flattened wrapper contributes its projected children in source order.
+func projectCompactNodes(n *protocol.Node, screen compactProjection,
+	ancestors [][]string, reference *protocol.Bounds) []*protocol.ReadNode {
 	if n == nil {
 		return nil
 	}
@@ -182,6 +162,20 @@ func projectCompactNode(n *protocol.Node, screen compactProjection,
 	if out.Role == protocol.RoleInput && out.Value != nil &&
 		len(out.Label) == 1 && out.Label[0] == *out.Value {
 		out.Label = []string{}
+	}
+	if !out.Context && out.Role != protocol.RoleInput && len(out.Actions) > 0 && len(out.Label) > 0 {
+		for i, part := range out.Label {
+			if utf8.RuneCountInString(part) <= compactActionableLabelMaxRunes {
+				continue
+			}
+			end := 0
+			for range compactActionableLabelMaxRunes {
+				_, size := utf8.DecodeRuneInString(part[end:])
+				end += size
+			}
+			out.Label[i] = part[:end]
+			out.Truncated = true
+		}
 	}
 
 	switch {
@@ -202,12 +196,7 @@ func projectCompactNode(n *protocol.Node, screen compactProjection,
 		childAncestors = appendCompactAncestorLabel(ancestors, out.Label)
 	}
 	for _, child := range n.Children {
-		if child == nil {
-			continue
-		}
-		if projected := projectCompactNode(child, screen, childAncestors, reference); projected != nil {
-			out.Children = append(out.Children, projected)
-		}
+		out.Children = append(out.Children, projectCompactNodes(child, screen, childAncestors, reference)...)
 	}
 
 	if !originalHasChildren && compactImageLeafCanPrune(out) {
@@ -221,8 +210,8 @@ func projectCompactNode(n *protocol.Node, screen compactProjection,
 		out.Bounds.Kind == protocol.GeometryHidden && AnonymousPlain(out) {
 		return nil
 	}
-	if out.Bounds.Kind == protocol.GeometryHidden && AnonymousPlain(out) && len(out.Children) == 1 {
-		return out.Children[0]
+	if out.Bounds.Kind == protocol.GeometryHidden && AnonymousPlain(out) && len(out.Children) > 0 {
+		return out.Children
 	}
 	if compactHoistsTextChildren(out) {
 		hoisted := make([]string, 0, len(out.Children))
@@ -242,7 +231,7 @@ func projectCompactNode(n *protocol.Node, screen compactProjection,
 		short := compactResourceTail(*out.Resource)
 		out.Resource = &short
 	}
-	return out
+	return []*protocol.ReadNode{out}
 }
 
 // hasNonNilChild reports whether the original logical node has at least one
@@ -727,7 +716,7 @@ func equalReadNode(a, b *protocol.ReadNode) bool {
 	if a == nil || b == nil {
 		return a == b
 	}
-	if a.Ref != b.Ref || a.Role != b.Role || a.Context != b.Context {
+	if a.Ref != b.Ref || a.Role != b.Role || a.Context != b.Context || a.Truncated != b.Truncated {
 		return false
 	}
 	if !a.Bounds.Equal(b.Bounds) {

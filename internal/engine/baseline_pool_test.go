@@ -127,8 +127,9 @@ func publicNodeByLabel(root *protocol.Node, label string) *protocol.Node {
 }
 
 // TestBaselinePoolPageReturnWindow covers the split confirmed-full windows: a
-// backup page return inside four revisions becomes current, then that same full
-// remains available through revision span ten. Span eleven falls back to full.
+// backup page return inside ten revisions becomes current, then that same full
+// remains available through the twelve-revision primary span. Span thirteen
+// falls back to full.
 func TestBaselinePoolPageReturnWindow(t *testing.T) {
 	h := newHarness(t)
 	h.engine.cfg.MaxObservations = 3
@@ -181,56 +182,108 @@ func TestBaselinePoolPageReturnWindow(t *testing.T) {
 	requireBaselineDelta(t, o5, 5, o1.ID)
 
 	last := o5
-	for revision := 6; revision <= 11; revision++ {
+	for revision := 6; revision <= 13; revision++ {
 		h.device.scriptCaptures(baselinePageStep(pageAChanged))
 		last = baselineObserve(t, h, fmt.Sprintf("PbaselineCurrentSpan%d", revision), last.ID)
 		requireBaselineDelta(t, last, revision, o1.ID)
 	}
 
-	// Span eleven is outside the extended current window.
+	// Span thirteen is outside the extended current window; the pooled page B
+	// backup (span twelve) is outside the backup window too.
 	h.device.scriptCaptures(baselinePageStep(pageA))
-	o12 := baselineObserve(t, h, "PbaselineSpanEleven", last.ID)
-	requireFullTree(t, o12, 12)
+	o14 := baselineObserve(t, h, "PbaselineSpanThirteen", last.ID)
+	requireFullTree(t, o14, 14)
 
 	// The discarded probes never shifted the ref high-water mark: after the new
 	// full is confirmed, the same page is again an empty delta.
 	h.device.scriptCaptures(baselinePageStep(pageA))
-	o13 := baselineObserve(t, h, "PbaselineAfterFull", o12.ID)
-	after := requireBaselineDelta(t, o13, 13, o12.ID)
+	o15 := baselineObserve(t, h, "PbaselineAfterFull", o14.ID)
+	after := requireBaselineDelta(t, o15, 15, o14.ID)
 	if !after.IsEmpty() {
 		t.Fatalf("post-full continuity was polluted: %+v", after)
 	}
 }
 
-func TestBaselinePoolBackupReturnBecomesCurrentAtSpanFour(t *testing.T) {
+// TestBaselinePoolDemotedPrimaryReselectsAtBackupWindow follows the proposal's
+// baseline timeline: a primary used through span five is demoted to a backup at
+// span six, stays recoverable through the ten-revision backup window, is selected
+// back at span ten, and then keeps the primary window through span twelve before
+// the thirteen-span fallback.
+func TestBaselinePoolDemotedPrimaryReselectsAtBackupWindow(t *testing.T) {
 	h := newHarness(t)
 	pageA := baselineRows("alpha", 8)
+	pageAChanged := append(append([]rawNodeSpec(nil), pageA...), rawNodeSpec{
+		Parent: 0,
+		Bounds: device.Rect{Left: 40, Top: 1600, Right: 1040, Bottom: 1700},
+		Class:  "android.widget.TextView",
+		Text:   "alpha-extra",
+	})
 	pageB := baselineRows("beta", 4)
 
 	h.device.scriptCaptures(baselinePageStep(pageA))
 	start := h.startSession()
-	pageAFull := start.Observation
-	requireFullTree(t, pageAFull, 1)
+	o1 := start.Observation
+	requireFullTree(t, o1, 1)
 
-	h.device.scriptCaptures(baselinePageStep(pageB))
-	pageBFull := baselineObserve(t, h, "PbackupB2", pageAFull.ID)
-	requireFullTree(t, pageBFull, 2)
-	h.device.scriptCaptures(baselinePageStep(pageB))
-	pageBFull = baselineObserveRequest(t, h, "PbackupB3",
-		&protocol.ObserveRequest{Reference: pageBFull.ID, Full: true})
-	requireFullTree(t, pageBFull, 3)
-	h.device.scriptCaptures(baselinePageStep(pageB))
-	pageBFull = baselineObserveRequest(t, h, "PbackupB4",
-		&protocol.ObserveRequest{Reference: pageBFull.ID, Full: true})
-	requireFullTree(t, pageBFull, 4)
+	// Spans one through five stay on the primary baseline.
+	last := o1
+	for revision := 2; revision <= 6; revision++ {
+		h.device.scriptCaptures(baselinePageStep(pageAChanged))
+		last = baselineObserve(t, h, fmt.Sprintf("PdemotedPrimary%d", revision), last.ID)
+		requireBaselineDelta(t, last, revision, o1.ID)
+	}
 
+	// Publishing page B at span six demotes the page A full to a backup. It must
+	// not be pruned immediately, unlike the old four-revision backup window.
+	h.device.scriptCaptures(baselinePageStep(pageB))
+	pageBFull := baselineObserve(t, h, "PdemotedPageB", last.ID)
+	requireFullTree(t, pageBFull, 7)
+	h.engine.mu.Lock()
+	pooled := baselineWithID(h.engine.baselines, o1.ID) != nil
+	demotedSpan := pageBFull.Revision - o1.Revision
+	h.engine.mu.Unlock()
+	if !pooled || demotedSpan != 6 {
+		t.Fatalf("page A baseline pooled=%t span=%d, want a span-six backup",
+			pooled, demotedSpan)
+	}
+
+	// Hold page B through span ten so the demoted page A full reaches the backup
+	// window boundary; the newest page B full keeps its own deltas.
+	last = pageBFull
+	for revision := 8; revision <= 10; revision++ {
+		h.device.scriptCaptures(baselinePageStep(pageB))
+		last = baselineObserve(t, h, fmt.Sprintf("PdemotedKeepPageB%d", revision), last.ID)
+		requireBaselineDelta(t, last, revision, pageBFull.ID)
+	}
+
+	// The page A return at span ten is the last selectable backup revision. The
+	// selected backup becomes current, so the primary window applies after.
 	h.device.scriptCaptures(baselinePageStep(pageA))
-	returned := baselineObserve(t, h, "PbackupA5", pageBFull.ID)
-	requireBaselineDelta(t, returned, 5, pageAFull.ID)
+	reselected := baselineObserve(t, h, "PdemotedReselectAtSpanTen", last.ID)
+	requireBaselineDelta(t, reselected, 11, o1.ID)
+	if span := reselected.Revision - o1.Revision; span != backupBaselineRevisionSpan {
+		t.Fatalf("reselect span = %d, want the backup boundary %d",
+			span, backupBaselineRevisionSpan)
+	}
+	h.engine.mu.Lock()
+	activeID := h.engine.activeBaselineID
+	h.engine.mu.Unlock()
+	if activeID != o1.ID {
+		t.Fatalf("active baseline = %q after reselect, want %q", activeID, o1.ID)
+	}
 
-	h.device.scriptCaptures(baselinePageStep(pageA))
-	extended := baselineObserve(t, h, "PbackupA6", returned.ID)
-	requireBaselineDelta(t, extended, 6, pageAFull.ID)
+	// The reselected baseline keeps the primary window through span twelve.
+	last = reselected
+	for revision := 12; revision <= 13; revision++ {
+		h.device.scriptCaptures(baselinePageStep(pageAChanged))
+		last = baselineObserve(t, h, fmt.Sprintf("PdemotedPrimaryAgain%d", revision), last.ID)
+		requireBaselineDelta(t, last, revision, o1.ID)
+	}
+
+	// Span thirteen expires the reselected primary.
+	h.device.scriptCaptures(baselinePageStep(pageAChanged))
+	expired := baselineObserve(t, h, "PdemotedSpanThirteen", last.ID)
+	requireFullTree(t, expired, 14)
 }
 
 // TestBaselinePoolAllPoolMayReuseBannerRef pins the selected shortest-delta
@@ -357,18 +410,18 @@ func TestBaselinePoolRejectedPublicationKeepsCurrentBase(t *testing.T) {
 	}
 
 	// A certain commit for revision 6 does prune the out-of-window entry; the
-	// retained observation itself stays readable. The current ten-revision
-	// window keeps this base through revision eleven.
+	// retained observation itself stays readable. The current twelve-revision
+	// window keeps this base through revision thirteen.
 	h.engine.cfg = DefaultConfig(h.engine.cfg.ServiceInstanceID, h.engine.cfg.AgentName)
 	last := o5
-	for revision := 6; revision <= 11; revision++ {
+	for revision := 6; revision <= 13; revision++ {
 		h.device.scriptCaptures(baselinePageStep(pageA))
 		last = baselineObserve(t, h, fmt.Sprintf("PrejectCommitted%d", revision), last.ID)
 		requireBaselineDelta(t, last, revision, o1.ID)
 	}
 	h.device.scriptCaptures(baselinePageStep(pageA))
-	o12 := baselineObserve(t, h, "PrejectWindowExpired", last.ID)
-	requireFullTree(t, o12, 12)
+	o14 := baselineObserve(t, h, "PrejectWindowExpired", last.ID)
+	requireFullTree(t, o14, 14)
 	h.engine.mu.Lock()
 	pruned := true
 	for _, entry := range h.engine.baselines {
@@ -620,14 +673,14 @@ func TestBaselinePoolSplitRevisionWindows(t *testing.T) {
 		}
 	}
 	h.engine.baselines = []*baselineState{
-		common(currentID, session.Revision+5),
-		common(backupID, session.Revision+11),
+		common(currentID, session.Revision+3),
+		common(backupID, session.Revision+5),
 	}
 	nextRevision := session.Revision + 15
 	pool := h.engine.baselinePoolForActiveLocked(nextRevision, currentID, time.Now())
 	h.engine.mu.Unlock()
 	if baselineWithID(pool, currentID) == nil || baselineWithID(pool, backupID) == nil {
-		t.Fatalf("exact ten/four windows excluded a baseline: %+v", pool)
+		t.Fatalf("exact twelve/ten windows excluded a baseline: %+v", pool)
 	}
 
 	h.engine.mu.Lock()
@@ -636,10 +689,10 @@ func TestBaselinePoolSplitRevisionWindows(t *testing.T) {
 	withoutCurrent := h.engine.baselinePoolForActiveLocked(nextRevision, "", time.Now())
 	h.engine.mu.Unlock()
 	if len(pool) != 0 {
-		t.Fatalf("span eleven/five kept baselines: %+v", pool)
+		t.Fatalf("span thirteen/eleven kept baselines: %+v", pool)
 	}
 	if len(withoutCurrent) != 0 {
-		t.Fatalf("a five-span full remained a backup: %+v", withoutCurrent)
+		t.Fatalf("an eleven-span full remained a backup: %+v", withoutCurrent)
 	}
 }
 
@@ -662,7 +715,10 @@ func TestBaselinePoolPostSelectionPrunesOldCurrent(t *testing.T) {
 		Tree: tree,
 	}
 	h.engine.baselines = []*baselineState{selected, oldCurrent}
-	nextRevision := session.Revision + 8
+	// The old current still serves as the active twelve-span baseline before the
+	// selection, but it is a twelve-span backup afterwards and falls outside the
+	// ten-revision backup window.
+	nextRevision := session.Revision + 13
 	before := h.engine.baselinePoolForActiveLocked(nextRevision,
 		oldCurrent.ObservationID, time.Now())
 	after := h.engine.baselinePoolForActiveLocked(nextRevision,
@@ -677,10 +733,11 @@ func TestBaselinePoolPostSelectionPrunesOldCurrent(t *testing.T) {
 	}
 }
 
-func TestBaselinePoolKeepsOneCurrentAndThreeBackups(t *testing.T) {
+func TestBaselinePoolKeepsOneCurrentAndFourBackups(t *testing.T) {
 	h := newHarness(t)
 	h.engine.mu.Lock()
 	h.engine.baselines = []*baselineState{
+		{ObservationID: "Ob5", Revision: 5},
 		{ObservationID: "Ob4", Revision: 4},
 		{ObservationID: "Ob3", Revision: 3},
 		{ObservationID: "Ob2", Revision: 2},
@@ -692,18 +749,25 @@ func TestBaselinePoolKeepsOneCurrentAndThreeBackups(t *testing.T) {
 		t.Fatalf("backup-only pool length = %d, want %d",
 			len(h.engine.baselines), maxBackupBaselines)
 	}
+	if maxBackupBaselines != 4 {
+		t.Fatalf("backup-only capacity = %d, want 4", maxBackupBaselines)
+	}
 	h.engine.baselines = []*baselineState{
+		{ObservationID: "Ob5", Revision: 5},
 		{ObservationID: "Ob4", Revision: 4},
 		{ObservationID: "Ob3", Revision: 3},
 		{ObservationID: "Ob2", Revision: 2},
 		{ObservationID: "Ob1", Revision: 1},
 	}
-	h.engine.activeBaselineID = "Ob4"
+	h.engine.activeBaselineID = "Ob5"
 	h.engine.truncateBaselinesLocked()
 	length := len(h.engine.baselines)
 	h.engine.mu.Unlock()
 	if length != maxBaselines {
 		t.Fatalf("current plus backups pool length = %d, want %d", length, maxBaselines)
+	}
+	if maxBaselines != 5 {
+		t.Fatalf("full pool capacity = %d, want 5", maxBaselines)
 	}
 }
 

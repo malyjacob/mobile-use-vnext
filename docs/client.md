@@ -19,22 +19,22 @@ instance, err := c.Discover(ctx)
 `POST /api/status {}` 取得当前准入事实（`can_start`、`blocking_code`、本 Agent 的
 `session`、`start_operation_id` 与 `cleanup`）。它不生成 P、不续租、不创建会话。
 
-当前共同契约为 `"28"`。契约版本不等时返回 `contract_mismatch`；客户端不刷新版本、不重发
+当前共同契约为 `"29"`。契约版本不等时返回 `contract_mismatch`；客户端不刷新版本、不重发
 业务动作。端口可应答、`/health` 正常都不等于 `can_start=true`。
 
 公开树与 detailed inspection 使用相同的完整节点布尔默认/unknown 规则，不携带 defaults。
 compact 中 `root`/`scroll` 的已知几何是四整数矩形，其余角色的已知几何是二整数中心点；
 detailed inspection 始终使用四整数矩形。delta 的 set 保留显式 false/空值/null，`bounds`
 的已知值按同一角色规则写中心点或矩形；应用器将五块作为固定基线的原子最终图声明，支持
-存续节点迁移与新增组装父。服务端维护至多 4 条已确认 full 基线（同一会话 origin 与同一目标
-显示 ID/代次，采集龄 `< 180s`）。当前基线可在跨度 1–10 内成为 `delta.base`，其他备用 full
-仅可使用跨度 1–4；备用 full 被成功选回后，从下一次发布起成为当前基线。调用方必须保留所有
-可能被引用的已确认 full 树，不能在第 4 个修订后立即淘汰仍为当前基线的 full，并逐条按
+存续节点迁移与新增组装父。服务端维护 1 条当前基线与至多 4 条备用 full（同一会话 origin 与
+同一目标显示 ID/代次，采集龄 `< 180s`）。当前基线可在跨度 1–12 内成为 `delta.base`，其他
+备用 full 可在跨度 1–10 内使用；备用 full 被成功选回后，从下一次发布起成为当前基线。调用方
+必须保留所有可能被引用的已确认 full 树，不能按修订数提前淘汰仍可能被引用的 full，并逐条按
 `delta.base` 应用到对应完整树，不能叠加在上一份 delta 结果上。服务从同一采集的全池候选中
-按实际 `tree v5` 树块 UTF-8 字节选择最短合格差分，合格条件是严格小于对应 full 的 70%。
-同一字节数优先当前基线，再取较新 revision。`observe(P)` 与 `full=true` 强制 full，基线仍在
-池内时可经 `inspect(reference=base)` 回看。阅读 ref 连续性不代替服务端输入授权。格式见
-[接口契约](interface.md)。
+按实际 `tree v5` 树块 UTF-8 字节选择最短合格差分，合格条件是严格小于
+对应 full 的 80%。同一字节数优先当前基线，再取较新 revision。`observe(P)` 与 `full=true`
+强制 full，基线仍在池内时可经 `inspect(reference=base)` 回看。阅读 ref 连续性不代替服务端
+输入授权。格式见 [接口契约](interface.md)。
 
 ## 2. 操作编号 P
 
@@ -91,9 +91,15 @@ type Response struct {
 或空串都不是合法响应。
 
 `Result.Observation.Tree` 携带 compact full 或 delta，节点集合随服务的[裁剪策略](interface.md#node)
-确定。留存节点使用原编号，匿名包装省略后孩子可能换父。调用方留存已确认的 full，按每条
+确定。留存节点使用原编号，匿名包装省略后孩子可能换父。compact 投影对隐藏匿名容器按裁剪后
+剩余孩子的顺序扁平化（单子与多子一致），并对有动作、非 `input`、非 `context` 节点中超过
+`250` 个 Unicode 码点的 `label` 段前置截取前 `250` 个码点、置 `truncated=true`；未超过的
+段不截断、不置位，无动作正文与 `input` 的 `value` 保留全文。需要被截断节点的完整原文、四元
+矩形与全部节点时用只读 `Client.Inspect` 补看，它返回 `view=detailed` 与完整未截断的 label，
+节点定义不输出 `truncated`；`query` 结果顶层的预算字段 `truncated` 仍保留。应用器按 delta 的
+`set` 显式还原 `truncated=true|false`。调用方留存已确认的 full，按每条
 `delta.base` 独立应用差分。使用 `observation.ReadApply` 时，历史 full 与 `add`/`replace` 定义中的
-折叠链会展开，重建结果以普通节点定义交付。只读 `Client.Inspect` 返回 detailed 视图。
+折叠链会展开，重建结果以普通节点定义交付。
 诊断中的节点编号可能缺席于 compact。同一调用方的原 O 仍在服务端留存时，按该 O 和编号补看。
 
 失败结果可以携带 `observation`：`act` 的重验在派发前失败且已发布新帧时，`not_executed` 结果带

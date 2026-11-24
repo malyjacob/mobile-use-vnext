@@ -24,8 +24,10 @@ const compatibilityProtocolVersion = "2025-11-25"
 // descriptions must stay strictly below it. The current ceiling covers the
 // text auto_submit/submit_ref contract (result v4 partial, write/submit
 // snapshot and text_submit_not_executed), the four-tier scroll amount, the
-// scroll axis-fallback guidance and the contract-28 visual hint plus binary
-// center-point tree legend.
+// scroll axis-fallback guidance, the contract-28 visual hint plus binary
+// center-point tree legend, and the contract-29 truncation column with the
+// flattened narrow net body (label whitespace purification, actionable
+// 250-code-point cut and the set-line truncated=true|false tri-state).
 const baselineDiscoveryBytes = 37500
 
 // TestTreeTextGuideStatesTriStateOmission pins the shared tree legend to the
@@ -78,8 +80,12 @@ func TestTreeTextGuideStatesCompactPruningAndLegacyChains(t *testing.T) {
 		"`label==value` 时省略 `label`",
 		"`<=4px`",
 		"最后的非纯数字短段",
-		"清理变空/单子隐藏匿名容器",
-		"`len>=2` 保持层级",
+		"所有隐藏匿名容器（无文本/动作/`resource`、状态全默认、至少 1 子）按序扁平化透传",
+		"原始无子合成叶例外",
+		"变空的匿名容器清理",
+		"公开 `label` 首尾空白净化（含 NBSP/纯空白归空）",
+		"有动作非 `input` 节点单段 `label` 超 `250` 码点截断并置 `truncated=true`",
+		"被动文本/`input.Value` 保持全文，`inspect` 补看全文",
 		"无动作 `text` 与匿名容器隐藏几何，详细补看交付矩形",
 		"新 v5 只生成普通节点定义",
 		"读取端继续接受历史 `[n2 n3]`",
@@ -91,6 +97,37 @@ func TestTreeTextGuideStatesCompactPruningAndLegacyChains(t *testing.T) {
 	}
 	if strings.Contains(treeTextGuide, "节点未出现在普通树，不代表详细快照中不存在") {
 		t.Error("tree guide repeats the removed compact omission explanation")
+	}
+}
+
+// TestTreeTextGuideStatesTruncationContract pins the contract-29 truncation
+// column: the complete-node grammar places it after resource and before context,
+// the set grammar keeps both assignments explicit, and the compact net-body
+// legend names the actionable 250-code-point cut while passive text and input
+// values keep their full text.
+func TestTreeTextGuideStatesTruncationContract(t *testing.T) {
+	for _, required := range []string{
+		"axis=… resource=… [truncated=true] context",
+		"`truncated=true` 只在 compact 有动作非 `input` 节点截断时出现，`false` 省略、detailed 禁止",
+		"`truncated=true|false` 同样显式保留，省略表示未修改",
+		"有动作非 `input` 节点单段 `label` 超 `250` 码点截断并置 `truncated=true`",
+		"被动文本/`input.Value` 保持全文，`inspect` 补看全文",
+	} {
+		if !strings.Contains(treeTextGuide, required) {
+			t.Errorf("tree guide lacks %q", required)
+		}
+	}
+	for _, retired := range []string{"`len>=2` 保持层级", "清理变空/单子隐藏匿名容器"} {
+		if strings.Contains(treeTextGuide, retired) {
+			t.Errorf("tree guide retains retired compact wording %q", retired)
+		}
+	}
+	// The public legend states the caller-facing contract only; the internal
+	// baseline pool parameters stay out of discovery.
+	for _, internal := range []string{"12, 10, 5", "(12,10,5)", "80%"} {
+		if strings.Contains(treeTextGuide, internal) {
+			t.Errorf("tree guide leaks internal baseline pool parameter %q", internal)
+		}
 	}
 }
 

@@ -377,6 +377,132 @@ func TestTreeTextDeltaExplicitValues(t *testing.T) {
 	}
 }
 
+// TestTreeTextV5SetTruncatedTriState pins the set-line truncation column: an
+// omitted member keeps the baseline value, while both explicit assignments stay
+// visible and null is never an assignment.
+func TestTreeTextV5SetTruncatedTriState(t *testing.T) {
+	for _, raw := range []string{"true", "false"} {
+		ref, set, err := parseV5SetLineValue("~ n2 truncated=" + raw)
+		if err != nil {
+			t.Fatalf("truncated=%s: %v", raw, err)
+		}
+		if ref != "n2" || !set.Truncated.Set || set.Truncated.Value != (raw == "true") {
+			t.Fatalf("truncated=%s parsed as ref=%q field=%+v", raw, ref, set.Truncated)
+		}
+	}
+	for _, raw := range []string{"null", "yes", "True"} {
+		if _, _, err := parseV5SetLineValue("~ n2 truncated=" + raw); err == nil {
+			t.Fatalf("truncated=%q was accepted", raw)
+		}
+	}
+	for _, line := range []string{
+		"~ n2 truncated=true truncated=false",
+		"~ n2 truncated=true resource=\"r\"",
+	} {
+		if _, _, err := parseV5SetLineValue(line); err == nil {
+			t.Fatalf("set line %q was accepted", line)
+		}
+	}
+
+	delta := &protocol.ReadDelta{
+		Format: "delta", Base: "O1", View: protocol.ViewCompact,
+		Set: map[string]protocol.ReadSetNode{
+			"n2": {Truncated: protocol.Field[bool]{Set: true, Value: true}},
+			"n3": {Truncated: protocol.Field[bool]{Set: true, Value: false}},
+		},
+	}
+	block := mustRenderTreeText(t, &protocol.Result{Observation: &protocol.Observation{
+		ID: "O2", Tree: &protocol.ReadTreeValue{Delta: delta},
+	}})
+	for _, want := range []string{"~ n2 truncated=true\n", "~ n3 truncated=false\n"} {
+		if !strings.Contains(block, want) {
+			t.Fatalf("missing %q in:\n%s", want, block)
+		}
+	}
+	parsed := parseDeltaText(t, block)
+	if got, want := mustJSONValue(t, parsed), mustJSONValue(t, delta); !reflect.DeepEqual(got, want) {
+		t.Fatalf("truncated delta did not round-trip:\n got %s\nwant %s", mustJSON(t, got), mustJSON(t, want))
+	}
+}
+
+// TestTreeTextV5TruncatedColumn pins the complete-node truncation column: it
+// sits after resource and before context, only the true fact is written, and a
+// chain definition carrying it always spells its columns instead of using the
+// anonymous shorthand.
+func TestTreeTextV5TruncatedColumn(t *testing.T) {
+	root := testNode("n1", protocol.RoleRoot, testBounds(0, 0, 1080, 2400))
+	truncated := testNode("n2", protocol.RoleButton, testPoint(540, 120))
+	truncated.Label = []string{"超长标题"}
+	truncated.Actions = []protocol.Action{protocol.ActionTap}
+	truncated.Resource = testStringPtr("btn")
+	truncated.Truncated = true
+
+	chain := testNode("", protocol.RoleView, protocol.HiddenBounds())
+	chain.Chain = []string{"n3", "n4"}
+	chain.Truncated = true
+	if isAnonymousDefaultViewChain(chain) {
+		t.Fatal("truncated chain is treated as the anonymous default view")
+	}
+
+	root.Children = []*protocol.ReadNode{truncated, chain}
+	tree := &protocol.ReadTree{Format: "full", Scope: protocol.Scope, View: protocol.ViewCompact, Root: root}
+	block := mustRenderTreeText(t, &protocol.Result{Observation: &protocol.Observation{
+		ID: "O1", Tree: &protocol.ReadTreeValue{Full: tree},
+	}})
+	for _, want := range []string{
+		// The default tap of a button stays omitted; the truncation column
+		// still follows resource and precedes context.
+		" n2 button 540,120 \"超长标题\" resource=\"btn\" truncated=true\n",
+		" chain [n3 n4] view truncated=true\n",
+	} {
+		if !strings.Contains(block, want) {
+			t.Fatalf("missing %q in:\n%s", want, block)
+		}
+	}
+	if strings.Contains(block, "\n  [n3 n4]\n") {
+		t.Fatalf("truncated chain used the anonymous shorthand:\n%s", block)
+	}
+	parsed := parseFullTreeText(t, block)
+	if got, want := mustJSON(t, parsed), mustJSON(t, tree); got != want {
+		t.Fatalf("truncated full tree did not round-trip:\n got %s\nwant %s", got, want)
+	}
+	if !parsed.Root.Children[0].Truncated || !parsed.Root.Children[1].Truncated {
+		t.Fatal("truncated column did not round-trip")
+	}
+}
+
+// TestTreeTextV5TruncatedColumnRejects keeps the complete-node column strict:
+// the false default is omitted, the column appears exactly once between
+// resource and context, and null or other values are never spellable.
+func TestTreeTextV5TruncatedColumnRejects(t *testing.T) {
+	for _, column := range []string{
+		"button 0,0,10,10 tap truncated=false",
+		"button 0,0,10,10 tap truncated=null",
+		"button 0,0,10,10 tap truncated=yes",
+		"button 0,0,10,10 tap truncated=true truncated=true",
+		"button 0,0,10,10 tap truncated=true resource=\"r\"",
+		"button 0,0,10,10 context truncated=true",
+	} {
+		if _, err := parseV5NodeContent(column, nil); err == nil {
+			t.Fatalf("column %q was accepted", column)
+		}
+	}
+}
+
+// TestTreeTextInspectRejectsTruncatedLabel proves the detailed inspect parser
+// never accepts the compact truncation fact, for either assignment.
+func TestTreeTextInspectRejectsTruncatedLabel(t *testing.T) {
+	block := "inspect v3 scope=subtree observation=O2 revision=4 captured_at=2026-11-10T03:00:00Z " +
+		"tree_scope=reported_visible_with_context view=detailed root=n5 nodes=1 entries=1\n\n" +
+		"n5 button [0,0,10,10] \"确定\" tap truncated=true\nend inspect\n"
+	if _, err := parseInspectionTextValue(block); err == nil {
+		t.Fatal("inspect v3 accepted a truncated label")
+	}
+	if _, err := parseInspectionTextValue(strings.Replace(block, "truncated=true", "truncated=false", 1)); err == nil {
+		t.Fatal("inspect v3 accepted an explicit truncated=false")
+	}
+}
+
 func TestTreeTextV5FieldInverse(t *testing.T) {
 	block := `tree v5 full nodes=2
 
@@ -1782,6 +1908,30 @@ func TestTreeTextRejectsUnrepresentableMetadata(t *testing.T) {
 				return &protocol.Result{Inspection: view}
 			}(),
 		},
+		{
+			name: "inspection subtree carries truncated label",
+			result: func() *protocol.Result {
+				view := testInspectionSubtreeView()
+				view.Root.Children[0].Truncated = true
+				return &protocol.Result{Inspection: view}
+			}(),
+		},
+		{
+			name: "inspection query match carries truncated label",
+			result: func() *protocol.Result {
+				view := testInspectionQueryView()
+				view.Matches[0].Node.Truncated = true
+				return &protocol.Result{Inspection: view}
+			}(),
+		},
+		{
+			name: "inspection tree scope carries truncated label",
+			result: func() *protocol.Result {
+				view := testInspectionTreeView()
+				view.Tree.Root.Children[0].Children[0].Truncated = true
+				return &protocol.Result{Inspection: view}
+			}(),
+		},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -2824,8 +2974,16 @@ func parseNodeTailFields(
 				return fmt.Errorf("resource must be a JSON string")
 			}
 			node.Resource = value
-		case token == "context":
+		case token == "truncated=true":
+			// truncated is a compact-only delivery fact of actionable labels:
+			// the true fact is the only legal spelling, between resource and
+			// context.
 			rank = 11
+			node.Truncated = true
+		case strings.HasPrefix(token, "truncated="):
+			return fmt.Errorf("truncated must be spelled truncated=true or omitted")
+		case token == "context":
+			rank = 12
 			node.Context = true
 		default:
 			return fmt.Errorf("unexpected node token %q", token)
@@ -3194,6 +3352,16 @@ func parseV5SetLineValue(line string) (string, protocol.ReadSetNode, error) {
 			if err != nil {
 				return "", protocol.ReadSetNode{}, err
 			}
+		case "truncated":
+			// A set assignment keeps all three truncation states: an omitted
+			// member keeps the baseline value while an explicit false and true
+			// stay visible. null is never a legal assignment.
+			rank = 12
+			value, err := parseRequiredBoolFieldValue(raw)
+			if err != nil {
+				return "", protocol.ReadSetNode{}, err
+			}
+			set.Truncated = value
 		default:
 			return "", protocol.ReadSetNode{}, fmt.Errorf("unexpected set field %q", key)
 		}
@@ -3204,7 +3372,8 @@ func parseV5SetLineValue(line string) (string, protocol.ReadSetNode, error) {
 		if key != "label" && key != "actions" && key != "bounds" &&
 			key != "enabled" && key != "focused" && key != "selected" &&
 			key != "checked" && key != "value" && key != "hint" &&
-			key != "protected" && key != "axis" && key != "resource" {
+			key != "protected" && key != "axis" && key != "resource" &&
+			key != "truncated" {
 			return "", protocol.ReadSetNode{}, fmt.Errorf("unexpected set field %q", key)
 		}
 	}
@@ -3233,6 +3402,20 @@ func parseOptionalBoolFieldValue(raw string) (protocol.Field[*bool], error) {
 		return protocol.Field[*bool]{}, err
 	}
 	return protocol.Field[*bool]{Set: true, Value: value}, nil
+}
+
+// parseRequiredBoolFieldValue decodes one explicit true/false assignment. It is
+// used by the explicitly three-state members such as truncated, where an omitted
+// member means "keep" and null is not an assignment.
+func parseRequiredBoolFieldValue(raw string) (protocol.Field[bool], error) {
+	switch raw {
+	case "true":
+		return protocol.Field[bool]{Set: true, Value: true}, nil
+	case "false":
+		return protocol.Field[bool]{Set: true, Value: false}, nil
+	default:
+		return protocol.Field[bool]{}, fmt.Errorf("%q is not true or false", raw)
+	}
 }
 
 func parseOptionalStringFieldValue(raw string) (protocol.Field[*string], error) {
@@ -3539,6 +3722,11 @@ func parseInspectV3NodeContent(content string) (*protocol.ReadNode, error) {
 	}
 	if err := parseNodeTailFields(node, tokens[index:], false, false); err != nil {
 		return nil, err
+	}
+	// inspect v3 is always the detailed view: it keeps the complete label text,
+	// so a truncated label has no detailed spelling.
+	if node.Truncated {
+		return nil, fmt.Errorf("inspect v3 detailed view must not deliver truncated labels")
 	}
 	return node, nil
 }

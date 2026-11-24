@@ -27,7 +27,7 @@ func (d toolDefinition) readOnlyHint() bool {
 // never repeated inside a tool description.
 const treeTextGuide = "结果文本：text/both 以 `result v4 <ok|err> [op=…] [state=…] [outcome=…] [phase=…]` 开头、`end result` 结尾。" +
 	"常规成功（`ok` 且无 `state=`）省略 `outcome=executed`；非 `executed`、错误结果与带 `state=` 的重放摘要一律显式输出 `outcome=…`。" +
-	"`op=` 只是本次调用编号参考、`at=` 只是 UTC 秒级时序提示，均不替代引擎对会话归属、显示代次与期限的权威校验。" +
+	"`op=`/`at=` 只是编号/UTC 时序提示，不替代引擎对会话/显示代次/期限的校验。" +
 	"`text`/`both` 是面向调用的紧凑投影；`structured` 保留完整审计字段与全部三态、空集合语义。\n" +
 	"观察为单行 `obs [<O>] [status=…] [fg=…] [at=HH:MM:SS] [visual=<token>] [screen=<W>x<H>[@<display_id>]] [rot=<1|2|3>] [missing=…]`：" +
 	"`obs ` 后首个不含 `=` 的字段是完整 O；`status=complete` 省略，`partial`/`failed` 显式；" +
@@ -36,73 +36,77 @@ const treeTextGuide = "结果文本：text/both 以 `result v4 <ok|err> [op=…]
 	"`screen` 仅在带 `session` 或无树帧输出；" +
 	"`rot` 在非零旋转时始终输出；所有 `HH:MM:SS` 均为 UTC 秒级时间；" +
 	"`origin`/`revision`/`actionable_until` 只在 `structured` JSON 中保留。" +
-	"`obs.image` 与顶层 `image` 同字段同顺序（仅前缀不同）；" +
-	"`obs.error <code> \"<message>\"` 子行只在对应字段存在时紧跟。\n" +
+	"`obs.image` 与顶层 `image` 同字段同顺序；" +
+	"`obs.error <code> \"<message>\"` 子行只在字段存在时紧跟。\n" +
 	"其他块：单行 `image [<W>x<H>] [read_only] [media=<非 jpeg>] [screen=<W>x<H>[@<display_id>]] [rot=<1|2|3>] [at=HH:MM:SS]`、" +
 	"`session <state> mode=… origin=… [started=…] [expires=…] [ended=…] [reason=…]`、" +
 	"`wait trigger=… elapsed=<ms>ms`、`cleanup …`、`error <code> \"<message>\"`、" +
-	"`recovery entry=<entry> ref=<精确 O/P 编号|O|P|none> [input=…] [cause=…]`（ref 已把可判定的抽象词解析为精确编号）。" +
+	"`recovery entry=<entry> ref=<精确 O/P 编号|O|P|none> [input=…] [cause=…]`（ref 已是精确编号）。" +
 	"`app.items` 以 `app_items v1 kind=find|list count=<n>` … `end app_items` 交付：" +
-	"`kind=find` 行写 `<package> \"<name>\"`，`kind=list` 行写 `#<task_id> <package> <ownership>[ origin_display=<显示号>]`。" +
-	"`app.tasks` 以 `app_tasks v1 count=<n>` … `end app_tasks` 交付，行写 " +
+	"`kind=find` 写 `<package> \"<name>\"`，`kind=list` 行写 `#<task_id> <package> <ownership>[ origin_display=<显示号>]`。" +
+	"`app.tasks` 以 `app_tasks v1 count=<n>` … `end app_tasks` 交付，行 " +
 	"`#<task_id> <outcome>[ recents_cleaned=…][ error=<code> \"<message>\"[ details=<JSON>]]`。" +
 	"无法无损编码的字段保留 `json v1 path=\"<绝对 JSON Pointer>\" value=<原值>`。\n" +
-	"普通树：当前树由 `base` 指向的 full 加本次 delta 重建。" +
+	"普通树：当前树=`base` 指向的 full+本次 delta。" +
 	"full 头为 `tree v5 full nodes=<n>`；delta 头为 " +
-	"`tree v5 delta base=<O|_<序号>> changes=<n>`；头后空一行进入正文，均以 `end tree` 结尾。" +
+	"`tree v5 delta base=<O|_<序号>> changes=<n>`；头后空行进入正文、以 `end tree` 结尾。" +
 	"同一 base 的每条 delta 独立应用到该 full。" +
-	"当前完整 O 与真实 base 在最后一个 `_` 前同前缀且尾号为正十进制时，base 可写 `_<尾号>`；" +
-	"否则写完整 O。`base=_72` 只供读树，调用仍用完整 O/P。\n" +
-	"普通节点每层恰写一个 ASCII 空格，根深度为零；差分 `+ `、`= ` 只在所属定义根行出现，标记不计层级。" +
+	"base 可写 `_<尾号>`：与真实 base 在最后 `_` 前同前缀、尾号为正十进制；" +
+	"否则写完整 O。`base=_72` 只供读树，调用用完整 O/P。\n" +
+	"普通节点每层恰写一个 ASCII 空格，根深度为零；差分 `+ `、`= ` 只在定义根行出现、不计层级。" +
 	"节点行为 `n<ref> [<role>] [l,t,r,b|x,y|@] \"label\"… value=… hint=… " +
-	"tap|long_press|text|swipe enabled=… focused=… selected=… protected=… checked=… axis=… resource=… context`。" +
-	"`n<ref>` 可直接用作 target.ref；标签为 JSON 字符串。" +
+	"tap|long_press|text|swipe enabled=… focused=… selected=… protected=… checked=… axis=… resource=… [truncated=true] context`。" +
+	"`truncated=true` 只在 compact 有动作非 `input` 节点截断时出现，`false` 省略、detailed 禁止。" +
+	"`n<ref>` 即 target.ref；标签是 JSON 串。" +
 	"`root`/`scroll` 交付矩形 `l,t,r,b`（`right>=left`、`bottom>=top`），其余交付中心点 `x,y`；" +
 	"未知写 `-`，缺失列表示隐藏。" +
 	"`@` 表示与同一定义中最近已交付几何的严格祖先同形同值；无此祖先无效。" +
-	"每个 `+`、`=` 子树独立判断，不继承其他定义或 base。\n" +
+	"每个 `+`、`=` 子树独立判断，不继承其他定义/base。\n" +
 	"角色：`button` 默认 `tap`，`input` 默认 `text`，`scroll` 默认 `swipe`。" +
-	"能按源动作顺序完整恢复时省略默认词；默认动作缺失时保留其他动作并在动作列末写 `!tap`、`!text` 或 `!swipe`。" +
-	"无显式默认词或对应 `!动作` 时，其余动作须符合源顺序，再按 `tap,long_press,text,swipe` 插回默认动作；" +
-	"无法恢复时写完整显式列表。出现默认词时保留显式顺序。" +
-	"同一动作不可既显式又否定，其他角色的否定词和无可解析祖先的 `@` 均无效。" +
+	"动作可按源顺序完整恢复时省略默认词；默认动作缺失时保留其余动作并在动作末写 `!tap`、`!text` 或 `!swipe`。" +
+	"无默认词或对应 `!动作` 时其余动作须符合源顺序，再按 `tap,long_press,text,swipe` 插回默认动作；" +
+	"无法恢复时写完整显式列表；出现默认词时保留顺序。" +
+	"动作不可既显式又否定；其他角色否定词与无祖先 `@` 无效。" +
 	"省略 `role` 时按 ref 后首列恢复；未隐藏几何是四元矩形、二元点或 `@`，" +
 	"首项为引号标签时默认 `text`，其他列或行尾默认 `view`。" +
 	"显式角色覆盖默认；首项为标签或角色词的 `view`、无标签或带几何列的 `text` 必须显式写角色。\n" +
 	"complete 定义的状态位省略已知默认：`enabled=true` 省略，`enabled=false`/`enabled=null` 显式；" +
 	"`focused`/`selected`/`protected`/`checked` 的已知 `false` 省略，`true`/`null` 显式。" +
-	"`set` 行不同：出现的状态字段一律保留显式 `false`/`true`/`null`，未出现才表示不修改。" +
-	"`~` 的 set 值保持原数组、字符串、`null` 与三态；`actions=[]`、`bounds=[x,y]`、" +
-	"`bounds=[l,t,r,b]`、`bounds=null`、`bounds=hidden` 均原样表达，`@`、无括号几何和默认动作不用于 set。" +
-	"`nodes` 是展开历史链后的逻辑节点数，`changes` 是五类顶层声明的总量；零变化 delta 正文为空。\n" +
+	"`set` 行不同：出现的状态字段一律保留显式 `false`/`true`/`null`，未出现才表示不修改；" +
+	"`truncated=true|false` 同样显式保留，省略表示未修改。" +
+	"`~` 保留原数组/串/`null`/三态；`actions=[]`、`bounds=[x,y]|[l,t,r,b]|null|hidden` 原样，" +
+	"`@`、无括号几何与默认动作不用于 set。" +
+	"`nodes` 计展开链后节点数，`changes` 计五类顶层声明；零变化 delta 正文为空。\n" +
 	"compact 净体：全裁无标注非交互 `image` 叶；裁剪被祖先复合标签覆盖的纯被动文本叶；" +
 	"纯被动文本子叶的无字可点击 `view` 升为 `button`（保留多段 `label`，清 `resource`）；" +
-	"`input` 的 `label==value` 时省略 `label`；裁掉宽或高 `<=4px` 的无字露边 `view`；" +
+	"`input` 的 `label==value` 时省略 `label`；裁掉宽/高 `<=4px` 无字露边 `view`；" +
 	"`resource` 取按 `:`、`/` 切分后最后的非纯数字短段。" +
-	"清理变空/单子隐藏匿名容器，`len>=2` 保持层级；" +
+	"所有隐藏匿名容器（无文本/动作/`resource`、状态全默认、至少 1 子）按序扁平化透传，" +
+	"原始无子合成叶例外；变空的匿名容器清理。" +
+	"公开 `label` 首尾空白净化（含 NBSP/纯空白归空）；" +
+	"有动作非 `input` 节点单段 `label` 超 `250` 码点截断并置 `truncated=true`" +
+	"（被动文本/`input.Value` 保持全文，`inspect` 补看全文）。" +
 	"无动作 `text` 与匿名容器隐藏几何，详细补看交付矩形。" +
 	"新 v5 只生成普通节点定义；读取端继续接受历史 `[n2 n3]` 与 " +
 	"`chain [n2 n3] <role> ...`，链下缩进的孩子属于链尾。\n" +
-	"补看使用独立语法：`inspect v3 scope=<tree|subtree|query> observation=<O> revision=<n> " +
+	"补看语法：`inspect v3 scope=<tree|subtree|query> observation=<O> revision=<n> " +
 	"captured_at=<RFC3339> tree_scope=<scope> view=detailed [root=<ref>|matches=<n> total=<n> truncated=<bool>] " +
 	"nodes=<n> entries=<m>`，以 `end inspect` 结尾。" +
-	"`nodes` 计展开后的逻辑节点数，`entries` 计正文定义行数。查询按每个命中子树分别累加。" +
+	"`nodes` 计展开后逻辑节点数，`entries` 计正文行数；查询按命中子树累加。" +
 	"inspect v3 一律使用两格缩进、`[l,t,r,b]` 矩形和显式动作词，不使用默认动作、`@` 或短 base。\n" +
 	"示例 full：\n" +
-	"`result v4 ok op=P7391_4\nobs O4821_72 fg=present at=22:05:11 visual=sparse_tree\n\n" +
-	"tree v5 full nodes=2\n\nn1 root 0,0,1080,2400\n n2 button 540,120 \"设置\"\nend tree\nend result`\n" +
+	"`result v4 ok op=P7391_4\nobs O4821_72\n\ntree v5 full nodes=2\n\nn1 root 0,0,1080,2400\n n2 button 540,120 \"设置\"\nend tree\nend result`\n" +
 	"示例 delta：\n" +
-	"`result v4 ok op=P7391_5\nobs O4821_76 fg=com.android.settings#177 at=22:05:12\n\n" +
-	"tree v5 delta base=_72 changes=3\n\n~ n2 label=[\"无线设置\"]\n" +
+	"`result v4 ok op=P7391_5\nobs O4821_76\n\ntree v5 delta base=_72 changes=3\n\n~ n2 label=[\"a\"]\n" +
 	"+ n3 button 700,300 \"返回\"\nchildren n1 = [n2 n3]\nend tree\nend result`\n" +
 	"示例 inspect：\n" +
 	"`result v4 ok op=P7391_6\n\ninspect v3 scope=subtree observation=O4821_76 revision=4 " +
 	"captured_at=2026-11-21T01:00:00Z tree_scope=reported_visible_with_context view=detailed root=n2 nodes=1 entries=1\n\n" +
-	"n2 button [0,0,1080,2400] \"无线设置\" tap\nend inspect\nend result`\n" +
-	"`button`/`input`/`scroll` 的省略动作分别是已存在的 `tap`/`text`/`swipe` 源能力；" +
-	"`!动作` 表示该默认能力缺失，不能由调用方补授权。" +
-	"滚动用 `operation.type=scroll` + `operation.container` 表达；raw `swipe` 是原始手势。" +
-	"`scroll` 不承诺真实方向、触摸消费者或业务安全。"
+	"n2 button [0,0,1080,2400] \"a\" tap\nend inspect\nend result`\n" +
+	"`button`/`input`/`scroll` 省略动作是既有 `tap`/`text`/`swipe` 能力；" +
+	"`!动作` 表示该能力缺失，不能补授权。" +
+	"滚动用 `operation.type=scroll` + `operation.container`；raw `swipe` 是原始手势。" +
+	"`scroll` 不承诺方向、触摸者或业务安全。"
 
 // callerGuidance is the cross-tool part of the server instructions. It is
 // written for the calling agent: session progression, O/P identity, tool

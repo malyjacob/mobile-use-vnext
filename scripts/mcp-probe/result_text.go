@@ -735,7 +735,7 @@ func validateTreeNodeTokens(tokens []string, rules treeNodeRules) (treeNodeValid
 	if len(tokens) == 0 || tokens[0] == "defaults" {
 		return treeNodeValidation{}, failf(rules.prefix + "_body_invalid")
 	}
-	if failure := validateFullNodeFlags(tokens, rules.prefix); failure != nil {
+	if failure := validateFullNodeFlags(tokens, rules.prefix, rules.detailed); failure != nil {
 		return treeNodeValidation{}, failure
 	}
 	if tokens[0] == "chain" {
@@ -942,6 +942,15 @@ func validateTreeNodeColumns(tokens []string, start int, allowGeometry bool,
 		}
 		index++
 	}
+	// The truncation fact is a compact-only column of actionable labels. It
+	// keeps the fixed position between resource= and context, never appears in
+	// the detailed view, spells only its true value and occurs at most once.
+	// Deliberately not a treeFullFlagOrder entry: that table is consumed before
+	// axis=/resource=, so admitting truncated there would silently accept the
+	// wrong column.
+	if !rules.detailed && index < len(tokens) && tokens[index] == "truncated=true" {
+		index++
+	}
 	if index < len(tokens) && tokens[index] == "context" {
 		index++
 	}
@@ -1140,10 +1149,32 @@ func isTreeJSONString(token string) bool {
 // default. Unknown is null and therefore explicit; the non-default known value
 // is explicit. This is the contract that allows the removed defaults line to be
 // omitted without letting an old producer silently keep writing it per node.
-func validateFullNodeFlags(tokens []string, prefix string) *checkError {
+//
+// The compact truncation fact is a one-way flag as well: only truncated=true is
+// writable, so an explicit false is the default and must be omitted. It is also
+// a compact-only column, so the detailed view must not carry it at all. A value
+// of null, an unknown word or a bare member without its value is not the
+// declared boolean spelling.
+func validateFullNodeFlags(tokens []string, prefix string, detailed bool) *checkError {
 	for _, token := range tokens {
 		name, value, found := strings.Cut(token, "=")
 		if !found {
+			if name == "truncated" {
+				return failf(prefix+"_flag_invalid", field("flag", name))
+			}
+			continue
+		}
+		if name == "truncated" {
+			switch value {
+			case "false":
+				return failf(prefix+"_flag_default", field("flag", name))
+			case "true":
+				if detailed {
+					return failf(prefix+"_flag_invalid", field("flag", name))
+				}
+			default:
+				return failf(prefix+"_flag_invalid", field("flag", name))
+			}
 			continue
 		}
 		switch name {
@@ -1167,14 +1198,34 @@ func validateFullNodeFlags(tokens []string, prefix string) *checkError {
 }
 
 // validateSetNodeFlags accepts every explicit tri-state value. An absent member
-// alone means "not modified".
+// alone means "not modified". The truncation assignment is a two-state column:
+// the canonical writer keeps it after resource= and preserves both explicit
+// values, while null is not a settable truncation state. The set member order is
+// otherwise not policed here beyond that one declared position, because a set
+// line is an explicit assignment list rather than a definition column.
 func validateSetNodeFlags(tokens []string, prefix string) *checkError {
-	for _, token := range tokens {
+	resourceIndex, truncatedIndex := -1, -1
+	for index, token := range tokens {
 		name, value, found := strings.Cut(token, "=")
 		if !found {
+			if name == "truncated" {
+				return failf(prefix+"_flag_invalid", field("flag", name))
+			}
 			continue
 		}
 		switch name {
+		case "truncated":
+			if value != "true" && value != "false" {
+				return failf(prefix+"_flag_invalid", field("flag", name))
+			}
+			if truncatedIndex >= 0 {
+				return failf(prefix+"_flag_invalid", field("flag", name))
+			}
+			truncatedIndex = index
+		case "resource":
+			if resourceIndex < 0 {
+				resourceIndex = index
+			}
 		case "enabled", "focused", "selected", "protected", "checked":
 			if value != "true" && value != "false" && value != "null" {
 				return failf(prefix+"_flag_invalid", field("flag", name))
@@ -1184,6 +1235,9 @@ func validateSetNodeFlags(tokens []string, prefix string) *checkError {
 				return failf(prefix + "_bounds_invalid")
 			}
 		}
+	}
+	if truncatedIndex >= 0 && resourceIndex >= 0 && truncatedIndex < resourceIndex {
+		return failf(prefix+"_flag_invalid", field("flag", "truncated"))
 	}
 	return nil
 }

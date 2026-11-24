@@ -234,7 +234,8 @@ func writeChainRefs(body *treeTextBuffer, refs []string) {
 
 // isAnonymousDefaultViewChain recognizes the one chain definition whose role
 // and hidden shared columns add no information: an anonymous default view with
-// every other shared field at its complete-node default.
+// every other shared field at its complete-node default. A truncated label is
+// never the default, so a truncated definition always spells its columns.
 func isAnonymousDefaultViewChain(node *protocol.ReadNode) bool {
 	return len(node.Chain) > 0 &&
 		node.Role == protocol.RoleView &&
@@ -250,6 +251,7 @@ func isAnonymousDefaultViewChain(node *protocol.ReadNode) bool {
 		node.Checked != nil && !*node.Checked &&
 		node.Axis == "" &&
 		node.Resource == nil &&
+		!node.Truncated &&
 		!node.Context
 }
 
@@ -432,7 +434,10 @@ func validateBounds(bounds *protocol.Bounds) bool {
 }
 
 // validateReadNodeTree checks one definition subtree iteratively. Full trees
-// rely on ReadTree.Validate for global ref uniqueness, and inspection keeps its
+// rely on ReadTree.Validate for global ref uniqueness and for the view rules,
+// including its rejection of truncated labels in the detailed view; the
+// inspection subtree and query paths add detailedRectanglesOnly, which rejects
+// truncated labels together with hidden and point geometry. Inspection keeps its
 // existing subtree semantics.
 func validateReadNodeTree(root *protocol.ReadNode, requireRoot bool) bool {
 	if root == nil {
@@ -530,15 +535,16 @@ func validateInspection(view *protocol.InspectionView) bool {
 }
 
 // detailedRectanglesOnly reports whether a detailed subtree delivers every known
-// rectangle. The detailed inspection view keeps the complete node set, so hidden
-// and point geometry are both invalid there.
+// rectangle and no truncated label. The detailed inspection view keeps the
+// complete node set and the complete label text, so hidden and point geometry
+// are both invalid there, and a truncated label has no detailed spelling.
 func detailedRectanglesOnly(root *protocol.ReadNode) bool {
 	type pendingNode struct{ node *protocol.ReadNode }
 	stack := []pendingNode{{node: root}}
 	for len(stack) > 0 {
 		entry := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
-		if entry.node == nil || entry.node.IsChain() {
+		if entry.node == nil || entry.node.IsChain() || entry.node.Truncated {
 			return false
 		}
 		switch entry.node.Bounds.Kind {

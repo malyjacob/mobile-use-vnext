@@ -309,8 +309,8 @@ func postOrder(cap *device.Capture) []int {
 
 // hasSemantics reports whether a visible leaf carries readable content,
 // interaction capability, non-default state, or an intrinsic leaf role. Text
-// semantics are decided on the cleaned public label, so a node whose text is
-// only invisible placeholders never enters the public tree.
+// semantics are decided on the cleaned public label, which treats whitespace
+// and invisible placeholders alone as empty.
 func hasSemantics(raw *device.RawNode) bool {
 	if len(labelParts(raw)) > 0 {
 		return true
@@ -435,18 +435,15 @@ var readableInvisibleReplacer = strings.NewReplacer(
 // "\n \n\t\n".
 var readableBlankLineRun = regexp.MustCompile("\n(?:[ \t]*\n)+")
 
-// cleanReadableText removes invisible placeholder code points from one public
-// readable string. A string without any of them is returned unchanged, so
-// ordinary leading/trailing whitespace and line breaks stay exactly as
-// reported. Otherwise every placeholder is removed, runs of empty lines are
-// collapsed to one line break and the result is trimmed. It only formats the
-// public label: the raw capture and input values keep their original bytes.
+// cleanReadableText trims the edges of a public readable string. If it
+// contains invisible placeholders, remove them and collapse runs of blank lines
+// before trimming. The raw capture and input values keep their original bytes.
 func cleanReadableText(s string) string {
-	if !strings.ContainsAny(s, readableInvisibleRunes) {
-		return s
+	if strings.ContainsAny(s, readableInvisibleRunes) {
+		s = readableInvisibleReplacer.Replace(s)
+		s = readableBlankLineRun.ReplaceAllString(s, "\n")
 	}
-	stripped := readableInvisibleReplacer.Replace(s)
-	return strings.TrimSpace(readableBlankLineRun.ReplaceAllString(stripped, "\n"))
+	return strings.TrimSpace(s)
 }
 
 // newPublicNode projects one published source node to its complete public node.

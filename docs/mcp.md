@@ -103,14 +103,15 @@ text 失败（含 `outcome=partial` 与 `outcome=uncertain`）的 `error.details
 返回同一份说明，包含一份完整树图例，以及会话推进、O/P、`reference`、租期和跨工具恢复。
 工具描述给出用途、关键参数分流、动作边界及独立理解该工具所需的恢复提示。
 `start` 描述简述 O/P 和 full/delta。每条 delta 都单独应用到 `base` 指向的完整树；`base` 可
-指向服务端基线池中的当前基线（跨度 1–10）或备用 full（跨度 1–4），而不是只能指向上一帧。
+指向服务端基线池中的当前基线（跨度 1–12）或备用 full（跨度 1–10），而不是只能指向上一帧。
 图例以 `tree v5`、`inspect v3` 标识普通树与详细补看的独立语法，并说明普通节点在
 `n<ref>` 后按首列恢复角色：
 不带引号的合法角色词是显式角色，JSON 字符串字面量默认为 `text`，几何、`value=`、`hint=`、
 `tap`/`long_press`/`swipe`、状态或属性标记或行尾默认为 `view`；只有恢复结果等于原角色且
 首项不会被误读为角色词时才省略。当前 compact full 和 delta 输出普通节点定义。读取历史
 `[n2 n3]` 或 `chain [n2 n3] <role> ...` 时，按顺序展开，缩进孩子归最后一个 ref。
-图例还说明 `obs` 行的可选 `visual=` 提示、节点动作列、块头后的空行、几何省略与状态默认；
+图例还说明 `obs` 行的可选 `visual=` 提示、节点标志列（含 compact 截断时的 `truncated`）、
+块头后的空行、几何省略、状态默认与 compact 净体；
 几何列在 `root`/`scroll` 上是四元矩形，其他角色是二元中心点。`visual` 只是提示模型按需
 `snap`，不是输入授权，也不替代页面事实。普通 `tree v5` 完整头只写
 `nodes`，差分头只写 `base` 与 `changes`；块头 `view=` 以及 `nodes`/`entries` 两项计数
@@ -666,13 +667,16 @@ end result
 
 标志为 `enabled=false|null`、
 `focused`/`selected`/`protected` 的 `true|null`、`checked=true|null`、
-`axis=x|y|both`、`resource="…"` 与 `context`。`axis` 由服务端投影：非 `context`、有公开几何的
-`role=scroll` 节点按类名强特征（横向 `ScrollView`、`NestedScrollView`/`ListView`/`AbsListView`、
-`ViewPager` 等）与子项单轴排布（至多前 16 项、主轴中心跨度 ≥24px、主轴位移与跨度都不少于交轴
-2 倍、至少半数相邻子项在交轴重叠）判为 `x` 或 `y`，子项证据优先；证据不足或双向时不输出该
-标志。compact 中保留的 `resource` 是服务截取的语义短尾名；detailed 补看保留完整 source
-resource。设备来源字符串按 JSON 字符串字面量转义，
-`<`、`>`、`&` 保持原样；缺省值按协议省略规则不输出。
+`axis=x|y|both`、`resource="…"`、`truncated=true` 与 `context`。`truncated` 固定位于
+`resource=` 之后、`context` 之前，只在 compact 观察的有动作标签被截断时出现，`false` 或
+未截断时省略，`root`/`context` 与详细补看不输出该列；节点行例如
+`n7 button 540,120 "产品说明" resource="title" truncated=true`。`axis` 由服务端投影：非
+`context`、有公开几何的 `role=scroll` 节点按类名强特征（横向 `ScrollView`、
+`NestedScrollView`/`ListView`/`AbsListView`、`ViewPager` 等）与子项单轴排布（至多前 16 项、
+主轴中心跨度 ≥24px、主轴位移与跨度都不少于交轴 2 倍、至少半数相邻子项在交轴重叠）判为
+`x` 或 `y`，子项证据优先；证据不足或双向时不输出该标志。compact 中保留的 `resource` 是
+服务截取的语义短尾名；detailed 补看保留完整 source resource。设备来源字符串按 JSON 字符串
+字面量转义，`<`、`>`、`&` 保持原样；缺省值按协议省略规则不输出。
 
 几何列与节点定义一一对应：`root` 与 `scroll` 的已知几何写无括号的 `l,t,r,b`，四边均为有符号
 十进制整数并满足 `right>=left`、`bottom>=top`；其余角色的已知几何写无括号的 `x,y` 二元中心
@@ -686,11 +690,20 @@ resource。设备来源字符串按 JSON 字符串字面量转义，
 compact 几何策略保留合成根、`scroll` 容器与 `actions` 非空节点的几何：`root`/`scroll` 写
 四元矩形，其余写二元中心点。无动作 `text` 与匿名普通 `view`/`group` 的已知几何被省略；
 其余展示节点在裁剪到屏幕后，若四元矩形与父链上最近交付者四边完全相同，或该可见面积小于
-屏幕面积的 1%，也省略。随后按[接口策略](interface.md#node)执行露边细条裁剪、`input` 标签
-去重、无标注非交互 `image` 全裁、祖先复合标签覆盖的被动文本叶裁剪、变空匿名容器清理、单子
-隐藏匿名容器绕过、无字可点击 `view` 提升为 `button` 与 `resource` 短尾名提取。两个及以上
-孩子的隐藏匿名容器保留原层级，不拍平。text、structured 和 both 里的 compact 节点集合相同。
-详细补看交付完整快照的节点与已知原矩形。
+屏幕面积的 1%，也省略。按[接口策略](interface.md#node)，露边细条裁剪与 `input` 标签去重
+在决定几何前执行；上行阶段再执行无标注非交互 `image` 全裁、祖先复合标签覆盖的被动文本叶
+裁剪、变空匿名容器清理、隐藏匿名容器扁平化、无字可点击 `view` 提升为 `button` 与
+`resource` 短尾名提取。隐藏匿名
+容器按裁剪后全部孩子的原顺序透传扁平化，单子与多子一致；被扁平化释放的纯文本子叶随后参与
+`button` 提升。有动作、非 `input`、非 `context` 节点的 `label` 段超过 `250` 个 Unicode
+码点时前置截取前 `250` 个码点并标记 `truncated=true`，未超长段不截断、不置位，也不追加
+省略号或总字数；无动作的被动正文与 `input` 的 `value` 保持全文。被动文本提升为 `button`
+生成的 label（无论段数）不再二次截断，保持全文且 `truncated` 缺席。公开 `label` 在构造时仅在含
+固定闭集零宽与占位码点时剔除这些码点并把残留连续空行折叠为单个换行，随后无条件去掉首尾
+空白（纯空白与 `U+00A0` 归空，内部非占位换行与 `input.value` 原样保留）。
+text、structured 和 both 里的 compact 节点集合相同。
+详细补看交付完整快照的节点、完整未截断的 `label` 与已知原矩形，节点定义不输出
+`truncated`（`query` 顶层的预算字段除外）。
 
 新 `tree v5` 只生成普通节点定义。读取端继续接受兼容历史的 `[n2 n3]` 匿名默认 `view` 链和
 `chain [n2 n3] <role> ...` 定义；按顺序展开后，缩进的孩子归链尾，链内编号均可引用。
@@ -701,17 +714,19 @@ defaults 行。
 delta 块头为 `tree v5 delta base=<O|_<序号>> changes=<n>`，正文按
 `set → add → remove → children → replace` 顺序输出。当前 O 来自同一结果的 `obs` 行，
 不在块头重复。`base` 指向服务端基线池中的近期任一已确认 `full`：同一会话 origin、同一目标
-显示 ID/代次且采集龄 `< 180s`，池中最多保留 4 条。当前基线可在跨度 1–10 内作为 base，
-其他备用 full 仅可在跨度 1–4 内作为 base；备用 full 被成功选回后，从下一次发布起成为当前
-基线。服务对每份合格 full 使用该 full 自己的节点编号重新匹配同一采集，再将候选 full 与 delta
-分别按本节的正式 `tree v5` 普通树块编码。比较范围是 `tree v5 ...` 块头至 `end tree` 行末
+显示 ID/代次且采集龄 `< 180s`，池中保留 1 条当前基线与至多 4 条备用 full（共 5 条）。当前
+基线可在跨度 1–12 内作为 base，其他备用 full 可在跨度 1–10 内作为 base；备用 full 被成功
+选回后，从下一次发布起成为当前基线。服务对每份合格 full 使用该 full 自己的节点编号重新
+匹配同一采集，再将候选 full 与 delta 分别按本节的正式 `tree v5` 普通树块编码。比较范围是
+`tree v5 ...` 块头至 `end tree` 行末
 换行的 UTF-8 字节，包含实际短 base、转义、缩进和换行，不包含 `obs`、`result` 信封或图片。
-只有 `10×deltaBytes < 7×candidateFullBytes` 的候选合格，精确等于 70% 不合格；合格候选取
+只有 `10×deltaBytes < 8×candidateFullBytes` 的候选合格，精确等于 80% 不合格；合格候选取
 delta 树块字节最少者，长度相同优先当前基线，再取 revision 较大的 full。
 
 `observe(P)` 与 `full=true` 强制 full；凡作为 `base` 发出的 O 都在池内受留存保护，
-`inspect(reference=base)` 可回看。客户端必须保留所有被引用的完整树，不能在第 4 个修订后
-立即淘汰仍为当前基线的 full；当前基线可在跨度 5–10 继续成为 base。按 `base` 独立应用，
+`inspect(reference=base)` 可回看。客户端必须保留所有被引用的完整树；当前基线可在跨度
+1–12 内继续成为 base，备用 full 在跨度 1–10 内可用，不能按修订数提前淘汰仍可能被引用的
+full。按 `base` 独立应用，
 不能叠加在上一份 delta 上。只有当前 O 与真实 base 都能在最后一个下划线处分成逐字节相同的
 `O<实例>` 前缀和规范正十进制序号时，base 才写成 `_<序号>`；否则写完整 O。短 base 只用于
 读树，不能作为调用引用。`changes` 是五个块的顶层声明条数之和：一个 `set` 条目即使改了
@@ -749,7 +764,9 @@ end result
 
 `~` 行只列实际变化的字段，字段值保留显式 `false`、`""`、`[]` 与 `null`；字段顺序为
 `label`、`actions`、`bounds`、`enabled`、`focused`、`selected`、`checked`、`value`、
-`hint`、`protected`、`axis`、`resource`。`bounds=hidden` 表示该几何按策略不交付，
+`hint`、`protected`、`axis`、`resource`、`truncated`。`truncated` 显式写 `true` 或
+`false`（显式 `false` 表示从截断恢复为未截断），缺席表示未修改；`truncated=null` 与非法
+值被拒绝，例如 `~ n7 truncated=false`。`bounds=hidden` 表示该几何按策略不交付，
 `bounds=null` 表示置为未知；已知 `bounds` 按节点角色写 `[x,y]`（非 `root`/`scroll`）或
 `[l,t,r,b]`（`root`/`scroll`），set 不使用 `@` 或无括号几何。`SetNode` 没有 `role`，
 `~` 行也不输出 `role`。`+` 与 `=` 后输出普通 v5 节点定义及其子树；前缀只出现在所属定义
@@ -762,7 +779,8 @@ end result
 随后是一个空行与正文。
 `tree` 输出整树，`subtree` 额外带 `root=`，`query` 按命中顺序输出
 `match i/N path=[…]` 与完整命中子树，命中之间以空行分隔。`matches` 是本次返回条数，
-`total` 是预算前命中数，`truncated=true` 表示引擎只返回了完整条目前缀。`nodes` 计展开后的
+`total` 是预算前命中数，`truncated=true` 表示引擎只返回了完整条目前缀；该 `truncated`
+是查询预算事实，与 compact 的有动作标签截断列无关，补看块不输出节点级截断。`nodes` 计展开后的
 逻辑节点数，`entries` 计正文定义行数。查询按每个命中子树分别累加两项计数。`path` 是
 root..parent 的 ref 序列，
 不含命中节点本身。补看固定使用 detailed 视图：逐节点展开、不折 chain、不隐藏已知几何。

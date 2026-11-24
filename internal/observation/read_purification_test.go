@@ -105,6 +105,30 @@ func TestCompactPurificationHoistsTextChildren(t *testing.T) {
 		}
 	})
 
+	t.Run("multi-child FrameLayout enables resource shell hoisting", func(t *testing.T) {
+		builder := newCap(400, 800)
+		card := clickable(defaultEmptyRaw(rect(0, 100, 300, 200), "android.view.View"))
+		cardIndex := builder.add(builder.root(), withRes(card, "app:id/card"))
+		wrapperIndex := builder.add(cardIndex, defaultEmptyRaw(rect(0, 100, 300, 200), "android.widget.FrameLayout"))
+		for _, label := range []string{"歌名", "歌手"} {
+			text := defaultEmptyRaw(rect(0, 100, 150, 150), "android.widget.TextView")
+			text.Text = label
+			builder.add(wrapperIndex, text)
+		}
+		snap := buildOne(t, NewBuilder(), builder.capture())
+		cardNode := publicNodeAt(t, snap, cardIndex)
+		if cardNode.Resource == nil || *cardNode.Resource != "app:id/card" {
+			t.Fatalf("expected resource on the original card: %+v", cardNode)
+		}
+		compact := ProjectCompactTree(snap.Tree)
+		requireImmediateRefs(t, compact.Root, cardNode.Ref)
+		node := compact.Root.Children[0]
+		if node.Role != protocol.RoleButton || node.Resource != nil || len(node.Children) != 0 ||
+			!equalStrings(node.Label, []string{"歌名", "歌手"}) {
+			t.Fatalf("flattening must expose both text children for hoisting: %+v", node)
+		}
+	})
+
 	t.Run("two text children keep separate label parts", func(t *testing.T) {
 		shell := actionNodeT("n2", protocol.RoleView, rectT(0, 200, 300, 300), protocol.ActionTap)
 		shell.Children = []*protocol.Node{
@@ -121,19 +145,12 @@ func TestCompactPurificationHoistsTextChildren(t *testing.T) {
 		}
 	})
 
-	t.Run("never hoists interactive or multi-branch children", func(t *testing.T) {
+	t.Run("never hoists interactive children or labeled or swipe views", func(t *testing.T) {
 		// A card holding an inner button keeps both rows.
 		card := actionNodeT("n2", protocol.RoleView, rectT(0, 0, 300, 200), protocol.ActionTap)
 		inner := actionNodeT("n3", protocol.RoleButton, rectT(40, 40, 260, 120), protocol.ActionTap)
 		inner.Label = []string{"inner"}
 		card.Children = []*protocol.Node{inner}
-
-		// A multi-child anonymous container is never flattened.
-		container := plainViewT("n10")
-		container.Children = []*protocol.Node{
-			nodeT("n11", protocol.RoleText, rectT(0, 300, 100, 330), "a"),
-			nodeT("n12", protocol.RoleText, rectT(0, 340, 100, 370), "b"),
-		}
 
 		// A labelled view is not an unlabeled shell.
 		labelled := actionNodeT("n20", protocol.RoleView, rectT(0, 400, 300, 500), protocol.ActionTap)
@@ -148,14 +165,10 @@ func TestCompactPurificationHoistsTextChildren(t *testing.T) {
 			nodeT("n31", protocol.RoleText, rectT(0, 600, 200, 630), "滑动"),
 		}
 
-		compact := ProjectCompactTree(rootT(card, container, labelled, swipe))
+		compact := ProjectCompactTree(rootT(card, labelled, swipe))
 		if node := childOf(t, compact.Root, "n2"); node == nil || node.Role != protocol.RoleView ||
 			len(node.Children) != 1 {
 			t.Fatalf("card with an inner button must stay a view: %+v", node)
-		}
-		containerRead := childOf(t, compact.Root, "n10")
-		if containerRead == nil || len(containerRead.Children) != 2 {
-			t.Fatalf("multi-child anonymous container must not be flattened: %+v", containerRead)
 		}
 		if node := childOf(t, compact.Root, "n20"); node == nil || node.Role != protocol.RoleView ||
 			len(node.Children) != 1 {

@@ -14,8 +14,11 @@ import (
 func TestCleanReadableText(t *testing.T) {
 	cases := []struct{ name, in, want string }{
 		{"ordinary_text_untouched", "个人闲置", "个人闲置"},
-		{"ordinary_whitespace_untouched", "  a \n b  ", "  a \n b  "},
-		{"leading_newline_untouched", "\nabc", "\nabc"},
+		{"ordinary_whitespace_trimmed", "  a \n b  ", "a \n b"},
+		{"leading_newline_trimmed", "\nabc", "abc"},
+		{"nbsp_only", "\u00a0", ""},
+		{"newline_and_space_only", "\n ", ""},
+		{"mixed_edge_whitespace", "\u00a0林俊杰 ", "林俊杰"},
 		{"zero_width_between_han", "个\u200b人\u200b闲\u200b置\u200b", "个人闲置"},
 		{"object_replacement_only", "\ufffc\ufffc", ""},
 		{"closed_set_only", "\u200b\u200c\u200d\u2060\ufeff\ufffc", ""},
@@ -58,18 +61,27 @@ func TestBuildPurifiesReadableLabels(t *testing.T) {
 	described.Description = "我的\u200b收藏"
 	describedIdx := builder.add(rootIdx, described)
 
-	// A description that only differs by placeholders is the same readable
-	// string and must not be published as a second label part.
+	// A description that differs only by edge whitespace and placeholders
+	// shares the same cleaned label as the text.
 	sameText := defaultEmptyRaw(rect(0, 300, 400, 360), "android.widget.TextView")
 	sameText.Text = "消息\u200b"
-	sameText.Description = "消息"
+	sameText.Description = "\u00a0消息 "
 	sameTextIdx := builder.add(rootIdx, sameText)
 
 	input := defaultEmptyRaw(rect(0, 400, 400, 460), "android.widget.EditText")
 	input.Editable = true
-	input.Text = "ab\u200bcd"
+	input.Text = " ab\u200bcd "
 	input.Description = "搜索\u200b框"
 	inputIdx := builder.add(rootIdx, input)
+
+	trimmed := defaultEmptyRaw(rect(0, 600, 400, 660), "android.widget.TextView")
+	trimmed.Text = "\u00a0林俊杰 "
+	trimmed.Description = "\n "
+	trimmedIdx := builder.add(rootIdx, trimmed)
+
+	multiline := defaultEmptyRaw(rect(0, 700, 400, 760), "android.widget.TextView")
+	multiline.Text = "a\n\nb"
+	multilineIdx := builder.add(rootIdx, multiline)
 
 	// A placeholder-only label on a control keeps the control but publishes no
 	// label for it.
@@ -93,8 +105,14 @@ func TestBuildPurifiesReadableLabels(t *testing.T) {
 			t.Fatalf("placeholder-only leaf published as %q", ref)
 		}
 	}
-	if len(snap.Tree.Root.Children) != 5 {
-		t.Fatalf("public root children = %d, want 5\n%s",
+	if got := snap.Capture.Nodes[sameTextIdx].Description; got != "\u00a0消息 " {
+		t.Fatalf("raw description changed: %q", got)
+	}
+	if got := snap.Capture.Nodes[inputIdx].Text; got != " ab\u200bcd " {
+		t.Fatalf("raw input text changed: %q", got)
+	}
+	if len(snap.Tree.Root.Children) != 7 {
+		t.Fatalf("public root children = %d, want 7\n%s",
 			len(snap.Tree.Root.Children), dump(snap.Tree))
 	}
 
@@ -122,8 +140,15 @@ func TestBuildPurifiesReadableLabels(t *testing.T) {
 		t.Fatalf("input label = %v, want [abcd 搜索框]", inputNode.Label)
 	}
 	// An input's value keeps the original bytes: it is written back verbatim.
-	if inputNode.Value == nil || *inputNode.Value != "ab\u200bcd" {
+	if inputNode.Value == nil || *inputNode.Value != " ab\u200bcd " {
 		t.Fatalf("input value = %v, want the raw bytes", inputNode.Value)
+	}
+
+	if node := publicNodeAt(t, snap, trimmedIdx); !equalStrings(node.Label, []string{"林俊杰"}) {
+		t.Fatalf("expected trimmed text and no whitespace-only description: %q", node.Label)
+	}
+	if node := publicNodeAt(t, snap, multilineIdx); !equalStrings(node.Label, []string{"a\n\nb"}) {
+		t.Fatalf("expected interior line breaks to be preserved: %q", node.Label)
 	}
 
 	buttonNode := publicNodeAt(t, snap, placeholderButtonIdx)

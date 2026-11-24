@@ -136,7 +136,7 @@ func readApplyAdapter() applyAdapter[*protocol.ReadNode, protocol.ReadSetNode] {
 		ApplySet:    applyReadSet,
 		SetTouchesInteraction: func(change protocol.ReadSetNode) bool {
 			return change.Label.Set || change.Actions.Set || change.Checked.Set ||
-				change.Value.Set || change.Hint.Set || change.Axis.Set || change.Resource.Set
+				change.Value.Set || change.Hint.Set || change.Axis.Set || change.Resource.Set || change.Truncated.Set
 		},
 	}
 }
@@ -192,6 +192,9 @@ func diffReadFields(prev, cur *protocol.ReadNode) (protocol.ReadSetNode, bool) {
 	if !equalOptionalString(prev.Resource, cur.Resource) {
 		change.Resource = protocol.Field[*string]{Set: true, Value: cloneOptionalString(cur.Resource)}
 	}
+	if prev.Truncated != cur.Truncated {
+		change.Truncated = protocol.Field[bool]{Set: true, Value: cur.Truncated}
+	}
 	return change, !change.IsZero()
 }
 
@@ -235,5 +238,8 @@ func applyReadSet(node *protocol.ReadNode, change protocol.ReadSetNode) {
 	}
 	if change.Resource.Set {
 		node.Resource = cloneOptionalString(change.Resource.Value)
+	}
+	if change.Truncated.Set {
+		node.Truncated = change.Truncated.Value
 	}
 }

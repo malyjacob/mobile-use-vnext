@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/malyjacob/mobile-use-vnext/internal/device"
 	"github.com/malyjacob/mobile-use-vnext/internal/observation"
@@ -334,7 +335,10 @@ func sameOptionalString(left, right *string) bool {
 // exists in detailed with the same public content. Compact may omit a pruned
 // subtree, may hide a retained node's geometry and delivers the center point of a
 // non-root/non-scroll node instead of its rectangle, so this is a
-// projection-subset check rather than a pairwise tree comparison.
+// projection-subset check rather than a pairwise tree comparison. An actionable
+// non-input label longer than the compact truncation limit is additionally
+// delivered as a leading UTF-8 codepoint prefix with Truncated=true, while the
+// detailed view keeps the full text.
 func assertReadContentConsistent(t *testing.T, compact, detailed *protocol.ReadTree) {
 	t.Helper()
 	compact = observation.UnpackTree(compact)
@@ -432,7 +436,9 @@ func assertReadContentConsistent(t *testing.T, compact, detailed *protocol.ReadT
 // compactLabelsMatch compares the label of one compact node with the complete label
 // of the detailed node it was projected from. The compact projection rewrites only
 // one label: an input whose single label part repeats its value publishes no label,
-// while the detailed view keeps the source text as both.
+// while the detailed view keeps the source text as both. A node carrying
+// Truncated=true is accepted as the T250 prefix delivery instead, see
+// truncatedLabelsMatch.
 func compactLabelsMatch(compact, detailed *protocol.ReadNode) bool {
 	if compact == nil || detailed == nil {
 		return false
@@ -440,9 +446,38 @@ func compactLabelsMatch(compact, detailed *protocol.ReadNode) bool {
 	if slices.Equal(compact.Label, detailed.Label) {
 		return true
 	}
+	if compact.Truncated {
+		return truncatedLabelsMatch(compact, detailed)
+	}
 	return compact.Role == protocol.RoleInput && len(compact.Label) == 0 &&
 		len(detailed.Label) == 1 && detailed.Value != nil &&
 		detailed.Label[0] == *detailed.Value
+}
+
+// truncatedLabelsMatch accepts one T250 compact delivery: an actionable,
+// non-input, non-context, non-root node whose compact label parts are proper
+// UTF-8 codepoint prefixes of the detailed parts at the same index. The detailed
+// view always keeps the full text, so a truncated node must differ from it and
+// must never split a multi-byte rune.
+func truncatedLabelsMatch(compact, detailed *protocol.ReadNode) bool {
+	if compact.Role == protocol.RoleInput || compact.Role == protocol.RoleRoot ||
+		compact.Context || len(compact.Actions) == 0 {
+		return false
+	}
+	if len(compact.Label) == 0 || len(compact.Label) != len(detailed.Label) {
+		return false
+	}
+	truncated := false
+	for index, part := range compact.Label {
+		full := detailed.Label[index]
+		if !utf8.ValidString(part) || !strings.HasPrefix(full, part) {
+			return false
+		}
+		if utf8.RuneCountInString(part) < utf8.RuneCountInString(full) {
+			truncated = true
+		}
+	}
+	return truncated
 }
 
 // compactCenterOf returns the center point the compact projection publishes for one
@@ -977,7 +1012,7 @@ func checkedState(value *bool) string {
 func TestI02FixedBaselineDeltaChain(t *testing.T) {
 	h := continuationHarness(t)
 	// The compact projection withholds most display geometry, so the changing
-	// controls alone are close to the fixed 70% delta threshold. Stable labelled
+	// controls alone are close to the fixed 80% delta threshold. Stable labelled
 	// leaves keep this fixture focused on the fixed-baseline delta chain instead
 	// of turning it into a full-fallback sample.
 	stableResources := []string{
@@ -1118,7 +1153,11 @@ func TestI02FixedBaselineDeltaChain(t *testing.T) {
 		t.Fatal("delivered full tree differs from the committed compact tree")
 	}
 
-	h.device.scriptCaptures(i02Capture("i02-after-full", boolAddress(false)))
+	// Keep checked at true so the newly acknowledged full is the shortest
+	// eligible base: with the ten-revision backup window the older full could
+	// otherwise win the byte comparison, while this fixture proves the
+	// acknowledgement switches the chain to the new full.
+	h.device.scriptCaptures(i02Capture("i02-after-full", boolAddress(true)))
 	afterFullResult, apiErr := h.engine.Observe(context.Background(), "agent", "Pi02afterfull",
 		&protocol.ObserveRequest{Reference: fullObservation.ID})
 	if apiErr != nil {

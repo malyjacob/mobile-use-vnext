@@ -193,7 +193,7 @@ func TestTreeTextPreviewDoesNotAllocateObservationID(t *testing.T) {
 // TestObserveFullFlagAndDeltaCostGate covers the full flag and the encoding
 // cost gate together: after a confirmed baseline an unchanged tree yields a
 // delta with full=false, full=true forces a full tree for that same baseline,
-// and a delta that is not cheaper than 70% of the full encoding falls back to
+// and a delta that is not cheaper than 80% of the full encoding falls back to
 // full even when full=false.
 func TestObserveFullFlagAndDeltaCostGate(t *testing.T) {
 	h := newHarness(t)
@@ -217,6 +217,11 @@ func TestObserveFullFlagAndDeltaCostGate(t *testing.T) {
 		t.Fatalf("full=true did not force a full tree: %+v %v", forced, err)
 	}
 
+	// The expensive delta must be one the compact projection cannot shrink: an
+	// input value keeps its full text (the actionable-label truncation only
+	// applies to non-input nodes), so the delta stays larger than 80% of the full
+	// block. A huge actionable button label would be truncated and would turn
+	// this boundary check into a cheap delta.
 	huge := strings.Repeat("x", 60*1024)
 	base := h.device
 	h.engine.dev = &hookedDevice{Device: base,
@@ -226,7 +231,7 @@ func TestObserveFullFlagAndDeltaCostGate(t *testing.T) {
 				return capture, captureErr
 			}
 			for i := range capture.Nodes {
-				if capture.Nodes[i].ClassName == "android.widget.Button" {
+				if capture.Nodes[i].ClassName == "android.widget.EditText" {
 					capture.Nodes[i].Text = huge
 					capture.Nodes[i].TextSet = true
 				}
@@ -277,8 +282,8 @@ func thresholdReadTree(changedBytes, stableBytes int) *protocol.ReadTree {
 }
 
 // thresholdDeltaFixture uses two independent label lengths. The changed label
-// contributes to both tree v4 blocks. The unchanged public label contributes
-// only to the full block, which makes an exact 70% boundary constructible
+// contributes to both tree v5 blocks. The unchanged public label contributes
+// only to the full block, which makes an exact 80% boundary constructible
 // without changing topology.
 func thresholdDeltaFixture(t *testing.T) (
 	base, belowTree, equalTree *protocol.ReadTree,
@@ -293,20 +298,20 @@ func thresholdDeltaFixture(t *testing.T) (
 		}
 		probeFullText, ok := treetext.EncodeFull("Osynthetic", probe)
 		if !ok {
-			t.Fatal("encode threshold full as tree v4")
+			t.Fatal("encode threshold full as tree v5")
 		}
 		probeDeltaText, ok := treetext.EncodeDelta("Osynthetic", probeDelta)
 		if !ok {
-			t.Fatal("encode threshold delta as tree v4")
+			t.Fatal("encode threshold delta as tree v5")
 		}
 		// Increasing the changed label by one byte raises 10*delta by ten and
-		// 7*full by seven, closing this gap by three.
+		// 8*full by eight, closing this gap by two.
 		gap := baselineDeltaNumerator*len(probeFullText) -
 			baselineDeltaDenominator*len(probeDeltaText)
-		if gap < 0 || gap%3 != 0 {
+		if gap < 0 || gap%2 != 0 {
 			continue
 		}
-		changedBytes := 2 + gap/3
+		changedBytes := 2 + gap/2
 		belowTree = thresholdReadTree(changedBytes-1, stableBytes)
 		equalTree = thresholdReadTree(changedBytes, stableBytes)
 		belowDelta, err = observation.ReadDiff("Osynthetic", base, belowTree)
@@ -319,19 +324,19 @@ func thresholdDeltaFixture(t *testing.T) (
 		}
 		belowFullText, ok := treetext.EncodeFull("Osynthetic", belowTree)
 		if !ok {
-			t.Fatal("encode below-boundary full as tree v4")
+			t.Fatal("encode below-boundary full as tree v5")
 		}
 		belowDeltaText, ok := treetext.EncodeDelta("Osynthetic", belowDelta)
 		if !ok {
-			t.Fatal("encode below-boundary delta as tree v4")
+			t.Fatal("encode below-boundary delta as tree v5")
 		}
 		equalFullText, ok := treetext.EncodeFull("Osynthetic", equalTree)
 		if !ok {
-			t.Fatal("encode boundary full as tree v4")
+			t.Fatal("encode boundary full as tree v5")
 		}
 		equalDeltaText, ok := treetext.EncodeDelta("Osynthetic", equalDelta)
 		if !ok {
-			t.Fatal("encode boundary delta as tree v4")
+			t.Fatal("encode boundary delta as tree v5")
 		}
 		if baselineDeltaDenominator*len(belowDeltaText) >=
 			baselineDeltaNumerator*len(belowFullText) ||
@@ -341,11 +346,11 @@ func thresholdDeltaFixture(t *testing.T) (
 		}
 		return base, belowTree, equalTree, belowDelta, equalDelta
 	}
-	t.Fatal("could not construct exact 70% delta/full boundary")
+	t.Fatal("could not construct exact 80% delta/full boundary")
 	return nil, nil, nil, nil, nil
 }
 
-func TestDeltaCostGateIsStrictlyBelowSeventyPercent(t *testing.T) {
+func TestDeltaCostGateIsStrictlyBelowEightyPercent(t *testing.T) {
 	base, belowTree, equalTree, belowDelta, equalDelta := thresholdDeltaFixture(t)
 	for _, test := range []struct {
 		name     string
@@ -404,10 +409,10 @@ func TestTreeTextDeltaMeasurementUsesUTF8BlockBytes(t *testing.T) {
 	fullText, fullOK := treetext.EncodeFull("Osynthetic", current)
 	deltaText, deltaOK := treetext.EncodeDelta("Osynthetic", selected)
 	if !fullOK || !deltaOK {
-		t.Fatal("encode UTF-8 tree-v4 blocks")
+		t.Fatal("encode UTF-8 tree-v5 blocks")
 	}
 	if !strings.HasSuffix(fullText, "end tree\n") || len(deltaText) != deltaBytes {
-		t.Fatalf("tree-v4 block measurement lost its trailer: full=%q deltaBytes=%d",
+		t.Fatalf("tree-v5 block measurement lost its trailer: full=%q deltaBytes=%d",
 			fullText[len(fullText)-min(len(fullText), 16):], deltaBytes)
 	}
 	if !strings.Contains(fullText, stable) {

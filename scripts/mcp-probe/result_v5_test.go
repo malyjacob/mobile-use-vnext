@@ -207,6 +207,232 @@ func TestV5DeltaSetBoundsForms(t *testing.T) {
 	}
 }
 
+// TestV5TruncatedColumnGrammar pins the contract 29 truncation column of the
+// compact tree block. A complete node writes only the true fact, between
+// resource= and context; the same column applies to chain and delta +/=
+// definitions; a delta set line preserves both explicit booleans after
+// resource=; and the detailed inspection view never carries the column at all.
+func TestV5TruncatedColumnGrammar(t *testing.T) {
+	acceptedFull := []struct {
+		name  string
+		body  string
+		nodes string
+	}{
+		{
+			name: "true after resource and before context",
+			body: "n1 root 0,0,1080,2400\n" +
+				" n2 button 540,120 \"设置\" truncated=true\n" +
+				" n3 text \"说明\" resource=\"id/text\" truncated=true context\n",
+			nodes: "3",
+		},
+		{
+			name: "chain definition keeps the same column",
+			body: "n1 root 0,0,1080,2400\n" +
+				" chain [n2 n3] group 5,5 \"分组\" resource=\"id/group\" truncated=true\n",
+			nodes: "3",
+		},
+	}
+	for _, testCase := range acceptedFull {
+		t.Run("full accept "+testCase.name, func(t *testing.T) {
+			if _, failure := decodeResultText(
+				v5FullText(testCase.body, testCase.nodes)); failure != nil {
+				t.Fatalf("valid truncated full node rejected: %s %v",
+					failure.reason, failure.fields)
+			}
+		})
+	}
+
+	acceptedDelta := []struct {
+		name    string
+		body    string
+		changes string
+	}{
+		{
+			name: "add and replace definitions",
+			body: "+ n20 button 5,5 \"x\" resource=\"id/x\" truncated=true\n" +
+				"= n24 view 1,1 resource=\"id/v\" truncated=true\n",
+			changes: "2",
+		},
+		{
+			name:    "set keeps both explicit values",
+			body:    "~ n2 resource=\"id/b\" truncated=true\n~ n3 truncated=false\n",
+			changes: "2",
+		},
+		{
+			name:    "set keeps the column after an earlier flag",
+			body:    "~ n4 checked=false resource=\"id/c\" truncated=true\n",
+			changes: "1",
+		},
+		{
+			name:    "set keeps an explicit false after resource",
+			body:    "~ n5 resource=\"id/d\" truncated=false\n",
+			changes: "1",
+		},
+	}
+	for _, testCase := range acceptedDelta {
+		t.Run("delta accept "+testCase.name, func(t *testing.T) {
+			if _, failure := decodeResultText(
+				v5DeltaText(testCase.body, testCase.changes, "O4821_2")); failure != nil {
+				t.Fatalf("valid truncated delta line rejected: %s %v",
+					failure.reason, failure.fields)
+			}
+		})
+	}
+
+	rejected := []struct {
+		name   string
+		text   string
+		reason string
+	}{
+		{
+			name: "full column before resource",
+			text: v5FullText(
+				"n1 root 0,0,1080,2400\n n2 text \"x\" truncated=true resource=\"r\"\n",
+				"2"),
+			reason: "text_tree_body_invalid",
+		},
+		{
+			name: "full column before axis",
+			text: v5FullText(
+				"n1 root 0,0,1080,2400\n n2 scroll 0,0,1080,2400 truncated=true axis=y\n",
+				"2"),
+			reason: "text_tree_body_invalid",
+		},
+		{
+			name: "full column after context",
+			text: v5FullText(
+				"n1 root 0,0,1080,2400\n n2 text \"x\" resource=\"r\" context truncated=true\n",
+				"2"),
+			reason: "text_tree_body_invalid",
+		},
+		{
+			name: "full column repeated",
+			text: v5FullText(
+				"n1 root 0,0,1080,2400\n n2 text \"x\" resource=\"r\" truncated=true truncated=true\n",
+				"2"),
+			reason: "text_tree_body_invalid",
+		},
+		{
+			name: "full node writes the default false",
+			text: v5FullText(
+				"n1 root 0,0,1080,2400\n n2 text \"x\" truncated=false\n",
+				"2"),
+			reason: "text_tree_flag_default",
+		},
+		{
+			name: "full node writes null",
+			text: v5FullText(
+				"n1 root 0,0,1080,2400\n n2 text \"x\" truncated=null\n",
+				"2"),
+			reason: "text_tree_flag_invalid",
+		},
+		{
+			name: "full node writes an unknown word",
+			text: v5FullText(
+				"n1 root 0,0,1080,2400\n n2 text \"x\" truncated=maybe\n",
+				"2"),
+			reason: "text_tree_flag_invalid",
+		},
+		{
+			name: "full node member has no value",
+			text: v5FullText(
+				"n1 root 0,0,1080,2400\n n2 text \"x\" truncated\n",
+				"2"),
+			reason: "text_tree_flag_invalid",
+		},
+		{
+			name: "delta add writes the default false",
+			text: v5DeltaText(
+				"+ n20 button 5,5 \"x\" truncated=false\n", "1", "O4821_2"),
+			reason: "text_tree_flag_default",
+		},
+		{
+			name:   "set line writes null",
+			text:   v5DeltaText("~ n2 truncated=null\n", "1", "O4821_2"),
+			reason: "text_tree_flag_invalid",
+		},
+		{
+			name:   "set line writes an unknown word",
+			text:   v5DeltaText("~ n2 truncated=maybe\n", "1", "O4821_2"),
+			reason: "text_tree_flag_invalid",
+		},
+		{
+			name:   "set line member has no value",
+			text:   v5DeltaText("~ n2 truncated\n", "1", "O4821_2"),
+			reason: "text_tree_flag_invalid",
+		},
+		{
+			name:   "set line column before resource",
+			text:   v5DeltaText("~ n2 truncated=true resource=\"r\"\n", "1", "O4821_2"),
+			reason: "text_tree_flag_invalid",
+		},
+		{
+			name:   "set line column repeated",
+			text:   v5DeltaText("~ n2 truncated=true truncated=false\n", "1", "O4821_2"),
+			reason: "text_tree_flag_invalid",
+		},
+	}
+	for _, testCase := range rejected {
+		t.Run("reject "+testCase.name, func(t *testing.T) {
+			if _, failure := decodeResultText(testCase.text); failure == nil ||
+				failure.reason != testCase.reason {
+				t.Fatalf("failure = %v, want %s", failure, testCase.reason)
+			}
+		})
+	}
+}
+
+// TestInspectRejectsTruncatedColumn pins the detailed view half of the same
+// contract: inspect v3 always delivers full text, so neither the true fact nor
+// its default spelling is writable there.
+func TestInspectRejectsTruncatedColumn(t *testing.T) {
+	header := "inspect v3 scope=tree observation=O1 revision=1 captured_at=22:00:00 " +
+		"tree_scope=reported_visible_with_context view=detailed nodes=1 entries=1\n\n"
+	rejected := []struct {
+		name   string
+		node   string
+		reason string
+	}{
+		{
+			name:   "detailed node writes true",
+			node:   "n1 root [0,0,1080,2400] truncated=true\n",
+			reason: "text_inspect_flag_invalid",
+		},
+		{
+			name:   "detailed node writes false",
+			node:   "n1 root [0,0,1080,2400] truncated=false\n",
+			reason: "text_inspect_flag_default",
+		},
+		{
+			name:   "detailed node writes null",
+			node:   "n1 root [0,0,1080,2400] truncated=null\n",
+			reason: "text_inspect_flag_invalid",
+		},
+	}
+	for _, testCase := range rejected {
+		t.Run(testCase.name, func(t *testing.T) {
+			text := "result v4 ok\n\n" + header + testCase.node + "end inspect\nend result\n"
+			if _, failure := decodeResultText(text); failure == nil ||
+				failure.reason != testCase.reason {
+				t.Fatalf("failure = %v, want %s", failure, testCase.reason)
+			}
+		})
+	}
+
+	t.Run("query matches keep the same ban", func(t *testing.T) {
+		queryHeader := "inspect v3 scope=query observation=O1 revision=1 captured_at=22:00:00 " +
+			"tree_scope=reported_visible_with_context view=detailed " +
+			"matches=1 total=1 truncated=false nodes=2 entries=2\n\n"
+		text := "result v4 ok\n\n" + queryHeader +
+			"match 1/1 path=[n1 n2]\nn1 group [0,0,10,10]\n  n2 text [0,0,5,5] " +
+			"truncated=true\nend inspect\nend result\n"
+		if _, failure := decodeResultText(text); failure == nil ||
+			failure.reason != "text_inspect_flag_invalid" {
+			t.Fatalf("failure = %v, want text_inspect_flag_invalid", failure)
+		}
+	})
+}
+
 // TestObsLineVisualTokenGrammar pins the optional visual hint token on the obs
 // line: the sparse classification or the clamped whole-page image percentage, in
 // its declared column between the capture time and the screen.

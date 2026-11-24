@@ -1,6 +1,7 @@
 package observation
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -284,8 +285,13 @@ func TestGeometryStatesAreDistinct(t *testing.T) {
 
 func TestAnonymousPlainPredicate(t *testing.T) {
 	base := plainT("n2", protocol.RoleView)
-	if !AnonymousPlain(projectRead(base)) {
+	plain := projectRead(base)
+	if !AnonymousPlain(plain) {
 		t.Fatal("a known-default view must be anonymous plain")
+	}
+	plain.Truncated = true
+	if AnonymousPlain(plain) {
+		t.Fatal("a truncation flag must prevent anonymous pruning")
 	}
 	cases := map[string]func(n *protocol.Node){
 		"root role":         func(n *protocol.Node) { n.Role = protocol.RoleRoot },
@@ -321,7 +327,11 @@ func TestAnonymousPlainPredicate(t *testing.T) {
 
 // projectRead projects one internal node in the compact view.
 func projectRead(node *protocol.Node) *protocol.ReadNode {
-	return projectReadNode(node, true)
+	projected := projectCompactNodes(node, compactProjection{}, nil, nil)
+	if len(projected) == 0 {
+		return nil
+	}
+	return projected[0]
 }
 
 func TestLegacyPackFoldsOnlyLegalChains(t *testing.T) {
@@ -519,8 +529,8 @@ func TestReadDeltaRejectsRoleChange(t *testing.T) {
 	base := ProjectCompactTree(rootT(leaf))
 	changed := plainT("n2", protocol.RoleGroup)
 	current := ProjectCompactTree(rootT(changed))
-	if _, err := ReadDiff("O1", base, current); err == nil {
-		t.Fatal("a role change has no legal delta")
+	if _, err := ReadDiff("O1", base, current); !errors.Is(err, ErrNotRepresentable) {
+		t.Fatalf("a role change must be not representable: %v", err)
 	}
 }
 

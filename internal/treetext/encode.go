@@ -258,6 +258,12 @@ func writeSetNode(body *textBuffer, set protocol.ReadSetNode) {
 			writeJSONString(body, *set.Resource.Value)
 		}
 	}
+	// A set assignment keeps all three truncation states: an absent member
+	// leaves the baseline value, while an explicit false and true stay visible.
+	if set.Truncated.Set {
+		body.write(" truncated=")
+		body.writeBool(set.Truncated.Value)
+	}
 }
 
 func writeStringArray(body *textBuffer, values []string) {
@@ -455,6 +461,12 @@ func writeNodeColumns(
 	if node.Resource != nil {
 		body.write(" resource=")
 		writeJSONString(body, *node.Resource)
+	}
+	// truncated is a compact delivery fact of actionable labels: it keeps the
+	// fixed column between resource and context, and only the true fact is
+	// written.
+	if node.Truncated {
+		body.write(" truncated=true")
 	}
 	if node.Context {
 		body.write(" context")
@@ -739,6 +751,11 @@ func validReadNodeTreeDetails(
 		if (entry.mustBeRoot && (node.IsChain() || node.Role != protocol.RoleRoot)) ||
 			!validBoundsForState(node.Bounds) ||
 			(node.Axis != "" && !node.Axis.Valid()) {
+			return false
+		}
+		// The detailed view and the compact root/context positions always keep
+		// full text, so a truncation flag there is not encodable.
+		if node.Truncated && (node.Context || node.Role == protocol.RoleRoot) {
 			return false
 		}
 		for _, action := range node.Actions {

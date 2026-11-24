@@ -283,20 +283,22 @@ func TestCompactPruningSingletonWrapperShapes(t *testing.T) {
 		requireImmediateRefs(t, cardRead, "n11")
 	})
 
-	t.Run("two interaction branches preserve their wrapper", func(t *testing.T) {
+	t.Run("multilevel branches flatten in preorder", func(t *testing.T) {
 		first := actionNodeT("n15", protocol.RoleButton, rectT(0, 0, 200, 100), protocol.ActionTap)
 		first.Label = []string{"first"}
 		second := actionNodeT("n16", protocol.RoleButton, rectT(0, 120, 200, 220), protocol.ActionLongPress)
 		second.Label = []string{"second"}
 		branch := plainT("n14", protocol.RoleGroup)
 		branch.Children = []*protocol.Node{first, second}
+		third := nodeT("n17", protocol.RoleText, rectT(0, 240, 200, 300), "third")
+		fourth := nodeT("n18", protocol.RoleText, rectT(0, 320, 200, 380), "fourth")
+		otherBranch := plainT("n13", protocol.RoleView)
+		otherBranch.Children = []*protocol.Node{third, fourth}
 		outer := plainT("n12", protocol.RoleGroup)
-		outer.Children = []*protocol.Node{branch}
+		outer.Children = []*protocol.Node{branch, otherBranch}
 
 		compact := ProjectCompactTree(compactScreenTree(outer))
-		requireImmediateRefs(t, compact.Root, "n14")
-		branchRead := childOf(t, compact.Root, "n14")
-		requireImmediateRefs(t, branchRead, "n15", "n16")
+		requireImmediateRefs(t, compact.Root, "n15", "n16", "n17", "n18")
 	})
 
 	t.Run("wrappers between interaction nodes", func(t *testing.T) {
@@ -338,8 +340,18 @@ func TestCompactPruningSingletonWrapperShapes(t *testing.T) {
 		empty := plainT("n2", protocol.RoleView)
 		context := plainT("n3", protocol.RoleGroup)
 		context.Context = true
-		unknownState := plainT("n4", protocol.RoleView)
-		unknownState.Protected = nil
+		context.Bounds = nil
+		context.Children = []*protocol.Node{
+			nodeT("n8", protocol.RoleText, rectT(0, 0, 200, 60), "context child"),
+			nodeT("n9", protocol.RoleText, rectT(0, 60, 200, 120), "another context child"),
+		}
+		selected := plainT("n4", protocol.RoleView)
+		selected.Bounds = rectT(0, 0, 1000, 1000)
+		selected.Selected = readBool(true)
+		selected.Children = []*protocol.Node{
+			nodeT("n10", protocol.RoleText, rectT(0, 120, 200, 180), "selected child"),
+			nodeT("n11", protocol.RoleText, rectT(0, 180, 200, 240), "another selected child"),
+		}
 		unknownBounds := nodeT("n5", protocol.RoleView, nil)
 		button := actionNodeT("n7", protocol.RoleButton, rectT(0, 500, 200, 600), protocol.ActionTap)
 		button.Label = []string{"button"}
@@ -347,9 +359,12 @@ func TestCompactPruningSingletonWrapperShapes(t *testing.T) {
 		wrapper.Children = []*protocol.Node{button}
 
 		compact := ProjectCompactTree(compactScreenTree(
-			empty, context, unknownState, unknownBounds, wrapper,
+			empty, context, selected, unknownBounds, wrapper,
 		))
 		requireImmediateRefs(t, compact.Root, "n2", "n3", "n4", "n5", "n7")
+		requireImmediateRefs(t, childOf(t, compact.Root, "n3"), "n8", "n9")
+		requireImmediateRefs(t, childOf(t, compact.Root, "n4"), "n10", "n11")
+		requireBoundsKind(t, compact.Root, "n4", protocol.GeometryHidden)
 	})
 }
 

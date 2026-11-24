@@ -183,6 +183,155 @@ func TestBothModeComparesDeltaBodyAgainstStructured(t *testing.T) {
 	}
 }
 
+// TestBothModeComparesTruncatedTreeBody extends the lossless body contract to
+// the contract 29 truncation column: the canonical encoder writes the compact
+// true fact and both delta set spellings, so a readable block that omits,
+// downgrades or invents the flag is body drift even though the grammar alone
+// would accept every one of those lines.
+func TestBothModeComparesTruncatedTreeBody(t *testing.T) {
+	fullPayload := func(truncated, withResource bool) map[string]any {
+		button := compactNode("n2", "button", []any{540, 120}, []string{"保存"},
+			[]string{"tap"}, nil)
+		if withResource {
+			button["resource"] = "id/save"
+		}
+		if truncated {
+			button["truncated"] = true
+		}
+		root := compactNode("n1", "root", []any{0, 0, 1080, 2400}, nil, nil,
+			[]any{button})
+		return map[string]any{
+			"operation_id": "P4821_1",
+			"observation": map[string]any{
+				"status": observationComplete,
+				"id":     "O4821_1",
+				"tree": map[string]any{
+					"format": treeFull, "scope": "reported_visible_with_context",
+					"view": "compact", "root": root,
+				},
+			},
+		}
+	}
+	fullFrame := func(line string) string {
+		return "result v4 ok op=P4821_1\nobs O4821_1\n\n" +
+			"tree v5 full nodes=2\n\nn1 root 0,0,1080,2400\n" + line +
+			"end tree\nend result\n"
+	}
+	withResourceLine := " n2 button 540,120 \"保存\" resource=\"id/save\" truncated=true\n"
+	bareLine := " n2 button 540,120 \"保存\" truncated=true\n"
+
+	t.Run("canonical true fact passes", func(t *testing.T) {
+		for _, testCase := range []struct {
+			name         string
+			line         string
+			withResource bool
+		}{
+			{name: "after resource", line: withResourceLine, withResource: true},
+			{name: "without resource", line: bareLine},
+		} {
+			t.Run(testCase.name, func(t *testing.T) {
+				if _, failure := project(bothModeResult(t, fullFrame(testCase.line),
+					fullPayload(true, testCase.withResource)), resultModeBoth); failure != nil {
+					t.Fatalf("canonical truncated body rejected: %s %v",
+						failure.reason, failure.fields)
+				}
+			})
+		}
+	})
+
+	t.Run("text omits the true fact", func(t *testing.T) {
+		line := " n2 button 540,120 \"保存\" resource=\"id/save\"\n"
+		if _, failure := project(bothModeResult(t, fullFrame(line),
+			fullPayload(true, true)), resultModeBoth); failure == nil ||
+			failure.reason != "both_mode_tree_body_mismatch" {
+			t.Fatalf("failure = %v, want both_mode_tree_body_mismatch", failure)
+		}
+	})
+
+	t.Run("structured omits the true fact", func(t *testing.T) {
+		if _, failure := project(bothModeResult(t, fullFrame(withResourceLine),
+			fullPayload(false, true)), resultModeBoth); failure == nil ||
+			failure.reason != "both_mode_tree_body_mismatch" {
+			t.Fatalf("failure = %v, want both_mode_tree_body_mismatch", failure)
+		}
+	})
+
+	t.Run("text writes the forbidden default", func(t *testing.T) {
+		line := " n2 button 540,120 \"保存\" resource=\"id/save\" truncated=false\n"
+		if _, failure := project(bothModeResult(t, fullFrame(line),
+			fullPayload(true, true)), resultModeBoth); failure == nil ||
+			failure.reason != "text_tree_flag_default" {
+			t.Fatalf("failure = %v, want text_tree_flag_default", failure)
+		}
+	})
+
+	deltaPayload := func(set map[string]any) map[string]any {
+		return map[string]any{
+			"operation_id": "P4821_2",
+			"observation": map[string]any{
+				"status": observationComplete,
+				"id":     "O4821_2",
+				"tree": map[string]any{
+					"format": treeDelta, "base": "O4821_1", "view": "compact",
+					"set": set,
+				},
+			},
+		}
+	}
+	deltaFrame := func(body string) string {
+		return "result v4 ok op=P4821_2\nobs O4821_2\n\n" +
+			"tree v5 delta base=O4821_1 changes=2\n\n" + body +
+			"end tree\nend result\n"
+	}
+	canonicalDelta := "~ n2 resource=\"id/save\" truncated=true\n~ n3 truncated=false\n"
+	canonicalSet := map[string]any{
+		"n2": map[string]any{"resource": "id/save", "truncated": true},
+		"n3": map[string]any{"truncated": false},
+	}
+
+	t.Run("canonical set spellings pass", func(t *testing.T) {
+		if _, failure := project(bothModeResult(t, deltaFrame(canonicalDelta),
+			deltaPayload(canonicalSet)), resultModeBoth); failure != nil {
+			t.Fatalf("canonical truncated set rejected: %s %v",
+				failure.reason, failure.fields)
+		}
+	})
+
+	divergent := []struct {
+		name string
+		body string
+		set  map[string]any
+	}{
+		{
+			name: "text omits the true set member",
+			body: "~ n2 resource=\"id/save\"\n~ n3 truncated=false\n",
+			set:  canonicalSet,
+		},
+		{
+			name: "text downgrades the set member",
+			body: "~ n2 resource=\"id/save\" truncated=false\n~ n3 truncated=false\n",
+			set:  canonicalSet,
+		},
+		{
+			name: "structured drops the set member",
+			body: canonicalDelta,
+			set: map[string]any{
+				"n2": map[string]any{"resource": "id/save"},
+				"n3": map[string]any{"truncated": false},
+			},
+		},
+	}
+	for _, testCase := range divergent {
+		t.Run(testCase.name, func(t *testing.T) {
+			if _, failure := project(bothModeResult(t, deltaFrame(testCase.body),
+				deltaPayload(testCase.set)), resultModeBoth); failure == nil ||
+				failure.reason != "both_mode_tree_body_mismatch" {
+				t.Fatalf("failure = %v, want both_mode_tree_body_mismatch", failure)
+			}
+		})
+	}
+}
+
 // TestBothModeComparesTreeJSONFallbackAsWholeObject pins the documented fallback
 // path: when the tree member cannot be written as a readable block the projection
 // writes the complete object through json v1, and both mode then compares that whole
