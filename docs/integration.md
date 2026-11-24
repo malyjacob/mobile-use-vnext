@@ -41,7 +41,7 @@ adb forward          主机 18881 → 服务；主机 18883 → 手机 MCP
    `adb forward`，也不需要 Agent token。
 
 只需要直连 HTTP 的 Agent 则使用 `http://127.0.0.1:18881/api/<tool>`、`agent_token` 与
-`X-Mobile-Use-Contract: 27`。
+`X-Mobile-Use-Contract: 28`。
 
 ## 1. 默认部署后的网络与进程
 
@@ -235,10 +235,13 @@ MCP 适配器对每次工具调用提供 `both`、`text`、`structured` 三种�
 `text` 中每次观察写成单行，`obs ` 之后首个不含 `=` 的字段是完整 `O`：
 
 ```text
-obs [<O>] [status=…] [fg=…] [at=HH:MM:SS] [screen=<W>x<H>[@<display_id>]] [rot=…] [missing=…]
+obs [<O>] [status=…] [fg=…] [at=HH:MM:SS] [visual=…] [screen=<W>x<H>[@<display_id>]] [rot=…] [missing=…]
 ```
 
-结构化结果中该编号仍是 `observation.id`。可见 O/P 形如 `O4821_72` 与 `P7391_12`：
+结构化结果中该编号仍是 `observation.id`。`visual` 仅在观察带该字段时出现，取值为
+`image_heavy(<pct>%)` 或 `sparse_tree`；`full` 观察输出本次分类，`delta` 仅在同会话、同显示
+代次的视觉状态变化时输出，`structured` 的 `observation.visual` 使用同一值。可见 O/P 形如
+`O4821_72` 与 `P7391_12`：
 `O`/`P` 后接 4 位十进制实例标签（`1000`–`9999`，无前导零）、`_` 与单调序号，与 `/api/*`
 使用同一编号。`start` 首帧的会话屏 `display_id` 从 `obs` 行的
 `screen=<W>x<H>@<display_id>` 读取；`snap` 的 `image` 与 `app(list)` 的 `display=` 也给出
@@ -251,19 +254,24 @@ obs [<O>] [status=…] [fg=…] [at=HH:MM:SS] [screen=<W>x<H>[@<display_id>]] [r
 结果在附带有效新 ready O 时省略 `recovery`；重复 P、`status(P)` 或交付失败时，在会话仍活动
 且无实时阻塞时给出 `observe(P, retired)`，撤权或实时阻塞按 `recovery` 的覆盖规则处理。
 
-普通观察树由 `tree v4` 标识，完整块头只写 `nodes`，差分块头写 `base` 与 `changes`。`base`
+普通观察树由 `tree v5` 标识，完整块头只写 `nodes`，差分块头写 `base` 与 `changes`。普通
+节点几何在 `root` 与 `scroll` 上为四元 `l,t,r,b`，其他角色为二元 `x,y` 中心点；`~` 行的
+`bounds` 按同一角色规则使用 `[x,y]` 或 `[l,t,r,b]`，`hidden`/`null` 分别表示按策略省略与
+未知。compact 投影还会执行固定净体（露边细条、`input` 重复标签、无标注装饰图、祖先复合标签
+覆盖的被动文本叶、无字可点击容器的文本提升与 `resource` 短尾名）。`base`
 指向基线池中的已确认 full，要求同一会话 origin、同一目标显示 ID/代次及采集龄 `< 180s`，
 池中最多 4 条。当前基线可用跨度 1–10，其他备用 full 为 1–4；备用 full 成功选回后，从下一次
-发布起成为当前基线。服务拿每份 full 自己的节点编号重新匹配同一采集，再按实际 `tree v4`
+发布起成为当前基线。服务拿每份 full 自己的节点编号重新匹配同一采集，再按实际 `tree v5`
 普通树块计量 UTF-8 字节。只有 `10×deltaBytes < 7×candidateFullBytes` 的候选合格，取最短
 delta，平手优先当前基线、再取较新 revision。指向同一个完整 base 的多条差分分别应用到该整树，
 不能叠加在上一份 delta 上。`base=_72` 是文本读树简写，不能作为后续工具调用的引用。
 `observe(P)` 与 `full=true` 强制 full；`inspect(base)` 在基线仍在池内时可回看。需要操作当前
 观察时使用 `obs` 行的完整 O，需要看历史树时使用完整历史 O。
 
-`inspect` 继续使用 `inspect v3` 的两格缩进、方括号矩形和显式动作词。`tree v4` 的默认动作、
-`@` 同矩形引用与短 base 不适用于补看块。未知或无法无损表达的字段继续在文本中使用绝对
-JSON Pointer 的原值兜底；解析时按块头 `tree v4`、`inspect v3` 分派，不要混用两种语法。
+`inspect` 继续使用 `inspect v3` 的两格缩进、方括号矩形和显式动作词，始终交付四元
+`[l,t,r,b]`。`tree v5` 的默认动作、`@` 同几何引用（矩形或中心点）与短 base 不适用于补看块。
+未知或无法无损表达的字段继续在文本中使用绝对 JSON Pointer 的原值兜底；解析时按块头
+`tree v5`、`inspect v3` 分派，不要混用两种语法。
 
 选择方式：
 
@@ -324,7 +332,7 @@ HTTP 宿主在原有 `Authorization` 头之外按需添加：
 
 ```text
 Authorization: Bearer <agent_token>
-X-Mobile-Use-Contract: 27
+X-Mobile-Use-Contract: 28
 Content-Type: application/json; charset=utf-8
 ```
 
@@ -332,7 +340,7 @@ Content-Type: application/json; charset=utf-8
 $deploy = Get-Content .state/deploy.json -Raw | ConvertFrom-Json
 $headers = @{
     Authorization           = "Bearer $($deploy.agent_token)"
-    'X-Mobile-Use-Contract' = '27'
+    'X-Mobile-Use-Contract' = '28'
 }
 Invoke-RestMethod http://127.0.0.1:18881/api/status -Method Post `
   -Headers $headers -ContentType 'application/json' -Body '{}'
@@ -577,7 +585,7 @@ Header: Authorization: Bearer <mcp_token>
 两种选择：
 
 ```text
-直连 HTTP:  http://127.0.0.1:18880/api/<tool>   + agent_token + X-Mobile-Use-Contract: 27
+直连 HTTP:  http://127.0.0.1:18880/api/<tool>   + agent_token + X-Mobile-Use-Contract: 28
 MCP HTTP:   http://127.0.0.1:18882/mcp          + mcp_token
 ```
 
@@ -657,7 +665,7 @@ adb shell su -c 'tail -n 50 /data/local/chroots/debian13/var/lib/mobile-use-vnex
 
 升级后：
 
-- 服务、App、适配器与客户端共同使用同一个 `contract_version`（当前 `27`）；
+- 服务、App、适配器与客户端共同使用同一个 `contract_version`（当前 `28`）；
 - 重新建立可能失效的转发；
 - 重启实际 MCP 宿主进程，不能只替换磁盘文件；
 - 旧会话转退休记录，不恢复旧 O/P 或主屏授权；旧 cleanup 的 `pending`/`unconfirmed` 可继续
@@ -764,7 +772,7 @@ GET 判断工具是否可用。
 $deploy = Get-Content .state/deploy.json -Raw | ConvertFrom-Json
 $headers = @{
     Authorization           = "Bearer $($deploy.agent_token)"
-    'X-Mobile-Use-Contract' = '27'
+    'X-Mobile-Use-Contract' = '28'
 }
 $start = Invoke-RestMethod http://127.0.0.1:18881/api/start -Method Post `
   -Headers $headers -ContentType 'application/json' -Body '{}'

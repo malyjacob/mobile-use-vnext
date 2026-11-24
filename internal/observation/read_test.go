@@ -220,10 +220,12 @@ func TestUnknownStateNodesKeepBoundsAndStayOutsideCompactPruning(t *testing.T) {
 
 	compact := ProjectCompactTree(rootT(unknownParent))
 	requireNoReadChains(t, compact.Root)
-	// The unknown-state ancestor keeps its distinct rectangle; the descendant
+	// The unknown-state ancestor keeps its delivered center point; the descendant
 	// with the same clipped rectangle is a duplicate and hides it.
-	if node := childOf(t, compact.Root, "n2"); node == nil || node.Bounds.Kind != protocol.GeometryKnown {
-		t.Fatalf("unknown-state ancestor n2 must keep known geometry: %+v", node)
+	if node := childOf(t, compact.Root, "n2"); node == nil ||
+		node.Bounds.Kind != protocol.GeometryPoint ||
+		node.Bounds.Point != (protocol.Point{X: 50, Y: 50}) {
+		t.Fatalf("unknown-state ancestor n2 must keep its center point: %+v", node)
 	}
 	if node := childOf(t, compact.Root, "n3"); node == nil || node.Bounds.Kind != protocol.GeometryHidden {
 		t.Fatalf("duplicate unknown-state child n3 must hide its geometry: %+v", node)
@@ -263,8 +265,10 @@ func TestGeometryStatesAreDistinct(t *testing.T) {
 	if node := childOf(t, tree.Root, "n3"); node == nil || node.Bounds.Kind != protocol.GeometryHidden {
 		t.Fatalf("anonymous plain geometry must be hidden: %+v", node)
 	}
-	if node := childOf(t, tree.Root, "n4"); node == nil || node.Bounds.Kind != protocol.GeometryKnown {
-		t.Fatalf("functional geometry must be delivered: %+v", node)
+	if node := childOf(t, tree.Root, "n4"); node == nil ||
+		node.Bounds.Kind != protocol.GeometryPoint ||
+		node.Bounds.Point != (protocol.Point{X: 2, Y: 3}) {
+		t.Fatalf("functional geometry must be delivered as its center point: %+v", node)
 	}
 	detailed := ProjectDetailedTree(rootT(unknown, anonymous, functional))
 	for _, ref := range []string{"n2", "n3", "n4"} {
@@ -430,8 +434,8 @@ func TestReadDeltaFollowsDisplayStateChanges(t *testing.T) {
 	if !ok || !set.Actions.Set || len(set.Actions.Value) != 1 {
 		t.Fatalf("expected an action set on n3: %+v", delta.Set)
 	}
-	if !set.Bounds.Set || set.Bounds.Value.Kind != protocol.GeometryKnown {
-		t.Fatalf("new visible geometry must be published: %+v", set.Bounds)
+	if !set.Bounds.Set || set.Bounds.Value.Kind != protocol.GeometryPoint {
+		t.Fatalf("new visible geometry must be published as a center point: %+v", set.Bounds)
 	}
 
 	// Back to the anonymous plain state: actions=[] and bounds=hidden.
@@ -620,7 +624,7 @@ func protocolDecode(data []byte, value any) error {
 func readR(ref string, role protocol.Role, label string, children ...*protocol.ReadNode) *protocol.ReadNode {
 	return &protocol.ReadNode{
 		Ref: ref, Role: role,
-		Bounds:    readRect(0, 0, 100, 100),
+		Bounds:    readFixtureBounds(role),
 		Label:     []string{label},
 		Actions:   []protocol.Action{},
 		Enabled:   readBool(true),
@@ -630,6 +634,16 @@ func readR(ref string, role protocol.Role, label string, children ...*protocol.R
 		Protected: readBool(false),
 		Children:  children,
 	}
+}
+
+// readFixtureBounds builds the delivered geometry a compact fixture may carry for
+// one role: the four-sided rectangle of the root and of scroll containers, the
+// binary center point of every other role.
+func readFixtureBounds(role protocol.Role) protocol.ReadBounds {
+	if role == protocol.RoleRoot || role == protocol.RoleScroll {
+		return readRect(0, 0, 100, 100)
+	}
+	return protocol.PointBounds(50, 50)
 }
 
 func readRootR(children ...*protocol.ReadNode) *protocol.ReadTree {

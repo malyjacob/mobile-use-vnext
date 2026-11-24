@@ -2,6 +2,7 @@ package observation
 
 import (
 	"errors"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -307,12 +308,11 @@ func postOrder(cap *device.Capture) []int {
 }
 
 // hasSemantics reports whether a visible leaf carries readable content,
-// interaction capability, non-default state, or an intrinsic leaf role.
+// interaction capability, non-default state, or an intrinsic leaf role. Text
+// semantics are decided on the cleaned public label, so a node whose text is
+// only invisible placeholders never enters the public tree.
 func hasSemantics(raw *device.RawNode) bool {
-	if raw.TextSet && raw.Text != "" {
-		return true
-	}
-	if raw.DescSet && raw.Description != "" {
+	if len(labelParts(raw)) > 0 {
 		return true
 	}
 	if (raw.HasClickable && raw.Clickable) ||
@@ -390,21 +390,63 @@ func classifyRole(raw *device.RawNode) protocol.Role {
 }
 
 // labelParts returns the readable label of one public unit in the fixed order:
-// own text, then own description when it differs. The whole string is kept;
-// text is never split into business fields.
+// own text, then own description when it differs. The whole cleaned string is
+// kept; text is never split into business fields and the raw capture is never
+// modified.
 func labelParts(raw *device.RawNode) []string {
 	if raw.HasPassword && raw.Password {
 		// A protected input's text is never published.
 		return nil
 	}
 	var label []string
-	if raw.TextSet && raw.Text != "" {
-		label = append(label, raw.Text)
+	text := ""
+	if raw.TextSet {
+		text = cleanReadableText(raw.Text)
 	}
-	if raw.DescSet && raw.Description != "" && raw.Description != raw.Text {
-		label = append(label, raw.Description)
+	if text != "" {
+		label = append(label, text)
+	}
+	if raw.DescSet {
+		desc := cleanReadableText(raw.Description)
+		if desc != "" && desc != text {
+			label = append(label, desc)
+		}
 	}
 	return label
+}
+
+// readableInvisibleRunes is the closed set of code points that carry no
+// readable meaning and are removed from public readable labels: the zero-width
+// space, zero-width non-joiner, zero-width joiner, word joiner, byte-order mark
+// and object replacement character.
+const readableInvisibleRunes = "\u200b\u200c\u200d\u2060\ufeff\ufffc"
+
+// readableInvisibleReplacer removes exactly the closed set above byte for byte,
+// so every other code point and every invalid byte of a reported string stays
+// unchanged.
+var readableInvisibleReplacer = strings.NewReplacer(
+	"\u200b", "", "\u200c", "", "\u200d", "", "\u2060", "", "\ufeff", "", "\ufffc", "",
+)
+
+// readableBlankLineRun matches one line break followed by one or more further
+// lines that hold nothing but horizontal whitespace and a line break: the residue
+// of empty lines that only survives label purification as whitespace. The repeated
+// group folds the whole run in one pass, including mixed residues such as
+// "\n \n\t\n".
+var readableBlankLineRun = regexp.MustCompile("\n(?:[ \t]*\n)+")
+
+// cleanReadableText removes invisible placeholder code points from one public
+// readable string. A string without any of them is returned unchanged, so
+// ordinary leading/trailing whitespace and line breaks stay exactly as
+// reported. Otherwise every placeholder is removed, runs of empty lines are
+// collapsed to one line break and the result is trimmed. It only formats the
+// public label: the raw capture and input values keep their original bytes.
+func cleanReadableText(s string) string {
+	if !strings.ContainsAny(s, readableInvisibleRunes) {
+		return s
+	}
+	stripped := readableInvisibleReplacer.Replace(s)
+	return strings.TrimSpace(readableBlankLineRun.ReplaceAllString(stripped, "\n"))
 }
 
 // newPublicNode projects one published source node to its complete public node.
@@ -456,6 +498,11 @@ func newPublicNode(cap *device.Capture, index int, u unit, ref string) *protocol
 			node.Checked = triBool(true, raw.Checked)
 		}
 	}
+	// No capture field maps to the public Hint today: a uiAutomator node reports
+	// text, a content description and a resource id, not a hint string. The wire
+	// member exists for readers and for a future producer; any such producer must
+	// pass its text through cleanReadableText like labelParts does, and needs its
+	// own purification test at that point.
 	return node
 }
 

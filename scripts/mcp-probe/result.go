@@ -169,6 +169,7 @@ type observationView struct {
 	Origin     string          `json:"origin"`
 	Revision   int             `json:"revision"`
 	CapturedAt string          `json:"captured_at"`
+	Visual     string          `json:"visual"`
 	Quality    *qualityView    `json:"quality"`
 	Screen     *screenView     `json:"screen"`
 	Foreground *foregroundView `json:"foreground"`
@@ -370,6 +371,11 @@ func project(result *sdk.CallToolResult, mode string, requestRefs ...string) (*c
 		projected.textHeader = &decoded.header
 	}
 	if failure := checkTextInputSnapshot(projected.view.TextInput); failure != nil {
+		return nil, failure
+	}
+	// The readable tree body and the optional visual classification member are
+	// verified on the decoded projection, so every result mode shares one gate.
+	if failure := checkProjectionConsistency(projected); failure != nil {
 		return nil, failure
 	}
 	return projected, nil
@@ -734,7 +740,7 @@ func snapImageBytes(projected *callResult, meta *imageView) ([]byte, *checkError
 func treeBlockText(projected *callResult, headerPrefix string) (string, *checkError) {
 	end := "end inspect"
 	reason := "text_inspect_block_missing"
-	if strings.HasPrefix(headerPrefix, "tree v4 ") {
+	if strings.HasPrefix(headerPrefix, "tree v5 ") {
 		end = "end tree"
 		reason = "text_tree_block_missing"
 	}

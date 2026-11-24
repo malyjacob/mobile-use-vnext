@@ -550,7 +550,12 @@ type observationState struct {
 	ClaimedBy string
 	RetiredAt time.Time
 	Full      bool
-	Error     *protocol.Error
+	// VisualKind is the raw visual classification computed for this frame,
+	// independent of whether the hint was published on the wire. A later delta
+	// compares its own kind against it, so the same page never repeats the hint
+	// on every frame while a kind switch is still reported.
+	VisualKind string
+	Error      *protocol.Error
 }
 
 type operationState struct {

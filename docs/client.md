@@ -19,17 +19,19 @@ instance, err := c.Discover(ctx)
 `POST /api/status {}` 取得当前准入事实（`can_start`、`blocking_code`、本 Agent 的
 `session`、`start_operation_id` 与 `cleanup`）。它不生成 P、不续租、不创建会话。
 
-当前共同契约为 `"27"`。契约版本不等时返回 `contract_mismatch`；客户端不刷新版本、不重发
+当前共同契约为 `"28"`。契约版本不等时返回 `contract_mismatch`；客户端不刷新版本、不重发
 业务动作。端口可应答、`/health` 正常都不等于 `can_start=true`。
 
 公开树与 detailed inspection 使用相同的完整节点布尔默认/unknown 规则，不携带 defaults。
-delta 的 set 保留显式 false/空值/null；应用器将五块作为固定基线的原子最终图声明，支持
+compact 中 `root`/`scroll` 的已知几何是四整数矩形，其余角色的已知几何是二整数中心点；
+detailed inspection 始终使用四整数矩形。delta 的 set 保留显式 false/空值/null，`bounds`
+的已知值按同一角色规则写中心点或矩形；应用器将五块作为固定基线的原子最终图声明，支持
 存续节点迁移与新增组装父。服务端维护至多 4 条已确认 full 基线（同一会话 origin 与同一目标
 显示 ID/代次，采集龄 `< 180s`）。当前基线可在跨度 1–10 内成为 `delta.base`，其他备用 full
 仅可使用跨度 1–4；备用 full 被成功选回后，从下一次发布起成为当前基线。调用方必须保留所有
 可能被引用的已确认 full 树，不能在第 4 个修订后立即淘汰仍为当前基线的 full，并逐条按
 `delta.base` 应用到对应完整树，不能叠加在上一份 delta 结果上。服务从同一采集的全池候选中
-按实际 `tree v4` 树块 UTF-8 字节选择最短合格差分，合格条件是严格小于对应 full 的 70%。
+按实际 `tree v5` 树块 UTF-8 字节选择最短合格差分，合格条件是严格小于对应 full 的 70%。
 同一字节数优先当前基线，再取较新 revision。`observe(P)` 与 `full=true` 强制 full，基线仍在
 池内时可经 `inspect(reference=base)` 回看。阅读 ref 连续性不代替服务端输入授权。格式见
 [接口契约](interface.md)。
@@ -82,6 +84,11 @@ type Response struct {
 `observation.quality` 对象出现时 `state`/`samples`/`stop_reason` 三个成员都必填，显式
 `null`、未知枚举或负 `samples` 使整次响应按 `invalid_response` 拒绝。`samples=0` 是合法
 值；对象缺失只表示本次结果没有该事实，不能当作 `not_observed` 或 `unknown` 的替代来源。
+
+`observation.visual` 是可选字符串，取值为 `image_heavy(<pct>%)` 或 `sparse_tree`；客户端
+按原值保留，不重算分类、不补默认值，也不用它替代 `observation.quality`、树或图片事实。
+`full` 观察直接携带本次分类，`delta` 只在该视觉状态变化时携带。空成员省略；显式 `null`
+或空串都不是合法响应。
 
 `Result.Observation.Tree` 携带 compact full 或 delta，节点集合随服务的[裁剪策略](interface.md#node)
 确定。留存节点使用原编号，匿名包装省略后孩子可能换父。调用方留存已确认的 full，按每条

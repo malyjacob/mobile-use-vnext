@@ -181,7 +181,7 @@ func measureBaselineSelectionCandidate(
 		projection.Capture == nil {
 		t.Fatalf("candidate against %s failed: %v", baseline.ObservationID, err)
 	}
-	compact, _, cost, apiErr := h.engine.publicCandidate(*projection.Capture, projection)
+	compact, _, cost, _, apiErr := h.engine.publicCandidate(*projection.Capture, projection)
 	if apiErr != nil {
 		t.Fatalf("public candidate against %s failed: %v", baseline.ObservationID, apiErr)
 	}

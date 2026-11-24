@@ -108,7 +108,7 @@ func signature(raw *device.RawNode, role protocol.Role) matchKey {
 		key.label = labelSignature(labelParts(raw))
 	}
 	if role == protocol.RoleInput && raw.DescSet && !(raw.HasPassword && raw.Password) {
-		key.anchor = raw.Description
+		key.anchor = cleanReadableText(raw.Description)
 	}
 	return key
 }
@@ -157,7 +157,7 @@ func publicSignature(raw *device.RawNode, role protocol.Role) publicKey {
 	}
 	if role == protocol.RoleInput {
 		if raw.DescSet && !key.protected {
-			key.anchor = raw.Description
+			key.anchor = cleanReadableText(raw.Description)
 		}
 		return key
 	}

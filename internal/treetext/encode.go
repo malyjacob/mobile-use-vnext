@@ -1,4 +1,4 @@
-// Package treetext encodes ordinary compact trees and deltas as tree v4 text.
+// Package treetext encodes ordinary compact trees and deltas as tree v5 text.
 package treetext
 
 import (
@@ -15,8 +15,8 @@ const (
 	hexDigits  = "0123456789abcdef"
 )
 
-// EncodeFull renders one complete compact tree as a tree v4 block. The block
-// starts with "tree v4 full" and ends with the "end tree" line and newline.
+// EncodeFull renders one complete compact tree as a tree v5 block. The block
+// starts with "tree v5 full" and ends with the "end tree" line and newline.
 // A false result means the caller must use canonical JSON.
 func EncodeFull(observationID string, tree *protocol.ReadTree) (string, bool) {
 	if !validObservationID(observationID) || !validFullTree(tree) ||
@@ -26,14 +26,14 @@ func EncodeFull(observationID string, tree *protocol.ReadTree) (string, bool) {
 	body := textBuffer{}
 	nodes, _ := writeSubtree(&body, tree.Root, "")
 	block := textBlock{
-		header:  "tree v4 full nodes=" + strconv.Itoa(nodes),
+		header:  "tree v5 full nodes=" + strconv.Itoa(nodes),
 		body:    body,
 		trailer: "end tree",
 	}
 	return block.finish()
 }
 
-// EncodeDelta renders one compact delta as a tree v4 block. observationID is
+// EncodeDelta renders one compact delta as a tree v5 block. observationID is
 // the current full O used only to abbreviate a matching delta base.
 func EncodeDelta(observationID string, delta *protocol.ReadDelta) (string, bool) {
 	if !validObservationID(observationID) || !validDelta(delta) {
@@ -44,7 +44,7 @@ func EncodeDelta(observationID string, delta *protocol.ReadDelta) (string, bool)
 	body := textBuffer{}
 	writeDeltaBody(&body, delta)
 	block := textBlock{
-		header: "tree v4 delta base=" + shortDeltaBase(observationID, delta.Base) +
+		header: "tree v5 delta base=" + shortDeltaBase(observationID, delta.Base) +
 			" changes=" + strconv.Itoa(changes),
 		body:    body,
 		trailer: "end tree",
@@ -180,6 +180,8 @@ func writeSetNode(body *textBuffer, set protocol.ReadSetNode) {
 			body.write("hidden")
 		case protocol.GeometryUnknown:
 			body.write("null")
+		case protocol.GeometryPoint:
+			writePointArray(body, set.Bounds.Value.Point)
 		default:
 			writeBounds(body, &set.Bounds.Value.Rect)
 		}
@@ -293,7 +295,9 @@ func writeBounds(body *textBuffer, bounds *protocol.Bounds) {
 }
 
 // Each definition owns an ancestor stack, so delta + and = roots never inherit
-// @ references from another definition or historical result.
+// @ references from another definition or historical result. The nearest known
+// ancestor geometry is compared by kind and payload, so a point only abbreviates
+// an equal point and a rectangle only an equal rectangle.
 func writeSubtree(body *textBuffer, root *protocol.ReadNode, prefix string) (int, int) {
 	if root == nil {
 		return 0, 0
@@ -303,16 +307,16 @@ func writeSubtree(body *textBuffer, root *protocol.ReadNode, prefix string) (int
 		depth          int
 		prefix         string
 		ancestorKnown  bool
-		ancestorBounds protocol.Bounds
+		ancestorBounds protocol.ReadBounds
 	}
 	stack := []pendingNode{{node: root, prefix: prefix}}
 	nodes, entries := 0, 0
 	for len(stack) > 0 {
 		entry := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
-		referenceBounds := entry.node.Bounds.Kind == protocol.GeometryKnown &&
+		referenceBounds := deliveredGeometryKnown(entry.node.Bounds.Kind) &&
 			!entry.node.IsChain() && entry.ancestorKnown &&
-			entry.node.Bounds.Rect == entry.ancestorBounds
+			entry.node.Bounds.Equal(entry.ancestorBounds)
 		writeIndent(body, entry.depth)
 		if entry.prefix != "" {
 			body.write(entry.prefix)
@@ -323,9 +327,9 @@ func writeSubtree(body *textBuffer, root *protocol.ReadNode, prefix string) (int
 
 		childKnown := entry.ancestorKnown
 		childBounds := entry.ancestorBounds
-		if entry.node.Bounds.Kind == protocol.GeometryKnown {
+		if deliveredGeometryKnown(entry.node.Bounds.Kind) {
 			childKnown = true
-			childBounds = entry.node.Bounds.Rect
+			childBounds = entry.node.Bounds
 		}
 		for index := len(entry.node.Children) - 1; index >= 0; index-- {
 			stack = append(stack, pendingNode{
@@ -337,6 +341,11 @@ func writeSubtree(body *textBuffer, root *protocol.ReadNode, prefix string) (int
 		}
 	}
 	return nodes, entries
+}
+
+// deliveredGeometryKnown reports whether the kind carries delivered geometry.
+func deliveredGeometryKnown(kind protocol.GeometryKind) bool {
+	return kind == protocol.GeometryKnown || kind == protocol.GeometryPoint
 }
 
 func writeIndent(body *textBuffer, depth int) {
@@ -380,7 +389,7 @@ func writeChainRefs(body *textBuffer, refs []string) {
 	body.write("]")
 }
 
-// omitsNodeRole applies the v4 recovery rule to an ordinary node. An unquoted
+// omitsNodeRole applies the v5 recovery rule to an ordinary node. An unquoted
 // role word in the first surviving column is always explicit, while a quoted
 // label defaults to text and every other first column defaults to view.
 func omitsNodeRole(node *protocol.ReadNode) bool {
@@ -463,6 +472,10 @@ func writeNodeGeometry(body *textBuffer, node *protocol.ReadNode, referenceBound
 	}
 	if referenceBounds {
 		body.write("@")
+		return
+	}
+	if node.Bounds.Kind == protocol.GeometryPoint {
+		writePoint(body, node.Bounds.Point)
 		return
 	}
 	writeRectangle(body, &node.Bounds.Rect)
@@ -562,6 +575,18 @@ func writeRectangle(body *textBuffer, bounds *protocol.Bounds) {
 	body.writeInt(bounds.Right)
 	body.write(",")
 	body.writeInt(bounds.Bottom)
+}
+
+func writePoint(body *textBuffer, point protocol.Point) {
+	body.writeInt(point.X)
+	body.write(",")
+	body.writeInt(point.Y)
+}
+
+func writePointArray(body *textBuffer, point protocol.Point) {
+	body.write("[")
+	writePoint(body, point)
+	body.write("]")
 }
 
 func writeDefaultFalseFlag(body *textBuffer, name string, value *bool) {
@@ -730,7 +755,7 @@ func validReadNodeTreeDetails(
 
 func validBoundsForState(bounds protocol.ReadBounds) bool {
 	switch bounds.Kind {
-	case protocol.GeometryHidden, protocol.GeometryUnknown:
+	case protocol.GeometryHidden, protocol.GeometryUnknown, protocol.GeometryPoint:
 		return true
 	case protocol.GeometryKnown:
 		return validBounds(&bounds.Rect)

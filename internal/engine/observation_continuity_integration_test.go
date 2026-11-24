@@ -167,11 +167,13 @@ func continuationCapture(marker string, checked *bool, extraResources ...string)
 }
 
 // compactCycleCapture exercises the actual Builder, purification and compact
-// projection path. One stable image moves between two anonymous parents and
-// crosses the one-percent pruning boundary while the input value changes from
-// absent to an explicit empty string.
-func compactCycleCapture(largeImage, imageInSecondParent, explicitEmptyValue,
-	includeLateImage bool) captureStep {
+// projection path. One stable tappable edge sliver moves between two anonymous
+// parents and crosses the sliver pruning boundary: a two-pixel-high strip at the
+// viewport edge carries no readable content and is dropped, while the full-sized
+// control survives. The input value changes from absent to an explicit empty
+// string across the same frames.
+func compactCycleCapture(largeSliver, sliverInSecondParent, explicitEmptyValue,
+	includeLateSliver bool) captureStep {
 	return func(_ *fakeDevice, display device.Display) (device.Capture, error) {
 		screen := display.Bounds()
 		width, height := screen.Width(), screen.Height()
@@ -179,41 +181,41 @@ func compactCycleCapture(largeImage, imageInSecondParent, explicitEmptyValue,
 		firstParent := device.Rect{Left: 0, Top: 0, Right: width, Bottom: half}
 		secondParent := device.Rect{Left: 0, Top: half, Right: width, Bottom: height}
 
-		imageParent := 1
-		imageParentBounds := firstParent
-		if imageInSecondParent {
-			imageParent = 2
-			imageParentBounds = secondParent
+		sliverParent := 1
+		sliverParentBounds := firstParent
+		if sliverInSecondParent {
+			sliverParent = 2
+			sliverParentBounds = secondParent
 		}
-		imageSide := 40
-		if largeImage {
-			imageSide = 200
+		sliverWidth, sliverHeight := 200, 2
+		if largeSliver {
+			sliverHeight = 200
 		}
-		imageBounds := device.Rect{
+		sliverBounds := device.Rect{
 			Left:   100,
-			Top:    imageParentBounds.Top + 300,
-			Right:  100 + imageSide,
-			Bottom: imageParentBounds.Top + 300 + imageSide,
+			Top:    sliverParentBounds.Top + 300,
+			Right:  100 + sliverWidth,
+			Bottom: sliverParentBounds.Top + 300 + sliverHeight,
 		}
-		image := device.RawNode{
-			Index: 6, Parent: imageParent, Depth: 2, DisplayID: display.ID,
-			Visible: true, RawBounds: imageBounds, Bounds: imageBounds,
-			Package: "com.example", ClassName: "android.widget.ImageView",
-			ResourceSet: true, ResourceID: "compact_cycle_image",
+		sliver := device.RawNode{
+			Index: 6, Parent: sliverParent, Depth: 2, DisplayID: display.ID,
+			Visible: true, RawBounds: sliverBounds, Bounds: sliverBounds,
+			Package: "com.example", ClassName: "android.view.View",
+			ResourceSet: true, ResourceID: "compact_cycle_sliver",
 			HasEnabled: true, Enabled: true,
 			HasFocused: true, Focused: false,
 			HasSelected: true, Selected: false,
 			HasPassword: true, Password: false,
 			HasChecked: true, Checked: false,
-			HasClickable: true, Clickable: false,
+			HasClickable: true, Clickable: true,
 		}
 
 		firstChildren := []int{4}
 		secondChildren := []int{5}
-		if imageInSecondParent {
-			secondChildren = append(secondChildren, image.Index)
+		if sliverInSecondParent {
+			secondChildren = append(secondChildren, sliver.Index)
 		} else {
-			firstChildren = append(firstChildren, image.Index)
+			firstChildren = append(firstChildren, sliver.Index)
 		}
 		anonymousParent := func(index int, bounds device.Rect, children []int) device.RawNode {
 			return device.RawNode{
@@ -264,18 +266,18 @@ func compactCycleCapture(largeImage, imageInSecondParent, explicitEmptyValue,
 			anchor(5, 2, device.Rect{
 				Left: 20, Top: half + 20, Right: width - 20, Bottom: half + 100,
 			}, "cycle-second"),
-			image,
+			sliver,
 		}
-		if includeLateImage {
+		if includeLateSliver {
 			lateBounds := device.Rect{Left: 350, Top: 300, Right: 550, Bottom: 500}
-			lateImage := image
-			lateImage.Index = 7
-			lateImage.Parent = 1
-			lateImage.RawBounds = lateBounds
-			lateImage.Bounds = lateBounds
-			lateImage.ResourceID = "compact_late_image"
-			nodes = append(nodes, lateImage)
-			nodes[1].Children = append(nodes[1].Children, lateImage.Index)
+			lateSliver := sliver
+			lateSliver.Index = 7
+			lateSliver.Parent = 1
+			lateSliver.RawBounds = lateBounds
+			lateSliver.Bounds = lateBounds
+			lateSliver.ResourceID = "compact_late_sliver"
+			nodes = append(nodes, lateSliver)
+			nodes[1].Children = append(nodes[1].Children, lateSliver.Index)
 		}
 
 		return device.Capture{
@@ -330,7 +332,8 @@ func sameOptionalString(left, right *string) bool {
 
 // assertReadContentConsistent checks that every node delivered by compact also
 // exists in detailed with the same public content. Compact may omit a pruned
-// subtree and may hide a retained node's known rectangle, so this is a
+// subtree, may hide a retained node's geometry and delivers the center point of a
+// non-root/non-scroll node instead of its rectangle, so this is a
 // projection-subset check rather than a pairwise tree comparison.
 func assertReadContentConsistent(t *testing.T, compact, detailed *protocol.ReadTree) {
 	t.Helper()
@@ -338,6 +341,10 @@ func assertReadContentConsistent(t *testing.T, compact, detailed *protocol.ReadT
 	detailed = observation.UnpackTree(detailed)
 	if compact == nil || detailed == nil {
 		t.Fatalf("missing compact/detailed tree: %+v %+v", compact, detailed)
+	}
+	screen := protocol.Bounds{}
+	if compact.Root != nil && compact.Root.Bounds.Kind == protocol.GeometryKnown {
+		screen = compact.Root.Bounds.Rect
 	}
 	detailedByRef := make(map[string]*protocol.ReadNode)
 	var indexDetailed func(*protocol.ReadNode)
@@ -373,7 +380,7 @@ func assertReadContentConsistent(t *testing.T, compact, detailed *protocol.ReadT
 		}
 		if node.Role != expected.Role || node.Context != expected.Context ||
 			node.Axis != expected.Axis ||
-			!slices.Equal(node.Label, expected.Label) ||
+			!compactLabelsMatch(node, expected) ||
 			!slices.Equal(node.Actions, expected.Actions) ||
 			!sameOptionalBool(node.Enabled, expected.Enabled) ||
 			!sameOptionalBool(node.Focused, expected.Focused) ||
@@ -393,6 +400,17 @@ func assertReadContentConsistent(t *testing.T, compact, detailed *protocol.ReadT
 				t.Fatalf("known compact geometry differs at %q: compact=%+v detailed=%+v",
 					node.Ref, node.Bounds, expected.Bounds)
 			}
+		case protocol.GeometryPoint:
+			if expected.Bounds.Kind != protocol.GeometryKnown {
+				t.Fatalf("point compact geometry has no known detailed source at %q: %+v",
+					node.Ref, expected.Bounds)
+			}
+			wantX, wantY := compactCenterOf(expected.Bounds.Rect, screen)
+			if node.Bounds.Point.X != wantX || node.Bounds.Point.Y != wantY {
+				t.Fatalf("compact point %q = (%d,%d), want the center (%d,%d) of %+v",
+					node.Ref, node.Bounds.Point.X, node.Bounds.Point.Y, wantX, wantY,
+					expected.Bounds.Rect)
+			}
 		case protocol.GeometryUnknown:
 			if expected.Bounds.Kind != protocol.GeometryUnknown {
 				t.Fatalf("unknown compact geometry differs at %q: compact=%+v detailed=%+v",
@@ -409,6 +427,40 @@ func assertReadContentConsistent(t *testing.T, compact, detailed *protocol.ReadT
 		}
 	}
 	walkCompact(compact.Root)
+}
+
+// compactLabelsMatch compares the label of one compact node with the complete label
+// of the detailed node it was projected from. The compact projection rewrites only
+// one label: an input whose single label part repeats its value publishes no label,
+// while the detailed view keeps the source text as both.
+func compactLabelsMatch(compact, detailed *protocol.ReadNode) bool {
+	if compact == nil || detailed == nil {
+		return false
+	}
+	if slices.Equal(compact.Label, detailed.Label) {
+		return true
+	}
+	return compact.Role == protocol.RoleInput && len(compact.Label) == 0 &&
+		len(detailed.Label) == 1 && detailed.Value != nil &&
+		detailed.Label[0] == *detailed.Value
+}
+
+// compactCenterOf returns the center point the compact projection publishes for one
+// complete rectangle: the truncated half-open center of its visible part, or of the
+// whole rectangle when nothing of it is visible. Device edges are non-negative, so
+// this is the plain truncated midpoint the projection uses, clamped by construction
+// inside the rectangle.
+func compactCenterOf(rect, screen protocol.Bounds) (int, int) {
+	visible := protocol.Bounds{
+		Left:   max(rect.Left, screen.Left),
+		Top:    max(rect.Top, screen.Top),
+		Right:  min(rect.Right, screen.Right),
+		Bottom: min(rect.Bottom, screen.Bottom),
+	}
+	if visible.Right > visible.Left && visible.Bottom > visible.Top {
+		rect = visible
+	}
+	return (rect.Left + rect.Right) / 2, (rect.Top + rect.Bottom) / 2
 }
 
 func assertSourceMapping(t *testing.T, state *observationState) {
@@ -1080,8 +1132,9 @@ func TestI02FixedBaselineDeltaChain(t *testing.T) {
 
 // TestI04ActualProjectionPruningDeltaTopology uses Engine with the real
 // observation.Builder rather than synthetic read trees. It proves that one
-// image ref survives pruning, reappearance and reparenting while every later
-// delta remains relative to the acknowledged initial full.
+// tappable edge-sliver ref survives compact sliver pruning, reappearance and
+// reparenting while every later delta remains relative to the acknowledged initial
+// full.
 func TestI04ActualProjectionPruningDeltaTopology(t *testing.T) {
 	h := continuationHarness(t)
 	h.device.scriptCaptures(compactCycleCapture(true, false, false, false))
@@ -1093,13 +1146,14 @@ func TestI04ActualProjectionPruningDeltaTopology(t *testing.T) {
 		t.Fatalf("start did not publish a compact full: %+v", base)
 	}
 	requireOrdinaryReadDefinitions(t, base.Root)
-	imageRef, ok := sourceRefForResource(startState.Projection, "compact_cycle_image")
+	sliverRef, ok := sourceRefForResource(startState.Projection, "compact_cycle_sliver")
 	if !ok {
-		t.Fatal("start projection has no image ref")
+		t.Fatal("start projection has no sliver ref")
 	}
-	initialImage := readNodeByRef(base.Root, imageRef)
-	if initialImage == nil || initialImage.Bounds.Kind != protocol.GeometryKnown {
-		t.Fatalf("initial full did not contain the enlarged image %q: %+v", imageRef, initialImage)
+	initialSliver := readNodeByRef(base.Root, sliverRef)
+	if initialSliver == nil || initialSliver.Bounds.Kind != protocol.GeometryPoint {
+		t.Fatalf("initial full did not contain the full-size sliver %q: %+v",
+			sliverRef, initialSliver)
 	}
 
 	ackResult, apiErr := h.engine.Observe(context.Background(), "agent", "Pi04ack",
@@ -1117,13 +1171,13 @@ func TestI04ActualProjectionPruningDeltaTopology(t *testing.T) {
 	assertDeliveredDelta(t, ackResult, ackState, base, startObservation.ID)
 
 	type frameExpectation struct {
-		name               string
-		capture            captureStep
-		imagePresent       bool
-		imageParent        string
-		wantLateImageAdded bool
-		wantRemoved        bool
-		inputEmpty         bool
+		name                string
+		capture             captureStep
+		sliverPresent       bool
+		sliverParent        string
+		wantLateSliverAdded bool
+		wantRemoved         bool
+		inputEmpty          bool
 	}
 	frames := []frameExpectation{
 		{
@@ -1133,17 +1187,17 @@ func TestI04ActualProjectionPruningDeltaTopology(t *testing.T) {
 			inputEmpty:  true,
 		},
 		{
-			name:         "reappeared_and_moved_to_second_parent",
-			capture:      compactCycleCapture(true, true, true, false),
-			imagePresent: true, imageParent: "cycle-second",
+			name:          "reappeared_and_moved_to_second_parent",
+			capture:       compactCycleCapture(true, true, true, false),
+			sliverPresent: true, sliverParent: "cycle-second",
 			inputEmpty: true,
 		},
 		{
-			name:               "replaced_cycle_with_new_image",
-			capture:            compactCycleCapture(false, true, true, true),
-			wantRemoved:        true,
-			wantLateImageAdded: true,
-			inputEmpty:         true,
+			name:                "replaced_cycle_with_new_sliver",
+			capture:             compactCycleCapture(false, true, true, true),
+			wantRemoved:         true,
+			wantLateSliverAdded: true,
+			inputEmpty:          true,
 		},
 	}
 	baseBytes, err := protocol.JSON(base)
@@ -1168,33 +1222,34 @@ func TestI04ActualProjectionPruningDeltaTopology(t *testing.T) {
 		}
 		requireOrdinaryReadDefinitions(t, state.Compact.Root)
 
-		gotImageRef, mapped := sourceRefForResource(state.Projection, "compact_cycle_image")
-		if !mapped || gotImageRef != imageRef {
-			t.Fatalf("%s image ref=%q/%t, want stable %q", frame.name, gotImageRef, mapped, imageRef)
+		gotSliverRef, mapped := sourceRefForResource(state.Projection, "compact_cycle_sliver")
+		if !mapped || gotSliverRef != sliverRef {
+			t.Fatalf("%s sliver ref=%q/%t, want stable %q", frame.name, gotSliverRef, mapped, sliverRef)
 		}
-		image := readNodeByRef(state.Compact.Root, imageRef)
-		if frame.imagePresent {
-			if image == nil {
-				t.Fatalf("%s did not publish the enlarged image %q", frame.name, imageRef)
+		sliver := readNodeByRef(state.Compact.Root, sliverRef)
+		if frame.sliverPresent {
+			if sliver == nil {
+				t.Fatalf("%s did not publish the full-size sliver %q", frame.name, sliverRef)
 			}
-			parent := readParentOf(state.Compact.Root, image)
-			if parent == nil || !tapNodeHasLabel(parent, frame.imageParent) {
-				t.Fatalf("%s image parent=%+v, want anchor %q",
-					frame.name, parent, frame.imageParent)
+			parent := readParentOf(state.Compact.Root, sliver)
+			if parent == nil || !tapNodeHasLabel(parent, frame.sliverParent) {
+				t.Fatalf("%s sliver parent=%+v, want anchor %q",
+					frame.name, parent, frame.sliverParent)
 			}
-			if image.Bounds.Kind != protocol.GeometryKnown ||
-				image.Label == nil || len(image.Label) != 0 ||
-				image.Actions == nil || len(image.Actions) != 0 ||
-				image.Value != nil || image.Hint != nil || image.Resource != nil {
-				t.Fatalf("%s compact image fields changed: %+v", frame.name, image)
+			if sliver.Bounds.Kind != protocol.GeometryPoint ||
+				len(sliver.Label) != 0 ||
+				!slices.Equal(sliver.Actions, []protocol.Action{protocol.ActionTap}) ||
+				sliver.Value != nil || sliver.Hint != nil ||
+				sliver.Resource == nil || *sliver.Resource != "compact_cycle_sliver" {
+				t.Fatalf("%s compact sliver fields changed: %+v", frame.name, sliver)
 			}
-		} else if image != nil {
-			t.Fatalf("%s kept pruned image %q: %+v", frame.name, imageRef, image)
+		} else if sliver != nil {
+			t.Fatalf("%s kept the pruned sliver %q: %+v", frame.name, sliverRef, sliver)
 		}
 
 		delta := stateDeltaFromObserve(t, result, state, base)
 		requireOrdinaryReadDelta(t, delta)
-		if frame.wantLateImageAdded && len(delta.Add) == 0 {
+		if frame.wantLateSliverAdded && len(delta.Add) == 0 {
 			t.Fatalf("%s did not exercise an ordinary add definition: %+v", frame.name, delta)
 		}
 		if frame.wantRemoved {
@@ -1202,18 +1257,18 @@ func TestI04ActualProjectionPruningDeltaTopology(t *testing.T) {
 				t.Fatalf("%s pruning emitted no structural removal: %+v", frame.name, delta)
 			}
 		}
-		if frame.wantLateImageAdded {
-			lateImageRef, mapped := sourceRefForResource(state.Projection, "compact_late_image")
+		if frame.wantLateSliverAdded {
+			lateSliverRef, mapped := sourceRefForResource(state.Projection, "compact_late_sliver")
 			if !mapped {
-				t.Fatalf("%s has no mapped late image ref", frame.name)
+				t.Fatalf("%s has no mapped late sliver ref", frame.name)
 			}
-			lateDefinition := readNodeInDefinitions(delta.Add, lateImageRef)
-			if lateDefinition == nil || lateDefinition.Bounds.Kind != protocol.GeometryKnown {
-				t.Fatalf("%s add definitions lack late image %q: %+v",
-					frame.name, lateImageRef, delta.Add)
+			lateDefinition := readNodeInDefinitions(delta.Add, lateSliverRef)
+			if lateDefinition == nil || lateDefinition.Bounds.Kind != protocol.GeometryPoint {
+				t.Fatalf("%s add definitions lack late sliver %q: %+v",
+					frame.name, lateSliverRef, delta.Add)
 			}
-			if readNodeByRef(state.Compact.Root, lateImageRef) == nil {
-				t.Fatalf("%s current full omitted the late image %q", frame.name, lateImageRef)
+			if readNodeByRef(state.Compact.Root, lateSliverRef) == nil {
+				t.Fatalf("%s current full omitted the late sliver %q", frame.name, lateSliverRef)
 			}
 		}
 

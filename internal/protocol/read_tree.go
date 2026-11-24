@@ -18,27 +18,37 @@ const (
 	ViewDetailed = "detailed"
 )
 
-// GeometryKind is the public state of one node rectangle.
+// GeometryKind is the public state of one node geometry.
 //
 //	GeometryHidden  known geometry that this view does not deliver
 //	GeometryUnknown the source did not provide usable geometry
 //	GeometryKnown   a delivered rectangle
+//	GeometryPoint   a delivered center point
 type GeometryKind uint8
 
 const (
 	GeometryHidden GeometryKind = iota
 	GeometryUnknown
 	GeometryKnown
+	GeometryPoint
 )
 
-// ReadBounds is the tri-state public geometry of one node.
+// ReadBounds is the four-state public geometry of one node. Kind selects the
+// wire form and which payload member is meaningful; the zero-value payload of
+// the other member is ignored.
 type ReadBounds struct {
-	Kind GeometryKind
-	Rect Bounds
+	Kind  GeometryKind
+	Rect  Bounds
+	Point Point
 }
 
 // KnownBounds builds a delivered rectangle.
 func KnownBounds(rect Bounds) ReadBounds { return ReadBounds{Kind: GeometryKnown, Rect: rect} }
+
+// PointBounds builds a delivered center point.
+func PointBounds(x, y int) ReadBounds {
+	return ReadBounds{Kind: GeometryPoint, Point: Point{X: x, Y: y}}
+}
 
 // UnknownBounds builds the "source did not provide geometry" state.
 func UnknownBounds() ReadBounds { return ReadBounds{Kind: GeometryUnknown} }
@@ -46,17 +56,38 @@ func UnknownBounds() ReadBounds { return ReadBounds{Kind: GeometryUnknown} }
 // HiddenBounds builds the "known but not delivered by this view" state.
 func HiddenBounds() ReadBounds { return ReadBounds{Kind: GeometryHidden} }
 
-// Equal reports whether two public geometry states are identical.
+// Equal reports whether two public geometry states are identical, including the
+// delivered payload of the selected form.
 func (b ReadBounds) Equal(other ReadBounds) bool {
 	if b.Kind != other.Kind {
 		return false
 	}
-	return b.Kind != GeometryKnown || b.Rect == other.Rect
+	switch b.Kind {
+	case GeometryKnown:
+		return b.Rect == other.Rect
+	case GeometryPoint:
+		return b.Point == other.Point
+	}
+	return true
+}
+
+// writePoint encodes one delivered center point as [x,y].
+func writePoint(enc *jsontext.Encoder, point Point) error {
+	if err := enc.WriteToken(jsontext.BeginArray); err != nil {
+		return err
+	}
+	for _, value := range []int{point.X, point.Y} {
+		if err := writeInt(enc, value); err != nil {
+			return err
+		}
+	}
+	return enc.WriteToken(jsontext.EndArray)
 }
 
 // MarshalJSONTo encodes the modifying form: null for unknown, the controlled
-// string "hidden" for hidden geometry and the rectangle array for known
-// geometry. A complete node omits hidden geometry instead of writing it.
+// string "hidden" for hidden geometry, the point array for point geometry and
+// the rectangle array for rectangle geometry. A complete node omits hidden
+// geometry instead of writing it.
 func (b ReadBounds) MarshalJSONTo(enc *jsontext.Encoder) error {
 	switch b.Kind {
 	case GeometryHidden:
@@ -65,13 +96,15 @@ func (b ReadBounds) MarshalJSONTo(enc *jsontext.Encoder) error {
 		return writeNull(enc)
 	case GeometryKnown:
 		return MarshalJSONTo(enc, &b.Rect)
+	case GeometryPoint:
+		return writePoint(enc, b.Point)
 	}
 	return fmt.Errorf("invalid public geometry state")
 }
 
-// UnmarshalJSONFrom decodes null, the controlled string "hidden" or a
-// rectangle array. Absence is never seen here: the caller decides whether a
-// missing member means hidden or "not modified".
+// UnmarshalJSONFrom decodes null, the controlled string "hidden", a two-integer
+// point array or a four-integer rectangle array. Absence is never seen here: the
+// caller decides whether a missing member means hidden or "not modified".
 func (b *ReadBounds) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 	raw, err := dec.ReadValue()
 	if err != nil {
@@ -89,12 +122,25 @@ func (b *ReadBounds) decodeValue(raw jsontext.Value) error {
 		*b = ReadBounds{Kind: GeometryHidden}
 		return nil
 	}
-	var rect Bounds
-	if err := json.Unmarshal(raw, &rect); err != nil {
-		return fmt.Errorf("bounds must be null, %q or [left,top,right,bottom]", "hidden")
+	var values []int
+	if err := json.Unmarshal(raw, &values); err != nil {
+		return fmt.Errorf("bounds must be null, %q, [x,y] or [left,top,right,bottom]", "hidden")
 	}
-	*b = ReadBounds{Kind: GeometryKnown, Rect: rect}
-	return nil
+	switch len(values) {
+	case 2:
+		*b = PointBounds(values[0], values[1])
+		return nil
+	case 4:
+		if values[2] < values[0] || values[3] < values[1] {
+			return fmt.Errorf("bounds must be a non-negative rectangle")
+		}
+		*b = KnownBounds(Bounds{
+			Left: values[0], Top: values[1], Right: values[2], Bottom: values[3],
+		})
+		return nil
+	default:
+		return fmt.Errorf("bounds must be null, %q, [x,y] or [left,top,right,bottom]", "hidden")
+	}
 }
 
 // ReadNode is one public node definition. Exactly one of Ref and Chain is
@@ -588,8 +634,33 @@ func (t *ReadTree) Validate() error {
 			}
 			seen[ref] = true
 		}
-		if n.Bounds.Kind == GeometryHidden && t.View == ViewDetailed {
-			return fmt.Errorf("detailed view must not hide geometry")
+		switch t.View {
+		case ViewDetailed:
+			switch n.Bounds.Kind {
+			case GeometryKnown, GeometryUnknown:
+			case GeometryPoint:
+				return fmt.Errorf("detailed view must not deliver point geometry")
+			case GeometryHidden:
+				return fmt.Errorf("detailed view must not hide geometry")
+			default:
+				return fmt.Errorf("invalid public geometry state")
+			}
+		case ViewCompact:
+			switch n.Bounds.Kind {
+			case GeometryKnown:
+				if n.Role != RoleRoot && n.Role != RoleScroll {
+					return fmt.Errorf("compact view delivers rectangle geometry only on root and scroll nodes")
+				}
+			case GeometryPoint:
+				if n.Role == RoleRoot || n.Role == RoleScroll {
+					return fmt.Errorf("compact view delivers point geometry only on non-root and non-scroll nodes")
+				}
+			case GeometryHidden, GeometryUnknown:
+			default:
+				return fmt.Errorf("invalid public geometry state")
+			}
+		default:
+			return fmt.Errorf("unsupported tree view %q", t.View)
 		}
 		for _, child := range n.Children {
 			if err := walk(child, false); err != nil {

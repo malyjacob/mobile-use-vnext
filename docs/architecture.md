@@ -37,7 +37,7 @@ cmd/device-mcp
 - `internal/android` 只执行有界设备 I/O 并返回受控事实；不决定观察什么、操作什么。
 - `internal/mcp` 只依赖 `protocol` 与 `client`，不导入 `engine`、`android`、`store`，不因
   同仓而绕过认证与服务状态；`internal/client` 只依赖 `protocol`。该包以单一固定说明源生成
-  server instructions（`text`/`both` 的 `result v4` 紧凑文本、`tree v4` 与 `inspect v3` 的完整
+  server instructions（`text`/`both` 的 `result v4` 紧凑文本、`tree v5` 与 `inspect v3` 的完整
   文法一次加跨工具调用规则；`both`/`structured` 的 `structuredContent` 保持完整 `Result` JSON），
   由 `server/discover` 与兼容 `initialize` 发布；13 个工具描述不内联树引导。
 - `internal/store` 实现 `engine.Store` 与 `engine.MessageStore`，分别持久化 `engine.Ledger`
@@ -387,11 +387,14 @@ Android 时为 `uncertain`；全部确定未派发时为 `not_executed`。`parti
 5. 采集龄超过 `CaptureMaxAge=15s` → `stale_screen`；
 6. 虚拟屏上出现控制 App 的可见节点 → `control_ui_on_virtual_display`，采集失败；
 7. `observation.Builder` 构造完整的内部公开树（合成根、必要祖先、保守保号、`role=scroll` 节点的
-   `axis` 投影）。动作规划、重验与详细补看读取完整快照。compact 投影、序列化与计量都在锁外完成；
-8. compact 投影先按[几何策略](interface.md#node)决定每个节点的交付几何，再省略符合条件
-   的小型无标注图片，清理因此变空的匿名容器，并绕过裁剪后恰有一个孩子的隐藏匿名容器。
-   留存节点沿用裁剪前的公开几何。输出普通节点定义并按规范 JSON 计量，
-   超过 `MaxFullTreeBytes=128 KiB`
+   `axis` 投影），并在公开 label 上清洗固定闭集的零宽与占位码点；原始 `device.Capture` 与输入值
+   不变。动作规划、重验与详细补看读取完整快照。compact 投影、序列化与计量都在锁外完成；
+8. compact 投影先按[几何策略](interface.md#node)决定每个节点的交付几何，再按固定顺序执行露边
+   细条裁剪、`input` 标签去重、无标注非交互 `image` 全裁、祖先复合标签覆盖的被动文本叶裁剪、
+   变空匿名容器清理、单子隐藏匿名容器绕过、无字可点击 `view` 提升为 `button` 与 `resource`
+   短尾名提取。留存节点沿用裁剪前的完整公开几何；`root`/`scroll` 交付四元矩形，其余角色交付
+   二元中心点。同一候选在完整公开树上计算 `Observation.visual`，该计算不读设备、不增加截图，也不改变
+   输入授权。输出普通节点定义并按规范 JSON 计量，超过 `MaxFullTreeBytes=128 KiB`
    → `tree_too_large`（`details.budget=public_full`）；同一快照的内部计费对象
    （`raw_capture` + 完整内部树）超过 `MaxSnapshotCostBytes=4 MiB`
    → `tree_too_large`（`details.budget=internal_snapshot`）；
@@ -407,12 +410,20 @@ Android 时为 `uncertain`；全部确定未派发时为 `not_executed`。`parti
 派发前失败时复用重验已经读取的那一帧，不重新采集、不做收敛采样、不确认基线，只把该帧投影、
 校验并提交为新的 ready O。
 
+最终 `Observation.visual` 也在该提交门禁内决定：`full` 观察输出本次帧的分类，`delta` 观察
+仅当本次分类非空且与同会话、同显示代次的紧邻上一已发布帧（该帧已不在留存集合时回退到
+`delta.base` 对应观察）不同时输出，否则省略。撤销、超时或采集失败的候选不更新这一状态；
+无树观察永不设置 `visual`。该提示只由完整公开树与前台状态纯计算得出，不增加设备读取、
+截图或请求字段。
+
 `wait_for` 的验证采集直接进入同一 `publishTreeAttempt`，不经过本节的收敛采样：等待期的只读
 采样不发布、不推进基线；命中或稳态退出复用候选帧，到时或采样守卫退出时若最新成功帧仍新鲜
 且之后没有失败，复用该帧，否则只读一次终帧。它的 `observation.quality` 由等待比较得出
 （见 §3 条件等待）。
 
-净化仅改变公开投影：默认空叶不发布，原始事实仍供动作重验使用；非目标 display 包装层不发布，
+净化仅改变公开投影：公开 label 与输入框描述锚点剔除固定闭集的零宽与占位码点，默认空叶与仅含
+占位字符且无其他语义的普通叶不发布；可见但本身无语义、仍有可发布后代的容器保留为公开容器，
+非可见的必要祖先保留为 `context`。原始事实仍供动作重验使用；非目标 display 包装层不发布，
 目标后代按最近公开祖先挂接并保持 raw 先序。Source 与 ContextSource 互斥且完整覆盖公开 ref，
 context 只承载阅读祖先关系、不提供动作能力。五个状态保留来源三态，合成根使用已知默认。
 
@@ -473,7 +484,7 @@ full，或成功发布引用某份 full 的 delta 后，该 full 成为当前基
 2. 对每份窗口合格 full，用该 full 的内部投影对同一份采集重新匹配节点号，调用只读
    `CandidateAgainst` 生成候选 compact full，再从该 full 计算 delta，并完成重建校验。最终发布
    的内部快照、公开树、差分与编号状态必须全部来自同一候选。
-3. 对候选 full 和 delta 分别使用正式的 `tree v4` 普通树编码，计量从 `tree v4 ...` 块头到
+3. 对候选 full 和 delta 分别使用正式的 `tree v5` 普通树编码，计量从 `tree v5 ...` 块头到
    `end tree` 行末换行的 UTF-8 字节；实际短 base、字段转义、缩进与换行都计入，`result` 信封
    与图片不计入。只有 `10×deltaBytes < 7×candidateFullBytes` 的候选合格，精确等于 70% 也不合格。
 4. 合格候选按 delta 树块绝对字节数升序排列，长度相同优先当前基线，再优先 revision 较大的
@@ -499,8 +510,8 @@ delta O 时交付 full。`start`、会话重建与收尾完成清空或过滤基
 
 差分规划先展开任何兼容输入中的历史链，再按原 ref 比较节点；输出普通 `add`/`replace` 定义，
 并校验重建树的逻辑相等与规范 JSON 字节相等。可读文本块使用 `result v4` 的 `obs` 观察行、
-`tree v4` 普通树和 `inspect v3` 详细补看编码；`both`/`structured` 的 JSON 保持完整 `Result`。
-普通角色与动作按文本语法恢复。full/delta 候选选择按实际 `tree v4` 树块 UTF-8 字节计量，公开
+`tree v5` 普通树和 `inspect v3` 详细补看编码；`both`/`structured` 的 JSON 保持完整 `Result`。
+普通角色与动作按文本语法恢复。full/delta 候选选择按实际 `tree v5` 树块 UTF-8 字节计量，公开
 树与内部快照仍按各自的 JSON 容量预算校验。
 
 **基线的唯一确认入口**：只有被接纳的 `observe(O)`、`wait_for(O)` 或 `act` 对 `full` O 的认领确认
@@ -777,7 +788,7 @@ text 完成事件记 `focus_dispatch`/`write_dispatch`/`submit_dispatch` 与受�
 ### 发布
 
 `release/versions.json` 是发行号、共同契约号与 Android versionCode 的唯一来源；当前为
-`release_version=0.31.0`、`contract_version=27`、`android_version_code=33`，构建生成
+`release_version=0.32.0`、`contract_version=28`、`android_version_code=34`，构建生成
 Go/Java 常量。`scripts/build-release.ps1` 产出整组产物与 `build/release/manifest.json`
 （源码提交、Go 版本、MCP SDK/协议、各产物 SHA-256/大小、Android 包名/版本、工具目录指纹）。
 工具目录固定为 `scripts/toolcatalog` 投影的 13 个工具，指纹是该目录注册顺序、名称、描述与

@@ -36,15 +36,15 @@ func decodeTreeBlock(lines []string, start int, object map[string]any,
 	expectedChanges := 0
 	var failure *checkError
 	switch {
-	case strings.HasPrefix(lines[start], "tree v4 full nodes="):
+	case strings.HasPrefix(lines[start], "tree v5 full nodes="):
 		format = treeFull
-		rawNodes := strings.TrimPrefix(lines[start], "tree v4 full nodes=")
+		rawNodes := strings.TrimPrefix(lines[start], "tree v5 full nodes=")
 		if expectedNodes, failure = parseCanonicalPositive(rawNodes, "text_tree_count_invalid", "nodes"); failure != nil {
 			return 0, failure
 		}
-	case strings.HasPrefix(lines[start], "tree v4 delta base="):
+	case strings.HasPrefix(lines[start], "tree v5 delta base="):
 		format = treeDelta
-		rest := strings.TrimPrefix(lines[start], "tree v4 delta base=")
+		rest := strings.TrimPrefix(lines[start], "tree v5 delta base=")
 		separator := strings.LastIndex(rest, " changes=")
 		if separator <= 0 {
 			return 0, failf("text_tree_header_invalid")
@@ -81,7 +81,7 @@ func decodeTreeBlock(lines []string, start int, object map[string]any,
 		kind:             format,
 		prefix:           "text_tree",
 		indentWidth:      1,
-		v4:               true,
+		compact:          true,
 		rootRoleRequired: format == treeFull,
 	}
 	stats, failure := analyzeTreeBody(lines[start+2:end-1], rules)
@@ -326,7 +326,7 @@ type treeBodyRules struct {
 	prefix             string
 	detailed           bool
 	indentWidth        int
-	v4                 bool
+	compact            bool
 	rootRoleRequired   bool
 	expectedMatches    int
 	hasExpectedMatches bool
@@ -345,21 +345,34 @@ type treeBodyLine struct {
 	blank bool
 }
 
+// treeGeometry is the geometry a definition declares, resolved through @. A
+// hidden or unknown column is present in the ancestor stack but not delivered,
+// so a nested @ can only abbreviate the nearest delivered ancestor.
+type treeGeometry struct {
+	delivered bool
+	point     bool
+	x, y      int
+	left      int
+	top       int
+	right     int
+	bottom    int
+}
+
 type treeNodeRules struct {
 	prefix           string
 	allowChain       bool
 	requireGeometry  bool
 	rootRoleRequired bool
-	v4               bool
+	compact          bool
 	detailed         bool
-	ancestorsKnown   []bool
-	requireRectangle bool
+	ancestors        []treeGeometry
+	forbidAt         bool
 	explicitActions  bool
 }
 
 type treeNodeValidation struct {
-	refs        int
-	boundsKnown bool
+	refs     int
+	geometry treeGeometry
 }
 
 func analyzeTreeBody(body []string, rules treeBodyRules) (treeBodyStats, *checkError) {
@@ -419,7 +432,7 @@ func analyzeTreeDefinitionTree(lines []treeBodyLine,
 	}
 	nodes, entries := 0, 0
 	previousDepth := 0
-	ancestorsKnown := make([]bool, 0)
+	ancestors := make([]treeGeometry, 0)
 	for index, line := range lines {
 		if line.blank {
 			return 0, 0, failf(rules.prefix + "_body_invalid")
@@ -436,16 +449,16 @@ func analyzeTreeDefinitionTree(lines []treeBodyLine,
 			allowChain:       !rules.detailed && index > 0,
 			requireGeometry:  rules.detailed,
 			rootRoleRequired: index == 0 && rules.rootRoleRequired,
-			v4:               rules.v4,
+			compact:          rules.compact,
 			detailed:         rules.detailed,
-			ancestorsKnown:   ancestorsKnown[:line.depth],
+			ancestors:        ancestors[:line.depth],
 		})
 		if failure != nil {
 			return 0, 0, failure
 		}
 		nodes += validated.refs
 		entries++
-		ancestorsKnown = append(ancestorsKnown[:line.depth], validated.boundsKnown)
+		ancestors = append(ancestors[:line.depth], validated.geometry)
 		previousDepth = line.depth
 	}
 	return nodes, entries, nil
@@ -456,7 +469,7 @@ func analyzeTreeDeltaBody(lines []treeBodyLine,
 	stats := treeBodyStats{}
 	previousDepth := 0
 	subtreeOpen := false
-	ancestorsKnown := make([]bool, 0)
+	ancestors := make([]treeGeometry, 0)
 	for _, line := range lines {
 		if line.blank {
 			return treeBodyStats{}, failf(rules.prefix + "_body_invalid")
@@ -468,7 +481,7 @@ func analyzeTreeDeltaBody(lines []treeBodyLine,
 		if line.depth == 0 {
 			stats.changes++
 			subtreeOpen = false
-			ancestorsKnown = ancestorsKnown[:0]
+			ancestors = ancestors[:0]
 			switch tokens[0] {
 			case "~":
 				if len(tokens) < 2 || !isPublicRef(tokens[1]) {
@@ -482,14 +495,14 @@ func analyzeTreeDeltaBody(lines []treeBodyLine,
 					return treeBodyStats{}, failf(rules.prefix + "_body_invalid")
 				}
 				validated, failure := validateTreeNodeTokens(tokens[1:], treeNodeRules{
-					prefix:         rules.prefix,
-					v4:             rules.v4,
-					ancestorsKnown: nil,
+					prefix:    rules.prefix,
+					compact:   rules.compact,
+					ancestors: nil,
 				})
 				if failure != nil {
 					return treeBodyStats{}, failure
 				}
-				ancestorsKnown = append(ancestorsKnown, validated.boundsKnown)
+				ancestors = append(ancestors, validated.geometry)
 				subtreeOpen = true
 				previousDepth = 0
 			case "-":
@@ -510,15 +523,15 @@ func analyzeTreeDeltaBody(lines []treeBodyLine,
 			return treeBodyStats{}, failf(rules.prefix + "_body_invalid")
 		}
 		validated, failure := validateTreeDefinition(line.text, treeNodeRules{
-			prefix:         rules.prefix,
-			allowChain:     true,
-			v4:             rules.v4,
-			ancestorsKnown: ancestorsKnown[:line.depth],
+			prefix:     rules.prefix,
+			allowChain: true,
+			compact:    rules.compact,
+			ancestors:  ancestors[:line.depth],
 		})
 		if failure != nil {
 			return treeBodyStats{}, failure
 		}
-		ancestorsKnown = append(ancestorsKnown[:line.depth], validated.boundsKnown)
+		ancestors = append(ancestors[:line.depth], validated.geometry)
 		previousDepth = line.depth
 	}
 	return stats, nil
@@ -731,7 +744,7 @@ func validateTreeNodeTokens(tokens []string, rules treeNodeRules) (treeNodeValid
 			return treeNodeValidation{}, failf(rules.prefix + "_body_invalid")
 		}
 		columnRules := rules
-		columnRules.requireRectangle = rules.v4
+		columnRules.forbidAt = true
 		columnRules.explicitActions = true
 		validated, failure := validateTreeNodeColumns(tokens, 3, true,
 			tokens[2], columnRules)
@@ -743,7 +756,12 @@ func validateTreeNodeTokens(tokens []string, rules treeNodeRules) (treeNodeValid
 		return validated, nil
 	}
 	if strings.HasPrefix(tokens[0], "[") {
-		if rules.v4 || !rules.allowChain || rules.requireGeometry || rules.rootRoleRequired ||
+		// Historical anonymous chain shorthand: consecutive anonymous single-child
+		// nodes fold into one definition that carries only its ref list. The
+		// canonical v5 encoder never emits it and the live product gate rejects
+		// it, but the reader still decodes it. The detailed syntax never uses it
+		// because every node there spells a rectangle.
+		if !rules.allowChain || rules.requireGeometry || rules.rootRoleRequired ||
 			len(tokens) != 1 || !validTreeRefListToken(tokens[0], 2) {
 			return treeNodeValidation{}, failf(rules.prefix + "_body_invalid")
 		}
@@ -782,41 +800,68 @@ func validateTreeNodeColumns(tokens []string, start int, allowGeometry bool,
 	role string, rules treeNodeRules) (treeNodeValidation, *checkError) {
 	prefix := rules.prefix
 	index := start
-	geometryKnown := false
+	geometry := treeGeometry{}
 	haveGeometry := false
-	if allowGeometry && index < len(tokens) {
+	// Only a geometry-shaped column may be consumed as geometry. A label is a
+	// JSON string, and value=/hint=/resource= are JSON strings too, so a comma
+	// inside one of those values must never be mistaken for a point or a
+	// rectangle.
+	if allowGeometry && index < len(tokens) && isGeometryColumn(tokens[index], rules.compact) {
+		token := tokens[index]
 		switch {
-		case tokens[index] == "@":
-			if !rules.v4 || !nearestKnownAncestor(rules.ancestorsKnown) {
+		case token == "@":
+			// A chain definition must spell its own geometry; the live compact
+			// encoder never abbreviates it. Everything else may abbreviate.
+			if !rules.compact || rules.forbidAt {
 				return treeNodeValidation{}, failf(prefix + "_body_invalid")
 			}
-			geometryKnown = true
-			haveGeometry = true
-			index++
-		case tokens[index] == "-":
-			haveGeometry = true
-			index++
-		case rules.v4 && looksLikeUnparenthesizedRectangle(tokens[index]):
-			if !validV4TreeGeometry(tokens[index]) {
+			ancestor, found := nearestDeliveredGeometry(rules.ancestors)
+			if !found {
 				return treeNodeValidation{}, failf(prefix + "_body_invalid")
 			}
-			geometryKnown = true
+			geometry = ancestor
 			haveGeometry = true
 			index++
-		case !rules.v4 && strings.HasPrefix(tokens[index], "["):
-			if !validDetailedTreeGeometry(tokens[index]) {
+		case token == "-":
+			haveGeometry = true
+			index++
+		case rules.compact && looksLikeCompactPoint(token):
+			point, ok := parseCompactPointGeometry(token)
+			if !ok {
 				return treeNodeValidation{}, failf(prefix + "_body_invalid")
 			}
-			geometryKnown = true
+			geometry = point
+			haveGeometry = true
+			index++
+		case rules.compact:
+			rectangle, ok := parseCompactRectangleGeometry(token)
+			if !ok {
+				return treeNodeValidation{}, failf(prefix + "_body_invalid")
+			}
+			geometry = rectangle
+			haveGeometry = true
+			index++
+		default:
+			rectangle, ok := parseDetailedRectangleGeometry(token)
+			if !ok {
+				return treeNodeValidation{}, failf(prefix + "_body_invalid")
+			}
+			geometry = rectangle
 			haveGeometry = true
 			index++
 		}
 	}
-	if rules.requireGeometry && !haveGeometry {
-		return treeNodeValidation{}, failf(prefix + "_body_invalid")
+	// Only the compact view binds the delivered form to the role: root and
+	// scroll keep the four-sided rectangle, every other role a center point. The
+	// detailed view delivers rectangles for every role. An @ abbreviation
+	// resolves to its ancestor's form, so the compact check covers it too.
+	if rules.compact && geometry.delivered {
+		container := role == "root" || role == "scroll"
+		if container == geometry.point {
+			return treeNodeValidation{}, failf(prefix + "_body_invalid")
+		}
 	}
-	if rules.requireRectangle &&
-		(!haveGeometry || !geometryKnown || strings.HasPrefix(tokens[start], "@")) {
+	if rules.requireGeometry && !haveGeometry {
 		return treeNodeValidation{}, failf(prefix + "_body_invalid")
 	}
 	for index < len(tokens) && isTreeJSONString(tokens[index]) {
@@ -851,7 +896,7 @@ func validateTreeNodeColumns(tokens []string, start int, allowGeometry bool,
 		}
 		if strings.HasPrefix(action, "!") {
 			name := strings.TrimPrefix(action, "!")
-			if !rules.v4 || rules.explicitActions || name != defaultAction || negatedAction != "" ||
+			if !rules.compact || rules.explicitActions || name != defaultAction || negatedAction != "" ||
 				explicitActions[name] {
 				return treeNodeValidation{}, failf(prefix + "_body_invalid")
 			}
@@ -861,7 +906,7 @@ func validateTreeNodeColumns(tokens []string, start int, allowGeometry bool,
 		}
 		break
 	}
-	if rules.v4 && negatedAction == "" {
+	if rules.compact && negatedAction == "" {
 		lastAction := -1
 		for _, action := range actions {
 			order := treeActionOrder[action]
@@ -903,7 +948,7 @@ func validateTreeNodeColumns(tokens []string, start int, allowGeometry bool,
 	if index != len(tokens) {
 		return treeNodeValidation{}, failf(prefix + "_body_invalid")
 	}
-	return treeNodeValidation{boundsKnown: geometryKnown}, nil
+	return treeNodeValidation{geometry: geometry}, nil
 }
 
 var treeFullFlagOrder = map[string]int{
@@ -930,55 +975,100 @@ var treeRoleDefaultAction = map[string]string{
 	"scroll": "swipe",
 }
 
-func nearestKnownAncestor(ancestorsKnown []bool) bool {
-	for index := len(ancestorsKnown) - 1; index >= 0; index-- {
-		if ancestorsKnown[index] {
-			return true
+// nearestDeliveredGeometry returns the geometry of the nearest strict ancestor
+// that delivered a rectangle or a point. Hidden and unknown columns are skipped.
+func nearestDeliveredGeometry(ancestors []treeGeometry) (treeGeometry, bool) {
+	for index := len(ancestors) - 1; index >= 0; index-- {
+		if ancestors[index].delivered {
+			return ancestors[index], true
 		}
 	}
-	return false
+	return treeGeometry{}, false
 }
 
-func looksLikeUnparenthesizedRectangle(token string) bool {
-	return strings.Count(token, ",") == 3
-}
-
-func validV4TreeGeometry(token string) bool {
-	parts := strings.Split(token, ",")
-	if len(parts) != 4 {
-		return false
-	}
-	values := [4]int{}
-	for index, part := range parts {
-		value, ok := parseCanonicalTreeInteger(part)
-		if !ok {
-			return false
-		}
-		values[index] = value
-	}
-	return values[2] >= values[0] && values[3] >= values[1]
-}
-
-func validDetailedTreeGeometry(token string) bool {
-	if token == "-" {
+// isGeometryColumn reports whether one token can only be a geometry column: the
+// unknown marker, the @ abbreviation, a bracketed detailed rectangle or, in the
+// compact syntax, an integer list. Attribute values, labels and state members
+// never match, so a comma inside a JSON string is not geometry.
+func isGeometryColumn(token string, compact bool) bool {
+	if token == "-" || token == "@" {
 		return true
 	}
-	if len(token) < 2 || token[0] != '[' || token[len(token)-1] != ']' {
+	if !compact {
+		return strings.HasPrefix(token, "[")
+	}
+	return isIntegerListToken(token)
+}
+
+// isIntegerListToken reports whether every byte of a token is a decimal digit, a
+// hyphen or a comma.
+func isIntegerListToken(token string) bool {
+	if token == "" {
 		return false
 	}
-	parts := strings.Split(token[1:len(token)-1], ",")
+	for index := 0; index < len(token); index++ {
+		character := token[index]
+		if (character < '0' || character > '9') &&
+			character != ',' && character != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+// looksLikeCompactPoint reports whether a token has the two-integer shape of a
+// compact center point.
+func looksLikeCompactPoint(token string) bool {
+	return strings.Count(token, ",") == 1
+}
+
+// parseCompactPointGeometry parses x,y into a delivered point.
+func parseCompactPointGeometry(token string) (treeGeometry, bool) {
+	parts := strings.Split(token, ",")
+	if len(parts) != 2 {
+		return treeGeometry{}, false
+	}
+	x, ok := parseCanonicalTreeInteger(parts[0])
+	if !ok {
+		return treeGeometry{}, false
+	}
+	y, ok := parseCanonicalTreeInteger(parts[1])
+	if !ok {
+		return treeGeometry{}, false
+	}
+	return treeGeometry{delivered: true, point: true, x: x, y: y}, true
+}
+
+// parseCompactRectangleGeometry parses l,t,r,b into a delivered rectangle.
+func parseCompactRectangleGeometry(token string) (treeGeometry, bool) {
+	parts := strings.Split(token, ",")
 	if len(parts) != 4 {
-		return false
+		return treeGeometry{}, false
 	}
 	values := [4]int{}
 	for index, part := range parts {
 		value, ok := parseCanonicalTreeInteger(part)
 		if !ok {
-			return false
+			return treeGeometry{}, false
 		}
 		values[index] = value
 	}
-	return values[2] >= values[0] && values[3] >= values[1]
+	if values[2] < values[0] || values[3] < values[1] {
+		return treeGeometry{}, false
+	}
+	return treeGeometry{
+		delivered: true, left: values[0], top: values[1],
+		right: values[2], bottom: values[3],
+	}, true
+}
+
+// parseDetailedRectangleGeometry parses the bracketed [l,t,r,b] rectangle of the
+// detailed inspection syntax.
+func parseDetailedRectangleGeometry(token string) (treeGeometry, bool) {
+	if len(token) < 2 || token[0] != '[' || token[len(token)-1] != ']' {
+		return treeGeometry{}, false
+	}
+	return parseCompactRectangleGeometry(token[1 : len(token)-1])
 }
 
 func parseCanonicalTreeInteger(value string) (int, bool) {
@@ -1089,9 +1179,33 @@ func validateSetNodeFlags(tokens []string, prefix string) *checkError {
 			if value != "true" && value != "false" && value != "null" {
 				return failf(prefix+"_flag_invalid", field("flag", name))
 			}
+		case "bounds":
+			if !validSetBoundsValue(value) {
+				return failf(prefix + "_bounds_invalid")
+			}
 		}
 	}
 	return nil
+}
+
+// validSetBoundsValue accepts the four explicit set forms: hidden, null, a
+// delivered rectangle and a delivered center point. A set line carries no role,
+// so the two delivered arities are told apart by shape alone.
+func validSetBoundsValue(value string) bool {
+	switch value {
+	case "hidden", "null":
+		return true
+	}
+	if len(value) < 2 || value[0] != '[' || value[len(value)-1] != ']' {
+		return false
+	}
+	inner := value[1 : len(value)-1]
+	if strings.Count(inner, ",") == 1 {
+		_, ok := parseCompactPointGeometry(inner)
+		return ok
+	}
+	_, ok := parseCompactRectangleGeometry(inner)
+	return ok
 }
 
 // treeLineTokens splits one node line while keeping quoted JSON strings and

@@ -422,6 +422,9 @@ func TestProjectQualityAndEffectChannels(t *testing.T) {
 		"tree": map[string]any{
 			"format": treeFull, "scope": "reported_visible_with_context",
 			"view": "compact",
+			// A real service always sends the complete tree, so the readable block
+			// can be compared with its canonical projection.
+			"root": compactNode("n1", "root", []any{0, 0, 1080, 2400}, nil, nil, nil),
 		},
 	}
 	payload := map[string]any{
@@ -578,6 +581,7 @@ func TestProjectResultModeViolations(t *testing.T) {
 }
 
 func TestProjectBothPreservesTreeMetadata(t *testing.T) {
+	fullRoot := compactNode("n1", "root", []any{0, 0, 1080, 2400}, nil, nil, nil)
 	fullPayload := map[string]any{
 		"operation_id": "P4821_1",
 		"observation": map[string]any{
@@ -587,11 +591,12 @@ func TestProjectBothPreservesTreeMetadata(t *testing.T) {
 				"format": treeFull,
 				"scope":  "reported_visible_with_context",
 				"view":   "compact",
+				"root":   fullRoot,
 			},
 		},
 	}
 	fullText := "result v4 ok op=P4821_1\nobs O4821_1\n\n" +
-		"tree v4 full nodes=1\n\nn1 root 0,0,1080,2400\nend tree\nend result\n"
+		"tree v5 full nodes=1\n\nn1 root 0,0,1080,2400\nend tree\nend result\n"
 	fullResult := &sdk.CallToolResult{
 		Content:           []sdk.Content{&sdk.TextContent{Text: fullText}},
 		StructuredContent: fullPayload,
@@ -609,6 +614,7 @@ func TestProjectBothPreservesTreeMetadata(t *testing.T) {
 				"format": treeFull,
 				"scope":  "reported_visible_with_context",
 				"view":   "compact",
+				"root":   fullRoot,
 				"extra":  "must-compare",
 			},
 		},
@@ -632,7 +638,7 @@ func TestProjectBothPreservesTreeMetadata(t *testing.T) {
 		},
 	}
 	deltaText := "result v4 ok op=P4821_2\nobs O4821_2\n\n" +
-		"tree v4 delta base=_1 changes=0\n\nend tree\nend result\n"
+		"tree v5 delta base=_1 changes=0\n\nend tree\nend result\n"
 	deltaResult := &sdk.CallToolResult{
 		Content:           []sdk.Content{&sdk.TextContent{Text: deltaText}},
 		StructuredContent: deltaPayload,
@@ -705,7 +711,7 @@ func TestDecodeResultTextEmptyDeltaWithWait(t *testing.T) {
 	text := "result v4 ok op=P7391_3 phase=finished\n" +
 		"obs O4821_9 at=22:08:55\n" +
 		"\n" +
-		"tree v4 delta base=_8 changes=0\n" +
+		"tree v5 delta base=_8 changes=0\n" +
 		"\n" +
 		"end tree\n" +
 		"wait trigger=timeout matched=timeout elapsed=1000ms\n" +
@@ -883,7 +889,7 @@ func TestDecodeResultTextObsLine(t *testing.T) {
 		{
 			name: "screen with tree but no session",
 			text: "result v4 ok\nobs O4821_85 screen=1080x2400@148\n\n" +
-				"tree v4 full nodes=1\n\nn1 root 0,0,1080,2400\nend tree\nend result\n",
+				"tree v5 full nodes=1\n\nn1 root 0,0,1080,2400\nend tree\nend result\n",
 			reason: "text_result_obs_screen_redundant",
 		},
 	}
@@ -911,14 +917,14 @@ func TestDecodeResultTextRejectsIncompleteProjection(t *testing.T) {
 		{
 			name: "empty delta missing tree tail",
 			text: "result v4 ok\nobs O4821_2\n\n" +
-				"tree v4 delta base=O4821_1 changes=0\n\n" +
+				"tree v5 delta base=O4821_1 changes=0\n\n" +
 				"end result\n",
 			reason: "text_tree_unterminated",
 		},
 		{
 			name: "omitted tree",
 			text: "result v4 ok\nobs O4821_1\n\n" +
-				"tree v4 omitted reason=ref_format\nend result\n",
+				"tree v5 omitted reason=ref_format\nend result\n",
 			reason: "text_result_block_omitted",
 		},
 		{
@@ -940,7 +946,7 @@ func TestDecodeResultTextRejectsIncompleteProjection(t *testing.T) {
 		{
 			name: "legacy tree defaults line",
 			text: "result v4 ok\nobs O4821_1\n\n" +
-				"tree v4 full nodes=1\n" +
+				"tree v5 full nodes=1\n" +
 				"defaults {\"checked\":false}\n\nn1 root 0,0,1080,2400\nend tree\nend result\n",
 			reason: "text_tree_separator_invalid",
 		},
@@ -955,21 +961,21 @@ func TestDecodeResultTextRejectsIncompleteProjection(t *testing.T) {
 		{
 			name: "defaults line inside tree body",
 			text: "result v4 ok\nobs O4821_1\n\n" +
-				"tree v4 full nodes=1\n\n" +
+				"tree v5 full nodes=1\n\n" +
 				"defaults {\"checked\":false}\nn1 root 0,0,1080,2400\nend tree\nend result\n",
 			reason: "text_tree_body_invalid",
 		},
 		{
 			name: "full node writes checked default",
 			text: "result v4 ok\nobs O4821_1\n\n" +
-				"tree v4 full nodes=1\n\n" +
+				"tree v5 full nodes=1\n\n" +
 				"n1 root 0,0,1080,2400 checked=false\nend tree\nend result\n",
 			reason: "text_tree_flag_default",
 		},
 		{
 			name: "full node writes enabled default",
 			text: "result v4 ok\nobs O4821_1\n\n" +
-				"tree v4 full nodes=1\n\n" +
+				"tree v5 full nodes=1\n\n" +
 				"n1 root 0,0,1080,2400 enabled=true\nend tree\nend result\n",
 			reason: "text_tree_flag_default",
 		},
@@ -1040,7 +1046,7 @@ func TestDecodeResultTextJSONFallbackNumericObjectKey(t *testing.T) {
 // set false, or a quoted label that merely looks like a state member.
 func TestDecodeResultTextAcceptsTriStateContract(t *testing.T) {
 	text := "result v4 ok\nobs O4821_1\n\n" +
-		"tree v4 full nodes=3\n\n" +
+		"tree v5 full nodes=3\n\n" +
 		"n1 root 0,0,1080,2400\n" +
 		" n2 text \"checked=false is a label\" value=\"x\" enabled=false focused=true selected=null protected=null checked=null\n" +
 		" n3 button enabled=null checked=true\n" +
@@ -1050,9 +1056,9 @@ func TestDecodeResultTextAcceptsTriStateContract(t *testing.T) {
 	}
 
 	delta := "result v4 ok\nobs O4821_2\n\n" +
-		"tree v4 delta base=O4821_1 changes=2\n\n" +
+		"tree v5 delta base=O4821_1 changes=2\n\n" +
 		"~ n2 checked=false focused=null\n" +
-		"+ n4 text 0,0,10,10 checked=true\n" +
+		"+ n4 text 5,5 checked=true\n" +
 		"end tree\nend result\n"
 	if _, failure := decodeResultText(delta); failure != nil {
 		t.Fatalf("valid delta set rejected: %s %v", failure.reason, failure.fields)
@@ -1067,26 +1073,26 @@ func TestDecodeResultTextAcceptsTriStateContract(t *testing.T) {
 	}
 }
 
-func TestDecodeResultTextV4Blocks(t *testing.T) {
-	full := "tree v4 full nodes=11\n\n" +
+func TestDecodeResultTextV5Blocks(t *testing.T) {
+	full := "tree v5 full nodes=11\n\n" +
 		"n1 root 0,0,1080,2400\n" +
-		" n2 group 24,60,144,180 \"菜单\"\n" +
+		" n2 group 84,120 \"菜单\"\n" +
 		"  n3 button @ \"设置\"\n" +
 		"  n4 text \"说明\"\n" +
-		"  chain [n10 n11] group 0,0,10,10 \"分组\"\n" +
-		" n5 button 10,20,30,40 tap long_press text swipe\n" +
-		" n6 input 0,0,10,10 tap text " +
+		"  chain [n10 n11] group 5,5 \"分组\"\n" +
+		" n5 button 20,30 tap long_press text swipe\n" +
+		" n6 input 5,5 tap text " +
 		"enabled=false focused=true selected=null protected=null checked=true " +
 		"axis=y resource=\"res\" context\n" +
 		" n7 scroll - swipe axis=both\n" +
 		" n8 view \"sibling\"\n" +
-		" n9 button 0,0,1,1 !tap\n" +
+		" n9 button 0,0 !tap\n" +
 		"end tree\n"
-	delta := "tree v4 delta base=_1 changes=5\n\n" +
+	delta := "tree v5 delta base=_1 changes=5\n\n" +
 		"~ n2 checked=false focused=null\n" +
-		"+ n20 group 0,0,1,1\n" +
+		"+ n20 group 0,0\n" +
 		" n21 button @ !tap\n" +
-		"= n24 view 0,0,2,2 checked=true\n" +
+		"= n24 view 1,1 checked=true\n" +
 		" n25 scroll 0,0,3,3 swipe\n" +
 		"- n3\n" +
 		"children n4 = [n5 n6]\n" +
@@ -1145,7 +1151,7 @@ func TestDecodeResultTextV4Blocks(t *testing.T) {
 		{
 			name: "empty delta",
 			text: "result v4 ok\nobs Otest_3\n\n" +
-				"tree v4 delta base=_1 changes=0\n\n" +
+				"tree v5 delta base=_1 changes=0\n\n" +
 				"end tree\nend result\n",
 		},
 	}
@@ -1153,7 +1159,7 @@ func TestDecodeResultTextV4Blocks(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			decoded, failure := decodeResultText(testCase.text)
 			if failure != nil {
-				t.Fatalf("valid v4 block rejected: %s %v", failure.reason, failure.fields)
+				t.Fatalf("valid v5 block rejected: %s %v", failure.reason, failure.fields)
 			}
 			if testCase.format != "" && (decoded.view.Observation == nil ||
 				decoded.view.Observation.Tree == nil ||
@@ -1170,7 +1176,7 @@ func TestDecodeResultTextV4Blocks(t *testing.T) {
 
 func TestShortTreeBaseUsesUint64Sequence(t *testing.T) {
 	text := "result v4 ok\nobs Otest_18446744073709551615\n\n" +
-		"tree v4 delta base=_18446744073709551615 changes=0\n\n" +
+		"tree v5 delta base=_18446744073709551615 changes=0\n\n" +
 		"end tree\nend result\n"
 	decoded, failure := decodeResultText(text)
 	if failure != nil {
@@ -1197,14 +1203,14 @@ func TestTreeTextOUsesV4TokenGrammar(t *testing.T) {
 	}
 
 	full := "result v4 ok\nobs Oabc+foo_2\n\n" +
-		"tree v4 full nodes=1\n\nn1 root 0,0,1080,2400\nend tree\nend result\n"
+		"tree v5 full nodes=1\n\nn1 root 0,0,1080,2400\nend tree\nend result\n"
 	if _, failure := decodeResultText(full); failure != nil {
-		t.Fatalf("full v4 O rejected: %s %v", failure.reason, failure.fields)
+		t.Fatalf("full v5 O rejected: %s %v", failure.reason, failure.fields)
 	}
 	fullMaxO := "result v4 ok\nobs " + maxO + "\n\n" +
-		"tree v4 full nodes=1\n\nn1 root 0,0,1080,2400\nend tree\nend result\n"
+		"tree v5 full nodes=1\n\nn1 root 0,0,1080,2400\nend tree\nend result\n"
 	if _, failure := decodeResultText(fullMaxO); failure != nil {
-		t.Fatalf("64-byte v4 O rejected: %s %v", failure.reason, failure.fields)
+		t.Fatalf("64-byte v5 O rejected: %s %v", failure.reason, failure.fields)
 	}
 	observation := &observationView{ID: maxO, Tree: &treeView{Format: treeFull}}
 	if failure := checkObservationTreeBlock(&callResult{texts: []string{fullMaxO}},
@@ -1216,15 +1222,15 @@ func TestTreeTextOUsesV4TokenGrammar(t *testing.T) {
 func TestDecodeResultTextActionReconstructionSyntax(t *testing.T) {
 	valid := []string{
 		"result v4 ok\nobs O4821_1\n\n" +
-			"tree v4 full nodes=1\n\nn1 root 0,0,1080,2400\nend tree\nend result\n",
+			"tree v5 full nodes=1\n\nn1 root 0,0,1080,2400\nend tree\nend result\n",
 		"result v4 ok\nobs O4821_1\n\n" +
-			"tree v4 full nodes=2\n\nn1 root 0,0,1080,2400\n n2 button 0,0,1,1\nend tree\nend result\n",
+			"tree v5 full nodes=2\n\nn1 root 0,0,1080,2400\n n2 button 0,0\nend tree\nend result\n",
 		"result v4 ok\nobs O4821_1\n\n" +
-			"tree v4 full nodes=2\n\nn1 root 0,0,1080,2400\n n2 button 0,0,1,1 tap\nend tree\nend result\n",
+			"tree v5 full nodes=2\n\nn1 root 0,0,1080,2400\n n2 button 0,0 tap\nend tree\nend result\n",
 		"result v4 ok\nobs O4821_1\n\n" +
-			"tree v4 full nodes=2\n\nn1 root 0,0,1080,2400\n n2 button 0,0,1,1 tap long_press\nend tree\nend result\n",
+			"tree v5 full nodes=2\n\nn1 root 0,0,1080,2400\n n2 button 0,0 tap long_press\nend tree\nend result\n",
 		"result v4 ok\nobs O4821_1\n\n" +
-			"tree v4 full nodes=2\n\nn1 root 0,0,1080,2400\n n2 button 0,0,1,1 tap long_press text swipe\nend tree\nend result\n",
+			"tree v5 full nodes=2\n\nn1 root 0,0,1080,2400\n n2 button 0,0 tap long_press text swipe\nend tree\nend result\n",
 	}
 	for _, text := range valid {
 		if _, failure := decodeResultText(text); failure != nil {
@@ -1233,11 +1239,11 @@ func TestDecodeResultTextActionReconstructionSyntax(t *testing.T) {
 	}
 	invalid := []string{
 		"result v4 ok\nobs O4821_1\n\n" +
-			"tree v4 full nodes=2\n\nn1 root 0,0,1080,2400\n n2 button 0,0,1,1 !tap tap\nend tree\nend result\n",
+			"tree v5 full nodes=2\n\nn1 root 0,0,1080,2400\n n2 button 0,0 !tap tap\nend tree\nend result\n",
 		"result v4 ok\nobs O4821_1\n\n" +
-			"tree v4 full nodes=2\n\nn1 root 0,0,1080,2400\n n2 view 0,0,1,1 !tap\nend tree\nend result\n",
+			"tree v5 full nodes=2\n\nn1 root 0,0,1080,2400\n n2 view 0,0 !tap\nend tree\nend result\n",
 		"result v4 ok\nobs O4821_1\n\n" +
-			"tree v4 full nodes=2\n\nn1 root 0,0,1080,2400\n n2 button 0,0,1,1 tap swipe tap\nend tree\nend result\n",
+			"tree v5 full nodes=2\n\nn1 root 0,0,1080,2400\n n2 button 0,0 tap swipe tap\nend tree\nend result\n",
 	}
 	for _, text := range invalid {
 		if _, failure := decodeResultText(text); failure == nil {
@@ -1264,7 +1270,7 @@ func TestDecodeResultTextRejectsLegacyAndMissingBlocks(t *testing.T) {
 		"tree_scope=reported_visible_with_context view=detailed nodes=1 entries=1\n\n" +
 		"n1 root [0,0,1080,2400]\nend inspect\nend result\n"
 	legacyTreeWithoutSeparator := "result v4 ok\nblocking_code=complete\n" +
-		"tree v4 full nodes=1\n\nn1 root 0,0,1080,2400\nend tree\nend result\n"
+		"tree v5 full nodes=1\n\nn1 root 0,0,1080,2400\nend tree\nend result\n"
 	for name, text := range map[string]string{
 		"legacy tree":                   legacyTree,
 		"legacy inspect":                legacyInspect,
@@ -1279,12 +1285,12 @@ func TestDecodeResultTextRejectsLegacyAndMissingBlocks(t *testing.T) {
 	}
 }
 
-func TestV4BlockChecksRequireCompleteBlocks(t *testing.T) {
+func TestV5BlockChecksRequireCompleteBlocks(t *testing.T) {
 	projected := &callResult{texts: []string{
 		"result v4 ok\nobs O4821_1\n\n" +
-			"tree v4 full nodes=1\n\nn1 root 0,0,1080,2400\nend tree\nend result\n",
+			"tree v5 full nodes=1\n\nn1 root 0,0,1080,2400\nend tree\nend result\n",
 	}}
-	block, failure := treeBlockText(projected, "tree v4 full nodes=")
+	block, failure := treeBlockText(projected, "tree v5 full nodes=")
 	if failure != nil {
 		t.Fatalf("complete tree block rejected: %s", failure.reason)
 	}
@@ -1293,20 +1299,20 @@ func TestV4BlockChecksRequireCompleteBlocks(t *testing.T) {
 	}
 
 	missing := "result v4 ok\nobs O4821_1\n\n" +
-		"tree v4 full nodes=1\n\nn1 root 0,0,1080,2400\nend result\n"
+		"tree v5 full nodes=1\n\nn1 root 0,0,1080,2400\nend result\n"
 	if _, failure := decodeResultText(missing); failure == nil ||
 		failure.reason != "text_tree_unterminated" {
 		t.Fatalf("unterminated tree = %v", failure)
 	}
 
 	projected.texts = []string{"result v4 ok\nobs O4821_1\nend result\n"}
-	if _, failure := treeBlockText(projected, "tree v4 full nodes="); failure == nil ||
+	if _, failure := treeBlockText(projected, "tree v5 full nodes="); failure == nil ||
 		failure.reason != "text_tree_block_missing" {
 		t.Fatalf("missing tree block = %v", failure)
 	}
 }
 
-func TestDecodeResultTextV4RejectsInvalidBodies(t *testing.T) {
+func TestDecodeResultTextV5RejectsInvalidBodies(t *testing.T) {
 	cases := []struct {
 		name   string
 		text   string
@@ -1315,36 +1321,36 @@ func TestDecodeResultTextV4RejectsInvalidBodies(t *testing.T) {
 		{
 			name: "tree full count invalid",
 			text: "result v4 ok\nobs O4821_1\n\n" +
-				"tree v4 full nodes=0\n\nend tree\nend result\n",
+				"tree v5 full nodes=0\n\nend tree\nend result\n",
 			reason: "text_tree_count_invalid",
 		},
 		{
 			name: "tree full count mismatch",
 			text: "result v4 ok\nobs O4821_1\n\n" +
-				"tree v4 full nodes=2\n\nn1 root 0,0,1080,2400\nend tree\nend result\n",
+				"tree v5 full nodes=2\n\nn1 root 0,0,1080,2400\nend tree\nend result\n",
 			reason: "text_tree_count_mismatch",
 		}, {
 			name: "tree delta base invalid",
 			text: "result v4 ok\nobs O4821_1\n\n" +
-				"tree v4 delta base=_0 changes=0\n\nend tree\nend result\n",
+				"tree v5 delta base=_0 changes=0\n\nend tree\nend result\n",
 			reason: "text_tree_base_invalid",
 		},
 		{
 			name: "tree missing observation id",
 			text: "result v4 ok\n\n" +
-				"tree v4 delta base=O4821_1 changes=0\n\nend tree\nend result\n",
+				"tree v5 delta base=O4821_1 changes=0\n\nend tree\nend result\n",
 			reason: "text_tree_id_missing",
 		},
 		{
 			name: "tree id outside obs line",
 			text: "result v4 ok\njson v1 path=\"/observation/id\" value=\"O4821_1\"\n\n" +
-				"tree v4 delta base=O4821_1 changes=0\n\nend tree\nend result\n",
+				"tree v5 delta base=O4821_1 changes=0\n\nend tree\nend result\n",
 			reason: "text_tree_id_group_required",
 		},
 		{
 			name: "tree count mismatch",
 			text: "result v4 ok\nobs O4821_1\n\n" +
-				"tree v4 delta base=_1 changes=3\n\n~ n2 checked=false\nend tree\nend result\n",
+				"tree v5 delta base=_1 changes=3\n\n~ n2 checked=false\nend tree\nend result\n",
 			reason: "text_tree_count_mismatch",
 		},
 		{
@@ -1641,7 +1647,7 @@ func TestCompareResultTextToStructuredOmissions(t *testing.T) {
 		"session active mode=virtual origin=P7391_12 started=22:05:10 expires=22:10:10\n" +
 		"obs O4821_85 fg=none at=22:08:55 screen=1080x2400@148\n" +
 		"\n" +
-		"tree v4 full nodes=1\n\nn1 root 0,0,1080,2400\nend tree\nend result\n"
+		"tree v5 full nodes=1\n\nn1 root 0,0,1080,2400\nend tree\nend result\n"
 	decoded, failure := decodeResultText(text)
 	if failure != nil {
 		t.Fatalf("decode omitted frame: %s %v", failure.reason, failure.fields)

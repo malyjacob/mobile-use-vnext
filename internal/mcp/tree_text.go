@@ -480,7 +480,7 @@ func validateReadNodeTree(root *protocol.ReadNode, requireRoot bool) bool {
 
 func validateBoundsForState(bounds protocol.ReadBounds) bool {
 	switch bounds.Kind {
-	case protocol.GeometryHidden, protocol.GeometryUnknown:
+	case protocol.GeometryHidden, protocol.GeometryUnknown, protocol.GeometryPoint:
 		return true
 	case protocol.GeometryKnown:
 		return validateBounds(&bounds.Rect)
@@ -509,7 +509,7 @@ func validateInspection(view *protocol.InspectionView) bool {
 		if view.View != protocol.ViewDetailed {
 			return false
 		}
-		return validateReadNodeTree(view.Root, false) && noHiddenGeometry(view.Root)
+		return validateReadNodeTree(view.Root, false) && detailedRectanglesOnly(view.Root)
 	case "query":
 		if view.View != protocol.ViewDetailed {
 			return false
@@ -520,7 +520,7 @@ func validateInspection(view *protocol.InspectionView) bool {
 					return false
 				}
 			}
-			if !validateReadNodeTree(match.Node, false) || !noHiddenGeometry(match.Node) {
+			if !validateReadNodeTree(match.Node, false) || !detailedRectanglesOnly(match.Node) {
 				return false
 			}
 		}
@@ -529,16 +529,21 @@ func validateInspection(view *protocol.InspectionView) bool {
 	return false
 }
 
-// noHiddenGeometry reports whether a detailed subtree delivers every known
-// rectangle.
-func noHiddenGeometry(root *protocol.ReadNode) bool {
+// detailedRectanglesOnly reports whether a detailed subtree delivers every known
+// rectangle. The detailed inspection view keeps the complete node set, so hidden
+// and point geometry are both invalid there.
+func detailedRectanglesOnly(root *protocol.ReadNode) bool {
 	type pendingNode struct{ node *protocol.ReadNode }
 	stack := []pendingNode{{node: root}}
 	for len(stack) > 0 {
 		entry := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
-		if entry.node == nil || entry.node.Bounds.Kind == protocol.GeometryHidden ||
-			entry.node.IsChain() {
+		if entry.node == nil || entry.node.IsChain() {
+			return false
+		}
+		switch entry.node.Bounds.Kind {
+		case protocol.GeometryKnown, protocol.GeometryUnknown:
+		default:
 			return false
 		}
 		for _, child := range entry.node.Children {

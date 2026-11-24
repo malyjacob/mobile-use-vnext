@@ -1773,10 +1773,10 @@ func TestObservationTreeTriStateDecode(t *testing.T) {
 	const responseBody = `{"observation":{"status":"complete","id":"O1","tree":{` +
 		`"format":"full","scope":"reported_visible_with_context","view":"compact",` +
 		`"root":{"ref":"n1","role":"root","bounds":[0,0,1080,2400],"children":[` +
-		`{"ref":"n2","role":"text","bounds":[0,0,100,100]},` +
-		`{"ref":"n3","role":"text","bounds":[0,0,100,100],` +
+		`{"ref":"n2","role":"text","bounds":[50,50]},` +
+		`{"ref":"n3","role":"text","bounds":[50,50],` +
 		`"enabled":null,"focused":null,"selected":null,"checked":null,"protected":null},` +
-		`{"ref":"n4","role":"button","bounds":[0,0,100,100],` +
+		`{"ref":"n4","role":"button","bounds":[50,50],` +
 		`"enabled":false,"focused":true,"selected":true,"checked":true,"protected":true}` +
 		`]}}}}`
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {

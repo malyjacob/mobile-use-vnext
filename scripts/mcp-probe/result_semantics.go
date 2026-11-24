@@ -270,7 +270,12 @@ func compareResultTextToStructured(decoded *decodedTextResult,
 		if failure := normalizeImageView(textObs, wantObs, "image"); failure != nil {
 			return failure
 		}
-		reduceTreeHeader(wantObs)
+		// A readable block declares header facts only, so its body is stripped from
+		// the structured side. The documented JSON fallback for the tree member does
+		// carry the complete tree, so the two objects are then compared in full.
+		if !textCarriesFallbackTree(textObs) {
+			reduceTreeHeader(wantObs)
+		}
 	}
 
 	if failure := compareInspection(text, want); failure != nil {
@@ -461,11 +466,32 @@ func reduceTreeHeader(wantObs map[string]any) {
 	if !ok {
 		return
 	}
-	for _, bodyKey := range []string{
-		"root", "set", "add", "remove", "children", "replace",
-	} {
+	for _, bodyKey := range treeBodyKeys() {
 		delete(tree, bodyKey)
 	}
+}
+
+// treeBodyKeys are the definition and modification members a readable block
+// delivers instead of a complete object.
+func treeBodyKeys() []string {
+	return []string{"root", "set", "add", "remove", "children", "replace"}
+}
+
+// textCarriesFallbackTree reports whether the text channel delivered the documented
+// JSON fallback for the tree member instead of a readable block. The fallback value
+// is the complete tree object, so it is compared member for member and no body keys
+// are stripped from the structured side.
+func textCarriesFallbackTree(textObs map[string]any) bool {
+	tree, ok := textObs["tree"].(map[string]any)
+	if !ok || tree == nil {
+		return false
+	}
+	for _, bodyKey := range treeBodyKeys() {
+		if _, present := tree[bodyKey]; present {
+			return true
+		}
+	}
+	return false
 }
 
 // compareInspection reduces the structured inspection to the header facts the

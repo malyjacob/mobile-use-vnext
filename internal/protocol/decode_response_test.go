@@ -81,6 +81,7 @@ func testObservation() *Observation {
 			TaskID:  &taskID,
 			HasTask: true,
 		},
+		Visual:  "sparse_tree",
 		Tree:    &ReadTreeValue{Full: testReadFullTree(ViewCompact)},
 		Missing: []string{"image"},
 	}

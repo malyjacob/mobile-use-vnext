@@ -553,7 +553,7 @@ func (p *probe) startCheck(ctx context.Context) (startSummary, bool) {
 		"session=active", field("session_mode", view.Session.Mode), "tree=full",
 	}
 	if p.mode() != resultModeStructured {
-		passFields = append(passFields, "tree_block=v4")
+		passFields = append(passFields, "tree_block=v5")
 	}
 	p.reporter.pass("start",
 		passFields...)
@@ -639,7 +639,7 @@ func (p *probe) observeCheck(ctx context.Context, reference string) (string, boo
 		field("height", strconv.Itoa(observation.Image.Height)),
 	}
 	if p.mode() != resultModeStructured {
-		passFields = append(passFields, "tree_block=v4")
+		passFields = append(passFields, "tree_block=v5")
 	}
 	p.reporter.pass("observe", passFields...)
 	return observation.ID, true
@@ -701,9 +701,9 @@ func checkObservationTreeBlock(projected *callResult, observation *observationVi
 	headerPrefix := ""
 	switch format {
 	case treeFull:
-		headerPrefix = "tree v4 full nodes="
+		headerPrefix = "tree v5 full nodes="
 	case treeDelta:
-		headerPrefix = "tree v4 delta base="
+		headerPrefix = "tree v5 delta base="
 	default:
 		return failf("text_tree_format_invalid")
 	}
@@ -747,7 +747,7 @@ func checkObservationTreeBlock(projected *callResult, observation *observationVi
 }
 
 func treeHeaderBase(header string) (string, *checkError) {
-	rest, found := strings.CutPrefix(header, "tree v4 delta base=")
+	rest, found := strings.CutPrefix(header, "tree v5 delta base=")
 	if !found {
 		return "", failf("text_tree_header_invalid")
 	}

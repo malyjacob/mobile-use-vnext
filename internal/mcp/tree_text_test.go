@@ -25,6 +25,9 @@ func testBounds(left, top, right, bottom int) protocol.ReadBounds {
 	return protocol.KnownBounds(protocol.Bounds{Left: left, Top: top, Right: right, Bottom: bottom})
 }
 
+// testPoint builds one delivered compact center point.
+func testPoint(x, y int) protocol.ReadBounds { return protocol.PointBounds(x, y) }
+
 func testAxisPtr(value protocol.Axis) *protocol.Axis { return &value }
 
 // testNode builds one public read node with the known defaults a decoded node
@@ -42,14 +45,23 @@ func testNode(ref string, role protocol.Role, bounds protocol.ReadBounds) *proto
 	}
 }
 
-func testLargeTree(childCount, labelBytes int) *protocol.ReadTree {
+// testLargeTree builds one synthetic tree for size tests. A detailed view
+// delivers every child rectangle; a compact view delivers the child center
+// point instead.
+func testLargeTree(childCount, labelBytes int, detailed bool) *protocol.ReadTree {
 	root := testNode("n1", protocol.RoleRoot, testBounds(0, 0, 1080, 2400))
+	childBounds := testPoint(540, 40)
+	view := protocol.ViewCompact
+	if detailed {
+		childBounds = testBounds(0, 0, 1080, 80)
+		view = protocol.ViewDetailed
+	}
 	for index := 2; index < childCount+2; index++ {
-		child := testNode("n"+strconv.Itoa(index), protocol.RoleText, testBounds(0, 0, 1080, 80))
+		child := testNode("n"+strconv.Itoa(index), protocol.RoleText, childBounds)
 		child.Label = []string{strings.Repeat("x", labelBytes)}
 		root.Children = append(root.Children, child)
 	}
-	return &protocol.ReadTree{Format: "full", Scope: protocol.Scope, View: protocol.ViewCompact, Root: root}
+	return &protocol.ReadTree{Format: "full", Scope: protocol.Scope, View: view, Root: root}
 }
 
 func mustRenderTreeText(t *testing.T, result *protocol.Result) string {
@@ -76,16 +88,16 @@ func requireNoTreeText(t *testing.T, result *protocol.Result) {
 // state is also unknown and therefore rendered checked=null).
 func testFullTree() *protocol.ReadTree {
 	root := testNode("n1", protocol.RoleRoot, testBounds(0, 0, 1080, 2400))
-	group := testNode("n2", protocol.RoleGroup, testBounds(0, 0, 1080, 220))
+	group := testNode("n2", protocol.RoleGroup, testPoint(540, 110))
 
-	back := testNode("n3", protocol.RoleButton, testBounds(24, 60, 144, 180))
+	back := testNode("n3", protocol.RoleButton, testPoint(84, 120))
 	back.Label = []string{"返回"}
 	back.Actions = []protocol.Action{protocol.ActionTap}
 
-	title := testNode("n4", protocol.RoleText, testBounds(300, 80, 780, 160))
+	title := testNode("n4", protocol.RoleText, testPoint(540, 120))
 	title.Label = []string{"设置"}
 
-	toggle := testNode("n6", protocol.RoleSwitch, testBounds(900, 60, 1032, 180))
+	toggle := testNode("n6", protocol.RoleSwitch, testPoint(966, 120))
 	toggle.Label = []string{"启用"}
 	toggle.Actions = []protocol.Action{protocol.ActionTap}
 	toggle.Checked = testBoolPtr(true)
@@ -94,7 +106,7 @@ func testFullTree() *protocol.ReadTree {
 	scroll.Axis = protocol.AxisY
 
 	group12 := testNode("n12", protocol.RoleGroup, protocol.UnknownBounds())
-	search := testNode("n13", protocol.RoleInput, testBounds(48, 1850, 1032, 1990))
+	search := testNode("n13", protocol.RoleInput, testPoint(540, 1920))
 	search.Label = []string{"搜索设置"}
 	search.Value = testStringPtr("")
 	search.Hint = testStringPtr("输入关键词")
@@ -110,29 +122,29 @@ func testFullTree() *protocol.ReadTree {
 	return &protocol.ReadTree{Format: "full", Scope: protocol.Scope, View: protocol.ViewCompact, Root: root}
 }
 
-const testTreeTextFullGolden = `tree v4 full nodes=9
+const testTreeTextFullGolden = `tree v5 full nodes=9
 
 n1 root 0,0,1080,2400
- n2 group 0,0,1080,220
-  n3 button 24,60,144,180 "返回"
-  n4 text 300,80,780,160 "设置"
-  n6 switch 900,60,1032,180 "启用" tap checked=true
+ n2 group 540,110
+  n3 button 84,120 "返回"
+  n4 text 540,120 "设置"
+  n6 switch 966,120 "启用" tap checked=true
  n5 scroll 0,220,1080,2400 !swipe axis=y
   n12 group -
-   n13 input 48,1850,1032,1990 "搜索设置" value="" hint="输入关键词" tap
+   n13 input 540,1920 "搜索设置" value="" hint="输入关键词" tap
   n14 group checked=null
 end tree
 `
 
 func testDelta() *protocol.ReadDelta {
-	add := testNode("n14", protocol.RoleGroup, testBounds(0, 460, 1080, 580))
-	mobile := testNode("n15", protocol.RoleText, testBounds(48, 490, 700, 550))
+	add := testNode("n14", protocol.RoleGroup, testPoint(540, 520))
+	mobile := testNode("n15", protocol.RoleText, testPoint(374, 520))
 	mobile.Label = []string{"移动网络"}
 	mobile.Actions = []protocol.Action{protocol.ActionTap}
 	add.Children = []*protocol.ReadNode{mobile}
 
-	replace := testNode("n12", protocol.RoleGroup, testBounds(0, 1800, 1080, 2100))
-	search := testNode("n91", protocol.RoleInput, testBounds(48, 1850, 1032, 1990))
+	replace := testNode("n12", protocol.RoleGroup, testPoint(540, 1950))
+	search := testNode("n91", protocol.RoleInput, testPoint(540, 1920))
 	search.Label = []string{"搜索设置"}
 	search.Value = testStringPtr("")
 	search.Hint = testStringPtr("输入关键词")
@@ -155,16 +167,16 @@ func testDelta() *protocol.ReadDelta {
 	}
 }
 
-const testTreeTextDeltaGolden = `tree v4 delta base=O3 changes=6
+const testTreeTextDeltaGolden = `tree v5 delta base=O3 changes=6
 
 ~ n7 label=["WLAN 已关闭"] actions=["tap"]
 ~ n8 checked=false
-+ n14 group 0,460,1080,580
- n15 text 48,490,700,550 "移动网络" tap
++ n14 group 540,520
+ n15 text 374,520 "移动网络" tap
 - n16
 children n5 = [n6 n9 n14]
-= n12 group 0,1800,1080,2100
- n91 input 48,1850,1032,1990 "搜索设置" value="" hint="输入关键词" tap
+= n12 group 540,1950
+ n91 input 540,1920 "搜索设置" value="" hint="输入关键词" tap
 end tree
 `
 
@@ -365,11 +377,11 @@ func TestTreeTextDeltaExplicitValues(t *testing.T) {
 	}
 }
 
-func TestTreeTextV4FieldInverse(t *testing.T) {
-	block := `tree v4 full nodes=2
+func TestTreeTextV5FieldInverse(t *testing.T) {
+	block := `tree v5 full nodes=2
 
 n1 root 0,0,1080,2400
- n2 group -10,-20,30,40 "label @ !tap _72" value="v" hint="h" long_press text swipe enabled=false focused=true selected=null protected=false checked=true axis=both resource="r" context
+ n2 group 10,10 "label @ !tap _72" value="v" hint="h" long_press text swipe enabled=false focused=true selected=null protected=false checked=true axis=both resource="r" context
 end tree
 `
 	parsed, err := parseFullTreeTextValue(block, "Oabc_72")
@@ -377,7 +389,7 @@ end tree
 		t.Fatalf("parse: %v", err)
 	}
 	root := testNode("n1", protocol.RoleRoot, testBounds(0, 0, 1080, 2400))
-	child := testNode("n2", protocol.RoleGroup, testBounds(-10, -20, 30, 40))
+	child := testNode("n2", protocol.RoleGroup, testPoint(10, 10))
 	child.Label = []string{"label @ !tap _72"}
 	child.Value = testStringPtr("v")
 	child.Hint = testStringPtr("h")
@@ -401,7 +413,7 @@ end tree
 	}
 }
 
-func TestTreeTextV4DefaultActionInverse(t *testing.T) {
+func TestTreeTextV5DefaultActionInverse(t *testing.T) {
 	cases := []struct {
 		name   string
 		column string
@@ -428,7 +440,7 @@ func TestTreeTextV4DefaultActionInverse(t *testing.T) {
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
-			block := "tree v4 full nodes=2\n\nn1 root 0,0,100,100\n n2 " +
+			block := "tree v5 full nodes=2\n\nn1 root 0,0,100,100\n n2 " +
 				testCase.column + "\nend tree\n"
 			tree, err := parseFullTreeTextValue(block, "O1")
 			if err != nil {
@@ -449,7 +461,7 @@ func TestTreeTextV4DefaultActionInverse(t *testing.T) {
 		"button 0,0,10,10 !tap !tap",
 	} {
 		t.Run("reject/"+column, func(t *testing.T) {
-			block := "tree v4 full nodes=2\n\nn1 root 0,0,100,100\n n2 " +
+			block := "tree v5 full nodes=2\n\nn1 root 0,0,100,100\n n2 " +
 				column + "\nend tree\n"
 			if _, err := parseFullTreeTextValue(block, "O1"); err == nil {
 				t.Fatalf("invalid default-action spelling was accepted: %s", column)
@@ -458,8 +470,8 @@ func TestTreeTextV4DefaultActionInverse(t *testing.T) {
 	}
 }
 
-func TestTreeTextV4PreservesDuplicateExplicitActions(t *testing.T) {
-	button := testNode("n2", protocol.RoleButton, testBounds(0, 0, 10, 10))
+func TestTreeTextV5PreservesDuplicateExplicitActions(t *testing.T) {
+	button := testNode("n2", protocol.RoleButton, testPoint(5, 5))
 	button.Actions = []protocol.Action{
 		protocol.ActionTap, protocol.ActionTap, protocol.ActionLongPress,
 	}
@@ -476,7 +488,7 @@ func TestTreeTextV4PreservesDuplicateExplicitActions(t *testing.T) {
 		ID: "O1", Tree: &protocol.ReadTreeValue{Full: tree},
 	}})
 	for _, want := range []string{
-		" n2 button 0,0,10,10 tap tap long_press\n",
+		" n2 button 5,5 tap tap long_press\n",
 		" n3 scroll 0,20,10,40 long_press long_press !swipe\n",
 	} {
 		if !strings.Contains(block, want) {
@@ -492,25 +504,27 @@ func TestTreeTextV4PreservesDuplicateExplicitActions(t *testing.T) {
 	}
 }
 
-func TestTreeTextV4StrictGeometryAndCounts(t *testing.T) {
+func TestTreeTextV5StrictGeometryAndCounts(t *testing.T) {
 	cases := []struct {
 		name  string
 		block string
 	}{
-		{"full-count-too-large", "tree v4 full nodes=3\n\nn1 root 0,0,1,1\n n2 group 0,0,1,1\nend tree\n"},
-		{"full-count-nonpositive", "tree v4 full nodes=0\n\nn1 root 0,0,1,1\nend tree\n"},
-		{"full-count-leading-zero", "tree v4 full nodes=02\n\nn1 root 0,0,1,1\n n2 group 0,0,1,1\nend tree\n"},
-		{"duplicate-header-field", "tree v4 full nodes=1 nodes=1\n\nn1 root 0,0,1,1\nend tree\n"},
-		{"old-bracket-geometry", "tree v4 full nodes=1\n\nn1 root [0,0,1,1]\nend tree\n"},
-		{"two-space-indent", "tree v4 full nodes=2\n\nn1 root 0,0,1,1\n  n2 group 0,0,1,1\nend tree\n"},
-		{"indent-skip", "tree v4 full nodes=2\n\nn1 root 0,0,1,1\n  n2 group 0,0,1,1\nend tree\n"},
-		{"leading-zero-coordinate", "tree v4 full nodes=1\n\nn1 root 01,0,1,1\nend tree\n"},
-		{"negative-zero-coordinate", "tree v4 full nodes=1\n\nn1 root -0,0,1,1\nend tree\n"},
-		{"reversed-rectangle", "tree v4 full nodes=1\n\nn1 root 2,0,1,1\nend tree\n"},
-		{"duplicate-node-ref", "tree v4 full nodes=2\n\nn1 root 0,0,1,1\n n1 group 0,0,1,1\nend tree\n"},
-		{"orphan-at", "tree v4 full nodes=1\n\nn1 root @\nend tree\n"},
-		{"delta-count", "tree v4 delta base=O1 changes=2\n\n~ n2 label=[\"x\"]\nend tree\n"},
-		{"delta-cross-definition-at", "tree v4 delta base=O1 changes=2\n\n+ n2 group 0,0,1,1\n+ n3 group @\nend tree\n"},
+		{"full-count-too-large", "tree v5 full nodes=3\n\nn1 root 0,0,1,1\n n2 group 0,0,1,1\nend tree\n"},
+		{"full-count-nonpositive", "tree v5 full nodes=0\n\nn1 root 0,0,1,1\nend tree\n"},
+		{"full-count-leading-zero", "tree v5 full nodes=02\n\nn1 root 0,0,1,1\n n2 group 0,0,1,1\nend tree\n"},
+		{"duplicate-header-field", "tree v5 full nodes=1 nodes=1\n\nn1 root 0,0,1,1\nend tree\n"},
+		{"old-bracket-geometry", "tree v5 full nodes=1\n\nn1 root [0,0,1,1]\nend tree\n"},
+		{"two-space-indent", "tree v5 full nodes=2\n\nn1 root 0,0,1,1\n  n2 group 0,0,1,1\nend tree\n"},
+		{"indent-skip", "tree v5 full nodes=2\n\nn1 root 0,0,1,1\n  n2 group 0,0,1,1\nend tree\n"},
+		{"leading-zero-coordinate", "tree v5 full nodes=1\n\nn1 root 01,0,1,1\nend tree\n"},
+		{"negative-zero-coordinate", "tree v5 full nodes=1\n\nn1 root -0,0,1,1\nend tree\n"},
+		{"reversed-rectangle", "tree v5 full nodes=1\n\nn1 root 2,0,1,1\nend tree\n"},
+		{"duplicate-node-ref", "tree v5 full nodes=2\n\nn1 root 0,0,1,1\n n1 group 0,0,1,1\nend tree\n"},
+		{"orphan-at", "tree v5 full nodes=1\n\nn1 root @\nend tree\n"},
+		{"chain-at", "tree v5 full nodes=3\n\nn1 root 0,0,1,1\n chain [n2 n3] group @\nend tree\n"},
+		{"no-delivered-ancestor-at", "tree v5 full nodes=2\n\nn1 root -\n n2 group @\nend tree\n"},
+		{"delta-count", "tree v5 delta base=O1 changes=2\n\n~ n2 label=[\"x\"]\nend tree\n"},
+		{"delta-cross-definition-at", "tree v5 delta base=O1 changes=2\n\n+ n2 group 0,0,1,1\n+ n3 group @\nend tree\n"},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -521,27 +535,27 @@ func TestTreeTextV4StrictGeometryAndCounts(t *testing.T) {
 				_, err = parseFullTreeTextValue(testCase.block, "O2")
 			}
 			if err == nil {
-				t.Fatalf("invalid v4 tree was accepted:\n%s", testCase.block)
+				t.Fatalf("invalid v5 tree was accepted:\n%s", testCase.block)
 			}
 		})
 	}
 }
 
-func TestTreeTextV4SameBaseIndependentDeltas(t *testing.T) {
-	baseChild := testNode("n2", protocol.RoleText, testBounds(0, 0, 100, 20))
+func TestTreeTextV5SameBaseIndependentDeltas(t *testing.T) {
+	baseChild := testNode("n2", protocol.RoleText, testPoint(50, 10))
 	baseChild.Label = []string{"base"}
 	baseRoot := testNode("n1", protocol.RoleRoot, testBounds(0, 0, 100, 100))
 	baseRoot.Children = []*protocol.ReadNode{baseChild}
 	base := &protocol.ReadTree{
 		Format: "full", Scope: protocol.Scope, View: protocol.ViewCompact, Root: baseRoot,
 	}
-	add := mustParseDeltaFixture(t, `tree v4 delta base=_72 changes=2
+	add := mustParseDeltaFixture(t, `tree v5 delta base=_72 changes=2
 
 + n3 button 0,30,20,50 "added"
 children n1 = [n2 n3]
 end tree
 `, "Oabc_76")
-	update := mustParseDeltaFixture(t, `tree v4 delta base=_72 changes=1
+	update := mustParseDeltaFixture(t, `tree v5 delta base=_72 changes=1
 
 ~ n2 label=["updated"]
 end tree
@@ -601,17 +615,17 @@ func cloneReadTree(t *testing.T, tree *protocol.ReadTree) *protocol.ReadTree {
 	return &clone
 }
 
-// TestTreeTextChainDefinition pins the v4 explicit chain definition: consecutive
+// TestTreeTextChainDefinition pins the v5 explicit chain definition: consecutive
 // anonymous single-child nodes fold into one definition line whose ref list
 // expands to distinct logical nodes in nodes=. The refs are not re-expanded as
 // separate lines; entries= counts definition lines only.
 func TestTreeTextChainDefinition(t *testing.T) {
-	title := testNode("n4", protocol.RoleText, testBounds(0, 0, 1080, 60))
+	title := testNode("n4", protocol.RoleText, testPoint(540, 30))
 	title.Label = []string{"标题"}
 	chain := &protocol.ReadNode{
 		Chain:   []string{"n2", "n3"},
 		Role:    protocol.RoleView,
-		Bounds:  testBounds(0, 0, 1080, 120),
+		Bounds:  testPoint(540, 60),
 		Label:   []string{},
 		Actions: []protocol.Action{},
 		Enabled: testBoolPtr(true), Focused: testBoolPtr(false),
@@ -626,10 +640,10 @@ func TestTreeTextChainDefinition(t *testing.T) {
 	block := mustRenderTreeText(t, &protocol.Result{Observation: &protocol.Observation{
 		ID: "O5", Tree: &protocol.ReadTreeValue{Full: tree},
 	}})
-	want := "tree v4 full nodes=4\n\n" +
+	want := "tree v5 full nodes=4\n\n" +
 		"n1 root 0,0,1080,2400\n" +
-		" chain [n2 n3] view 0,0,1080,120\n" +
-		"  n4 text 0,0,1080,60 \"标题\"\nend tree\n"
+		" chain [n2 n3] view 540,60\n" +
+		"  n4 text 540,30 \"标题\"\nend tree\n"
 	if block != want {
 		t.Fatalf("chain block mismatch:\n--- got ---\n%s\n--- want ---\n%s", block, want)
 	}
@@ -642,10 +656,10 @@ func TestTreeTextChainDefinition(t *testing.T) {
 	}
 }
 
-// TestTreeTextLegacyChainTailInDeltaAddAndReplace keeps v4 chain tails bound to
+// TestTreeTextLegacyChainTailInDeltaAddAndReplace keeps v5 chain tails bound to
 // the last ref, including inside independent add and replace definitions.
 func TestTreeTextLegacyChainTailInDeltaAddAndReplace(t *testing.T) {
-	addedButton := testNode("n23", protocol.RoleButton, testBounds(0, 0, 20, 20))
+	addedButton := testNode("n23", protocol.RoleButton, testPoint(10, 10))
 	addedButton.Label = []string{"增加"}
 	addedButton.Actions = []protocol.Action{protocol.ActionTap}
 	addedChain := testNode("", protocol.RoleView, protocol.HiddenBounds())
@@ -654,7 +668,7 @@ func TestTreeTextLegacyChainTailInDeltaAddAndReplace(t *testing.T) {
 	addedRoot := testNode("n20", protocol.RoleView, protocol.HiddenBounds())
 	addedRoot.Children = []*protocol.ReadNode{addedChain}
 
-	replacedText := testNode("n33", protocol.RoleText, testBounds(0, 0, 40, 20))
+	replacedText := testNode("n33", protocol.RoleText, testPoint(20, 10))
 	replacedText.Label = []string{"替换"}
 	replacedChain := testNode("", protocol.RoleGroup, protocol.HiddenBounds())
 	replacedChain.Chain = []string{"n31", "n32"}
@@ -671,8 +685,8 @@ func TestTreeTextLegacyChainTailInDeltaAddAndReplace(t *testing.T) {
 		ID: "O2", Tree: &protocol.ReadTreeValue{Delta: delta},
 	}})
 	for _, wanted := range []string{
-		"+ n20\n chain [n21 n22] view\n  n23 button 0,0,20,20 \"增加\"\n",
-		"= n30 group\n chain [n31 n32] group\n  n33 text 0,0,40,20 \"替换\"\n",
+		"+ n20\n chain [n21 n22] view\n  n23 button 10,10 \"增加\"\n",
+		"= n30 group\n chain [n31 n32] group\n  n33 text 20,10 \"替换\"\n",
 	} {
 		if !strings.Contains(block, wanted) {
 			t.Fatalf("legacy chain delta lacks %q:\n%s", wanted, block)
@@ -694,14 +708,14 @@ func TestTreeTextLegacyChainTailInDeltaAddAndReplace(t *testing.T) {
 	}
 }
 
-func TestTreeTextV4OmitsViewRoles(t *testing.T) {
+func TestTreeTextV5OmitsViewRoles(t *testing.T) {
 	cases := []struct {
 		name   string
 		mutate func(*protocol.ReadNode)
 	}{
 		{"no-fields", nil},
-		{"rectangle", func(node *protocol.ReadNode) {
-			node.Bounds = testBounds(1, 2, 3, 4)
+		{"point", func(node *protocol.ReadNode) {
+			node.Bounds = testPoint(2, 3)
 		}},
 		{"unknown-geometry", func(node *protocol.ReadNode) {
 			node.Bounds = protocol.UnknownBounds()
@@ -789,7 +803,7 @@ func TestTreeTextV4OmitsViewRoles(t *testing.T) {
 	}
 }
 
-func TestTreeTextV4RoleRecoveryMatrix(t *testing.T) {
+func TestTreeTextV5RoleRecoveryMatrix(t *testing.T) {
 	type firstColumn struct {
 		name             string
 		mutate           func(*protocol.ReadNode)
@@ -838,11 +852,18 @@ func TestTreeTextV4RoleRecoveryMatrix(t *testing.T) {
 	}
 	geometries := []struct {
 		name   string
-		bounds protocol.ReadBounds
+		bounds func(protocol.Role) protocol.ReadBounds
 	}{
-		{"hidden", protocol.HiddenBounds()},
-		{"unknown", protocol.UnknownBounds()},
-		{"known", testBounds(1, 2, 3, 4)},
+		{"hidden", func(protocol.Role) protocol.ReadBounds { return protocol.HiddenBounds() }},
+		{"unknown", func(protocol.Role) protocol.ReadBounds { return protocol.UnknownBounds() }},
+		// A delivered form is bound to the role: root and scroll keep the
+		// rectangle, every other role keeps a center point.
+		{"known", func(role protocol.Role) protocol.ReadBounds {
+			if role == protocol.RoleRoot || role == protocol.RoleScroll {
+				return testBounds(1, 2, 3, 4)
+			}
+			return testPoint(2, 3)
+		}},
 	}
 	roles := []protocol.Role{
 		protocol.RoleRoot, protocol.RoleGroup, protocol.RoleText, protocol.RoleButton,
@@ -854,7 +875,8 @@ func TestTreeTextV4RoleRecoveryMatrix(t *testing.T) {
 			for _, firstColumn := range firstColumns {
 				caseName := string(role) + "/" + geometry.name + "/" + firstColumn.name
 				t.Run(caseName, func(t *testing.T) {
-					child := testNode("n2", role, geometry.bounds)
+					bounds := geometry.bounds(role)
+					child := testNode("n2", role, bounds)
 					if firstColumn.mutate != nil {
 						firstColumn.mutate(child)
 					}
@@ -873,10 +895,10 @@ func TestTreeTextV4RoleRecoveryMatrix(t *testing.T) {
 					}
 					gotExplicit := len(tokens) > 1 && protocol.Role(tokens[1]).Valid()
 					defaultRole := protocol.RoleView
-					if geometry.bounds.Kind == protocol.GeometryHidden && firstColumn.quotedLabel {
+					if bounds.Kind == protocol.GeometryHidden && firstColumn.quotedLabel {
 						defaultRole = protocol.RoleText
 					}
-					firstIsRole := geometry.bounds.Kind == protocol.GeometryHidden &&
+					firstIsRole := bounds.Kind == protocol.GeometryHidden &&
 						firstColumn.roleWordIfHidden
 					wantExplicit := firstIsRole || role != defaultRole
 					if gotExplicit != wantExplicit {
@@ -892,7 +914,67 @@ func TestTreeTextV4RoleRecoveryMatrix(t *testing.T) {
 	}
 }
 
-func TestTreeTextV4ChainAndGeometry(t *testing.T) {
+// TestTreeTextV5AtAbbreviation pins the positive @ form: an ordinary node with
+// delivered geometry repeats the nearest known strict ancestor only when the
+// Kind and payload are identical. Unknown ancestors are skipped, a point never
+// abbreviates a rectangle, and a hidden ancestor does not clear the chain.
+func TestTreeTextV5AtAbbreviation(t *testing.T) {
+	root := testNode("n1", protocol.RoleRoot, testBounds(0, 0, 1080, 2400))
+
+	group := testNode("n2", protocol.RoleGroup, testPoint(540, 100))
+	pointButton := testNode("n3", protocol.RoleButton, testPoint(540, 100))
+	pointButton.Actions = []protocol.Action{protocol.ActionTap}
+	pointText := testNode("n4", protocol.RoleText, testPoint(540, 100))
+	pointText.Label = []string{"同点"}
+	hidden := testNode("n7", protocol.RoleGroup, protocol.HiddenBounds())
+	hiddenButton := testNode("n8", protocol.RoleButton, testPoint(540, 100))
+	hiddenButton.Actions = []protocol.Action{protocol.ActionTap}
+	hidden.Children = []*protocol.ReadNode{hiddenButton}
+	unknown := testNode("n10", protocol.RoleGroup, protocol.UnknownBounds())
+	unknownButton := testNode("n11", protocol.RoleButton, testPoint(540, 100))
+	unknownButton.Actions = []protocol.Action{protocol.ActionTap}
+	unknown.Children = []*protocol.ReadNode{unknownButton}
+	group.Children = []*protocol.ReadNode{pointButton, pointText, hidden, unknown}
+
+	rectScroll := testNode("n5", protocol.RoleScroll, testBounds(0, 0, 1080, 2400))
+	kindMismatch := testNode("n9", protocol.RoleButton, testPoint(0, 0))
+	kindMismatch.Actions = []protocol.Action{protocol.ActionTap}
+	rectScroll.Children = []*protocol.ReadNode{kindMismatch}
+
+	movedScroll := testNode("n6", protocol.RoleScroll, testBounds(0, 500, 1080, 2400))
+
+	root.Children = []*protocol.ReadNode{group, rectScroll, movedScroll}
+	tree := &protocol.ReadTree{
+		Format: "full", Scope: protocol.Scope, View: protocol.ViewCompact, Root: root,
+	}
+	block := mustRenderTreeText(t, &protocol.Result{Observation: &protocol.Observation{
+		ID: "O1", Tree: &protocol.ReadTreeValue{Full: tree},
+	}})
+	const want = `tree v5 full nodes=11
+
+n1 root 0,0,1080,2400
+ n2 group 540,100
+  n3 button @
+  n4 text @ "同点"
+  n7 group
+   n8 button @
+  n10 group -
+   n11 button @
+ n5 scroll @ !swipe
+  n9 button 0,0
+ n6 scroll 0,500,1080,2400 !swipe
+end tree
+`
+	if block != want {
+		t.Fatalf("at-abbreviation rendering mismatch:\n--- got ---\n%s\n--- want ---\n%s", block, want)
+	}
+	parsed := parseFullTreeText(t, block)
+	if got, want := mustJSON(t, parsed), mustJSON(t, tree); got != want {
+		t.Fatalf("@ abbreviation did not round-trip:\n got %s\nwant %s", got, want)
+	}
+}
+
+func TestTreeTextV5ChainAndGeometry(t *testing.T) {
 	chainNode := func(refs []string, role protocol.Role, bounds protocol.ReadBounds) *protocol.ReadNode {
 		node := testNode("", role, bounds)
 		node.Chain = refs
@@ -905,7 +987,7 @@ func TestTreeTextV4ChainAndGeometry(t *testing.T) {
 		return child
 	}()}
 	group := chainNode([]string{"n20", "n21"}, protocol.RoleGroup, protocol.HiddenBounds())
-	known := chainNode([]string{"n30", "n31"}, protocol.RoleView, testBounds(1, 2, 3, 4))
+	known := chainNode([]string{"n30", "n31"}, protocol.RoleView, testPoint(2, 3))
 	unknown := chainNode([]string{"n32", "n33"}, protocol.RoleView, protocol.UnknownBounds())
 	context := chainNode([]string{"n34", "n35"}, protocol.RoleView, protocol.HiddenBounds())
 	context.Context = true
@@ -924,12 +1006,12 @@ func TestTreeTextV4ChainAndGeometry(t *testing.T) {
 	block := mustRenderTreeText(t, &protocol.Result{Observation: &protocol.Observation{
 		ID: "O1", Tree: &protocol.ReadTreeValue{Full: tree},
 	}})
-	want := "tree v4 full nodes=18\n\n" +
+	want := "tree v5 full nodes=18\n\n" +
 		"n1 root 0,0,1080,2400\n" +
 		" chain [n10 n11] view\n" +
 		"  n12 \"child\"\n" +
 		" chain [n20 n21] group\n" +
-		" chain [n30 n31] view 1,2,3,4\n" +
+		" chain [n30 n31] view 2,3\n" +
 		" chain [n32 n33] view -\n" +
 		" chain [n34 n35] view context\n" +
 		" chain [n36 n37] view enabled=null\n" +
@@ -949,20 +1031,20 @@ func TestTreeTextV4ChainAndGeometry(t *testing.T) {
 	}
 }
 
-func TestTreeTextV4ChainDelta(t *testing.T) {
+func TestTreeTextV5ChainDelta(t *testing.T) {
 	chainNode := func(refs []string, role protocol.Role, bounds protocol.ReadBounds) *protocol.ReadNode {
 		node := testNode("", role, bounds)
 		node.Chain = refs
 		return node
 	}
-	addRoot := testNode("n50", protocol.RoleGroup, testBounds(0, 0, 100, 100))
+	addRoot := testNode("n50", protocol.RoleGroup, testPoint(50, 50))
 	addChain := chainNode([]string{"n51", "n52"}, protocol.RoleView, protocol.HiddenBounds())
 	addChild := testNode("n53", protocol.RoleText, protocol.HiddenBounds())
 	addChild.Label = []string{"moved"}
 	addChain.Children = []*protocol.ReadNode{addChild}
 	addRoot.Children = []*protocol.ReadNode{addChain}
 
-	replaceRoot := testNode("n60", protocol.RoleButton, testBounds(0, 0, 10, 10))
+	replaceRoot := testNode("n60", protocol.RoleButton, testPoint(5, 5))
 	replaceChain := chainNode([]string{"n61", "n62"}, protocol.RoleGroup, protocol.HiddenBounds())
 	replaceRoot.Children = []*protocol.ReadNode{replaceChain}
 
@@ -976,13 +1058,13 @@ func TestTreeTextV4ChainDelta(t *testing.T) {
 	block := mustRenderTreeText(t, &protocol.Result{Observation: &protocol.Observation{
 		ID: "O2", Tree: &protocol.ReadTreeValue{Delta: delta},
 	}})
-	want := "tree v4 delta base=O1 changes=4\n\n" +
-		"+ n50 group 0,0,100,100\n" +
+	want := "tree v5 delta base=O1 changes=4\n\n" +
+		"+ n50 group 50,50\n" +
 		" chain [n51 n52] view\n" +
 		"  n53 \"moved\"\n" +
 		"- n70\n" +
 		"children n60 = [n61 n62]\n" +
-		"= n60 button 0,0,10,10 !tap\n" +
+		"= n60 button 5,5 !tap\n" +
 		" chain [n61 n62] group\n" +
 		"end tree\n"
 	if block != want {
@@ -1005,17 +1087,17 @@ func TestTreeTextV4ChainDelta(t *testing.T) {
 	}
 }
 
-func TestTreeTextV4CompactBytesWin(t *testing.T) {
+func TestTreeTextV5CompactBytesWin(t *testing.T) {
 	root := testNode("n1", protocol.RoleRoot, testBounds(0, 0, 1080, 2400))
 	view := testNode("n2", protocol.RoleView, protocol.HiddenBounds())
 	text := testNode("n3", protocol.RoleText, protocol.HiddenBounds())
 	text.Label = []string{"title"}
 	chain := testNode("", protocol.RoleView, protocol.HiddenBounds())
 	chain.Chain = []string{"n10", "n11"}
-	child := testNode("n12", protocol.RoleText, testBounds(1, 2, 3, 4))
+	child := testNode("n12", protocol.RoleText, testPoint(2, 3))
 	child.Label = []string{"child"}
 	chain.Children = []*protocol.ReadNode{child}
-	tap := testNode("n4", protocol.RoleView, testBounds(0, 0, 10, 10))
+	tap := testNode("n4", protocol.RoleView, testPoint(5, 5))
 	tap.Actions = []protocol.Action{protocol.ActionTap}
 	root.Children = []*protocol.ReadNode{view, text, chain, tap}
 	tree := &protocol.ReadTree{Format: "full", Scope: protocol.Scope, View: protocol.ViewCompact, Root: root}
@@ -1023,7 +1105,7 @@ func TestTreeTextV4CompactBytesWin(t *testing.T) {
 		ID: "O1", Tree: &protocol.ReadTreeValue{Full: tree},
 	}})
 	if !strings.Contains(block, "\n chain [n10 n11] view\n") || !strings.Contains(block, "\n n2\n") {
-		t.Fatalf("fixture does not exercise v4 omissions:\n%s", block)
+		t.Fatalf("fixture does not exercise v5 omissions:\n%s", block)
 	}
 	expanded := expandTreeTextRoles(block)
 	if len(block) >= len(expanded) {
@@ -1042,7 +1124,7 @@ func TestTreeTextDeltaReplayAndSetPresence(t *testing.T) {
 	baseRoot.Children = []*protocol.ReadNode{baseNode}
 	base := &protocol.ReadTree{Format: "full", Scope: protocol.Scope, View: protocol.ViewCompact, Root: baseRoot}
 
-	addRoot := testNode("n3", protocol.RoleGroup, testBounds(0, 100, 1080, 200))
+	addRoot := testNode("n3", protocol.RoleGroup, testPoint(540, 150))
 	chain := testNode("", protocol.RoleView, protocol.HiddenBounds())
 	chain.Chain = []string{"n10", "n11"}
 	chainChild := testNode("n12", protocol.RoleText, protocol.HiddenBounds())
@@ -1055,7 +1137,7 @@ func TestTreeTextDeltaReplayAndSetPresence(t *testing.T) {
 			"n2": {
 				Label:   protocol.Field[[]string]{Set: true, Value: []string{}},
 				Actions: protocol.Field[[]protocol.Action]{Set: true, Value: []protocol.Action{}},
-				Bounds:  protocol.Field[protocol.ReadBounds]{Set: true, Value: testBounds(0, 0, 0, 0)},
+				Bounds:  protocol.Field[protocol.ReadBounds]{Set: true, Value: testPoint(0, 0)},
 				Enabled: protocol.Field[*bool]{Set: true, Value: testBoolPtr(false)},
 				Checked: protocol.Field[*bool]{Set: true},
 				Value:   protocol.Field[*string]{Set: true, Value: testStringPtr("")},
@@ -1070,6 +1152,9 @@ func TestTreeTextDeltaReplayAndSetPresence(t *testing.T) {
 	block := mustRenderTreeText(t, &protocol.Result{Observation: &protocol.Observation{
 		ID: "O2", Tree: &protocol.ReadTreeValue{Delta: delta},
 	}})
+	if !strings.Contains(block, "~ n2 ") || !strings.Contains(block, " bounds=[0,0]") {
+		t.Fatalf("set point bounds must be bracketed on the wire:\n%s", block)
+	}
 	parsed := parseDeltaText(t, block)
 	if got, want := mustJSONValue(t, parsed), mustJSONValue(t, delta); !reflect.DeepEqual(got, want) {
 		t.Fatalf("delta replay fixture did not round-trip:\n got %s\nwant %s", mustJSON(t, got), mustJSON(t, want))
@@ -1089,9 +1174,9 @@ func TestTreeTextDeltaReplayAndSetPresence(t *testing.T) {
 	if len(replayed.Label) != 0 || len(replayed.Actions) != 0 {
 		t.Fatalf("empty set values were lost: %#v", replayed)
 	}
-	if replayed.Bounds.Kind != protocol.GeometryKnown ||
-		replayed.Bounds.Rect != (protocol.Bounds{}) {
-		t.Fatalf("zero rectangle was not preserved: %#v", replayed.Bounds)
+	if replayed.Bounds.Kind != protocol.GeometryPoint ||
+		replayed.Bounds.Point != (protocol.Point{}) {
+		t.Fatalf("zero point was not preserved: %#v", replayed.Bounds)
 	}
 	if replayed.Enabled == nil || *replayed.Enabled {
 		t.Fatalf("enabled=false was not preserved: %#v", replayed.Enabled)
@@ -1305,11 +1390,11 @@ func TestTreeTextEscapes(t *testing.T) {
 
 func TestTreeTextKeepsPreviouslyBoundedBlocks(t *testing.T) {
 	t.Run("full", func(t *testing.T) {
-		tree := testLargeTree(699, 60)
+		tree := testLargeTree(699, 60, false)
 		block := mustRenderTreeText(t, &protocol.Result{Observation: &protocol.Observation{
 			ID: "O3", Tree: &protocol.ReadTreeValue{Full: tree},
 		}})
-		assertCompleteTreeText(t, block, "tree v4 full nodes=", "end tree\n", 24*1024)
+		assertCompleteTreeText(t, block, "tree v5 full nodes=", "end tree\n", 24*1024)
 	})
 
 	t.Run("delta", func(t *testing.T) {
@@ -1322,11 +1407,11 @@ func TestTreeTextKeepsPreviouslyBoundedBlocks(t *testing.T) {
 		block := mustRenderTreeText(t, &protocol.Result{Observation: &protocol.Observation{
 			ID: "O4", Tree: &protocol.ReadTreeValue{Delta: delta},
 		}})
-		assertCompleteTreeText(t, block, "tree v4 delta base=O3 ", "end tree\n", 24*1024)
+		assertCompleteTreeText(t, block, "tree v5 delta base=O3 ", "end tree\n", 24*1024)
 	})
 
 	t.Run("inspect", func(t *testing.T) {
-		tree := testLargeTree(799, 60)
+		tree := testLargeTree(799, 60, true)
 		tree.View = protocol.ViewDetailed
 		view := &protocol.InspectionView{
 			ObservationID: "O2", Revision: 4, CapturedAt: "2026-11-10T03:00:00Z", Scope: "tree",
@@ -1345,12 +1430,12 @@ func TestTreeTextLargeFixtures(t *testing.T) {
 	)
 
 	t.Run("observation-full-128KiB", func(t *testing.T) {
-		tree := testLargeTree(200, 700)
+		tree := testLargeTree(200, 700, false)
 		result := &protocol.Result{Observation: &protocol.Observation{
 			ID: "O3", Tree: &protocol.ReadTreeValue{Full: tree},
 		}}
 		block := mustRenderTreeText(t, result)
-		assertCompleteTreeText(t, block, "tree v4 full nodes=", "end tree\n", observationFullBytes)
+		assertCompleteTreeText(t, block, "tree v5 full nodes=", "end tree\n", observationFullBytes)
 		if got, want := mustJSON(t, parseFullTreeText(t, block)), mustJSON(t, tree); got != want {
 			t.Fatalf("observation full tree did not round-trip:\n got %s\nwant %s", got, want)
 		}
@@ -1358,8 +1443,7 @@ func TestTreeTextLargeFixtures(t *testing.T) {
 	})
 
 	t.Run("inspection-full-128KiB", func(t *testing.T) {
-		tree := testLargeTree(200, 700)
-		tree.View = protocol.ViewDetailed
+		tree := testLargeTree(200, 700, true)
 		view := &protocol.InspectionView{
 			ObservationID: "O2", Revision: 4, CapturedAt: "2026-11-10T03:00:00Z", Scope: "tree",
 			Tree: tree,
@@ -1376,7 +1460,7 @@ func TestTreeTextLargeFixtures(t *testing.T) {
 		view := &protocol.InspectionView{
 			ObservationID: "O2", Revision: 4, CapturedAt: "2026-11-10T03:00:00Z", Scope: "subtree",
 			View: protocol.ViewDetailed,
-			Root: testLargeTree(80, 700).Root,
+			Root: testLargeTree(80, 700, true).Root,
 		}
 		block := mustRenderTreeText(t, &protocol.Result{Inspection: view})
 		assertCompleteTreeText(t, block, "inspect v3 scope=subtree observation=O2 ", "end inspect\n", narrowInspectionBytes)
@@ -1531,6 +1615,20 @@ func TestTreeTextRejectsUnrepresentableMetadata(t *testing.T) {
 			}(),
 		},
 		{
+			name: "full compact rectangle on non-scroll",
+			result: func() *protocol.Result {
+				root := testNode("n1", protocol.RoleRoot, protocol.UnknownBounds())
+				root.Children = []*protocol.ReadNode{
+					testNode("n2", protocol.RoleButton, testBounds(0, 0, 10, 10)),
+				}
+				return &protocol.Result{Observation: &protocol.Observation{
+					ID: "O3", Tree: &protocol.ReadTreeValue{Full: &protocol.ReadTree{
+						Format: "full", Scope: protocol.Scope, View: protocol.ViewCompact, Root: root,
+					}},
+				}}
+			}(),
+		},
+		{
 			name: "full detailed tree hides geometry",
 			result: func() *protocol.Result {
 				root := testNode("n1", protocol.RoleRoot, protocol.HiddenBounds())
@@ -1649,6 +1747,30 @@ func TestTreeTextRejectsUnrepresentableMetadata(t *testing.T) {
 			}},
 		},
 		{
+			name: "inspection tree scope delivers point geometry",
+			result: &protocol.Result{Inspection: &protocol.InspectionView{
+				ObservationID: "O2", CapturedAt: "2026-11-10T03:00:00Z", Scope: "tree",
+				Tree: &protocol.ReadTree{Format: "full", Scope: protocol.Scope, View: protocol.ViewDetailed,
+					Root: testNode("n1", protocol.RoleRoot, testPoint(5, 10))},
+			}},
+		},
+		{
+			name: "inspection subtree delivers point geometry",
+			result: &protocol.Result{Inspection: &protocol.InspectionView{
+				ObservationID: "O2", CapturedAt: "2026-11-10T03:00:00Z", Scope: "subtree",
+				View: protocol.ViewDetailed,
+				Root: testNode("n5", protocol.RoleScroll, testPoint(5, 10)),
+			}},
+		},
+		{
+			name: "inspection query match delivers point geometry",
+			result: func() *protocol.Result {
+				view := testInspectionQueryView()
+				view.Matches[0].Node = testNode("n7", protocol.RoleButton, testPoint(5, 10))
+				return &protocol.Result{Inspection: view}
+			}(),
+		},
+		{
 			name: "inspection query match chain",
 			result: func() *protocol.Result {
 				view := testInspectionQueryView()
@@ -1742,7 +1864,7 @@ func TestTreeTextEmptyTree(t *testing.T) {
 	block := mustRenderTreeText(t, &protocol.Result{Observation: &protocol.Observation{
 		ID: "O1", Tree: &protocol.ReadTreeValue{Full: &protocol.ReadTree{Format: "full", Scope: protocol.Scope, View: protocol.ViewCompact, Root: root}},
 	}})
-	want := "tree v4 full nodes=1\n" +
+	want := "tree v5 full nodes=1\n" +
 		blockSeparator +
 		"n1 root 0,0,1080,2400\nend tree\n"
 	if block != want {
@@ -1753,7 +1875,7 @@ func TestTreeTextEmptyTree(t *testing.T) {
 	block = mustRenderTreeText(t, &protocol.Result{Observation: &protocol.Observation{
 		ID: "O2", Tree: &protocol.ReadTreeValue{Delta: delta},
 	}})
-	want = "tree v4 delta base=O1 changes=0\n" +
+	want = "tree v5 delta base=O1 changes=0\n" +
 		blockSeparator + "end tree\n"
 	if block != want {
 		t.Fatalf("empty delta block = %q, want %q", block, want)
@@ -1821,25 +1943,25 @@ func TestTextCarriesTreeBlock(t *testing.T) {
 		{
 			name: "start", tool: "start", arguments: `{}`,
 			response: `{"operation_id":"P1","outcome":"executed","session":` + testActiveSessionJSON + `,"observation":` + observation + `}`,
-			header:   "tree v4 full nodes=1",
+			header:   "tree v5 full nodes=1",
 			trailer:  "end tree\n",
 		},
 		{
 			name: "observe", tool: "observe", arguments: `{"reference":"O1"}`,
 			response: `{"operation_id":"P2","observation":` + observation + `}`,
-			header:   "tree v4 full nodes=1",
+			header:   "tree v5 full nodes=1",
 			trailer:  "end tree\n",
 		},
 		{
 			name: "observe-delta", tool: "observe", arguments: `{"reference":"O1"}`,
 			response: `{"operation_id":"P2","observation":{"status":"complete","id":"O2","revision":2,"tree":` + testDeltaTreeJSON + `}}`,
-			header:   "tree v4 delta base=O1 changes=0",
+			header:   "tree v5 delta base=O1 changes=0",
 			trailer:  "end tree\n",
 		},
 		{
 			name: "act", tool: "act", arguments: `{"reference":"O1","operation":{"type":"key","key":"BACK"}}`,
 			response: `{"operation_id":"P2","outcome":"executed","observation":` + observation + `}`,
-			header:   "tree v4 full nodes=1",
+			header:   "tree v5 full nodes=1",
 			trailer:  "end tree\n",
 		},
 		{
@@ -1847,7 +1969,7 @@ func TestTextCarriesTreeBlock(t *testing.T) {
 			response: `{"operation_id":"P2","outcome":"executed","app":{"kind":"open",` +
 				`"package":"com.example.probe","task_id":42,"display_id":12,"ownership":"owned",` +
 				`"reused":false,"state_preserved":false},"observation":` + observation + `}`,
-			header:  "tree v4 full nodes=1",
+			header:  "tree v5 full nodes=1",
 			trailer: "end tree\n",
 		},
 		{
@@ -1883,14 +2005,14 @@ func TestTextCarriesTreeBlock(t *testing.T) {
 			if !strings.Contains(text, "\n"+testCase.header+"\n") && !strings.HasPrefix(text, testCase.header+"\n") {
 				t.Fatalf("%s text lacks header %q:\n%s", testCase.name, testCase.header, text)
 			}
-			if strings.Count(text, "\n\ntree v4 ") != 1 && strings.Count(text, "\n\ninspect v3 ") != 1 {
+			if strings.Count(text, "\n\ntree v5 ") != 1 && strings.Count(text, "\n\ninspect v3 ") != 1 {
 				t.Fatalf("%s text does not carry exactly one tree block:\n%s", testCase.name, text)
 			}
 			structured := testStructuredJSON(t, result)
 			switch {
 			case testCase.tool == "inspect":
 				requireTestContains(t, structured, `"scope":"tree"`)
-			case strings.Contains(testCase.header, "tree v4 delta "):
+			case strings.Contains(testCase.header, "tree v5 delta "):
 				requireTestContains(t, structured, `"format":"delta"`)
 			default:
 				requireTestContains(t, structured, `"format":"full"`)
@@ -1901,7 +2023,7 @@ func TestTextCarriesTreeBlock(t *testing.T) {
 
 func TestTreeTextParserVersionGate(t *testing.T) {
 	for _, header := range []string{
-		"tree v4 full nodes=1",
+		"tree v5 full nodes=1",
 		"inspect v3 scope=tree",
 	} {
 		if err := validateTreeTextHeaderVersion(header); err != nil {
@@ -1942,7 +2064,7 @@ type parsedTreeTextBlock struct {
 	trailer string
 }
 
-// parseTreeTextBlock checks the framed block shape. Ordinary trees use v4;
+// parseTreeTextBlock checks the framed block shape. Ordinary trees use v5;
 // historical inspection material remains inspect v3.
 func parseTreeTextBlock(t *testing.T, block string) parsedTreeTextBlock {
 	t.Helper()
@@ -1972,7 +2094,7 @@ func parseTreeTextBlockValue(block string) (parsedTreeTextBlock, error) {
 	}
 	kind := strings.Join(strings.Split(lines[0], " ")[:2], " ")
 	trailer := "end inspect"
-	if kind == "tree v4" {
+	if kind == "tree v5" {
 		trailer = "end tree"
 	}
 	if lines[len(lines)-1] != trailer {
@@ -2000,11 +2122,11 @@ func validateTreeTextHeaderVersion(header string) error {
 	}
 	kind := tokens[0] + " " + tokens[1]
 	switch kind {
-	case "tree v4":
+	case "tree v5":
 		return nil
 	case "inspect v3":
 		return nil
-	case "tree v1", "tree v2", "tree v3", "inspect v1", "inspect v2":
+	case "tree v1", "tree v2", "tree v3", "tree v4", "inspect v1", "inspect v2":
 		return fmt.Errorf("retired block version %q", kind)
 	default:
 		return fmt.Errorf("unsupported block version %q", kind)
@@ -2013,23 +2135,23 @@ func validateTreeTextHeaderVersion(header string) error {
 
 func parseHeaderFields(t *testing.T, header string) (string, map[string]string) {
 	t.Helper()
-	if strings.HasPrefix(header, "tree v4 ") {
+	if strings.HasPrefix(header, "tree v5 ") {
 		tokens := strings.Split(header, " ")
 		if len(tokens) < 4 {
-			t.Fatalf("short tree v4 header: %q", header)
+			t.Fatalf("short tree v5 header: %q", header)
 		}
 		fields := map[string]string{}
 		for _, token := range tokens[3:] {
 			key, value, ok := strings.Cut(token, "=")
 			if !ok || key == "" || value == "" || strings.Contains(value, "=") {
-				t.Fatalf("malformed tree v4 field %q", token)
+				t.Fatalf("malformed tree v5 field %q", token)
 			}
 			if _, exists := fields[key]; exists {
-				t.Fatalf("duplicate tree v4 field %q", key)
+				t.Fatalf("duplicate tree v5 field %q", key)
 			}
 			fields[key] = value
 		}
-		return "tree v4", fields
+		return "tree v5", fields
 	}
 	kind, fields, _, err := parseHeaderFieldsValue(header)
 	if err != nil {
@@ -2103,7 +2225,7 @@ func parseFullTreeTextValue(block, currentO string) (*protocol.ReadTree, error) 
 		return nil, err
 	}
 	tokens := strings.Split(parsed.header, " ")
-	if len(tokens) != 4 || tokens[0] != "tree" || tokens[1] != "v4" ||
+	if len(tokens) != 4 || tokens[0] != "tree" || tokens[1] != "v5" ||
 		tokens[2] != "full" || !strings.HasPrefix(tokens[3], "nodes=") {
 		return nil, fmt.Errorf("full header fields or order are invalid: %q", parsed.header)
 	}
@@ -2114,7 +2236,7 @@ func parseFullTreeTextValue(block, currentO string) (*protocol.ReadTree, error) 
 	if currentO != "" && !validTreeTextObservationID(currentO) {
 		return nil, fmt.Errorf("tree has no readable current observation id")
 	}
-	root, nodes, err := parseV4Subtree(parsed.body, true)
+	root, nodes, err := parseV5Subtree(parsed.body, true)
 	if err != nil {
 		return nil, err
 	}
@@ -2135,7 +2257,7 @@ func parseDeltaTextValue(block, currentO string) (*protocol.ReadDelta, error) {
 		return nil, err
 	}
 	tokens := strings.Split(parsed.header, " ")
-	if len(tokens) != 5 || tokens[0] != "tree" || tokens[1] != "v4" ||
+	if len(tokens) != 5 || tokens[0] != "tree" || tokens[1] != "v5" ||
 		tokens[2] != "delta" || !strings.HasPrefix(tokens[3], "base=") ||
 		!strings.HasPrefix(tokens[4], "changes=") {
 		return nil, fmt.Errorf("delta header fields or order are invalid: %q", parsed.header)
@@ -2148,7 +2270,7 @@ func parseDeltaTextValue(block, currentO string) (*protocol.ReadDelta, error) {
 	if err != nil {
 		return nil, err
 	}
-	delta, changes, err := parseV4DeltaBody(parsed.body, base)
+	delta, changes, err := parseV5DeltaBody(parsed.body, base)
 	if err != nil {
 		return nil, err
 	}
@@ -2230,7 +2352,7 @@ func parseCanonicalUint64(raw string) (uint64, error) {
 	return value, nil
 }
 
-func parseV4DeltaBody(lines []string, base string) (*protocol.ReadDelta, int, error) {
+func parseV5DeltaBody(lines []string, base string) (*protocol.ReadDelta, int, error) {
 	delta := &protocol.ReadDelta{Format: "delta", Base: base, View: protocol.ViewCompact}
 	seenAdd := map[string]bool{}
 	changes := 0
@@ -2240,7 +2362,7 @@ func parseV4DeltaBody(lines []string, base string) (*protocol.ReadDelta, int, er
 			return nil, 0, fmt.Errorf("delta body contains a blank line")
 		}
 		if strings.HasPrefix(line, "~ ") {
-			ref, set, err := parseV4SetLineValue(line)
+			ref, set, err := parseV5SetLineValue(line)
 			if err != nil {
 				return nil, 0, err
 			}
@@ -2263,7 +2385,7 @@ func parseV4DeltaBody(lines []string, base string) (*protocol.ReadDelta, int, er
 				subtree = append(subtree, lines[index])
 				index++
 			}
-			root, _, err := parseV4Subtree(subtree, false)
+			root, _, err := parseV5Subtree(subtree, false)
 			if err != nil {
 				return nil, 0, err
 			}
@@ -2327,12 +2449,12 @@ func parseV4DeltaBody(lines []string, base string) (*protocol.ReadDelta, int, er
 	return delta, changes, nil
 }
 
-type v4Ancestor struct {
+type v5Ancestor struct {
 	depth  int
 	bounds protocol.ReadBounds
 }
 
-func parseV4Subtree(lines []string, requireRoot bool) (*protocol.ReadNode, int, error) {
+func parseV5Subtree(lines []string, requireRoot bool) (*protocol.ReadNode, int, error) {
 	if len(lines) == 0 {
 		return nil, 0, fmt.Errorf("definition has no root")
 	}
@@ -2342,7 +2464,7 @@ func parseV4Subtree(lines []string, requireRoot bool) (*protocol.ReadNode, int, 
 	}
 	var root *protocol.ReadNode
 	stack := []pendingNode{}
-	ancestors := []v4Ancestor{}
+	ancestors := []v5Ancestor{}
 	seen := map[string]bool{}
 	logicalNodes := 0
 	previousDepth := -1
@@ -2369,7 +2491,7 @@ func parseV4Subtree(lines []string, requireRoot bool) (*protocol.ReadNode, int, 
 		for len(ancestors) > 0 && ancestors[len(ancestors)-1].depth >= depth {
 			ancestors = ancestors[:len(ancestors)-1]
 		}
-		node, err := parseV4NodeContent(line[depth:], ancestors)
+		node, err := parseV5NodeContent(line[depth:], ancestors)
 		if err != nil {
 			return nil, 0, fmt.Errorf("definition line %d: %w", index+1, err)
 		}
@@ -2397,13 +2519,13 @@ func parseV4Subtree(lines []string, requireRoot bool) (*protocol.ReadNode, int, 
 		}
 		logicalNodes += len(refs)
 		stack = append(stack, pendingNode{depth: depth, node: node})
-		ancestors = append(ancestors, v4Ancestor{depth: depth, bounds: node.Bounds})
+		ancestors = append(ancestors, v5Ancestor{depth: depth, bounds: node.Bounds})
 		previousDepth = depth
 	}
 	return root, logicalNodes, nil
 }
 
-func parseV4NodeContent(content string, ancestors []v4Ancestor) (*protocol.ReadNode, error) {
+func parseV5NodeContent(content string, ancestors []v5Ancestor) (*protocol.ReadNode, error) {
 	tokens, err := tokenizeTreeTextLineStrict(content)
 	if err != nil {
 		return nil, err
@@ -2467,7 +2589,7 @@ func parseV4NodeContent(content string, ancestors []v4Ancestor) (*protocol.ReadN
 		return nil, fmt.Errorf("invalid role %q", node.Role)
 	}
 	geometry := ""
-	if index < len(tokens) && isV4GeometryToken(tokens[index]) {
+	if index < len(tokens) && isV5GeometryToken(tokens[index]) {
 		geometry = tokens[index]
 		index++
 	}
@@ -2478,15 +2600,15 @@ func parseV4NodeContent(content string, ancestors []v4Ancestor) (*protocol.ReadN
 		var resolved bool
 		for ancestorIndex := len(ancestors) - 1; ancestorIndex >= 0; ancestorIndex-- {
 			bounds := ancestors[ancestorIndex].bounds
-			if bounds.Kind != protocol.GeometryKnown {
+			if !deliveredReadGeometry(bounds) {
 				continue
 			}
-			node.Bounds = protocol.KnownBounds(bounds.Rect)
+			node.Bounds = bounds
 			resolved = true
 			break
 		}
 		if !resolved {
-			return nil, fmt.Errorf("@ has no known strict ancestor")
+			return nil, fmt.Errorf("@ has no delivered strict ancestor")
 		}
 	} else {
 		switch geometry {
@@ -2495,11 +2617,19 @@ func parseV4NodeContent(content string, ancestors []v4Ancestor) (*protocol.ReadN
 		case "-":
 			node.Bounds = protocol.UnknownBounds()
 		default:
-			rect, err := parseBoundsValue(geometry)
-			if err != nil {
-				return nil, err
+			if strings.Count(geometry, ",") == 1 {
+				point, err := parsePointValue(geometry)
+				if err != nil {
+					return nil, err
+				}
+				node.Bounds = protocol.PointBounds(point.X, point.Y)
+			} else {
+				rect, err := parseBoundsValue(geometry)
+				if err != nil {
+					return nil, err
+				}
+				node.Bounds = protocol.KnownBounds(rect)
 			}
-			node.Bounds = protocol.KnownBounds(rect)
 		}
 	}
 	if err := parseNodeTailFields(node, tokens[index:], !node.IsChain(), !node.IsChain()); err != nil {
@@ -2508,13 +2638,37 @@ func parseV4NodeContent(content string, ancestors []v4Ancestor) (*protocol.ReadN
 	return node, nil
 }
 
-func isV4GeometryToken(token string) bool {
-	return token == "-" || token == "@" || isCanonicalBoundsToken(token)
+// deliveredReadGeometry reports whether one public geometry state carries a
+// rectangle or a point that an @ abbreviation may repeat.
+func deliveredReadGeometry(bounds protocol.ReadBounds) bool {
+	return bounds.Kind == protocol.GeometryKnown || bounds.Kind == protocol.GeometryPoint
 }
 
-func isCanonicalBoundsToken(token string) bool {
+func isV5GeometryToken(token string) bool {
+	if token == "-" || token == "@" {
+		return true
+	}
+	if _, err := parsePointValue(token); err == nil {
+		return true
+	}
 	_, err := parseBoundsValue(token)
 	return err == nil
+}
+
+func parsePointValue(token string) (protocol.Point, error) {
+	parts := strings.Split(token, ",")
+	if len(parts) != 2 {
+		return protocol.Point{}, fmt.Errorf("geometry %q does not have two coordinates", token)
+	}
+	x, err := parseCanonicalSignedInt(parts[0])
+	if err != nil {
+		return protocol.Point{}, fmt.Errorf("geometry coordinate %q: %w", parts[0], err)
+	}
+	y, err := parseCanonicalSignedInt(parts[1])
+	if err != nil {
+		return protocol.Point{}, fmt.Errorf("geometry coordinate %q: %w", parts[1], err)
+	}
+	return protocol.Point{X: x, Y: y}, nil
 }
 
 func parseBoundsValue(token string) (protocol.Bounds, error) {
@@ -2695,7 +2849,7 @@ func parseNodeTailFields(
 		node.Actions = explicitActions
 		return nil
 	}
-	actions, err := restoreV4DefaultActions(node.Role, explicitActions, negated)
+	actions, err := restoreV5DefaultActions(node.Role, explicitActions, negated)
 	if err != nil {
 		return err
 	}
@@ -2703,7 +2857,7 @@ func parseNodeTailFields(
 	return nil
 }
 
-func restoreV4DefaultActions(role protocol.Role, explicit []protocol.Action, negated protocol.Action) ([]protocol.Action, error) {
+func restoreV5DefaultActions(role protocol.Role, explicit []protocol.Action, negated protocol.Action) ([]protocol.Action, error) {
 	defaultAction := protocol.Action("")
 	switch role {
 	case protocol.RoleButton:
@@ -2894,7 +3048,7 @@ func tokenizeTreeTextLineStrict(line string) ([]string, error) {
 	return tokens, nil
 }
 
-func parseV4SetLineValue(line string) (string, protocol.ReadSetNode, error) {
+func parseV5SetLineValue(line string) (string, protocol.ReadSetNode, error) {
 	if !strings.HasPrefix(line, "~ ") || strings.HasPrefix(line, "~  ") {
 		return "", protocol.ReadSetNode{}, fmt.Errorf("malformed set line %q", line)
 	}
@@ -2956,7 +3110,18 @@ func parseV4SetLineValue(line string) (string, protocol.ReadSetNode, error) {
 				if len(raw) < 2 || !strings.HasPrefix(raw, "[") || !strings.HasSuffix(raw, "]") {
 					return "", protocol.ReadSetNode{}, fmt.Errorf("set bounds must be bracketed")
 				}
-				bounds, err := parseBoundsValue(strings.TrimSuffix(strings.TrimPrefix(raw, "["), "]"))
+				inner := strings.TrimSuffix(strings.TrimPrefix(raw, "["), "]")
+				if strings.Count(inner, ",") == 1 {
+					point, err := parsePointValue(inner)
+					if err != nil {
+						return "", protocol.ReadSetNode{}, err
+					}
+					set.Bounds = protocol.Field[protocol.ReadBounds]{
+						Set: true, Value: protocol.PointBounds(point.X, point.Y),
+					}
+					break
+				}
+				bounds, err := parseBoundsValue(inner)
 				if err != nil {
 					return "", protocol.ReadSetNode{}, err
 				}
@@ -3732,15 +3897,15 @@ func TestTreeTextReflectsCompactBoundsPolicy(t *testing.T) {
 		}
 		return ""
 	}
-	if line := find(" n2 button "); !strings.Contains(line, "10,10,50,50") {
-		t.Fatalf("action node lost its rectangle: %q", line)
+	if line := find(" n2 button "); !strings.Contains(line, "30,30") {
+		t.Fatalf("action node lost its center point: %q", line)
 	}
 	if line := find(" n3 "); line != ` n3 "标题"` {
 		t.Fatalf("actionless text must omit both role and geometry: %q", line)
 	}
-	if line := find(" n4 image "); !strings.Contains(line, "0,500,300,700") ||
+	if line := find(" n4 image "); !strings.Contains(line, "150,600") ||
 		!strings.Contains(line, `"缩略图"`) || !strings.Contains(line, "enabled=false") {
-		t.Fatalf("retained threshold fixture must carry its public fields and rectangle: %q", line)
+		t.Fatalf("retained threshold fixture must carry its public fields and center point: %q", line)
 	}
 
 	current := observation.ProjectCompactTree(buildTree(100))

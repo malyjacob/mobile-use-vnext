@@ -237,7 +237,7 @@ func resultModeFixtures() []resultModeFixture {
 		`{"ref":"n2","role":"view"},` +
 		`{"chain":["n10","n11"],"role":"view","children":[` +
 		`{"ref":"n12","role":"text","label":["child"]}]},` +
-		`{"ref":"n3","role":"view","bounds":[0,0,10,10],"actions":["tap"]}]}}`
+		`{"ref":"n3","role":"view","bounds":[5,5],"actions":["tap"]}]}}`
 	legacyChainDelta := `{"format":"delta","base":"O1","view":"compact",` +
 		`"add":[{"ref":"n20","role":"view","children":[` +
 		`{"chain":["n21","n22"],"role":"view","children":[` +
@@ -537,7 +537,7 @@ func TestHTTPModesSelectProjectionPerCall(t *testing.T) {
 
 func TestCatalogFingerprintBaseline(t *testing.T) {
 	// The catalog has thirteen tools. This baseline covers the caller-oriented
-	// descriptions after result v4/tree v4 local guidance was added to start,
+	// descriptions after result v4/tree v5 local guidance was added to start,
 	// observe, wait_for, act, app and inspect, including content-stability
 	// guidance and omission of the two structured evidence objects. It also
 	// covers app kill stating that a virtual-display foreground task is
@@ -545,7 +545,7 @@ func TestCatalogFingerprintBaseline(t *testing.T) {
 	// still having a task on the primary or another display refuses, the
 	// act(text) auto_submit/submit_ref contract with outcome=partial, and the
 	// four-tier scroll amount with scroll axis-fallback guidance.
-	const baseline = "3a9ad87c7af904226731f9fec90b0def7b2d8233487fdf7435041e365211b98b"
+	const baseline = "df6afaa50d401e0498bd39a63959cfbf394a4c4ed4c210ce852b2bc48a7f22fc"
 	if got := CatalogFingerprint(); got != baseline {
 		t.Fatalf("catalog changed: %s", got)
 	}

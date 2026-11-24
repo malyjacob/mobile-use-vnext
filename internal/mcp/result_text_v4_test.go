@@ -17,7 +17,7 @@ func TestResultV4GoldenActSuccess(t *testing.T) {
 	text := assertResultTextParity(t, raw, false)
 	want := "result v4 ok op=P7391_12\n" +
 		"obs O4821_85 fg=tv.danmaku.bili#177 at=22:08:55\n" +
-		"\ntree v4 full nodes=1\n\nn1 root 0,0,1080,2400\nend tree\nend result\n"
+		"\ntree v5 full nodes=1\n\nn1 root 0,0,1080,2400\nend tree\nend result\n"
 	if text != want {
 		t.Fatalf("golden mismatch\n got:\n%s\nwant:\n%s", text, want)
 	}
@@ -161,6 +161,29 @@ func TestResultV4TimestampsAndImages(t *testing.T) {
 	requireTestContains(t, fallback, `json v1 path="/observation/captured_at"`)
 }
 
+// TestResultV4VisualHintLine pins the optional observation.visual member: it is
+// a bare token after at= and before screen=, an absent member emits nothing, and
+// a value that is not a safe token falls back to the json v1 row instead of
+// corrupting the obs line.
+func TestResultV4VisualHintLine(t *testing.T) {
+	text := assertResultTextParity(t, []byte(`{"observation":{"status":"complete","id":"O1",`+
+		`"captured_at":"2026-11-21T22:08:55Z","visual":"image_heavy(52%)",`+
+		`"screen":{"width":1080,"height":2400,"rotation":0}}}`), false)
+	requireTestContains(t, text, "obs O1 at=22:08:55 visual=image_heavy(52%) screen=1080x2400\n")
+	sparse := assertResultTextParity(t, []byte(`{"observation":{"status":"complete","id":"O1",`+
+		`"visual":"sparse_tree"}}`), false)
+	requireTestContains(t, sparse, "obs O1 visual=sparse_tree\n")
+	absent := assertResultTextParity(t, []byte(`{"observation":{"status":"complete","id":"O1"}}`), false)
+	requireTestNotContains(t, absent, "visual=")
+	fallback := assertResultTextParity(t, []byte(`{"observation":{"status":"complete","id":"O1",`+
+		`"visual":"image heavy"}}`), false)
+	requireTestContains(t, fallback, `json v1 path="/observation/visual" value="image heavy"`)
+	requireTestNotContains(t, fallback, "visual=image heavy")
+	nonString := assertResultTextParity(t, []byte(`{"observation":{"status":"complete","id":"O1",`+
+		`"visual":null}}`), false)
+	requireTestContains(t, nonString, `json v1 path="/observation/visual" value=null`)
+}
+
 func TestResultV4NotifyAggregate(t *testing.T) {
 	text := assertResultTextParity(t, []byte(`{"outcome":"executed","message_id":"M1","saved":true,`+
 		`"notification":{"state":"queued","error":{"code":"notification_unavailable","message":"通知不可用",`+
@@ -258,7 +281,7 @@ func TestResultV4UnknownAndInvalidTokensFallback(t *testing.T) {
 }
 
 func TestResultV4NestedUnknownFieldsFallback(t *testing.T) {
-	// A future tree member cannot enter the unchanged tree v4 block, so the
+	// A future tree member cannot enter the unchanged tree v5 block, so the
 	// whole tree keeps its facts through json v1.
 	tree := assertResultTextParity(t, []byte(`{"observation":{"status":"complete","id":"O1",`+
 		`"tree":{"format":"full","scope":"reported_visible_with_context","view":"compact",`+

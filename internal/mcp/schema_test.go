@@ -23,8 +23,9 @@ const compatibilityProtocolVersion = "2025-11-25"
 // plus the complete tools/list JSON. The deduplicated instructions and
 // descriptions must stay strictly below it. The current ceiling covers the
 // text auto_submit/submit_ref contract (result v4 partial, write/submit
-// snapshot and text_submit_not_executed), the four-tier scroll amount and the
-// scroll axis-fallback guidance.
+// snapshot and text_submit_not_executed), the four-tier scroll amount, the
+// scroll axis-fallback guidance and the contract-28 visual hint plus binary
+// center-point tree legend.
 const baselineDiscoveryBytes = 37500
 
 // TestTreeTextGuideStatesTriStateOmission pins the shared tree legend to the
@@ -46,16 +47,18 @@ func TestTreeTextGuideStatesTriStateOmission(t *testing.T) {
 	}
 }
 
-// TestTreeTextGuideStatesCompactGeometryPolicy pins the v4 geometry legend.
+// TestTreeTextGuideStatesCompactGeometryPolicy pins the v5 geometry legend: the
+// container rectangle, the ordinary center point and the same-form @ shorthand.
 func TestTreeTextGuideStatesCompactGeometryPolicy(t *testing.T) {
 	for _, required := range []string{
 		"每层恰写一个 ASCII 空格",
-		"矩形四边为有符号整数",
+		"`root`/`scroll` 交付矩形 `l,t,r,b`",
+		"其余交付中心点 `x,y`",
 		"`right>=left`",
 		"`bottom>=top`",
-		"未知几何写 `-`",
-		"缺失几何列表示按策略隐藏",
-		"`@` 表示与同一串行化定义中最近一个有已知矩形的严格祖先同矩形",
+		"未知写 `-`",
+		"缺失列表示隐藏",
+		"`@` 表示与同一定义中最近已交付几何的严格祖先同形同值",
 		"每个 `+`、`=` 子树独立判断",
 	} {
 		if !strings.Contains(treeTextGuide, required) {
@@ -69,14 +72,16 @@ func TestTreeTextGuideStatesCompactGeometryPolicy(t *testing.T) {
 // continue to accept.
 func TestTreeTextGuideStatesCompactPruningAndLegacyChains(t *testing.T) {
 	for _, required := range []string{
-		"小型隐藏无标注 `image`",
-		"enabled 已知为 true",
-		"focused/selected/protected/checked 已知为 false",
-		"祖先动作和状态不参与",
-		"原矩形裁屏后面积为正且严格小于屏幕面积 1%",
-		"清理因此变空的隐藏匿名 `view`/`group`",
-		"仅剩一个直接孩子的隐藏匿名 `view`/`group`",
-		"新 v4 只生成普通节点定义",
+		"全裁无标注非交互 `image` 叶",
+		"裁剪被祖先复合标签覆盖的纯被动文本叶",
+		"纯被动文本子叶的无字可点击 `view` 升为 `button`",
+		"`label==value` 时省略 `label`",
+		"`<=4px`",
+		"最后的非纯数字短段",
+		"清理变空/单子隐藏匿名容器",
+		"`len>=2` 保持层级",
+		"无动作 `text` 与匿名容器隐藏几何，详细补看交付矩形",
+		"新 v5 只生成普通节点定义",
 		"读取端继续接受历史 `[n2 n3]`",
 		"链下缩进的孩子属于链尾",
 	} {
@@ -89,17 +94,20 @@ func TestTreeTextGuideStatesCompactPruningAndLegacyChains(t *testing.T) {
 	}
 }
 
-func TestTreeTextGuideStatesResultV4AndTreeV4(t *testing.T) {
+func TestTreeTextGuideStatesResultV4AndTreeV5(t *testing.T) {
 	for _, required := range []string{
 		"`result v4 <ok|err> [op=…] [state=…] [outcome=…] [phase=…]`",
 		"常规成功（`ok` 且无 `state=`）省略 `outcome=executed`",
 		"非 `executed`、错误结果与带 `state=` 的重放摘要一律显式输出",
 		"`text`/`both` 是面向调用的紧凑投影",
 		"`structured` 保留完整审计字段",
-		"`obs [<O>] [status=…] [fg=…] [at=HH:MM:SS] [screen=<W>x<H>[@<display_id>]] [rot=<1|2|3>] [missing=…]`",
+		"`obs [<O>] [status=…] [fg=…] [at=HH:MM:SS] [visual=<token>] [screen=<W>x<H>[@<display_id>]] [rot=<1|2|3>] [missing=…]`",
 		"`obs ` 后首个不含 `=` 的字段是完整 O",
 		"`status=complete` 省略",
 		"`fg` 写 `<包名>#<task_id>`、`<包名>`、`#<task_id>`、`present`、`none` 或 `unknown(<reason>)`",
+		"`visual` 为视觉提示",
+		"`sparse_tree`/`image_heavy(<pct>%)`",
+		"同态 `delta` 省略",
 		"`obs.image` 与顶层 `image` 同字段同顺序",
 		"`screen` 仅在带 `session` 或无树帧输出",
 		"`rot` 在非零旋转时始终输出",
@@ -112,8 +120,8 @@ func TestTreeTextGuideStatesResultV4AndTreeV4(t *testing.T) {
 		"`kind=list` 行写 `#<task_id> <package> <ownership>[ origin_display=<显示号>]`",
 		"`recovery entry=<entry> ref=<精确 O/P 编号|O|P|none> [input=…] [cause=…]`",
 		"`json v1 path=\"<绝对 JSON Pointer>\" value=<原值>`",
-		"tree v4 full nodes=<n>",
-		"tree v4 delta base=<O|_<序号>> changes=<n>",
+		"tree v5 full nodes=<n>",
+		"tree v5 delta base=<O|_<序号>> changes=<n>",
 		"inspect v3 scope=",
 		"`base=_72`",
 		"每层恰写一个 ASCII 空格",
@@ -137,6 +145,7 @@ func TestTreeTextGuideStatesResultV4AndTreeV4(t *testing.T) {
 	for _, retired := range []string{
 		"result v2",
 		"result v3",
+		"tree v4",
 		"tree v3",
 		"tree v2",
 		"inspect v2",
@@ -337,7 +346,7 @@ func TestServerInstructionsCarryCrossToolRules(t *testing.T) {
 		"同一 O 和新 P",
 		"无需重观察或手算坐标",
 		"session.origin",
-		"小型隐藏无标注 `image`",
+		"全裁无标注非交互 `image` 叶",
 		"inspect({reference:原 act 的 O,node:诊断 ref})",
 		"O 过期后仍可能可读",
 		"`recovery` 行给出的精确 `ref=` 编号",
@@ -667,7 +676,7 @@ func TestToolDescriptionsAreCallerOriented(t *testing.T) {
 			"重放原 start 不重新获得五分钟",
 			"可消费观察",
 			"幂等/查询编号",
-			"`tree v4 full`",
+			"`tree v5 full`",
 			"base 指向的 full 加本次 delta",
 		},
 		"status": {
@@ -754,7 +763,7 @@ func TestToolDescriptionsAreCallerOriented(t *testing.T) {
 			"inspection_too_large",
 			"inspect v3",
 			"两格缩进",
-			"不使用普通树 v4 的默认动作、`@` 或短 base",
+			"不使用普通树 v5 的默认动作、`@` 或短 base",
 		},
 		"keepalive": {
 			"1～120",
@@ -902,7 +911,7 @@ func TestLiveToolDescriptionsClarifyWaitAndTextRecovery(t *testing.T) {
 			"详细子树",
 			"O 过期后仍可能可读",
 			"两格缩进",
-			"不使用普通树 v4 的默认动作、`@` 或短 base",
+			"不使用普通树 v5 的默认动作、`@` 或短 base",
 		},
 	}
 	for name, fragments := range required {
@@ -928,14 +937,14 @@ func TestLiveToolDescriptionsClarifyWaitAndTextRecovery(t *testing.T) {
 		"直接 observe 核对当前框值/页面",
 		"`recovery entry=observe ref=<P>`",
 		"通常 uncertain 先用 status",
-		"小型隐藏无标注 `image`",
+		"全裁无标注非交互 `image` 叶",
 		"inspect({reference:原 act 的 O,node:诊断 ref})",
 		"链下缩进的孩子属于链尾",
 		"`result v4 <ok|err> [op=…] [state=…] [outcome=…] [phase=…]`",
-		"`obs [<O>] [status=…] [fg=…] [at=HH:MM:SS]",
-		"tree v4 full nodes=<n>",
+		"`obs [<O>] [status=…] [fg=…] [at=HH:MM:SS] [visual=<token>]",
+		"tree v5 full nodes=<n>",
 		"`base=_72`",
-		"`@` 表示与同一串行化定义中最近一个有已知矩形的严格祖先同矩形",
+		"`@` 表示与同一定义中最近已交付几何的严格祖先同形同值",
 		"`!tap`、`!text` 或 `!swipe`",
 		"3×3 网格选点",
 		"同视口嵌套滚动栈",

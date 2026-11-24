@@ -55,72 +55,80 @@ func requireImmediateRefs(t *testing.T, node *protocol.ReadNode, want ...string)
 }
 
 func TestCompactPruningImageCriteria(t *testing.T) {
-	t.Run("independent and action containers", func(t *testing.T) {
-		independent := nodeT("n2", protocol.RoleImage, rectT(10, 10, 109, 110))
-
-		tapCard := actionNodeT("n3", protocol.RoleView, rectT(200, 200, 900, 500), protocol.ActionTap)
-		tapCard.Children = []*protocol.Node{
-			nodeT("n4", protocol.RoleImage, rectT(210, 210, 300, 300)),
-		}
-
-		longCard := actionNodeT("n5", protocol.RoleView, rectT(200, 550, 900, 800), protocol.ActionLongPress)
-		longCard.Children = []*protocol.Node{
-			nodeT("n6", protocol.RoleImage, rectT(210, 560, 300, 650)),
-		}
-
-		tree := ProjectCompactTree(compactScreenTree(independent, tapCard, longCard))
-		for _, ref := range []string{"n2", "n4", "n6"} {
-			if node := childOf(t, tree.Root, ref); node != nil {
-				t.Fatalf("tiny unlabeled image %s must be omitted: %+v", ref, node)
+	t.Run("unlabeled non-interactive image leaves are always pruned", func(t *testing.T) {
+		// An unlabeled image leaf with no action and no non-default state carries
+		// nothing a reader can use: the pixels are not delivered and there is
+		// nothing to aim at. Neither its area nor a screen denominator matters.
+		for _, bounds := range []*protocol.Bounds{
+			rectT(0, 0, 1000, 1000),
+			rectT(0, 0, 500, 500),
+			rectT(10, 10, 100, 100),
+			rectT(0, 0, 1, 1),
+			nil,
+		} {
+			image := nodeT("n2", protocol.RoleImage, bounds)
+			compact := ProjectCompactTree(compactScreenTree(image))
+			if node := childOf(t, compact.Root, "n2"); node != nil {
+				t.Fatalf("unlabeled non-interactive image %v must be pruned: %+v", bounds, node)
 			}
 		}
-		requireBoundsKind(t, tree.Root, "n3", protocol.GeometryKnown)
-		requireBoundsKind(t, tree.Root, "n5", protocol.GeometryKnown)
 	})
 
-	t.Run("clipped area boundary", func(t *testing.T) {
-		cases := []struct {
-			name       string
-			bounds     *protocol.Bounds
-			wantPruned bool
-		}{
-			{"just_below", rectT(0, 0, 99, 100), true},
-			{"exact_one_percent", rectT(0, 0, 100, 100), false},
-			{"above_one_percent", rectT(0, 0, 101, 100), false},
-			{"clipped_below", rectT(901, 0, 1200, 100), true},
-			{"clipped_exact", rectT(900, 0, 1200, 100), false},
-			{"crosses_edges_below", rectT(-100, -100, 99, 100), true},
-			{"empty_intersection", rectT(1000, 0, 1200, 100), false},
-			{"degenerate_source", rectT(10, 10, 10, 100), false},
+	t.Run("labelled interactive or non-default images are retained", func(t *testing.T) {
+		cases := map[string]func(*protocol.Node){
+			"label":           func(n *protocol.Node) { n.Label = []string{"icon"} },
+			"tap":             func(n *protocol.Node) { n.Actions = []protocol.Action{protocol.ActionTap} },
+			"long_press":      func(n *protocol.Node) { n.Actions = []protocol.Action{protocol.ActionLongPress} },
+			"value":           func(n *protocol.Node) { n.Value = readString("v") },
+			"hint_empty":      func(n *protocol.Node) { n.Hint = readString("") },
+			"resource_empty":  func(n *protocol.Node) { n.Resource = readString("") },
+			"axis":            func(n *protocol.Node) { n.Axis = protocol.AxisY },
+			"context":         func(n *protocol.Node) { n.Context = true },
+			"non_image_role":  func(n *protocol.Node) { n.Role = protocol.RoleGroup },
+			"enabled_unknown": func(n *protocol.Node) { n.Enabled = nil },
+			"enabled_false":   func(n *protocol.Node) { n.Enabled = readBool(false) },
+			"focused_unknown": func(n *protocol.Node) { n.Focused = nil },
+			"focused_true":    func(n *protocol.Node) { n.Focused = readBool(true) },
+			"selected_unknown": func(n *protocol.Node) {
+				n.Selected = nil
+			},
+			"selected_true": func(n *protocol.Node) { n.Selected = readBool(true) },
+			"protected_unknown": func(n *protocol.Node) {
+				n.Protected = nil
+			},
+			"protected_true": func(n *protocol.Node) { n.Protected = readBool(true) },
+			"checked_unknown": func(n *protocol.Node) {
+				n.Checked = nil
+			},
+			"checked_true": func(n *protocol.Node) { n.Checked = readBool(true) },
 		}
-		for _, tc := range cases {
-			t.Run(tc.name, func(t *testing.T) {
-				image := nodeT("n2", protocol.RoleImage, tc.bounds)
-				tree := ProjectCompactTree(compactScreenTree(image))
-				got := childOf(t, tree.Root, "n2")
-				if tc.wantPruned && got != nil {
-					t.Fatalf("image must be pruned: %+v", got)
-				}
-				if !tc.wantPruned && got == nil {
-					t.Fatal("image must be retained")
+		for name, mutate := range cases {
+			t.Run(name, func(t *testing.T) {
+				image := nodeT("n2", protocol.RoleImage, rectT(0, 0, 100, 100))
+				mutate(image)
+				compact := ProjectCompactTree(compactScreenTree(image))
+				if childOf(t, compact.Root, "n2") == nil {
+					t.Fatal("image must remain when a required public condition is absent")
 				}
 			})
 		}
 	})
 
-	t.Run("unknown screen disables image area pruning", func(t *testing.T) {
-		tree := rootT(nodeT("n2", protocol.RoleImage, rectT(0, 0, 1, 1)))
+	t.Run("unknown screen does not disable the image rule", func(t *testing.T) {
+		tree := rootT(nodeT("n2", protocol.RoleImage, rectT(0, 0, 1000, 1000)))
 		tree.Root.Bounds = nil
-		compact := ProjectCompactTree(tree)
-		if childOf(t, compact.Root, "n2") == nil {
-			t.Fatal("image must remain when the screen area is unknown")
+		if node := childOf(t, ProjectCompactTree(tree).Root, "n2"); node != nil {
+			t.Fatalf("unlabeled image must be pruned without a screen rectangle: %+v", node)
 		}
 	})
 
-	t.Run("large duplicate image remains", func(t *testing.T) {
-		image := nodeT("n2", protocol.RoleImage, rectT(0, 0, 1000, 1000))
-		compact := ProjectCompactTree(compactScreenTree(image))
-		requireBoundsKind(t, compact.Root, "n2", protocol.GeometryHidden)
+	t.Run("wrapper left empty by a pruned image disappears", func(t *testing.T) {
+		wrapper := plainT("n2", protocol.RoleView)
+		wrapper.Children = []*protocol.Node{
+			nodeT("n3", protocol.RoleImage, rectT(0, 0, 1000, 1000)),
+		}
+		compact := ProjectCompactTree(compactScreenTree(wrapper))
+		requireImmediateRefs(t, compact.Root)
 	})
 
 	t.Run("image children make a non-leaf", func(t *testing.T) {
@@ -148,49 +156,19 @@ func TestCompactPruningImageCriteria(t *testing.T) {
 			t.Fatalf("original non-leaf image must remain empty: %+v", parent)
 		}
 		if childOf(t, compact.Root, "n3") != nil {
-			t.Fatal("the tiny image child must still be pruned")
+			t.Fatal("the unlabeled image child must still be pruned")
 		}
 	})
 
-	t.Run("explicit fields and unknown state retain image", func(t *testing.T) {
-		cases := map[string]func(*protocol.Node){
-			"context":        func(n *protocol.Node) { n.Context = true },
-			"label":          func(n *protocol.Node) { n.Label = []string{"icon"} },
-			"action":         func(n *protocol.Node) { n.Actions = []protocol.Action{protocol.ActionTap} },
-			"value_empty":    func(n *protocol.Node) { n.Value = readString("") },
-			"hint_empty":     func(n *protocol.Node) { n.Hint = readString("") },
-			"resource_empty": func(n *protocol.Node) { n.Resource = readString("") },
-			"axis":           func(n *protocol.Node) { n.Axis = protocol.AxisY },
-			"enabled_unknown": func(n *protocol.Node) {
-				n.Enabled = nil
-			},
-			"enabled_false":   func(n *protocol.Node) { n.Enabled = readBool(false) },
-			"focused_unknown": func(n *protocol.Node) { n.Focused = nil },
-			"focused_true":    func(n *protocol.Node) { n.Focused = readBool(true) },
-			"selected_unknown": func(n *protocol.Node) {
-				n.Selected = nil
-			},
-			"selected_true": func(n *protocol.Node) { n.Selected = readBool(true) },
-			"protected_unknown": func(n *protocol.Node) {
-				n.Protected = nil
-			},
-			"protected_true": func(n *protocol.Node) { n.Protected = readBool(true) },
-			"checked_unknown": func(n *protocol.Node) {
-				n.Checked = nil
-			},
-			"checked_true":   func(n *protocol.Node) { n.Checked = readBool(true) },
-			"unknown_bounds": func(n *protocol.Node) { n.Bounds = nil },
-			"non_image_role": func(n *protocol.Node) { n.Role = protocol.RoleGroup },
-		}
-		for name, mutate := range cases {
-			t.Run(name, func(t *testing.T) {
-				image := nodeT("n2", protocol.RoleImage, rectT(0, 0, 99, 100))
-				mutate(image)
-				compact := ProjectCompactTree(compactScreenTree(image))
-				if childOf(t, compact.Root, "n2") == nil {
-					t.Fatal("image must remain when a required public condition is absent")
-				}
-			})
+	t.Run("detailed view keeps every image", func(t *testing.T) {
+		unlabeled := nodeT("n2", protocol.RoleImage, rectT(0, 0, 1000, 1000))
+		labelled := nodeT("n3", protocol.RoleImage, rectT(0, 0, 100, 100), "cover")
+		detailed := ProjectDetailedTree(compactScreenTree(unlabeled, labelled))
+		for _, ref := range []string{"n2", "n3"} {
+			node := childOf(t, detailed.Root, ref)
+			if node == nil || node.Bounds.Kind != protocol.GeometryKnown {
+				t.Fatalf("detailed view must keep image %s: %+v", ref, node)
+			}
 		}
 	})
 }
@@ -419,7 +397,9 @@ func compactDiffFrame(imagePresent, imageMoved bool, imageBounds *protocol.Bound
 	other := nodeT("n5", protocol.RoleGroup, rectT(0, 720, 1000, 1000), "other")
 	button := actionNodeT("n4", protocol.RoleButton, rectT(600, 50, 900, 150), protocol.ActionTap)
 	button.Label = []string{"action"}
-	image := nodeT("n3", protocol.RoleImage, imageBounds)
+	// A labelled image is content, so the compact view retains it and only the
+	// frame that really reports it carries the node.
+	image := nodeT("n3", protocol.RoleImage, imageBounds, "cover")
 
 	if imagePresent {
 		if imageMoved {
@@ -439,10 +419,10 @@ func TestCompactPruningNewDeltaRoundTrip(t *testing.T) {
 	reappeared := compactDiffFrame(true, false, rectT(100, 100, 300, 300))
 	moved := compactDiffFrame(true, true, rectT(100, 100, 300, 300))
 	if childOf(t, base.Root, "n3") != nil {
-		t.Fatal("base frame must omit the small image")
+		t.Fatal("base frame must omit the absent image")
 	}
 	if childOf(t, reappeared.Root, "n3") == nil {
-		t.Fatal("reappeared frame must retain the grown image")
+		t.Fatal("reappeared frame must retain the labelled image")
 	}
 	movedParent := childOf(t, moved.Root, "n5")
 	if movedParent == nil || len(movedParent.Children) != 1 ||

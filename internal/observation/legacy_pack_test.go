@@ -3,8 +3,9 @@ package observation
 import "github.com/malyjacob/mobile-use-vnext/internal/protocol"
 
 // projectLegacyCompactNode builds the historical logical compact tree used to
-// exercise chain input. It applies geometry only and deliberately does not run
-// T2a or T2b.
+// exercise chain input. It applies geometry only and deliberately skips the
+// content purification rules, so it still produces the chainable anonymous
+// wrappers the historical definition format needs.
 func projectLegacyCompactNode(n *protocol.Node, screen compactProjection,
 	reference *protocol.Bounds) *protocol.ReadNode {
 	if n == nil {
@@ -15,12 +16,12 @@ func projectLegacyCompactNode(n *protocol.Node, screen compactProjection,
 	case n.Bounds == nil:
 		out.Bounds = protocol.UnknownBounds()
 	case n.Role == protocol.RoleRoot || len(n.Actions) != 0:
-		out.Bounds = protocol.KnownBounds(*n.Bounds)
+		out.Bounds = compactDeliveredBounds(n.Role, *n.Bounds, screen)
 		reference = deliveredRect(*n.Bounds, screen)
 	case compactHidesBounds(n, out, screen, reference):
 		out.Bounds = protocol.HiddenBounds()
 	default:
-		out.Bounds = protocol.KnownBounds(*n.Bounds)
+		out.Bounds = compactDeliveredBounds(n.Role, *n.Bounds, screen)
 		reference = deliveredRect(*n.Bounds, screen)
 	}
 	for _, child := range n.Children {

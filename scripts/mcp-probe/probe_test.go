@@ -448,6 +448,9 @@ type fakeAdapter struct {
 	appNextTaskID   int
 	killRefusalCode string
 	keepKilledTask  bool
+	// visual is the optional lightweight classification every fake observation
+	// carries. Empty keeps the member absent, which is the common shape.
+	visual string
 }
 
 func newFakeAdapter() *fakeAdapter {
@@ -477,6 +480,15 @@ func (f *fakeAdapter) observation(id, origin string, revision int, withImage boo
 		"tree": map[string]any{
 			"format": treeFull, "scope": "reported_visible_with_context",
 			"view": protocol.ViewCompact,
+			// The complete tree body is what the live service sends, so the
+			// both-mode body comparison runs against the whole fake suite.
+			"root": map[string]any{
+				"ref": "n1", "role": "root",
+				"bounds": []any{0, 0, 1080, 2400},
+				"label":  []any{}, "actions": []any{}, "children": []any{},
+				"enabled": true, "focused": false, "selected": false,
+				"protected": false, "checked": false,
+			},
 		},
 	}
 	if withImage {
@@ -486,6 +498,9 @@ func (f *fakeAdapter) observation(id, origin string, revision int, withImage boo
 			"height":      1024,
 			"media_type":  imageJPEG,
 		}
+	}
+	if f.visual != "" {
+		observation["visual"] = f.visual
 	}
 	return observation
 }
@@ -1123,6 +1138,9 @@ func writeFakeObservation(builder *strings.Builder, observation map[string]any, 
 	if capturedAt, ok := observation["captured_at"].(string); ok && capturedAt != "" {
 		builder.WriteString(" at=" + fakeClock(capturedAt))
 	}
+	if visual, ok := observation["visual"].(string); ok && visual != "" {
+		builder.WriteString(" visual=" + visual)
+	}
 	tree, hasTree := observation["tree"].(map[string]any)
 	screen, hasScreen := observation["screen"].(map[string]any)
 	if hasScreen && (sessionPresent || !hasTree) {
@@ -1164,9 +1182,9 @@ func writeFakeObservation(builder *strings.Builder, observation map[string]any, 
 	base, _ := tree["base"].(string)
 	block := ""
 	if format == treeDelta {
-		block = "tree v4 delta base=" + base + " changes=0\n\n"
+		block = "tree v5 delta base=" + base + " changes=0\n\n"
 	} else {
-		block = "tree v4 full nodes=1\n\nn1 root 0,0,1080,2400\n"
+		block = "tree v5 full nodes=1\n\nn1 root 0,0,1080,2400\n"
 	}
 	block += "end tree\n"
 	writeFakeBlock(builder, block)
@@ -1732,7 +1750,7 @@ func TestAdapterChecksAgainstFakeAdapter(t *testing.T) {
 				"RESULT PASS",
 			}
 			if mode != resultModeStructured {
-				wants = append(wants, "PASS observe", "tree_block=v4",
+				wants = append(wants, "PASS observe", "tree_block=v5",
 					"PASS inspect", "inspect_block=complete tree_block=v3")
 			}
 			for _, want := range wants {
@@ -1858,8 +1876,8 @@ func TestInstructionsCheck(t *testing.T) {
 	}
 	source := mcpserver.ServerInstructions()
 	for _, required := range []string{
-		"新 v4 只生成普通节点定义",
-		"tree v4 full nodes=<n>",
+		"新 v5 只生成普通节点定义",
+		"tree v5 full nodes=<n>",
 		"inspect v3 一律使用两格缩进",
 		"链下缩进的孩子属于链尾",
 		"inspect({reference:原 act 的 O,node:诊断 ref})",
@@ -2718,7 +2736,7 @@ func TestProbeAgainstRealAdapter(t *testing.T) {
 				"PASS cancel",
 			}
 			if mode != resultModeStructured {
-				wants = append(wants, "PASS observe", "tree_block=v4",
+				wants = append(wants, "PASS observe", "tree_block=v5",
 					"PASS inspect", "inspect_block=complete tree_block=v3")
 			}
 			for _, want := range wants {
@@ -2897,7 +2915,7 @@ func TestProbeAgainstRealHTTPAdapter(t *testing.T) {
 			}
 			if mode != resultModeStructured {
 				for _, want := range []string{
-					"PASS observe", "tree_block=v4",
+					"PASS observe", "tree_block=v5",
 					"PASS inspect", "inspect_block=complete tree_block=v3",
 				} {
 					if !strings.Contains(output.String(), want) {

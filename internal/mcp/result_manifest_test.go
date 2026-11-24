@@ -82,8 +82,9 @@ var rmfKnownExclusions = map[string]string{
 	// complete tree, an add or a replace, so it cannot appear on every scanned
 	// definition path; the composite inventory still pins both members.
 	"protocol.ReadNode.Chain": "definition anchor variant",
-	// ReadBounds selects the wire geometry form (null, "hidden" or one
-	// rectangle). Only the rectangle is a tuple that needs per-member coverage.
+	// ReadBounds selects the wire geometry form (null, "hidden", one center
+	// point or one rectangle). Only delivered forms are tuples that need
+	// per-member coverage.
 	"protocol.ReadBounds.Kind": "public geometry variant",
 	"protocol.Field.Set":       "generic Field wrapper",
 	"protocol.Field.Value":     "generic Field wrapper",
@@ -101,7 +102,8 @@ var rmfCompositeInventory = map[string]string{
 	"ReadNode":        "Ref Chain Role Bounds Label Actions Enabled Focused Selected Protected Checked Value Hint Axis Resource Context Children",
 	"ReadDelta":       "Format Base View Set Add Remove Children Replace",
 	"ReadSetNode":     "Label Actions Bounds Enabled Focused Selected Checked Value Hint Protected Axis Resource",
-	"ReadBounds":      "Kind Rect",
+	"ReadBounds":      "Kind Rect Point",
+	"Point":           "X Y",
 	"AppItem":         "Name Package",
 	"AppTaskItem":     "TaskID Package Ownership OriginDisplay",
 	"AppCloseTask":    "TaskID Outcome RecentsCleaned HasRecentsCleaned Error",
@@ -201,6 +203,16 @@ func TestResultFieldManifest(t *testing.T) {
 	for index, name := range wantBounds {
 		if got := boundsType.Field(index).Name; got != name {
 			t.Errorf("Bounds field %d = %s, want %s", index, got, name)
+		}
+	}
+	pointType := reflect.TypeOf(protocol.Point{})
+	wantPoint := []string{"X", "Y"}
+	if pointType.NumField() != len(wantPoint) {
+		t.Fatalf("Point has %d fields, want tuple fields %v", pointType.NumField(), wantPoint)
+	}
+	for index, name := range wantPoint {
+		if got := pointType.Field(index).Name; got != name {
+			t.Errorf("Point field %d = %s, want %s", index, got, name)
 		}
 	}
 }
@@ -683,17 +695,33 @@ func rmfAnalyzeManifest() rmfManifest {
 		}
 
 		// ReadBounds selects the wire geometry form: null, the controlled
-		// string "hidden" or one rectangle tuple. Only the rectangle carries
-		// delivered members, and it is encoded at the bounds position itself.
+		// string "hidden", one two-integer point tuple or one four-integer
+		// rectangle tuple. Both delivered forms are encoded at the bounds
+		// position itself.
 		if valueType == reflect.TypeOf(protocol.ReadBounds{}) {
 			rmfRecordExclusion(&manifest, "protocol.ReadBounds.Kind")
-			if valueType.NumField() != 2 ||
+			if valueType.NumField() != 3 ||
 				valueType.Field(0).Name != "Kind" ||
-				valueType.Field(1).Name != "Rect" {
+				valueType.Field(1).Name != "Rect" ||
+				valueType.Field(2).Name != "Point" {
 				manifest.problems = append(manifest.problems, "ReadBounds public geometry shape changed")
 				return
 			}
 			scanValue(valueType.Field(1).Type, wirePath, coveredBy, stack)
+			scanValue(valueType.Field(2).Type, wirePath, coveredBy, stack)
+			return
+		}
+
+		if valueType == reflect.TypeOf(protocol.Point{}) {
+			for index := 0; index < valueType.NumField(); index++ {
+				field := valueType.Field(index)
+				manifest.fields = append(manifest.fields, rmfWireField{
+					goPath:    "protocol.Point." + field.Name,
+					wirePath:  wirePath + "[*]",
+					coveredBy: coveredBy,
+					tuple:     true,
+				})
+			}
 			return
 		}
 
@@ -976,6 +1004,7 @@ func rmfResultFixtures() []rmfFixture {
 				Revision:        1,
 				CapturedAt:      "2026-11-10T00:00:01Z",
 				ActionableUntil: "2026-11-10T00:01:01Z",
+				Visual:          "image_heavy(52%)",
 				Quality: &protocol.Quality{
 					State:      protocol.QualityStable,
 					Samples:    3,
@@ -1792,10 +1821,22 @@ func v4ScanType(valueType reflect.Type, wirePath, coveredBy string, stack map[re
 	}
 	if valueType == reflect.TypeOf(protocol.ReadBounds{}) {
 		rmfRecordExclusion(manifest, "protocol.ReadBounds.Kind")
-		if valueType.NumField() != 2 || valueType.Field(0).Name != "Kind" || valueType.Field(1).Name != "Rect" {
+		if valueType.NumField() != 3 || valueType.Field(0).Name != "Kind" ||
+			valueType.Field(1).Name != "Rect" || valueType.Field(2).Name != "Point" {
 			return []string{"ReadBounds public geometry shape changed"}
 		}
-		return v4ScanType(valueType.Field(1).Type, wirePath, coveredBy, stack, table, manifest)
+		problems = append(problems, v4ScanType(valueType.Field(1).Type, wirePath, coveredBy, stack, table, manifest)...)
+		problems = append(problems, v4ScanType(valueType.Field(2).Type, wirePath, coveredBy, stack, table, manifest)...)
+		return problems
+	}
+	if valueType == reflect.TypeOf(protocol.Point{}) {
+		for index := 0; index < valueType.NumField(); index++ {
+			field := valueType.Field(index)
+			manifest.fields = append(manifest.fields, rmfWireField{
+				goPath: "protocol.Point." + field.Name, wirePath: wirePath + "[*]", coveredBy: coveredBy, tuple: true,
+			})
+		}
+		return nil
 	}
 	if valueType == reflect.TypeOf(protocol.Bounds{}) {
 		for index := 0; index < valueType.NumField(); index++ {

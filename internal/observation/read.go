@@ -2,6 +2,7 @@ package observation
 
 import (
 	"math"
+	"strings"
 
 	"github.com/malyjacob/mobile-use-vnext/internal/device"
 	"github.com/malyjacob/mobile-use-vnext/internal/protocol"
@@ -49,19 +50,29 @@ func compactKnownDefaultState(n *protocol.ReadNode) bool {
 }
 
 // ProjectCompactTree builds the compact public reading tree from the complete
-// internal tree. One recursive traversal decides geometry before descending,
-// then prunes on return by removing tiny unlabeled image leaves and anonymous
-// containers made empty by those removals before bypassing hidden anonymous
-// singleton wrappers. The result contains only ordinary node definitions. The
-// synthetic root rectangle is the screen denominator of the image-area rule;
-// when it is missing or degenerate, images remain present.
+// internal tree.
+//
+// One recursive traversal decides geometry before descending and then reduces
+// bottom-up. On the way down it removes viewport-edge sliver views, de-duplicates
+// an input label that repeats its value and decides geometry: a delivered root
+// or scroll container keeps its four-sided rectangle, every other delivered node
+// keeps only the center point of its visible rectangle. On the way back it prunes
+// unlabeled non-interactive image leaves, prunes passive text leaves already
+// covered by an ancestor composite label, removes anonymous containers left empty
+// by those removals, bypasses hidden anonymous singleton wrappers, hoists the
+// passive text children of a labeled-clickable view into one button and shortens a
+// remaining source resource id to its semantic tail. The result contains only
+// ordinary node definitions. The synthetic root rectangle is the screen
+// denominator of the remaining rectangle rules; when it is missing or
+// degenerate, only those rules are skipped.
 func ProjectCompactTree(t *protocol.Tree) *protocol.ReadTree {
 	if t == nil || t.Root == nil {
 		return nil
 	}
+	screen := newCompactProjection(t.Root)
 	return &protocol.ReadTree{
 		Format: "full", Scope: protocol.Scope, View: protocol.ViewCompact,
-		Root: projectCompactNode(t.Root, newCompactProjection(t.Root), nil),
+		Root: projectCompactNode(t.Root, screen, nil, nil),
 	}
 }
 
@@ -86,20 +97,22 @@ func ProjectDetailedNode(n *protocol.Node) *protocol.ReadNode {
 // projectReadNode copies every public field of one internal node. In the
 // detailed view every known rectangle is delivered and a missing source
 // rectangle stays explicitly unknown. A compact projection of one standalone
-// node applies the geometry and wrapper rules without a screen denominator.
+// node applies the compact geometry and content rules without a screen
+// denominator.
 func projectReadNode(n *protocol.Node, compact bool) *protocol.ReadNode {
 	if n == nil {
 		return nil
 	}
 	if compact {
-		return projectCompactNode(n, compactProjection{}, nil)
+		return projectCompactNode(n, compactProjection{}, nil, nil)
 	}
 	return projectDetailedNode(n)
 }
 
 // compactProjection carries the fixed screen facts of one compact projection.
 // screenKnown is false when the synthetic root rectangle is missing or
-// degenerate, which skips only the area rule.
+// degenerate, which skips the area rule, the visible-sliver rule and the clipping
+// of delivered center points.
 type compactProjection struct {
 	screen      protocol.Bounds
 	screenKnown bool
@@ -137,40 +150,71 @@ func projectDetailedNode(n *protocol.Node) *protocol.ReadNode {
 	return out
 }
 
+// compactSliverMaxEdge is the largest short edge of a viewport-edge sliver that
+// the compact view removes. A view whose visible rectangle is at most this many
+// pixels wide or high cannot be read or aimed at and only adds a row.
+const compactSliverMaxEdge = 4
+
 // projectCompactNode copies one internal node, decides its delivered geometry
-// from its original rectangle, and processes children before applying T2a and
-// T2b. This preserves the nearest-delivered-ancestor rule while letting a tiny
-// image and then its newly empty anonymous wrappers disappear bottom-up. An
-// image is a T2a leaf only when the original logical node has no non-nil child.
-func projectCompactNode(n *protocol.Node, screen compactProjection, reference *protocol.Bounds) *protocol.ReadNode {
+// from its original rectangle, processes children, and then reduces the result
+// bottom-up.
+//
+// The downward pass removes sliver views, de-duplicates an input label equal to
+// its value and decides geometry against the nearest delivered ancestor
+// rectangle. Geometry keeps the plain internal state machine for hidden
+// geometry; a delivered root or scroll container keeps its four-sided rectangle
+// while every other delivered node keeps the center point of its visible
+// rectangle. The upward pass then applies the fixed order: unlabeled
+// non-interactive image leaves, ancestor-covered passive text leaves, anonymous
+// containers made empty by those removals, hidden anonymous singleton wrappers,
+// labeled-clickable view hoisting and source-resource shortening.
+func projectCompactNode(n *protocol.Node, screen compactProjection,
+	ancestors [][]string, reference *protocol.Bounds) *protocol.ReadNode {
 	if n == nil {
 		return nil
 	}
+	originalHasChildren := hasNonNilChild(n)
 	out := copyReadFields(n)
+
+	if !originalHasChildren && compactSliverCanPrune(n, out, screen) {
+		return nil
+	}
+	if out.Role == protocol.RoleInput && out.Value != nil &&
+		len(out.Label) == 1 && out.Label[0] == *out.Value {
+		out.Label = []string{}
+	}
+
 	switch {
 	case n.Bounds == nil:
 		out.Bounds = protocol.UnknownBounds()
 	case n.Role == protocol.RoleRoot || len(n.Actions) != 0:
-		out.Bounds = protocol.KnownBounds(*n.Bounds)
+		out.Bounds = compactDeliveredBounds(n.Role, *n.Bounds, screen)
 		reference = deliveredRect(*n.Bounds, screen)
 	case compactHidesBounds(n, out, screen, reference):
 		out.Bounds = protocol.HiddenBounds()
 	default:
-		out.Bounds = protocol.KnownBounds(*n.Bounds)
+		out.Bounds = compactDeliveredBounds(n.Role, *n.Bounds, screen)
 		reference = deliveredRect(*n.Bounds, screen)
 	}
-	originalHasChildren := false
+
+	childAncestors := ancestors
+	if originalHasChildren && len(out.Label) > 0 {
+		childAncestors = appendCompactAncestorLabel(ancestors, out.Label)
+	}
 	for _, child := range n.Children {
 		if child == nil {
 			continue
 		}
-		originalHasChildren = true
-		projected := projectCompactNode(child, screen, reference)
-		if projected != nil {
+		if projected := projectCompactNode(child, screen, childAncestors, reference); projected != nil {
 			out.Children = append(out.Children, projected)
 		}
 	}
-	if !originalHasChildren && compactImageCanPrune(out, n.Bounds, screen) {
+
+	if !originalHasChildren && compactImageLeafCanPrune(out) {
+		return nil
+	}
+	if !originalHasChildren && isPlainPassiveTextLeaf(out) &&
+		compactLabelCovered(out.Label, ancestors) {
 		return nil
 	}
 	if originalHasChildren && len(out.Children) == 0 &&
@@ -180,29 +224,340 @@ func projectCompactNode(n *protocol.Node, screen compactProjection, reference *p
 	if out.Bounds.Kind == protocol.GeometryHidden && AnonymousPlain(out) && len(out.Children) == 1 {
 		return out.Children[0]
 	}
+	if compactHoistsTextChildren(out) {
+		hoisted := make([]string, 0, len(out.Children))
+		for _, child := range out.Children {
+			for _, part := range child.Label {
+				if part != "" {
+					hoisted = append(hoisted, part)
+				}
+			}
+		}
+		out.Role = protocol.RoleButton
+		out.Label = hoisted
+		out.Children = []*protocol.ReadNode{}
+		out.Resource = nil
+	}
+	if out.Resource != nil && *out.Resource != "" {
+		short := compactResourceTail(*out.Resource)
+		out.Resource = &short
+	}
 	return out
 }
 
-// compactImageCanPrune applies the T2a public-field predicate. Empty string
-// pointers are explicit values and therefore keep the image.
-func compactImageCanPrune(n *protocol.ReadNode, source *protocol.Bounds,
-	screen compactProjection) bool {
-	if n == nil || n.Context || n.Role != protocol.RoleImage || source == nil {
+// hasNonNilChild reports whether the original logical node has at least one
+// child definition. An empty child list is the ordinary leaf shape.
+func hasNonNilChild(n *protocol.Node) bool {
+	if n == nil {
 		return false
 	}
-	if n.Bounds.Kind != protocol.GeometryHidden ||
-		!compactNoReadableContent(n) || !compactKnownDefaultState(n) {
+	for _, child := range n.Children {
+		if child != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// compactSliverCanPrune applies the viewport-edge sliver predicate. It only
+// removes an original leaf view without readable content, without a text or
+// swipe action and in the known default state when at least one visible edge is
+// at most compactSliverMaxEdge pixels. Explicit control roles are out of scope.
+func compactSliverCanPrune(n *protocol.Node, out *protocol.ReadNode, screen compactProjection) bool {
+	if n.Role != protocol.RoleView || out.Context {
+		return false
+	}
+	if len(out.Label) != 0 || out.Value != nil || out.Hint != nil || out.Axis != "" {
+		return false
+	}
+	for _, action := range out.Actions {
+		if action == protocol.ActionText || action == protocol.ActionSwipe {
+			return false
+		}
+	}
+	if !compactKnownDefaultState(out) || n.Bounds == nil {
 		return false
 	}
 	if !screen.screenKnown {
-		return false
+		return minInt(n.Bounds.Width(), n.Bounds.Height()) <= compactSliverMaxEdge
 	}
-	clipped, positive := compactRect(*source, screen)
+	clipped, positive := compactRect(*n.Bounds, screen)
 	if !positive {
+		return true
+	}
+	return minInt(clipped.Width(), clipped.Height()) <= compactSliverMaxEdge
+}
+
+// compactImageLeafCanPrune applies the fixed unlabeled-image leaf predicate: an
+// image leaf without readable content, actions or non-default state carries no
+// evidence a reader can use. Neither its area nor a known rectangle is required,
+// because the reader can neither see nor act on it.
+func compactImageLeafCanPrune(n *protocol.ReadNode) bool {
+	if n == nil || n.Context || n.Role != protocol.RoleImage {
 		return false
 	}
-	area, ok := boundsArea(clipped)
-	return ok && belowPercent(area, screen.screenArea)
+	return compactNoReadableContent(n) && compactKnownDefaultState(n)
+}
+
+// isPlainPassiveTextLeaf reports whether one compact node is a passive text leaf
+// whose whole readable content is its own label: ordinary text, no children, no
+// action, no value, hint, resource or axis, hidden geometry and the known default
+// state.
+func isPlainPassiveTextLeaf(n *protocol.ReadNode) bool {
+	if n == nil || n.Context || n.IsChain() {
+		return false
+	}
+	if n.Role != protocol.RoleText || len(n.Children) != 0 || len(n.Label) == 0 {
+		return false
+	}
+	if n.Bounds.Kind != protocol.GeometryHidden || len(n.Actions) != 0 {
+		return false
+	}
+	if n.Value != nil || n.Hint != nil || n.Resource != nil || n.Axis != "" {
+		return false
+	}
+	return compactKnownDefaultState(n)
+}
+
+// compactHoistsTextChildren reports whether one compact view is an unlabeled
+// tappable shell whose every direct child is a plain passive text leaf. Hoisting
+// folds that two-row shell into one readable button.
+func compactHoistsTextChildren(n *protocol.ReadNode) bool {
+	if n == nil || n.Context || n.Role != protocol.RoleView {
+		return false
+	}
+	if len(n.Label) != 0 || n.Value != nil || n.Hint != nil || n.Axis != "" {
+		return false
+	}
+	if !hasReadAction(n.Actions, protocol.ActionTap) || len(n.Children) < 1 {
+		return false
+	}
+	for _, child := range n.Children {
+		if !isPlainPassiveTextLeaf(child) {
+			return false
+		}
+	}
+	return true
+}
+
+// hasReadAction reports whether one action list carries the requested action.
+func hasReadAction(actions []protocol.Action, action protocol.Action) bool {
+	for _, candidate := range actions {
+		if candidate == action {
+			return true
+		}
+	}
+	return false
+}
+
+// compactResourceTail keeps the last colon- or slash-separated segment that
+// carries at least one non-digit character, so a trailing numeric index never
+// becomes the whole hint. When every segment is numeric the last segment is
+// kept.
+func compactResourceTail(resource string) string {
+	segments := strings.FieldsFunc(resource, func(r rune) bool {
+		return r == ':' || r == '/'
+	})
+	for i := len(segments) - 1; i >= 0; i-- {
+		if !allASCIIDigits(segments[i]) {
+			return segments[i]
+		}
+	}
+	if len(segments) == 0 {
+		return ""
+	}
+	return segments[len(segments)-1]
+}
+
+// allASCIIDigits reports whether every byte of s is an ASCII decimal digit. The
+// empty string has no non-digit character and is treated as numeric.
+func allASCIIDigits(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// compactDeliveredBounds builds the delivered geometry of one node. The root and
+// every scroll container keep their four-sided rectangle; every other node keeps
+// a binary center point of its visible rectangle, which is the nearest visible
+// part of the original rectangle when the screen is known.
+func compactDeliveredBounds(role protocol.Role, rect protocol.Bounds,
+	screen compactProjection) protocol.ReadBounds {
+	if role == protocol.RoleRoot || role == protocol.RoleScroll {
+		return protocol.KnownBounds(rect)
+	}
+	point := rect
+	if screen.screenKnown {
+		if clipped, positive := compactRect(rect, screen); positive {
+			point = clipped
+		}
+	}
+	x, y := compactCenter(point)
+	return protocol.PointBounds(x, y)
+}
+
+// compactCenter returns the truncated half-open center of one rectangle. The
+// mixed-sign branch and the final clamp keep the point inside the rectangle for
+// every representable edge pair.
+func compactCenter(rect protocol.Bounds) (int, int) {
+	x := compactMidpoint(rect.Left, rect.Right)
+	y := compactMidpoint(rect.Top, rect.Bottom)
+	if rect.Right > rect.Left {
+		x = clampInt(x, rect.Left, rect.Right-1)
+	}
+	if rect.Bottom > rect.Top {
+		y = clampInt(y, rect.Top, rect.Bottom-1)
+	}
+	return x, y
+}
+
+// compactMidpoint returns the truncated integer midpoint of two edges without
+// overflowing for same-sign extremes; it mirrors the tap planner's safe average
+// so a published coordinate and a planned tap agree.
+func compactMidpoint(a, b int) int {
+	if (a < 0) != (b < 0) {
+		return (a + b) / 2
+	}
+	return a/2 + b/2 + (a%2+b%2)/2
+}
+
+// clampInt limits v to the inclusive range [low, high].
+func clampInt(v, low, high int) int {
+	if v < low {
+		return low
+	}
+	if v > high {
+		return high
+	}
+	return v
+}
+
+// appendCompactAncestorLabel appends one retained ancestor label to the
+// downward label stack. The returned slice never aliases the caller's backing
+// array, so sibling subtrees cannot observe each other's ancestors.
+func appendCompactAncestorLabel(ancestors [][]string, label []string) [][]string {
+	next := make([][]string, len(ancestors)+1)
+	copy(next, ancestors)
+	next[len(ancestors)] = label
+	return next
+}
+
+// normalizeReadableText collapses every whitespace run of one readable part to a
+// single space and trims the edges. It is the comparison form of a label part.
+func normalizeReadableText(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// compactAncestorText returns the comparison form of one ancestor label: its
+// non-empty normalized parts joined by one space.
+func compactAncestorText(parts []string) string {
+	normalized := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if text := normalizeReadableText(part); text != "" {
+			normalized = append(normalized, text)
+		}
+	}
+	return strings.Join(normalized, " ")
+}
+
+// compactLabelCovered reports whether a composite ancestor label already carries
+// one compact label. An ancestor whose label slice equals the whole label
+// covers it outright; otherwise every part must occur as a whole word or number
+// inside one ancestor's normalized composite text.
+func compactLabelCovered(parts []string, ancestors [][]string) bool {
+	if len(parts) == 0 {
+		return false
+	}
+	for _, ancestor := range ancestors {
+		if equalStrings(ancestor, parts) {
+			return true
+		}
+	}
+	for _, part := range parts {
+		if !compactPartCovered(part, ancestors) {
+			return false
+		}
+	}
+	return true
+}
+
+// compactPartCovered reports whether one label part occurs as a whole word or
+// number inside one ancestor's normalized composite text. A part that normalizes
+// to nothing is never covered.
+func compactPartCovered(part string, ancestors [][]string) bool {
+	normalized := normalizeReadableText(part)
+	if normalized == "" {
+		return false
+	}
+	for _, ancestor := range ancestors {
+		if compactAncestorContainsWord(compactAncestorText(ancestor), normalized) {
+			return true
+		}
+	}
+	return false
+}
+
+// compactAncestorContainsWord reports whether needle occurs in text at a position
+// whose neighbours do not continue an ASCII word or a composite number. A pure
+// non-ASCII phrase only has to occur literally; an ASCII edge additionally
+// rejects a neighbouring word byte and, for a digit edge, a neighbouring
+// digit-connector-digit run such as "16:48" or "1.5".
+func compactAncestorContainsWord(text, needle string) bool {
+	if text == "" || needle == "" || len(needle) > len(text) {
+		return false
+	}
+	for start := 0; start+len(needle) <= len(text); start++ {
+		if !strings.HasPrefix(text[start:], needle) {
+			continue
+		}
+		if compactWordBoundaryOK(text, start, start+len(needle), needle) {
+			return true
+		}
+	}
+	return false
+}
+
+// compactWordBoundaryOK applies the word and composite-number boundary guards of
+// one candidate substring match. Bytes at or above 0x80 are never ASCII word
+// bytes, so a Chinese phrase needs no neighbour check.
+func compactWordBoundaryOK(text string, i, j int, needle string) bool {
+	first, last := needle[0], needle[len(needle)-1]
+	if asciiWordByte(first) || (len(needle) == 1 && first < 0x80) {
+		if i > 0 && asciiWordByte(text[i-1]) {
+			return false
+		}
+		if asciiDigitByte(first) && i >= 2 &&
+			asciiDigitByte(text[i-2]) && asciiNumberConnector(text[i-1]) {
+			return false
+		}
+	}
+	if asciiWordByte(last) || (len(needle) == 1 && last < 0x80) {
+		if j < len(text) && asciiWordByte(text[j]) {
+			return false
+		}
+		if asciiDigitByte(last) && j+1 < len(text) &&
+			asciiNumberConnector(text[j]) && asciiDigitByte(text[j+1]) {
+			return false
+		}
+	}
+	return true
+}
+
+// asciiWordByte reports whether b is an ASCII letter or decimal digit.
+func asciiWordByte(b byte) bool {
+	return b >= '0' && b <= '9' || b >= 'A' && b <= 'Z' || b >= 'a' && b <= 'z'
+}
+
+// asciiDigitByte reports whether b is an ASCII decimal digit.
+func asciiDigitByte(b byte) bool { return b >= '0' && b <= '9' }
+
+// asciiNumberConnector reports whether b separates the parts of one composite
+// number such as "16:48", "1.5", "3/4" or "2024-01".
+func asciiNumberConnector(b byte) bool {
+	return b == ':' || b == '.' || b == '/' || b == '-'
 }
 
 // compactHidesBounds applies the non-action part of the compact geometry

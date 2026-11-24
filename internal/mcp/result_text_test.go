@@ -358,7 +358,7 @@ func resultObservationIDFromMap(root map[string]any) string {
 
 func isResultV4BlockStart(line string) bool {
 	for _, prefix := range []string{
-		"tree v4 ", "inspect v3 ", "shell v1 ", "timeline v1 ", "app_items v1 ", "app_tasks v1 ",
+		"tree v5 ", "inspect v3 ", "shell v1 ", "timeline v1 ", "app_items v1 ", "app_tasks v1 ",
 	} {
 		if strings.HasPrefix(line, prefix) {
 			return true
@@ -390,9 +390,9 @@ func decodeResultV4Block(line string, rest []string, root map[string]any, put fu
 		var value any
 		var err error
 		switch {
-		case strings.HasPrefix(line, "tree v4 full "):
+		case strings.HasPrefix(line, "tree v5 full "):
 			value, err = parseFullTreeTextValue(block, id)
-		case strings.HasPrefix(line, "tree v4 delta "):
+		case strings.HasPrefix(line, "tree v5 delta "):
 			value, err = parseDeltaTextValue(block, id)
 		default:
 			return 0, fmt.Errorf("unknown tree block")
@@ -891,6 +891,8 @@ func decodeResultV4ObservationLine(line string, root map[string]any) error {
 			observation["foreground"] = foreground
 		case "at":
 			observation["captured_at"] = value
+		case "visual":
+			observation["visual"] = value
 		case "quality":
 			quality, err := decodeResultV4QualityToken(value)
 			if err != nil {

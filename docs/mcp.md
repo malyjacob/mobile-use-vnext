@@ -15,7 +15,7 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
   `snap`、`wait_for`、`act`、`inspect`、`keepalive`、`end`、`app`、`notify`、`shell`、
   `diagnose`。不注册 `/health`、认证初始化、旧工具别名或旧协议回退。
 - 目录指纹是工具数、注册顺序、名称、描述与入参 schema 的 canonical SHA-256。当前源码的
-  工具目录指纹为 `3a9ad87c7af904226731f9fec90b0def7b2d8233487fdf7435041e365211b98b`。
+  工具目录指纹为 `df6afaa50d401e0498bd39a63959cfbf394a4c4ed4c210ce852b2bc48a7f22fc`。
   发布清单中的指纹对应其记录的源码提交。发布时从目标提交重建并核验清单。
   探针按工具名比对实际 `tools/list` 的描述和入参 schema，并核对只读注解。传入 `-manifest`
   时，探针对每份清单核对构建发行号、契约号、工具数和工具目录 SHA-256。探针将
@@ -104,13 +104,15 @@ text 失败（含 `outcome=partial` 与 `outcome=uncertain`）的 `error.details
 工具描述给出用途、关键参数分流、动作边界及独立理解该工具所需的恢复提示。
 `start` 描述简述 O/P 和 full/delta。每条 delta 都单独应用到 `base` 指向的完整树；`base` 可
 指向服务端基线池中的当前基线（跨度 1–10）或备用 full（跨度 1–4），而不是只能指向上一帧。
-图例以 `tree v4`、`inspect v3` 标识普通树与详细补看的独立语法，并说明普通节点在
+图例以 `tree v5`、`inspect v3` 标识普通树与详细补看的独立语法，并说明普通节点在
 `n<ref>` 后按首列恢复角色：
 不带引号的合法角色词是显式角色，JSON 字符串字面量默认为 `text`，几何、`value=`、`hint=`、
 `tap`/`long_press`/`swipe`、状态或属性标记或行尾默认为 `view`；只有恢复结果等于原角色且
 首项不会被误读为角色词时才省略。当前 compact full 和 delta 输出普通节点定义。读取历史
 `[n2 n3]` 或 `chain [n2 n3] <role> ...` 时，按顺序展开，缩进孩子归最后一个 ref。
-图例还说明节点动作列、块头后的空行、几何省略与状态默认。普通 `tree v4` 完整头只写
+图例还说明 `obs` 行的可选 `visual=` 提示、节点动作列、块头后的空行、几何省略与状态默认；
+几何列在 `root`/`scroll` 上是四元矩形，其他角色是二元中心点。`visual` 只是提示模型按需
+`snap`，不是输入授权，也不替代页面事实。普通 `tree v5` 完整头只写
 `nodes`，差分头只写 `base` 与 `changes`；块头 `view=` 以及 `nodes`/`entries` 两项计数
 属于 `inspect v3` 补看头。动作列的 `swipe` 表示节点的源能力，受控滚动使用
 `operation.type=scroll` 和 `container`。嵌套容器可按要滚动的区域选择 ref。
@@ -354,11 +356,11 @@ end result
 
 - 块前恰好一个空行；块后接行时没有额外空行，相邻块之间恰好一个空行。
 - 块头的 `nodes`、`changes`、`events`、`output_bytes` 仅为派生计数。普通 full 恢复时使用
-  固定 `scope=reported_visible_with_context`，该字段不写入 `tree v4` 头；delta 不携带也不
+  固定 `scope=reported_visible_with_context`，该字段不写入 `tree v5` 头；delta 不携带也不
   恢复 `scope`。`inspect` 的 subtree/query 头中 `tree_scope` 仍是派生显示，不新增 `A` 的
   成员。
 
-`result v4` 的文法稳定；普通树与详细补看正文分别由块头 `tree v4`、`inspect v3`
+`result v4` 的文法稳定；普通树与详细补看正文分别由块头 `tree v5`、`inspect v3`
 标识独立语法。三层版本按块头分派，`structuredContent` 保持同一份事实集，未知成员一律走
 绝对 JSON Pointer 兜底。取消统一标为 `isError=true`。工具名称、描述、入参 schema 与目录
 指纹随发布清单核验，描述变更会改变目录指纹，部署必须按清单重新核验。
@@ -381,11 +383,11 @@ result v4 err op=P7391_14 outcome=partial
 text_input write=executed submit=not_executed
 obs O4821_77 fg=com.android.settings at=22:05:13
 
-tree v4 full nodes=3
+tree v5 full nodes=3
 
 n1 root 0,0,1080,2400
- n2 input 0,60,1080,180 "搜索" value="周杰伦" hint="输入关键词"
- n3 button 900,60,1080,180 "搜索"
+ n2 input 540,120 "搜索" value="周杰伦" hint="输入关键词"
+ n3 button 990,120 "搜索"
 end tree
 error text_submit_not_executed "文字已写入，但提交未执行"
 error.details={"stage":"submit","reason":"submit_target_unconfirmed","dispatch":{"focus":"not_attempted","write":"dispatched","submit":"not_attempted"}}
@@ -434,7 +436,7 @@ token，或时间值既非合法 RFC3339 也不是安全 token 时，整对象�
 **观察行。** 单行摘要，`obs ` 之后首个不含 `=` 的字段是完整 `O`：
 
 ```text
-obs [<O>] [status=<partial|failed|…>] [fg=<前景>] [at=HH:MM:SS] [screen=<W>x<H>[@<display_id>]] [rot=<1|2|3>] [missing=<a,b>]
+obs [<O>] [status=<partial|failed|…>] [fg=<前景>] [at=HH:MM:SS] [visual=<image_heavy(<pct>%)|sparse_tree>] [screen=<W>x<H>[@<display_id>]] [rot=<1|2|3>] [missing=<a,b>]
 ```
 
 - `status=complete` 通常省略；整行没有其他字段时写 `obs status=complete`，不产出裸 `obs`
@@ -443,6 +445,11 @@ obs [<O>] [status=<partial|failed|…>] [fg=<前景>] [at=HH:MM:SS] [screen=<W>x
 - `fg` 按 `foreground.state` 编码：`package` 与 `task_id` 都有写 `<package>#<task_id>`，
   只有 `package` 写 `<package>`，只有 `task_id` 写 `#<task_id>`，都没有写 `present`；
   `none` 写 `none`；`unknown` 写 `unknown(<reason>)`，`reason` 为空时写 `unknown`。
+- `visual` 仅在观察携带该字段时输出，取值为 `image_heavy(<pct>%)` 或 `sparse_tree`，判据与
+  `structuredContent` 完全一致（见[接口契约](interface.md#observation-与-quality)）。`full`
+  观察输出本次分类；`delta` 仅在同会话、同显示代次的视觉状态由无变有或种类切换时输出，
+  同态省略。适配器不重算、不补默认值。例如
+  `obs O4821_80 fg=com.example.gallery at=22:05:18 visual=image_heavy(52%)`。
 - `screen` 仅在顶层 `session` 非空或观察没有树时输出；`screen` 存在时，无论 `screen=` 是否
   省略，`rotation != 0` 都一律输出 `rot=<rotation>`。
 - `missing` 以逗号连接，空列表省略。
@@ -624,29 +631,29 @@ recovery entry=<entry> ref=<精确 O/P|O|P|none> [input=<input_state>] [cause=<c
 result v4 ok op=P7391_12
 obs O4821_72 fg=com.android.settings#177 at=22:05:11
 
-tree v4 full nodes=8
+tree v5 full nodes=8
 
 n1 root 0,0,1080,2400
- n2 button @ "设置"
-  n3 button 24,60,144,180 "返回"
-  n4 input 180,60,1032,180 "搜索设置" value="" hint="输入关键词"
+ n2 button 540,120 "设置"
+  n3 button 84,120 "返回"
+  n4 input 606,120 "搜索设置" value="" hint="输入关键词"
  n5 scroll 0,300,1080,2400 axis=y
-  n6 switch 900,300,1032,420 "启用" tap checked=true
+  n6 switch 966,360 "启用" tap checked=true
   n8 "网络"
- n9 group 0,1800,1080,2400 "详情"
+ n9 group 540,2100 "详情"
 end tree
 end result
 ```
 
 普通节点行固定列序为
-`缩进 n<ref> [<role>] [<bounds>|@] "label"… value="…" hint="…" 动作词 标志`。
+`缩进 n<ref> [<role>] [<x,y>|<l,t,r,b>|@] "label"… value="…" hint="…" 动作词 标志`。
 读取 `n<ref>` 后，首项为不带引号的合法角色词时使用该显式角色；首项为 JSON 字符串字面量时
-默认 `text`，该字符串是第一个 label；首项为几何（`l,t,r,b`、`@` 或 `-`）、`value=`、
+默认 `text`，该字符串是第一个 label；首项为几何（`x,y`、`l,t,r,b`、`@` 或 `-`）、`value=`、
 `hint=`、普通动作（`tap`/`long_press`/`swipe`）、状态或属性标记、或行尾时默认 `view`。
 发送端只有在省略后按上述判据恢复出原角色、且首项不会被误读为显式角色词时才省略角色：
-无几何且有 label 的 `text` 省略 `text`；无 label 或带几何列（`l,t,r,b`/`@`/`-`）的 `text`
-显式写 `text`；首项为几何、`value=`、`hint=`、普通动作、状态或属性标记、或行尾的 `view`
-省略 `view`，首项为 label 或角色词（包括输入动作 `text`）的 `view` 显式写 `view`；
+无几何且有 label 的 `text` 省略 `text`；无 label 或带几何列（`x,y`/`l,t,r,b`/`@`/`-`）的
+`text` 显式写 `text`；首项为几何、`value=`、`hint=`、普通动作、状态或属性标记、或行尾的
+`view` 省略 `view`，首项为 label 或角色词（包括输入动作 `text`）的 `view` 显式写 `view`；
 其他角色始终显式。引号内的角色词仍是 label。
 
 只有 `button`、`input`、`scroll` 具有对应默认动作，分别为 `tap`、`text`、`swipe`；其他
@@ -663,35 +670,41 @@ end result
 `role=scroll` 节点按类名强特征（横向 `ScrollView`、`NestedScrollView`/`ListView`/`AbsListView`、
 `ViewPager` 等）与子项单轴排布（至多前 16 项、主轴中心跨度 ≥24px、主轴位移与跨度都不少于交轴
 2 倍、至少半数相邻子项在交轴重叠）判为 `x` 或 `y`，子项证据优先；证据不足或双向时不输出该
-标志。设备来源字符串按 JSON 字符串字面量转义，
+标志。compact 中保留的 `resource` 是服务截取的语义短尾名；detailed 补看保留完整 source
+resource。设备来源字符串按 JSON 字符串字面量转义，
 `<`、`>`、`&` 保持原样；缺省值按协议省略规则不输出。
 
-几何列与节点定义一一对应：已知矩形写无括号的 `l,t,r,b`，四边均为有符号十进制整数并满足
-`right>=left`、`bottom>=top`；源未提供几何写 `-`；观察视图里按 compact 几何策略隐藏的
-已知矩形直接没有该列，`-` 不表示隐藏。同一串行化定义中，普通节点的已知矩形与最近一个有
-已知矩形的严格祖先四边完全一致时写 `@`；隐藏或未知几何不会清除该祖先。每个 `+`、`=` 子树
+几何列与节点定义一一对应：`root` 与 `scroll` 的已知几何写无括号的 `l,t,r,b`，四边均为有符号
+十进制整数并满足 `right>=left`、`bottom>=top`；其余角色的已知几何写无括号的 `x,y` 二元中心
+点，恒落在原矩形内并满足 `left<=x<right`、`top<=y<bottom`。源未提供几何写 `-`；观察视图里
+按 compact 几何策略隐藏的已知几何直接没有该列，`-` 不表示隐藏。同一串行化定义中，普通节点
+的已知几何与最近一个有已知几何的严格祖先同 `Kind` 且数值完全相等时写 `@`：四元矩形只缩写
+相同矩形，二元中心点只缩写相同中心点；隐藏或未知几何不会清除该祖先。每个 `+`、`=` 子树
 独立维护祖先，不从其他定义、base 或前一条结果继承；无可解析祖先时 `@` 无效。历史链定义
-仍显式写矩形，不使用 `@`。
+不参与 `@` 缩写，已知几何仍显式写出。
 
-compact 几何策略保留合成根与 `actions` 非空节点的矩形，省略无动作 `text` 与匿名普通
-`view`/`group` 的矩形，其余展示节点在裁剪到屏幕后的矩形与父链上最近交付者四边完全相同、
-或该可见面积小于屏幕面积的 1% 时省略。随后按[接口策略](interface.md#node)省略符合条件
-的小图，清理因此变空的匿名容器，并提升隐藏匿名容器的唯一孩子。text、structured 和 both
-里的 compact 节点集合相同。详细补看交付完整快照的节点与已知原矩形。
+compact 几何策略保留合成根、`scroll` 容器与 `actions` 非空节点的几何：`root`/`scroll` 写
+四元矩形，其余写二元中心点。无动作 `text` 与匿名普通 `view`/`group` 的已知几何被省略；
+其余展示节点在裁剪到屏幕后，若四元矩形与父链上最近交付者四边完全相同，或该可见面积小于
+屏幕面积的 1%，也省略。随后按[接口策略](interface.md#node)执行露边细条裁剪、`input` 标签
+去重、无标注非交互 `image` 全裁、祖先复合标签覆盖的被动文本叶裁剪、变空匿名容器清理、单子
+隐藏匿名容器绕过、无字可点击 `view` 提升为 `button` 与 `resource` 短尾名提取。两个及以上
+孩子的隐藏匿名容器保留原层级，不拍平。text、structured 和 both 里的 compact 节点集合相同。
+详细补看交付完整快照的节点与已知原矩形。
 
-新 `tree v4` 只生成普通节点定义。读取端继续接受兼容历史的 `[n2 n3]` 匿名默认 `view` 链和
+新 `tree v5` 只生成普通节点定义。读取端继续接受兼容历史的 `[n2 n3]` 匿名默认 `view` 链和
 `chain [n2 n3] <role> ...` 定义；按顺序展开后，缩进的孩子归链尾，链内编号均可引用。
 full 块头的 `nodes` 计展开历史链后的逻辑节点数。完整节点的缺席布尔恢复为已知默认，显式
 `null` 保持未知；`checked` 默认 `false`。set 的缺席只表示未修改。树与补看块均不输出
 defaults 行。
 
-delta 块头为 `tree v4 delta base=<O|_<序号>> changes=<n>`，正文按
+delta 块头为 `tree v5 delta base=<O|_<序号>> changes=<n>`，正文按
 `set → add → remove → children → replace` 顺序输出。当前 O 来自同一结果的 `obs` 行，
 不在块头重复。`base` 指向服务端基线池中的近期任一已确认 `full`：同一会话 origin、同一目标
 显示 ID/代次且采集龄 `< 180s`，池中最多保留 4 条。当前基线可在跨度 1–10 内作为 base，
 其他备用 full 仅可在跨度 1–4 内作为 base；备用 full 被成功选回后，从下一次发布起成为当前
 基线。服务对每份合格 full 使用该 full 自己的节点编号重新匹配同一采集，再将候选 full 与 delta
-分别按本节的正式 `tree v4` 普通树块编码。比较范围是 `tree v4 ...` 块头至 `end tree` 行末
+分别按本节的正式 `tree v5` 普通树块编码。比较范围是 `tree v5 ...` 块头至 `end tree` 行末
 换行的 UTF-8 字节，包含实际短 base、转义、缩进和换行，不包含 `obs`、`result` 信封或图片。
 只有 `10×deltaBytes < 7×candidateFullBytes` 的候选合格，精确等于 70% 不合格；合格候选取
 delta 树块字节最少者，长度相同优先当前基线，再取 revision 较大的 full。
@@ -708,15 +721,15 @@ delta 树块字节最少者，长度相同优先当前基线，再取 revision �
 result v4 ok op=P7391_13
 obs O4821_76 fg=com.android.settings#177 at=22:05:12
 
-tree v4 delta base=_72 changes=6
+tree v5 delta base=_72 changes=6
 
 ~ n4 label=["无线设置"]
-~ n5 bounds=[40,300,1080,1800]
+~ n5 bounds=[0,300,1080,1800]
 + n11 button "返回上页" !tap
  n12 "网络"
 - n8
 children n1 = [n2 n5 n11 n9]
-= n9 group 0,1800,1080,2400 "详情"
+= n9 group 540,2100 "详情"
  n10 input @ "备注" value="" hint="输入备注"
 end tree
 end result
@@ -728,7 +741,7 @@ end result
 result v4 ok op=P7391_15
 obs O4821_90 fg=com.zhihu.android at=22:05:20
 
-tree v4 delta base=O4821_85 changes=0
+tree v5 delta base=O4821_85 changes=0
 
 end tree
 end result
@@ -737,9 +750,10 @@ end result
 `~` 行只列实际变化的字段，字段值保留显式 `false`、`""`、`[]` 与 `null`；字段顺序为
 `label`、`actions`、`bounds`、`enabled`、`focused`、`selected`、`checked`、`value`、
 `hint`、`protected`、`axis`、`resource`。`bounds=hidden` 表示该几何按策略不交付，
-`bounds=null` 表示置为未知。`SetNode` 没有 `role`，`~` 行也不输出 `role`。
-`+` 与 `=` 后输出普通 v4 节点定义及其子树；前缀只出现在所属定义根行，不计入缩进层级。
-`@`、无括号矩形和默认动作用于这些普通定义，不应用于 `~` 的 set 值。
+`bounds=null` 表示置为未知；已知 `bounds` 按节点角色写 `[x,y]`（非 `root`/`scroll`）或
+`[l,t,r,b]`（`root`/`scroll`），set 不使用 `@` 或无括号几何。`SetNode` 没有 `role`，
+`~` 行也不输出 `role`。`+` 与 `=` 后输出普通 v5 节点定义及其子树；前缀只出现在所属定义
+根行，不计入缩进层级。`@`、无括号几何和默认动作用于这些普通定义，不应用于 `~` 的 set 值。
 `add` / `remove` 保持结果中的顺序；`set`、`children`、`replace` 按 ref 数值升序输出。
 同一个 `base` 下的新 delta 覆盖旧 delta，不叠加；块头 `base=` 是唯一锚点。
 
@@ -752,7 +766,7 @@ end result
 逻辑节点数，`entries` 计正文定义行数。查询按每个命中子树分别累加两项计数。`path` 是
 root..parent 的 ref 序列，
 不含命中节点本身。补看固定使用 detailed 视图：逐节点展开、不折 chain、不隐藏已知几何。
-`inspect v3` 使用两格缩进、`[l,t,r,b]` 方括号矩形和显式动作词，不使用普通 v4 的默认动作、
+`inspect v3` 使用两格缩进、`[l,t,r,b]` 方括号矩形和显式动作词，不使用普通 v5 的默认动作、
 `@` 或短 base。其完整节点行仍按首列恢复角色；例如带已知几何的 `view` 节点省略 `view`，
 带几何的 `text` 节点保留 `text`，未知几何仍写 `-`。
 

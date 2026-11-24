@@ -15,7 +15,7 @@
 | 方法 | 所有业务端点只接受 `POST`；其他方法返回 `405`，错误码 `invalid_request` |
 | 认证 | `/api/*` 用 `agent_token`；`/v1/control/*` 用 `control_token`；`Authorization: Bearer <token>` |
 | 身份隔离 | agent token 不能访问 `/v1/control/*`，control token 不能访问 `/api/*`；错误为 `401 unauthorized` |
-| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 27`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
+| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 28`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
 | 预分配 P | `/api/*` 可带 `X-Mobile-Use-Operation: P…`；缺省由服务分配。`status` 不使用该头 |
 | 请求体 | 必须是一个 JSON 对象；大小上限：`start`/`status`/`end`/`wait_for` 16 KiB，`observe` 32 KiB，`snap` 8 KiB，`act` 64 KiB，`inspect`/`keepalive`/`diagnose`/`app` 8 KiB，`notify` 16 KiB，`shell` 32 KiB，`sync` 32 KiB，`stop` 8 KiB |
 | 响应 | `Content-Type: application/json; charset=utf-8`，`Cache-Control: no-store` |
@@ -311,7 +311,7 @@ HTTP 状态映射（默认由 `protocol.Status` 按 code 决定；认领前的 t
   新采集可相对 O1 返回 delta；页面未变时是空差异（只有 `format`、`base`、`view`）。当前基线
   在跨度 1–10 内可用，其他备用 full 在跨度 1–4 内可用，所有候选都要求同一会话 origin、同一
   显示 ID/代次且采集龄严格小于 180 秒。服务用每份完整 full 自己的节点编号重新匹配同一采集，
-  按实际 `tree v4` 树块字节选择最短合格 delta；备用 full 的跨度 5–10 不参与，成功的备用候选
+  按实际 `tree v5` 树块字节选择最短合格 delta；备用 full 的跨度 5–10 不参与，成功的备用候选
   从下一次发布起成为当前基线。
 - `observe(P…)`：强制 full。P 必须属于本 Agent 且其原会话仍活动。
 - 引用已结束会话的 `O` → `409 session_ended`；O 不存在或不属于本 Agent →
@@ -431,6 +431,10 @@ STOP、原租期、请求与工作期限、会话绑定显示 ID/代次与几何
 | `reference` | 是 | 本次要消费的当前 ready O；旧 `observation_id` 不再是别名，按未知成员拒绝 |
 | `operation` | 是 | 非 null 对象，见下表 |
 | `image` | 否 | 布尔，默认 `false`；`true` 为本次后观察附加一张图片，规则见 §5 图片 |
+
+本节的目标解析、祖先提升、安全落点、实时重验与 `error.details.candidates[*].bounds` 都使用
+完整内部公开树的四元矩形与原始采集；compact 阅读树中的二元中心点只供调用方判断方位或手工
+坐标参考，不缩小可操作节点集合，也不改变动作授权。
 
 `operation` 的六个分支（成员出现即校验，多余成员一律拒绝）：
 
@@ -942,7 +946,7 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms），
 
 | 字段 | 必填 | 类型 | 说明 |
 | --- | --- | --- | --- |
-| `contract_version` | 是 | 字符串 | 必须为 `"27"`，否则 `409 contract_mismatch` |
+| `contract_version` | 是 | 字符串 | 必须为 `"28"`，否则 `409 contract_mismatch` |
 | `app_instance_id` | 是 | UUID | App 进程实例；变化会撤销旧归属 |
 | `app_version` | 否（App 应发送） | 字符串 | 仅发行标识 |
 | `selected_mode` | 是 | `virtual`/`primary` | 用户选择 |
@@ -969,7 +973,7 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms），
 
 ```json
 {
-  "contract_version": "27",
+  "contract_version": "28",
   "service_instance_id": "…",
   "control": {
     "revision": 42,
@@ -1005,7 +1009,7 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms），
 ## 9. `POST /v1/control/stop`
 
 ```json
-{"contract_version":"27","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
+{"contract_version":"28","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
 ```
 
 - **不校验普通契约**：`contract_version` 字段存在但不参与准入，服务与 App 契约版本
@@ -1015,7 +1019,7 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms），
 - 重复或过期 `seq` 不报错，只返回 `state=duplicate`。
 
 ```json
-{"contract_version":"27","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
+{"contract_version":"28","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
 ```
 
 `accepted` 恒为 `true`；`state` 为 `revoked`（绑定时撤销了活动会话）、`recorded`
@@ -1028,7 +1032,7 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms），
 无认证，只表示进程可应答，不代表设备就绪或资源干净：
 
 ```json
-{"status":"ok","contract_version":"27","service_instance_id":"…","release_version":"…"}
+{"status":"ok","contract_version":"28","service_instance_id":"…","release_version":"…"}
 ```
 
 ## 11. 数据对象
@@ -1057,12 +1061,13 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms），
  "quality":{"state":"unstable","samples":5,"stop_reason":"max_samples"},
  "screen":{"width":1080,"height":2400,"rotation":0,"display_id":115},
  "foreground":{"state":"present","package":"com.example","task_id":12},
+ "visual":"image_heavy(52%)",
  "tree":{"format":"full","scope":"reported_visible_with_context","view":"compact",
    "root":{"ref":"n1","role":"root","bounds":[0,0,1080,2400]}}}
 ```
 
 Observation 的编码顺序固定为 `status`、`id`、`origin`、`revision`、`captured_at`、
-`actionable_until`、`quality`、`screen`、`foreground`、`tree`、`missing`、`image`、`error`。
+`actionable_until`、`quality`、`screen`、`foreground`、`visual`、`tree`、`missing`、`image`、`error`。
 `quality` 是对象；出现时三个成员总是编码，成员顺序固定为 `state`、`samples`、`stop_reason`：
 
 | 成员 | 取值与规则 |
@@ -1089,6 +1094,25 @@ Observation 的编码顺序固定为 `status`、`id`、`origin`、`revision`、`
 - `quality` 是观察材料事实，不是输入授权：`unstable`/`unknown` 的 O 仍可发布、仍可被认领；
   它不改变 `status`、`actionable_until`、基线确认或 O 状态机。`complete+unstable` 与
   `partial+stable` 都是合法组合；没有树的失败观察不发布 `quality`，只保留错误与图片材料。
+
+`visual` 是可选字符串，由服务在完整公开树上按固定口径计算，不是请求字段，也不替代 `snap`。
+它只在带树的观察上出现，空串省略；取值只有：
+
+| 值 | 判据 |
+| --- | --- |
+| `image_heavy(<pct>%)` | 完整公开树中非 `context`、无 label/value/hint/resource/axis、无动作、无子节点且五布尔为已知默认的 `image` 叶，剔除占屏 `<5%` 的碎片图、占屏 `>=90%` 的全屏底图，以及内部含至少 3 个面积更小且有可读 label/非空 value/动作控件的承载图后，取面积最大的至多 64 张求精确并集；并集面积 `>=45%` 屏幕面积且全树可读文字 `<150` 个非空白码点时命中。`<pct>` 为并集占屏四舍五入的整数，夹在 `45`–`100` |
+| `sparse_tree` | 未命中 `image_heavy`，前台状态不是 `none`，全树可读文字 `<20` 个非空白码点且可交互控件 `<5` 个时命中 |
+
+统计口径固定：非 `root`、非 `context` 节点的非空 label 段、非受保护节点的 `value` 与已知
+`hint` 计入可读文字，空白码点不计，已被祖先复合 label 覆盖的 label 段不重复计数；可交互
+控件指非 `root`、非 `context`、有动作且有正面积可见矩形的节点。`image` 统计在完整公开树上
+进行，不使用已裁剪装饰图的 compact 投影；服务不因该提示附加截图、增加设备读取或改变 O 的
+输入授权。
+
+`full` 观察输出本次计算的 `visual`（无命中则省略）。`delta` 观察仅当本次命中且分类与同会话、
+同显示代次紧邻上一已发布帧（若该帧已不在留存集合，则取该 delta 的 `base` 对应观察）不同时
+输出，否则省略；因此同一页面的连续差分不会重复刷同一提示。无树或树根缺少可用屏幕矩形的
+观察不产生 `visual`。
 
 ### Result 与 Effect
 
@@ -1137,7 +1161,7 @@ Observation 的编码顺序固定为 `status`、`id`、`origin`、`revision`、`
 和同级顺序。省略匿名包装时，唯一孩子提升到包装在父节点下的位置。
 
 ```json
-{"ref":"n7","role":"button","bounds":[40,300,240,380],
+{"ref":"n7","role":"button","bounds":[140,340],
  "label":["确定"],"actions":["tap"],"enabled":false}
 ```
 
@@ -1145,6 +1169,14 @@ Observation 的编码顺序固定为 `status`、`id`、`origin`、`revision`、`
 单独的 resource-id 或未知状态也不构成叶语义；非空内容、真实能力、非默认状态及 image 等固有
 叶角色保留。原始采集事实不变。必要的目标屏祖先按最近公开父连接，其他显示器的包装层不发布，
 但其目标屏后代仍可达。context 五个状态均为 unknown，不提供动作授权。
+
+公开可读标签在构造时清洗固定闭集零宽与占位码点：`U+200B`、`U+200C`、`U+200D`、`U+2060`、
+`U+FEFF`、`U+FFFC`。不含这些码点的字符串原样保留；含有时剔除全部码点、把连续空行折叠为
+单个换行并去掉首尾空白。清洗后没有可读文本、且没有动作、非默认状态或固有叶角色的普通叶
+不进入公开树，也不分配 `ref`；可见但本身无语义、却仍有可发布后代的容器保留为公开容器，
+非可见的必要祖先保留为 `context`。因此 `wait_for(query=…)` 与 `inspect(query=…)` 可按正常
+可见文字匹配。清洗只作用于公开 label 与输入框描述锚点；`device.Capture` 原始节点和 `input`
+的 `value` 保持原始字节，`act` 的结构重验与 `text` 写入读回仍读取原始采集。
 
 普通节点的字段全集：`ref`、`role`、`bounds`、`label`、`actions`、`enabled`、`focused`、
 `selected`、`checked`、`value`、`hint`、`protected`、`axis`、`resource`、`context`、
@@ -1154,12 +1186,12 @@ Observation 的编码顺序固定为 `status`、`id`、`origin`、`revision`、`
 | --- | --- |
 | `ref`/`chain` | 二选一。普通定义写节点自己的 `ref`。历史 `chain` 读取为至少两个按数组顺序相连的 ref，成员共享公共字段且几何都隐藏，孩子挂在末成员下 |
 | `role` | 总是出现；属于固定集合 `root`、`group`、`text`、`button`、`input`、`checkbox`、`radio`、`switch`、`toggle`、`scroll`、`image`、`view` |
-| `bounds` | 三态：四整数数组表示已知矩形；`null` 表示源未提供可用几何；compact 视图里按几何策略省略的已知矩形直接省略该成员。detailed 视图不允许隐藏，`bounds` 总是出现 |
+| `bounds` | 四态：compact 视图中 `root` 与 `scroll` 的已知几何是四整数矩形 `[left,top,right,bottom]`，其他角色的已知几何是二整数中心点 `[x,y]`；`null` 表示源未提供可用几何；按几何策略省略的已知几何直接省略该成员。detailed 视图总是交付四整数矩形，未知几何写 `null` |
 | `label`/`actions`/`children` | 空时省略；`actions` 取 `tap`、`long_press`、`text`、`swipe` |
 | `enabled` | 默认 `true`；已知 `false` 时显式 `false`；未知时显式 `null` |
 | `focused`/`selected`/`protected` | 默认 `false`；已知 `true` 时显式 `true`；未知时显式 `null` |
 | `checked` | 完整节点默认 `false`：已知 `false` 省略，已知 `true` 显式 `true`，未知显式 `null` |
-| `value`/`hint`/`resource` | 未知时省略；显式 `null` 也解码为未知；已知值显式给出（`""` 也保留） |
+| `value`/`hint`/`resource` | 未知时省略；显式 `null` 也解码为未知；已知值显式给出（`""` 也保留）。compact 中保留的 `resource` 只交付语义短尾名，见下段；detailed 保留完整 source resource |
 | `axis` | 缺席或 `null` 为未知；已知值只能是 `x`、`y`、`both`，空串非法。`role=scroll` 节点的已知值由服务按类名与子项单轴排布投影，证据不足或双向时省略，见下段 |
 | `context` | 仅在 `true` 时出现，表示非可见的必要祖先（`role=group`、无动作/标签、几何未知） |
 
@@ -1182,26 +1214,52 @@ Observation 的编码顺序固定为 `status`、`id`、`origin`、`revision`、`
 unknown；来源未知不能在构造时补成默认。五个状态的比较与差分严格区分 unknown/false/true。
 `set` 的缺席表示不修改，不应用完整节点默认。树与 inspection 信封均不携带 `defaults`。
 
-compact 几何策略是固定的服务策略，不是请求字段，按以下顺序判断一个节点的已知矩形：
-源矩形缺失时保持 `null`；合成根与 `actions` 非空的节点保留已知矩形；匿名普通节点（角色为
-`view`/`group`、无动作、无标签、无 `value`/`hint`/`resource`/`axis`、`enabled` 已知 `true`
-且 `focused`/`selected`/`protected`/`checked` 都已知 `false`）和无动作的 `text` 省略已知
-矩形；其余展示节点的矩形（裁剪到目标屏幕后）若与父链上最近一个实际交付的矩形四边完全
+compact 几何策略是固定的服务策略，不是请求字段。先按原矩形判断每个节点的交付几何：源矩形
+缺失时保持 `null`；合成根、`scroll` 容器与 `actions` 非空的节点保留已知几何；匿名普通节点
+（角色为 `view`/`group`、无动作、无标签、无 `value`/`hint`/`resource`/`axis`、`enabled` 已知
+`true` 且 `focused`/`selected`/`protected`/`checked` 都已知 `false`）和无动作的 `text` 省略
+已知几何；其余展示节点的矩形裁剪到目标屏幕后，若与父链上最近一个实际交付的矩形四边完全
 相同，或可见面积按合成根矩形面积计算严格小于 1%，也省略。角色名本身不构成保护：只有控件
 角色而没有动作的节点仍按重复与面积规则判断。面积使用整数计算；合成根矩形缺失或不可计算时
-跳过面积规则。detailed 视图交付完整快照中的全部节点与已知原矩形。
+跳过面积规则。
 
-服务按上述规则先决定几何，再精简 compact 逻辑树。
+交付几何的形式按角色固定：`root` 与 `scroll` 交付原四元矩形；其他角色交付可见矩形的二元
+中心点，屏幕已知且裁剪后为正面积时使用裁剪矩形，否则使用原矩形，半开中点恒落在该矩形内。
+detailed 视图交付完整快照中的全部节点与四元已知原矩形，不交付中心点。
 
-1. 省略几何为 hidden 的普通 `image` 叶。该叶须无标签、无动作、无公开的 `value`/`hint`/
-   `resource`/`axis`，且五个布尔状态均为已知默认。用隐藏前的矩形裁到合成根的屏幕矩形，
-   裁后面积须为可计算的正数且严格小于屏幕面积的 1%。设备源字段只有公开为 `resource` 后才参与
-   判定。面积等于 1%、裁后为空、屏幕或面积无法计算的图片继续交付。
-2. 逐层清理因图片省略而变空的匿名普通容器，条件为几何 hidden、原先有孩子且现在没有孩子。
-   原有空叶继续交付。
-3. 绕过几何 hidden 且此时恰好有一个直接孩子的匿名普通容器。几何在所留节点上沿用裁剪前
-   的结果，两个或更多孩子的分支继续交付。合成根、`context`、动作节点、有可读内容或有
-   未知状态或几何的节点继续交付。
+服务按上述规则先决定几何，再按固定顺序精简 compact 逻辑树：
+
+1. **露边细条**：原始无子节点、角色为 `view`、非 `context`、无 label/value/hint/axis、
+   不含 `text`/`swipe` 动作、五个布尔均为已知默认且源几何非空的叶；屏幕已知时裁剪后无正
+   面积或较短可见边不超过 `4px`，屏幕未知时原矩形较短边不超过 `4px`，则不交付。只带
+   `tap`/`long_press` 的视口边缘细条也在此范围；`image`、`input`、`scroll`、`button` 等
+   显式角色不受该规则裁剪。
+2. **input 标签去重**：`input` 的 `value` 非空，且 `label` 只有一项并与 `value` 完全相等
+   时，省略该 `label`。
+3. **无标注非交互 image 全裁**：原始无子节点的 `image` 叶，若非 `context`、无
+   label/value/hint/resource/axis、无动作且五个布尔均为已知默认，则不交付。该规则不再以
+   面积占比或已知几何为前提；有标注、有动作、有非默认状态或带子节点的图片继续交付。
+4. **祖先复合标签覆盖的被动文本叶**：原始无子节点、角色 `text`、非 `context`、`label`
+   非空、几何隐藏、无动作/value/hint/resource/axis 且五个布尔均为已知默认的叶，若其完整
+   `label` 切片与某个仍交付非空 label 的严格祖先完全相同，或每个 label 段归一化后作为完整
+   词或复合数值出现在某祖先的归一化拼接文本中，则不交付。词边界守卫避免把 `48` 误判为
+   `16:48` 的一部分，或把 `68` 误判为 `680` 的一部分；纯中文短语按字面命中。
+5. **变空匿名容器清理**：原始有子节点、裁剪后没有孩子、几何隐藏且满足匿名普通节点谓词的
+   容器不交付。
+6. **单子隐藏匿名容器绕过**：几何隐藏、匿名普通且裁剪后恰有一个直接孩子的容器，由该孩子
+   替代其位置，几何沿用裁剪前的结果。两个及以上孩子的分支继续交付，不拍平；合成根、
+   `context`、动作节点、有可读内容或有未知状态或几何的节点不绕过。
+7. **无字可点击 view 提升为 button**：非 `context`、角色 `view`、无 label/value/hint/axis、
+   含 `tap` 动作且至少一个直接孩子的节点，若每个直接孩子都是上述被动文本叶，则角色改为
+   `button`，按孩子顺序把非空 label 段合并为原生多段 `label`，清空孩子并清除 `resource`。
+   含交互子节点、多子匿名容器或非文本子节点的卡片不误合并。
+8. **resource 语义短尾名**：归约后仍带非空 `resource` 的节点，按 `:` 与 `/` 切分为非空段，
+   自右向左取第一个含非 `0`–`9` 字符的段；全部为纯数字时取最后一个非空段。该短尾名只用于
+   compact 阅读提示，不改变 `ref`、动作选择或 detailed 的完整 source resource。
+
+compact 的二元中心点只用于阅读、方位判断与手工坐标参考。`act` 的 `ref` 解析、安全落点规划、
+`text` 的焦点与 `submit_ref` 规划、实时重验以及 `inspect` 的节点集，仍使用完整内部公开树的
+四元矩形与原始采集；compact 裁剪与中心点都不缩小可操作节点集合，也不改变动作授权。
 
 ### Tree 与 Delta
 
@@ -1219,7 +1277,8 @@ compact 几何策略是固定的服务策略，不是请求字段，按以下顺
 - delta 的五个块都可省略；空差异只含 `format`、`base`、`view`；
 - `set` 的每个成员只携带发生变化的字段，但值必须是**完整新值**，显式保留
   `false`/`0`/`""`/`[]`/`null`；省略表示“未修改”，`null` 表示“置为未知”，
-  `bounds:"hidden"` 表示“该几何按策略不交付”；
+  `bounds:"hidden"` 表示“该几何按策略不交付”。delta 只在 compact 视图出现，`set.bounds`
+  的已知值按 compact 规则写：`root`/`scroll` 为四元矩形，其他角色为二元中心点；
 - 五个块共同声明固定基线的唯一最终树，不能按出现顺序逐步修改基线；任何冲突都整体拒绝，
   不返回部分树，也不改写基线或 delta；
 - `children` 给出父节点的最终完整子列表。存续节点可跨父移动：来源父与目标父的最终 claim
@@ -1234,7 +1293,7 @@ compact 几何策略是固定的服务策略，不是请求字段，按以下顺
   不强制 full。`delta.base` 必须是仍在池内、满足下列窗口且采集龄 `< 180s` 的已确认 full：
   当前基线跨度为 1–10，其他备用 full 为 1–4。成功发布引用备用 full 的 delta 后，该 full
   从下一次发布起成为当前基线。
-- 全池候选分别按候选 full 和 delta 的正式 `tree v4` 普通树块计量 UTF-8 字节，块头至
+- 全池候选分别按候选 full 和 delta 的正式 `tree v5` 普通树块计量 UTF-8 字节，块头至
   `end tree` 行末换行均计入，`result` 信封与图片不计入。只有
   `10×deltaBytes < 7×candidateFullBytes` 才合格，精确等于 70% 不合格。合格候选取 delta 树块
   字节最少者，长度相同优先当前基线，再取 revision 较大的 full；没有合格候选时发送 full。
@@ -1311,7 +1370,8 @@ compact 几何策略是固定的服务策略，不是请求字段，按以下顺
 不因它是基线而放宽；预算不足或树已被淘汰分别返回
 `inspection_too_large` 与 `content_unavailable`，不回退到 compact 或旧树。
 
-- 补看固定使用 `view=detailed`：逐节点展开、不折 `chain`、不隐藏已知几何；`tree` 作用域的
+- 补看固定使用 `view=detailed`：逐节点展开、不折 `chain`、不隐藏已知几何，几何始终是四元
+  矩形（即使同节点在 compact 中曾以二元中心点交付）；`tree` 作用域的
   `view` 在嵌套完整树里声明，`subtree`/`query` 在 inspection 信封声明一次；
 - 整树补看按 detailed 公共编码计量，受 128 KiB 上限；`node` 子树的 `{view,root}`
   内容对象与 `query` 的 `{view,matches,total,truncated}` 内容对象各受 32 KiB 上限；
@@ -1319,8 +1379,9 @@ compact 几何策略是固定的服务策略，不是请求字段，按以下顺
   超过 32 KiB 时整次查询以 `409 inspection_too_large` 失败（即使它不在返回前缀内）；
   总量预算只决定完整命中的返回前缀，共享的 `view` 只计一次，前缀不足全部命中时
   置 `truncated=true`；
-- `query` 在 `label`/`value`/`hint`/`resource` 上做字面 Unicode 折叠子串匹配，按原树顺序
-  返回完整命中子树和祖先 `ref` 路径；`total` 为预算前命中数，返回值只含完整命中子树；
+- `query` 在完整树的 `label`/`value`/`hint`/`resource` 上做字面 Unicode 折叠子串匹配，按原树
+  顺序返回完整命中子树和祖先 `ref` 路径；匹配使用完整 source resource 与净化后的公开 label，
+  不受 compact 短尾名或裁剪结果影响；`total` 为预算前命中数，返回值只含完整命中子树；
 - 常见失败：`409 observation_not_found`（不存在或不属于本 Agent）、
   `409 content_unavailable`（树已被淘汰）、`409 node_not_found`、
   `409 inspection_too_large`（`details.limit` 为字节上限）。这些失败不携带 `recovery`。
@@ -1615,8 +1676,10 @@ STOP 撤权后的迟到结果不发布新观察。
 
 ### 条件与稳定判据
 
-- `query` 是字面 Unicode 大小写折叠子串匹配；`absent_query` 要求该帧先通过最小可读证据
-  门槛——除合成根外至少 1 个非 `context` 内容节点——且整棵树没有任何节点命中。
+- `query` 是字面 Unicode 大小写折叠子串匹配；匹配对象是完整公开树的净化 label、`value`、
+  `hint` 与完整 source `resource`，不是 compact 投影的短尾 `resource`；`absent_query` 要求该帧
+  先通过最小可读证据门槛——除合成根外至少 1 个非 `context` 内容节点——且整棵树没有任何节点
+  命中。
 - 检索范围严格等于服务公布的 `reported_visible_with_context` 公开树：视口外或被隐私策略
   抑制的内容永不命中，“未命中”不等于业务界面没有变化。
 - `stable=true` 要求连续 3 帧的内容摘要相等。无查询时它是独立触发分支；有查询时，退出帧

@@ -3,7 +3,7 @@
 本页定义手机内控制 App 与设备服务之间的最小配对协议：模式、显示资源、命令回执、最低控制
 视图、消息中心投递与独立 STOP。Agent 工具接口见 [接口契约](interface.md)。本协议与普通业务
 契约共用一个 `contract_version`；STOP 载体独立于普通契约。MCP 的 `result v4`（`text`/`both`）、
-`tree v4` 与 `inspect v3` 只描述 Agent 结果文本，不进入控制同步，也不改变 App 的工具结果处理边界。
+`tree v5` 与 `inspect v3` 只描述 Agent 结果文本，不进入控制同步，也不改变 App 的工具结果处理边界。
 
 ## 1. 传输与身份
 
@@ -23,9 +23,9 @@
 
 ```json
 {
-  "contract_version": "27",
+  "contract_version": "28",
   "app_instance_id": "0b0b8c0e-...",
-  "app_version": "0.31.0",
+  "app_version": "0.32.0",
   "selected_mode": "virtual",
   "mode_generation": "8f0b2e2e-...",
   "mode_ready": true,
@@ -46,7 +46,7 @@
 
 | 字段 | 必填 | 含义 |
 | --- | --- | --- |
-| contract_version | 是 | 共同普通契约；必须等于 `"27"` |
+| contract_version | 是 | 共同普通契约；必须等于 `"28"` |
 | app_instance_id | 是 | 本次 App 进程实例，UUID；重建即变化 |
 | app_version | 否（App 应发送） | 仅发行标识，不参与能力协商 |
 | selected_mode | 是 | `virtual` 或 `primary`；App 重建默认 virtual |
@@ -76,7 +76,7 @@
 
 ```json
 {
-  "contract_version": "27",
+  "contract_version": "28",
   "service_instance_id": "d0e...",
   "control": {
     "revision": 42,
@@ -149,13 +149,13 @@ App 必须拒绝无法解析、未知 kind、缺字段或 `contract_version` 不
 `POST /v1/control/stop`
 
 ```json
-{"contract_version":"27","app_instance_id":"...","stop_seq":7,"reason":"user_stop"}
+{"contract_version":"28","app_instance_id":"...","stop_seq":7,"reason":"user_stop"}
 ```
 
 响应（最小，不含普通服务状态、消息或设备命令）：
 
 ```json
-{"contract_version":"27","service_instance_id":"...","accepted":true,"stop_seq":7,"state":"revoked"}
+{"contract_version":"28","service_instance_id":"...","accepted":true,"stop_seq":7,"state":"revoked"}
 ```
 
 - App 先在本地提高停止代次、拒绝旧命令/回调恢复权限，再在独立线程发起本请求；不等待

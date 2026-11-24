@@ -23,12 +23,36 @@
 // Published descendants attach to the nearest published ancestor in source
 // preorder, even across wrappers from another display. Source and ContextSource
 // form a disjoint, complete public-ref index; raw facts remain unchanged.
-// Compact reading may hide known geometry, omit tiny unlabeled image leaves,
-// remove anonymous containers left empty by those omissions, and bypass hidden
-// anonymous singleton wrappers. Retained nodes keep their logical fields,
-// ordering and refs. New compact output uses ordinary definitions only. Readers
-// continue to expand historical chain definitions, assigning indented children
-// to the chain tail.
+//
+// Public readable labels are purified on the way out: the closed set of invisible
+// placeholder code points (zero-width space/non-joiner/joiner, word joiner,
+// byte-order mark, object replacement character) is removed, runs of empty lines
+// collapse and the result is trimmed. A leaf whose only text was placeholder
+// residue has no readable content any more and does not enter the public tree. The
+// raw capture and every input value keep their original bytes, so tap static
+// planning, revalidation and text read-back are unaffected.
+//
+// Compact reading then reduces the projection without mutating the complete one. It
+// removes viewport-edge sliver views, drops an input label that merely repeats its
+// value, omits unlabeled non-interactive image leaves, prunes passive text leaves
+// whose text an ancestor composite label already carries, removes anonymous
+// containers left empty by those omissions, bypasses hidden anonymous singleton
+// wrappers, folds the passive text children of an unlabeled tappable view into one
+// button and shortens a remaining source resource id to its semantic tail.
+// Multi-child anonymous containers are never flattened. Delivered geometry keeps
+// the four-sided rectangle of the root and of scroll containers and the center
+// point of every other visible rectangle; detailed inspection always reveals the
+// original rectangles. Retained nodes keep their logical fields, ordering and refs.
+// New compact output uses ordinary definitions only. Readers continue to expand
+// historical chain definitions, assigning indented children to the chain tail.
+//
+// # Visual hint
+//
+// InferVisualHint classifies one complete public tree against the fixed screen
+// rectangle. The union of large foreground pictures on a text-poor page reports
+// "image_heavy(<pct>%)"; an open application whose page has almost no readable text
+// and almost no interactive control reports "sparse_tree". The classifier is a pure
+// function: it reads no pixels, performs no device call and hides no content.
 //
 // # Refs and continuity
 //

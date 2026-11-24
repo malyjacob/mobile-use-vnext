@@ -79,6 +79,15 @@ type imageAttempt struct {
 	err    *protocol.APIError
 }
 
+// visualHint is the lightweight visual classification of one projected public
+// tree. kind is the closed enum "" / "image_heavy" / "sparse_tree"; raw is the
+// exact token published on the observation ("" when no hint applies). The value
+// is computed outside the state lock and never describes the device directly.
+type visualHint struct {
+	kind string
+	raw  string
+}
+
 // treeAttempt is one complete public tree candidate plus its source capture.
 // The compact read tree and its canonical bytes are produced once, outside the
 // state lock, and never recomputed at commit time.
@@ -88,6 +97,7 @@ type treeAttempt struct {
 	compact      *protocol.ReadTree
 	compactBytes []byte
 	cost         int
+	visual       visualHint
 	// commit publishes the candidate's continuity state. It runs at the single
 	// commit point; a rejected candidate is simply dropped.
 	commit func()
@@ -110,6 +120,7 @@ type baselineDeltaCandidate struct {
 	projection *Projection
 	compact    *protocol.ReadTree
 	cost       int
+	visual     visualHint
 	commit     func()
 	delta      *protocol.ReadDelta
 	deltaBytes int
@@ -331,7 +342,7 @@ func (e *Engine) publishTreeAttempt(work *workState, session *sessionState, phas
 				projection.Capture == nil {
 				continue
 			}
-			compact, _, cost, apiErr := e.publicCandidate(*projection.Capture, projection)
+			compact, _, cost, visual, apiErr := e.publicCandidate(*projection.Capture, projection)
 			if apiErr != nil {
 				continue
 			}
@@ -342,7 +353,8 @@ func (e *Engine) publishTreeAttempt(work *workState, session *sessionState, phas
 			}
 			candidates = append(candidates, baselineDeltaCandidate{
 				baseline: baseline, projection: projection, compact: compact,
-				cost: cost, commit: commit, delta: delta, deltaBytes: deltaBytes,
+				cost: cost, visual: visual, commit: commit,
+				delta: delta, deltaBytes: deltaBytes,
 				current: baseline.ObservationID == activeBaselineID,
 			})
 		}
@@ -381,6 +393,7 @@ func (e *Engine) publishTreeAttempt(work *workState, session *sessionState, phas
 		chosenCompact    = tree.compact
 		chosenProjection = tree.projection
 		chosenCost       = tree.cost
+		chosenVisual     = tree.visual
 		chosenCommit     = tree.commit
 		delta            *protocol.ReadDelta
 		poolSource       = "full"
@@ -424,6 +437,7 @@ func (e *Engine) publishTreeAttempt(work *workState, session *sessionState, phas
 			chosenCompact = candidate.compact
 			chosenProjection = candidate.projection
 			chosenCost = candidate.cost
+			chosenVisual = candidate.visual
 			chosenCommit = candidate.commit
 			delta = candidate.delta
 			if candidate.current {
@@ -460,6 +474,12 @@ func (e *Engine) publishTreeAttempt(work *workState, session *sessionState, phas
 		e.mu.Unlock()
 		return nil, nil, budgetError("retained_snapshots", e.cfg.MaxRetainedSnapshotCostBytes)
 	}
+	// The published hint is decided only here, after every commit gate passed and
+	// before any public state is rewritten: a full tree always carries the hint of
+	// its own frame, while a delta repeats it only when the hint appeared or
+	// switched kind against the immediately previous published frame.
+	publishedVisual := observationVisual(delta != nil, chosenVisual,
+		e.previousVisualKindLocked(delta))
 	prunedBaselines := baselineIDsMissingFrom(e.baselines, finalPool)
 	retainedBefore := len(e.observations)
 	e.baselines = finalPool
@@ -487,7 +507,7 @@ func (e *Engine) publishTreeAttempt(work *workState, session *sessionState, phas
 		Quality: quality,
 		Screen:  e.session.Display, Foreground: tree.capture.Foreground,
 		Projection: chosenProjection, Compact: chosenCompact, Cost: chosenCost,
-		Status: ObservationReady, Full: delta == nil,
+		Status: ObservationReady, Full: delta == nil, VisualKind: chosenVisual.kind,
 	}
 	for _, victim := range victims {
 		delete(e.observations, victim.ID)
@@ -513,7 +533,8 @@ func (e *Engine) publishTreeAttempt(work *workState, session *sessionState, phas
 		ttl = e.cfg.StartSessionTTL
 	}
 	e.extendSessionLocked(time.Now(), ttl)
-	public := e.observationPublicLocked(obs, status, chosenCompact, delta, image, quality)
+	public := e.observationPublicLocked(obs, status, chosenCompact, delta, image,
+		quality, publishedVisual)
 	e.mu.Unlock()
 	// The baseline path is a diagnostic fact of a certain commit; it is
 	// recorded outside the state lock.
@@ -522,6 +543,44 @@ func (e *Engine) publishTreeAttempt(work *workState, session *sessionState, phas
 		e.logRetention(work.OperationID, prunedBaselines, prunedObservations)
 	}
 	return public, obs, nil
+}
+
+// observationVisual decides the hint one published observation carries. A full
+// tree always states the classification of its own frame. A delta repeats it
+// only when the classification is non-empty and differs from the raw kind of the
+// immediately previous published frame, so an unchanged page never repeats the
+// same hint on every delta while a new or switched state is still reported.
+func observationVisual(delta bool, hint visualHint, previousKind string) string {
+	if hint.kind == "" {
+		return ""
+	}
+	if delta && hint.kind == previousKind {
+		return ""
+	}
+	return hint.raw
+}
+
+// previousVisualKindLocked returns the raw visual kind of the immediately
+// previous published frame of this session and display generation. A delta whose
+// frame already left the retained set falls back to the observation of its own
+// base, so a kind switch is still recognised after the previous observation was
+// pruned. It reads only already-committed immutable facts; the caller holds e.mu.
+func (e *Engine) previousVisualKindLocked(delta *protocol.ReadDelta) string {
+	if e.session != nil {
+		if previous := e.current; previous != nil &&
+			previous.Origin == e.session.Origin &&
+			previous.DisplayID == e.session.Display.ID &&
+			previous.DisplayGeneration == e.session.Display.Generation {
+			return previous.VisualKind
+		}
+	}
+	if delta == nil || delta.Base == "" {
+		return ""
+	}
+	if base := e.observations[delta.Base]; base != nil {
+		return base.VisualKind
+	}
+	return ""
 }
 
 // logBaseline records which delta path produced one published observation. The
@@ -992,53 +1051,63 @@ func (e *Engine) captureValidated(cap device.Capture, session *sessionState) (de
 
 // projectCapture builds the public reading tree candidate: the complete
 // internal projection, its compact public representation, the canonical bytes
-// of that representation and the internal accounting size. The public budget
-// is checked on the compact encoding; the internal budget is checked on the
-// complete snapshot. Neither check may delete or crop content.
+// of that representation, the internal accounting size and the lightweight
+// visual hint of the projected frame. The public budget is checked on the
+// compact encoding; the internal budget is checked on the complete snapshot.
+// Neither check may delete or crop content.
 func (e *Engine) projectCapture(work *workState, phase string, cap device.Capture) (*treeAttempt, *protocol.APIError) {
 	e.setWorkPhase(work, phase+".project")
 	projection, commit, err := work.Projector.Candidate(&cap)
 	if err != nil {
 		return nil, protocol.NewError(503, protocol.CodeHierarchyFailed, "公开树构造失败")
 	}
-	compact, compactBytes, cost, apiErr := e.publicCandidate(cap, projection)
+	compact, compactBytes, cost, visual, apiErr := e.publicCandidate(cap, projection)
 	if apiErr != nil {
 		return nil, apiErr
 	}
 	return &treeAttempt{
 		capture: cap, projection: projection, compact: compact,
-		compactBytes: compactBytes, cost: cost, commit: commit,
+		compactBytes: compactBytes, cost: cost, visual: visual, commit: commit,
 	}, nil
 }
 
 // publicCandidate validates one projected public tree against the public compact
 // and internal snapshot budgets and returns its compact representation, its
-// canonical bytes and the internal accounting cost. It is the single budget
-// gate of the ordinary candidate and the historical-baseline probe, so the two
-// paths cannot drift.
-func (e *Engine) publicCandidate(cap device.Capture, projection *Projection) (*protocol.ReadTree, []byte, int, *protocol.APIError) {
+// canonical bytes, the internal accounting cost and the visual hint of the
+// complete projected frame. It is the single budget gate of the ordinary
+// candidate and the historical-baseline probe, so the two paths cannot drift.
+// The hint is computed on the complete public tree, never on the compact
+// projection: the cropped decoration images are exactly the evidence the hint
+// exists to summarise.
+func (e *Engine) publicCandidate(cap device.Capture, projection *Projection) (*protocol.ReadTree, []byte, int, visualHint, *protocol.APIError) {
 	if projection == nil || projection.Tree == nil {
-		return nil, nil, 0, protocol.NewError(503, protocol.CodeHierarchyFailed, "公开树构造失败")
+		return nil, nil, 0, visualHint{},
+			protocol.NewError(503, protocol.CodeHierarchyFailed, "公开树构造失败")
 	}
 	compact := observation.ProjectCompactTree(projection.Tree)
 	if compact == nil || compact.Validate() != nil {
-		return nil, nil, 0, protocol.NewError(503, protocol.CodeHierarchyFailed, "公开树构造失败")
+		return nil, nil, 0, visualHint{},
+			protocol.NewError(503, protocol.CodeHierarchyFailed, "公开树构造失败")
 	}
 	compactBytes, err := json.Marshal(compact)
 	if err != nil {
-		return nil, nil, 0, protocol.NewError(503, protocol.CodeHierarchyFailed, "公开树构造失败")
+		return nil, nil, 0, visualHint{},
+			protocol.NewError(503, protocol.CodeHierarchyFailed, "公开树构造失败")
 	}
 	if len(compactBytes) > e.cfg.MaxFullTreeBytes {
-		return nil, nil, 0, budgetError("public_full", e.cfg.MaxFullTreeBytes)
+		return nil, nil, 0, visualHint{}, budgetError("public_full", e.cfg.MaxFullTreeBytes)
 	}
 	cost, err := observation.SnapshotCost(&cap, projection.Tree)
 	if err != nil {
-		return nil, nil, 0, protocol.NewError(503, protocol.CodeHierarchyFailed, "公开树构造失败")
+		return nil, nil, 0, visualHint{},
+			protocol.NewError(503, protocol.CodeHierarchyFailed, "公开树构造失败")
 	}
 	if cost > e.cfg.MaxSnapshotCostBytes {
-		return nil, nil, 0, budgetError("internal_snapshot", e.cfg.MaxSnapshotCostBytes)
+		return nil, nil, 0, visualHint{},
+			budgetError("internal_snapshot", e.cfg.MaxSnapshotCostBytes)
 	}
-	return compact, compactBytes, cost, nil
+	kind, raw := observation.InferVisualHint(projection.Tree, cap.Foreground.State)
+	return compact, compactBytes, cost, visualHint{kind: kind, raw: raw}, nil
 }
 
 // readImageForAcquisition reads the requested image and confirms that the
@@ -1198,15 +1267,18 @@ func screenOf(display device.Display) *protocol.Screen {
 }
 
 // observationPublicLocked is the single committed observation projection. The
-// status, the optional image and the settle quality are decided by the
-// acquisition; everything else keeps its fixed public meaning.
+// status, the optional image, the settle quality and the already-decided visual
+// hint are supplied by the acquisition; everything else keeps its fixed public
+// meaning.
 func (e *Engine) observationPublicLocked(obs *observationState, status string, full *protocol.ReadTree,
-	delta *protocol.ReadDelta, image *protocol.ImageMeta, quality *protocol.Quality) *protocol.Observation {
+	delta *protocol.ReadDelta, image *protocol.ImageMeta, quality *protocol.Quality,
+	visual string) *protocol.Observation {
 	observation := &protocol.Observation{
 		Status: status, ID: obs.ID, Origin: obs.Origin, Revision: obs.Revision,
 		CapturedAt: formatTime(obs.CapturedAt), ActionableUntil: formatTime(obs.ActionableUntil),
 		Quality: quality,
 		Screen:  screenOf(obs.Screen),
+		Visual:  visual,
 	}
 	foreground := &protocol.Foreground{State: obs.Foreground.State}
 	switch obs.Foreground.State {

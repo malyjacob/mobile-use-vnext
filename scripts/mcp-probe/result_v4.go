@@ -296,7 +296,7 @@ func v4Split(rest string) ([]string, *checkError) {
 
 func isV4BlockHeader(line string) bool {
 	for _, prefix := range []string{
-		"tree v4 ", "inspect v3 ", "shell v1 ", "timeline v1 ",
+		"tree v5 ", "inspect v3 ", "shell v1 ", "timeline v1 ",
 		"app_items v1 ", "app_tasks v1 ",
 	} {
 		if strings.HasPrefix(line, prefix) {
@@ -323,7 +323,7 @@ func isForeignV4BlockHeader(line string) bool {
 func (p *v4Parser) decodeBlock(lines []string, start int) (int, *checkError) {
 	line := lines[start]
 	switch {
-	case strings.HasPrefix(line, "tree v4 "):
+	case strings.HasPrefix(line, "tree v5 "):
 		if failure := p.enter(15); failure != nil {
 			return 0, failure
 		}
@@ -1048,7 +1048,7 @@ func (p *v4Parser) decodeObs(line string) *checkError {
 		id = tokens[0]
 		index++
 	}
-	order := map[string]int{"status": 0, "fg": 1, "at": 2, "quality": 3, "screen": 4, "rot": 5, "missing": 6}
+	order := map[string]int{"status": 0, "fg": 1, "at": 2, "visual": 3, "quality": 4, "screen": 5, "rot": 6, "missing": 7}
 	last := -1
 	var statusToken string
 	var rotation int
@@ -1081,6 +1081,13 @@ func (p *v4Parser) decodeObs(line string) *checkError {
 				return failf("text_result_obs_invalid", field("field", "at"))
 			}
 			if failure := p.set([]string{"observation", "captured_at"}, value); failure != nil {
+				return failure
+			}
+		case "visual":
+			if !validVisualHintToken(value) {
+				return failf("text_result_obs_invalid", field("field", "visual"))
+			}
+			if failure := p.set([]string{"observation", "visual"}, value); failure != nil {
 				return failure
 			}
 		case "quality":
@@ -1148,6 +1155,31 @@ func (p *v4Parser) decodeObs(line string) *checkError {
 	}
 	p.haveObs = true
 	return nil
+}
+
+// validVisualHintToken repeats the frozen visual classification grammar: the
+// sparse-tree hint or a whole-page foreground-image percentage clamped to the
+// published 45..100 interval. Any other value would not be one the projection
+// can compute, so the probe rejects it.
+func validVisualHintToken(value string) bool {
+	if value == "sparse_tree" {
+		return true
+	}
+	rest, found := strings.CutPrefix(value, "image_heavy(")
+	if !found || !strings.HasSuffix(rest, "%)") {
+		return false
+	}
+	digits := strings.TrimSuffix(rest, "%)")
+	if digits == "" || digits[0] < '1' || digits[0] > '9' {
+		return false
+	}
+	for index := 1; index < len(digits); index++ {
+		if digits[index] < '0' || digits[index] > '9' {
+			return false
+		}
+	}
+	percent, err := strconv.Atoi(digits)
+	return err == nil && percent >= 45 && percent <= 100
 }
 
 func parseForegroundToken(token string) any {

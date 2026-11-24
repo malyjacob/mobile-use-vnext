@@ -319,6 +319,7 @@ type Observation struct {
 	Quality         *Quality
 	Screen          *Screen
 	Foreground      *Foreground
+	Visual          string
 	Tree            *ReadTreeValue
 	Missing         []string
 	Image           *ImageMeta
@@ -400,6 +401,14 @@ func (o *Observation) MarshalJSONTo(enc *jsontext.Encoder) error {
 			return err
 		}
 		if err := MarshalJSONTo(enc, o.Foreground); err != nil {
+			return err
+		}
+	}
+	if o.Visual != "" {
+		if err := writeName(enc, "visual"); err != nil {
+			return err
+		}
+		if err := writeString(enc, o.Visual); err != nil {
 			return err
 		}
 	}

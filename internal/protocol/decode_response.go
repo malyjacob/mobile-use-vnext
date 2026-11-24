@@ -364,6 +364,7 @@ func (o *Observation) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 		Quality         member[*Quality] `json:"quality"`
 		Screen          *Screen          `json:"screen"`
 		Foreground      *Foreground      `json:"foreground"`
+		Visual          member[string]   `json:"visual"`
 		Tree            *ReadTreeValue   `json:"tree"`
 		Missing         member[[]string] `json:"missing"`
 		Image           *ImageMeta       `json:"image"`
@@ -392,6 +393,12 @@ func (o *Observation) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 	}
 	if wire.Missing.Present {
 		o.Missing = wire.Missing.Value
+	}
+	if wire.Visual.Present {
+		if wire.Visual.Value == "" {
+			return fmt.Errorf("observation.visual must not be empty")
+		}
+		o.Visual = wire.Visual.Value
 	}
 	return nil
 }
