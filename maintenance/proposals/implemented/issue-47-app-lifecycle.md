@@ -1,7 +1,8 @@
 # 提案：允许 app 分支冗余入参，按会话归属强停 Android 用户下的应用包
 
-状态：提案，未实现。
+状态：已实现（契约 31）。实现提交：`0479df7eb87511725717712c6cae2369fc7027b3`。
 基线提交：`d65c97653adb262e750b1e8879e1937a3b8035d7`（分支 `master`，2026-11-25）。
+验证记录：[issue-47-app-lifecycle](../../verification/issue-47-app-lifecycle.md)。
 适用范围：HTTP、MCP、强类型客户端的 app 工具；虚屏任务和包的生命周期。
 影响范围：internal/{protocol,engine,device,android,client,mcp}、探针、release、docs。
 契约（`/api/*` 字段与 `contract_version`）：改变。以 30 为基线升至 31。
@@ -135,7 +136,7 @@ kill 增加派发前身份重验和派发后的任务/进程读取，调用者�
 
 ### 8.3 记录
 
-maintenance/verification/issue-47-app-lifecycle.md 记录源码提交、环境、命令、观察与缺口；分别记录磁盘替换、独立进程验证及依赖方切换。当前未执行。
+maintenance/verification/issue-47-app-lifecycle.md 记录源码提交、环境、命令、观察与缺口；分别记录磁盘替换、独立进程验证及依赖方切换。已执行，见该记录。
 
 ## 9. 已定与未决
 
@@ -161,17 +162,62 @@ maintenance/verification/issue-47-app-lifecycle.md 记录源码提交、环境�
 5. 推送实现与归档提交至本仓库约定的远端分支，核对远端提交可访问。提交信息避免提前自动关闭 issue。
 6. 在 #47 回复实际发行/契约、七分支与生命周期示例、保护条件、实机和双端探针结论，并链接实现提交与验证记录。核对回复可见后关闭 #47，再核对状态为 CLOSED。关键验收未完成则记录阻塞，保留 OPEN。
 
-## 11. 实现结果（归档时补写）
+## 11. 实现结果
 
 ### 11.1 已落地
 
-待归档填写。
+- **入参归一化（HTTP/MCP/typed client）**：七个 kind 共享严格封闭的已声明顶层成员；根对象与
+  `target` 嵌套仍拒绝未知键、重复键、大小写变体、尾随值与显式 `null`，嵌套值只做类型检查；
+  仅生效成员进入 `AppRequest`，冗余成员被忽略。`list` 与五个变更分支缺失/空 `reference`
+  返回具名 `422 invalid_request`（`details.field=reference`）；`kill` 接受 `task_id` 或包名。
+- **关闭资格**：`close` 对确认移除的 owned 窗口按用户读取安装身份，在归属仍有效的同一 epoch
+  提交中建立资格；绑定会话、显示 ID/代次、boot、Android 用户、包与安装身份；borrowed、
+  未确认移除、旧会话迟到结果不建立；身份未知时 close 成功但不建立资格；5 分钟单调时钟、
+  最多 64 条、按包与用户合并、满载淘汰最早、查询不续期；会话撤权、显示代次失效、handoff、
+  外部使用或安装身份变化撤销。
+- **包级强停**：`kill` 支持 `target.task_id` 与 `target.app`；全设备同包 live 任务必须为
+  本会话 owned，空任务集仅凭唯一有效关闭资格；按任务清单解析并核验 Android 用户，锁外读取
+  任务快照、安装身份、进程、前台服务、播放、root 与执行身份，认领后派发前重验；对整包只
+  派发一次 `am force-stop --user <id> <pkg>`，不逐 PID kill、不操作任务窗口；STOP 派发前
+  不派发、已派发命令不伪称撤回；按回执区分 `not_executed`/`uncertain`/`executed`，最终
+  有界采样同包同用户任务与进程并据证据清理注册与资格。
+- **结果与投影**：`kill` 输出 `package`、`android_user_id`、`source_task_id`、
+  `target_task_ids`、`display_id`、`remaining_task_ids`、`target_pids`、`killed_pids`、
+  `remaining_pids`、`restarted`（不可比较显式 null）与 `package_state`
+  （`stopped_at_check`/`still_present`/`unknown`）；集合完整且空才 `[]`，未知省略；删除
+  契约 30 的空原进程集预填规则。MCP 文本与七行矩阵、独立探针、README 与 9 份 docs 同步；
+  版本源升至 `0.35.0/31/37`。
+- **验证**：`go build ./...`、`go vet ./...`、非 engine 全部包与 `internal/engine` 全量
+  （`813.608s`）、`scripts/mcp-probe` 均通过；`generate-version.ps1 -Check` 通过；
+  `docs/`+README 独立只读审计两轮后 CLEAN。实机整组覆盖部署（保留 App 私有数据）、主机
+  stdio 与手机 HTTP MCP 探针、虚屏前台强停、close 后按包强停后台、主屏重开拒绝均已执行；
+  细节、采样时点、结果与缺口见[验证记录](../../verification/issue-47-app-lifecycle.md)。
 
 ### 11.2 与提案不同或未执行
 
-待归档填写。
+- **进程集合不冻结**：派发前重验只要求任务集合、用户、安装身份与执行身份一致；正常 PID
+  增减不阻断（force-stop 是包级命令），`target_pids` 取派发前最后一次读取。提案 §5.4 原
+  表述的“任务快照及设备身份”未要求逐 PID 冻结，实机与实现按此执行。
+- **他屏任务**：实现统一在“其他显示屏仍有同包 live 任务”时返回
+  `kill_refused_task_elsewhere` 并拒绝，会话自有登记只存在于会话显示屏，实际不会出现
+  owned 他屏任务；与“全部同包 live 任务 owned 即可”的理论口径不同，文档已按实际行为写明。
+- **close 身份读取时点**：在逐项移除前按用户读取安装身份，并给附加读取设置子截止以保留
+  既有工作期给关窗和 recents；未改为关闭后读取，避免 close 期间重装被误绑为新身份。
+- **未采样前台服务证据**：未新增结果字段。`kill` 的前台服务/播放证据是派发前门禁，未知即
+  拒绝；MCP/docs 说明该阶段，不把未采样包装成已知，也不为统一展示额外扫描设备。
+- **MCP 文本列**：保留 `task=` 列（`open`/`claim`/`handoff` 需要），新字段按实际行序
+  `pkg task user src_task target_tasks ...` 投影。
+- **发现字节预算**：`internal/mcp` 测试的 discovery 上限由 38200 调至 40000，
+  `CatalogFingerprint` 基线随之更新；这是测试常量，不改变发布契约。
+- **未执行**：跨 Android 用户、资格真实到期/淘汰、多个 owned 窗口的实机场景未执行（本机仅
+  user 0，其余由单测覆盖）；主机 stdio app-lifecycle 的 `app_kill_package` 因受控 reopen
+  `task_focus_unavailable` SKIP，由手机 HTTP app-lifecycle 与手动第二场景覆盖；依赖方
+  MCP 进程/重连由用户处理。
 
-提案审阅取舍：采纳身份区分、有限资格、只读查询及可发现性测试。保留用户确认的包级路线；沿用现有错误详情和分支证据，避免维护第二份矩阵或将缺少的采样包装为已知结果。
+提案审阅取舍：采纳身份区分、有限资格、只读查询及可发现性测试。保留用户确认的包级路线；
+沿用现有错误详情和分支证据，避免维护第二份矩阵或将缺少的采样包装为已知结果。实现审阅中
+采纳了“进程集合不冻结”“他屏 owned 仅位置限制分档”和“close 身份读取保留在移除前”的
+证据取舍；未新增 kill 错误码。
 
 ## 附：本提案不改变的事项
 
