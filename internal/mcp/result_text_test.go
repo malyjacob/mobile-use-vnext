@@ -893,6 +893,10 @@ func decodeResultV4ObservationLine(line string, root map[string]any) error {
 			observation["captured_at"] = value
 		case "visual":
 			observation["visual"] = value
+		case "change":
+			observation["tree_change"] = value
+		case "hint":
+			observation["hint"] = value
 		case "quality":
 			quality, err := decodeResultV4QualityToken(value)
 			if err != nil {

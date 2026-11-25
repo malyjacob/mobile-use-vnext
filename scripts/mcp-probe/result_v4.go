@@ -1048,7 +1048,7 @@ func (p *v4Parser) decodeObs(line string) *checkError {
 		id = tokens[0]
 		index++
 	}
-	order := map[string]int{"status": 0, "fg": 1, "at": 2, "visual": 3, "quality": 4, "screen": 5, "rot": 6, "missing": 7}
+	order := map[string]int{"status": 0, "fg": 1, "at": 2, "visual": 3, "change": 4, "hint": 5, "quality": 6, "screen": 7, "rot": 8, "missing": 9}
 	last := -1
 	var statusToken string
 	var rotation int
@@ -1088,6 +1088,20 @@ func (p *v4Parser) decodeObs(line string) *checkError {
 				return failf("text_result_obs_invalid", field("field", "visual"))
 			}
 			if failure := p.set([]string{"observation", "visual"}, value); failure != nil {
+				return failure
+			}
+		case "change":
+			if !validTreeChangeToken(value) {
+				return failf("text_result_obs_invalid", field("field", "change"))
+			}
+			if failure := p.set([]string{"observation", "tree_change"}, value); failure != nil {
+				return failure
+			}
+		case "hint":
+			if !validObservationHintToken(value) {
+				return failf("text_result_obs_invalid", field("field", "hint"))
+			}
+			if failure := p.set([]string{"observation", "hint"}, value); failure != nil {
 				return failure
 			}
 		case "quality":
@@ -1157,12 +1171,11 @@ func (p *v4Parser) decodeObs(line string) *checkError {
 	return nil
 }
 
-// validVisualHintToken repeats the frozen visual classification grammar: the
-// sparse-tree hint or a whole-page foreground-image percentage clamped to the
-// published 45..100 interval. Any other value would not be one the projection
-// can compute, so the probe rejects it.
+// validVisualHintToken checks the published visual grammar independently of
+// the server, including the canonical image percentage range of 45..100.
 func validVisualHintToken(value string) bool {
-	if value == "sparse_tree" {
+	switch value {
+	case "loading", "media_surface", "sparse_tree":
 		return true
 	}
 	rest, found := strings.CutPrefix(value, "image_heavy(")
@@ -1180,6 +1193,14 @@ func validVisualHintToken(value string) bool {
 	}
 	percent, err := strconv.Atoi(digits)
 	return err == nil && percent >= 45 && percent <= 100
+}
+
+func validTreeChangeToken(value string) bool {
+	return value == "unchanged" || value == "detail_only" || value == "matched_base"
+}
+
+func validObservationHintToken(value string) bool {
+	return value == "snap" || value == "wait_for"
 }
 
 func parseForegroundToken(token string) any {

@@ -62,7 +62,7 @@ func (e *Engine) deliverRejectedObservation(work *workState, session *sessionSta
 		selection = treeSelection{allowedBaseID: obs.ID}
 	}
 	public, _, publishErr := e.publishTreeAttempt(work, session, "act.delivery", tree,
-		tree.capture.CapturedAt, selection, "complete", nil, quality)
+		tree.capture.CapturedAt, selection, "complete", nil, quality, nil)
 	if publishErr != nil {
 		e.logQuality(work.OperationID, "act.delivery", nil, quality)
 		e.logDelivery(work, "failed", publishErr.Code, "")

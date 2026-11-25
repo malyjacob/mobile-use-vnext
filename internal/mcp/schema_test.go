@@ -19,16 +19,9 @@ import (
 // server/discover, so the same server instructions must appear there too.
 const compatibilityProtocolVersion = "2025-11-25"
 
-// baselineDiscoveryBytes is the measured discovery payload ceiling: instructions
-// plus the complete tools/list JSON. The deduplicated instructions and
-// descriptions must stay strictly below it. The current ceiling covers the
-// text auto_submit/submit_ref contract (result v4 partial, write/submit
-// snapshot and text_submit_not_executed), the four-tier scroll amount, the
-// scroll axis-fallback guidance, the contract-28 visual hint plus binary
-// center-point tree legend, and the contract-29 truncation column with the
-// flattened narrow net body (label whitespace purification, actionable
-// 250-code-point cut and the set-line truncated=true|false tri-state).
-const baselineDiscoveryBytes = 37500
+// baselineDiscoveryBytes caps the instructions plus the complete tools/list
+// JSON. Contract 30 adds observation change and hint guidance to this budget.
+const baselineDiscoveryBytes = 38200
 
 // TestTreeTextGuideStatesTriStateOmission pins the shared tree legend to the
 // complete-node defaults and the different set semantics.
@@ -138,13 +131,19 @@ func TestTreeTextGuideStatesResultV4AndTreeV5(t *testing.T) {
 		"非 `executed`、错误结果与带 `state=` 的重放摘要一律显式输出",
 		"`text`/`both` 是面向调用的紧凑投影",
 		"`structured` 保留完整审计字段",
-		"`obs [<O>] [status=…] [fg=…] [at=HH:MM:SS] [visual=<token>] [screen=<W>x<H>[@<display_id>]] [rot=<1|2|3>] [missing=…]`",
+		"`obs [<O>] [status=…] [fg=…] [at=HH:MM:SS] [visual=<token>] [change=<token>] [hint=<token>] [screen=<W>x<H>[@<display_id>]] [rot=<1|2|3>] [missing=…]`",
 		"`obs ` 后首个不含 `=` 的字段是完整 O",
 		"`status=complete` 省略",
 		"`fg` 写 `<包名>#<task_id>`、`<包名>`、`#<task_id>`、`present`、`none` 或 `unknown(<reason>)`",
 		"`visual` 为视觉提示",
-		"`sparse_tree`/`image_heavy(<pct>%)`",
-		"同态 `delta` 省略",
+		"`loading`/`image_heavy(<pct>%)`（45–100）/`media_surface`/`sparse_tree`",
+		"`loading` 在 `delta` 也保留，其余同态 `delta` 省略",
+		"`change` 仅见于 `act` 常规成功且比较前后树",
+		"`unchanged` 前后紧凑树与完整树均相同",
+		"`detail_only` 紧凑树相同但完整树细节有变",
+		"`matched_base` 前后树内容或公开语境有变且零差异命中历史基线",
+		"`hint=snap` 建议用同一 O 截图核对（只读，不消费、不发布 O）",
+		"`hint=wait_for` 表示可能仍在加载或过渡",
 		"`obs.image` 与顶层 `image` 同字段同顺序",
 		"`screen` 仅在带 `session` 或无树帧输出",
 		"`rot` 在非零旋转时始终输出",
@@ -724,7 +723,8 @@ func TestToolDescriptionsAreCallerOriented(t *testing.T) {
 			"不续租",
 		},
 		"snap": {
-			"不读取节点树",
+			"`hint=snap` 只读核对",
+			"不读取树、不消费 O、不发布新 O",
 			"ImageContent",
 			"`image <W>x<H> read_only screen=",
 			"不续租",
@@ -782,6 +782,9 @@ func TestToolDescriptionsAreCallerOriented(t *testing.T) {
 			"inspect({reference:原 O,node:诊断 ref})",
 			"target_changed",
 			"`obs` 行",
+			"`change=` 树变化",
+			"`matched_base` 为前后有变、零差异命中历史基线，不是没生效",
+			"`hint=` 建议截图或等待",
 			"`!tap`/`!text`/`!swipe`",
 			"`@` 表示",
 			"uncertain",
@@ -978,7 +981,12 @@ func TestLiveToolDescriptionsClarifyWaitAndTextRecovery(t *testing.T) {
 		"inspect({reference:原 act 的 O,node:诊断 ref})",
 		"链下缩进的孩子属于链尾",
 		"`result v4 <ok|err> [op=…] [state=…] [outcome=…] [phase=…]`",
-		"`obs [<O>] [status=…] [fg=…] [at=HH:MM:SS] [visual=<token>]",
+		"`obs [<O>] [status=…] [fg=…] [at=HH:MM:SS] [visual=<token>] [change=<token>] [hint=<token>]",
+		"`hint=snap` 用同一 O 调 snap 核对画面",
+		"`hint=wait_for` 用 wait_for 等条件或稳定",
+		"`change` 表示 `act` 前后树比较",
+		"`detail_only` 仅完整树细节有变",
+		"`matched_base` 前后有变、零差异命中历史基线",
 		"tree v5 full nodes=<n>",
 		"`base=_72`",
 		"`@` 表示与同一定义中最近已交付几何的严格祖先同形同值",

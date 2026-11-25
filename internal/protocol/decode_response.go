@@ -365,6 +365,8 @@ func (o *Observation) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 		Screen          *Screen          `json:"screen"`
 		Foreground      *Foreground      `json:"foreground"`
 		Visual          member[string]   `json:"visual"`
+		TreeChange      member[string]   `json:"tree_change"`
+		Hint            member[string]   `json:"hint"`
 		Tree            *ReadTreeValue   `json:"tree"`
 		Missing         member[[]string] `json:"missing"`
 		Image           *ImageMeta       `json:"image"`
@@ -377,6 +379,15 @@ func (o *Observation) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 	if err != nil {
 		return err
 	}
+	if wire.Visual.Present && wire.Visual.Value == "" {
+		return fmt.Errorf("observation.visual must not be empty")
+	}
+	if wire.TreeChange.Present && wire.TreeChange.Value == "" {
+		return fmt.Errorf("observation.tree_change must not be empty")
+	}
+	if wire.Hint.Present && wire.Hint.Value == "" {
+		return fmt.Errorf("observation.hint must not be empty")
+	}
 	*o = Observation{
 		Status:          status,
 		ID:              wire.ID.Value,
@@ -387,18 +398,15 @@ func (o *Observation) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 		Quality:         wire.Quality.Value,
 		Screen:          wire.Screen,
 		Foreground:      wire.Foreground,
+		Visual:          wire.Visual.Value,
+		TreeChange:      wire.TreeChange.Value,
+		Hint:            wire.Hint.Value,
 		Tree:            wire.Tree,
 		Image:           wire.Image,
 		Error:           wire.Error,
 	}
 	if wire.Missing.Present {
 		o.Missing = wire.Missing.Value
-	}
-	if wire.Visual.Present {
-		if wire.Visual.Value == "" {
-			return fmt.Errorf("observation.visual must not be empty")
-		}
-		o.Visual = wire.Visual.Value
 	}
 	return nil
 }

@@ -7,8 +7,8 @@ HTTP 协议配对。
 
 - 模块：`github.com/malyjacob/mobile-use-vnext`
 - Go：1.27.1，启用 `GOEXPERIMENT=jsonv2`
-- 契约：`contract_version = "29"`，服务、HTTP 客户端、控制 App 精确相等才做普通工作
-- 发行：`0.33.0`；`release/versions.json` 是发行号、契约号与 Android versionCode（35）的唯一
+- 契约：`contract_version = "30"`，服务、HTTP 客户端、控制 App 精确相等才做普通工作
+- 发行：`0.34.0`；`release/versions.json` 是发行号、契约号与 Android versionCode（36）的唯一
   来源，构建生成 Go/Java 常量
 
 ## 能力边界
@@ -36,9 +36,10 @@ HTTP 协议配对。
   图子树识别等价静态图标容器并按真叶/图标容器分桶，透明匿名包装层限深穿透，列表回收与同
   坐标换卡仍分配新号。`inspect` 的 `detailed` 视图仍交付保留快照的全部节点、完整未截断的
   label 与已知四元矩形，节点定义不出现 `truncated`。
-- 观察可带可选 `visual` 提示（`image_heavy(<pct>%)` 或 `sparse_tree`）：`full` 给出本次值
-  （空则省略），`delta` 仅在非空分类相较上一帧变化时给出，用于提示按需 `snap`；普通树文本块
-  为 `tree v5`。
+- 观察可带可选 `visual` 分类（`loading`、`image_heavy(<pct>%)`、`media_surface` 或
+  `sparse_tree`）：`full` 给出本次值（空则省略），`delta` 中 `loading` 不省略、其余三类仅在
+  分类变化时给出；`act` 常规成功另可带 `tree_change`（`unchanged`/`detail_only`/`matched_base`）
+  与只读 `hint`（`snap`/`wait_for`），用于按需截图核对或等待。普通树文本块为 `tree v5`。
 - 控制端为 `POST /v1/control/sync|stop`；同步下发控制视图、至多一条显示命令与未确认的 Agent
   消息，独立 STOP 只绑定停止边界，见 [控制端协议](docs/control-protocol.md)。
 - `notify` 保存的消息通过控制同步进入 App 消息中心与系统通知；`notification.state=pending`
@@ -180,7 +181,7 @@ $env:GOEXPERIMENT = 'jsonv2'; go test ./...
 ## 接口
 
 Agent 工具（`POST /api/<tool>`，`Authorization: Bearer <agent_token>`，
-`X-Mobile-Use-Contract: 29`）：
+`X-Mobile-Use-Contract: 30`）：
 
 | 工具 | 说明 |
 | --- | --- |

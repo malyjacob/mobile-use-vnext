@@ -36,9 +36,9 @@
 | `android_version_code` | Android versionCode，写入 `AndroidManifest.xml` 与清单 |
 | `source_commit` | 该版本号冻结时的基线提交（仅供校验）；清单记录构建时的 HEAD |
 
-当前版本源为 `release_version=0.33.0`、`contract_version=29`、`android_version_code=35`；三者
+当前版本源为 `release_version=0.34.0`、`contract_version=30`、`android_version_code=36`；三者
 在 `release/versions.json` 中手改，Go、Java 和 XML 构建常量由生成脚本写入。版本源当前记录
-的冻结基线为 `7a1fe518833ae224896c174eaf2720e020bf4e45`；发布清单的 `source_commit` 记录
+的冻结基线为 `18fb2b1fb5e78774e5ffc570413517a823a18085`；发布清单的 `source_commit` 记录
 实际构建时的干净实现 `HEAD`，不复制这个冻结基线。
 
 `scripts/generate-version.ps1` 生成：
@@ -74,8 +74,8 @@
 {
   "format": "mobile-use-vnext-release",
   "version": 1,
-  "release_version": "0.33.0",
-  "contract_version": 29,
+  "release_version": "0.34.0",
+  "contract_version": 30,
   "source_commit": "<40 位提交>",
   "source_dirty": false,
   "built_at": "…",
@@ -83,7 +83,7 @@
   "go_experiment": "jsonv2",
   "build_target": {"goos": "linux", "goarch": "arm64", "cgo_enabled": false},
   "mcp": {"sdk": "github.com/modelcontextprotocol/go-sdk v1.8.0", "protocol": "2026-07-28"},
-  "android": {"package": "com.mobileuse.vnext", "version_name": "0.33.0", "version_code": 35},
+  "android": {"package": "com.mobileuse.vnext", "version_name": "0.34.0", "version_code": 36},
   "tool_catalog": {"count": 13, "sha256": "…"},
   "artifacts": [{"name": "device-service", "path": "device-service", "sha256": "…", "bytes": 0}]
 }

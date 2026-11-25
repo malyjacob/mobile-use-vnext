@@ -41,7 +41,7 @@ adb forward          主机 18881 → 服务；主机 18883 → 手机 MCP
    `adb forward`，也不需要 Agent token。
 
 只需要直连 HTTP 的 Agent 则使用 `http://127.0.0.1:18881/api/<tool>`、`agent_token` 与
-`X-Mobile-Use-Contract: 29`。
+`X-Mobile-Use-Contract: 30`。
 
 ## 1. 默认部署后的网络与进程
 
@@ -236,12 +236,19 @@ MCP 适配器对每次工具调用提供 `both`、`text`、`structured` 三种�
 `text` 中每次观察写成单行，`obs ` 之后首个不含 `=` 的字段是完整 `O`：
 
 ```text
-obs [<O>] [status=…] [fg=…] [at=HH:MM:SS] [visual=…] [screen=<W>x<H>[@<display_id>]] [rot=…] [missing=…]
+obs [<O>] [status=…] [fg=…] [at=HH:MM:SS] [visual=…] [change=…] [hint=…] [screen=<W>x<H>[@<display_id>]] [rot=…] [missing=…]
 ```
 
 结构化结果中该编号仍是 `observation.id`。`visual` 仅在观察带该字段时出现，取值为
-`image_heavy(<pct>%)` 或 `sparse_tree`；`full` 观察输出本次分类，`delta` 仅在同会话、同显示
-代次的视觉状态变化时输出，`structured` 的 `observation.visual` 使用同一值。可见 O/P 形如
+`loading`/`image_heavy(<pct>%)`/`media_surface`/`sparse_tree`（判据见
+[接口契约](interface.md#observation-与-quality)）；`full` 观察输出本次分类，`delta` 中
+`loading` 不省略、其余三类仅在同会话、同显示代次的分类变化时输出，`structured` 的
+`observation.visual` 使用同一值。`change` 映射 `observation.tree_change`，只在 `act` 常规
+成功时出现（`unchanged`/`detail_only`/`matched_base`；常规内容变化时省略，`unchanged` 不
+要求本次差分为空）；`hint` 映射 `observation.hint`
+（`snap`/`wait_for`）。调用方按 `hint` 分流：`hint=snap` 用同一 O 调 `snap` 核对画面（只读，
+不消费也不发布 O）；`hint=wait_for` 用 `wait_for` 等条件或稳定；`change=matched_base` 表示
+前后树内容或公开语境有变、只是差分零差异命中历史基线，不是动作没生效。可见 O/P 形如
 `O4821_72` 与 `P7391_12`：
 `O`/`P` 后接 4 位十进制实例标签（`1000`–`9999`，无前导零）、`_` 与单调序号，与 `/api/*`
 使用同一编号。`start` 首帧的会话屏 `display_id` 从 `obs` 行的
@@ -339,7 +346,7 @@ HTTP 宿主在原有 `Authorization` 头之外按需添加：
 
 ```text
 Authorization: Bearer <agent_token>
-X-Mobile-Use-Contract: 29
+X-Mobile-Use-Contract: 30
 Content-Type: application/json; charset=utf-8
 ```
 
@@ -347,7 +354,7 @@ Content-Type: application/json; charset=utf-8
 $deploy = Get-Content .state/deploy.json -Raw | ConvertFrom-Json
 $headers = @{
     Authorization           = "Bearer $($deploy.agent_token)"
-    'X-Mobile-Use-Contract' = '29'
+    'X-Mobile-Use-Contract' = '30'
 }
 Invoke-RestMethod http://127.0.0.1:18881/api/status -Method Post `
   -Headers $headers -ContentType 'application/json' -Body '{}'
@@ -592,7 +599,7 @@ Header: Authorization: Bearer <mcp_token>
 两种选择：
 
 ```text
-直连 HTTP:  http://127.0.0.1:18880/api/<tool>   + agent_token + X-Mobile-Use-Contract: 29
+直连 HTTP:  http://127.0.0.1:18880/api/<tool>   + agent_token + X-Mobile-Use-Contract: 30
 MCP HTTP:   http://127.0.0.1:18882/mcp          + mcp_token
 ```
 
@@ -672,7 +679,7 @@ adb shell su -c 'tail -n 50 /data/local/chroots/debian13/var/lib/mobile-use-vnex
 
 升级后：
 
-- 服务、App、适配器与客户端共同使用同一个 `contract_version`（当前 `29`）；
+- 服务、App、适配器与客户端共同使用同一个 `contract_version`（当前 `30`）；
 - 重新建立可能失效的转发；
 - 重启实际 MCP 宿主进程，不能只替换磁盘文件；
 - 旧会话转退休记录，不恢复旧 O/P 或主屏授权；旧 cleanup 的 `pending`/`unconfirmed` 可继续
@@ -779,7 +786,7 @@ GET 判断工具是否可用。
 $deploy = Get-Content .state/deploy.json -Raw | ConvertFrom-Json
 $headers = @{
     Authorization           = "Bearer $($deploy.agent_token)"
-    'X-Mobile-Use-Contract' = '29'
+    'X-Mobile-Use-Contract' = '30'
 }
 $start = Invoke-RestMethod http://127.0.0.1:18881/api/start -Method Post `
   -Headers $headers -ContentType 'application/json' -Body '{}'

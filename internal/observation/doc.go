@@ -48,11 +48,17 @@
 //
 // # Visual hint
 //
-// InferVisualHint classifies one complete public tree against the fixed screen
-// rectangle. The union of large foreground pictures on a text-poor page reports
-// "image_heavy(<pct>%)"; an open application whose page has almost no readable text
-// and almost no interactive control reports "sparse_tree". The classifier is a pure
-// function: it reads no pixels, performs no device call and hides no content.
+// ClassifyVisual uses the complete public tree, optional raw capture, and
+// optional settle quality. It returns the first applicable class in this order:
+// "loading" for low-content pages with a progress indicator or qualifying
+// instability, "image_heavy(<pct>%)" for substantial foreground image coverage,
+// "media_surface" for substantial media view coverage on a low-content page,
+// and "sparse_tree" for pages with little readable text and few controls.
+// Classification uses only the supplied in-memory facts.
+//
+// EqualCompactContent and EqualPublicTreeContent compare ordered logical tree
+// contents independently of ref numbering. Compact comparison also checks the
+// view and expands historical chains when needed.
 //
 // # Refs and continuity
 //

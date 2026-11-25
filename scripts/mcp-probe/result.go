@@ -170,6 +170,8 @@ type observationView struct {
 	Revision   int             `json:"revision"`
 	CapturedAt string          `json:"captured_at"`
 	Visual     string          `json:"visual"`
+	TreeChange string          `json:"tree_change"`
+	Hint       string          `json:"hint"`
 	Quality    *qualityView    `json:"quality"`
 	Screen     *screenView     `json:"screen"`
 	Foreground *foregroundView `json:"foreground"`
@@ -373,8 +375,8 @@ func project(result *sdk.CallToolResult, mode string, requestRefs ...string) (*c
 	if failure := checkTextInputSnapshot(projected.view.TextInput); failure != nil {
 		return nil, failure
 	}
-	// The readable tree body and the optional visual classification member are
-	// verified on the decoded projection, so every result mode shares one gate.
+	// Every result mode shares the checks on decoded observation metadata and
+	// the tree projection.
 	if failure := checkProjectionConsistency(projected); failure != nil {
 		return nil, failure
 	}

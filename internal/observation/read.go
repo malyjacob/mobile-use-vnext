@@ -712,11 +712,42 @@ func ReadEqual(a, b *protocol.ReadTree) bool {
 	return equalReadNode(left.Root, right.Root)
 }
 
+// EqualCompactContent compares the logical contents of two read trees while
+// ignoring refs. Ordinary trees are compared directly without allocating.
+func EqualCompactContent(a, b *protocol.ReadTree) bool {
+	if a == nil || b == nil || a.Root == nil || b.Root == nil || a.View != b.View {
+		return false
+	}
+	if readTreeHasChain(a.Root) || readTreeHasChain(b.Root) {
+		a, b = UnpackTree(a), UnpackTree(b)
+	}
+	return equalReadNodes(a.Root, b.Root, false)
+}
+
+func readTreeHasChain(n *protocol.ReadNode) bool {
+	if n == nil {
+		return false
+	}
+	if len(n.Chain) > 0 {
+		return true
+	}
+	for _, child := range n.Children {
+		if readTreeHasChain(child) {
+			return true
+		}
+	}
+	return false
+}
+
 func equalReadNode(a, b *protocol.ReadNode) bool {
+	return equalReadNodes(a, b, true)
+}
+
+func equalReadNodes(a, b *protocol.ReadNode, compareRefs bool) bool {
 	if a == nil || b == nil {
 		return a == b
 	}
-	if a.Ref != b.Ref || a.Role != b.Role || a.Context != b.Context || a.Truncated != b.Truncated {
+	if (compareRefs && a.Ref != b.Ref) || a.Role != b.Role || a.Context != b.Context || a.Truncated != b.Truncated {
 		return false
 	}
 	if !a.Bounds.Equal(b.Bounds) {
@@ -740,7 +771,45 @@ func equalReadNode(a, b *protocol.ReadNode) bool {
 		return false
 	}
 	for i := range a.Children {
-		if !equalReadNode(a.Children[i], b.Children[i]) {
+		if !equalReadNodes(a.Children[i], b.Children[i], compareRefs) {
+			return false
+		}
+	}
+	return true
+}
+
+// EqualPublicTreeContent compares the logical contents of two complete public
+// trees while ignoring refs and tree format metadata.
+func EqualPublicTreeContent(a, b *protocol.Tree) bool {
+	return a != nil && b != nil && a.Root != nil && b.Root != nil && equalPublicNodes(a.Root, b.Root)
+}
+
+func equalPublicNodes(a, b *protocol.Node) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if a.Role != b.Role || a.Context != b.Context || !equalBounds(a.Bounds, b.Bounds) {
+		return false
+	}
+	if !equalStrings(a.Label, b.Label) || !equalActions(a.Actions, b.Actions) {
+		return false
+	}
+	if !equalOptionalBool(a.Enabled, b.Enabled) ||
+		!equalOptionalBool(a.Focused, b.Focused) ||
+		!equalOptionalBool(a.Selected, b.Selected) ||
+		!equalOptionalBool(a.Protected, b.Protected) ||
+		!equalOptionalBool(a.Checked, b.Checked) {
+		return false
+	}
+	if !equalOptionalString(a.Value, b.Value) || !equalOptionalString(a.Hint, b.Hint) ||
+		!equalOptionalString(a.Resource, b.Resource) {
+		return false
+	}
+	if a.Axis != b.Axis || len(a.Children) != len(b.Children) {
+		return false
+	}
+	for i := range a.Children {
+		if !equalPublicNodes(a.Children[i], b.Children[i]) {
 			return false
 		}
 	}

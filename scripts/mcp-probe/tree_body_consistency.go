@@ -9,46 +9,51 @@ import (
 	"github.com/malyjacob/mobile-use-vnext/internal/treetext"
 )
 
-// checkProjectionConsistency applies the two projection gates that need both
-// channels at once: the readable tree body must be exactly the canonical
-// projection of the structured tree, and the optional visual classification member
-// must be one the frozen grammar allows on a frame that actually carries a tree.
-// It runs on the already-decoded result, so every tool call and every result mode
-// shares it.
+// checkProjectionConsistency checks observation metadata in every result mode
+// and compares the readable and structured trees when both are delivered.
 func checkProjectionConsistency(projected *callResult) *checkError {
-	if failure := checkObservationVisual(projected); failure != nil {
+	if failure := checkObservationHints(projected); failure != nil {
 		return failure
 	}
 	return checkTreeBodyAgainstStructured(projected)
 }
 
-// checkObservationVisual validates the optional observation.visual member. The
-// member is optional, but when the projection carries it the value must be one the
-// engine can compute - the sparse classification or the clamped whole-page image
-// share - and only a frame with a tree has a page classification to report. A
-// present member that is not a string (including an explicit null) is not what the
-// structured contract declares, so it is rejected instead of being read as absent.
-func checkObservationVisual(projected *callResult) *checkError {
+// checkObservationHints validates the optional observation tokens against the
+// public grammar and checks when they can accompany a tree or image.
+func checkObservationHints(projected *callResult) *checkError {
 	if projected == nil || projected.object == nil {
 		return nil
 	}
-	observationObject, ok := projected.object["observation"].(map[string]any)
-	if !ok || observationObject == nil {
+	observation, ok := projected.object["observation"].(map[string]any)
+	if !ok || observation == nil {
 		return nil
 	}
-	rawVisual, present := observationObject["visual"]
-	if !present {
-		return nil
+	for _, member := range []struct {
+		name  string
+		valid func(string) bool
+	}{
+		{"visual", validVisualHintToken},
+		{"tree_change", validTreeChangeToken},
+		{"hint", validObservationHintToken},
+	} {
+		raw, present := observation[member.name]
+		if !present {
+			continue
+		}
+		value, isString := raw.(string)
+		if !isString {
+			return failf("observation_" + member.name + "_unexpected")
+		}
+		if !member.valid(value) {
+			return failf("observation_" + member.name + "_invalid")
+		}
+		if !observationCarriesTree(observation) {
+			return failf("observation_" + member.name + "_without_tree")
+		}
 	}
-	value, isString := rawVisual.(string)
-	if !isString {
-		return failf("observation_visual_unexpected")
-	}
-	if !validVisualHintToken(value) {
-		return failf("observation_visual_invalid")
-	}
-	if !observationCarriesTree(observationObject) {
-		return failf("observation_visual_without_tree")
+	if image, ok := observation["image"].(map[string]any); ok && image != nil &&
+		image["error"] == nil && observation["hint"] == "snap" {
+		return failf("observation_hint_snap_with_image")
 	}
 	return nil
 }

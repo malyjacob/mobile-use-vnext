@@ -541,9 +541,8 @@ func TestBothModeFailsClosedOnUnrenderableStructuredTree(t *testing.T) {
 }
 
 // TestObservationVisualGrammarAcrossModes pins the optional classification member
-// on every projection mode: only the two documented tokens are legal, the member
-// is absent or a string (never null or another type), and a frame without a tree
-// never carries one.
+// across projection modes: the member is absent or a documented string token,
+// and a frame without a tree never carries one.
 func TestObservationVisualGrammarAcrossModes(t *testing.T) {
 	withTree := func(visual any) map[string]any {
 		observation := map[string]any{
@@ -647,6 +646,93 @@ func TestObservationVisualGrammarAcrossModes(t *testing.T) {
 		result := &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: text}}}
 		if _, failure := project(result, resultModeText); failure != nil {
 			t.Fatalf("legal text visual rejected: %s %v", failure.reason, failure.fields)
+		}
+	})
+}
+
+func TestObservationChangeAndHintAcrossModes(t *testing.T) {
+	const header = "result v4 ok op=P4821_1\nobs O4821_1"
+	const full = "\n\ntree v5 full nodes=1\n\nn1 root 0,0,1080,2400\nend tree\nend result\n"
+	newObservation := func() map[string]any {
+		return map[string]any{
+			"status": observationComplete, "id": "O4821_1",
+			"tree": map[string]any{
+				"format": treeFull, "scope": "reported_visible_with_context", "view": "compact",
+				"root": compactNode("n1", "root", []any{0, 0, 1080, 2400}, nil, nil, nil),
+			},
+		}
+	}
+	payload := func(observation map[string]any) map[string]any {
+		return map[string]any{"operation_id": "P4821_1", "observation": observation}
+	}
+	assertProjection := func(t *testing.T, result *sdk.CallToolResult, mode, want string) {
+		t.Helper()
+		_, failure := project(result, mode)
+		if want == "" && failure == nil || failure != nil && failure.reason == want {
+			return
+		}
+		t.Fatalf("%s projection failure = %v, want %q", mode, failure, want)
+	}
+
+	for _, member := range []struct{ key, column, value string }{
+		{"visual", "visual", "media_surface"},
+		{"tree_change", "change", "detail_only"},
+		{"hint", "hint", "snap"},
+	} {
+		t.Run(member.key, func(t *testing.T) {
+			observation := newObservation()
+			result := &sdk.CallToolResult{Content: []sdk.Content{}, StructuredContent: payload(observation)}
+			for _, test := range []struct {
+				value  any
+				suffix string
+			}{{member.value, ""}, {"invalid", "_invalid"}, {"", "_invalid"}, {nil, "_unexpected"}} {
+				observation[member.key] = test.value
+				want := ""
+				if test.suffix != "" {
+					want = "observation_" + member.key + test.suffix
+				}
+				assertProjection(t, result, resultModeStructured, want)
+			}
+			delete(observation, "tree")
+			observation[member.key] = member.value
+			want := "observation_" + member.key + "_without_tree"
+			for _, status := range []string{"failed", "partial"} {
+				observation["status"] = status
+				assertProjection(t, result, resultModeStructured, want)
+				line := header + " status=" + status + " " + member.column + "=" + member.value
+				textResult := &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: line + "\nend result\n"}}}
+				assertProjection(t, textResult, resultModeText, want)
+			}
+		})
+	}
+
+	t.Run("both channels must agree", func(t *testing.T) {
+		observation := newObservation()
+		observation["visual"], observation["tree_change"], observation["hint"] = "media_surface", "detail_only", "snap"
+		const columns = " visual=media_surface change=detail_only hint=snap"
+		for _, test := range []struct{ columns, want string }{
+			{columns, ""},
+			{" visual=media_surface change=unchanged hint=snap", "both_mode_object_mismatch"},
+			{" visual=media_surface change=detail_only", "both_mode_object_mismatch"},
+		} {
+			result := &sdk.CallToolResult{
+				Content:           []sdk.Content{&sdk.TextContent{Text: header + test.columns + full}},
+				StructuredContent: payload(observation),
+			}
+			assertProjection(t, result, resultModeBoth, test.want)
+		}
+	})
+
+	t.Run("only a successful image suppresses snap", func(t *testing.T) {
+		for _, test := range []struct{ columns, imageError, want string }{
+			{" change=unchanged hint=snap", "", "observation_hint_snap_with_image"},
+			{" change=unchanged hint=snap", "\nobs.image.error image_capture_failed \"unavailable\"", ""},
+			{" visual=loading hint=wait_for", "", ""},
+			{" change=unchanged", "", ""},
+		} {
+			text := header + test.columns + "\nobs.image 2x3" + test.imageError + full
+			result := &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: text}}}
+			assertProjection(t, result, resultModeText, test.want)
 		}
 	})
 }

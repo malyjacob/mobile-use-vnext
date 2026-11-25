@@ -554,6 +554,10 @@ func TestActPostTreeFailureKeepsExecutedWithReadOnlyImage(t *testing.T) {
 	if obs.Error == nil || obs.Error.Code != protocol.CodeTreeTooLarge {
 		t.Fatalf("post failure error = %+v", obs.Error)
 	}
+	requireObservationCue(t, obs, "", "", "")
+	if obs.Tree != nil {
+		t.Fatal("failed tree acquired an observation tree")
+	}
 	if obs.Screen == nil || obs.Image == nil || !obs.Image.ReadOnly {
 		t.Fatalf("read-only image = %+v, screen = %+v", obs.Image, obs.Screen)
 	}

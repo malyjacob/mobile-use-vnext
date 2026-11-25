@@ -1019,6 +1019,8 @@ func rmfResultFixtures() []rmfFixture {
 				CapturedAt:      "2026-11-10T00:00:01Z",
 				ActionableUntil: "2026-11-10T00:01:01Z",
 				Visual:          "image_heavy(52%)",
+				TreeChange:      protocol.TreeChangeUnchanged,
+				Hint:            protocol.HintSnap,
 				Quality: &protocol.Quality{
 					State:      protocol.QualityStable,
 					Samples:    3,

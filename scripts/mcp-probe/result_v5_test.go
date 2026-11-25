@@ -433,11 +433,10 @@ func TestInspectRejectsTruncatedColumn(t *testing.T) {
 	})
 }
 
-// TestObsLineVisualTokenGrammar pins the optional visual hint token on the obs
-// line: the sparse classification or the clamped whole-page image percentage, in
-// its declared column between the capture time and the screen.
+// TestObsLineVisualTokenGrammar pins the visual column's closed set, including
+// the canonical range of the whole-page image percentage.
 func TestObsLineVisualTokenGrammar(t *testing.T) {
-	accepted := []string{"sparse_tree", "image_heavy(45%)", "image_heavy(52%)", "image_heavy(100%)"}
+	accepted := []string{"loading", "media_surface", "sparse_tree", "image_heavy(45%)", "image_heavy(52%)", "image_heavy(100%)"}
 	for _, token := range accepted {
 		t.Run("accept "+token, func(t *testing.T) {
 			decoded, failure := decodeResultText(
@@ -491,6 +490,39 @@ func TestObsLineVisualTokenGrammar(t *testing.T) {
 			t.Fatalf("failure = %v, want text_result_obs_quality_present", failure)
 		}
 	})
+}
+
+func TestObsLineChangeAndHintTokenGrammar(t *testing.T) {
+	const prefix = "result v4 ok\nobs O4821_85 "
+	const suffix = "\nend result\n"
+	for _, test := range []struct{ line, change, hint string }{
+		{"change=unchanged", "unchanged", ""},
+		{"hint=snap", "", "snap"},
+		{"visual=loading change=detail_only hint=wait_for screen=1080x2400", "detail_only", "wait_for"},
+		{"change=matched_base", "matched_base", ""},
+	} {
+		t.Run(test.line, func(t *testing.T) {
+			decoded, failure := decodeResultText(prefix + test.line + suffix)
+			if failure != nil {
+				t.Fatalf("decode: %v", failure)
+			}
+			observation := decoded.view.Observation
+			if observation == nil || observation.TreeChange != test.change || observation.Hint != test.hint {
+				t.Fatalf("unexpected observation: %+v", observation)
+			}
+		})
+	}
+	for _, line := range []string{
+		"change=changed", "hint=observe", "change=", "hint=",
+		"change=unchanged visual=sparse_tree", "hint=snap change=unchanged",
+		"screen=1080x2400 hint=snap", "change=unchanged change=matched_base", "hint=snap hint=wait_for",
+	} {
+		t.Run(line, func(t *testing.T) {
+			if _, failure := decodeResultText(prefix + line + suffix); failure == nil || failure.reason != "text_result_obs_invalid" {
+				t.Fatalf("failure = %v, want text_result_obs_invalid", failure)
+			}
+		})
+	}
 }
 
 // TestInspectKeepsBracketedRectanglesForEveryRole pins the detailed contract: the

@@ -544,8 +544,9 @@ func TestCatalogFingerprintBaseline(t *testing.T) {
 	// terminated together with its task window container, while the same app
 	// still having a task on the primary or another display refuses, the
 	// act(text) auto_submit/submit_ref contract with outcome=partial, and the
-	// four-tier scroll amount with scroll axis-fallback guidance.
-	const baseline = "df6afaa50d401e0498bd39a63959cfbf394a4c4ed4c210ce852b2bc48a7f22fc"
+	// four-tier scroll amount with scroll axis-fallback guidance. Contract 30
+	// adds observation change and hint guidance to the act and snap descriptions.
+	const baseline = "25a09a66f54e728b1c9fc67e6898514c6ac7438b9976528ece7e36bd4f5eab43"
 	if got := CatalogFingerprint(); got != baseline {
 		t.Fatalf("catalog changed: %s", got)
 	}

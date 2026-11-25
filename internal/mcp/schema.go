@@ -29,10 +29,12 @@ const treeTextGuide = "结果文本：text/both 以 `result v4 <ok|err> [op=…]
 	"常规成功（`ok` 且无 `state=`）省略 `outcome=executed`；非 `executed`、错误结果与带 `state=` 的重放摘要一律显式输出 `outcome=…`。" +
 	"`op=`/`at=` 只是编号/UTC 时序提示，不替代引擎对会话/显示代次/期限的校验。" +
 	"`text`/`both` 是面向调用的紧凑投影；`structured` 保留完整审计字段与全部三态、空集合语义。\n" +
-	"观察为单行 `obs [<O>] [status=…] [fg=…] [at=HH:MM:SS] [visual=<token>] [screen=<W>x<H>[@<display_id>]] [rot=<1|2|3>] [missing=…]`：" +
+	"观察为单行 `obs [<O>] [status=…] [fg=…] [at=HH:MM:SS] [visual=<token>] [change=<token>] [hint=<token>] [screen=<W>x<H>[@<display_id>]] [rot=<1|2|3>] [missing=…]`：" +
 	"`obs ` 后首个不含 `=` 的字段是完整 O；`status=complete` 省略，`partial`/`failed` 显式；" +
 	"`fg` 写 `<包名>#<task_id>`、`<包名>`、`#<task_id>`、`present`、`none` 或 `unknown(<reason>)`；" +
-	"`visual` 为视觉提示（`sparse_tree`/`image_heavy(<pct>%)`，pct 45–100），`full` 命中才带、同态 `delta` 省略；" +
+	"`visual` 为视觉提示：`loading`/`image_heavy(<pct>%)`（45–100）/`media_surface`/`sparse_tree`。`loading` 在 `delta` 也保留，其余同态 `delta` 省略。" +
+	"`change` 仅见于 `act` 常规成功且比较前后树：`unchanged` 前后紧凑树与完整树均相同，`detail_only` 紧凑树相同但完整树细节有变，`matched_base` 前后树内容或公开语境有变且零差异命中历史基线。" +
+	"`hint=snap` 建议用同一 O 截图核对（只读，不消费、不发布 O），`hint=wait_for` 表示可能仍在加载或过渡。" +
 	"`screen` 仅在带 `session` 或无树帧输出；" +
 	"`rot` 在非零旋转时始终输出；所有 `HH:MM:SS` 均为 UTC 秒级时间；" +
 	"`origin`/`revision`/`actionable_until` 只在 `structured` JSON 中保留。" +
@@ -105,7 +107,6 @@ const treeTextGuide = "结果文本：text/both 以 `result v4 <ok|err> [op=…]
 	"n2 button [0,0,1080,2400] \"a\" tap\nend inspect\nend result`\n" +
 	"`button`/`input`/`scroll` 省略动作是既有 `tap`/`text`/`swipe` 能力；" +
 	"`!动作` 表示该能力缺失，不能补授权。" +
-	"滚动用 `operation.type=scroll` + `operation.container`；raw `swipe` 是原始手势。" +
 	"`scroll` 不承诺方向、触摸者或业务安全。"
 
 // callerGuidance is the cross-tool part of the server instructions. It is
@@ -126,14 +127,16 @@ const callerGuidance = "会话与推进：首次可直接 start({})。已有 act
 	"inspect({reference:原 act 的 O,node:诊断 ref}) 补看；O 过期后仍可能可读。\n" +
 	"start 租期五分钟；普通活动在续期点只增不减，至少续至两分钟后。" +
 	"status、inspect、diagnose、snap、app 查询不续租。keepalive 可重设并缩短租期，不延长 O。\n\n" +
-	"选择工具：observe 单次采集、snap 只看画面、wait_for 等公开树条件、inspect 补看历史树、diagnose 查健康。" +
-	"wait_for 以 wait.trigger/wait.matched 说明退出分支与终帧命中项；有新 O 就用它继续。\n\n" +
+	"observe 单次采集、inspect 补看历史树、diagnose 查健康。" +
+	"观察提示：`hint=snap` 用同一 O 调 snap 核对画面，不消费、不发布 O；`hint=wait_for` 用 wait_for 等条件或稳定。" +
+	"`change` 表示 `act` 前后树比较：`unchanged` 两树均同，`detail_only` 仅完整树细节有变，`matched_base` 前后有变、零差异命中历史基线。" +
+	"wait.trigger/wait.matched 说明退出分支与终帧命中项；有新 O 就用它继续。\n\n" +
 	"输入：act 认领 ready O 才消费。点按/长按默认 bubble=true，自动按 3×3 网格选点；" +
 	"无动作目标按视觉区锚定最近交互祖先，竞争遮挡时停止外扩并自动吸附唯一局部共位可点击控件。" +
 	"operation.bubble=false 只点原目标，坐标省略 bubble。坐标目标用最深命中集合，" +
 	"仅在无法按请求动作唯一消歧时报 ambiguous_point；raw swipe 不报 ambiguous_point。" +
 	"scroll 可直接传同视口嵌套滚动栈任一层，非滚动节点自动找最近滚动祖先，坐标取最内层滚动容器；" +
-	"轨迹居中并尝试 50%/25%/75% 三条轴线避让；amount 四档 step 15%/500ms、half 30%/450ms、page 60%/400ms（默认）、full 85%/300ms，scroll 不接受时长参数；" +
+	"轨迹居中，尝试 50%/25%/75% 三条轴线避让；amount 四档 step 15%/500ms、half 30%/450ms、page 60%/400ms（默认）、full 85%/300ms，scroll 不接受时长参数；" +
 	"轴向不兼容时自动回退兼容外层滚动祖先，无解报 422 unsupported_node_action（reason=axis_mismatch）。" +
 	"静态 422（invalid_target、unsupported_node_action、ambiguous_point、no_safe_point、no_safe_trajectory）不消费 O；" +
 	"取 error.details.candidates 中第一个 executable=true 的 ref，用同一 O 和新 P 重试，无需重观察或手算坐标。" +
@@ -256,11 +259,10 @@ var toolCatalog = []toolDefinition{
 	},
 	{
 		name: "snap",
-		description: "对给定 O/P 所指原会话绑定的屏幕立即读取一张图，不读取节点树，也不发布观察。" +
-			"reference 必填，指向本 Agent 仍活动的原会话；图片始终取当前屏。" +
-			"成功只返回 operation_id 与单行 `image <W>x<H> read_only screen=<W>x<H>[@<display_id>] [at=<HH:MM:SS>]` 元数据，" +
-			"并以一个 ImageContent 交付 JPEG。" +
-			"snap 不分配 O、不续租、不认领观察；同一 P 重放或 status(P) 只返回无图摘要。",
+		description: "立即截图，供 `hint=snap` 只读核对。不读取树、不消费 O、不发布新 O、不续租。" +
+			"reference 必填，用活动原会话的 O/P，图片取该会话当前屏。" +
+			"成功返回 operation_id、`image <W>x<H> read_only screen=<W>x<H>[@<display_id>] [at=<HH:MM:SS>]` 单行元数据及一个 JPEG ImageContent。" +
+			"同一 P 重放或 status(P) 只返回无图摘要。",
 		schema: json.RawMessage(`{
   "type": "object",
   "properties": {
@@ -342,6 +344,7 @@ var toolCatalog = []toolDefinition{
 		name: "act",
 		description: "对当前 ready O 执行交互。reference 必填且用当前 ready O 的完整 `O`；节点目标用 `n<ref>`。" +
 			"静态拒绝不认领 O，认领即消费原 O。image=true 随观察附加 ImageContent。" +
+			"`change=` 树变化（`matched_base` 为前后有变、零差异命中历史基线，不是没生效）；`hint=` 建议截图或等待。" +
 			"\n分支：tap/long_press 用 target；text 用 target 与 text；key 用 key 白名单。scroll 用 container/direction，可选 amount；swipe 用 from/to，可选 duration_ms。" +
 			"\n树中 `button`/`input`/`scroll` 省略的默认动作分别是既有 `tap`/`text`/`swipe`；" +
 			"`!tap`/`!text`/`!swipe` 表示该默认能力缺失。`@` 表示与最近一个有已交付几何的祖先同形同值；需要坐标时沿该祖先读取。" +

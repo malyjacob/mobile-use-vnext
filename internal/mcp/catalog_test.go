@@ -35,7 +35,7 @@ func TestCatalogSnapshotCarriesResultV4Discovery(t *testing.T) {
 	instructions := ServerInstructions()
 	for _, required := range []string{
 		"`result v4 <ok|err> [op=…] [state=…] [outcome=…] [phase=…]`",
-		"`obs [<O>] [status=…] [fg=…] [at=HH:MM:SS] [visual=<token>] [screen=<W>x<H>[@<display_id>]] [rot=<1|2|3>] [missing=…]`",
+		"`obs [<O>] [status=…] [fg=…] [at=HH:MM:SS] [visual=<token>] [change=<token>] [hint=<token>] [screen=<W>x<H>[@<display_id>]] [rot=<1|2|3>] [missing=…]`",
 		"`app_items v1 kind=find|list count=<n>`",
 		"`app_tasks v1 count=<n>`",
 		"`recovery entry=<entry> ref=<精确 O/P 编号|O|P|none> [input=…] [cause=…]`",

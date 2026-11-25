@@ -158,6 +158,40 @@ func TestWaitForQueryHitReusesCandidateFrame(t *testing.T) {
 	}
 }
 
+// TestWaitForConditionCue distinguishes an early condition hit from an unstable
+// sparse frame that exhausted the sample limit. Both must publish their quality
+// and use it when deciding the visual classification.
+func TestWaitForConditionCue(t *testing.T) {
+	for _, tc := range []struct {
+		name, query, trigger, stopReason string
+		samples                          int
+		visual, hint                     string
+	}{
+		{"second frame hits condition", "完成", protocol.WaitTriggerQuery, protocol.QualityStopCondition,
+			2, "sparse_tree", protocol.HintSnap},
+		{"sparse frames reach sample limit", "永不出现", protocol.WaitTriggerTimeout, protocol.QualityStopMaxSamples,
+			3, "loading", protocol.HintWaitFor},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, reference := waitForTestHarness(t)
+			h.engine.cfg.Wait.MaxSamples = 3
+			// The three frames have short labels, three controls, and no ProgressBar.
+			h.device.scriptCaptures(markerCapture("开始"), markerCapture("完成"), markerCapture("更新"))
+			result, apiErr := h.engine.WaitFor(context.Background(), "agent", "",
+				&protocol.WaitForRequest{Reference: reference, Query: tc.query, HasQuery: true, Timeout: 10, Full: true})
+			if apiErr != nil {
+				t.Fatalf("wait_for rejected: %v", apiErr)
+			}
+			if result.Error != nil || result.Wait == nil || result.Wait.Trigger != tc.trigger {
+				t.Fatalf("wait_for trigger = %+v, error = %+v, want %q", result.Wait, result.Error, tc.trigger)
+			}
+			requireFullTree(t, result.Observation, 2)
+			requireQuality(t, result.Observation.Quality, protocol.QualityUnstable, tc.samples, tc.stopReason)
+			requireObservationCue(t, result.Observation, tc.visual, "", tc.hint)
+		})
+	}
+}
+
 // TestWaitForStableNeedsThreeConsecutiveFrames is the reverse control of the
 // stability gate: the sequence A,B,B is three samples but only two consecutive
 // equal frames, so a sample-count implementation would release early. The gate

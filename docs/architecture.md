@@ -401,9 +401,9 @@ Android 时为 `uncertain`；全部确定未派发时为 `not_executed`。`parti
    子叶也能提升为 `button`；被动正文与 `input` 全文永不截断，被动文本提升为 `button` 的
    label（无论段数）也不再二次截断。留存节点沿用裁剪前的完整公开
    几何；
-   `root`/`scroll` 交付四元矩形，其余角色交付二元中心点。同一候选在完整公开树上计算
-   `Observation.visual`，该计算不读设备、不增加截图，也不改变
-   输入授权。输出普通节点定义并按规范 JSON 计量，超过 `MaxFullTreeBytes=128 KiB`
+   `root`/`scroll` 交付四元矩形，其余角色交付二元中心点。同一候选的 `Observation.visual`
+   分类由完整公开树、原始采集类名与收敛质量计算（见下文），该计算不读设备、不增加
+   截图，也不改变输入授权。输出普通节点定义并按规范 JSON 计量，超过 `MaxFullTreeBytes=128 KiB`
    → `tree_too_large`（`details.budget=public_full`）；同一快照的内部计费对象
    （`raw_capture` + 完整内部树）超过 `MaxSnapshotCostBytes=4 MiB`
    → `tree_too_large`（`details.budget=internal_snapshot`）；
@@ -414,16 +414,32 @@ Android 时为 `uncertain`；全部确定未派发时为 `not_executed`。`parti
     （`details.budget=retained_snapshots`），且不先删除历史；可容纳时一次应用淘汰、扣费、
     提交构造器连续性并发布新 O。
 
-第 9–10 步与 full/delta 选择抽成单一发布步骤 `publishTreeAttempt`（第 7–8 步由
-`projectCapture` 完成）：普通采集与 `act` 重验失败交付的帧共用同一提交门禁。交付路径在
+第 9–10 步与 full/delta 选择、观察级派生事实抽成单一发布步骤 `publishTreeAttempt`（第 7–8 步
+由 `projectCapture` 完成）：普通采集与 `act` 重验失败交付的帧共用同一提交门禁。交付路径在
 派发前失败时复用重验已经读取的那一帧，不重新采集、不做收敛采样、不确认基线，只把该帧投影、
 校验并提交为新的 ready O。
 
-最终 `Observation.visual` 也在该提交门禁内决定：`full` 观察输出本次帧的分类，`delta` 观察
-仅当本次分类非空且与同会话、同显示代次的紧邻上一已发布帧（该帧已不在留存集合时回退到
-`delta.base` 对应观察）不同时输出，否则省略。撤销、超时或采集失败的候选不更新这一状态；
-无树观察永不设置 `visual`。该提示只由完整公开树与前台状态纯计算得出，不增加设备读取、
-截图或请求字段。
+`publishTreeAttempt` 在状态锁外完成两项只读计算：一次 `ClassifyVisual` 读取完整公开树、前台
+状态、原始采集的目标显示可见节点类名（`ProgressBar` 与媒体面后缀）和本次 `quality`，得到页面
+视觉候选；
+`act` 常规成功传入被消费的前置观察时，另按公开前景投影与屏幕宽/高/旋转语境，忽略 `ref`
+比较紧凑树内容（展开历史链）与完整公开树内容。锁外候选与多基线 delta 选择都不发布状态。
+锁内对派生事实只做 O(1) 决策：候选分类按 delta 同态去重，由前后内容判等得出 `tree_change`，
+再由已发布 `visual`、`tree_change` 与本次是否交付有效图片推导 `hint`。这些派生事实不新增
+设备读取、截图、请求字段或日志事件；提交门禁失败或撤销时，锁外候选整份丢弃，不更新当前观察
+或视觉状态。
+
+最终 `Observation.visual` 的发布值也在该提交门禁内决定：`full` 观察输出本次分类，`delta`
+观察对 `loading` 始终输出，其余三类仅当本次分类非空且与同会话、同显示代次的紧邻上一已发布帧
+（该帧已不在留存集合时回退到 `delta.base` 对应观察）不同时输出，否则省略。撤销、超时或采集
+失败的候选不更新这一状态；无树观察永不设置 `visual`。`act` 常规成功的
+`Observation.tree_change` 取 `unchanged`/`detail_only`/`matched_base`；紧凑树内容有变化且发布
+非空 delta 或 full 时省略该成员，`unchanged` 不要求本次差分为空（差分大小相对所选基线）。
+`start`、`observe`、`wait_for`、`app`、`act.delivery`、`text` 的 `partial` 交付与无树失败观察
+恒省略。`Observation.hint` 由已发布 `visual`、`tree_change` 与有效图片派生：`loading` 给
+`wait_for`；无有效图片且 `tree_change` 为 `unchanged`/`detail_only` 或 `visual` 非空时给
+`snap`；其余省略。`hint` 只是观察级只读建议，不进入 `recovery` 的 6 元入口，不改变 O 状态机
+与输入授权。
 
 `wait_for` 的验证采集直接进入同一 `publishTreeAttempt`，不经过本节的收敛采样：等待期的只读
 采样不发布、不推进基线；命中或稳态退出复用候选帧，到时或采样守卫退出时若最新成功帧仍新鲜
@@ -773,14 +789,19 @@ P 已无法定位时，`end(P)` 返回 `409 operation_unknown`、`phase=referenc
 | 观察 | `observation.status` | `complete` / `partial` / `failed`；后观察失败不改写已确认的 `executed` |
 | 条件等待 | `wait.trigger` / `wait.matched` / `wait.elapsed_ms` | 等待因哪个分支退出、最终发布帧上成立哪些单帧条件、整次调用耗时；不表示页面之后不再变化，也不替代 `observation.status` |
 | 观察质量 | `observation.quality` | `state` / `samples` / `stop_reason`；表示按该阶段的摘要判据是否收敛、经过多少有效采样，不限制输入授权 |
+| 树变化 | `observation.tree_change` | `unchanged` / `detail_only` / `matched_base`；只在 `act` 常规成功时比较动作前后树内容与公开语境，`matched_base` 表示前后有变、只是差分零差异命中历史基线，不是动作未生效；不证明像素变化或动作因果 |
+| 观察提示 | `observation.hint` | `snap` / `wait_for`；由已发布 `visual`、`tree_change` 与是否交付有效图片推导的只读核对建议；与 `recovery` 正交，不改变 O 状态与输入授权 |
 | 图片 | `observation.image` | 本次附图的元数据或受控错误；图片失败不改写核心树与主动作 |
 | 会话 | `session.state` | `starting` / `active` / `ended` |
 | 物理收尾 | `cleanup.*` | 显示/任务/执行链是否确认释放 |
 
-`outcome`、`effect`、`wait` 与 `observation.quality` 各自独立：`executed + effect=unknown`
-是合法结果；`unstable`/`unknown` 的观察仍可发布、仍可被认领，是否执行由动作自己的判据决定；
-`effect`、`wait` 与 `quality` 都不改写 `outcome`、`observation.status`、错误或恢复入口，也
-不改变 O 的 `status`、`actionable_until` 与基线确认。`partial` 同样不改写后观察、`effect` 或
+`outcome`、`effect`、`wait`、`observation.quality`、`tree_change` 与 `hint` 各自独立：
+`executed + effect=unknown` 是合法结果；`unstable`/`unknown` 的观察仍可发布、仍可被认领，
+是否执行由动作自己的判据决定；
+`effect`、`wait`、`quality`、`tree_change` 与 `hint` 都不改写 `outcome`、`observation.status`、
+错误或恢复入口，也不改变 O 的 `status`、`actionable_until` 与基线确认。`hint` 与 `recovery`
+正交：`recovery` 只在存在待恢复事实时出现，`hint` 只是观察级只读建议；`tree_change` 与 `hint`
+都不证明像素变化或动作因果。`partial` 同样不改写后观察、`effect` 或
 `cleanup` 事实；只判 `executed` 的调用方必须把它当作未完成动作。`wait` 在 `Result` 中固定位于
 `shell` 之后、`notification` 之前；`status(P)` 与重复 `P` 的视图保留已保存的 `wait`，并按既有
 规则省略 `observation`。
@@ -812,7 +833,7 @@ text 完成事件记 `focus_dispatch`/`write_dispatch`/`submit_dispatch` 与受�
 ### 发布
 
 `release/versions.json` 是发行号、共同契约号与 Android versionCode 的唯一来源；当前为
-`release_version=0.33.0`、`contract_version=29`、`android_version_code=35`，构建生成
+`release_version=0.34.0`、`contract_version=30`、`android_version_code=36`，构建生成
 Go/Java 常量。`scripts/build-release.ps1` 产出整组产物与 `build/release/manifest.json`
 （源码提交、Go 版本、MCP SDK/协议、各产物 SHA-256/大小、Android 包名/版本、工具目录指纹）。
 工具目录固定为 `scripts/toolcatalog` 投影的 13 个工具，指纹是该目录注册顺序、名称、描述与

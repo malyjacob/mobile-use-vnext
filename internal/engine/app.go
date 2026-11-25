@@ -205,7 +205,7 @@ func (e *Engine) appPostObservation(work *workState, op *operationState) (*proto
 	if session == nil {
 		return nil, ""
 	}
-	public, _, postErr := e.captureAndPublish(work.Ctx, work, session, true, false, appTool+"."+op.AppKind)
+	public, _, postErr := e.captureAndPublish(work.Ctx, work, session, true, false, appTool+"."+op.AppKind, nil)
 	if postErr != nil {
 		return &protocol.Observation{
 			Status: "failed", Missing: []string{"tree"}, Error: postErr.Public(),

@@ -15,7 +15,7 @@
 | 方法 | 所有业务端点只接受 `POST`；其他方法返回 `405`，错误码 `invalid_request` |
 | 认证 | `/api/*` 用 `agent_token`；`/v1/control/*` 用 `control_token`；`Authorization: Bearer <token>` |
 | 身份隔离 | agent token 不能访问 `/v1/control/*`，control token 不能访问 `/api/*`；错误为 `401 unauthorized` |
-| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 29`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
+| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 30`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
 | 预分配 P | `/api/*` 可带 `X-Mobile-Use-Operation: P…`；缺省由服务分配。`status` 不使用该头 |
 | 请求体 | 必须是一个 JSON 对象；大小上限：`start`/`status`/`end`/`wait_for` 16 KiB，`observe` 32 KiB，`snap` 8 KiB，`act` 64 KiB，`inspect`/`keepalive`/`diagnose`/`app` 8 KiB，`notify` 16 KiB，`shell` 32 KiB，`sync` 32 KiB，`stop` 8 KiB |
 | 响应 | `Content-Type: application/json; charset=utf-8`，`Cache-Control: no-store` |
@@ -69,7 +69,9 @@ app, shell, wait, notification, diagnosis, cleanup, error, recovery
 `text_input`（复合 text 的 write/submit 原语）、
 `wait`（条件等待的退出分支、单帧匹配项与耗时）、
 `image`（`snap` 的顶层单张图片元数据）、
-`observation.status` 与 `observation.quality`（观察及其收敛质量）、`session.state`（会话）、
+`observation.status` 与 `observation.quality`（观察及其收敛质量）、
+`observation.tree_change`（`act` 动作前后公开树内容的对比）、
+`observation.hint`（观察级只读核对建议，与 `recovery` 正交）、`session.state`（会话）、
 `cleanup.*`（物理收尾）。`error` 只在失败时出现：
 
 ```json
@@ -946,7 +948,7 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms），
 
 | 字段 | 必填 | 类型 | 说明 |
 | --- | --- | --- | --- |
-| `contract_version` | 是 | 字符串 | 必须为 `"29"`，否则 `409 contract_mismatch` |
+| `contract_version` | 是 | 字符串 | 必须为 `"30"`，否则 `409 contract_mismatch` |
 | `app_instance_id` | 是 | UUID | App 进程实例；变化会撤销旧归属 |
 | `app_version` | 否（App 应发送） | 字符串 | 仅发行标识 |
 | `selected_mode` | 是 | `virtual`/`primary` | 用户选择 |
@@ -973,7 +975,7 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms），
 
 ```json
 {
-  "contract_version": "29",
+  "contract_version": "30",
   "service_instance_id": "…",
   "control": {
     "revision": 42,
@@ -1009,7 +1011,7 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms），
 ## 9. `POST /v1/control/stop`
 
 ```json
-{"contract_version":"29","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
+{"contract_version":"30","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
 ```
 
 - **不校验普通契约**：`contract_version` 字段存在但不参与准入，服务与 App 契约版本
@@ -1019,7 +1021,7 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms），
 - 重复或过期 `seq` 不报错，只返回 `state=duplicate`。
 
 ```json
-{"contract_version":"29","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
+{"contract_version":"30","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
 ```
 
 `accepted` 恒为 `true`；`state` 为 `revoked`（绑定时撤销了活动会话）、`recorded`
@@ -1032,7 +1034,7 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms），
 无认证，只表示进程可应答，不代表设备就绪或资源干净：
 
 ```json
-{"status":"ok","contract_version":"29","service_instance_id":"…","release_version":"…"}
+{"status":"ok","contract_version":"30","service_instance_id":"…","release_version":"…"}
 ```
 
 ## 11. 数据对象
@@ -1061,13 +1063,15 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms），
  "quality":{"state":"unstable","samples":5,"stop_reason":"max_samples"},
  "screen":{"width":1080,"height":2400,"rotation":0,"display_id":115},
  "foreground":{"state":"present","package":"com.example","task_id":12},
- "visual":"image_heavy(52%)",
+ "visual":"image_heavy(52%)","tree_change":"unchanged","hint":"snap",
  "tree":{"format":"full","scope":"reported_visible_with_context","view":"compact",
    "root":{"ref":"n1","role":"root","bounds":[0,0,1080,2400]}}}
 ```
 
 Observation 的编码顺序固定为 `status`、`id`、`origin`、`revision`、`captured_at`、
-`actionable_until`、`quality`、`screen`、`foreground`、`visual`、`tree`、`missing`、`image`、`error`。
+`actionable_until`、`quality`、`screen`、`foreground`、`visual`、`tree_change`、`hint`、`tree`、
+`missing`、`image`、`error`。`visual`、`tree_change`、`hint` 都是可选非可空字符串：空串不
+序列化；出现显式 `null` 或空串不是合法观察编码。
 `quality` 是对象；出现时三个成员总是编码，成员顺序固定为 `state`、`samples`、`stop_reason`：
 
 | 成员 | 取值与规则 |
@@ -1095,24 +1099,56 @@ Observation 的编码顺序固定为 `status`、`id`、`origin`、`revision`、`
   它不改变 `status`、`actionable_until`、基线确认或 O 状态机。`complete+unstable` 与
   `partial+stable` 都是合法组合；没有树的失败观察不发布 `quality`，只保留错误与图片材料。
 
-`visual` 是可选字符串，由服务在完整公开树上按固定口径计算，不是请求字段，也不替代 `snap`。
-它只在带树的观察上出现，空串省略；取值只有：
+`visual` 是可选非可空字符串，由服务按固定口径计算，不是请求字段，也不替代 `snap`。
+它只在带树的观察上出现，空串省略；取值是固定优先级的四值闭集（`loading` >
+`image_heavy(<pct>%)` > `media_surface` > `sparse_tree`，先命中先输出）：
 
 | 值 | 判据 |
 | --- | --- |
-| `image_heavy(<pct>%)` | 完整公开树中非 `context`、无 label/value/hint/resource/axis、无动作、无子节点且五布尔为已知默认的 `image` 叶，剔除占屏 `<5%` 的碎片图、占屏 `>=90%` 的全屏底图，以及内部含至少 3 个面积更小且有可读 label/非空 value/动作控件的承载图后，取面积最大的至多 64 张求精确并集；并集面积 `>=45%` 屏幕面积且全树可读文字 `<150` 个非空白码点时命中。`<pct>` 为并集占屏四舍五入的整数，夹在 `45`–`100` |
-| `sparse_tree` | 未命中 `image_heavy`，前台状态不是 `none`，全树可读文字 `<20` 个非空白码点且可交互控件 `<5` 个时命中 |
+| `loading` | 前台状态不是 `none`，且满足任一条件：① 原始采集中存在 `ProgressBar` 类名节点（简单类名取最后一个 `.` 之后的部分，以 `ProgressBar` 结尾且不含 `SeekBar`；目标显示、可见、按树根矩形裁屏后宽高都 `>4` 像素），且全树可读文字 `<80` 个非空白码点、可交互控件 `<8` 个；② `quality.state=unstable` 且 `quality.stop_reason` 不是 `condition`，且可读文字 `<40`、可交互控件 `<8`。`SeekBar` 不命中；`wait_for stable=false` 的条件命中早停（`unstable` + `condition`）不判加载 |
+| `image_heavy(<pct>%)` | 完整公开树中非 `context`、无 label/value/hint/resource/axis、无动作、无子节点且五布尔为已知默认的 `image` 叶，剔除占屏 `<5%` 的碎片图、占屏 `>=90%` 的全屏底图，以及内部含至少 3 个面积更小且有可读 label/非空 value/动作控件的承载图后，取面积最大的至多 64 张求精确并集；并集面积 `>=45%` 屏幕面积且全树可读文字 `<150` 个非空白码点时命中。`<pct>` 为并集占屏四舍五入的整数，夹在 `45`–`100`。该分类不要求前台状态不是 `none` |
+| `media_surface` | 前台状态不是 `none`；原始采集节点（目标显示、可见、非根、按树根矩形裁屏后正面积）中简单类名以 `SurfaceView`/`TextureView`/`VideoView`/`PlayerView` 结尾的矩形，剔除占屏 `<5%` 的碎片后至多取面积最大的 16 个求精确并集；并集 `>=25%` 屏幕面积且全树可读文字 `<80`、可交互控件 `<10` 时命中 |
+| `sparse_tree` | 前台状态不是 `none`，全树可读文字 `<30` 个非空白码点且可交互控件 `<7` 个时命中 |
 
 统计口径固定：非 `root`、非 `context` 节点的非空 label 段、非受保护节点的 `value` 与已知
 `hint` 计入可读文字，空白码点不计，已被祖先复合 label 覆盖的 label 段不重复计数；可交互
 控件指非 `root`、非 `context`、有动作且有正面积可见矩形的节点。`image` 统计在完整公开树上
-进行，不使用已裁剪装饰图的 compact 投影；服务不因该提示附加截图、增加设备读取或改变 O 的
-输入授权。
+进行，不使用已裁剪装饰图的 compact 投影；`loading` 与 `media_surface` 的类名扫描使用本次
+原始采集的目标显示可见节点，跳过采集根。`visual` 同时使用完整公开树、原始采集类名与收敛
+质量，不增加设备读取、截图或请求字段，也不改变 O 的输入授权。
 
-`full` 观察输出本次计算的 `visual`（无命中则省略）。`delta` 观察仅当本次命中且分类与同会话、
-同显示代次紧邻上一已发布帧（若该帧已不在留存集合，则取该 delta 的 `base` 对应观察）不同时
-输出，否则省略；因此同一页面的连续差分不会重复刷同一提示。无树或树根缺少可用屏幕矩形的
-观察不产生 `visual`。
+`full` 观察输出本次计算的 `visual`（无命中则省略）。`delta` 观察中 `loading` 永不省略；其余
+三类仅当本次分类与同会话、同显示代次紧邻上一已发布帧（该帧已不在留存集合时取该差分的
+`base` 观察）的分类不同时输出，否则省略；因此同一页面的连续差分不会重复刷同一提示。
+无树或树根缺少可用屏幕矩形的观察不产生 `visual`。
+
+**`tree_change`。** 可选非可空字符串，只在 `act` 常规成功（`outcome=executed` 且成功发布
+后观察）时出现，取值只有：
+
+| 值 | 含义 |
+| --- | --- |
+| `unchanged` | 动作前后前景公开投影与屏幕宽/高/旋转一致，忽略 `ref` 的紧凑树内容与完整公开树内容都相同 |
+| `detail_only` | 同上语境一致、忽略 `ref` 的紧凑树内容相同，但完整公开树内容有差异 |
+| `matched_base` | 紧凑树内容判等不成立（前后内容不同，或前景/屏幕语境不一致），且本次发布的差分零差异（`changes=0`）。表示前后树内容或公开语境有变、只是差分零差异命中历史基线，不是“动作未生效” |
+
+前景公开投影按态比较 `state`：`present` 比较 `package` 与 `task_id`，`unknown` 比较归一化
+`reason`（空串归为 `foreground_unknown`），`none` 无额外字段。紧凑树比较会展开历史 `chain`；
+`Ref`/`Observation.ID`/`revision`/`captured_at`/`quality`/`image` 不参与判等。其余 `act` 常规
+成功（紧凑树内容有变化且发布非空差分或 full）省略该成员；`unchanged` 不要求本次差分为空，
+差分大小相对所选基线。`start`、`observe`、`wait_for`、`app`、`act.delivery`、`text` 的
+`partial` 交付与无树失败观察恒省略该成员。
+
+**`hint`。** 可选非可空字符串，取值只有 `snap` 与 `wait_for`，完全由本次发布的
+`(visual, tree_change, 是否已成功交付有效图片)` 推导：
+
+- `visual=loading` → `wait_for`（即使本次观察带图也一样）；
+- 否则，没有有效图片且（`tree_change` 为 `unchanged`/`detail_only`，或 `visual` 非空）→ `snap`；
+- 其余省略。
+
+衍生不变式：`matched_base` 且无 `visual` 时 `hint` 恒为空；本次观察已交付有效图片时 `hint`
+永不为 `snap`（客观事实 `visual` 与 `tree_change` 保持原样）；无树失败观察的 `visual`、
+`tree_change` 与 `hint` 全为空。`hint` 只是观察级只读建议，不进入 `recovery`、不改变 O 的
+状态机或输入授权；`snap` 不消费 O、不发布新 O、不续租。
 
 ### Result 与 Effect
 

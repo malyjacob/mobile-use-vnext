@@ -4,6 +4,8 @@ import (
 	"encoding/json/jsontext"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 )
 
 // Screen is the target display identity, size and Android rotation.
@@ -308,6 +310,53 @@ func (e *Effect) MarshalJSONTo(enc *jsontext.Encoder) error {
 	return enc.WriteToken(jsontext.EndObject)
 }
 
+// Tree change values form a closed set shared by protocol, engine and client tests.
+const (
+	TreeChangeUnchanged   = "unchanged"
+	TreeChangeDetailOnly  = "detail_only"
+	TreeChangeMatchedBase = "matched_base"
+)
+
+// Observation hint values form a closed set shared by protocol, engine and client tests.
+const (
+	HintSnap    = "snap"
+	HintWaitFor = "wait_for"
+)
+
+// ValidObservationVisual reports whether value belongs to the closed visual set
+// shared by protocol, engine and client tests.
+func ValidObservationVisual(value string) bool {
+	switch value {
+	case "loading", "media_surface", "sparse_tree":
+		return true
+	}
+	pct, ok := strings.CutPrefix(value, "image_heavy(")
+	if !ok {
+		return false
+	}
+	pct, ok = strings.CutSuffix(pct, "%)")
+	if !ok || len(pct) < 2 || len(pct) > 3 {
+		return false
+	}
+	percent, err := strconv.Atoi(pct)
+	return err == nil && percent >= 45 && percent <= 100 && pct == strconv.Itoa(percent)
+}
+
+// ValidTreeChange reports whether value is a defined observation tree change.
+func ValidTreeChange(value string) bool {
+	switch value {
+	case TreeChangeUnchanged, TreeChangeDetailOnly, TreeChangeMatchedBase:
+		return true
+	default:
+		return false
+	}
+}
+
+// ValidObservationHint reports whether value is a defined observation hint.
+func ValidObservationHint(value string) bool {
+	return value == HintSnap || value == HintWaitFor
+}
+
 // Observation is the single observation shape for all valid/missing branches.
 type Observation struct {
 	Status          string
@@ -320,6 +369,8 @@ type Observation struct {
 	Screen          *Screen
 	Foreground      *Foreground
 	Visual          string
+	TreeChange      string
+	Hint            string
 	Tree            *ReadTreeValue
 	Missing         []string
 	Image           *ImageMeta
@@ -409,6 +460,22 @@ func (o *Observation) MarshalJSONTo(enc *jsontext.Encoder) error {
 			return err
 		}
 		if err := writeString(enc, o.Visual); err != nil {
+			return err
+		}
+	}
+	if o.TreeChange != "" {
+		if err := writeName(enc, "tree_change"); err != nil {
+			return err
+		}
+		if err := writeString(enc, o.TreeChange); err != nil {
+			return err
+		}
+	}
+	if o.Hint != "" {
+		if err := writeName(enc, "hint"); err != nil {
+			return err
+		}
+		if err := writeString(enc, o.Hint); err != nil {
 			return err
 		}
 	}

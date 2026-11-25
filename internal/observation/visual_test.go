@@ -31,12 +31,12 @@ func visualControl(ref string, bounds *protocol.Bounds, label string) *protocol.
 	return node
 }
 
-// visualControlBar places five labelled controls in a bottom strip that no
-// fixture picture covers, so the sparse-tree rule stays off without feeding the
+// visualControlBar places labeled controls in a bottom strip that no fixture
+// picture covers, so the sparse-tree rule stays off without feeding the
 // background-carrier rule.
 func visualControlBar() []*protocol.Node {
-	nodes := make([]*protocol.Node, 0, 5)
-	for i := 0; i < 5; i++ {
+	nodes := make([]*protocol.Node, 0, 7)
+	for i := 0; i < 7; i++ {
 		left := i * 60
 		nodes = append(nodes, visualControl(
 			"b"+itoa(i+1), rectT(left, 940, left+50, 980), "b"))
@@ -123,6 +123,8 @@ func TestInferVisualHintImageHeavy(t *testing.T) {
 			visualControl("c3", rectT(500, 100, 600, 180), "six"),
 			visualControl("o1", rectT(0, 900, 50, 940), "x"),
 			visualControl("o2", rectT(60, 900, 110, 940), "y"),
+			visualControl("o3", rectT(120, 900, 170, 940), "z"),
+			visualControl("o4", rectT(180, 900, 230, 940), "w"),
 		}
 		requireVisualHint(t, visualTree(1000, 1000, children...), "com.example.app", "", "")
 
@@ -193,8 +195,8 @@ func TestInferVisualHintSparseTree(t *testing.T) {
 			return visualTree(1000, 1000,
 				nodeT("n2", protocol.RoleText, rectT(0, 0, 500, 40), strings.Repeat("字", runes)))
 		}
-		requireVisualHint(t, text(19), "com.example.app", VisualKindSparseTree, "sparse_tree")
-		requireVisualHint(t, text(20), "com.example.app", "", "")
+		requireVisualHint(t, text(29), "com.example.app", VisualKindSparseTree, "sparse_tree")
+		requireVisualHint(t, text(30), "com.example.app", "", "")
 
 		controls := func(count int) *protocol.Tree {
 			children := make([]*protocol.Node, 0, count)
@@ -204,8 +206,8 @@ func TestInferVisualHintSparseTree(t *testing.T) {
 			}
 			return visualTree(1000, 1000, children...)
 		}
-		requireVisualHint(t, controls(4), "com.example.app", VisualKindSparseTree, "sparse_tree")
-		requireVisualHint(t, controls(5), "com.example.app", "", "")
+		requireVisualHint(t, controls(6), "com.example.app", VisualKindSparseTree, "sparse_tree")
+		requireVisualHint(t, controls(7), "com.example.app", "", "")
 	})
 
 	t.Run("covered composite text is counted once", func(t *testing.T) {
@@ -220,18 +222,18 @@ func TestInferVisualHintSparseTree(t *testing.T) {
 	})
 
 	t.Run("context, protected value and whitespace are excluded", func(t *testing.T) {
-		contextNode := nodeT("n2", protocol.RoleGroup, nil, "很长的上下文说明文字内容")
+		contextNode := nodeT("n2", protocol.RoleGroup, nil, strings.Repeat("字", 30))
 		contextNode.Context = true
 		protected := plainT("n3", protocol.RoleInput)
-		protected.Value = readString("秘密的值不会公开")
+		protected.Value = readString(strings.Repeat("密", 30))
 		protected.Protected = readBool(true)
-		spaces := nodeT("n4", protocol.RoleText, rectT(0, 0, 100, 20), "   \t  ")
+		spaces := nodeT("n4", protocol.RoleText, rectT(0, 0, 100, 20), strings.Repeat(" \t", 30))
 		requireVisualHint(t, visualTree(1000, 1000, contextNode, protected, spaces),
 			"com.example.app", VisualKindSparseTree, "sparse_tree")
 
 		// A published hint is readable content and is counted.
 		hinted := plainT("n5", protocol.RoleGroup)
-		hinted.Hint = readString(strings.Repeat("字", 20))
+		hinted.Hint = readString(strings.Repeat("字", 30))
 		requireVisualHint(t, visualTree(1000, 1000, hinted), "com.example.app", "", "")
 	})
 
@@ -240,6 +242,168 @@ func TestInferVisualHintSparseTree(t *testing.T) {
 		tree := visualTree(1000, 1000, visualPicture("n2", rectT(0, 0, 1000, 520)))
 		requireVisualHint(t, tree, "com.example.app", VisualKindImageHeavy, "image_heavy(52%)")
 	})
+}
+
+const (
+	visualProgressClass = "android.widget.ProgressBar"
+	visualSeekClass     = "android.widget.SeekBar"
+	visualSurfaceClass  = "android.view.SurfaceView"
+	visualTextureClass  = "android.view.TextureView"
+	visualVideoClass    = "android.widget.VideoView"
+	visualPlayerClass   = "com.google.android.exoplayer2.ui.PlayerView"
+	visualDisplayID     = 42
+)
+
+func visualRawNode(class string, left, top, right, bottom int) device.RawNode {
+	return device.RawNode{
+		ClassName: class, DisplayID: visualDisplayID, Visible: true,
+		Bounds: device.Rect{Left: left, Top: top, Right: right, Bottom: bottom},
+	}
+}
+
+func visualCapture(width, height int, children ...device.RawNode) *device.Capture {
+	root := visualRawNode("android.view.View", 0, 0, width, height)
+	return &device.Capture{
+		Root: 0, Display: device.Display{ID: visualDisplayID, Width: width, Height: height},
+		Nodes: append([]device.RawNode{root}, children...),
+	}
+}
+
+func visualContentPage(controls, textRunes int) *protocol.Tree {
+	children := make([]*protocol.Node, 0, controls+1)
+	for i := range controls {
+		children = append(children, visualControl("c"+itoa(i+1), rectT(i*60, 940, i*60+50, 980), ""))
+	}
+	if textRunes > 0 {
+		children = append(children, nodeT("text", protocol.RoleText,
+			rectT(0, 820, 1000, 900), strings.Repeat("字", textRunes)))
+	}
+	return visualTree(1000, 1000, children...)
+}
+
+func requireVisualClass(t *testing.T, tree *protocol.Tree, capture *device.Capture,
+	foreground string, quality *protocol.Quality, wantKind, wantValue string) {
+	t.Helper()
+	kind, value := ClassifyVisual(tree, capture, foreground, quality)
+	if kind != wantKind || value != wantValue {
+		t.Fatalf("ClassifyVisual = (%q,%q), want (%q,%q)", kind, value, wantKind, wantValue)
+	}
+}
+
+func TestClassifyVisualLoading(t *testing.T) {
+	progress := visualCapture(1000, 1000, visualRawNode(visualProgressClass, 490, 950, 510, 975))
+	seek := visualCapture(1000, 1000, visualRawNode(visualSeekClass, 490, 950, 510, 975))
+	unstable := &protocol.Quality{State: protocol.QualityUnstable, StopReason: protocol.QualityStopMaxSamples}
+	condition := &protocol.Quality{State: protocol.QualityUnstable, StopReason: protocol.QualityStopCondition}
+	for _, tc := range []struct {
+		name            string
+		controls, runes int
+		capture         *device.Capture
+		quality         *protocol.Quality
+		want            string
+	}{
+		{"visible progress bar", 7, 79, progress, nil, VisualKindLoading},
+		{"seek bar", 4, 15, seek, nil, VisualKindSparseTree},
+		{"seek bar suffix with progress", 4, 15, visualCapture(1000, 1000,
+			visualRawNode("example.SeekBarProgressBar", 490, 950, 510, 975)), nil, VisualKindSparseTree},
+		{"progress on rich list", 3, 80, progress, nil, ""},
+		{"progress on control-heavy list", 8, 12, progress, nil, ""},
+		{"unstable five-node page", 3, 39, visualCapture(1000, 1000), unstable, VisualKindLoading},
+		{"unstable rich list", 3, 120, nil, unstable, ""},
+		{"unstable text limit", 3, 40, nil, unstable, ""},
+		{"unstable control limit", 8, 12, nil, unstable, ""},
+		{"unstable condition early stop", 3, 15, nil, condition, VisualKindSparseTree},
+		{"condition early stop with progress bar", 3, 15, progress, condition, VisualKindLoading},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireVisualClass(t, visualContentPage(tc.controls, tc.runes), tc.capture,
+				device.ForegroundPresent, tc.quality, tc.want, tc.want)
+		})
+	}
+}
+
+func TestClassifyVisualRawCaptureFilters(t *testing.T) {
+	tiny := visualRawNode(visualProgressClass, -6, 10, 4, 20)
+	offscreen := visualRawNode(visualProgressClass, 1000, 10, 1020, 50)
+	hidden := visualRawNode(visualProgressClass, 20, 20, 50, 50)
+	hidden.Visible = false
+	otherDisplay := visualRawNode(visualProgressClass, 20, 20, 50, 50)
+	otherDisplay.DisplayID++
+	capture := visualCapture(1000, 1000, tiny, offscreen, hidden, otherDisplay)
+	capture.Nodes[capture.Root].ClassName = visualProgressClass
+	tree := visualContentPage(6, 25)
+	requireVisualClass(t, tree, capture, device.ForegroundPresent, nil, VisualKindSparseTree, VisualKindSparseTree)
+
+	// One more clipped pixel makes the progress bar wide enough.
+	capture.Nodes[1].Bounds.Right++
+	requireVisualClass(t, tree, capture, device.ForegroundPresent, nil, VisualKindLoading, VisualKindLoading)
+}
+
+func TestClassifyVisualMediaSurface(t *testing.T) {
+	for _, class := range []string{visualSurfaceClass, visualTextureClass, visualVideoClass, visualPlayerClass} {
+		t.Run(class, func(t *testing.T) {
+			capture := visualCapture(1000, 1000, visualRawNode(class, -50, 0, 1000, 350))
+			requireVisualClass(t, visualContentPage(6, 25), capture, device.ForegroundPresent, nil,
+				VisualKindMediaSurface, VisualKindMediaSurface)
+			requireVisualClass(t, visualContentPage(6, 80), capture, device.ForegroundPresent, nil, "", "")
+			requireVisualClass(t, visualContentPage(10, 25), capture, device.ForegroundPresent, nil, "", "")
+		})
+	}
+
+	card := visualCapture(1000, 1000, visualRawNode(visualVideoClass, 0, 0, 1000, 200))
+	requireVisualClass(t, visualContentPage(6, 120), card, device.ForegroundPresent, nil, "", "")
+	requireVisualClass(t, visualContentPage(6, 25), card, device.ForegroundPresent, nil,
+		VisualKindSparseTree, VisualKindSparseTree)
+
+	// Overlapping surfaces covering 15% each can have a union below 25%.
+	capture := visualCapture(1000, 1000, visualRawNode(visualSurfaceClass, 0, 0, 1000, 150),
+		visualRawNode(visualPlayerClass, 0, 99, 1000, 249))
+	tree := visualContentPage(6, 25)
+	requireVisualClass(t, tree, capture, device.ForegroundPresent, nil, VisualKindSparseTree, VisualKindSparseTree)
+	capture.Nodes[2].Bounds.Bottom++
+	requireVisualClass(t, tree, capture, device.ForegroundPresent, nil, VisualKindMediaSurface, VisualKindMediaSurface)
+
+	// The smaller strip would bring the union to 25%, but only the largest
+	// sixteen surfaces count. Put the smaller strip first to test area ordering.
+	capture = visualCapture(1000, 1000, visualRawNode(visualTextureClass, 0, 200, 1000, 250))
+	for range 16 {
+		capture.Nodes = append(capture.Nodes, visualRawNode(visualSurfaceClass, 0, 0, 1000, 200))
+	}
+	requireVisualClass(t, tree, capture, device.ForegroundPresent, nil, VisualKindSparseTree, VisualKindSparseTree)
+	capture.Nodes = capture.Nodes[:len(capture.Nodes)-1]
+	requireVisualClass(t, tree, capture, device.ForegroundPresent, nil, VisualKindMediaSurface, VisualKindMediaSurface)
+}
+
+func TestClassifyVisualMediaSurfaceHugeScreen(t *testing.T) {
+	// The area is 2^60, so even screenArea*25 overflows int64.
+	const side = 1 << 30
+	tree := visualTree(side, side)
+	boundary := side / 4
+	capture := visualCapture(side, side, visualRawNode(visualSurfaceClass, 0, 0, side, boundary-1),
+		visualRawNode(visualTextureClass, 0, boundary, side, boundary+side/20))
+	// The first face misses 25% narrowly, and the second is strictly below 5%.
+	requireVisualClass(t, tree, capture, device.ForegroundPresent, nil, VisualKindSparseTree, VisualKindSparseTree)
+	capture.Nodes[1].Bounds.Bottom++
+	requireVisualClass(t, tree, capture, device.ForegroundPresent, nil, VisualKindMediaSurface, VisualKindMediaSurface)
+}
+
+func TestClassifyVisualPriority(t *testing.T) {
+	tree := visualContentPage(6, 25)
+	withPicture := visualContentPage(6, 25)
+	withPicture.Root.Children = append(withPicture.Root.Children, visualPicture("p1", rectT(0, 0, 1000, 500)))
+	media := visualRawNode(visualTextureClass, 0, 0, 1000, 350)
+	progress := visualRawNode(visualProgressClass, 5, 5, 20, 20)
+	both := visualCapture(1000, 1000, media, progress)
+	mediaOnly := visualCapture(1000, 1000, media)
+	present := device.ForegroundPresent
+	requireVisualClass(t, withPicture, both, present, nil, VisualKindLoading, VisualKindLoading)
+	requireVisualClass(t, withPicture, mediaOnly, present, nil, VisualKindImageHeavy, "image_heavy(50%)")
+	requireVisualClass(t, tree, mediaOnly, present, nil, VisualKindMediaSurface, VisualKindMediaSurface)
+	requireVisualClass(t, tree, nil, present, nil, VisualKindSparseTree, VisualKindSparseTree)
+	requireVisualClass(t, visualContentPage(7, 25), nil, present, nil, "", "")
+	requireVisualClass(t, visualContentPage(6, 30), nil, present, nil, "", "")
+	requireVisualClass(t, tree, both, device.ForegroundNone, nil, "", "")
+	requireVisualClass(t, withPicture, both, device.ForegroundNone, nil, VisualKindImageHeavy, "image_heavy(50%)")
 }
 
 func TestInferVisualHintIsStableAcrossIdenticalFrames(t *testing.T) {

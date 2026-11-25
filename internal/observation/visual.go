@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/bits"
 	"sort"
+	"strings"
 	"unicode"
 
 	"github.com/malyjacob/mobile-use-vnext/internal/device"
@@ -14,8 +15,10 @@ import (
 // for delta de-duplication; the value is the short token written on the public
 // observation line. Neither carries page text, coordinates or package details.
 const (
-	VisualKindImageHeavy = "image_heavy"
-	VisualKindSparseTree = "sparse_tree"
+	VisualKindLoading      = "loading"
+	VisualKindImageHeavy   = "image_heavy"
+	VisualKindMediaSurface = "media_surface"
+	VisualKindSparseTree   = "sparse_tree"
 )
 
 // Visual hint thresholds. They are fixed compile-time constants: the hint never
@@ -31,14 +34,22 @@ const (
 //	visualSparseMaxTextRunes   a page with fewer readable runes is sparse
 //	visualSparseMaxInteractive a page with fewer interactive controls is sparse
 const (
-	visualMinImagePercent      = 5
-	visualMaxBackdropPercent   = 90
-	visualBackdropControlLimit = 3
-	visualMaxSampledRects      = 64
-	visualHeavyUnionPercent    = 45
-	visualHeavyMaxTextRunes    = 150
-	visualSparseMaxTextRunes   = 20
-	visualSparseMaxInteractive = 5
+	visualMinImagePercent           = 5
+	visualMaxBackdropPercent        = 90
+	visualBackdropControlLimit      = 3
+	visualMaxSampledRects           = 64
+	visualHeavyUnionPercent         = 45
+	visualHeavyMaxTextRunes         = 150
+	visualLoadingMaxTextRunes       = 80
+	visualLoadingMaxInteractive     = 8
+	visualUnstableSparseTextRunes   = 40
+	visualUnstableSparseInteractive = 8
+	visualMinMediaSurfacePercent    = 25
+	visualMaxMediaRects             = 16
+	visualMediaMaxTextRunes         = 80
+	visualMediaMaxInteractive       = 10
+	visualSparseMaxTextRunes        = 30
+	visualSparseMaxInteractive      = 7
 )
 
 // visualRect is one screen-clipped rectangle with its area and center.
@@ -57,20 +68,16 @@ type visualStats struct {
 	controls    []visualRect
 }
 
-// InferVisualHint classifies the visual character of one complete public tree
-// and the current foreground state. It is a pure function over the internal
-// public tree, which still contains every reported image; the compact view has
-// already dropped the unlabeled decorative ones.
-//
-// It returns the empty kind and value when the tree carries no usable screen
-// rectangle, when no rule fires, or when the page looks ordinary. Otherwise it
-// returns one of the fixed kinds and the short public token:
-//
-//	image_heavy(<pct>%)  the union of foreground pictures covers at least 45% of
-//	                     the screen while the page carries little text
-//	sparse_tree          an open application whose page has almost no text and
-//	                     almost no interactive control
+// InferVisualHint classifies a complete public tree without raw capture or
+// settle quality evidence.
 func InferVisualHint(tree *protocol.Tree, foregroundState string) (string, string) {
+	return ClassifyVisual(tree, nil, foregroundState, nil)
+}
+
+// ClassifyVisual returns a visual kind and its public token in priority order:
+// loading, image_heavy(<pct>%), media_surface, or sparse_tree. It uses the
+// complete public tree, optional raw capture, and optional settle quality.
+func ClassifyVisual(tree *protocol.Tree, capture *device.Capture, foregroundState string, quality *protocol.Quality) (kind, value string) {
 	if tree == nil || tree.Root == nil || tree.Root.Bounds == nil {
 		return "", ""
 	}
@@ -81,15 +88,84 @@ func InferVisualHint(tree *protocol.Tree, foregroundState string) (string, strin
 	}
 	projection := compactProjection{screen: screen, screenKnown: true, screenArea: screenArea}
 	stats := collectVisualStats(tree.Root, projection)
+	var hasProgressIndicator bool
+	var mediaRects []visualRect
+	if capture != nil {
+		hasProgressIndicator, mediaRects = collectVisualCaptureStats(capture, projection)
+	}
+	if foregroundState != device.ForegroundNone && visualLoading(stats, hasProgressIndicator, quality) {
+		return VisualKindLoading, VisualKindLoading
+	}
 	if kind, value := visualImageHeavy(stats, screenArea); kind != "" {
 		return kind, value
 	}
-	if foregroundState != device.ForegroundNone &&
-		stats.textRunes < visualSparseMaxTextRunes &&
-		stats.interactive < visualSparseMaxInteractive {
+	if foregroundState == device.ForegroundNone {
+		return "", ""
+	}
+	if stats.textRunes < visualMediaMaxTextRunes && stats.interactive < visualMediaMaxInteractive &&
+		areaAtLeastPercent(visualMediaUnionArea(mediaRects), screenArea, visualMinMediaSurfacePercent) {
+		return VisualKindMediaSurface, VisualKindMediaSurface
+	}
+	if stats.textRunes < visualSparseMaxTextRunes && stats.interactive < visualSparseMaxInteractive {
 		return VisualKindSparseTree, VisualKindSparseTree
 	}
 	return "", ""
+}
+
+func visualLoading(stats visualStats, hasProgressIndicator bool, quality *protocol.Quality) bool {
+	return (hasProgressIndicator && stats.textRunes < visualLoadingMaxTextRunes &&
+		stats.interactive < visualLoadingMaxInteractive) ||
+		(quality != nil && quality.State == protocol.QualityUnstable &&
+			quality.StopReason != protocol.QualityStopCondition && stats.textRunes < visualUnstableSparseTextRunes &&
+			stats.interactive < visualUnstableSparseInteractive)
+}
+
+// collectVisualCaptureStats finds class evidence in visible nodes of the target
+// display. The complete public tree may omit these semantically empty nodes.
+func collectVisualCaptureStats(capture *device.Capture, screen compactProjection) (bool, []visualRect) {
+	var hasProgressIndicator bool
+	var mediaRects []visualRect
+	for i := range capture.Nodes {
+		node := &capture.Nodes[i]
+		if i == capture.Root || node.DisplayID != capture.Display.ID || !node.Visible {
+			continue
+		}
+		rect, positive := compactRect(protocol.Bounds(node.Bounds), screen)
+		if !positive {
+			continue
+		}
+		if isProgressBarClass(node.ClassName) && rect.Width() > 4 && rect.Height() > 4 {
+			hasProgressIndicator = true
+		}
+		if isMediaSurfaceClass(node.ClassName) {
+			media := newVisualRect(rect)
+			if !areaBelowPercent(media.area, screen.screenArea, visualMinImagePercent) {
+				mediaRects = append(mediaRects, media)
+			}
+		}
+	}
+	return hasProgressIndicator, mediaRects
+}
+
+func isProgressBarClass(class string) bool {
+	simple := class[strings.LastIndexByte(class, '.')+1:]
+	return strings.HasSuffix(simple, "ProgressBar") && !strings.Contains(simple, "SeekBar")
+}
+
+func isMediaSurfaceClass(class string) bool {
+	simple := class[strings.LastIndexByte(class, '.')+1:]
+	return strings.HasSuffix(simple, "SurfaceView") || strings.HasSuffix(simple, "TextureView") ||
+		strings.HasSuffix(simple, "VideoView") || strings.HasSuffix(simple, "PlayerView")
+}
+
+func visualMediaUnionArea(rects []visualRect) int64 {
+	if len(rects) > visualMaxMediaRects {
+		sort.SliceStable(rects, func(i, j int) bool {
+			return rects[i].area > rects[j].area
+		})
+		rects = rects[:visualMaxMediaRects]
+	}
+	return unionRectArea(rects)
 }
 
 // visualImageHeavy applies the foreground-picture rule. It keeps image leaves

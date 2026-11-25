@@ -204,7 +204,7 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 		e.addSessionIfEnded(result)
 		return result, nil
 	}
-	public, postObs, postErr := e.captureAndPublish(work.Ctx, work, session, false, req.Image, "act")
+	public, postObs, postErr := e.captureAndPublish(work.Ctx, work, session, false, req.Image, "act", obs)
 	if postErr != nil && postErr.Code == protocol.CodeStopped {
 		// A revoked session has no post observation to publish; the action
 		// itself stays executed. This is the same fact as the pre-capture

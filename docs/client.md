@@ -19,7 +19,7 @@ instance, err := c.Discover(ctx)
 `POST /api/status {}` 取得当前准入事实（`can_start`、`blocking_code`、本 Agent 的
 `session`、`start_operation_id` 与 `cleanup`）。它不生成 P、不续租、不创建会话。
 
-当前共同契约为 `"29"`。契约版本不等时返回 `contract_mismatch`；客户端不刷新版本、不重发
+当前共同契约为 `"30"`。契约版本不等时返回 `contract_mismatch`；客户端不刷新版本、不重发
 业务动作。端口可应答、`/health` 正常都不等于 `can_start=true`。
 
 公开树与 detailed inspection 使用相同的完整节点布尔默认/unknown 规则，不携带 defaults。
@@ -85,10 +85,18 @@ type Response struct {
 `null`、未知枚举或负 `samples` 使整次响应按 `invalid_response` 拒绝。`samples=0` 是合法
 值；对象缺失只表示本次结果没有该事实，不能当作 `not_observed` 或 `unknown` 的替代来源。
 
-`observation.visual` 是可选字符串，取值为 `image_heavy(<pct>%)` 或 `sparse_tree`；客户端
-按原值保留，不重算分类、不补默认值，也不用它替代 `observation.quality`、树或图片事实。
-`full` 观察直接携带本次分类，`delta` 只在该视觉状态变化时携带。空成员省略；显式 `null`
-或空串都不是合法响应。
+`observation.visual` 是可选字符串，取值为固定优先级的四值闭集 `loading`、
+`image_heavy(<pct>%)`、`media_surface`、`sparse_tree`；`observation.tree_change` 是可选字符串，
+取值为 `unchanged`/`detail_only`/`matched_base`，只在 `act` 常规成功且命中这三种状态时出现
+（常规内容变化时省略，`unchanged` 不要求本次差分为空）；`observation.hint` 是可选字符串，
+取值为 `snap`/`wait_for`。客户端按原值透明解码并保留，不
+重算分类或建议、不补默认值，也不用它们替代 `observation.quality`、树或图片事实。`full` 观察
+直接携带本次 `visual`，`delta` 中 `loading` 仍会携带，其余三类只在该视觉状态变化时携带。
+`tree_change` 是动作前后树内容与公开语境的对比结果（忽略 `ref`）；`hint` 是只读核对建议
+（`snap` 表示可用同一 O 只读截图，`wait_for` 表示可等待条件或稳定）；两者都不改变 O 状态或
+输入授权。客户端结构中
+空串与缺席都表示本次没有该事实；线上显式 `null` 或空串不是合法编码，严格解码按
+`invalid_response` 拒绝。
 
 `Result.Observation.Tree` 携带 compact full 或 delta，节点集合随服务的[裁剪策略](interface.md#node)
 确定。留存节点使用原编号，匿名包装省略后孩子可能换父。compact 投影对隐藏匿名容器按裁剪后

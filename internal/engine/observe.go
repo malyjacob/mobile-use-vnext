@@ -67,7 +67,7 @@ func (e *Engine) Observe(ctx context.Context, agent, p string, req *protocol.Obs
 
 	e.setOperationPhase(op, "capture")
 	public, _, captureErr := e.captureAndPublish(work.Ctx, work, target.session,
-		target.forceFull || req.Full, req.Image, "observe")
+		target.forceFull || req.Full, req.Image, "observe", nil)
 	result := newResult(op)
 	if captureErr != nil {
 		// The acquisition may still return read-only image material of its own

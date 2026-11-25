@@ -184,6 +184,33 @@ func TestResultV4VisualHintLine(t *testing.T) {
 	requireTestContains(t, nonString, `json v1 path="/observation/visual" value=null`)
 }
 
+func TestResultV4ObservationChangeAndHint(t *testing.T) {
+	text := assertResultTextParity(t, []byte(`{"observation":{"status":"complete","id":"O1",`+
+		`"hint":"snap","tree_change":"detail_only","visual":"media_surface",`+
+		`"screen":{"width":1080,"height":2400,"rotation":0}}}`), false)
+	requireTestContains(t, text, "obs O1 visual=media_surface change=detail_only hint=snap screen=1080x2400\n")
+
+	for _, member := range []struct {
+		key    string
+		column string
+		value  string
+	}{
+		{"tree_change", "change", "unchanged"},
+		{"hint", "hint", "wait_for"},
+	} {
+		t.Run(member.key, func(t *testing.T) {
+			prefix := `{"observation":{"status":"complete","id":"O1","` + member.key + `":`
+			text := assertResultTextParity(t, []byte(prefix+`"`+member.value+`"}}`), false)
+			requireTestContains(t, text, "obs O1 "+member.column+"="+member.value+"\n")
+			for _, raw := range []string{`"not a token"`, `""`, `null`, `42`} {
+				text := assertResultTextParity(t, []byte(prefix+raw+`}}`), false)
+				requireTestContains(t, text, `json v1 path="/observation/`+member.key+`" value=`+raw+"\n")
+				requireTestNotContains(t, text, member.column+"=")
+			}
+		})
+	}
+}
+
 func TestResultV4NotifyAggregate(t *testing.T) {
 	text := assertResultTextParity(t, []byte(`{"outcome":"executed","message_id":"M1","saved":true,`+
 		`"notification":{"state":"queued","error":{"code":"notification_unavailable","message":"通知不可用",`+

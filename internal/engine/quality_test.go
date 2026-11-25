@@ -36,7 +36,7 @@ func requireQuality(t *testing.T, got *protocol.Quality, state string, samples i
 func (h *harness) publishQuality(t *testing.T, work *workState, session *sessionState,
 	phase string) *protocol.Observation {
 	t.Helper()
-	public, obs, apiErr := h.engine.captureAndPublish(work.Ctx, work, session, true, false, phase)
+	public, obs, apiErr := h.engine.captureAndPublish(work.Ctx, work, session, true, false, phase, nil)
 	if apiErr != nil {
 		t.Fatalf("%s acquisition rejected: %v", phase, apiErr)
 	}
@@ -265,6 +265,7 @@ func TestQualityAppPostObservation(t *testing.T) {
 	}
 	requireQuality(t, result.Observation.Quality, protocol.QualityStable, 3,
 		protocol.QualityStopStable)
+	requireObservationCue(t, result.Observation, "sparse_tree", "", protocol.HintSnap)
 }
 
 // TestQualityImageRefreshEqualCompletesPair is the behavior fix of the image

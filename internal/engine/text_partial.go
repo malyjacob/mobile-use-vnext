@@ -32,7 +32,7 @@ func (e *Engine) deliverTextPartialObservation(work *workState, session *session
 			return public, nil
 		}
 	}
-	public, _, postErr := e.captureAndPublish(work.Ctx, work, session, false, wantImage, "act")
+	public, _, postErr := e.captureAndPublish(work.Ctx, work, session, false, wantImage, "act", nil)
 	return public, postErr
 }
 
@@ -90,7 +90,7 @@ func (e *Engine) publishTextPartialCapture(work *workState, session *sessionStat
 		StopReason: protocol.QualityStopNotSampled,
 	}
 	public, _, publishErr := e.publishTreeAttempt(work, session, textPartialPhase, tree,
-		tree.capture.CapturedAt, treeSelection{}, "complete", nil, quality)
+		tree.capture.CapturedAt, treeSelection{}, "complete", nil, quality, nil)
 	e.logQuality(work.OperationID, textPartialPhase, public, quality)
 	if publishErr != nil {
 		if publishErr.Code == protocol.CodeStopped {

@@ -15,7 +15,7 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
   `snap`、`wait_for`、`act`、`inspect`、`keepalive`、`end`、`app`、`notify`、`shell`、
   `diagnose`。不注册 `/health`、认证初始化、旧工具别名或旧协议回退。
 - 目录指纹是工具数、注册顺序、名称、描述与入参 schema 的 canonical SHA-256。当前源码的
-  工具目录指纹为 `df6afaa50d401e0498bd39a63959cfbf394a4c4ed4c210ce852b2bc48a7f22fc`。
+  工具目录指纹为 `25a09a66f54e728b1c9fc67e6898514c6ac7438b9976528ece7e36bd4f5eab43`。
   发布清单中的指纹对应其记录的源码提交。发布时从目标提交重建并核验清单。
   探针按工具名比对实际 `tools/list` 的描述和入参 schema，并核对只读注解。传入 `-manifest`
   时，探针对每份清单核对构建发行号、契约号、工具数和工具目录 SHA-256。探针将
@@ -110,10 +110,13 @@ text 失败（含 `outcome=partial` 与 `outcome=uncertain`）的 `error.details
 `tap`/`long_press`/`swipe`、状态或属性标记或行尾默认为 `view`；只有恢复结果等于原角色且
 首项不会被误读为角色词时才省略。当前 compact full 和 delta 输出普通节点定义。读取历史
 `[n2 n3]` 或 `chain [n2 n3] <role> ...` 时，按顺序展开，缩进孩子归最后一个 ref。
-图例还说明 `obs` 行的可选 `visual=` 提示、节点标志列（含 compact 截断时的 `truncated`）、
-块头后的空行、几何省略、状态默认与 compact 净体；
-几何列在 `root`/`scroll` 上是四元矩形，其他角色是二元中心点。`visual` 只是提示模型按需
-`snap`，不是输入授权，也不替代页面事实。普通 `tree v5` 完整头只写
+图例还说明 `obs` 行的可选 `visual`/`change`/`hint` 列、节点标志列（含 compact 截断时的
+`truncated`）、块头后的空行、几何省略、状态默认与 compact 净体；
+几何列在 `root`/`scroll` 上是四元矩形，其他角色是二元中心点。`hint=snap` 时用同一 O 调
+`snap` 核对画面；`hint=wait_for` 时用 `wait_for` 等待条件或稳定；`change=matched_base` 表示
+前后树内容或公开语境有变、只是差分零差异命中历史基线，不是动作没生效。三者都只是观察事实或
+只读建议，不是输入授权，也不替代页面事实。
+普通 `tree v5` 完整头只写
 `nodes`，差分头只写 `base` 与 `changes`；块头 `view=` 以及 `nodes`/`entries` 两项计数
 属于 `inspect v3` 补看头。动作列的 `swipe` 表示节点的源能力，受控滚动使用
 `operation.type=scroll` 和 `container`。嵌套容器可按要滚动的区域选择 ref。
@@ -134,7 +137,8 @@ text 失败（含 `outcome=partial` 与 `outcome=uncertain`）的 `error.details
 注解表达操作意图，实时查询的结果仍取自调用时的状态。
 
 `snap` 的 schema 只有一个必填 `reference`（`O…`/`P…`，≤64）。它与 `observe` 共用
-引用解析口径，额外拒绝本次请求 P 的自引用。它只读取一张图，不读取树或发布观察。
+引用解析口径，额外拒绝本次请求 P 的自引用。它只读取一张图，不读取树或发布观察；`obs` 行
+`hint=snap` 指的就是用同一 O 这样只读核对画面（不消费 O、不发布新 O、不续租）。
 成功时结果是顶层 `image` 元数据加一个 `ImageContent`；`result v4` 以单行
 `image <W>x<H> read_only screen=<W>x<H>[@<display_id>] [at=<HH:MM:SS>]` 输出同一元数据（不含 base64），
 `structuredContent` 在顶层 `image` 携带同组成员，三种结果模式都只发送一个 `ImageContent`。
@@ -437,7 +441,7 @@ token，或时间值既非合法 RFC3339 也不是安全 token 时，整对象�
 **观察行。** 单行摘要，`obs ` 之后首个不含 `=` 的字段是完整 `O`：
 
 ```text
-obs [<O>] [status=<partial|failed|…>] [fg=<前景>] [at=HH:MM:SS] [visual=<image_heavy(<pct>%)|sparse_tree>] [screen=<W>x<H>[@<display_id>]] [rot=<1|2|3>] [missing=<a,b>]
+obs [<O>] [status=<partial|failed|…>] [fg=<前景>] [at=HH:MM:SS] [visual=<loading|image_heavy(<pct>%)|media_surface|sparse_tree>] [change=<unchanged|detail_only|matched_base>] [hint=<snap|wait_for>] [screen=<W>x<H>[@<display_id>]] [rot=<1|2|3>] [missing=<a,b>]
 ```
 
 - `status=complete` 通常省略；整行没有其他字段时写 `obs status=complete`，不产出裸 `obs`
@@ -446,11 +450,21 @@ obs [<O>] [status=<partial|failed|…>] [fg=<前景>] [at=HH:MM:SS] [visual=<ima
 - `fg` 按 `foreground.state` 编码：`package` 与 `task_id` 都有写 `<package>#<task_id>`，
   只有 `package` 写 `<package>`，只有 `task_id` 写 `#<task_id>`，都没有写 `present`；
   `none` 写 `none`；`unknown` 写 `unknown(<reason>)`，`reason` 为空时写 `unknown`。
-- `visual` 仅在观察携带该字段时输出，取值为 `image_heavy(<pct>%)` 或 `sparse_tree`，判据与
-  `structuredContent` 完全一致（见[接口契约](interface.md#observation-与-quality)）。`full`
-  观察输出本次分类；`delta` 仅在同会话、同显示代次的视觉状态由无变有或种类切换时输出，
-  同态省略。适配器不重算、不补默认值。例如
-  `obs O4821_80 fg=com.example.gallery at=22:05:18 visual=image_heavy(52%)`。
+- `visual` 仅在观察携带该字段时输出，取值为 `loading`、`image_heavy(<pct>%)`（45–100）、
+  `media_surface` 或 `sparse_tree`，判据与 `structuredContent` 完全一致（见
+  [接口契约](interface.md#observation-与-quality)）。`full` 观察输出本次分类；`delta` 中
+  `loading` 不省略，其余三类仅在同会话、同显示代次的分类变化时输出，同态省略。适配器不
+  重算、不补默认值。
+- `change` 映射 `observation.tree_change`，只在 `act` 常规成功（比较动作前后树内容与公开语境）
+  时出现：`unchanged` 前后紧凑树与完整树均相同，`detail_only` 紧凑树相同但完整树细节有变，
+  `matched_base` 前后树内容或公开语境有变、差分零差异命中历史基线，不是动作没生效。常规
+  内容变化（发布非空差分或 full）时省略该列；`change=unchanged` 不要求本次差分为空，可与
+  非空历史基线差分同时出现。`start`、`observe`、`wait_for`、`app`、`act.delivery`、`text`
+  的 `partial` 交付与无树观察省略该列。
+- `hint` 映射 `observation.hint`，由已发布的 `visual`、`change` 与是否交付有效图片推导：
+  `snap` 表示用同一 O 只读截图核对（不消费 O、不发布新 O、不续租）；`wait_for` 表示页面
+  可能仍在加载或过渡，应等待条件或稳定；`matched_base` 且无 `visual` 时不提示。
+- 例如 `obs O4821_80 fg=com.example.gallery at=22:05:18 visual=image_heavy(52%) hint=snap`。
 - `screen` 仅在顶层 `session` 非空或观察没有树时输出；`screen` 存在时，无论 `screen=` 是否
   省略，`rotation != 0` 都一律输出 `rot=<rotation>`。
 - `missing` 以逗号连接，空列表省略。

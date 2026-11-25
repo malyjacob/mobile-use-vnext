@@ -53,7 +53,7 @@ var v4ResultFields = func() map[string]resultV4FieldKind {
 	add("error.", "message", v4String)
 	add("error.", "details", v4JSON)
 	add("recovery.", "entry reference input_state cause", v4Token)
-	add("observation.", "status id captured_at visual", v4Token)
+	add("observation.", "status id captured_at visual tree_change hint", v4Token)
 	add("observation.", "origin revision actionable_until", v4Omitted)
 	add("observation.", "foreground screen image error", v4Object)
 	add("observation.", "quality", v4Omitted)
@@ -874,17 +874,19 @@ func renderObservationV4(w *resultV4Writer, raw []byte, top map[string]json.RawM
 			emitted = true
 		}
 	}
-	// visual is optional: an absent member means this frame has no hint of this
-	// kind. A value that is not a safe token falls back to the json v1 row.
-	if rawValue, present := values["visual"]; present {
-		value, valid := rawStringValue(rawValue)
-		if valid && value != "" && resultToken(value) {
-			parts = append(parts, "visual="+value)
-			emitted = true
-		} else {
-			w.fallback("/observation/visual", rawValue)
-			emitted = true
+	for _, column := range []struct{ member, key string }{
+		{"visual", "visual"}, {"tree_change", "change"}, {"hint", "hint"},
+	} {
+		rawValue, present := values[column.member]
+		if !present {
+			continue
 		}
+		if value, valid := rawStringValue(rawValue); valid && resultToken(value) {
+			parts = append(parts, column.key+"="+value)
+		} else {
+			w.fallback("/observation/"+column.member, rawValue)
+		}
+		emitted = true
 	}
 	hasSession := false
 	if rawSession, present := top["session"]; present && !rawIsNull(rawSession) {
@@ -952,7 +954,7 @@ func renderObservationV4(w *resultV4Writer, raw []byte, top map[string]json.RawM
 	}
 	for _, member := range members {
 		switch member.name {
-		case "id", "status", "foreground", "captured_at", "visual", "quality", "screen", "missing", "image", "error", "tree", "origin", "revision", "actionable_until":
+		case "id", "status", "foreground", "captured_at", "visual", "tree_change", "hint", "quality", "screen", "missing", "image", "error", "tree", "origin", "revision", "actionable_until":
 			continue
 		}
 		w.fallback("/observation/"+pointerPart(member.name), member.value)
@@ -2054,7 +2056,7 @@ var resultFields = func() map[string]resultFieldKind {
 	add("error.", "message", fieldString)
 	add("error.", "details", fieldJSON)
 	add("recovery.", "entry reference input_state cause", fieldToken)
-	add("observation.", "status id origin revision captured_at actionable_until visual", fieldToken)
+	add("observation.", "status id origin revision captured_at actionable_until visual tree_change hint", fieldToken)
 	add("observation.", "quality", fieldObject)
 	add("observation.quality.", "state stop_reason", fieldToken)
 	add("observation.quality.", "samples", fieldLiteral)
