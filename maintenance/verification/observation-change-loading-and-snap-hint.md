@@ -66,3 +66,12 @@
 - 手机 MCP 的 `text`/`structured` 结果模式未单独运行；当前手机部署为 `both`，主机 stdio 三种模式均已 PASS。
 - 依赖方托管的 MCP 进程与其重连未操作；主机旧 `device-mcp.exe` 映像仍被占用并保留为备份，独立探针使用本次新产物直接启动，只证明磁盘产物与双入口契约。
 - 实机验证为虚拟屏模式的最小闭环，不覆盖主屏模式、外部宿主上下文与宿主侧提示消费行为；这些边界仍由原提案 §7.2 的能力边界约束。
+
+## Issue 收口
+
+归档提交 `a757933280ca3e7a472b22c8e0ed21f67969e289` 与实现提交已推送 `origin/master`。三个 issue 均以 `COMPLETED` 关闭：
+
+- [#44](https://github.com/malyjacob/mobile-use-vnext/issues/44#issuecomment-7163590567)：`tree_change` 三值与省略规则、`hint=snap`、实机 `unchanged`/`matched_base` 证据、不伪造像素事实与不进入 `recovery` 的边界。
+- [#45](https://github.com/malyjacob/mobile-use-vnext/issues/45#issuecomment-7163593714)：`visual` 四值判据与阈值、`loading` 在 delta 保留、实机 `sparse_tree` 证据、`loading`/`media_surface` 实机未构造的单测覆盖说明、不做业务词典 `modal` 的理由。
+- [#46](https://github.com/malyjacob/mobile-use-vnext/issues/46#issuecomment-7163596192)：`hint` 推导与不变式、`snap` 不消费/不发布 O、与 `recovery` 正交、实机 `snap` 后同一 O 仍可用证据。
+
