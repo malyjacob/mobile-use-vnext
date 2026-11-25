@@ -1,52 +1,45 @@
 package engine
 
 import (
+	"cmp"
 	"context"
-	"sort"
+	"slices"
 	"time"
 
 	"github.com/malyjacob/mobile-use-vnext/internal/device"
 	"github.com/malyjacob/mobile-use-vnext/internal/protocol"
 )
 
-// killPlan is the verified original process set of one kill attempt.
 type killPlan struct {
-	instances []device.ProcessInstance
-	userID    int
-	bootID    string
-	pkg       string
+	Package         string
+	AndroidUserID   int
+	Tasks           []device.Task
+	Identity        device.PackageIdentity
+	Execution       device.BootIdentity
+	Processes       []device.ProcessInstance
+	UsedEligibility bool
 }
 
-// pids returns the sorted external PIDs of the plan.
-func (p *killPlan) pids() []int {
-	out := make([]int, 0, len(p.instances))
-	for _, instance := range p.instances {
-		out = append(out, instance.PID)
-	}
-	sort.Ints(out)
-	return out
-}
-
-// appKill terminates the exact original process instances of one live owned task
-// on the session display. It never uses force-stop, a UID sweep or a prefix scan.
-func (e *Engine) appKill(ctx context.Context, op *operationState, req *protocol.AppRequest) (*protocol.Result, *protocol.APIError) {
-	now := time.Now()
+func (e *Engine) appKill(_ context.Context, op *operationState, req *protocol.AppRequest) (*protocol.Result, *protocol.APIError) {
 	e.mu.Lock()
-	_, session, staticErr := e.appStaticCheckLocked(op.Agent, req.Reference, now)
+	obs, session, staticErr := e.appStaticCheckLocked(op.Agent, req.Reference, time.Now())
 	if staticErr == nil {
 		staticErr = e.appModeGuardLocked(session, req.Kind)
 	}
 	var epoch int64
+	var display device.Display
 	if staticErr == nil {
-		epoch = session.Epoch
+		epoch, display = session.Epoch, session.Display
+		if obs.DisplayID != display.ID || obs.DisplayGeneration != display.Generation {
+			// The observation and every close authorization bound to its display
+			// generation are stale together.
+			session.CloseEligibilities = nil
+			staticErr = protocol.NewError(409, protocol.CodeObservationRetired, "观察的显示屏已变化")
+		}
 	}
 	e.mu.Unlock()
 	if staticErr != nil {
 		return e.finishAppError(op, "admission", appKindOnly(req.Kind), staticErr)
-	}
-	if req.Target == nil || !req.Target.UseTask {
-		return e.finishAppError(op, "admission", appKindOnly(req.Kind),
-			protocol.Invalid("kill 需要 target.task_id"))
 	}
 
 	work, busy := e.acquireWork(op, WorkAppAction)
@@ -55,392 +48,509 @@ func (e *Engine) appKill(ctx context.Context, op *operationState, req *protocol.
 	}
 	defer e.releaseWork(work)
 
-	task, targetErr := e.resolveAppTarget(work.Ctx, session.Display.ID, req.Target)
+	view := appViewWithDisplay(req.Kind, display.ID)
+	view.Package = req.Target.App
+	plan, targetErr := e.freezeKillTarget(work, epoch, display, req.Target, view)
 	if targetErr != nil {
-		return e.finishAppError(op, "preflight",
-			appViewWithDisplay(req.Kind, session.Display.ID), targetErr)
+		return e.finishAppError(op, "preflight", view, targetErr)
 	}
-	view := appTargetErrorView(req, task)
-	view.Kind = protocol.AppKindKill
-	view.SourceTaskID = appIntPtr(task.TaskID)
-	view.SourceDisplayID = nil
-	view.DisplayID = appIntPtr(session.Display.ID)
-
-	plan, planErr := e.killGuard(work, session, req, task)
-	if planErr != nil {
-		if plan != nil {
-			view.TargetPIDs = plan.pids()
-			view.HasTargetPIDs = true
-		}
-		return e.finishAppError(op, "preflight", view, planErr)
+	plan, guardErr := e.killGuard(work, epoch, display, req, plan)
+	if guardErr != nil {
+		return e.finishAppError(op, "preflight", view, guardErr)
 	}
-	view.TargetPIDs = plan.pids()
+	view.TargetPIDs = processPIDs(plan.Processes)
 	view.HasTargetPIDs = true
 
 	e.mu.Lock()
-	claimErr := e.claimObservationLocked(op, op.Agent, work, e.observations[req.Reference],
-		e.session, time.Now())
+	now := time.Now()
+	claimErr := e.killBindingErrorLocked(work, epoch, display, now)
+	if claimErr == nil {
+		claimErr = e.validateKillEligibilityLocked(plan, plan.Identity, plan.Execution, now)
+	}
+	if claimErr == nil {
+		claimErr = e.claimObservationLocked(op, op.Agent, work, e.observations[req.Reference], e.session, now)
+	}
 	e.mu.Unlock()
 	if claimErr != nil {
 		return e.finishAppError(op, "claim", view, claimErr)
 	}
 
-	// Final guard immediately before the one signal.
-	final, finalErr := e.killGuard(work, session, req, task)
-	if finalErr != nil {
-		view.TargetPIDs = plan.pids()
-		view.HasTargetPIDs = true
-		finalErr.Outcome = OutcomeNotExecuted
-		return e.finishAppError(op, "revalidate", view, finalErr)
+	final, guardErr := e.killGuard(work, epoch, display, req, plan)
+	if guardErr != nil {
+		return e.finishAppError(op, "revalidate", view, guardErr)
 	}
-	if !sameProcessSet(plan.instances, final.instances) {
-		view.TargetPIDs = plan.pids()
-		view.HasTargetPIDs = true
-		return e.finishAppError(op, "revalidate", view,
-			statusError(protocol.CodeKillUnconfirmed, "目标进程集合已变化，未派发信号"))
-	}
+	view.TargetPIDs = processPIDs(final.Processes)
 
-	view.TargetPIDs = final.pids()
-	view.HasTargetPIDs = true
-
-	// The termination is the first of two separate steps. Its dispatch fact
-	// decides which completion branches stay honest: a kill that never sent a
-	// signal has no device side effect, while a dispatched signal may not be
-	// withdrawn. The three process statistics are deliberately not prefilled for
-	// an empty verified process set: they only become a fact once the shell is
-	// confirmed gone or a removal was actually dispatched.
-	killDispatched := len(final.instances) > 0
-	processesGone := !killDispatched
-	if killDispatched {
-		allTerminated := true
-		killed := make([]int, 0, len(final.instances))
-		for _, instance := range final.instances {
-			if e.workRevoked(work) {
-				allTerminated = false
-				break
-			}
-			receipt, killErr := e.dev.KillProcess(work.Ctx, instance.PID, instance.StartTicks)
-			if receipt != device.DispatchTerminated || killErr != nil {
-				allTerminated = false
-			}
-		}
-
-		remaining, readOK := e.awaitKillVerification(work, final)
-		if readOK {
-			for _, instance := range final.instances {
-				if !instancePresent(remaining, instance) {
-					killed = append(killed, instance.PID)
-				}
-			}
-		} else {
-			// Without a complete post read only already-proven terminations count.
-			killed = nil
-		}
-		sort.Ints(killed)
-		view.KilledPIDs = killed
-		view.HasKilledPIDs = true
-
-		if readOK {
-			view.RemainingPIDs = processPIDs(remaining)
-			view.HasRemainingPIDs = true
-			view.Restarted = appBoolPtr(restarted(remaining, final.instances))
-			view.HasRestarted = true
-		} else {
-			view.Restarted = nil
-			view.HasRestarted = true
-		}
-
-		processesGone = readOK && len(killed) == len(final.instances) && allTerminated
-	}
-
-	if !processesGone {
-		return e.finishAppUncertainWork(work, op, view, protocol.CodeKillUnconfirmed,
-			"已派发进程终止，但无法确认原实例全部结束", nil)
-	}
-	return e.removeKilledTask(work, op, view, task, epoch, killDispatched)
-}
-
-// removeKilledTask is the second step of one kill. Once the original process set
-// is proven gone (or proven empty) it removes the task window shell and the
-// session registration in the same work. A removal that did not enter dispatch
-// never becomes executed: with no signal sent the call stays not_executed, while
-// an unconfirmed removal stays uncertain and keeps the registration because the
-// device may still execute it.
-func (e *Engine) removeKilledTask(work *workState, op *operationState, view *protocol.AppView,
-	task *device.Task, epoch int64, killDispatched bool) (*protocol.Result, *protocol.APIError) {
-	if e.workRevoked(work) {
-		return e.finishKillRemovalRevoked(work, op, view, killDispatched)
-	}
-	tasks, listErr := e.dev.TaskList(work.Ctx)
-	if listErr == nil && !taskListed(tasks, task.TaskID) {
-		// Android destroyed the TaskRecord together with the last process: the
-		// shell is already gone, so no removal is dispatched and no task read is
-		// used to confirm a removal.
-		if !killDispatched {
-			fillEmptyKillFacts(view)
-		}
-		e.forgetKilledTask(epoch, task.TaskID)
-		return e.finishAppExecuted(work, op, view)
-	}
-
-	// The shell is still listed (or the read failed): dispatch the removal once,
-	// immediately after one more revocation revalidation.
-	if e.workRevoked(work) {
-		return e.finishKillRemovalRevoked(work, op, view, killDispatched)
-	}
-	removeResult, removeErr := e.dev.RemoveTask(work.Ctx, task.TaskID)
-	switch {
-	case removeResult.Receipt == device.DispatchTerminated && removeErr == nil:
-		if !killDispatched {
-			fillEmptyKillFacts(view)
-		}
-		e.forgetKilledTask(epoch, task.TaskID)
-		return e.finishAppExecuted(work, op, view)
-	case removeResult.Receipt == device.DispatchNotDispatched:
-		// The receipt is authoritative: the removal never entered dispatch, so no
-		// task read may retroactively confirm it.
-		if !killDispatched {
-			return e.finishAppError(op, "dispatch", view,
-				protocol.NewError(409, protocol.CodeStopped, "任务窗口移除未派发"))
-		}
-		return e.finishAppUncertainWork(work, op, view, protocol.CodeKillUnconfirmed,
-			"已终止应用进程，但无法确认任务窗口已移除", nil)
-	default:
-		// An unknown receipt or a returned error: the removal may still be in
-		// flight, so the registration is kept.
-		if !killDispatched {
-			fillEmptyKillFacts(view)
-			return e.finishAppUncertainWork(work, op, view, protocol.CodeKillUnconfirmed,
-				"确认无运行进程，但无法确认任务窗口已移除", nil)
-		}
-		return e.finishAppUncertainWork(work, op, view, protocol.CodeKillUnconfirmed,
-			"已终止应用进程，但无法确认任务窗口已移除", nil)
-	}
-}
-
-// finishKillRemovalRevoked closes a kill whose shell removal may not be
-// dispatched because the work was revoked. A call that never sent a signal has
-// no device side effect and stays not_executed; a dispatched signal stays
-// uncertain because the original process set was already terminated.
-func (e *Engine) finishKillRemovalRevoked(work *workState, op *operationState,
-	view *protocol.AppView, killDispatched bool) (*protocol.Result, *protocol.APIError) {
-	if !killDispatched {
-		return e.finishAppError(op, "dispatch", view,
-			protocol.NewError(409, protocol.CodeStopped, "任务终止已撤销，未派发任务窗口移除"))
-	}
-	return e.finishAppUncertainWork(work, op, view, protocol.CodeKillUnconfirmed,
-		"已终止应用进程，但工作已撤销未能移除任务窗口", nil)
-}
-
-// forgetKilledTask removes one task from the session registry after its shell is
-// confirmed gone. The short lock revalidates the original session generation and
-// never performs device IO; the durable write is scheduled outside it.
-func (e *Engine) forgetKilledTask(epoch int64, taskID int) {
+	// STOP cancels the adapter context. Mark the dispatch window in the same
+	// lock that checks authority, so a detached P can never report that a
+	// command which may be running was definitely unissued.
 	e.mu.Lock()
-	if e.session != nil && e.session.Epoch == epoch && e.session.State != SessionEnded {
-		e.removeSessionTaskLocked(taskID)
-		e.persistAsync()
+	now = time.Now()
+	dispatchErr := e.killBindingErrorLocked(work, epoch, display, now)
+	if dispatchErr == nil {
+		dispatchErr = e.validateKillEligibilityLocked(final, final.Identity, final.Execution, now)
+	}
+	if dispatchErr == nil {
+		work.DispatchUnknown = true
 	}
 	e.mu.Unlock()
+	if dispatchErr != nil {
+		return e.finishAppError(op, "dispatch", view, dispatchErr)
+	}
+
+	result, _ := e.dev.ForceStopPackage(work.Ctx, final.Package, final.AndroidUserID)
+	confirmed := e.recordKillReceipt(work, op, epoch, display, final, result)
+	if result.Receipt == device.DispatchNotDispatched {
+		return e.finishAppError(op, "dispatch", view,
+			protocol.NewError(409, protocol.CodeStopped, "包级强停未派发"))
+	}
+
+	sample := e.sampleKillResult(work, final)
+	sample.apply(view, final.Processes)
+	e.forgetAbsentKillTasks(work, epoch, display, final.Tasks, sample.taskIDs, sample.tasksKnown)
+	if confirmed {
+		return e.finishAppExecuted(work, op, view)
+	}
+	return e.finishAppUncertainWork(work, op, view, protocol.CodeKillUnconfirmed,
+		"已派发包级强停，但无法确认命令成功", nil)
 }
 
-// fillEmptyKillFacts completes the kill statistics of a call that sent no signal
-// and whose process set was already proven empty. It is used only on the paths
-// that reach a completion fact, never on a bare not_executed view.
-func fillEmptyKillFacts(view *protocol.AppView) {
-	view.KilledPIDs = []int{}
-	view.HasKilledPIDs = true
-	view.RemainingPIDs = []int{}
-	view.HasRemainingPIDs = true
-	view.Restarted = appBoolPtr(false)
-	view.HasRestarted = true
+func (e *Engine) readKillTasks(ctx context.Context) ([]device.Task, *protocol.APIError) {
+	snapshot, err := e.dev.TaskSnapshot(ctx)
+	if err != nil {
+		return nil, protocol.NewError(503, protocol.CodeDeviceUnavailable, "无法读取任务清单")
+	}
+	if !snapshot.Complete {
+		return nil, protocol.NewError(503, protocol.CodeDeviceUnavailable, "任务枚举不完整")
+	}
+	return snapshot.Tasks, nil
 }
 
-// taskListed reports whether one task id is still present in a task listing.
-func taskListed(tasks []device.Task, taskID int) bool {
+func killPackageTasks(all []device.Task, pkg string) []device.Task {
+	var tasks []device.Task
+	for _, task := range all {
+		if task.Package == pkg {
+			tasks = append(tasks, task)
+		}
+	}
+	slices.SortFunc(tasks, func(a, b device.Task) int { return cmp.Compare(a.TaskID, b.TaskID) })
+	return tasks
+}
+
+func (e *Engine) freezeKillTarget(work *workState, epoch int64, display device.Display,
+	target *protocol.AppTarget, view *protocol.AppView) (killPlan, *protocol.APIError) {
+	var plan killPlan
+	if e.workRevoked(work) {
+		return plan, stoppedKill()
+	}
+	all, apiErr := e.readKillTasks(work.Ctx)
+	if apiErr != nil {
+		return plan, apiErr
+	}
+	if target.UseTask {
+		for _, task := range all {
+			if task.TaskID == target.TaskID {
+				if view.SourceTaskID != nil {
+					view.SourceTaskID, view.Package = nil, ""
+					return plan, protocol.NewError(503, protocol.CodeDeviceUnavailable, "无法确认唯一源任务")
+				}
+				view.SourceTaskID = appIntPtr(task.TaskID)
+				view.Package = task.Package
+			}
+		}
+		if view.SourceTaskID == nil {
+			return plan, protocol.NewError(409, protocol.CodeTaskNotFound, "找不到该任务")
+		}
+	}
+	if !protocol.ValidPackageName(view.Package) {
+		return plan, protocol.NewError(503, protocol.CodeDeviceUnavailable, "无法确认任务所属应用")
+	}
+	if view.Package == e.cfg.ControlPackage {
+		return plan, protocol.NewError(409, protocol.CodeControlUI, "不能终止控制界面进程")
+	}
+
+	plan.Package = view.Package
+	plan.Tasks = killPackageTasks(all, plan.Package)
+	elsewhere := killHasTaskElsewhere(plan.Tasks, display.ID)
+	e.mu.Lock()
+	now := time.Now()
+	apiErr = e.killBindingErrorLocked(work, epoch, display, now)
+	if apiErr == nil {
+		apiErr = e.killOwnershipLocked(plan.Package, plan.Tasks, elsewhere, target.UseTask)
+	}
+	if apiErr == nil && len(plan.Tasks) == 0 {
+		view.TargetTaskIDs = []int{}
+		view.HasTargetTaskIDs = true
+		eligibility := closeEligibilityLocked(e.session, plan.Package, now)
+		if eligibility == nil {
+			apiErr = missingKillEligibility()
+		} else {
+			plan.UsedEligibility = true
+			plan.AndroidUserID = eligibility.AndroidUserID
+		}
+	}
+	e.mu.Unlock()
+	if apiErr != nil {
+		return plan, apiErr
+	}
+
+	view.TargetTaskIDs = make([]int, 0, len(plan.Tasks))
+	view.HasTargetTaskIDs = true
+	if len(plan.Tasks) > 0 {
+		plan.AndroidUserID = plan.Tasks[0].UserID
+	}
+	for _, task := range plan.Tasks {
+		view.TargetTaskIDs = append(view.TargetTaskIDs, task.TaskID)
+	}
+	for _, task := range plan.Tasks {
+		if !task.HasUserID || task.UserID < 0 || task.UserID != plan.AndroidUserID {
+			return plan, protocol.NewError(503, protocol.CodeDeviceUnavailable, "无法确认任务所属 Android 用户")
+		}
+	}
+	view.AndroidUserID = appIntPtr(plan.AndroidUserID)
+	return plan, nil
+}
+
+func killHasTaskElsewhere(tasks []device.Task, displayID int) bool {
 	for _, task := range tasks {
-		if task.TaskID == taskID {
+		if task.DisplayID != displayID {
 			return true
 		}
 	}
 	return false
 }
 
-// killGuard verifies every pre-dispatch condition and reads the original process
-// set. A non-nil error never authorizes a signal. The order is load-bearing: the
-// ownership decision comes before the transfer protection, so a task this
-// session does not own is refused as not owned rather than as lifecycle busy.
-// The session foreground is deliberately not a guard: a virtual-display owned
-// task may be terminated while it is the only foreground window.
-func (e *Engine) killGuard(work *workState, session *sessionState, req *protocol.AppRequest,
-	task *device.Task) (*killPlan, *protocol.APIError) {
-	if e.workRevoked(work) {
-		return nil, protocol.NewError(409, protocol.CodeStopped, "进程终止已撤销")
-	}
-	if task.Package == e.cfg.ControlPackage {
-		return nil, protocol.NewError(409, protocol.CodeControlUI, "不能终止控制界面进程")
-	}
-	all, err := e.dev.TaskList(work.Ctx)
-	if err != nil {
-		return nil, protocol.NewError(503, protocol.CodeDeviceUnavailable, "无法读取任务清单")
-	}
-	var live *device.Task
-	for i := range all {
-		if all[i].TaskID == task.TaskID {
-			live = &all[i]
+func (e *Engine) killOwnershipLocked(pkg string, tasks []device.Task, elsewhere, useTask bool) *protocol.APIError {
+	// Compare against the session registration as well as the task ID, which
+	// Android may reuse. A matching registration on an external display still
+	// fails the location guard, but only unowned use invalidates eligibility.
+	notOwned := false
+	for i, task := range tasks {
+		entry := e.sessionTaskLocked(e.session, task.TaskID)
+		if task.TaskID <= 0 || i > 0 && task.TaskID == tasks[i-1].TaskID ||
+			entry == nil || entry.Ownership != TaskOwned || !entry.Proven || entry.Package != pkg ||
+			entry.DisplayID != e.session.Display.ID || entry.Generation != e.session.Display.Generation {
+			notOwned = true
+			revokeCloseEligibilityLocked(e.session, pkg)
+			break
 		}
 	}
-	if live == nil || live.DisplayID != session.Display.ID || live.Package != task.Package {
-		return nil, protocol.NewError(409, protocol.CodeTaskNotTracked, "任务已不在本会话显示屏")
+	if elsewhere {
+		return protocol.NewError(409, protocol.CodeKillTaskElsewhere, "该应用在其他显示屏仍有任务")
 	}
-	e.mu.Lock()
-	entry := e.sessionTaskLocked(e.session, task.TaskID)
-	protected := e.transferProtectsLocked(task.TaskID)
-	e.mu.Unlock()
-	if entry == nil || entry.Ownership != TaskOwned {
-		return nil, protocol.NewError(409, protocol.CodeKillNotOwned, "只有本会话自有任务可终止进程")
+	if notOwned {
+		return protocol.NewError(409, protocol.CodeKillNotOwned, "目标包含非本会话自有任务")
 	}
-	if protected {
-		return nil, protocol.NewError(409, protocol.CodeTaskLifecycleBusy,
-			"任务仍有未确认的迁移责任")
-	}
-	otherDisplay := false
-	sibling := false
-	for _, candidate := range all {
-		if candidate.Package != task.Package || candidate.TaskID == task.TaskID {
+	for _, transfer := range e.transfers {
+		if transfer == nil || transfer.record.State == TransferReleased {
 			continue
 		}
-		if candidate.DisplayID != session.Display.ID {
-			otherDisplay = true
-		} else if candidate.DisplayID == session.Display.ID {
-			sibling = true
+		// A not-yet-confirmed move may temporarily be absent from the live scan.
+		if !useTask && transfer.record.Package == pkg || slices.ContainsFunc(tasks, func(task device.Task) bool {
+			return task.TaskID == transfer.record.LeafTaskID
+		}) {
+			return protocol.NewError(409, protocol.CodeTaskLifecycleBusy, "任务仍有未确认的迁移责任")
 		}
 	}
-	if otherDisplay {
-		return nil, protocol.NewError(409, protocol.CodeKillTaskElsewhere,
-			"该应用在其他显示屏仍有任务")
-	}
-	if sibling {
-		return nil, protocol.NewError(409, protocol.CodeKillProcessShared,
-			"该应用在本屏还有其他窗口，进程终止会连带影响")
-	}
-
-	services, serviceErr := e.dev.ForegroundService(work.Ctx, task.Package)
-	media, mediaErr := e.dev.MediaPlayback(work.Ctx)
-	if serviceErr != nil || mediaErr != nil || !services.Known || !media.Known {
-		return nil, protocol.NewError(409, protocol.CodeKillPlayback,
-			"无法确认前台服务与播放状态，拒绝终止进程")
-	}
-	if (services.Foreground || media.Playing) && !req.AllowStopPlayback {
-		return nil, protocol.NewError(409, protocol.CodeKillPlayback,
-			"应用有前台服务或正在播放；需要显式允许才能中断")
-	}
-
-	root, rootErr := e.dev.RootAvailable(work.Ctx)
-	if rootErr != nil || !root {
-		return nil, protocol.NewError(409, protocol.CodeRootUnavailable,
-			"root 不可用，拒绝终止进程")
-	}
-
-	identity, identityErr := e.transferIdentity(work.Ctx)
-	if identityErr != nil {
-		return nil, identityErr
-	}
-	processes, processErr := e.dev.PackageProcesses(work.Ctx, task.Package)
-	if processErr != nil || !processes.Known {
-		return nil, protocol.NewError(503, protocol.CodeDeviceUnavailable,
-			"无法读取应用进程清单")
-	}
-	if processes.BootID != "" && identity.BootID != "" && processes.BootID != identity.BootID {
-		return nil, protocol.NewError(503, protocol.CodeDeviceUnavailable,
-			"无法确认当前启动身份")
-	}
-	if processes.UserID <= 0 {
-		return nil, protocol.NewError(503, protocol.CodeDeviceUnavailable,
-			"无法确认应用用户身份")
-	}
-	instances := append([]device.ProcessInstance(nil), processes.Instances...)
-	sort.Slice(instances, func(i, j int) bool { return instances[i].PID < instances[j].PID })
-	return &killPlan{instances: instances, userID: processes.UserID,
-		bootID: identity.BootID, pkg: task.Package}, nil
+	return nil
 }
 
-// awaitKillVerification polls the package process inventory after the signal. A
-// failed read stays unknown; it is never reported as an empty process set.
-func (e *Engine) awaitKillVerification(work *workState, plan *killPlan) ([]device.ProcessInstance, bool) {
-	var last []device.ProcessInstance
-	read := false
-	for _, delay := range []time.Duration{0, 200 * time.Millisecond, 400 * time.Millisecond, 800 * time.Millisecond} {
+func missingKillEligibility() *protocol.APIError {
+	return protocol.NewError(409, protocol.CodeKillNotOwned, "没有本会话自有任务或已确认关闭资格")
+}
+
+func stoppedKill() *protocol.APIError {
+	return protocol.NewError(409, protocol.CodeStopped, "包级强停已撤销")
+}
+
+func (e *Engine) killBindingErrorLocked(work *workState, epoch int64, display device.Display, now time.Time) *protocol.APIError {
+	if e.session == nil {
+		return stoppedKill()
+	}
+	if !e.workAuthorizedLocked(work, now) || e.session.Epoch != epoch {
+		return stoppedKill()
+	}
+	if e.session.Display.ID != display.ID || e.session.Display.Generation != display.Generation {
+		// A changed display generation invalidates every close authorization
+		// bound to it; the record must not survive for a later window.
+		e.session.CloseEligibilities = nil
+		return stoppedKill()
+	}
+	return nil
+}
+
+// validateKillEligibilityLocked revokes known stale records. An unreadable
+// installation identity cannot establish a mismatch or authorize dispatch.
+func (e *Engine) validateKillEligibilityLocked(plan killPlan, identity device.PackageIdentity,
+	execution device.BootIdentity, now time.Time) *protocol.APIError {
+	pruneCloseEligibilitiesLocked(e.session, now)
+	for _, record := range e.session.CloseEligibilities {
+		if record.Package != plan.Package {
+			continue
+		}
+		changed := record.ExecutionIdentity != execution ||
+			record.AndroidUserID == plan.AndroidUserID && identity.Known && !record.matches(identity, execution)
+		if changed {
+			revokeCloseEligibilityLocked(e.session, plan.Package)
+			if plan.UsedEligibility {
+				return protocol.NewError(409, protocol.CodeKillNotOwned, "应用安装身份已变化")
+			}
+			break
+		}
+	}
+	if plan.UsedEligibility {
+		record := closeEligibilityLocked(e.session, plan.Package, now)
+		if record == nil || record.AndroidUserID != plan.AndroidUserID {
+			return missingKillEligibility()
+		}
+	}
+	return nil
+}
+
+func validKillPackageIdentity(identity device.PackageIdentity, pkg string, user int) bool {
+	return identity.Known && identity.Package == pkg && user >= 0 && identity.AndroidUserID == user &&
+		identity.AppID >= 10000 && identity.AppID < 100000 && identity.AppUID/100000 == user &&
+		identity.AppUID%100000 == identity.AppID && identity.FirstInstallTime != "" && identity.SignatureHash != ""
+}
+
+// killGuard re-reads all pre-dispatch evidence. Only the first pass may fill
+// the frozen device, installation and process identities.
+func (e *Engine) killGuard(work *workState, epoch int64, display device.Display,
+	req *protocol.AppRequest, plan killPlan) (killPlan, *protocol.APIError) {
+	if e.workRevoked(work) {
+		return plan, stoppedKill()
+	}
+	all, apiErr := e.readKillTasks(work.Ctx)
+	if apiErr != nil {
+		return plan, apiErr
+	}
+	tasks := killPackageTasks(all, plan.Package)
+	elsewhere := killHasTaskElsewhere(tasks, display.ID)
+	e.mu.Lock()
+	apiErr = e.killBindingErrorLocked(work, epoch, display, time.Now())
+	if apiErr == nil {
+		apiErr = e.killOwnershipLocked(plan.Package, tasks, elsewhere, req.Target.UseTask)
+	}
+	e.mu.Unlock()
+	if apiErr != nil {
+		return plan, apiErr
+	}
+	if !slices.EqualFunc(plan.Tasks, tasks, sameKillTask) {
+		return plan, protocol.NewError(409, protocol.CodeTaskNotTracked, "应用任务集合或所属用户已变化")
+	}
+
+	services, serviceErr := e.dev.ForegroundService(work.Ctx, plan.Package)
+	media, mediaErr := e.dev.MediaPlayback(work.Ctx)
+	if serviceErr != nil || mediaErr != nil || !services.Known || !media.Known {
+		return plan, protocol.NewError(409, protocol.CodeKillPlayback, "无法确认前台服务与播放状态，拒绝强停应用")
+	}
+	if (services.Foreground || media.Playing) && !req.AllowStopPlayback {
+		return plan, protocol.NewError(409, protocol.CodeKillPlayback, "应用有前台服务或正在播放；需要显式允许才能中断")
+	}
+	root, rootErr := e.dev.RootAvailable(work.Ctx)
+	if rootErr != nil || !root {
+		return plan, protocol.NewError(409, protocol.CodeRootUnavailable, "root 不可用，拒绝强停应用")
+	}
+
+	execution, apiErr := e.transferIdentity(work.Ctx)
+	if apiErr != nil {
+		return plan, apiErr
+	}
+	identity, identityErr := e.dev.PackageIdentity(work.Ctx, plan.Package, plan.AndroidUserID)
+	identityKnown := identityErr == nil && validKillPackageIdentity(identity, plan.Package, plan.AndroidUserID)
+	if !identityKnown {
+		identity = device.PackageIdentity{}
+	}
+	e.mu.Lock()
+	now := time.Now()
+	apiErr = e.killBindingErrorLocked(work, epoch, display, now)
+	if apiErr == nil {
+		apiErr = e.validateKillEligibilityLocked(plan, identity, execution, now)
+	}
+	e.mu.Unlock()
+	if apiErr != nil {
+		return plan, apiErr
+	}
+	if !identityKnown || plan.Identity.Known && (plan.Identity != identity || plan.Execution != execution) {
+		return plan, protocol.NewError(503, protocol.CodeDeviceUnavailable, "无法确认应用安装身份")
+	}
+
+	processes, ok := e.readKillProcesses(work.Ctx, identity, execution)
+	if !ok {
+		return plan, protocol.NewError(503, protocol.CodeDeviceUnavailable, "无法读取应用进程清单")
+	}
+	plan.Identity, plan.Execution, plan.Processes = identity, execution, processes
+	return plan, nil
+}
+
+func sameKillTask(a, b device.Task) bool {
+	return a.TaskID == b.TaskID && a.RootID == b.RootID && a.DisplayID == b.DisplayID &&
+		a.Package == b.Package && a.HasUserID && b.HasUserID && a.UserID == b.UserID
+}
+
+func (e *Engine) readKillProcesses(ctx context.Context, identity device.PackageIdentity,
+	execution device.BootIdentity) ([]device.ProcessInstance, bool) {
+	processes, err := e.dev.PackageProcesses(ctx, identity.Package, identity.AndroidUserID)
+	if err != nil || !processes.Known || processes.ReadFailed || processes.AndroidUserID != identity.AndroidUserID ||
+		processes.AppUID != identity.AppID || processes.BootID != execution.BootID {
+		return nil, false
+	}
+	instances := slices.Clone(processes.Instances)
+	slices.SortFunc(instances, func(a, b device.ProcessInstance) int { return cmp.Compare(a.PID, b.PID) })
+	for i, instance := range instances {
+		if instance.PID <= 0 || instance.StartTicks == 0 || i > 0 && instance.PID == instances[i-1].PID {
+			return nil, false
+		}
+	}
+	return instances, true
+}
+
+func (e *Engine) recordKillReceipt(work *workState, op *operationState, epoch int64, display device.Display,
+	plan killPlan, result device.ForceStopResult) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	sameSession := e.session != nil && e.session.State == SessionActive && e.session.Epoch == epoch &&
+		e.session.Display.ID == display.ID && e.session.Display.Generation == display.Generation
+	if result.Receipt == device.DispatchNotDispatched {
+		work.DispatchUnknown = false
+		return false
+	}
+	if sameSession && e.work == work && !work.Revoked {
+		consumeCloseEligibilityLocked(e.session, plan.Package, plan.AndroidUserID)
+		if result.Receipt == device.DispatchTerminated && result.HasExitCode && result.ExitCode == 0 &&
+			op.State == OperationRunning {
+			work.DispatchUnknown = false
+			op.KnownOutcome = OutcomeExecuted
+			return true
+		}
+	}
+	return false
+}
+
+type killSample struct {
+	taskIDs        []int
+	tasksKnown     bool
+	processes      []device.ProcessInstance
+	processesKnown bool
+}
+
+func (e *Engine) sampleKillResult(work *workState, plan killPlan) killSample {
+	var sample killSample
+	for _, delay := range [...]time.Duration{0, 200 * time.Millisecond, 400 * time.Millisecond, 800 * time.Millisecond} {
 		if delay > 0 {
 			timer := time.NewTimer(delay)
 			select {
 			case <-timer.C:
 			case <-work.Ctx.Done():
 				timer.Stop()
-				return last, read
+				return sample
 			}
-			timer.Stop()
 		}
-		processes, err := e.dev.PackageProcesses(work.Ctx, plan.pkg)
-		if err != nil || !processes.Known {
+		if work.Ctx.Err() != nil {
+			break
+		}
+		all, taskErr := e.readKillTasks(work.Ctx)
+		sample = killSample{}
+		if taskErr == nil && work.Ctx.Err() == nil {
+			sample.taskIDs, sample.tasksKnown = remainingKillTasks(all, plan)
+		}
+		if work.Ctx.Err() != nil {
+			break
+		}
+		processes, known := e.readKillProcesses(work.Ctx, plan.Identity, plan.Execution)
+		if work.Ctx.Err() == nil {
+			sample.processes, sample.processesKnown = processes, known
+		}
+		if sample.tasksKnown && len(sample.taskIDs) == 0 && sample.processesKnown && len(sample.processes) == 0 {
+			break
+		}
+	}
+	return sample
+}
+
+func remainingKillTasks(all []device.Task, plan killPlan) ([]int, bool) {
+	ids := make([]int, 0)
+	for _, task := range killPackageTasks(all, plan.Package) {
+		if !task.HasUserID {
+			return nil, false
+		}
+		if task.UserID != plan.AndroidUserID {
 			continue
 		}
-		last = processes.Instances
-		read = true
-		gone := true
-		for _, instance := range plan.instances {
-			if instancePresent(last, instance) {
-				gone = false
-				break
+		if task.TaskID <= 0 || len(ids) > 0 && ids[len(ids)-1] == task.TaskID {
+			return nil, false
+		}
+		ids = append(ids, task.TaskID)
+	}
+	return ids, true
+}
+
+func (sample killSample) apply(view *protocol.AppView, original []device.ProcessInstance) {
+	if sample.tasksKnown {
+		view.RemainingTaskIDs = sample.taskIDs
+		view.HasRemainingTaskIDs = true
+	}
+	view.HasRestarted = true
+	if sample.processesKnown {
+		current := make(map[int]uint64, len(sample.processes))
+		for _, instance := range sample.processes {
+			current[instance.PID] = instance.StartTicks
+		}
+		view.KilledPIDs = make([]int, 0, len(original))
+		survivors := 0
+		for _, instance := range original {
+			if current[instance.PID] == instance.StartTicks {
+				survivors++
+			} else {
+				view.KilledPIDs = append(view.KilledPIDs, instance.PID)
 			}
 		}
-		if gone {
-			return last, true
-		}
+		view.HasKilledPIDs = true
+		view.RemainingPIDs = processPIDs(sample.processes)
+		view.HasRemainingPIDs = true
+		view.Restarted = appBoolPtr(survivors < len(sample.processes))
 	}
-	return last, read
+	switch {
+	case sample.tasksKnown && len(sample.taskIDs) > 0 || sample.processesKnown && len(sample.processes) > 0:
+		view.PackageState = "still_present"
+	case sample.tasksKnown && sample.processesKnown:
+		view.PackageState = "stopped_at_check"
+	default:
+		view.PackageState = "unknown"
+	}
 }
 
-// instancePresent reports whether the exact PID+boot-start identity is present.
-func instancePresent(instances []device.ProcessInstance, want device.ProcessInstance) bool {
-	for _, instance := range instances {
-		if instance.PID == want.PID && instance.StartTicks == want.StartTicks {
-			return true
-		}
-	}
-	return false
-}
-
-// sameProcessSet reports whether two inventories carry the same identities.
-func sameProcessSet(a, b []device.ProcessInstance) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for _, instance := range a {
-		if !instancePresent(b, instance) {
-			return false
-		}
-	}
-	return true
-}
-
-// processPIDs returns the sorted external PIDs.
 func processPIDs(instances []device.ProcessInstance) []int {
-	out := make([]int, 0, len(instances))
+	pids := make([]int, 0, len(instances))
 	for _, instance := range instances {
-		out = append(out, instance.PID)
+		pids = append(pids, instance.PID)
 	}
-	sort.Ints(out)
-	return out
+	return pids
 }
 
-// restarted reports whether the current set contains an instance that is not one
-// of the original identities. Original survivors are not a restart.
-func restarted(current, original []device.ProcessInstance) bool {
-	for _, instance := range current {
-		if !instancePresent(original, instance) {
-			return true
+func (e *Engine) forgetAbsentKillTasks(work *workState, epoch int64, display device.Display,
+	tasks []device.Task, remaining []int, known bool) {
+	if !known || len(tasks) == 0 {
+		return
+	}
+	absent := make([]int, 0, len(tasks))
+	for _, task := range tasks {
+		if _, found := slices.BinarySearch(remaining, task.TaskID); !found {
+			absent = append(absent, task.TaskID)
 		}
 	}
-	return false
+	if len(absent) == 0 {
+		return
+	}
+	e.mu.Lock()
+	commit := e.killBindingErrorLocked(work, epoch, display, time.Now()) == nil
+	if commit {
+		for _, id := range absent {
+			e.removeSessionTaskLocked(id)
+		}
+	}
+	e.mu.Unlock()
+	if commit {
+		e.persistAsync()
+	}
 }

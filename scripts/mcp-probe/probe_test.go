@@ -441,13 +441,22 @@ type fakeAdapter struct {
 	primaryCandidate bool
 	legacyInspect    bool
 	omitInspectBlock bool
-	// appTaskID is the one live controlled task; kill success clears it and a
-	// later open allocates the next id, so the app-lifecycle loop can prove the
-	// removal and then close a freshly reopened task.
+	// appTaskID is the one live controlled task; a kill keeps the task window
+	// (the contract no longer removes it), while close removes it, so a later
+	// open allocates the next id and the app-lifecycle loop can close a reopened
+	// task after a kill that reclaimed the window.
 	appTaskID       int
 	appNextTaskID   int
 	killRefusalCode string
-	keepKilledTask  bool
+	// closeEligible models the five-minute close eligibility of the controlled
+	// package: one confirmed close allows one package-entry kill.
+	closeEligible bool
+	// killFactFault is a reverse control that corrupts one dispatched kill
+	// result so the matching probe check must fail.
+	killFactFault string
+	// killUncertain reports one dispatched but unconfirmed force-stop with an
+	// unknown final read, exercising the uncertain kill branch.
+	killUncertain bool
 	// visual is the optional lightweight classification every fake observation
 	// carries. Empty keeps the member absent, which is the common shape.
 	visual string
@@ -699,11 +708,8 @@ func (f *fakeAdapter) handle(ctx context.Context, name string, request *sdk.Call
 	case "app":
 		kind, _ := arguments["kind"].(string)
 		if kind == "find" {
-			if _, crossKind := arguments["reference"]; crossKind {
-				return f.errorResult(map[string]any{
-					"error": map[string]any{"code": "invalid_request"},
-				}), nil
-			}
+			// Contract 31: find is read-only and ignores the declared members it
+			// does not use, including a redundant reference.
 			query, _ := arguments["query"].(string)
 			items := []any{map[string]any{"name": "Probe App", "package": "com.example.probe"}}
 			total := 1
@@ -776,35 +782,81 @@ func (f *fakeAdapter) handle(ctx context.Context, name string, request *sdk.Call
 			}, ""), nil
 		}
 		if kind == "kill" {
+			packageKill := targetApp != "" && targetTaskID == 0
 			sourceTaskID := targetTaskID
 			if sourceTaskID == 0 {
 				sourceTaskID = f.appTaskID
 			}
-			if f.killRefusalCode != "" {
+			refusal := f.killRefusalCode
+			if refusal == "" && f.primaryCandidate {
+				// A same-package task on the primary display is not owned by this
+				// virtual session, so both entries must refuse it.
+				refusal = "kill_refused_task_elsewhere"
+			}
+			if refusal == "" && packageKill && f.appTaskID == 0 && !f.closeEligible {
+				refusal = "kill_refused_not_owned"
+			}
+			if refusal != "" {
+				refused := map[string]any{
+					"kind": "kill", "package": controlledAppPackage,
+					"android_user_id": 0, "display_id": 12,
+					"target_task_ids": f.livePackageTaskIDs(),
+				}
+				if !packageKill {
+					refused["source_task_id"] = sourceTaskID
+				}
 				return f.errorResult(map[string]any{
 					"operation_id": f.nextID("P"),
 					"outcome":      "not_executed",
-					"app": map[string]any{
-						"kind": "kill", "package": controlledAppPackage,
-						"source_task_id": sourceTaskID, "display_id": 12,
-					},
-					"error": map[string]any{"code": f.killRefusalCode},
+					"app":          refused,
+					"error":        map[string]any{"code": refusal},
 				}), nil
 			}
-			if !f.keepKilledTask {
-				f.appTaskID = 0
+			if f.killUncertain {
+				uncertain := map[string]any{
+					"kind": "kill", "package": controlledAppPackage,
+					"android_user_id": 0, "display_id": 12,
+					"target_task_ids": f.livePackageTaskIDs(),
+					"target_pids":     []int{101}, "restarted": nil,
+					"package_state": "unknown",
+				}
+				if !packageKill {
+					uncertain["source_task_id"] = sourceTaskID
+				}
+				return f.errorResult(map[string]any{
+					"operation_id": f.nextID("P"),
+					"outcome":      "uncertain",
+					"app":          uncertain,
+					"error":        map[string]any{"code": "kill_unconfirmed"},
+				}), nil
 			}
+			// A package force-stop never removes the task window, so the live
+			// task stays listed until the caller closes it.
+			payload := map[string]any{
+				"kind": "kill", "package": controlledAppPackage,
+				"android_user_id": 0, "display_id": 12,
+				"target_task_ids":    f.livePackageTaskIDs(),
+				"remaining_task_ids": f.livePackageTaskIDs(),
+				"target_pids":        []int{101}, "killed_pids": []int{101},
+				"remaining_pids": []int{}, "restarted": false,
+				"package_state": "still_present",
+			}
+			if packageKill {
+				// The close that established the eligibility also removed the
+				// window: both the task and the process sets are empty.
+				payload["remaining_task_ids"] = []int{}
+				payload["package_state"] = "stopped_at_check"
+				f.closeEligible = false
+			} else {
+				payload["source_task_id"] = sourceTaskID
+			}
+			f.applyKillFactFault(payload)
 			o := f.nextID("O")
 			return f.result(map[string]any{
 				"operation_id": f.nextID("P"),
 				"outcome":      outcomeExecuted,
-				"app": map[string]any{
-					"kind": "kill", "package": controlledAppPackage,
-					"source_task_id": sourceTaskID, "display_id": 12,
-					"target_pids": []int{101}, "killed_pids": []int{101},
-					"remaining_pids": []int{}, "restarted": false,
-				},
-				"observation": f.observation(o, "P1", 2, false),
+				"app":          payload,
+				"observation":  f.observation(o, "P1", 2, false),
 			}, ""), nil
 		}
 		if kind == "claim" {
@@ -826,6 +878,9 @@ func (f *fakeAdapter) handle(ctx context.Context, name string, request *sdk.Call
 				closedTaskID = f.appTaskID
 			}
 			f.appTaskID = 0
+			// A confirmed close of the owned controlled task establishes the
+			// five-minute close eligibility for the package entry.
+			f.closeEligible = true
 			o := f.nextID("O")
 			return f.result(map[string]any{
 				"operation_id": f.nextID("P"),
@@ -907,6 +962,27 @@ func cloneStringMap(source map[string]any) map[string]any {
 		clone[key] = value
 	}
 	return clone
+}
+
+// livePackageTaskIDs is the controlled package's live virtual task set as the
+// fake engine would freeze it for a package kill.
+func (f *fakeAdapter) livePackageTaskIDs() []int {
+	if f.appTaskID == 0 {
+		return []int{}
+	}
+	return []int{f.appTaskID}
+}
+
+// applyKillFactFault corrupts one dispatched kill result so a reverse control
+// can prove the matching probe check fails instead of passing silently.
+func (f *fakeAdapter) applyKillFactFault(payload map[string]any) {
+	switch f.killFactFault {
+	case "missing_package_state":
+		delete(payload, "package_state")
+	case "stopped_with_tasks":
+		payload["package_state"] = "stopped_at_check"
+		payload["remaining_task_ids"] = []int{42}
+	}
 }
 
 func fakeDiagnosticText(payload map[string]any) string {
@@ -1318,12 +1394,26 @@ func writeFakeApp(builder *strings.Builder, app map[string]any) {
 		builder.WriteString(" pkg=" + string(encoded))
 	}
 	for _, field := range []struct{ key, label string }{
-		{"task_id", "task"}, {"source_task_id", "src_task"},
+		{"task_id", "task"}, {"android_user_id", "user"}, {"source_task_id", "src_task"},
+	} {
+		if value, ok := app[field.key].(int); ok {
+			builder.WriteString(" " + field.label + "=" + strconv.Itoa(value))
+		}
+	}
+	if value, present := app["target_task_ids"]; present {
+		encoded, _ := json.Marshal(value)
+		builder.WriteString(" target_tasks=" + string(encoded))
+	}
+	for _, field := range []struct{ key, label string }{
 		{"source_display_id", "src_display"}, {"display_id", "display"},
 	} {
 		if value, ok := app[field.key].(int); ok {
 			builder.WriteString(" " + field.label + "=" + strconv.Itoa(value))
 		}
+	}
+	if value, present := app["remaining_task_ids"]; present {
+		encoded, _ := json.Marshal(value)
+		builder.WriteString(" remaining_tasks=" + string(encoded))
 	}
 	if value, ok := app["ownership"].(string); ok && value != "" {
 		builder.WriteString(" ownership=" + value)
@@ -1356,6 +1446,9 @@ func writeFakeApp(builder *strings.Builder, app map[string]any) {
 		} else if boolean, ok := value.(bool); ok {
 			builder.WriteString(" restarted=" + strconv.FormatBool(boolean))
 		}
+	}
+	if value, ok := app["package_state"].(string); ok && value != "" {
+		builder.WriteString(" package_state=" + value)
 	}
 	if value, ok := app["total"].(int); ok {
 		builder.WriteString(" total=" + strconv.Itoa(value))
@@ -1433,10 +1526,11 @@ func writeFakeApp(builder *strings.Builder, app map[string]any) {
 func writeFakeAppFallbacks(builder *strings.Builder, app map[string]any) {
 	known := map[string]bool{
 		"kind": true, "package": true, "task_id": true, "source_task_id": true,
+		"android_user_id": true, "target_task_ids": true, "remaining_task_ids": true,
 		"source_display_id": true, "display_id": true, "ownership": true,
 		"reused": true, "state_preserved": true, "foreground_restore": true,
 		"complete": true, "target_pids": true, "killed_pids": true,
-		"remaining_pids": true, "restarted": true, "total": true,
+		"remaining_pids": true, "restarted": true, "package_state": true, "total": true,
 		"truncated": true, "foreground": true, "captured_at": true,
 		"items": true, "tasks": true,
 	}
@@ -2007,12 +2101,18 @@ type fakeRecoveryService struct {
 	operations    map[string]string // P -> finished/running
 	outcomes      map[string]string
 	image         []byte
-	// appTaskID is the one live controlled task. A successful kill clears it so
-	// the follow-up app.list proves removal, and the next open returns a new id
-	// for the closed close loop.
+	// appTaskID is the one live controlled task. A kill keeps the task window,
+	// close removes it, and the next open returns a new id for the closed close
+	// loop.
 	appTaskID       int
 	appNextTaskID   int
 	killRefusalCode string
+	// primaryCandidate exposes one same-package shared task on the primary
+	// display, so the package-entry refusal path is reachable.
+	primaryCandidate bool
+	// closeEligible models the five-minute close eligibility of the controlled
+	// package: one confirmed close allows one package-entry kill.
+	closeEligible bool
 	// The two omission switches are reverse controls: removing a fact from a
 	// fixture must make the matching probe check fail.
 	omitActQuality   bool
@@ -2323,7 +2423,15 @@ func (f *fakeRecoveryService) writeApp(writer http.ResponseWriter, operationID s
 		truncated := false
 		items := []protocol.AppTaskItem{}
 		total := 0
-		if appBody.App != "" && appBody.Scope != protocol.AppScopePrimary && f.appTaskID != 0 {
+		switch {
+		case appBody.App != "" && appBody.Scope == protocol.AppScopePrimary && f.primaryCandidate:
+			// One same-package shared task lives on the primary display; the
+			// package-entry kill must refuse while it stays outside this session.
+			items = []protocol.AppTaskItem{{
+				TaskID: 77, Package: appBody.App, Ownership: "shared",
+			}}
+			total = 1
+		case appBody.App != "" && appBody.Scope != protocol.AppScopePrimary && f.appTaskID != 0:
 			items = []protocol.AppTaskItem{{
 				TaskID: f.appTaskID, Package: appBody.App, Ownership: "owned",
 			}}
@@ -2359,6 +2467,8 @@ func (f *fakeRecoveryService) writeApp(writer http.ResponseWriter, operationID s
 			closedTaskID = f.appTaskID
 		}
 		f.appTaskID = 0
+		// A confirmed close establishes the five-minute close eligibility.
+		f.closeEligible = true
 		displayID := 12
 		recents := true
 		complete := true
@@ -2374,23 +2484,51 @@ func (f *fakeRecoveryService) writeApp(writer http.ResponseWriter, operationID s
 		f.revision++
 		observation = f.observationLocked(false, stableTestQuality())
 	case protocol.AppKindKill:
+		packageKill := appBody.Target.App != "" && appBody.Target.TaskID == 0
 		sourceTaskID := appBody.Target.TaskID
 		if sourceTaskID == 0 {
 			sourceTaskID = f.appTaskID
 		}
 		displayID := 12
+		userID := 0
+		liveTaskIDs := []int{}
+		if f.appTaskID != 0 {
+			liveTaskIDs = append(liveTaskIDs, f.appTaskID)
+		}
+		refusal := f.killRefusalCode
+		if refusal == "" && f.primaryCandidate {
+			// The same-package task on the primary display is not owned by this
+			// virtual session, so both entry forms must refuse.
+			refusal = "kill_refused_task_elsewhere"
+		}
+		if refusal == "" && packageKill && f.appTaskID == 0 && !f.closeEligible {
+			refusal = "kill_refused_not_owned"
+		}
 		outcome = outcomeExecuted
 		view = &protocol.AppView{
 			Kind: protocol.AppKindKill, Package: controlledAppPackage,
-			SourceTaskID: &sourceTaskID, DisplayID: &displayID,
+			AndroidUserID: &userID, DisplayID: &displayID,
+			TargetTaskIDs: liveTaskIDs, HasTargetTaskIDs: true,
 		}
-		if f.killRefusalCode != "" {
+		if !packageKill {
+			view.SourceTaskID = &sourceTaskID
+		}
+		if refusal != "" {
 			outcome = "not_executed"
-			resultError = &protocol.Error{Code: f.killRefusalCode, Message: "任务不可终止"}
+			resultError = &protocol.Error{Code: refusal, Message: "任务不可终止"}
 		} else {
 			targetPIDs := []int{101}
 			killedPIDs := []int{101}
 			remainingPIDs := []int{}
+			remainingTaskIDs := liveTaskIDs
+			packageState := "still_present"
+			if packageKill {
+				// The close that established the eligibility removed the window:
+				// both the final task and the final process sets are empty.
+				remainingTaskIDs = []int{}
+				packageState = "stopped_at_check"
+				f.closeEligible = false
+			}
 			restarted := false
 			view.TargetPIDs = targetPIDs
 			view.HasTargetPIDs = true
@@ -2398,9 +2536,11 @@ func (f *fakeRecoveryService) writeApp(writer http.ResponseWriter, operationID s
 			view.HasKilledPIDs = true
 			view.RemainingPIDs = remainingPIDs
 			view.HasRemainingPIDs = true
+			view.RemainingTaskIDs = remainingTaskIDs
+			view.HasRemainingTaskIDs = true
 			view.Restarted = &restarted
 			view.HasRestarted = true
-			f.appTaskID = 0
+			view.PackageState = packageState
 			f.revision++
 			observation = f.observationLocked(false, stableTestQuality())
 		}
@@ -2783,9 +2923,11 @@ func TestAppLifecycleAgainstRealAdapter(t *testing.T) {
 			for _, want := range []string{
 				"PASS app_open",
 				"PASS app_list_controlled",
-				"PASS app_kill task_id=42 target_pids=1 killed_pids=1 restarted=false",
-				"PASS app_kill_removed task_id=42 remaining=0",
+				expectedKillLine,
+				"PASS app_close task_id=42 outcome=executed tasks=1 is_error=false",
+				"SKIP app_kill_primary_refused reason=controlled_primary_task_absent",
 				"PASS app_close task_id=43 outcome=executed tasks=1 is_error=false",
+				expectedPackageKillLine,
 				"SKIP app_claim reason=controlled_primary_task_absent",
 				"PASS end",
 			} {
@@ -2799,7 +2941,7 @@ func TestAppLifecycleAgainstRealAdapter(t *testing.T) {
 
 // TestAppLifecycleRefusedKillAgainstRealAdapter keeps the refusal branch on the
 // real result encoder: a valid kill refusal code must still pass
-// app_kill_refused, skip the removal proof and close the original task.
+// app_kill_refused, close the original task and refuse the package entry too.
 func TestAppLifecycleRefusedKillAgainstRealAdapter(t *testing.T) {
 	for _, mode := range []string{resultModeBoth, resultModeText, resultModeStructured} {
 		t.Run(mode, func(t *testing.T) {
@@ -2820,8 +2962,10 @@ func TestAppLifecycleRefusedKillAgainstRealAdapter(t *testing.T) {
 			}
 			for _, want := range []string{
 				"PASS app_kill_refused task_id=42 code=kill_refused_task_elsewhere outcome=not_executed",
-				"SKIP app_kill_removed reason=controlled_task_not_killed task_id=42",
 				"PASS app_close task_id=42 outcome=executed tasks=1 is_error=false",
+				"SKIP app_kill_primary_refused reason=controlled_primary_task_absent",
+				"PASS app_close task_id=43 outcome=executed tasks=1 is_error=false",
+				"PASS app_kill_package pkg=com.mobileuse.probe refused=kill_refused_task_elsewhere outcome=not_executed",
 				"SKIP app_claim reason=controlled_primary_task_absent",
 				"PASS end",
 			} {

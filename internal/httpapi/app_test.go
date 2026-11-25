@@ -240,7 +240,8 @@ func TestAppRouteStrictAdmission(t *testing.T) {
 		body string
 	}{
 		{"unknown-member", `{"kind":"find","bogus":true}`},
-		{"cross-kind-member", `{"kind":"find","reference":"O1"}`},
+		{"nested-unknown-member", `{"kind":"find","target":{"bogus":true}}`},
+		{"nested-wrong-type", `{"kind":"find","target":{"task_id":"x"}}`},
 		{"explicit-null", `{"kind":"find","query":null}`},
 		{"trailing-value", `{"kind":"find"}{"kind":"find"}`},
 		{"duplicate-member", `{"kind":"find","query":"a","query":"b"}`},

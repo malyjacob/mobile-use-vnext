@@ -460,13 +460,38 @@ func TestDecodeAppCloseView(t *testing.T) {
 
 func TestDecodeAppKillView(t *testing.T) {
 	original := &Result{App: &AppView{
-		Kind: AppKindKill, Package: "com.example.app",
+		Kind: AppKindKill, Package: "com.example.app", AndroidUserID: intPtrForTest(0),
 		SourceTaskID: intPtrForTest(42), DisplayID: intPtrForTest(12),
+		TargetTaskIDs: []int{42}, HasTargetTaskIDs: true, RemainingTaskIDs: []int{}, HasRemainingTaskIDs: true,
 		TargetPIDs: []int{1234, 1235}, KilledPIDs: []int{1234}, RemainingPIDs: []int{1235},
 		HasTargetPIDs: true, HasKilledPIDs: true, HasRemainingPIDs: true,
-		Restarted: nil, HasRestarted: true,
+		Restarted: nil, HasRestarted: true, PackageState: "still_present",
 	}}
 	roundTripDecode(t, original)
+	roundTripDecode(t, &Result{App: &AppView{Kind: AppKindKill}})
+}
+
+func TestDecodeAppKillViewRejectsInvalidMemberShapes(t *testing.T) {
+	for _, member := range []string{
+		`"android_user_id":null`,
+		`"android_user_id":"0"`,
+		`"android_user_id":0.5`,
+		`"target_task_ids":null`,
+		`"target_task_ids":42`,
+		`"target_task_ids":[null]`,
+		`"remaining_task_ids":null`,
+		`"remaining_task_ids":["42"]`,
+		`"package_state":null`,
+		`"package_state":1`,
+	} {
+		t.Run(member, func(t *testing.T) {
+			var view AppView
+			body := `{"kind":"kill",` + member + `}`
+			if err := json.Unmarshal([]byte(body), &view); err == nil {
+				t.Fatalf("accepted invalid app view: %+v", view)
+			}
+		})
+	}
 }
 
 // intPtrForTest returns a pointer to one literal for response fixtures.

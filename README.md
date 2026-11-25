@@ -7,8 +7,8 @@ HTTP 协议配对。
 
 - 模块：`github.com/malyjacob/mobile-use-vnext`
 - Go：1.27.1，启用 `GOEXPERIMENT=jsonv2`
-- 契约：`contract_version = "30"`，服务、HTTP 客户端、控制 App 精确相等才做普通工作
-- 发行：`0.34.0`；`release/versions.json` 是发行号、契约号与 Android versionCode（36）的唯一
+- 契约：`contract_version = "31"`，服务、HTTP 客户端、控制 App 精确相等才做普通工作
+- 发行：`0.35.0`；`release/versions.json` 是发行号、契约号与 Android versionCode（37）的唯一
   来源，构建生成 Go/Java 常量
 
 ## 能力边界
@@ -181,7 +181,7 @@ $env:GOEXPERIMENT = 'jsonv2'; go test ./...
 ## 接口
 
 Agent 工具（`POST /api/<tool>`，`Authorization: Bearer <agent_token>`，
-`X-Mobile-Use-Contract: 30`）：
+`X-Mobile-Use-Contract: 31`）：
 
 | 工具 | 说明 |
 | --- | --- |
@@ -194,7 +194,7 @@ Agent 工具（`POST /api/<tool>`，`Authorization: Bearer <agent_token>`，
 | `inspect` | `reference` 可选 `node` 或 `query`；只读历史树 |
 | `keepalive` | `reference`（O/P）+ 可选 `duration_minutes`（1～120，默认 2）；从应用时重设当前活动会话租期，可延长或缩短；普通活动仅按两分钟取最大值 |
 | `end` | `reference`（O/P）；撤权并启动独立收尾 |
-| `app` | `kind` + 分支成员：`find`/`list` 查询应用与 live task；`open` 用 `target.app`，`claim`/`handoff`/`close`/`kill` 管理会话窗口与精确进程；引用字段为 `reference` |
+| `app` | `kind` + 七个分支；根对象与 `target` 嵌套对象严格封闭，七个 kind 都接受全部已声明顶层成员而只按生效成员处理（`find` 的 `query`；`list` 的 `reference`/`scope`/`app`；`open` 的 `target.app`；`claim`/`handoff`/`close`/`kill` 的 `target`；`handoff` 的 `restore_foreground`；`close` 的 `allow_borrowed`；`kill` 的 `allow_stop_playback`）；`find`/`list` 查询应用与 live task 且不消费 O，`open`/`claim`/`handoff`/`close` 管理会话窗口，`kill` 按 Android 用户对整个包执行一次 `force-stop` 并支持 `target.task_id` 或 `target.app` 两入口与关闭资格；引用字段统一为 `reference` |
 | `notify` | `text`；保存一条 Agent 消息，经控制同步投递到 App 消息中心 |
 | `shell` | `reference` + `command` + 可选 `root`；受管命令执行（不发布观察，原 O 仍可用） |
 | `diagnose` | 可选 `reference`；有界诊断事实 |

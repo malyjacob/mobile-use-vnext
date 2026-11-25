@@ -23,9 +23,9 @@
 
 ```json
 {
-  "contract_version": "30",
+  "contract_version": "31",
   "app_instance_id": "0b0b8c0e-...",
-  "app_version": "0.34.0",
+  "app_version": "0.35.0",
   "selected_mode": "virtual",
   "mode_generation": "8f0b2e2e-...",
   "mode_ready": true,
@@ -46,7 +46,7 @@
 
 | 字段 | 必填 | 含义 |
 | --- | --- | --- |
-| contract_version | 是 | 共同普通契约；必须等于 `"30"` |
+| contract_version | 是 | 共同普通契约；必须等于 `"31"` |
 | app_instance_id | 是 | 本次 App 进程实例，UUID；重建即变化 |
 | app_version | 否（App 应发送） | 仅发行标识，不参与能力协商 |
 | selected_mode | 是 | `virtual` 或 `primary`；App 重建默认 virtual |
@@ -76,7 +76,7 @@
 
 ```json
 {
-  "contract_version": "30",
+  "contract_version": "31",
   "service_instance_id": "d0e...",
   "control": {
     "revision": 42,
@@ -149,13 +149,13 @@ App 必须拒绝无法解析、未知 kind、缺字段或 `contract_version` 不
 `POST /v1/control/stop`
 
 ```json
-{"contract_version":"30","app_instance_id":"...","stop_seq":7,"reason":"user_stop"}
+{"contract_version":"31","app_instance_id":"...","stop_seq":7,"reason":"user_stop"}
 ```
 
 响应（最小，不含普通服务状态、消息或设备命令）：
 
 ```json
-{"contract_version":"30","service_instance_id":"...","accepted":true,"stop_seq":7,"state":"revoked"}
+{"contract_version":"31","service_instance_id":"...","accepted":true,"stop_seq":7,"state":"revoked"}
 ```
 
 - App 先在本地提高停止代次、拒绝旧命令/回调恢复权限，再在独立线程发起本请求；不等待
@@ -188,7 +188,7 @@ App 只能从 `control` 与本机事实构造界面，不显示 Agent step，也
 | session.state=active，work.kind=app，app_kind=claim | Agent · app · 认领任务 |
 | session.state=active，work.kind=app，app_kind=handoff | Agent · app · 交还任务 |
 | session.state=active，work.kind=app，app_kind=close | Agent · app · 关闭窗口 |
-| session.state=active，work.kind=app，app_kind=kill | Agent · app · 终止进程 |
+| session.state=active，work.kind=app，app_kind=kill | Agent · app · 强制停止应用 |
 | session.state=active，work.kind=observe | Agent · 正在观察 |
 | session.state=active，work.kind=snap | Agent · 正在截图 |
 | session.state=active，work.kind=wait_for | Agent · 正在等待界面 |

@@ -1,6 +1,8 @@
 package protocol
 
 import (
+	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -15,7 +17,6 @@ func TestToolSurfaceStrictAdmission(t *testing.T) {
 		{"app find empty", `{"kind":"find"}`, true, func(b []byte) *APIError { _, e := DecodeApp(b); return e }},
 		{"app find query", `{"kind":"find","query":"设置"}`, true, func(b []byte) *APIError { _, e := DecodeApp(b); return e }},
 		{"app find null query", `{"kind":"find","query":null}`, false, func(b []byte) *APIError { _, e := DecodeApp(b); return e }},
-		{"app find foreign member", `{"kind":"find","query":"x","scope":"session"}`, false, func(b []byte) *APIError { _, e := DecodeApp(b); return e }},
 		{"app find query too long", `{"kind":"find","query":"` + strings.Repeat("a", MaxQueryRunes+1) + `"}`, false,
 			func(b []byte) *APIError { _, e := DecodeApp(b); return e }},
 		{"app list", `{"kind":"list","reference":"O1"}`, true, func(b []byte) *APIError { _, e := DecodeApp(b); return e }},
@@ -30,7 +31,7 @@ func TestToolSurfaceStrictAdmission(t *testing.T) {
 			func(b []byte) *APIError { _, e := DecodeApp(b); return e }},
 		{"app open null target", `{"kind":"open","reference":"O1","target":null}`, false,
 			func(b []byte) *APIError { _, e := DecodeApp(b); return e }},
-		{"app open top-level app", `{"kind":"open","reference":"O1","app":"com.example"}`, false,
+		{"app open top-level app does not supply target", `{"kind":"open","reference":"O1","app":"com.example"}`, false,
 			func(b []byte) *APIError { _, e := DecodeApp(b); return e }},
 		{"app open bad package", `{"kind":"open","reference":"O1","target":{"app":"com..bad"}}`, false,
 			func(b []byte) *APIError { _, e := DecodeApp(b); return e }},
@@ -49,15 +50,13 @@ func TestToolSurfaceStrictAdmission(t *testing.T) {
 			func(b []byte) *APIError { _, e := DecodeApp(b); return e }},
 		{"app claim zero task", `{"kind":"claim","reference":"O1","target":{"task_id":0}}`, false,
 			func(b []byte) *APIError { _, e := DecodeApp(b); return e }},
-		{"app claim foreign flag", `{"kind":"claim","reference":"O1","target":{"task_id":1},"allow_borrowed":true}`, false,
-			func(b []byte) *APIError { _, e := DecodeApp(b); return e }},
 		{"app handoff restore", `{"kind":"handoff","reference":"O1","target":{"task_id":1},"restore_foreground":true}`, true,
 			func(b []byte) *APIError { _, e := DecodeApp(b); return e }},
 		{"app close borrowed", `{"kind":"close","reference":"O1","target":{"app":"com.example"},"allow_borrowed":true}`, true,
 			func(b []byte) *APIError { _, e := DecodeApp(b); return e }},
 		{"app kill task", `{"kind":"kill","reference":"O1","target":{"task_id":1},"allow_stop_playback":true}`, true,
 			func(b []byte) *APIError { _, e := DecodeApp(b); return e }},
-		{"app kill package target", `{"kind":"kill","reference":"O1","target":{"app":"com.example"}}`, false,
+		{"app kill missing target", `{"kind":"kill","reference":"O1"}`, false,
 			func(b []byte) *APIError { _, e := DecodeApp(b); return e }},
 		{"app unknown kind", `{"kind":"move"}`, false, func(b []byte) *APIError { _, e := DecodeApp(b); return e }},
 		{"app kind case", `{"kind":"Find"}`, false, func(b []byte) *APIError { _, e := DecodeApp(b); return e }},
@@ -103,6 +102,98 @@ func TestToolSurfaceStrictAdmission(t *testing.T) {
 			}
 			if !tc.ok && err == nil {
 				t.Fatalf("expected rejection")
+			}
+		})
+	}
+}
+
+func TestDecodeAppNormalizesEffectiveMembers(t *testing.T) {
+	const options = `,"restore_foreground":true,"allow_borrowed":true,"allow_stop_playback":true`
+	const bothSelectors = `,"target":{"task_id":-1,"app":"invalid package"}`
+	const mutation = `,"reference":"O1","query":"unused","scope":"unused","app":"invalid package"`
+	for _, tc := range []struct {
+		kind string
+		body string
+		want AppRequest
+	}{
+		{AppKindFind,
+			`,"query":"x","reference":"invalid","scope":"invalid","app":"invalid package"` + bothSelectors,
+			AppRequest{Kind: AppKindFind, Query: "x", HasQuery: true}},
+		{AppKindList,
+			`,"reference":"P1","scope":"primary","app":"com.example","query":"` + strings.Repeat("x", MaxQueryRunes+1) + `"` + bothSelectors,
+			AppRequest{Kind: AppKindList, Reference: "P1", Scope: AppScopePrimary, FilterApp: "com.example", HasFilter: true}},
+		{AppKindOpen, mutation + `,"target":{"app":"com.example"}`,
+			AppRequest{Kind: AppKindOpen, Reference: "O1", Target: &AppTarget{App: "com.example"}}},
+		{AppKindClaim, mutation + `,"target":{"task_id":1}`,
+			AppRequest{Kind: AppKindClaim, Reference: "O1", Target: &AppTarget{TaskID: 1, UseTask: true}}},
+		{AppKindHandoff, mutation + `,"target":{"app":"com.example"}`,
+			AppRequest{Kind: AppKindHandoff, Reference: "O1", Target: &AppTarget{App: "com.example"}, RestoreForeground: true}},
+		{AppKindClose, mutation + `,"target":{"task_id":1}`,
+			AppRequest{Kind: AppKindClose, Reference: "O1", Target: &AppTarget{TaskID: 1, UseTask: true}, AllowBorrowed: true}},
+		{AppKindKill, mutation + `,"target":{"app":"com.example"}`,
+			AppRequest{Kind: AppKindKill, Reference: "O1", Target: &AppTarget{App: "com.example"}, AllowStopPlayback: true}},
+	} {
+		t.Run(tc.kind, func(t *testing.T) {
+			body := `{"kind":"` + tc.kind + `"` + tc.body + options + `}`
+			got, err := DecodeApp([]byte(body))
+			if err != nil || !reflect.DeepEqual(got, &tc.want) {
+				t.Fatalf("DecodeApp = %+v, %v, want %+v", got, err, &tc.want)
+			}
+		})
+	}
+}
+
+func TestDecodeAppRequiresReference(t *testing.T) {
+	for _, kind := range AppKinds {
+		if kind == AppKindFind {
+			continue
+		}
+		for _, reference := range []string{"", `,"reference":""`} {
+			t.Run(kind+reference, func(t *testing.T) {
+				body := `{"kind":"` + kind + `","target":{"app":"com.example"}` + reference + `}`
+				req, err := DecodeApp([]byte(body))
+				if req != nil || err == nil || err.Code != CodeInvalidRequest || err.HTTPStatus != http.StatusUnprocessableEntity ||
+					err.Details["field"] != "reference" || !strings.Contains(err.Message, kind) || !strings.Contains(err.Message, "reference") {
+					t.Fatalf("DecodeApp = %+v, %+v, want %s missing reference error", req, err, kind)
+				}
+			})
+		}
+	}
+}
+
+func TestDecodeAppRejectsEffectiveTargetWithBothSelectors(t *testing.T) {
+	for _, kind := range []string{AppKindOpen, AppKindClaim, AppKindHandoff, AppKindClose, AppKindKill} {
+		t.Run(kind, func(t *testing.T) {
+			body := `{"kind":"` + kind + `","reference":"O1","target":{"task_id":1,"app":"com.example"}}`
+			req, err := DecodeApp([]byte(body))
+			if req != nil || err == nil || err.Code != CodeInvalidRequest || err.HTTPStatus != http.StatusUnprocessableEntity {
+				t.Fatalf("DecodeApp = %+v, %v, want conflicting target rejection", req, err)
+			}
+		})
+	}
+}
+
+func TestAppKillViewFieldOrderAndPresence(t *testing.T) {
+	full := &AppView{
+		Kind: AppKindKill, Package: "com.example", AndroidUserID: intPtrForTest(0), SourceTaskID: intPtrForTest(42),
+		TargetTaskIDs: []int{42, 43}, HasTargetTaskIDs: true, DisplayID: intPtrForTest(12),
+		RemainingTaskIDs: []int{43}, HasRemainingTaskIDs: true,
+		TargetPIDs: []int{101, 102}, HasTargetPIDs: true, KilledPIDs: []int{101}, HasKilledPIDs: true,
+		RemainingPIDs: []int{102}, HasRemainingPIDs: true, HasRestarted: true, PackageState: "still_present",
+	}
+	for _, tc := range []struct {
+		name string
+		view *AppView
+		want string
+	}{
+		{"full", full, `{"kind":"kill","package":"com.example","android_user_id":0,"source_task_id":42,"target_task_ids":[42,43],"display_id":12,"remaining_task_ids":[43],"target_pids":[101,102],"killed_pids":[101],"remaining_pids":[102],"restarted":null,"package_state":"still_present"}`},
+		{"empty task arrays", &AppView{Kind: AppKindKill, HasTargetTaskIDs: true, HasRemainingTaskIDs: true},
+			`{"kind":"kill","target_task_ids":[],"remaining_task_ids":[]}`},
+		{"unknown", &AppView{Kind: AppKindKill}, `{"kind":"kill"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := string(marshal(t, tc.view)); got != tc.want {
+				t.Fatalf("kill view = %s, want %s", got, tc.want)
 			}
 		})
 	}

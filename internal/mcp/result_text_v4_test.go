@@ -235,10 +235,11 @@ func TestResultV4AppTriStateAndCollections(t *testing.T) {
 	// Tri-state: absent members stay absent, explicit null stays null, false
 	// stays false, and empty PID arrays remain distinct from absence.
 	raw := []byte(`{"operation_id":"P1","outcome":"executed","app":{"kind":"kill","package":"p",` +
-		`"source_task_id":42,"display_id":12,"target_pids":[1234,1235],"killed_pids":[],` +
-		`"remaining_pids":[],"restarted":null}}`)
+		`"android_user_id":0,"source_task_id":42,"target_task_ids":[42,43],` +
+		`"display_id":12,"remaining_task_ids":[],"target_pids":[1234,1235],"killed_pids":[],` +
+		`"remaining_pids":[],"restarted":null,"package_state":"stopped_at_check"}}`)
 	text := assertResultTextParity(t, raw, false)
-	requireTestContains(t, text, "app kill pkg=p src_task=42 display=12 target_pids=[1234,1235] killed_pids=[] remaining_pids=[] restarted=null\n")
+	requireTestContains(t, text, "app kill pkg=p user=0 src_task=42 target_tasks=[42,43] display=12 remaining_tasks=[] target_pids=[1234,1235] killed_pids=[] remaining_pids=[] restarted=null package_state=stopped_at_check\n")
 
 	open := assertResultTextParity(t, []byte(`{"operation_id":"P2","outcome":"executed","app":{"kind":"open",`+
 		`"package":"p","task_id":42,"display_id":12,"ownership":"owned","reused":false,"state_preserved":false}}`), false)
@@ -268,6 +269,23 @@ func TestResultV4AppTriStateAndCollections(t *testing.T) {
 	requireTestContains(t, closeText, "app_tasks v1 count=2\n#42 executed recents_cleaned=true\n#43 uncertain recents_cleaned=null error=task_remove_unconfirmed \"关闭未确认\" details={\"phase\":\"close\"}\nend app_tasks\n")
 	closeEmpty := assertResultTextParity(t, []byte(`{"operation_id":"P7","outcome":"executed","app":{"kind":"close","tasks":[],"complete":true}}`), false)
 	requireTestContains(t, closeEmpty, "\napp_tasks v1 count=0\nend app_tasks\n")
+}
+
+// TestResultV4AppNewMembersAndFallback pins the kill projection members added
+// by contract 31 and proves an unknown app member still falls back at
+// /app/<name>, while an unrecognized package_state falls back for the whole
+// object instead of publishing an uncontrolled conclusion.
+func TestResultV4AppNewMembersAndFallback(t *testing.T) {
+	text := assertResultTextParity(t, []byte(`{"operation_id":"P1","app":{"kind":"kill","package":"p",`+
+		`"android_user_id":0,"target_task_ids":[],"remaining_task_ids":[],`+
+		`"package_state":"unknown","future":1}}`), false)
+	requireTestContains(t, text, "app kill pkg=p user=0 target_tasks=[] remaining_tasks=[] package_state=unknown\n")
+	requireTestContains(t, text, `json v1 path="/app/future" value=1`)
+
+	invalid := assertResultTextParity(t, []byte(`{"operation_id":"P2","app":{"kind":"kill","package":"p",`+
+		`"package_state":"done"}}`), false)
+	requireTestContains(t, invalid, `json v1 path="/app" value={"kind":"kill","package":"p","package_state":"done"}`)
+	requireTestNotContains(t, invalid, "package_state=done")
 }
 
 func TestResultV4WaitDiagnosisCleanupError(t *testing.T) {

@@ -41,7 +41,7 @@ adb forward          主机 18881 → 服务；主机 18883 → 手机 MCP
    `adb forward`，也不需要 Agent token。
 
 只需要直连 HTTP 的 Agent 则使用 `http://127.0.0.1:18881/api/<tool>`、`agent_token` 与
-`X-Mobile-Use-Contract: 30`。
+`X-Mobile-Use-Contract: 31`。
 
 ## 1. 默认部署后的网络与进程
 
@@ -346,7 +346,7 @@ HTTP 宿主在原有 `Authorization` 头之外按需添加：
 
 ```text
 Authorization: Bearer <agent_token>
-X-Mobile-Use-Contract: 30
+X-Mobile-Use-Contract: 31
 Content-Type: application/json; charset=utf-8
 ```
 
@@ -354,7 +354,7 @@ Content-Type: application/json; charset=utf-8
 $deploy = Get-Content .state/deploy.json -Raw | ConvertFrom-Json
 $headers = @{
     Authorization           = "Bearer $($deploy.agent_token)"
-    'X-Mobile-Use-Contract' = '30'
+    'X-Mobile-Use-Contract' = '31'
 }
 Invoke-RestMethod http://127.0.0.1:18881/api/status -Method Post `
   -Headers $headers -ContentType 'application/json' -Body '{}'
@@ -368,8 +368,10 @@ Invoke-RestMethod http://127.0.0.1:18881/api/status -Method Post `
 
 ### 5.1 `app` 接入示例
 
-`app` 必须是严格 JSON，根对象只含 `kind` 与该分支成员；未知字段、重复键、显式 `null`、
-其他分支成员与尾随第二个 JSON 值都会被 `422 invalid_request` 拒绝，请求体上限 8 KiB。
+`app` 必须是严格 JSON：根对象只允许 `kind` 与另外八个已声明顶层成员（共九个成员），未知字段、重复键、
+大小写变体、显式 `null` 与尾随第二个 JSON 值都会被 `422 invalid_request` 拒绝，请求体上限
+8 KiB。七个 kind 都接受全部已声明顶层成员，但只有该分支的生效成员进入服务端请求；冗余成员
+只做类型检查后忽略。
 
 ```json
 {"kind":"find","query":"设置"}
@@ -380,13 +382,17 @@ Invoke-RestMethod http://127.0.0.1:18881/api/status -Method Post `
 {"kind":"handoff","reference":"O4821_72","target":{"task_id":42},"restore_foreground":true}
 {"kind":"close","reference":"O4821_72","target":{"app":"com.example.target"}}
 {"kind":"kill","reference":"O4821_72","target":{"task_id":42}}
+{"kind":"kill","reference":"O4821_72","target":{"app":"com.example.target"}}
 ```
 
-`target` 的 `task_id` 与 `app` 互斥；`open` 只接受 `target.app`，`kill` 只接受 `task_id`，
-包名先由 `list` 解析。`find`/`list` 是查询，成功或失败都不返回 `outcome`；其余五个 kind
-成功返回 `outcome=executed` 与原会话屏的一次 full 无图观察。`find` 使用 detached P；
-`list` 的 P 绑定 `reference` 解析到的原会话。每次新调用都使用自己的新 P；重复 P 只返回原摘要。
-`act`、`inspect` 与 `app` 的引用字段都是 `reference`；旧 `observation_id` 按未知成员拒绝。
+生效 `target` 的 `task_id` 与 `app` 互斥（`find`/`list` 的 `target` 不生效，只做嵌套键与类型检查）；`open` 只接受 `target.app`，`kill` 接受 `target.task_id`
+或 `target.app`，`claim`/`handoff`/`close` 接受两者之一。`find`/`list` 是查询，成功或失败
+都不返回 `outcome`；其余五个 kind 成功返回 `outcome=executed` 与原会话屏的一次 full 无图
+观察。`find` 使用 detached P；`list` 的 P 绑定 `reference` 解析到的原会话。每次新调用都
+使用自己的新 P；重复 P 只返回原摘要。`kill` 按从任务清单解析并核验的 Android 用户对整个
+包执行一次 `force-stop`；包入口需要全设备同包 live 任务均属本会话，或凭 `close` 留下的
+关闭资格进入。`act`、`inspect` 与 `app` 的引用字段都是 `reference`；旧 `observation_id`
+按未知成员拒绝。
 
 `act` 的常见省略形式与显式关闭：
 
@@ -599,7 +605,7 @@ Header: Authorization: Bearer <mcp_token>
 两种选择：
 
 ```text
-直连 HTTP:  http://127.0.0.1:18880/api/<tool>   + agent_token + X-Mobile-Use-Contract: 30
+直连 HTTP:  http://127.0.0.1:18880/api/<tool>   + agent_token + X-Mobile-Use-Contract: 31
 MCP HTTP:   http://127.0.0.1:18882/mcp          + mcp_token
 ```
 
@@ -679,7 +685,7 @@ adb shell su -c 'tail -n 50 /data/local/chroots/debian13/var/lib/mobile-use-vnex
 
 升级后：
 
-- 服务、App、适配器与客户端共同使用同一个 `contract_version`（当前 `30`）；
+- 服务、App、适配器与客户端共同使用同一个 `contract_version`（当前 `31`）；
 - 重新建立可能失效的转发；
 - 重启实际 MCP 宿主进程，不能只替换磁盘文件；
 - 旧会话转退休记录，不恢复旧 O/P 或主屏授权；旧 cleanup 的 `pending`/`unconfirmed` 可继续
@@ -764,7 +770,7 @@ GET 判断工具是否可用。
 | `409 device_busy` | 已有普通工作 | 读 `blocking_operation_id`，串行化后重试 |
 | `409 task_target_ambiguous` | `claim`/`handoff`/`close` 按包名匹配到多个任务 | 读 `details.task_ids`，用精确 `task_id` 加新 P 重试；不取第一个 |
 | `409 close_refused_borrowed` | 关闭目标含借入窗口且 `allow_borrowed=false` | 先 `handoff` 该窗口，或显式传 `allow_borrowed=true` 并接受销毁 |
-| `409 kill_refused_*` / `409 root_unavailable` | 目标非本会话 owned、跨屏/同屏冲突、FGS/播放，或 root 不可用 | 按受控原因处理，不绕过身份与播放检查；虚拟屏前台自有任务可直接终止并移除任务窗口 |
+| `409 kill_refused_*` / `409 root_unavailable` | 无本会话 owned 任务或有效关闭资格、同包任务并非全部 owned、他屏仍有同包任务、FGS/播放门禁，或 root 不可用 | 按受控原因处理，不绕过身份与播放检查；`close` 确认关闭 owned 任务后可在 5 分钟内按包请求 `kill`，同包多窗口不再单独拒绝 |
 | `409 task_lifecycle_busy` | 该 task 仍有未确认的旧搬移/删除责任 | 用 `status` 与 `app.list` 核验现状；只限制该任务，稍后新 P 重试 |
 | `503 app_list_unavailable` | 应用清单读取失败 | 条件恢复后用新 P 重新 `app.find`，不伪造空列表 |
 | `504 app_launch_unconfirmed` | `app.open` 已派发启动但归属未确认 | 按 `recovery entry=observe`、`reference=P` 用 `observe`/`app.list` 核验（仅传输超时且未知操作结果时先用 `status(P)` 确认是否已完成）；不重放启动 |
@@ -786,7 +792,7 @@ GET 判断工具是否可用。
 $deploy = Get-Content .state/deploy.json -Raw | ConvertFrom-Json
 $headers = @{
     Authorization           = "Bearer $($deploy.agent_token)"
-    'X-Mobile-Use-Contract' = '30'
+    'X-Mobile-Use-Contract' = '31'
 }
 $start = Invoke-RestMethod http://127.0.0.1:18881/api/start -Method Post `
   -Headers $headers -ContentType 'application/json' -Body '{}'

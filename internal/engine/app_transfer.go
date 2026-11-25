@@ -676,6 +676,7 @@ func (e *Engine) appHandoff(ctx context.Context, op *operationState, req *protoc
 	e.mu.Lock()
 	if e.session != nil && e.session.Epoch == epoch && e.session.State != SessionEnded {
 		e.removeSessionTaskLocked(task.TaskID)
+		revokeCloseEligibilityLocked(e.session, task.Package)
 		e.releaseTransferLocked(transfer)
 	}
 	e.mu.Unlock()

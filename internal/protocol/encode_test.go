@@ -143,13 +143,16 @@ func TestRequestEncodersRoundTrip(t *testing.T) {
 			t.Fatalf("DecodeApp open: %v %+v", apiErr, req)
 		}
 		kill := &AppRequest{Kind: AppKindKill, Reference: "O4",
-			Target: &AppTarget{TaskID: 42, UseTask: true}, AllowStopPlayback: true}
+			Target: &AppTarget{App: "com.android.settings"}, AllowStopPlayback: true, AllowBorrowed: true}
 		body, err = kill.Encode()
 		if err != nil {
 			t.Fatal(err)
 		}
+		if got, want := string(body), `{"kind":"kill","reference":"O4","target":{"app":"com.android.settings"},"allow_stop_playback":true}`; got != want {
+			t.Fatalf("Encode kill = %s, want %s", got, want)
+		}
 		if req, apiErr := DecodeApp(body); apiErr != nil || req.Target == nil ||
-			req.Target.TaskID != 42 || !req.AllowStopPlayback {
+			req.Target.App != "com.android.settings" || !req.AllowStopPlayback || req.AllowBorrowed {
 			t.Fatalf("DecodeApp kill: %v %+v", apiErr, req)
 		}
 		notify := &NotifyRequest{Text: "消息正文"}

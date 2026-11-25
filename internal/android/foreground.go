@@ -71,24 +71,42 @@ func (d *Device) readCommand(ctx context.Context, command string, timeout time.D
 	return string(result.Stdout), result.ExitCode == 0, nil
 }
 
-// TaskList reads current application tasks (not historical recents entries).
-func (d *Device) TaskList(ctx context.Context) ([]device.Task, error) {
+// TaskSnapshot reads current application tasks together with the completeness of
+// the parse. The engine must never treat an incomplete enumeration as a full
+// one, so the fact is reported instead of hidden; only an unreadable command is
+// an error.
+func (d *Device) TaskSnapshot(ctx context.Context) (device.TaskSnapshot, error) {
 	if d == nil {
-		return nil, errNilDevice
+		return device.TaskSnapshot{}, errNilDevice
 	}
 	started := time.Now()
 	result, err := d.shellWith(ctx, d.timeout*2, "am stack list")
 	if err != nil {
-		return nil, err
+		return device.TaskSnapshot{}, err
 	}
 	if result.ExitCode != 0 {
-		return nil, exitDetail(result.ExitCode)
+		return device.TaskSnapshot{}, exitDetail(result.ExitCode)
 	}
-	tasks := parseTasks(string(result.Stdout))
+	snapshot := parseTaskSnapshot(string(result.Stdout))
+	state := "incomplete"
+	if snapshot.Complete {
+		state = "complete"
+	}
 	d.logEvent(eventlog.Debug, "android.tasks.read",
-		eventlog.Int("count", len(tasks)),
+		eventlog.Str("state", state),
+		eventlog.Int("count", len(snapshot.Tasks)),
 		eventlog.Duration("ms", time.Since(started)))
-	return tasks, nil
+	return snapshot, nil
+}
+
+// TaskList reads current application tasks (not historical recents entries).
+// Unknown leaves are not tasks: they carry no package identity.
+func (d *Device) TaskList(ctx context.Context) ([]device.Task, error) {
+	snapshot, err := d.TaskSnapshot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return packagedTasks(snapshot.Tasks), nil
 }
 
 // Tap issues one display-bound tap. It never retries or changes display.

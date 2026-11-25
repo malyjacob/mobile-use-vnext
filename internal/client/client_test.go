@@ -554,8 +554,24 @@ func TestAppEncodesKindBranches(t *testing.T) {
 		body    string
 	}{
 		{"find-all", &protocol.AppRequest{Kind: protocol.AppKindFind}, `{"kind":"find"}`},
-		{"find-query", &protocol.AppRequest{Kind: protocol.AppKindFind, Query: "设置", HasQuery: true}, `{"kind":"find","query":"设置"}`},
-		{"list-default", &protocol.AppRequest{Kind: protocol.AppKindList, Reference: "O1"}, `{"kind":"list","reference":"O1"}`},
+		{
+			"find-query",
+			&protocol.AppRequest{
+				Kind: protocol.AppKindFind, Query: "设置", HasQuery: true,
+				Reference: "invalid", Scope: "invalid", FilterApp: "invalid package", HasFilter: true,
+				Target:            &protocol.AppTarget{TaskID: -1, App: "invalid package", UseTask: true},
+				RestoreForeground: true, AllowBorrowed: true, AllowStopPlayback: true,
+			},
+			`{"kind":"find","query":"设置"}`,
+		},
+		{
+			"list-default",
+			&protocol.AppRequest{
+				Kind: protocol.AppKindList, Reference: "O1", Query: "unused",
+				Target: &protocol.AppTarget{App: "invalid package"}, AllowStopPlayback: true,
+			},
+			`{"kind":"list","reference":"O1"}`,
+		},
 		{
 			"list-primary-filter",
 			&protocol.AppRequest{
@@ -566,15 +582,18 @@ func TestAppEncodesKindBranches(t *testing.T) {
 		},
 		{
 			"open",
-			&protocol.AppRequest{Kind: protocol.AppKindOpen, Reference: "O1",
-				Target: &protocol.AppTarget{App: "com.example"}},
+			&protocol.AppRequest{
+				Kind: protocol.AppKindOpen, Reference: "O1",
+				Target: &protocol.AppTarget{App: "com.example"}, FilterApp: "unused", HasFilter: true,
+				RestoreForeground: true,
+			},
 			`{"kind":"open","reference":"O1","target":{"app":"com.example"}}`,
 		},
 		{
 			"claim-task",
 			&protocol.AppRequest{
 				Kind: protocol.AppKindClaim, Reference: "O1",
-				Target: &protocol.AppTarget{TaskID: 42, UseTask: true},
+				Target: &protocol.AppTarget{TaskID: 42, UseTask: true}, AllowBorrowed: true,
 			},
 			`{"kind":"claim","reference":"O1","target":{"task_id":42}}`,
 		},
@@ -590,7 +609,7 @@ func TestAppEncodesKindBranches(t *testing.T) {
 			"handoff-restore",
 			&protocol.AppRequest{
 				Kind: protocol.AppKindHandoff, Reference: "O1",
-				Target: &protocol.AppTarget{TaskID: 42, UseTask: true}, RestoreForeground: true,
+				Target: &protocol.AppTarget{TaskID: 42, UseTask: true}, RestoreForeground: true, AllowBorrowed: true,
 			},
 			`{"kind":"handoff","reference":"O1","target":{"task_id":42},"restore_foreground":true}`,
 		},
@@ -598,7 +617,7 @@ func TestAppEncodesKindBranches(t *testing.T) {
 			"close-borrowed",
 			&protocol.AppRequest{
 				Kind: protocol.AppKindClose, Reference: "O1",
-				Target: &protocol.AppTarget{App: "com.example"}, AllowBorrowed: true,
+				Target: &protocol.AppTarget{App: "com.example"}, AllowBorrowed: true, AllowStopPlayback: true,
 			},
 			`{"kind":"close","reference":"O1","target":{"app":"com.example"},"allow_borrowed":true}`,
 		},
@@ -609,6 +628,14 @@ func TestAppEncodesKindBranches(t *testing.T) {
 				Target: &protocol.AppTarget{TaskID: 42, UseTask: true}, AllowStopPlayback: true,
 			},
 			`{"kind":"kill","reference":"O1","target":{"task_id":42},"allow_stop_playback":true}`,
+		},
+		{
+			"kill-package",
+			&protocol.AppRequest{
+				Kind: protocol.AppKindKill, Reference: "O1",
+				Target: &protocol.AppTarget{App: "com.example"}, RestoreForeground: true,
+			},
+			`{"kind":"kill","reference":"O1","target":{"app":"com.example"}}`,
 		},
 	}
 
@@ -659,37 +686,12 @@ func TestAppRejectsUnencodableBranchesWithoutSending(t *testing.T) {
 		{"list-missing-reference", &protocol.AppRequest{Kind: protocol.AppKindList}},
 		{"open-missing-target", &protocol.AppRequest{Kind: protocol.AppKindOpen, Reference: "O1"}},
 		{"claim-missing-target", &protocol.AppRequest{Kind: protocol.AppKindClaim, Reference: "O1"}},
+		{"kill-missing-target", &protocol.AppRequest{Kind: protocol.AppKindKill, Reference: "O1"}},
 		{
-			"kill-package-target",
-			&protocol.AppRequest{
-				Kind: protocol.AppKindKill, Reference: "O1",
-				Target: &protocol.AppTarget{App: "com.example"},
-			},
-		},
-		{
-			"find-with-reference",
-			&protocol.AppRequest{Kind: protocol.AppKindFind, Reference: "O1"},
-		},
-		{
-			"list-with-target",
-			&protocol.AppRequest{
-				Kind: protocol.AppKindList, Reference: "O1",
-				Target: &protocol.AppTarget{App: "com.example"},
-			},
-		},
-		{
-			"open-with-top-level-app",
+			"open-task-target",
 			&protocol.AppRequest{
 				Kind: protocol.AppKindOpen, Reference: "O1",
-				FilterApp: "com.example", HasFilter: true,
-				Target: &protocol.AppTarget{App: "com.example"},
-			},
-		},
-		{
-			"claim-with-close-option",
-			&protocol.AppRequest{
-				Kind: protocol.AppKindClaim, Reference: "O1",
-				Target: &protocol.AppTarget{App: "com.example"}, AllowBorrowed: true,
+				Target: &protocol.AppTarget{TaskID: 42, UseTask: true},
 			},
 		},
 		{
@@ -1300,10 +1302,10 @@ func TestAppDecodesCloseTasks(t *testing.T) {
 	}
 }
 
-func TestAppDecodesKillPIDs(t *testing.T) {
+func TestAppDecodesKillFacts(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		writeResponse(w, http.StatusOK,
-			`{"operation_id":"Pappkill","outcome":"executed","app":{"kind":"kill","package":"com.example","source_task_id":42,"display_id":12,"target_pids":[1234,1235],"killed_pids":[1234,1235],"remaining_pids":[],"restarted":null}}`)
+			`{"operation_id":"Pappkill","outcome":"executed","app":{"kind":"kill","package":"com.example","android_user_id":0,"source_task_id":42,"target_task_ids":[42],"display_id":12,"remaining_task_ids":[],"target_pids":[1234,1235],"killed_pids":[1234,1235],"remaining_pids":[],"restarted":false,"package_state":"stopped_at_check"}}`)
 	}))
 	defer server.Close()
 
@@ -1320,12 +1322,19 @@ func TestAppDecodesKillPIDs(t *testing.T) {
 		t.Fatal("kill view was not decoded")
 	}
 	app := response.Result.App
-	if app.Kind != protocol.AppKindKill || app.Package != "com.example" {
+	if app.Kind != protocol.AppKindKill || app.Package != "com.example" ||
+		app.AndroidUserID == nil || *app.AndroidUserID != 0 {
 		t.Fatalf("kill identity differs: %+v", app)
 	}
 	if app.SourceTaskID == nil || *app.SourceTaskID != 42 ||
 		app.DisplayID == nil || *app.DisplayID != 12 {
 		t.Fatalf("kill task/display differs: %+v", app)
+	}
+	if !app.HasTargetTaskIDs || len(app.TargetTaskIDs) != 1 || app.TargetTaskIDs[0] != 42 {
+		t.Fatalf("target_task_ids = %v (present=%t)", app.TargetTaskIDs, app.HasTargetTaskIDs)
+	}
+	if !app.HasRemainingTaskIDs || app.RemainingTaskIDs == nil || len(app.RemainingTaskIDs) != 0 {
+		t.Fatalf("remaining_task_ids = %v (present=%t), want a present empty array", app.RemainingTaskIDs, app.HasRemainingTaskIDs)
 	}
 	if !app.HasTargetPIDs || len(app.TargetPIDs) != 2 ||
 		app.TargetPIDs[0] != 1234 || app.TargetPIDs[1] != 1235 {
@@ -1338,8 +1347,8 @@ func TestAppDecodesKillPIDs(t *testing.T) {
 	if !app.HasRemainingPIDs || app.RemainingPIDs == nil || len(app.RemainingPIDs) != 0 {
 		t.Fatalf("remaining_pids = %v (present=%t), want a present empty array", app.RemainingPIDs, app.HasRemainingPIDs)
 	}
-	if !app.HasRestarted || app.Restarted != nil {
-		t.Fatal("explicit restarted=null was not preserved")
+	if !app.HasRestarted || app.Restarted == nil || *app.Restarted || app.PackageState != "stopped_at_check" {
+		t.Fatalf("final package state differs: %+v", app)
 	}
 }
 

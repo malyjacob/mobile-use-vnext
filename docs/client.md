@@ -19,7 +19,7 @@ instance, err := c.Discover(ctx)
 `POST /api/status {}` 取得当前准入事实（`can_start`、`blocking_code`、本 Agent 的
 `session`、`start_operation_id` 与 `cleanup`）。它不生成 P、不续租、不创建会话。
 
-当前共同契约为 `"30"`。契约版本不等时返回 `contract_mismatch`；客户端不刷新版本、不重发
+当前共同契约为 `"31"`。契约版本不等时返回 `contract_mismatch`；客户端不刷新版本、不重发
 业务动作。端口可应答、`/health` 正常都不等于 `can_start=true`。
 
 公开树与 detailed inspection 使用相同的完整节点布尔默认/unknown 规则，不携带 defaults。
@@ -178,16 +178,26 @@ MCP 适配器的严格解码拒绝；两个条件折叠后相同则是引擎准�
 `candidate_count`；响应解码器不把 `0` 当成缺失、不改写枚举，客户端也不据此重建
 `text_input` 或恢复入口。
 
-`Client.App(ctx, *protocol.AppRequest, ...Option)` 按 `Kind` 编码七个互斥分支：编码器只写所选
-分支的成员；分支不完整、缺少选择器，或 `open`/`kill` 使用不允许的选择器时，`Encode` 在发送
-前拒绝。`list` 的 `reference` 可为 ready O 或活动原会话 P；`open`/`claim`/`handoff`/`close`/
-`kill` 的 `reference` 必须是当前 ready O。`open` 只编码 `target.app`，不接受顶层 `app`；
-`list` 的顶层 `app` 只是过滤。`App` 的每次新调用都生成自己的 P（或用 `WithOperationID`
+`Client.App(ctx, *protocol.AppRequest, ...Option)` 按 `Kind` 归一化七个分支：`Encode` 与
+HTTP/MCP 接入共用同一原则，只写该 kind 的生效成员与必填检查；调用方在非生效成员上填值
+（如 `find.Reference`、`find.Target`、`list.Target`、`close.AllowStopPlayback`）时忽略而
+不报错，生效成员仍严格校验。分支不完整、缺少选择器，或 `open`/`claim`/`handoff`/`close`
+使用不允许的选择器时，`Encode` 在发送前拒绝；`kill` 接受 `target.task_id` 或 `target.app`。
+`list` 的 `reference` 可为 ready O 或活动原会话 P；`open`/`claim`/`handoff`/`close`/`kill`
+的 `reference` 必须是当前 ready O。`open` 只编码 `target.app`，不接受顶层 `app`；`list` 的
+顶层 `app` 只是过滤。`App` 的每次新调用都生成自己的 P（或用 `WithOperationID`
 预分配）；`find` 是 detached P，不绑定调用时恰有的全局活动会话；`list` 的 P 绑定
 `reference` 解析到的原会话。`find`/`list` 成功与失败都没有 `outcome`；响应丢失时用
 `Status(ctx, p)` 只能读取摘要，集合需要以新 P 重新查询。重复 P 只返回原操作视图，不再次
 读取或派发。`app` 的五个变更 kind 在响应中带 `outcome` 与后观察，消费失败或重试规则与其他
 工作工具一致。
+
+`AppView` 的 `kill` 结果在 `kind` 之后按固定顺序携带 `package`、`android_user_id`、`source_task_id`、
+`target_task_ids`、`display_id`、`remaining_task_ids`、`target_pids`、`killed_pids`、
+`remaining_pids`、`restarted`、`package_state`。`target_task_ids`/`remaining_task_ids` 只在
+任务枚举完整时出现，空集合为 `[]`；PID 数组只在对应读取完整时出现，空集合为 `[]`；
+`restarted` 在最终进程读未知时为显式 `null`；`package_state` 取 `stopped_at_check`/
+`still_present`/`unknown`。客户端按原值解码并保留缺席与空集合的区别，不补默认值。
 
 `Keepalive(ctx, reference)` 表示显式重设为两分钟；`KeepaliveWithDuration` 发送显式
 `duration_minutes`。两者共用同一发送路径与 P 校验；直接传入 0、负数、超过 120 或把时长

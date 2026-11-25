@@ -340,7 +340,7 @@ func resultModeFixtures() []resultModeFixture {
 	add("app", "claim", `{"operation_id":"P7","outcome":"executed","app":{"kind":"claim","package":"p","task_id":42,"source_display_id":0,"display_id":12,"ownership":"borrowed","state_preserved":true}}`)
 	add("app", "handoff", `{"operation_id":"P8","outcome":"executed","app":{"kind":"handoff","package":"p","task_id":42,"source_display_id":12,"display_id":0,"ownership":"shared","state_preserved":null,"foreground_restore":"not_requested"}}`)
 	add("app", "close_partial", `{"operation_id":"P9","outcome":"uncertain","app":{"kind":"close","display_id":12,"tasks":[{"task_id":42,"outcome":"executed","recents_cleaned":true},{"task_id":43,"outcome":"uncertain","recents_cleaned":null}],"complete":false},"error":{"code":"task_remove_unconfirmed","message":"部分任务的关闭结果未确认"}}`)
-	add("app", "kill", `{"operation_id":"P10","outcome":"executed","app":{"kind":"kill","package":"p","source_task_id":42,"display_id":12,"target_pids":[1234,1235],"killed_pids":[1234,1235],"remaining_pids":[],"restarted":null}}`)
+	add("app", "kill", `{"operation_id":"P10","outcome":"executed","app":{"kind":"kill","package":"p","android_user_id":0,"source_task_id":42,"target_task_ids":[42,43],"display_id":12,"remaining_task_ids":[],"target_pids":[1234,1235],"killed_pids":[1234,1235],"remaining_pids":[],"restarted":null,"package_state":"stopped_at_check"}}`)
 	for _, state := range []string{"queued", "unavailable"} {
 		add("notify", state, `{"outcome":"executed","message_id":"M1","saved":true,"notification":{"state":"`+state+`"}}`)
 	}
@@ -546,7 +546,9 @@ func TestCatalogFingerprintBaseline(t *testing.T) {
 	// act(text) auto_submit/submit_ref contract with outcome=partial, and the
 	// four-tier scroll amount with scroll axis-fallback guidance. Contract 30
 	// adds observation change and hint guidance to the act and snap descriptions.
-	const baseline = "25a09a66f54e728b1c9fc67e6898514c6ac7438b9976528ece7e36bd4f5eab43"
+	// Contract 31 replaces the app kill wording and publishes the seven-branch
+	// tolerance matrix plus kill package-state result fields.
+	const baseline = "ee88b255e393d2538d68a0fd01aa9da816ccf8d5754a2436b99d642fc52ac427"
 	if got := CatalogFingerprint(); got != baseline {
 		t.Fatalf("catalog changed: %s", got)
 	}

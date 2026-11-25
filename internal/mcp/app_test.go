@@ -157,19 +157,24 @@ func TestAppStrictAdmission(t *testing.T) {
 		{"kind case variant", `{"kind":"Find"}`},
 		{"duplicate kind", `{"kind":"find","kind":"find"}`},
 		{"trailing value", `{"kind":"find"} {"kind":"find"}`},
-		{"find cross-branch reference", `{"kind":"find","reference":"O1"}`},
-		{"find cross-branch target", `{"kind":"find","target":{"task_id":1}}`},
+		{"member case variant", `{"kind":"find","Query":"x"}`},
+		{"unknown member", `{"kind":"find","extra":true}`},
+		{"find null reference", `{"kind":"find","reference":null}`},
 		{"find null query", `{"kind":"find","query":null}`},
 		{"find wrong query type", `{"kind":"find","query":1}`},
+		{"find null target", `{"kind":"find","target":null}`},
+		{"find target null selector", `{"kind":"find","target":{"task_id":null}}`},
+		{"find target unknown member", `{"kind":"find","target":{"task_id":1,"pid":7}}`},
+		{"find target wrong type", `{"kind":"find","target":{"task_id":"1"}}`},
 		{"list missing reference", `{"kind":"list"}`},
-		{"list cross-branch target", `{"kind":"list","reference":"O1","target":{"task_id":1}}`},
-		{"list cross-branch query", `{"kind":"list","reference":"O1","query":"x"}`},
+		{"list empty reference", `{"kind":"list","reference":""}`},
 		{"list bad scope", `{"kind":"list","reference":"O1","scope":"virtual"}`},
 		{"list null scope", `{"kind":"list","reference":"O1","scope":null}`},
+		{"list target unknown member", `{"kind":"list","reference":"O1","target":{"app":"com.example","pid":1}}`},
 		{"retired observation_id", `{"kind":"open","observation_id":"O1","target":{"app":"com.example"}}`},
+		{"open missing reference", `{"kind":"open","target":{"app":"com.example"}}`},
 		{"open missing target", `{"kind":"open","reference":"O1"}`},
-		{"open top-level app", `{"kind":"open","reference":"O1","app":"com.example"}`},
-		{"open cross-branch query", `{"kind":"open","reference":"O1","target":{"app":"com.example"},"query":"x"}`},
+		{"open target task", `{"kind":"open","reference":"O1","target":{"task_id":1}}`},
 		{"open bad package", `{"kind":"open","reference":"O1","target":{"app":"not a package"}}`},
 		{"claim missing target", `{"kind":"claim","reference":"O1"}`},
 		{"claim null target", `{"kind":"claim","reference":"O1","target":null}`},
@@ -179,12 +184,10 @@ func TestAppStrictAdmission(t *testing.T) {
 		{"claim target negative", `{"kind":"claim","reference":"O1","target":{"task_id":-1}}`},
 		{"claim target string", `{"kind":"claim","reference":"O1","target":{"task_id":"1"}}`},
 		{"claim target unknown member", `{"kind":"claim","reference":"O1","target":{"task_id":1,"pid":7}}`},
-		{"claim cross-branch app", `{"kind":"claim","reference":"O1","target":{"task_id":1},"app":"com.example"}`},
-		{"claim cross-branch restore", `{"kind":"claim","reference":"O1","target":{"task_id":1},"restore_foreground":true}`},
-		{"handoff cross-branch allow", `{"kind":"handoff","reference":"O1","target":{"task_id":1},"allow_borrowed":true}`},
-		{"close cross-branch restore", `{"kind":"close","reference":"O1","target":{"task_id":1},"restore_foreground":true}`},
-		{"kill package target", `{"kind":"kill","reference":"O1","target":{"app":"com.example"}}`},
-		{"kill cross-branch allow_borrowed", `{"kind":"kill","reference":"O1","target":{"task_id":1},"allow_borrowed":true}`},
+		{"kill missing reference", `{"kind":"kill","target":{"app":"com.example"}}`},
+		{"kill missing target", `{"kind":"kill","reference":"O1"}`},
+		{"kill target both", `{"kind":"kill","reference":"O1","target":{"task_id":1,"app":"com.example"}}`},
+		{"kill target zero", `{"kind":"kill","reference":"O1","target":{"task_id":0}}`},
 	}
 	for _, testCase := range cases {
 		testCase := testCase
@@ -228,6 +231,7 @@ func TestAppEveryKindIsAdmitted(t *testing.T) {
 		{"handoff", `{"kind":"handoff","reference":"O1","target":{"task_id":43},"restore_foreground":true}`, protocol.AppKindHandoff},
 		{"close", `{"kind":"close","reference":"O1","target":{"task_id":43},"allow_borrowed":true}`, protocol.AppKindClose},
 		{"kill", `{"kind":"kill","reference":"O1","target":{"task_id":43},"allow_stop_playback":true}`, protocol.AppKindKill},
+		{"kill app", `{"kind":"kill","reference":"O1","target":{"app":"com.example"}}`, protocol.AppKindKill},
 	}
 	for _, testCase := range cases {
 		testCase := testCase
@@ -253,6 +257,75 @@ func TestAppEveryKindIsAdmitted(t *testing.T) {
 				t.Fatalf("cancel policy mismatch for %q", testCase.kind)
 			}
 		})
+	}
+}
+
+// TestAppBranchTolerance proves the declared-member tolerance: a branch may
+// carry members effective for another branch, including a target selector and
+// options, without changing the selected branch. The protocol decoder keeps the
+// members out of the normalized request; this test pins MCP admission only.
+func TestAppBranchTolerance(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		kind string
+	}{
+		{"find reference", `{"kind":"find","reference":"O1"}`, protocol.AppKindFind},
+		{"find target task", `{"kind":"find","target":{"task_id":1}}`, protocol.AppKindFind},
+		{"find invalid target ignored", `{"kind":"find","target":{"task_id":-1}}`, protocol.AppKindFind},
+		{"find both selectors ignored", `{"kind":"find","target":{"task_id":1,"app":"com.example"}}`, protocol.AppKindFind},
+		{"find scope and app", `{"kind":"find","scope":"primary","app":"com.example"}`, protocol.AppKindFind},
+		{"find options", `{"kind":"find","restore_foreground":true,"allow_borrowed":true,"allow_stop_playback":true}`, protocol.AppKindFind},
+		{"list target", `{"kind":"list","reference":"O1","target":{"task_id":1}}`, protocol.AppKindList},
+		{"list query", `{"kind":"list","reference":"O1","query":"x"}`, protocol.AppKindList},
+		{"list options", `{"kind":"list","reference":"O1","restore_foreground":true,"allow_borrowed":true,"allow_stop_playback":true}`, protocol.AppKindList},
+		{"open top-level app", `{"kind":"open","reference":"O1","app":"com.example","target":{"app":"com.example"}}`, protocol.AppKindOpen},
+		{"open query and options", `{"kind":"open","reference":"O1","target":{"app":"com.example"},"query":"x","allow_borrowed":true}`, protocol.AppKindOpen},
+		{"claim app", `{"kind":"claim","reference":"O1","target":{"task_id":1},"app":"com.example"}`, protocol.AppKindClaim},
+		{"claim options", `{"kind":"claim","reference":"O1","target":{"task_id":1},"restore_foreground":true,"allow_borrowed":true}`, protocol.AppKindClaim},
+		{"handoff allow", `{"kind":"handoff","reference":"O1","target":{"task_id":1},"allow_borrowed":true}`, protocol.AppKindHandoff},
+		{"handoff stop playback", `{"kind":"handoff","reference":"O1","target":{"task_id":1},"allow_stop_playback":true}`, protocol.AppKindHandoff},
+		{"close restore", `{"kind":"close","reference":"O1","target":{"task_id":1},"restore_foreground":true}`, protocol.AppKindClose},
+		{"close stop playback", `{"kind":"close","reference":"O1","target":{"task_id":1},"allow_stop_playback":true}`, protocol.AppKindClose},
+		{"kill allow borrowed", `{"kind":"kill","reference":"O1","target":{"task_id":1},"allow_borrowed":true}`, protocol.AppKindKill},
+	}
+	for _, testCase := range cases {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			prepared, apiErr := prepareCall(nil, testDefinitionByName(t, "app"), []byte(testCase.body))
+			if apiErr != nil {
+				t.Fatalf("tolerant admission rejected %s: %s", testCase.body, apiErr.Code)
+			}
+			if prepared.kind != testCase.kind {
+				t.Fatalf("prepared kind = %q, want %q", prepared.kind, testCase.kind)
+			}
+		})
+	}
+}
+
+// TestAppListMissingReference proves the named 422 for a list without its
+// effective reference and that only the existing field detail is published.
+func TestAppListMissingReference(t *testing.T) {
+	for _, body := range []string{`{"kind":"list"}`, `{"kind":"list","reference":""}`} {
+		execution := (&adapter{}).run(context.Background(), testDefinitionByName(t, "app"), []byte(body))
+		if !execution.admission || execution.result == nil || execution.result.Error == nil {
+			t.Fatalf("%s was not rejected at admission", body)
+		}
+		errorValue := execution.result.Error
+		if errorValue.Code != protocol.CodeInvalidRequest {
+			t.Fatalf("code = %q, want invalid_request", errorValue.Code)
+		}
+		for _, fragment := range []string{"list", "reference"} {
+			if !strings.Contains(errorValue.Message, fragment) {
+				t.Errorf("message %q does not name %q", errorValue.Message, fragment)
+			}
+		}
+		if field, ok := errorValue.Details["field"].(string); !ok || field != "reference" {
+			t.Fatalf("details.field = %#v, want reference", errorValue.Details["field"])
+		}
+		if len(errorValue.Details) != 1 {
+			t.Fatalf("details = %#v, want only field", errorValue.Details)
+		}
 	}
 }
 
@@ -339,22 +412,51 @@ func appModeFixtures() []appModeFixture {
 			name:      "kill",
 			arguments: `{"kind":"kill","reference":"O1","target":{"task_id":42}}`,
 			service: `{"operation_id":%q,"outcome":"executed","app":{"kind":"kill",` +
-				`"package":"com.example","source_task_id":42,"display_id":12,` +
+				`"package":"com.example","android_user_id":0,"source_task_id":42,` +
+				`"target_task_ids":[42,43],"display_id":12,"remaining_task_ids":[],` +
 				`"target_pids":[1234,1235],"killed_pids":[1234,1235],` +
-				`"remaining_pids":[],"restarted":null}}`,
+				`"remaining_pids":[],"restarted":false,"package_state":"stopped_at_check"}}`,
 			typed: []string{
-				"app kill pkg=com.example src_task=42 display=12 target_pids=[1234,1235] killed_pids=[1234,1235] remaining_pids=[] restarted=null",
+				"app kill pkg=com.example user=0 src_task=42 target_tasks=[42,43] display=12 remaining_tasks=[] target_pids=[1234,1235] killed_pids=[1234,1235] remaining_pids=[] restarted=false package_state=stopped_at_check",
+			},
+		},
+		{
+			name:      "kill package target",
+			arguments: `{"kind":"kill","reference":"O1","target":{"app":"com.example"}}`,
+			service: `{"operation_id":%q,"outcome":"executed","app":{"kind":"kill",` +
+				`"package":"com.example","android_user_id":0,"target_task_ids":[],` +
+				`"display_id":12,"target_pids":[],"killed_pids":[],` +
+				`"remaining_pids":[4321],"restarted":null,"package_state":"still_present"}}`,
+			typed: []string{
+				"app kill pkg=com.example user=0 target_tasks=[] display=12 target_pids=[] killed_pids=[] remaining_pids=[4321] restarted=null package_state=still_present",
 			},
 		},
 		{
 			name:      "kill uncertain",
 			arguments: `{"kind":"kill","reference":"O1","target":{"task_id":42}}`,
 			service: `{"operation_id":%q,"outcome":"uncertain","app":{"kind":"kill",` +
-				`"package":"com.example","source_task_id":42,"display_id":12,` +
-				`"target_pids":[1234],"killed_pids":[1234],"restarted":null},` +
+				`"package":"com.example","android_user_id":0,"source_task_id":42,` +
+				`"target_task_ids":[42],"display_id":12,` +
+				`"target_pids":[1234],"killed_pids":[1234],"restarted":null,` +
+				`"package_state":"unknown"},` +
 				`"error":{"code":"kill_unconfirmed","message":"进程终止未确认"}}`,
 			isError: true,
-			typed:   []string{"app kill pkg=com.example src_task=42 display=12 target_pids=[1234] killed_pids=[1234] restarted=null"},
+			typed: []string{
+				"app kill pkg=com.example user=0 src_task=42 target_tasks=[42] display=12 target_pids=[1234] killed_pids=[1234] restarted=null package_state=unknown",
+			},
+		},
+		{
+			name:      "kill not executed",
+			arguments: `{"kind":"kill","reference":"O1","target":{"task_id":42}}`,
+			service: `{"operation_id":%q,"outcome":"not_executed","app":{"kind":"kill",` +
+				`"package":"com.example","android_user_id":0,"target_task_ids":[42],` +
+				`"display_id":12,"target_pids":[1234]},` +
+				`"error":{"code":"control_revoked","message":"包级强停未派发"}}`,
+			isError: true,
+			typed: []string{
+				"app kill pkg=com.example user=0 target_tasks=[42] display=12 target_pids=[1234]",
+				"outcome=not_executed",
+			},
 		},
 		{
 			name:      "claim not executed",
@@ -843,7 +945,11 @@ func appExpectedFieldKinds() map[string]resultV4FieldKind {
 		"app.captured_at":        v4Token,
 		"app.package":            v4String,
 		"app.task_id":            v4Literal,
+		"app.android_user_id":    v4Literal,
 		"app.source_task_id":     v4Literal,
+		"app.target_task_ids":    v4JSON,
+		"app.remaining_task_ids": v4JSON,
+		"app.package_state":      v4Token,
 		"app.display_id":         v4Literal,
 		"app.source_display_id":  v4Literal,
 		"app.total":              v4Literal,

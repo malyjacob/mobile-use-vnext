@@ -246,60 +246,154 @@ var rootTaskID = regexp.MustCompile(`^RootTask id=(\d+)\b`)
 // rootTaskDisplay reads the display id of one root task header.
 var rootTaskDisplay = regexp.MustCompile(`\bdisplayId=(\d+)\b`)
 
-// leafTask is one `taskId=N: package/Class` line under a root task.
-var leafTask = regexp.MustCompile(`^\s+taskId=(\d+): (` + componentPattern + `)\b`)
+// taskUserID reads the `userId=<n>` token a root or leaf line may carry.
+var taskUserID = regexp.MustCompile(`\buserId=(\d+)\b`)
+
+// leafTaskPrefix opens one leaf task line, including a line whose target cannot
+// be parsed: the line still proves that the snapshot is incomplete.
+var leafTaskPrefix = regexp.MustCompile(`^\s+taskId=`)
+
+// leafTaskID reads the id token of one leaf task line and stops right after the
+// separator, so the target can be read from the remainder of the line.
+var leafTaskID = regexp.MustCompile(`^\s+taskId=(\d+):[ \t]?`)
+
+// leafTaskUnknown matches an unknown leaf: the activity manager knows the
+// container but not the activity or package behind it.
+var leafTaskUnknown = regexp.MustCompile(`^unknown\b`)
+
+// leafTaskComponent reads the `package/Class` target of one leaf task line.
+var leafTaskComponent = regexp.MustCompile(`^(` + componentPattern + `)\b`)
 
 // leafTaskVisible reads the trailing visible=true flag of a leaf task line.
 var leafTaskVisible = regexp.MustCompile(`\bvisible=(true|false)\b`)
 
-// parseTasks reads this phone's `am stack list` RootTaskInfo output. Unlike
-// `dumpsys activity` it lists current containers only, so the same package can
-// own an independent task on another display without being collapsed.
-func parseTasks(listing string) []device.Task {
-	tasks := []device.Task{}
-	displayID := -1
-	rootID := 0
-	rootSeen := false
-	for _, line := range strings.Split(listing, "\n") {
+// taskRoot is the current root segment while one listing is parsed. display is
+// only meaningful while seen is true; a root whose display cannot be read never
+// makes its leaves a trustworthy inventory.
+type taskRoot struct {
+	id      int
+	display int
+	seen    bool
+	hasUser bool
+	user    int
+}
+
+// parseTaskSnapshot reads this phone's `am stack list` RootTaskInfo output.
+// Unlike `dumpsys activity` it lists current containers only, so the same
+// package can own an independent task on another display without being
+// collapsed.
+//
+// Every task line carries its own user on this device; a root segment may carry
+// one too. The leaf value wins, a root value fills a missing leaf value, and a
+// disagreement keeps the task with HasUserID=false because neither value is
+// proven. Unknown leaves are retained with an empty package: they carry no
+// activity identity, but their task id is still a real container.
+//
+// Complete is false when a task line cannot be structurally parsed or when a
+// leaf has no containing root segment with a readable display id. Such a task is
+// not guessed into the inventory; the incompleteness fact is what tells the
+// caller the enumeration cannot be trusted.
+func parseTaskSnapshot(listing string) device.TaskSnapshot {
+	snapshot := device.TaskSnapshot{Complete: true, Tasks: []device.Task{}}
+	var root taskRoot
+	for _, raw := range strings.Split(listing, "\n") {
+		line := strings.TrimRight(raw, "\r")
 		if rootTaskPrefix.MatchString(line) {
-			// Every header starts a new container, so the previous root id never
+			// Every header starts a new container, so the previous root never
 			// carries over to the next one.
-			rootID = 0
-			displayID = -1
-			rootSeen = false
+			root = taskRoot{display: -1}
 			if id := rootTaskID.FindStringSubmatch(line); id != nil {
 				if parsed, err := strconv.Atoi(id[1]); err == nil && parsed > 0 {
-					rootID = parsed
+					root.id = parsed
 				}
 			}
 			if display := rootTaskDisplay.FindStringSubmatch(line); display != nil {
 				if parsed, err := strconv.Atoi(display[1]); err == nil && parsed >= 0 {
-					displayID = parsed
-					rootSeen = true
+					root.display, root.seen = parsed, true
 				}
 			}
+			root.user, root.hasUser = parseUserToken(line)
 			continue
 		}
-		task := leafTask.FindStringSubmatch(line)
-		if task == nil || !rootSeen || displayID < 0 {
+		if !leafTaskPrefix.MatchString(line) {
 			continue
 		}
-		taskID, err := strconv.Atoi(task[1])
-		if err != nil {
+		id := leafTaskID.FindStringSubmatch(line)
+		if id == nil {
+			snapshot.Complete = false
 			continue
 		}
-		component := normalizeComponent(task[2])
-		visible := leafTaskVisible.FindStringSubmatch(line)
-		tasks = append(tasks, device.Task{
-			TaskID:    taskID,
-			RootID:    rootID,
-			DisplayID: displayID,
-			Package:   packageOf(component),
-			Component: component,
-			Visible:   visible != nil && visible[1] == "true",
-		})
+		taskID, err := strconv.Atoi(id[1])
+		if err != nil || taskID <= 0 {
+			snapshot.Complete = false
+			continue
+		}
+		if !root.seen || root.display < 0 {
+			snapshot.Complete = false
+			continue
+		}
+		task := device.Task{TaskID: taskID, RootID: root.id, DisplayID: root.display}
+		target := strings.TrimLeft(line[len(id[0]):], " \t")
+		switch {
+		case leafTaskUnknown.MatchString(target):
+			// An unknown leaf keeps its task identity and nothing else.
+		case leafTaskComponent.MatchString(target):
+			component := normalizeComponent(leafTaskComponent.FindString(target))
+			task.Package, task.Component = packageOf(component), component
+		default:
+			// A target that is neither `unknown` nor a component cannot be
+			// attributed, so the whole enumeration is incomplete.
+			snapshot.Complete = false
+		}
+		if visible := leafTaskVisible.FindStringSubmatch(line); visible != nil {
+			task.Visible = visible[1] == "true"
+		}
+		leafUser, leafHasUser := parseUserToken(line)
+		switch {
+		case leafHasUser && root.hasUser:
+			task.UserID = leafUser
+			task.HasUserID = leafUser == root.user
+		case leafHasUser:
+			task.UserID, task.HasUserID = leafUser, true
+		case root.hasUser:
+			task.UserID, task.HasUserID = root.user, true
+		}
+		snapshot.Tasks = append(snapshot.Tasks, task)
 	}
-	return tasks
+	return snapshot
+}
+
+// parseTasks returns the packaged leaf tasks of one listing. It keeps the
+// historical TaskList contract: unknown leaves stay in the snapshot but are not
+// exposed as tasks.
+func parseTasks(listing string) []device.Task {
+	return packagedTasks(parseTaskSnapshot(listing).Tasks)
+}
+
+// packagedTasks filters the attributable tasks out of one snapshot.
+func packagedTasks(tasks []device.Task) []device.Task {
+	out := make([]device.Task, 0, len(tasks))
+	for _, task := range tasks {
+		if task.Package == "" {
+			continue
+		}
+		out = append(out, task)
+	}
+	return out
+}
+
+// parseUserToken reads the `userId=<n>` token of one root or leaf line. Only a
+// non-negative decimal value counts; anything else is missing evidence.
+func parseUserToken(line string) (int, bool) {
+	match := taskUserID.FindStringSubmatch(line)
+	if match == nil {
+		return 0, false
+	}
+	value, err := strconv.Atoi(match[1])
+	if err != nil || value < 0 {
+		return 0, false
+	}
+	return value, true
 }
 
 // parseIntStrict parses a decimal integer with no surrounding text.

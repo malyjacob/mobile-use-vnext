@@ -80,12 +80,10 @@ func (p *probe) appLifecycleChecks(ctx context.Context, start startSummary) bool
 		field("task_id", strconv.Itoa(taskID)), field("display_id", strconv.Itoa(displayID)),
 		"ownership=owned")
 
-	// A kill is attempted only on the controlled owned task. The virtual screen
-	// now permits killing the foreground owned task: on success the task window
-	// must disappear from app.list, and the closed loop reopens the controlled
-	// target so app.close still runs against a live owned task. A refusal keeps
-	// the original close path.
-	killed := false
+	// A kill is attempted only on the controlled owned task. The contract kills
+	// the whole package once per Android user and never removes the task window,
+	// so the probe validates the package/user/task/process facts instead of
+	// requiring the window to disappear. A refusal keeps the original close path.
 	kill, failure := p.call(ctx, "app", map[string]any{
 		"kind": "kill", "reference": nextO, "target": map[string]any{"task_id": taskID},
 	})
@@ -93,14 +91,46 @@ func (p *probe) appLifecycleChecks(ctx context.Context, start startSummary) bool
 		p.reporter.fail("app_kill", failure.reason, failure.fields...)
 		return false
 	}
-	if kill.result.IsError {
-		code := codeOf(kill.view)
-		if resultOutcome(kill) == outcomeExecuted {
+	killCode := codeOf(kill.view)
+	killOutcome := resultOutcome(kill)
+	switch {
+	case killOutcome == "uncertain" || killCode == "kill_unconfirmed":
+		// A dispatched command with an unconfirmed result is an honest contract
+		// outcome: the verified identity and frozen facts still apply, the final
+		// read stays unknown, and the task window is not removed.
+		if kill.view.App == nil || kill.view.App.Kind != "kill" ||
+			kill.view.App.SourceTaskID == nil || *kill.view.App.SourceTaskID != taskID {
+			p.reporter.fail("app_kill", "kill_facts_unexpected",
+				field("outcome", killOutcome), field("code", killCode))
+			return false
+		}
+		if !containsInt(kill.view.App.TargetTaskIDs, taskID) {
+			p.reporter.fail("app_kill", "kill_target_tasks_missing_source",
+				field("task_id", strconv.Itoa(taskID)),
+				field("target_tasks", intListText(kill.view.App.TargetTaskIDs, kill.view.App.HasTargetTaskIDs)))
+			return false
+		}
+		if failure := checkKillFacts(kill.view.App); failure != nil {
+			p.reporter.fail("app_kill", failure.reason, failure.fields...)
+			return false
+		}
+		p.reporter.pass("app_kill", append(killFactFields(kill.view.App, true),
+			"outcome=uncertain", "code="+killCode)...)
+		// An uncertain result retired the O; rebuild the ready reference before
+		// the cleanup close runs.
+		updated, failure := p.readyObservation(ctx, start.OperationID)
+		if failure != nil {
+			p.reporter.fail("app_close", failure.reason, failure.fields...)
+			return false
+		}
+		nextO = updated
+	case kill.result.IsError:
+		if killOutcome == outcomeExecuted {
 			p.reporter.fail("app_kill_refused", "executed_result_marked_error")
 			return false
 		}
-		if !strings.HasPrefix(code, "kill_refused_") && code != "task_not_found" {
-			p.reporter.fail("app_kill_refused", "unexpected_refusal", field("code", code))
+		if !appKillRefusalCode(killCode) {
+			p.reporter.fail("app_kill_refused", "unexpected_refusal", field("code", killCode))
 			return false
 		}
 		if kill.view.App != nil {
@@ -108,22 +138,36 @@ func (p *probe) appLifecycleChecks(ctx context.Context, start startSummary) bool
 				p.reporter.fail("app_kill_refused", "app_kind_mismatch", field("kind", kill.view.App.Kind))
 				return false
 			}
-			if kill.view.App.HasKilledPIDs {
-				p.reporter.fail("app_kill_refused", "not_executed_has_killed_pids")
+			if failure := checkNoFinalKillFacts(kill.view.App); failure != nil {
+				p.reporter.fail("app_kill_refused", failure.reason, failure.fields...)
 				return false
 			}
 		}
 		p.reporter.pass("app_kill_refused",
-			field("task_id", strconv.Itoa(taskID)), field("code", code),
-			"outcome="+outcomeOrNone(resultOutcome(kill)))
-		p.reporter.skip("app_kill_removed", "controlled_task_not_killed",
-			field("task_id", strconv.Itoa(taskID)))
-	} else {
-		if resultOutcome(kill) != outcomeExecuted || kill.view.App == nil ||
+			field("task_id", strconv.Itoa(taskID)), field("code", killCode),
+			"outcome="+outcomeOrNone(killOutcome))
+		// A refusal before claim keeps the O usable, but a refusal after claim
+		// consumes it; rebuild one ready observation so cleanup never replays a
+		// stale reference.
+		updated, failure := p.readyObservation(ctx, start.OperationID)
+		if failure != nil {
+			p.reporter.fail("app_close", failure.reason, failure.fields...)
+			return false
+		}
+		nextO = updated
+	default:
+		if killOutcome != outcomeExecuted || kill.view.App == nil ||
 			kill.view.App.Kind != "kill" || kill.view.App.SourceTaskID == nil ||
-			*kill.view.App.SourceTaskID != taskID {
+			*kill.view.App.SourceTaskID != taskID || kill.view.App.Package != target ||
+			kill.view.App.DisplayID == nil || *kill.view.App.DisplayID != displayID {
 			p.reporter.fail("app_kill", "kill_facts_unexpected",
-				field("outcome", resultOutcome(kill)), field("code", codeOf(kill.view)))
+				field("outcome", killOutcome), field("code", killCode))
+			return false
+		}
+		if !containsInt(kill.view.App.TargetTaskIDs, taskID) {
+			p.reporter.fail("app_kill", "kill_target_tasks_missing_source",
+				field("task_id", strconv.Itoa(taskID)),
+				field("target_tasks", intListText(kill.view.App.TargetTaskIDs, kill.view.App.HasTargetTaskIDs)))
 			return false
 		}
 		if failure := checkKillFacts(kill.view.App); failure != nil {
@@ -136,30 +180,32 @@ func (p *probe) appLifecycleChecks(ctx context.Context, start startSummary) bool
 		} else {
 			nextO = updated
 		}
-		killed = true
-		p.reporter.pass("app_kill",
-			field("task_id", strconv.Itoa(taskID)),
-			field("target_pids", strconv.Itoa(len(kill.view.App.TargetPIDs))),
-			field("killed_pids", strconv.Itoa(len(kill.view.App.KilledPIDs))),
-			"restarted="+boolString(kill.view.App.Restarted))
+		p.reporter.pass("app_kill", killFactFields(kill.view.App, true)...)
 	}
 
-	if killed {
-		remaining, failure := p.killRemovalCount(ctx, start.OperationID, target, taskID)
+	// A force-stopped package keeps its task window: close that same window when
+	// it is still listed. If the window did disappear, rebuild the controlled
+	// owned task so app.close still runs against a live task.
+	windowIDs, failure := p.packageTaskIDs(ctx, start.OperationID, target)
+	if failure != nil {
+		p.reporter.fail("app_close", failure.reason, failure.fields...)
+		return false
+	}
+	closedExecuted := false
+	if containsInt(windowIDs, taskID) {
+		nextO, closedExecuted, failure = p.closeControlledTask(ctx, nextO, taskID)
 		if failure != nil {
-			p.reporter.fail("app_kill_removed", failure.reason, failure.fields...)
+			p.reporter.fail("app_close", failure.reason, failure.fields...)
 			return false
 		}
-		if remaining > 0 {
-			p.reporter.fail("app_kill_removed", "killed_task_still_listed",
-				field("task_id", strconv.Itoa(taskID)), field("remaining", strconv.Itoa(remaining)))
+	} else {
+		reopenO, failure := p.readyObservation(ctx, start.OperationID)
+		if failure != nil {
+			p.reporter.fail("app_close", failure.reason, failure.fields...)
 			return false
 		}
-		p.reporter.pass("app_kill_removed",
-			field("task_id", strconv.Itoa(taskID)), field("remaining", "0"))
-
 		reopened, failure := p.call(ctx, "app", map[string]any{
-			"kind": "open", "reference": nextO, "target": map[string]any{"app": target},
+			"kind": "open", "reference": reopenO, "target": map[string]any{"app": target},
 		})
 		if failure != nil {
 			p.reporter.fail("app_close", failure.reason, failure.fields...)
@@ -182,24 +228,22 @@ func (p *probe) appLifecycleChecks(ctx context.Context, start startSummary) bool
 			return false
 		}
 		reopenedTaskID := *reopenedApp.TaskID
-		reopenO, failure := appPostObservation(reopened.view)
+		reopenReadyO, failure := appPostObservation(reopened.view)
 		if failure != nil {
 			p.reporter.fail("app_close", failure.reason, failure.fields...)
 			return false
 		}
-		closedO, failure := p.closeControlledTask(ctx, reopenO, reopenedTaskID)
+		nextO, closedExecuted, failure = p.closeControlledTask(ctx, reopenReadyO, reopenedTaskID)
 		if failure != nil {
 			p.reporter.fail("app_close", failure.reason, failure.fields...)
 			return false
 		}
-		nextO = closedO
-	} else {
-		closedO, failure := p.closeControlledTask(ctx, nextO, taskID)
-		if failure != nil {
-			p.reporter.fail("app_close", failure.reason, failure.fields...)
-			return false
-		}
-		nextO = closedO
+	}
+
+	// Closed loop: a confirmed close of an owned task is the only thing that
+	// establishes the five-minute close eligibility behind the package entry.
+	if !p.appPackageKillChecks(ctx, start, target, closedExecuted) {
+		return false
 	}
 
 	// claim needs a second controlled task that already lives on the primary
@@ -249,6 +293,264 @@ func (p *probe) appLifecycleChecks(ctx context.Context, start startSummary) bool
 	return true
 }
 
+// appPackageKillChecks runs the two package-entry kill scenarios after the
+// controlled task has been closed. A close that executed established the close
+// eligibility; a live owned same-package task would authorize the package entry
+// as well. Both scenarios are environment-dependent, so an unprovable setup is
+// reported as SKIP instead of a failure.
+func (p *probe) appPackageKillChecks(ctx context.Context, start startSummary, target string, closeEligible bool) bool {
+	// Scenario A: while the controlled package is also live on the primary
+	// display, a package kill must be refused, never dispatched.
+	if !p.appPrimaryRefusedCheck(ctx, start, target, closeEligible) {
+		return false
+	}
+	// Scenario B: open, close, then kill the whole package by name.
+	return p.appCloseThenPackageKill(ctx, start, target)
+}
+
+const (
+	killRefusedNotOwned      = "kill_refused_not_owned"
+	killRefusedTaskElsewhere = "kill_refused_task_elsewhere"
+)
+
+// appPrimaryRefusedCheck proves the ownership guard of the package entry: a
+// same-package live task on the primary display, while this session holds an
+// owned task or a confirmed-close eligibility, must be refused before dispatch.
+// It returns true when the scenario ran or was skipped, and false only on a
+// contract failure.
+func (p *probe) appPrimaryRefusedCheck(ctx context.Context, start startSummary, target string, closeEligible bool) bool {
+	primary, failure := p.call(ctx, "app", map[string]any{
+		"kind": "list", "reference": start.OperationID, "scope": "primary", "app": target,
+	})
+	if failure != nil || primary.result.IsError || primary.view.App == nil ||
+		primary.view.App.Kind != "list" || !primary.view.App.HasTaskItems {
+		p.reporter.skip("app_kill_primary_refused", "primary_list_unavailable")
+		return true
+	}
+	primaryTaskID := 0
+	for _, item := range primary.view.App.TaskItems {
+		if item.Package == target && item.TaskID > 0 {
+			primaryTaskID = item.TaskID
+			break
+		}
+	}
+	if primaryTaskID == 0 {
+		p.reporter.skip("app_kill_primary_refused", "controlled_primary_task_absent")
+		return true
+	}
+	sessionIDs, failure := p.packageTaskIDs(ctx, start.OperationID, target)
+	if failure != nil {
+		p.reporter.skip("app_kill_primary_refused", "session_task_list_unavailable",
+			failure.fields...)
+		return true
+	}
+	if !closeEligible && len(sessionIDs) == 0 {
+		p.reporter.skip("app_kill_primary_refused", "no_owned_task_or_close_eligibility")
+		return true
+	}
+	killO, failure := p.readyObservation(ctx, start.OperationID)
+	if failure != nil {
+		p.reporter.skip("app_kill_primary_refused", "ready_observation_missing",
+			failure.fields...)
+		return true
+	}
+	refused, failure := p.call(ctx, "app", map[string]any{
+		"kind": "kill", "reference": killO, "target": map[string]any{"app": target},
+	})
+	if failure != nil {
+		p.reporter.fail("app_kill_primary_refused", failure.reason, failure.fields...)
+		return false
+	}
+	if refused.result.IsError {
+		code := codeOf(refused.view)
+		if resultOutcome(refused) == outcomeExecuted {
+			p.reporter.fail("app_kill_primary_refused", "executed_result_marked_error")
+			return false
+		}
+		if code != killRefusedNotOwned && code != killRefusedTaskElsewhere {
+			p.reporter.fail("app_kill_primary_refused", "unexpected_refusal", field("code", code))
+			return false
+		}
+		if refused.view.App != nil {
+			if refused.view.App.Kind != "kill" {
+				p.reporter.fail("app_kill_primary_refused", "app_kind_mismatch",
+					field("kind", refused.view.App.Kind))
+				return false
+			}
+			if failure := checkNoFinalKillFacts(refused.view.App); failure != nil {
+				p.reporter.fail("app_kill_primary_refused", failure.reason, failure.fields...)
+				return false
+			}
+		}
+		p.reporter.pass("app_kill_primary_refused",
+			field("primary_task", strconv.Itoa(primaryTaskID)), field("code", code),
+			"outcome="+outcomeOrNone(resultOutcome(refused)))
+		return true
+	}
+	p.reporter.fail("app_kill_primary_refused", "primary_task_not_refused",
+		field("primary_task", strconv.Itoa(primaryTaskID)),
+		field("package_state", packageStateOf(refused.view)))
+	return false
+}
+
+// appCloseThenPackageKill starts from a clean session: it opens the controlled
+// target, closes it through a confirmed close so the close eligibility exists,
+// then kills the whole package by name. Success and a controlled refusal are
+// both PASS; an unprovable setup is SKIP.
+func (p *probe) appCloseThenPackageKill(ctx context.Context, start startSummary, target string) bool {
+	openO, failure := p.readyObservation(ctx, start.OperationID)
+	if failure != nil {
+		p.reporter.skip("app_kill_package", "ready_observation_missing", failure.fields...)
+		return true
+	}
+	opened, failure := p.call(ctx, "app", map[string]any{
+		"kind": "open", "reference": openO, "target": map[string]any{"app": target},
+	})
+	if failure != nil {
+		p.reporter.fail("app_kill_package", failure.reason, failure.fields...)
+		return false
+	}
+	if opened.result.IsError || resultOutcome(opened) != outcomeExecuted ||
+		opened.view.App == nil || opened.view.App.Kind != "open" ||
+		opened.view.App.TaskID == nil || *opened.view.App.TaskID <= 0 ||
+		opened.view.App.DisplayID == nil || *opened.view.App.DisplayID <= 0 ||
+		opened.view.App.Ownership != "owned" {
+		p.reporter.skip("app_kill_package", "package_kill_open_not_executed",
+			field("outcome", resultOutcome(opened)), field("code", codeOf(opened.view)))
+		return true
+	}
+	displayID := *opened.view.App.DisplayID
+	taskID := *opened.view.App.TaskID
+	closeO, failure := appPostObservation(opened.view)
+	if failure != nil {
+		p.reporter.fail("app_kill_package", failure.reason, failure.fields...)
+		return false
+	}
+	killO, closedExecuted, failure := p.closeControlledTask(ctx, closeO, taskID)
+	if failure != nil {
+		p.reporter.fail("app_kill_package", failure.reason, failure.fields...)
+		return false
+	}
+	if !closedExecuted {
+		p.reporter.skip("app_kill_package", "package_kill_close_not_executed",
+			field("task_id", strconv.Itoa(taskID)))
+		return true
+	}
+	expected, failure := p.packageTaskIDs(ctx, start.OperationID, target)
+	if failure != nil {
+		p.reporter.fail("app_kill_package", failure.reason, failure.fields...)
+		return false
+	}
+	killed, failure := p.call(ctx, "app", map[string]any{
+		"kind": "kill", "reference": killO, "target": map[string]any{"app": target},
+	})
+	if failure != nil {
+		p.reporter.fail("app_kill_package", failure.reason, failure.fields...)
+		return false
+	}
+	killCode := codeOf(killed.view)
+	killOutcome := resultOutcome(killed)
+	switch {
+	case killOutcome == "uncertain" || killCode == "kill_unconfirmed":
+		// Dispatched once, final evidence unknown: the frozen facts still apply
+		// and the package entry never carries a source task.
+		if killed.view.App == nil || killed.view.App.Kind != "kill" {
+			p.reporter.fail("app_kill_package", "kill_facts_unexpected",
+				field("outcome", killOutcome), field("code", killCode))
+			return false
+		}
+		app := killed.view.App
+		if app.Package != target || app.DisplayID == nil || *app.DisplayID != displayID ||
+			app.SourceTaskID != nil {
+			p.reporter.fail("app_kill_package", "package_kill_facts_unexpected",
+				field("pkg", app.Package), field("display", integerString(app.DisplayID)),
+				field("src_task", integerString(app.SourceTaskID)))
+			return false
+		}
+		if failure := checkKillFacts(app); failure != nil {
+			p.reporter.fail("app_kill_package", failure.reason, failure.fields...)
+			return false
+		}
+		if !sameIntSet(app.TargetTaskIDs, expected) {
+			p.reporter.fail("app_kill_package", "package_target_tasks_mismatch",
+				field("target_tasks", intListText(app.TargetTaskIDs, app.HasTargetTaskIDs)),
+				field("session_tasks", intListText(expected, true)))
+			return false
+		}
+		p.reporter.pass("app_kill_package", append(killFactFields(app, false),
+			"outcome=uncertain", "code="+killCode)...)
+		return true
+	case killed.result.IsError:
+		if killOutcome == outcomeExecuted {
+			p.reporter.fail("app_kill_package", "executed_result_marked_error")
+			return false
+		}
+		if !appKillRefusalCode(killCode) {
+			p.reporter.fail("app_kill_package", "unexpected_refusal", field("code", killCode))
+			return false
+		}
+		if killed.view.App != nil {
+			if killed.view.App.Kind != "kill" {
+				p.reporter.fail("app_kill_package", "app_kind_mismatch",
+					field("kind", killed.view.App.Kind))
+				return false
+			}
+			if failure := checkNoFinalKillFacts(killed.view.App); failure != nil {
+				p.reporter.fail("app_kill_package", failure.reason, failure.fields...)
+				return false
+			}
+			if killed.view.App.SourceTaskID != nil {
+				p.reporter.fail("app_kill_package", "package_entry_has_source_task")
+				return false
+			}
+			// A pre-dispatch refusal still carries the frozen selection: with no
+			// live session task after the close, the set must be omitted or empty.
+			if killed.view.App.HasTargetTaskIDs {
+				if failure := checkAscendingIDs(killed.view.App.TargetTaskIDs, "target_task_ids"); failure != nil {
+					p.reporter.fail("app_kill_package", failure.reason, failure.fields...)
+					return false
+				}
+				if len(expected) == 0 && len(killed.view.App.TargetTaskIDs) != 0 {
+					p.reporter.fail("app_kill_package", "package_target_tasks_mismatch",
+						field("target_tasks", intListText(killed.view.App.TargetTaskIDs, true)),
+						field("session_tasks", intListText(expected, true)))
+					return false
+				}
+			}
+		}
+		p.reporter.pass("app_kill_package",
+			field("pkg", target), field("refused", killCode),
+			"outcome="+outcomeOrNone(killOutcome))
+		return true
+	}
+	if killOutcome != outcomeExecuted || killed.view.App == nil ||
+		killed.view.App.Kind != "kill" {
+		p.reporter.fail("app_kill_package", "kill_facts_unexpected",
+			field("outcome", killOutcome), field("code", killCode))
+		return false
+	}
+	app := killed.view.App
+	if app.Package != target || app.DisplayID == nil || *app.DisplayID != displayID ||
+		app.SourceTaskID != nil {
+		p.reporter.fail("app_kill_package", "package_kill_facts_unexpected",
+			field("pkg", app.Package), field("display", integerString(app.DisplayID)),
+			field("src_task", integerString(app.SourceTaskID)))
+		return false
+	}
+	if failure := checkKillFacts(app); failure != nil {
+		p.reporter.fail("app_kill_package", failure.reason, failure.fields...)
+		return false
+	}
+	if !sameIntSet(app.TargetTaskIDs, expected) {
+		p.reporter.fail("app_kill_package", "package_target_tasks_mismatch",
+			field("target_tasks", intListText(app.TargetTaskIDs, app.HasTargetTaskIDs)),
+			field("session_tasks", intListText(expected, true)))
+		return false
+	}
+	p.reporter.pass("app_kill_package", killFactFields(app, false)...)
+	return true
+}
+
 // appPostObservation returns the fresh ready O published by one successful app
 // mutation, or a controlled failure when the mandatory full post-observation is
 // missing.
@@ -269,58 +571,58 @@ func appPostObservation(view resultView) (string, *checkError) {
 	return observation.ID, nil
 }
 
-// killRemovalCount re-reads the controlled task list through the read-only
-// app.list projection and returns how many listed entries still carry taskID.
-// The list consumes no O, so the caller can keep using the kill result's
-// post-observation as the next ready reference.
-func (p *probe) killRemovalCount(ctx context.Context, reference, target string, taskID int) (int, *checkError) {
+// packageTaskIDs reads the controlled package's live session tasks through the
+// read-only app.list projection. A truncated list cannot prove absence, so it
+// is reported as a failure instead of a silently smaller set.
+func (p *probe) packageTaskIDs(ctx context.Context, reference, target string) ([]int, *checkError) {
 	list, failure := p.call(ctx, "app", map[string]any{
 		"kind": "list", "reference": reference, "app": target,
 	})
 	if failure != nil {
-		return 0, failure
+		return nil, failure
 	}
 	if list.result.IsError || list.view.App == nil || list.view.App.Kind != "list" {
-		return 0, failf("kill_removal_list_unavailable", field("code", codeOf(list.view)))
+		return nil, failf("package_list_unavailable", field("code", codeOf(list.view)))
 	}
 	if !list.view.App.HasTaskItems {
-		return 0, failf("kill_removal_list_items_missing")
+		return nil, failf("package_list_items_missing")
 	}
 	if list.view.App.Truncated == nil {
-		return 0, failf("kill_removal_list_truncated_missing")
+		return nil, failf("package_list_truncated_missing")
 	}
 	if *list.view.App.Truncated {
-		// A truncated list cannot prove absence: the killed task could sit
-		// outside the returned window.
-		return 0, failf("kill_removal_list_truncated")
+		return nil, failf("package_list_truncated")
 	}
-	remaining := 0
+	ids := make([]int, 0, len(list.view.App.TaskItems))
 	for _, item := range list.view.App.TaskItems {
-		if item.TaskID == taskID {
-			remaining++
+		if item.Package == target && item.TaskID > 0 {
+			ids = append(ids, item.TaskID)
 		}
 	}
-	return remaining, nil
+	sort.Ints(ids)
+	return ids, nil
 }
 
 // closeControlledTask closes one live controlled task and reports the shared
 // app_close pass line. It returns the post-close ready O when the close
-// executed so the caller can keep the observation chain current.
-func (p *probe) closeControlledTask(ctx context.Context, reference string, taskID int) (string, *checkError) {
+// executed, and whether the close executed so the caller can rely on the
+// close eligibility it establishes.
+func (p *probe) closeControlledTask(ctx context.Context, reference string, taskID int) (string, bool, *checkError) {
 	closed, failure := p.call(ctx, "app", map[string]any{
 		"kind": "close", "reference": reference, "target": map[string]any{"task_id": taskID},
 	})
 	if failure != nil {
-		return "", failure
+		return "", false, failure
 	}
 	if failure := checkCloseResult(closed, taskID); failure != nil {
-		return "", failure
+		return "", false, failure
 	}
 	nextO := reference
-	if resultOutcome(closed) == outcomeExecuted {
+	executed := resultOutcome(closed) == outcomeExecuted
+	if executed {
 		updated, failure := appPostObservation(closed.view)
 		if failure != nil {
-			return "", failure
+			return "", false, failure
 		}
 		nextO = updated
 	}
@@ -329,7 +631,7 @@ func (p *probe) closeControlledTask(ctx context.Context, reference string, taskI
 		field("outcome", resultOutcome(closed)),
 		field("tasks", strconv.Itoa(len(closed.view.App.Tasks))),
 		"is_error="+strconv.FormatBool(closed.result.IsError))
-	return nextO, nil
+	return nextO, executed, nil
 }
 
 // readyObservation requests one fresh full observation through the session
@@ -412,24 +714,236 @@ func checkCloseResult(closed *callResult, taskID int) *checkError {
 	return nil
 }
 
-// checkKillFacts validates the executed kill arrays: sorted, present and
-// consistent with the restarted nullable fact.
-func checkKillFacts(app *appView) *checkError {
-	if !app.HasTargetPIDs || !app.HasKilledPIDs || !app.HasRestarted {
-		return failf("kill_facts_missing")
+// appKillRefusalCode reports whether one kill refusal is a controlled service
+// decision instead of an unexpected failure.
+func appKillRefusalCode(code string) bool {
+	if strings.HasPrefix(code, "kill_refused_") {
+		return true
 	}
-	for name, values := range map[string][]int{
-		"target_pids": app.TargetPIDs, "killed_pids": app.KilledPIDs,
-		"remaining_pids": app.RemainingPIDs,
-	} {
-		if name == "remaining_pids" && !app.HasRemainingPIDs {
-			continue
+	return oneOf(code, "task_not_found", "task_lifecycle_busy", "root_unavailable",
+		"control_revoked")
+}
+
+// checkNoFinalKillFacts rejects process/task final-sampling facts on a kill that
+// never dispatched. package_state appears only after dispatch.
+func checkNoFinalKillFacts(app *appView) *checkError {
+	if app.HasKilledPIDs || app.HasRemainingTaskIDs || app.HasRemainingPIDs || app.HasRestarted {
+		return failf("not_executed_has_final_facts",
+			field("killed_pids", intListText(app.KilledPIDs, app.HasKilledPIDs)),
+			field("remaining_tasks", intListText(app.RemainingTaskIDs, app.HasRemainingTaskIDs)),
+			field("remaining_pids", intListText(app.RemainingPIDs, app.HasRemainingPIDs)),
+			field("restarted", boolString(app.Restarted)))
+	}
+	if app.PackageState != "" {
+		return failf("not_executed_has_package_state", field("package_state", app.PackageState))
+	}
+	return nil
+}
+
+// checkKillFacts validates the dispatched kill facts: user, frozen and final
+// task sets, pre-dispatch and final process sets, restarted, and the closed
+// package state. A final read that stayed unknown keeps restarted explicitly
+// null and omits the two final PID arrays; it may never be encoded as success.
+func checkKillFacts(app *appView) *checkError {
+	if app.AndroidUserID == nil {
+		return failf("kill_android_user_missing")
+	}
+	if *app.AndroidUserID < 0 {
+		return failf("kill_android_user_invalid", field("user", strconv.Itoa(*app.AndroidUserID)))
+	}
+	if !app.HasTargetTaskIDs {
+		return failf("kill_target_tasks_missing")
+	}
+	if failure := checkAscendingIDs(app.TargetTaskIDs, "target_task_ids"); failure != nil {
+		return failure
+	}
+	if app.HasRemainingTaskIDs {
+		if failure := checkAscendingIDs(app.RemainingTaskIDs, "remaining_task_ids"); failure != nil {
+			return failure
 		}
-		if !sort.IntsAreSorted(values) {
-			return failf("kill_pids_unsorted", field("field", name))
+	}
+	if !appPackageStateSet[app.PackageState] {
+		return failf("kill_package_state_invalid", field("package_state", app.PackageState))
+	}
+	// restarted always appears on a dispatched result: a boolean when the final
+	// process read completed, an explicit null when it stayed unknown.
+	if !app.HasRestarted {
+		return failf("kill_restarted_missing")
+	}
+	if !app.HasTargetPIDs {
+		return failf("kill_target_pids_missing")
+	}
+	if failure := checkAscendingIDs(app.TargetPIDs, "target_pids"); failure != nil {
+		return failure
+	}
+	processKnown := app.Restarted != nil
+	if processKnown != (app.HasKilledPIDs && app.HasRemainingPIDs) {
+		// killed_pids and remaining_pids exist exactly when the final process
+		// read completed.
+		return failf("kill_process_facts_mismatch",
+			field("restarted", boolString(app.Restarted)),
+			field("killed_pids", presenceText(app.HasKilledPIDs)),
+			field("remaining_pids", presenceText(app.HasRemainingPIDs)))
+	}
+	if processKnown {
+		if failure := checkAscendingIDs(app.KilledPIDs, "killed_pids"); failure != nil {
+			return failure
+		}
+		if failure := checkAscendingIDs(app.RemainingPIDs, "remaining_pids"); failure != nil {
+			return failure
+		}
+		for _, pid := range app.KilledPIDs {
+			if !containsInt(app.TargetPIDs, pid) {
+				return failf("kill_killed_pid_not_original", field("pid", strconv.Itoa(pid)))
+			}
+		}
+		for _, pid := range app.TargetPIDs {
+			killed := containsInt(app.KilledPIDs, pid)
+			remaining := containsInt(app.RemainingPIDs, pid)
+			if killed == remaining {
+				return failf("kill_pid_partition_invalid", field("pid", strconv.Itoa(pid)))
+			}
+		}
+		newInstances := 0
+		for _, pid := range app.RemainingPIDs {
+			if !containsInt(app.TargetPIDs, pid) {
+				newInstances++
+			}
+		}
+		if *app.Restarted != (newInstances > 0) {
+			return failf("kill_restarted_mismatch",
+				field("restarted", boolString(app.Restarted)),
+				field("new_pids", strconv.Itoa(newInstances)))
+		}
+	}
+	switch app.PackageState {
+	case "stopped_at_check":
+		if !app.HasRemainingTaskIDs || len(app.RemainingTaskIDs) != 0 {
+			return failf("kill_stopped_with_tasks",
+				field("remaining_tasks", intListText(app.RemainingTaskIDs, app.HasRemainingTaskIDs)))
+		}
+		if !processKnown || len(app.RemainingPIDs) != 0 {
+			return failf("kill_stopped_with_processes",
+				field("remaining_pids", intListText(app.RemainingPIDs, app.HasRemainingPIDs)))
+		}
+	case "still_present":
+		tasksPresent := app.HasRemainingTaskIDs && len(app.RemainingTaskIDs) > 0
+		processesPresent := processKnown && len(app.RemainingPIDs) > 0
+		if !tasksPresent && !processesPresent {
+			return failf("kill_still_present_without_evidence",
+				field("remaining_tasks", intListText(app.RemainingTaskIDs, app.HasRemainingTaskIDs)),
+				field("remaining_pids", intListText(app.RemainingPIDs, app.HasRemainingPIDs)))
+		}
+	case "unknown":
+		// Anything not proven empty and not proven present. A complete final
+		// read that is empty on both sides would be stopped_at_check instead,
+		// and one that proves a live task or process is still_present.
+		if app.HasRemainingTaskIDs && len(app.RemainingTaskIDs) == 0 &&
+			processKnown && len(app.RemainingPIDs) == 0 {
+			return failf("kill_unknown_but_empty")
+		}
+		if app.HasRemainingTaskIDs && len(app.RemainingTaskIDs) > 0 {
+			return failf("kill_unknown_with_tasks",
+				field("remaining_tasks", intListText(app.RemainingTaskIDs, true)))
+		}
+		if processKnown && len(app.RemainingPIDs) > 0 {
+			return failf("kill_unknown_with_processes",
+				field("remaining_pids", intListText(app.RemainingPIDs, true)))
 		}
 	}
 	return nil
+}
+
+func checkAscendingIDs(values []int, name string) *checkError {
+	for index, value := range values {
+		if value <= 0 {
+			return failf("kill_ids_invalid", field("field", name),
+				field("value", strconv.Itoa(value)))
+		}
+		if index > 0 && value <= values[index-1] {
+			return failf("kill_ids_unsorted", field("field", name))
+		}
+	}
+	return nil
+}
+
+func containsInt(values []int, wanted int) bool {
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
+}
+
+func sameIntSet(left, right []int) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	leftSorted := append([]int(nil), left...)
+	rightSorted := append([]int(nil), right...)
+	sort.Ints(leftSorted)
+	sort.Ints(rightSorted)
+	for index := range leftSorted {
+		if leftSorted[index] != rightSorted[index] {
+			return false
+		}
+	}
+	return true
+}
+
+// killFactFields renders the verified kill facts in the public wire order for
+// one reporter line: pkg, user, src_task (task entry only), target_tasks,
+// display, remaining_tasks, target_pids, killed_pids, remaining_pids,
+// restarted, package_state.
+func killFactFields(app *appView, withSourceTask bool) []string {
+	fields := []string{
+		field("pkg", app.Package),
+		field("user", integerString(app.AndroidUserID)),
+	}
+	if withSourceTask {
+		fields = append(fields, field("src_task", integerString(app.SourceTaskID)))
+	}
+	return append(fields,
+		field("target_tasks", intListText(app.TargetTaskIDs, app.HasTargetTaskIDs)),
+		field("display", integerString(app.DisplayID)),
+		field("remaining_tasks", intListText(app.RemainingTaskIDs, app.HasRemainingTaskIDs)),
+		field("target_pids", intListText(app.TargetPIDs, app.HasTargetPIDs)),
+		field("killed_pids", intListText(app.KilledPIDs, app.HasKilledPIDs)),
+		field("remaining_pids", intListText(app.RemainingPIDs, app.HasRemainingPIDs)),
+		field("restarted", boolString(app.Restarted)),
+		field("package_state", app.PackageState),
+	)
+}
+
+// intListText renders one optional integer array as a single reporter token so
+// an omitted member, an empty array and a non-empty set stay distinguishable.
+func intListText(values []int, present bool) string {
+	if !present {
+		return "unknown"
+	}
+	if len(values) == 0 {
+		return "empty"
+	}
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		parts = append(parts, strconv.Itoa(value))
+	}
+	return strings.Join(parts, ",")
+}
+
+func presenceText(present bool) string {
+	if present {
+		return "present"
+	}
+	return "absent"
+}
+
+func packageStateOf(view resultView) string {
+	if view.App == nil {
+		return "none"
+	}
+	return view.App.PackageState
 }
 
 func boolString(value *bool) string {

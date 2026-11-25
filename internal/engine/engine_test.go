@@ -105,6 +105,29 @@ type fakeDevice struct {
 	service       device.ServiceState
 	mediaErr      error
 	serviceErr    error
+
+	// Contract 31 package lifecycle facts. The task snapshot and process
+	// inventory scripts are consumed one step per read and fall back to the
+	// mutable base state once exhausted; the package identity is derived from
+	// the requested package/user unless a test overrides it.
+	taskSnapshotCalls      int
+	taskSnapshotIncomplete bool
+	taskSnapshotErr        error
+	taskSnapshotScript     []taskSnapshotStep
+	packageIdentity        *device.PackageIdentity
+	packageIdentityScript  []device.PackageIdentity
+	packageIdentityUnknown bool
+	packageIdentityErr     error
+	packageIdentityCalls   []packageIdentityCall
+	forceStopCalls         []forceStopCall
+	forceStopReceipt       *device.DispatchReceipt
+	forceStopExitCode      int
+	forceStopExitCodeSet   bool
+	forceStopErr           error
+	forceStopNoop          bool
+	forceStopHook          func()
+	processHook            func(call int)
+	processScript          []processStep
 }
 
 func newFakeDevice() *fakeDevice {

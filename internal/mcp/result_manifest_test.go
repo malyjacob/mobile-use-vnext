@@ -69,6 +69,8 @@ var rmfKnownExclusions = map[string]string{
 	"protocol.AppView.HasItems":               "presence flag",
 	"protocol.AppCloseTask.HasRecentsCleaned": "presence flag",
 	"protocol.AppView.HasTasks":               "presence flag",
+	"protocol.AppView.HasTargetTaskIDs":       "presence flag",
+	"protocol.AppView.HasRemainingTaskIDs":    "presence flag",
 	"protocol.AppView.HasTargetPIDs":          "presence flag",
 	"protocol.AppView.HasKilledPIDs":          "presence flag",
 	"protocol.AppView.HasRemainingPIDs":       "presence flag",
@@ -156,16 +158,18 @@ func TestResultFieldManifest(t *testing.T) {
 	}
 
 	requiredPresence := map[string]string{
-		"protocol.Result.IncludeSession":     "session",
-		"protocol.Foreground.HasTask":        "observation.foreground.task_id",
-		"protocol.InspectionView.HasTotal":   "inspection.total",
-		"protocol.AppView.HasTotal":          "app.total",
-		"protocol.AppView.HasStatePreserved": "app.state_preserved",
-		"protocol.AppView.HasTasks":          "app.tasks",
-		"protocol.AppView.HasTargetPIDs":     "app.target_pids",
-		"protocol.AppView.HasKilledPIDs":     "app.killed_pids",
-		"protocol.AppView.HasRemainingPIDs":  "app.remaining_pids",
-		"protocol.AppView.HasRestarted":      "app.restarted",
+		"protocol.Result.IncludeSession":       "session",
+		"protocol.Foreground.HasTask":          "observation.foreground.task_id",
+		"protocol.InspectionView.HasTotal":     "inspection.total",
+		"protocol.AppView.HasTotal":            "app.total",
+		"protocol.AppView.HasStatePreserved":   "app.state_preserved",
+		"protocol.AppView.HasTasks":            "app.tasks",
+		"protocol.AppView.HasTargetTaskIDs":    "app.target_task_ids",
+		"protocol.AppView.HasRemainingTaskIDs": "app.remaining_task_ids",
+		"protocol.AppView.HasTargetPIDs":       "app.target_pids",
+		"protocol.AppView.HasKilledPIDs":       "app.killed_pids",
+		"protocol.AppView.HasRemainingPIDs":    "app.remaining_pids",
+		"protocol.AppView.HasRestarted":        "app.restarted",
 	}
 	for exclusion, fieldPath := range requiredPresence {
 		if manifest.exclusions[exclusion] != "presence flag" {
@@ -901,6 +905,10 @@ func rmfFieldWireName(owner reflect.Type, field reflect.StructField) (string, bo
 		return "operation_id", true
 	case "protocol.AppView.TaskItems":
 		return "items", true
+	case "protocol.AppView.TargetTaskIDs":
+		return "target_task_ids", true
+	case "protocol.AppView.RemainingTaskIDs":
+		return "remaining_task_ids", true
 	case "protocol.AppView.TargetPIDs":
 		return "target_pids", true
 	case "protocol.AppView.KilledPIDs":
@@ -1323,11 +1331,15 @@ func rmfResultFixtures() []rmfFixture {
 			Outcome:     "executed",
 			App: &protocol.AppView{
 				Kind: protocol.AppKindKill, Package: "com.example.probe",
-				SourceTaskID: rmfPtr(42), DisplayID: rmfPtr(12),
+				AndroidUserID: rmfPtr(0), SourceTaskID: rmfPtr(42),
+				TargetTaskIDs: []int{42, 43}, HasTargetTaskIDs: true,
+				DisplayID:        rmfPtr(12),
+				RemainingTaskIDs: []int{}, HasRemainingTaskIDs: true,
 				TargetPIDs: []int{1234, 1235}, HasTargetPIDs: true,
 				KilledPIDs: []int{1234, 1235}, HasKilledPIDs: true,
 				RemainingPIDs: []int{}, HasRemainingPIDs: true,
 				HasRestarted: true,
+				PackageState: "stopped_at_check",
 			},
 		},
 	}

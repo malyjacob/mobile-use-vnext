@@ -904,25 +904,39 @@ func (p *probe) appQueryChecks(ctx context.Context, reference string) bool {
 		field("items", strconv.Itoa(len(pApp.TaskItems))),
 		field("foreground", pApp.Foreground.State), "outcome=none")
 
-	// Cross-kind member: find never admits reference. A strict adapter rejects
-	// before allocating an operation, so there is no P and no app result.
-	admission, failure := p.call(ctx, "app", map[string]any{
-		"kind": "find", "reference": reference,
+	// Tolerant branch: find ignores every declared member it does not use. A
+	// redundant reference to an unknown observation must not be resolved,
+	// rejected or consumed by this read-only query.
+	tolerant, failure := p.call(ctx, "app", map[string]any{
+		"kind": "find", "reference": probeUnknownObservation,
 	})
 	if failure != nil {
 		p.reporter.fail("app_admission", failure.reason, failure.fields...)
 		return false
 	}
-	if !admission.result.IsError || admission.view.Error == nil ||
-		admission.view.Error.Code != "invalid_request" ||
-		admission.view.App != nil || admission.view.Outcome != "" ||
-		admission.view.OperationID != "" {
-		p.reporter.fail("app_admission", "cross_kind_not_rejected",
-			field("code", codeOf(admission.view)), field("outcome", admission.view.Outcome))
+	if tolerant.result.IsError || tolerant.view.App == nil ||
+		tolerant.view.App.Kind != "find" || tolerant.view.Outcome != "" ||
+		!tolerant.view.App.HasItems || tolerant.view.App.Items == nil {
+		p.reporter.fail("app_admission", "redundant_member_not_tolerated",
+			field("code", codeOf(tolerant.view)), field("outcome", tolerant.view.Outcome))
+		return false
+	}
+	// The read-only query consumed nothing: the session reference still serves a
+	// task listing after the tolerant call.
+	after, failure := p.call(ctx, "app", map[string]any{
+		"kind": "list", "reference": reference,
+	})
+	if failure != nil {
+		p.reporter.fail("app_admission", failure.reason, failure.fields...)
+		return false
+	}
+	if after.result.IsError || after.view.App == nil || after.view.App.Kind != "list" {
+		p.reporter.fail("app_admission", "reference_unusable_after_tolerant_find",
+			field("code", codeOf(after.view)))
 		return false
 	}
 	p.reporter.pass("app_admission", "kind=find", "cross_member=reference",
-		"code=invalid_request", "is_error=true", "operation_id=none")
+		"is_error=false", "outcome=none")
 	return true
 }
 

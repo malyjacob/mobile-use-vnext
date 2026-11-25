@@ -1268,10 +1268,12 @@ func (p *v4Parser) decodeApp(line string) *checkError {
 		return failure
 	}
 	order := map[string]int{
-		"pkg": 0, "task": 1, "src_task": 2, "src_display": 3, "display": 4,
-		"ownership": 5, "reused": 6, "state_preserved": 7, "fg_restore": 8,
-		"complete": 9, "target_pids": 10, "killed_pids": 11, "remaining_pids": 12,
-		"restarted": 13, "total": 14, "truncated": 15, "fg": 16, "at": 17,
+		"pkg": 0, "task": 1, "user": 2, "src_task": 3, "target_tasks": 4,
+		"src_display": 5, "display": 6, "remaining_tasks": 7,
+		"ownership": 8, "reused": 9, "state_preserved": 10, "fg_restore": 11,
+		"complete": 12, "target_pids": 13, "killed_pids": 14, "remaining_pids": 15,
+		"restarted": 16, "package_state": 17, "total": 18, "truncated": 19, "fg": 20,
+		"at": 21,
 	}
 	last := -1
 	for _, token := range tokens[1:] {
@@ -1300,6 +1302,32 @@ func (p *v4Parser) decodeApp(line string) *checkError {
 				"src_display": "source_display_id", "display": "display_id",
 			}[key]
 			if failure := p.set([]string{"app", target}, number); failure != nil {
+				return failure
+			}
+		case "user":
+			number, ok := parseNonNegativeDecimal(value)
+			if !ok {
+				return failf("text_result_app_invalid", field("field", key))
+			}
+			if failure := p.set([]string{"app", "android_user_id"}, number); failure != nil {
+				return failure
+			}
+		case "target_tasks", "remaining_tasks":
+			values, failure := parseSortedTaskIDArray(value, key)
+			if failure != nil {
+				return failure
+			}
+			target := map[string]string{
+				"target_tasks": "target_task_ids", "remaining_tasks": "remaining_task_ids",
+			}[key]
+			if failure := p.set([]string{"app", target}, values); failure != nil {
+				return failure
+			}
+		case "package_state":
+			if !appPackageStateSet[value] {
+				return failf("text_result_app_invalid", field("field", key))
+			}
+			if failure := p.set([]string{"app", "package_state"}, value); failure != nil {
 				return failure
 			}
 		case "ownership":
@@ -1423,6 +1451,25 @@ func parseCompactIntArray(value string) ([]any, *checkError) {
 		result = append(result, int(number))
 	}
 	return result, nil
+}
+
+// parseSortedTaskIDArray accepts one compact task-id array from the kill head.
+// Task IDs are positive and ascending; the empty array is a complete, known
+// empty set and stays distinguishable from an omitted member.
+func parseSortedTaskIDArray(value, name string) ([]any, *checkError) {
+	values, failure := parseCompactIntArray(value)
+	if failure != nil {
+		return nil, failure
+	}
+	previous := 0
+	for _, item := range values {
+		number, _ := item.(int)
+		if number <= previous {
+			return nil, failf("text_result_app_invalid", field("field", name))
+		}
+		previous = number
+	}
+	return values, nil
 }
 
 // decodeAppBlockFallback accepts an unknown member of one collection element

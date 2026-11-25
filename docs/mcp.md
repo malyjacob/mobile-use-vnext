@@ -14,9 +14,9 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
 - 工具目录固定为 13 个，与 [接口契约](interface.md) 同名同义：`start`、`status`、`observe`、
   `snap`、`wait_for`、`act`、`inspect`、`keepalive`、`end`、`app`、`notify`、`shell`、
   `diagnose`。不注册 `/health`、认证初始化、旧工具别名或旧协议回退。
-- 目录指纹是工具数、注册顺序、名称、描述与入参 schema 的 canonical SHA-256。当前源码的
-  工具目录指纹为 `25a09a66f54e728b1c9fc67e6898514c6ac7438b9976528ece7e36bd4f5eab43`。
-  发布清单中的指纹对应其记录的源码提交。发布时从目标提交重建并核验清单。
+- 目录指纹是工具数、注册顺序、名称、描述与入参 schema 的 canonical SHA-256；当前源码的
+  指纹由 `scripts/toolcatalog` 计算并记录在发布清单与主机工具清单中，发布清单中的指纹对应
+  其记录的源码提交。发布时从目标提交重建并核验清单。
   探针按工具名比对实际 `tools/list` 的描述和入参 schema，并核对只读注解。传入 `-manifest`
   时，探针对每份清单核对构建发行号、契约号、工具数和工具目录 SHA-256。探针将
   `server/discover` 返回的 server instructions 与构建内的固定说明源逐字节比较，并附加兼容
@@ -164,24 +164,54 @@ schema 以 `reference` 与 `timeout` 为必填，`query`、`absent_query`、`sta
 `properties={kind,query,reference,scope,app,target,restore_foreground,allow_borrowed,
 allow_stop_playback}`、`required=["kind"]` 与 `additionalProperties=false`；`target` 也是
 扁平对象 `{task_id,app}`、`additionalProperties=false`。根内不使用 `allOf`、`if`/`then`/
-`else`、`not` 或 `oneOf`。根字段可见不代表每个 kind 都接受；服务端 `DecodeApp` 的封闭
-kind 成员矩阵是互斥权威：
+`else`、`not` 或 `oneOf`。七个 kind 都接受上述全部已声明顶层成员；只有下表“生效成员”参与
+值域、引用、选择器与权限处理，其余成员经顶层类型检查后忽略且不进入服务端请求。根对象与
+`target` 嵌套对象都保持严格封闭：未知键、重复键、大小写变体、显式 `null` 与未声明类型按
+`422 invalid_request` 拒绝。
 
-| kind | 必填（除 kind） | 可选与默认 |
-| --- | --- | --- |
-| `find` | 无 | `query`（≤256 码点） |
-| `list` | `reference`：ready O 或活动原会话 P | `scope=session`（默认）或 `primary`、`app`（包名过滤） |
-| `open` | `reference`（当前 ready O）、`target={app}` | 无 |
-| `claim` | `reference`（当前 ready O）、`target` | 无 |
-| `handoff` | `reference`（当前 ready O）、`target` | `restore_foreground=false` |
-| `close` | `reference`（当前 ready O）、`target` | `allow_borrowed=false` |
-| `kill` | `reference`（当前 ready O）、`target={task_id}` | `allow_stop_playback=false` |
+| kind | 必填（除 kind） | 生效成员 | 消费 ready O |
+| --- | --- | --- | --- |
+| `find` | 无 | `query` | 否 |
+| `list` | `reference`：当前 ready O 或活动原会话 P | `scope`、`app` | 否 |
+| `open` | `reference`（当前 ready O）、`target.app` | 无 | 是 |
+| `claim` | `reference`（当前 ready O）、`target` | 无 | 是 |
+| `handoff` | `reference`（当前 ready O）、`target` | `restore_foreground` | 是 |
+| `close` | `reference`（当前 ready O）、`target` | `allow_borrowed` | 是 |
+| `kill` | `reference`（当前 ready O）、`target.task_id` 或 `target.app` | `allow_stop_playback` | 是 |
 
-`target` 为 `{"task_id": 正整数}` 或 `{"app": 包名}`，恰好一种；`open` 只接受 `target.app`，
-`kill` 只接受 `target.task_id`，`claim`/`handoff`/`close` 接受两者之一。顶层 `app` 只保留给
-`list` 过滤。`find`/`list` 是查询，成功与失败均无 `outcome`；结果各按 32 KiB 完整条目前缀
-返回，`total`/`truncated` 说明预算前数量与截断。其余五个 kind 认领时消费当前 ready O，
-已执行后尝试发布原会话屏的 full 无图观察。查询与变更的 P 绑定、IsError 与取消差异见第 3、6 节。
+七个分支都接受其余已声明顶层成员，但只按上表生效；冗余成员不进入服务端请求。`target` 为
+`{"task_id": 正整数}` 或 `{"app": 包名}`，生效分支必须恰好一种；`open` 只接受 `target.app`，
+`kill` 接受 `target.task_id` 或 `target.app`，`claim`/`handoff`/`close` 接受两者之一。顶层
+`app` 只保留给 `list` 过滤。`scope` 省略为 `session`，`restore_foreground`、`allow_borrowed`
+与 `allow_stop_playback` 省略为 `false`。`list` 缺 `reference`（含空串）返回
+`422 invalid_request`，message 同时点名 `list` 与 `reference`，`error.details.field="reference"`。
+`tools/list` 的 app 工具描述按固定七行矩阵发布同一组 kind、必填、生效成员与消费 O 关系；
+矩阵每行独立成立。
+
+`find`/`list` 是查询，成功与失败均无 `outcome`；结果各按 32 KiB 完整条目前缀返回，
+`total`/`truncated` 说明预算前数量与截断。其余五个 kind 认领时消费当前 ready O，已执行后
+尝试发布原会话屏的 full 无图观察，整体 `outcome` 仍按 `executed`/`not_executed`/`uncertain`
+三态表达。查询与变更的 P 绑定、IsError 与取消差异见第 3、6 节。
+
+`kill` 按从任务清单解析并核验的 Android 用户，对整个包执行一次
+`am force-stop --user <id> <package>`。`task_id` 入口要求实时精确匹配本会话显示屏的 live
+owned 任务；`app` 入口要求全设备同包 live 任务都属于本会话 `owned`，或在没有 live 任务时
+凭本会话确认关闭 owned 任务留下的关闭资格进入；两种入口都要求全设备同包 live 任务均由
+本会话自有。关闭资格绑定会话代次、显示代次、boot、
+Android 用户、包与安装身份，从确认关闭起按单调时钟保留 5 分钟且查询不续期，按包与用户
+合并最多 64 条。全设备同包 live 任务均属本会话时，同包多窗口不再单独拒绝；其他显示屏仍有
+同包 live 任务时为 `kill_refused_task_elsewhere`（会话自有登记只在会话显示屏，实际不会出现
+owned 他屏任务）。控制 App 包、前台服务/播放门禁、root
+与安装身份校验仍按接口契约执行。`kill` 结果在 `kind` 之后按固定顺序投影 `package`、`android_user_id`、
+`source_task_id`、`target_task_ids`、`display_id`、`remaining_task_ids`、`target_pids`、
+`killed_pids`、`remaining_pids`、`restarted` 与 `package_state`。`target_task_ids`/
+`remaining_task_ids` 在读取完整时出现，空集合为 `[]`，未知省略；`target_pids`/`killed_pids`/
+`remaining_pids` 分别承载派发前原实例、最终读中已消失的原实例与最终读全部实例，空集合同样
+写 `[]`；`restarted` 在最终进程读未知时为显式 `null`；`package_state` 取
+`stopped_at_check`（最终任务与进程均完整为空）、`still_present`（任一证实存在）或 `unknown`
+（其余）。`close`/`claim`/`handoff`/`kill` 的 MCP 文本摘要按 `app` 行固定字段顺序投影
+（任务/归属与执行字段、进程、前台观察）；未采样事实按缺席、显式 `null` 或
+`package_state=unknown` 表达，不为展示额外扫描设备。
 
 `shell` 的 `status(P)` 可以在终止未确认时返回 `operation_state=finished` 与
 `outcome=uncertain`。受管命令的有限屏障仍可能让新的普通工作返回 `device_busy`。
@@ -486,11 +516,16 @@ obs [<O>] [status=<partial|failed|…>] [fg=<前景>] [at=HH:MM:SS] [visual=<loa
 **`app`。** 单行头按固定字段顺序输出（`kind` 必填）：
 
 ```text
-app <kind> [pkg=<package>] [task=<task_id>] [src_task=<source_task_id>] [src_display=<source_display_id>] [display=<display_id>] [ownership=<ownership>] [reused=<true|false>] [state_preserved=<true|false|null>] [fg_restore=<foreground_restore>] [complete=<true|false>] [target_pids=<数组>] [killed_pids=<数组>] [remaining_pids=<数组>] [restarted=<true|false|null>] [total=<n>] [truncated=<true|false>] [fg=<前景>] [at=HH:MM:SS]
+app <kind> [pkg=<package>] [task=<task_id>] [user=<android_user_id>] [src_task=<source_task_id>] [target_tasks=<数组>] [src_display=<source_display_id>] [display=<display_id>] [remaining_tasks=<数组>] [ownership=<ownership>] [reused=<true|false>] [state_preserved=<true|false|null>] [fg_restore=<foreground_restore>] [complete=<true|false>] [target_pids=<数组>] [killed_pids=<数组>] [remaining_pids=<数组>] [restarted=<true|false|null>] [package_state=<stopped_at_check|still_present|unknown>] [total=<n>] [truncated=<true|false>] [fg=<前景>] [at=HH:MM:SS]
 ```
 
 - `state_preserved`、`restarted` 的显式 `null` 原样写 `null`，与缺席严格区分。
-- `target_pids`、`killed_pids`、`remaining_pids` 存在时写紧凑整数数组，严格区分缺席与 `[]`。
+- `target_tasks`、`remaining_tasks`、`target_pids`、`killed_pids`、`remaining_pids` 存在时写紧凑
+  整数数组，严格区分缺席与 `[]`。`target_tasks` 是本次冻结的全部同包自有 live task；
+  `remaining_tasks` 是最终采样中同包同用户的 live task；三个 PID 数组分别只承载派发前原实例、
+  最终读中已消失的原实例与最终读全部实例。
+- `package_state` 只按 `stopped_at_check`/`still_present`/`unknown` 三值输出；空字符串或其他
+  值使整个对象按 `json v1 path="/app"` 兜底。
 - 空字符串 token 成员不输出；数字成员显式 `null`、类型不匹配或其他不可表示情况使整对象按
   `json v1 path="/app"` 兜底；未知成员按 `/app/<name>` 兜底。
 - `items` 存在时输出 `app_items v1` 块，空数组同样输出 `count=0`，与“未获得集合”区分：

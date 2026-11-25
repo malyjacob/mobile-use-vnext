@@ -135,13 +135,14 @@ engine 的状态锁只做有限内存检查与转换：锁内不等待 ADB、u2 
 
 ### app（统一应用生命周期）
 
-`app` 是应用发现、任务归属与进程终止的唯一入口，`kind` 为 `find`/`list`/`open`/`claim`/
+`app` 是应用发现、任务归属与应用强停的唯一入口，`kind` 为 `find`/`list`/`open`/`claim`/
 `handoff`/`close`/`kill`。查询与变更共用同一会话、O/P 与普通工作权威，不增加第二份任务表：
 
 - `find`/`list` 是查询：不消费 O、不续租、无 outcome；`find` 使用 detached P，`list` 绑定
   `reference` 解析到的原会话。`open`/`claim`/`handoff`/`close`/`kill` 消费当前 ready O；
   静态拒绝不消费，认领后不归还。主屏会话只允许 `find`/`list`/`open`。请求引用统一为
   `reference`；`open` 的操作目标固定为 `target.app`，`list` 的顶层 `app` 只是查询过滤。
+  七个 kind 都接受全部已声明顶层成员，但只有生效成员进入分支处理，冗余成员被忽略。
 - task 归属分三类：`owned` 是会话虚屏中可确认的自有任务（虚拟屏 open 新建或复用的窗口）；
   `borrowed` 是显式从主屏 `0` claim 进本会话虚屏的任务；`shared` 是主屏 open/list 或已
   handoff 交给主屏的任务。`shared` 不进入会话删除名单；主屏 open 不登记用户任务。
@@ -157,11 +158,23 @@ engine 的状态锁只做有限内存检查与转换：锁内不等待 ADB、u2 
   owned，否则省略 ownership；主 outcome 仍为 uncertain。主屏 open 返回 shared、不登记。
   `claim` 要求主屏 live task 精确且 root 只有单个 leaf；`handoff` 每次只交还一个任务，
   默认不恢复前台。`close` 冻结不超过 16 个本会话管理的 live 目标，逐项记录 outcome 与
-  独立 recents 核验；`complete` 仅在全部关闭且 recents 全确认时为真。`kill` 仅对本会话
-  同屏唯一可归因、无已知 FGS/播放（或显式允许）的 live owned 应用执行精确 PID
-  `kill -9`；虚拟屏上处于当前前台的 `live owned` 任务同样可终止（前台不再是拒绝原因），
-  确认原进程实例全部结束（或原进程集为空）后同步移除任务窗口容器与会话登记，进程与窗口
-  壳都确认才报 executed。不 force-stop、不追杀重启。
+  独立 recents 核验；`complete` 仅在全部关闭且 recents 全确认时为真。`close` 在逐项确认
+  移除 owned 任务时，在归属仍有效的同一提交中建立关闭资格；资格绑定会话代次、显示代次、
+  boot、Android 用户、包及安装身份（appId、完整 uid、首次安装时间、签名 hash），borrowed、
+  未确认移除与旧会话迟到结果不建立；安装身份未知时 close 仍成功，但不建立该包资格。资格从
+  确认关闭起按单调时钟保留 5 分钟，查询不续期；
+  内存按包与用户合并，最多 64 条，满时淘汰最早，过期、代次失效、身份变化、handoff 或发现
+  外部使用时撤销或拒绝。`kill` 按从任务清单解析并核验的 Android 用户，对整个包执行一次
+  `am force-stop --user <id> <pkg>`。`task_id` 入口要求实时精确匹配本会话屏幕的 live owned 任务；
+  包入口要求全设备同包 live 任务均属本会话 owned，或在没有 live 任务时凭该包有效的关闭
+  资格进入。两种入口都要求同包 live 目标全部属于本会话 owned：同会话屏有非 owned 目标返回
+  `kill_refused_not_owned`，其他显示屏仍有同包 live 任务时返回 `kill_refused_task_elsewhere`。
+  会话自有登记只存在于会话显示屏，因此实际不会出现 owned 他屏任务；同包多窗口不再单独拒绝。
+  派发前在锁外读取任务快照、安装身份、进程、前台服务、播放、root 与执行身份，未知即拒绝；
+  认领后派发前再次重验，任务集合、用户或安装身份变化则不派发，进程的正常增减不阻断，
+  `target_pids` 取派发前最后一次读取。整个调用只派发一次 force-stop，不执行额外进程终止、
+  不操作任务窗口；STOP 在派发前撤销时不派发，已派发命令可能完成；结果按回执区分
+  not_executed/uncertain/executed，并在工作期限内有限读取同包同用户任务与进程。
 - 五个变更成功提交后统一做一次原会话屏 full 无图后观察；后观察失败保留 executed 与
   `observation.status=failed`，不改写主 outcome；STOP 撤权后的迟到候选不发布。
 
@@ -833,7 +846,7 @@ text 完成事件记 `focus_dispatch`/`write_dispatch`/`submit_dispatch` 与受�
 ### 发布
 
 `release/versions.json` 是发行号、共同契约号与 Android versionCode 的唯一来源；当前为
-`release_version=0.34.0`、`contract_version=30`、`android_version_code=36`，构建生成
+`release_version=0.35.0`、`contract_version=31`、`android_version_code=37`，构建生成
 Go/Java 常量。`scripts/build-release.ps1` 产出整组产物与 `build/release/manifest.json`
 （源码提交、Go 版本、MCP SDK/协议、各产物 SHA-256/大小、Android 包名/版本、工具目录指纹）。
 工具目录固定为 `scripts/toolcatalog` 投影的 13 个工具，指纹是该目录注册顺序、名称、描述与

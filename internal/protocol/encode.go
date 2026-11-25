@@ -573,23 +573,16 @@ func (r *DiagnoseRequest) Encode() ([]byte, error) {
 	})
 }
 
-// validateAppRequest applies the same closed kind matrix the service decoder
-// enforces to a typed request before encoding. Without it a caller that fills a
-// member outside the selected branch would send a different request than the
-// struct describes: the encoder writes only branch members, so the extra value
-// would disappear instead of being rejected.
+// validateAppRequest checks the effective members before encoding.
 func validateAppRequest(r *AppRequest) error {
 	if r == nil {
 		return errors.New("app request is required")
 	}
-	allowed := appKindMembers(r.Kind)
-	if allowed == nil {
+	effective := appEffectiveMembers(r.Kind)
+	if effective == nil {
 		return errors.New("unsupported app kind")
 	}
-	if !allowed["query"] && (r.HasQuery || r.Query != "") {
-		return errors.New(r.Kind + " does not accept query")
-	}
-	if allowed["query"] {
+	if effective["query"] {
 		if r.Query != "" && !r.HasQuery {
 			return errors.New("app.query is set without HasQuery")
 		}
@@ -597,24 +590,15 @@ func validateAppRequest(r *AppRequest) error {
 			return errors.New("app.query exceeds the length limit")
 		}
 	}
-	if !allowed["reference"] && r.Reference != "" {
-		return errors.New(r.Kind + " does not accept reference")
-	}
-	if allowed["reference"] {
-		if apiErr := checkReference(r.Reference); apiErr != nil {
+	if effective["reference"] {
+		if apiErr := checkAppReference(r.Kind, r.Reference); apiErr != nil {
 			return errors.New(apiErr.Message)
 		}
 	}
-	if !allowed["scope"] && r.Scope != "" {
-		return errors.New(r.Kind + " does not accept scope")
-	}
-	if allowed["scope"] && r.Scope != "" && r.Scope != AppScopeSession && r.Scope != AppScopePrimary {
+	if effective["scope"] && r.Scope != "" && r.Scope != AppScopeSession && r.Scope != AppScopePrimary {
 		return errors.New("app.scope must be session or primary")
 	}
-	if !allowed["app"] && (r.HasFilter || r.FilterApp != "") {
-		return errors.New(r.Kind + " does not accept app")
-	}
-	if allowed["app"] {
+	if effective["app"] {
 		if !r.HasFilter && r.FilterApp != "" {
 			return errors.New("app filter is set without HasFilter")
 		}
@@ -622,10 +606,7 @@ func validateAppRequest(r *AppRequest) error {
 			return errors.New("app filter must be an explicit package name")
 		}
 	}
-	if !allowed["target"] && r.Target != nil {
-		return errors.New(r.Kind + " does not accept target")
-	}
-	if allowed["target"] {
+	if effective["target"] {
 		if r.Target == nil {
 			return errors.New(r.Kind + " requires target")
 		}
@@ -640,19 +621,7 @@ func validateAppRequest(r *AppRequest) error {
 			if r.Target.TaskID != 0 || !ValidPackageName(r.Target.App) {
 				return errors.New("app package target requires one explicit package")
 			}
-			if r.Kind == AppKindKill {
-				return errors.New("app.kill requires a task id target")
-			}
 		}
-	}
-	if !allowed["restore_foreground"] && r.RestoreForeground {
-		return errors.New(r.Kind + " does not accept restore_foreground")
-	}
-	if !allowed["allow_borrowed"] && r.AllowBorrowed {
-		return errors.New(r.Kind + " does not accept allow_borrowed")
-	}
-	if !allowed["allow_stop_playback"] && r.AllowStopPlayback {
-		return errors.New(r.Kind + " does not accept allow_stop_playback")
 	}
 	return nil
 }
@@ -683,9 +652,6 @@ func (r *AppRequest) Encode() ([]byte, error) {
 				}
 			}
 		case AppKindList:
-			if r.Reference == "" {
-				return errors.New("app.list requires reference")
-			}
 			if err := writeName(enc, "reference"); err != nil {
 				return err
 			}
@@ -708,13 +674,7 @@ func (r *AppRequest) Encode() ([]byte, error) {
 					return err
 				}
 			}
-		case AppKindOpen:
-			if r.Reference == "" || r.Target == nil || !r.Target.UseTask && r.Target.App == "" {
-				return errors.New("app.open requires reference and target.app")
-			}
-			if r.Target.UseTask {
-				return errors.New("app.open only accepts a package target")
-			}
+		case AppKindOpen, AppKindClaim, AppKindHandoff, AppKindClose, AppKindKill:
 			if err := writeName(enc, "reference"); err != nil {
 				return err
 			}
@@ -724,23 +684,7 @@ func (r *AppRequest) Encode() ([]byte, error) {
 			if err := writeName(enc, "target"); err != nil {
 				return err
 			}
-			if err := encodeAppTarget(enc, r.Kind, r.Target); err != nil {
-				return err
-			}
-		case AppKindClaim, AppKindHandoff, AppKindClose, AppKindKill:
-			if r.Reference == "" || r.Target == nil {
-				return errors.New("app target kind requires reference and target")
-			}
-			if err := writeName(enc, "reference"); err != nil {
-				return err
-			}
-			if err := writeString(enc, r.Reference); err != nil {
-				return err
-			}
-			if err := writeName(enc, "target"); err != nil {
-				return err
-			}
-			if err := encodeAppTarget(enc, r.Kind, r.Target); err != nil {
+			if err := encodeAppTarget(enc, r.Target); err != nil {
 				return err
 			}
 			if err := encodeAppOptions(enc, r); err != nil {
@@ -752,14 +696,11 @@ func (r *AppRequest) Encode() ([]byte, error) {
 }
 
 // encodeAppTarget writes the single admitted selector object.
-func encodeAppTarget(enc *jsontext.Encoder, kind string, target *AppTarget) error {
+func encodeAppTarget(enc *jsontext.Encoder, target *AppTarget) error {
 	if err := enc.WriteToken(jsontext.BeginObject); err != nil {
 		return err
 	}
 	if target.UseTask {
-		if target.TaskID <= 0 {
-			return errors.New("app target task id must be positive")
-		}
 		if err := writeName(enc, "task_id"); err != nil {
 			return err
 		}
@@ -767,12 +708,6 @@ func encodeAppTarget(enc *jsontext.Encoder, kind string, target *AppTarget) erro
 			return err
 		}
 	} else {
-		if kind == AppKindKill {
-			return errors.New("app.kill requires a task id target")
-		}
-		if target.App == "" {
-			return errors.New("app target requires a package")
-		}
 		if err := writeName(enc, "app"); err != nil {
 			return err
 		}

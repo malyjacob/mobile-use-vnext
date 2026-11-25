@@ -69,22 +69,33 @@ type processRow struct {
 	name string
 }
 
-// PackageProcesses enumerates the live processes of one package: the main
-// process and every `package:` child process of the running user. Known is true
-// only when every required read completed; an empty known inventory is a proven
+// PackageProcesses enumerates the live processes of one package for one Android
+// user: the main process and every `package:` child process. Known is true only
+// when every required read completed; an empty known inventory is a proven
 // absence, never a failed read.
 //
-// The package UID is resolved through `pm list packages -U` with the `cmd
-// package` form as the fallback. Start ticks come from /proc/<pid>/stat so the
-// engine can later recognize the exact instance; PIDs the direct read cannot
-// see are re-read once through the existing root path.
-func (d *Device) PackageProcesses(ctx context.Context, pkg string) (device.PackageProcesses, error) {
-	result := device.PackageProcesses{ReadFailed: true}
+// The command-side identity is resolved first: the package manager must prove the
+// installed identity of that exact user (application id, installed user block and
+// per-user full UID). The process table is then filtered by that full UID, so the
+// same package under another Android user is never reported. The returned AppUID
+// is the application id, not the full UID: the two differ for every user other
+// than user 0.
+//
+// Start ticks come from /proc/<pid>/stat so the engine can later recognize the
+// exact instance; PIDs the direct read cannot see are re-read once through the
+// existing root path.
+func (d *Device) PackageProcesses(ctx context.Context, pkg string, androidUserID int) (
+	device.PackageProcesses, error,
+) {
+	result := device.PackageProcesses{ReadFailed: true, AndroidUserID: androidUserID}
 	if d == nil {
 		return result, errNilDevice
 	}
 	if !validPackageName(pkg) {
 		return result, newErr(CodeInvalidArgs, "invalid package name", nil)
+	}
+	if androidUserID < 0 {
+		return result, newErr(CodeInvalidArgs, "invalid Android user id", nil)
 	}
 	if err := contextError(ctx); err != nil {
 		return result, err
@@ -103,11 +114,15 @@ func (d *Device) PackageProcesses(ctx context.Context, pkg string) (device.Packa
 		return fail("boot_identity")
 	}
 	result.BootID = bootID
-	uid, ok := d.packageUID(ctx, pkg)
-	if !ok {
-		return fail("package_uid")
+	identity, err := d.PackageIdentity(ctx, pkg, androidUserID)
+	if err != nil {
+		return fail("package_identity")
 	}
-	result.UserID = uid
+	if !identity.Known || identity.AndroidUserID != androidUserID {
+		return fail("package_identity")
+	}
+	fullUID := identity.AppUID
+	result.AppUID = identity.AppID
 	rows, ok := d.readProcessListing(ctx)
 	if !ok {
 		return fail("process_listing")
@@ -115,7 +130,7 @@ func (d *Device) PackageProcesses(ctx context.Context, pkg string) (device.Packa
 	instances := make([]device.ProcessInstance, 0, 2)
 	pids := make([]int, 0, 2)
 	for _, row := range rows {
-		if row.uid != uid {
+		if row.uid != fullUID {
 			continue
 		}
 		if row.name != pkg && !strings.HasPrefix(row.name, pkg+":") {
@@ -147,57 +162,6 @@ func (d *Device) PackageProcesses(ctx context.Context, pkg string) (device.Packa
 		eventlog.Int("count", len(instances)),
 		eventlog.Duration("ms", time.Since(started)))
 	return result, nil
-}
-
-// packageUID resolves exactly one application UID for the exact package. The
-// `pm` wrapper is preferred; the `cmd package` form is used when its output
-// cannot be parsed.
-func (d *Device) packageUID(ctx context.Context, pkg string) (int, bool) {
-	for _, command := range []string{
-		"pm list packages -U " + shellQuote(pkg),
-		"cmd package list packages -U " + shellQuote(pkg),
-	} {
-		result, err := d.shellWith(ctx, d.processTimeout(), command)
-		if err != nil || result.ExitCode != 0 {
-			continue
-		}
-		if uid, ok := parsePackageUID(string(result.Stdout), pkg); ok {
-			return uid, true
-		}
-	}
-	return 0, false
-}
-
-// parsePackageUID reads the UID of one exact package record. Substring matches
-// (for example a `.debug` variant) never satisfy the filter, and two different
-// UIDs are ambiguous evidence rather than a pick.
-func parsePackageUID(output, pkg string) (int, bool) {
-	prefix := "package:" + pkg
-	uids := make(map[int]bool)
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
-		if !strings.HasPrefix(line, prefix) {
-			continue
-		}
-		rest := strings.TrimPrefix(line, prefix)
-		if rest != "" && rest[0] != ' ' && rest[0] != '\t' {
-			// A longer package name that merely starts with the target.
-			continue
-		}
-		if match := uidColumnPattern.FindStringSubmatch(rest); match != nil {
-			if value, err := strconv.Atoi(match[1]); err == nil &&
-				value >= applicationUIDMin && value < applicationUIDMax {
-				uids[value] = true
-			}
-		}
-	}
-	if len(uids) != 1 {
-		return 0, false
-	}
-	for uid := range uids {
-		return uid, true
-	}
-	return 0, false
 }
 
 // readProcessListing reads the current process table. A listing with a record

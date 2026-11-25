@@ -1020,6 +1020,12 @@ func decodeResultV4AppLine(line string, put func(string, any) error) error {
 				return err
 			}
 			app["task_id"] = parsed
+		case "user":
+			parsed, err := strconv.Atoi(value)
+			if err != nil {
+				return err
+			}
+			app["android_user_id"] = parsed
 		case "src_task":
 			parsed, err := strconv.Atoi(value)
 			if err != nil {
@@ -1064,12 +1070,26 @@ func decodeResultV4AppLine(line string, put func(string, any) error) error {
 				return err
 			}
 			app["complete"] = parsed
+		case "target_tasks":
+			parsed, err := decodeResultJSON([]byte(value))
+			if err != nil {
+				return err
+			}
+			app["target_task_ids"] = parsed
+		case "remaining_tasks":
+			parsed, err := decodeResultJSON([]byte(value))
+			if err != nil {
+				return err
+			}
+			app["remaining_task_ids"] = parsed
 		case "target_pids", "killed_pids", "remaining_pids":
 			parsed, err := decodeResultJSON([]byte(value))
 			if err != nil {
 				return err
 			}
 			app[key] = parsed
+		case "package_state":
+			app["package_state"] = value
 		case "total":
 			parsed, err := strconv.Atoi(value)
 			if err != nil {

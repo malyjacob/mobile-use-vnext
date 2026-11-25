@@ -2,7 +2,6 @@ package protocol
 
 import (
 	"encoding/json/jsontext"
-	"encoding/json/v2"
 	"sort"
 	"strings"
 	"unicode"
@@ -13,8 +12,8 @@ import (
 // presence struct; every optional member is omitted from the wire when not
 // supplied (never encoded as an explicit null).
 
-// Application lifecycle kinds of the single app tool. Every kind is a closed
-// branch with its own required and admitted members.
+// Application lifecycle kinds of the single app tool. The kinds share a wire
+// shape and each kind has its own effective members.
 const (
 	AppKindFind    = "find"
 	AppKindList    = "list"
@@ -52,15 +51,15 @@ const (
 	ForegroundRestoreUnconfirmed  = "unconfirmed"
 )
 
-// AppTarget selects exactly one live task: a task id or an explicit package.
+// AppTarget selects a task by ID or an application by exact package name.
 type AppTarget struct {
 	TaskID  int
 	App     string
 	UseTask bool
 }
 
-// AppRequest is app(kind, ...). Only the branch members of Kind are populated;
-// the wire decoder rejects every other member before the engine sees it.
+// AppRequest is app(kind, ...). The wire decoder retains only the effective
+// members for Kind.
 type AppRequest struct {
 	Kind string
 
@@ -152,36 +151,32 @@ type DiagnoseRequest struct {
 	HasRef    bool
 }
 
-type rawAppTarget struct {
-	TaskID jsontext.Value `json:"task_id"`
-	App    jsontext.Value `json:"app"`
+type appDeclaredMembers struct {
+	Kind              jsontext.Value `json:"kind"`
+	Query             jsontext.Value `json:"query"`
+	Reference         jsontext.Value `json:"reference"`
+	Scope             jsontext.Value `json:"scope"`
+	App               jsontext.Value `json:"app"`
+	Target            jsontext.Value `json:"target"`
+	RestoreForeground jsontext.Value `json:"restore_foreground"`
+	AllowBorrowed     jsontext.Value `json:"allow_borrowed"`
+	AllowStopPlayback jsontext.Value `json:"allow_stop_playback"`
 }
 
-// DecodeApp admits exactly one strict app kind branch. Every branch declares its
-// own member set: a member belonging to another kind is rejected before any
-// session check, so a query can never inherit a mutation's admission path.
+// DecodeApp checks the shape of every supplied member and validates and
+// retains only the members effective for the selected kind.
 func DecodeApp(body []byte) (*AppRequest, *APIError) {
-	var presence struct {
-		Kind              jsontext.Value `json:"kind"`
-		Query             jsontext.Value `json:"query"`
-		Reference         jsontext.Value `json:"reference"`
-		Scope             jsontext.Value `json:"scope"`
-		App               jsontext.Value `json:"app"`
-		Target            jsontext.Value `json:"target"`
-		RestoreForeground jsontext.Value `json:"restore_foreground"`
-		AllowBorrowed     jsontext.Value `json:"allow_borrowed"`
-		AllowStopPlayback jsontext.Value `json:"allow_stop_playback"`
-	}
+	var presence appDeclaredMembers
 	var wire struct {
-		Kind              string        `json:"kind"`
-		Query             string        `json:"query"`
-		Reference         string        `json:"reference"`
-		Scope             string        `json:"scope"`
-		App               string        `json:"app"`
-		Target            *rawAppTarget `json:"target"`
-		RestoreForeground bool          `json:"restore_foreground"`
-		AllowBorrowed     bool          `json:"allow_borrowed"`
-		AllowStopPlayback bool          `json:"allow_stop_playback"`
+		Kind              string         `json:"kind"`
+		Query             string         `json:"query"`
+		Reference         string         `json:"reference"`
+		Scope             string         `json:"scope"`
+		App               string         `json:"app"`
+		Target            jsontext.Value `json:"target"`
+		RestoreForeground bool           `json:"restore_foreground"`
+		AllowBorrowed     bool           `json:"allow_borrowed"`
+		AllowStopPlayback bool           `json:"allow_stop_playback"`
 	}
 	if err := decodeStrict(body, &presence, &wire); err != nil {
 		return nil, invalidDecode(err)
@@ -190,7 +185,11 @@ func DecodeApp(body []byte) (*AppRequest, *APIError) {
 		return nil, Invalid("app 需要 kind")
 	}
 	kind := wire.Kind
-	members := []struct {
+	effective := appEffectiveMembers(kind)
+	if effective == nil {
+		return nil, Invalid("不支持的 app kind").WithDetail("allowed_kinds", AppKinds)
+	}
+	for _, member := range []struct {
 		name string
 		raw  jsontext.Value
 	}{
@@ -202,36 +201,50 @@ func DecodeApp(body []byte) (*AppRequest, *APIError) {
 		{"restore_foreground", presence.RestoreForeground},
 		{"allow_borrowed", presence.AllowBorrowed},
 		{"allow_stop_playback", presence.AllowStopPlayback},
-	}
-	allowed := appKindMembers(kind)
-	if allowed == nil {
-		return nil, Invalid("不支持的 app kind").WithDetail("allowed_kinds", AppKinds)
-	}
-	for _, member := range members {
-		if len(member.raw) == 0 {
-			continue
-		}
-		if !allowed[member.name] {
-			return nil, Invalid(kind+" 不接受该成员").WithDetail("field", member.name)
-		}
+	} {
 		if string(member.raw) == "null" {
 			return nil, Invalid("参数不接受显式 null；省略该字段使用默认值").
 				WithDetail("field", member.name)
 		}
 	}
+	var rawTarget appTargetWire
+	if len(wire.Target) > 0 {
+		var targetPresence struct {
+			TaskID jsontext.Value `json:"task_id"`
+			App    jsontext.Value `json:"app"`
+		}
+		if err := decodeStrict(wire.Target, &targetPresence, &rawTarget); err != nil {
+			return nil, invalidDecode(err).WithDetail("field", "target")
+		}
+		if string(targetPresence.TaskID) == "null" || string(targetPresence.App) == "null" {
+			return nil, Invalid("target 的成员不接受显式 null").WithDetail("field", "target")
+		}
+	}
+
 	req := &AppRequest{Kind: kind}
+	if effective["reference"] {
+		if err := checkAppReference(kind, wire.Reference); err != nil {
+			return nil, err
+		}
+		req.Reference = wire.Reference
+	}
+	if effective["target"] {
+		if len(wire.Target) == 0 {
+			return nil, Invalid(kind + " 需要 target")
+		}
+		target, apiErr := parseAppTarget(kind, rawTarget)
+		if apiErr != nil {
+			return nil, apiErr
+		}
+		req.Target = target
+	}
 	switch kind {
 	case AppKindFind:
 		req.Query, req.HasQuery = wire.Query, len(presence.Query) > 0
 		if utf8.RuneCountInString(req.Query) > MaxQueryRunes {
 			return nil, Invalid("query 超过长度上限").WithDetail("limit", MaxQueryRunes)
 		}
-		return req, nil
 	case AppKindList:
-		req.Reference = wire.Reference
-		if err := checkReference(req.Reference); err != nil {
-			return nil, err
-		}
 		req.Scope = wire.Scope
 		if req.Scope == "" {
 			req.Scope = AppScopeSession
@@ -244,103 +257,67 @@ func DecodeApp(body []byte) (*AppRequest, *APIError) {
 		if req.HasFilter && !ValidPackageName(req.FilterApp) {
 			return nil, Invalid("app 必须是明确的应用包名")
 		}
-		return req, nil
-	case AppKindOpen:
-		req.Reference = wire.Reference
-		if err := checkReference(req.Reference); err != nil {
-			return nil, err
-		}
-		if wire.Target == nil {
-			return nil, Invalid("open 需要 target")
-		}
-		target, apiErr := parseAppTarget(kind, wire.Target)
-		if apiErr != nil {
-			return nil, apiErr
-		}
-		req.Target = target
-		return req, nil
-	case AppKindClaim, AppKindHandoff, AppKindClose, AppKindKill:
-		req.Reference = wire.Reference
-		if err := checkReference(req.Reference); err != nil {
-			return nil, err
-		}
-		if wire.Target == nil {
-			return nil, Invalid(kind + " 需要 target")
-		}
-		target, apiErr := parseAppTarget(kind, wire.Target)
-		if apiErr != nil {
-			return nil, apiErr
-		}
-		req.Target = target
+	case AppKindHandoff:
 		req.RestoreForeground = wire.RestoreForeground
+	case AppKindClose:
 		req.AllowBorrowed = wire.AllowBorrowed
+	case AppKindKill:
 		req.AllowStopPlayback = wire.AllowStopPlayback
-		return req, nil
 	}
-	return nil, Invalid("不支持的 app kind").WithDetail("allowed_kinds", AppKinds)
+	return req, nil
 }
 
-// appKindMembers returns the closed member set of one kind, excluding kind.
-func appKindMembers(kind string) map[string]bool {
+// appEffectiveMembers returns the members used by a kind, excluding kind itself.
+func appEffectiveMembers(kind string) map[string]bool {
 	switch kind {
 	case AppKindFind:
 		return map[string]bool{"query": true}
 	case AppKindList:
 		return map[string]bool{"reference": true, "scope": true, "app": true}
-	case AppKindOpen:
-		return map[string]bool{"reference": true, "target": true}
-	case AppKindClaim:
+	case AppKindOpen, AppKindClaim:
 		return map[string]bool{"reference": true, "target": true}
 	case AppKindHandoff:
-		return map[string]bool{
-			"reference": true, "target": true, "restore_foreground": true,
-		}
+		return map[string]bool{"reference": true, "target": true, "restore_foreground": true}
 	case AppKindClose:
-		return map[string]bool{
-			"reference": true, "target": true, "allow_borrowed": true,
-		}
+		return map[string]bool{"reference": true, "target": true, "allow_borrowed": true}
 	case AppKindKill:
-		return map[string]bool{
-			"reference": true, "target": true, "allow_stop_playback": true,
-		}
+		return map[string]bool{"reference": true, "target": true, "allow_stop_playback": true}
 	}
 	return nil
 }
 
-// parseAppTarget admits exactly one selector. kill only accepts a task id;
-// open only accepts a package.
-func parseAppTarget(kind string, raw *rawAppTarget) (*AppTarget, *APIError) {
-	hasTask := len(raw.TaskID) > 0
-	hasApp := len(raw.App) > 0
+func checkAppReference(kind, reference string) *APIError {
+	if reference == "" {
+		return Invalid(kind+" 需要 reference").WithDetail("field", "reference")
+	}
+	return checkReference(reference)
+}
+
+type appTargetWire struct {
+	TaskID *int    `json:"task_id"`
+	App    *string `json:"app"`
+}
+
+// parseAppTarget validates the selector of a branch that uses target.
+func parseAppTarget(kind string, raw appTargetWire) (*AppTarget, *APIError) {
 	switch {
-	case hasTask && hasApp:
+	case raw.TaskID != nil && raw.App != nil:
 		return nil, Invalid("target 的 task_id 与 app 互斥")
-	case !hasTask && !hasApp:
+	case raw.TaskID == nil && raw.App == nil:
 		return nil, Invalid("target 需要 task_id 或 app")
-	case hasTask:
+	case raw.TaskID != nil:
 		if kind == AppKindOpen {
 			return nil, Invalid("open 只接受 target.app")
 		}
-		var taskID int
-		if err := json.Unmarshal(raw.TaskID, &taskID); err != nil {
-			return nil, Invalid("target.task_id 必须是整数")
-		}
-		if taskID <= 0 {
+		if *raw.TaskID <= 0 {
 			return nil, Invalid("target.task_id 必须是正整数")
 		}
-		return &AppTarget{TaskID: taskID, UseTask: true}, nil
+		return &AppTarget{TaskID: *raw.TaskID, UseTask: true}, nil
 	}
-	if kind == AppKindKill {
-		return nil, Invalid("kill 只接受 target.task_id；包名需先由 list 解析")
-	}
-	var app string
-	if err := json.Unmarshal(raw.App, &app); err != nil {
-		return nil, Invalid("target.app 必须是字符串")
-	}
-	if !ValidPackageName(app) {
+	if !ValidPackageName(*raw.App) {
 		return nil, Invalid("target.app 必须是明确的应用包名")
 	}
-	return &AppTarget{App: app}, nil
+	return &AppTarget{App: *raw.App}, nil
 }
 
 // DecodeNotify admits notify(text). The text must be present and non-empty;
@@ -594,15 +571,21 @@ type AppView struct {
 	Complete *bool
 
 	// kill
-	SourceTaskID     *int
-	TargetPIDs       []int
-	KilledPIDs       []int
-	RemainingPIDs    []int
-	HasTargetPIDs    bool
-	HasKilledPIDs    bool
-	HasRemainingPIDs bool
-	Restarted        *bool
-	HasRestarted     bool
+	AndroidUserID       *int
+	SourceTaskID        *int
+	TargetTaskIDs       []int
+	HasTargetTaskIDs    bool
+	RemainingTaskIDs    []int
+	HasRemainingTaskIDs bool
+	TargetPIDs          []int
+	KilledPIDs          []int
+	RemainingPIDs       []int
+	HasTargetPIDs       bool
+	HasKilledPIDs       bool
+	HasRemainingPIDs    bool
+	Restarted           *bool
+	HasRestarted        bool
+	PackageState        string
 }
 
 // MarshalJSONTo writes the kind-specific member set in its fixed public order.
@@ -910,13 +893,28 @@ func (a *AppView) writeKill(enc *jsontext.Encoder) error {
 			return err
 		}
 	}
+	if a.AndroidUserID != nil {
+		if err := a.writeIntPtr(enc, "android_user_id", a.AndroidUserID); err != nil {
+			return err
+		}
+	}
 	if a.SourceTaskID != nil {
 		if err := a.writeIntPtr(enc, "source_task_id", a.SourceTaskID); err != nil {
 			return err
 		}
 	}
+	if a.HasTargetTaskIDs {
+		if err := a.writeIntArray(enc, "target_task_ids", a.TargetTaskIDs); err != nil {
+			return err
+		}
+	}
 	if a.DisplayID != nil {
 		if err := a.writeIntPtr(enc, "display_id", a.DisplayID); err != nil {
+			return err
+		}
+	}
+	if a.HasRemainingTaskIDs {
+		if err := a.writeIntArray(enc, "remaining_task_ids", a.RemainingTaskIDs); err != nil {
 			return err
 		}
 	}
@@ -936,7 +934,12 @@ func (a *AppView) writeKill(enc *jsontext.Encoder) error {
 		}
 	}
 	if a.HasRestarted {
-		return a.writeNullableBool(enc, "restarted", a.Restarted)
+		if err := a.writeNullableBool(enc, "restarted", a.Restarted); err != nil {
+			return err
+		}
+	}
+	if a.PackageState != "" {
+		return a.writeString(enc, "package_state", a.PackageState)
 	}
 	return nil
 }

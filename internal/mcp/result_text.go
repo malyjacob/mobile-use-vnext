@@ -65,7 +65,9 @@ var v4ResultFields = func() map[string]resultV4FieldKind {
 	add("app.", "kind ownership foreground_restore captured_at", v4Token)
 	add("app.", "package", v4String)
 	add("app.", "task_id source_task_id display_id source_display_id total reused state_preserved complete truncated restarted", v4Literal)
-	add("app.", "target_pids killed_pids remaining_pids", v4JSON)
+	add("app.", "android_user_id", v4Literal)
+	add("app.", "target_task_ids remaining_task_ids target_pids killed_pids remaining_pids", v4JSON)
+	add("app.", "package_state", v4Token)
 	add("app.", "items tasks", v4Block)
 	add("app.", "foreground", v4Object)
 	add("notification.", "state", v4Token)
@@ -1157,11 +1159,33 @@ func renderAppV4(w *resultV4Writer, raw []byte) bool {
 		line += " " + label + "=" + compactResultJSON(rawValue)
 		return true
 	}
+	appendPackageState := func(name, label string) bool {
+		rawValue, present := values[name]
+		if !present {
+			return true
+		}
+		value, valid := rawStringValue(rawValue)
+		if !valid {
+			return false
+		}
+		// The kill post-check has three closed outcomes; any other spelling
+		// must fall back instead of publishing an unrecognized conclusion.
+		switch value {
+		case "stopped_at_check", "still_present", "unknown":
+		default:
+			return false
+		}
+		line += " " + label + "=" + value
+		return true
+	}
 	valid := appendToken("package", "pkg") &&
 		appendInt("task_id", "task") &&
+		appendInt("android_user_id", "user") &&
 		appendInt("source_task_id", "src_task") &&
+		appendIntArray("target_task_ids", "target_tasks") &&
 		appendInt("source_display_id", "src_display") &&
 		appendInt("display_id", "display") &&
+		appendIntArray("remaining_task_ids", "remaining_tasks") &&
 		appendToken("ownership", "ownership")
 	if valid {
 		valid = appendBool("reused", "reused") &&
@@ -1172,6 +1196,7 @@ func renderAppV4(w *resultV4Writer, raw []byte) bool {
 			appendIntArray("killed_pids", "killed_pids") &&
 			appendIntArray("remaining_pids", "remaining_pids") &&
 			appendNullableBool("restarted", "restarted") &&
+			appendPackageState("package_state", "package_state") &&
 			appendInt("total", "total") &&
 			appendBool("truncated", "truncated")
 	}
@@ -1204,8 +1229,9 @@ func renderAppV4(w *resultV4Writer, raw []byte) bool {
 		case "kind", "items", "total", "truncated", "captured_at", "display_id",
 			"foreground", "package", "task_id", "ownership", "reused",
 			"state_preserved", "source_display_id", "foreground_restore",
-			"tasks", "complete", "source_task_id", "target_pids", "killed_pids",
-			"remaining_pids", "restarted":
+			"tasks", "complete", "source_task_id", "android_user_id",
+			"target_task_ids", "remaining_task_ids", "target_pids", "killed_pids",
+			"remaining_pids", "restarted", "package_state":
 			continue
 		}
 		w.fallback(resultPointer("app")+"/"+pointerPart(member.name), member.value)
@@ -2066,7 +2092,10 @@ var resultFields = func() map[string]resultFieldKind {
 	add("app.", "kind ownership foreground_restore captured_at", fieldToken)
 	add("app.", "package", fieldString)
 	add("app.", "task_id source_task_id display_id source_display_id total", fieldLiteral)
+	add("app.", "android_user_id", fieldLiteral)
 	add("app.", "reused state_preserved complete truncated restarted", fieldLiteral)
+	add("app.", "target_task_ids remaining_task_ids", fieldJSON)
+	add("app.", "package_state", fieldToken)
 	add("app.", "items tasks foreground target_pids killed_pids remaining_pids", fieldJSON)
 	add("notification.", "state", fieldToken)
 	add("notification.", "error", fieldJSON)

@@ -63,24 +63,52 @@ func (f *fakeDevice) RemoveTask(_ context.Context, taskID int) (device.TaskRemov
 	return device.TaskRemoveResult{Receipt: receipt, TaskID: taskID}, f.removeErr
 }
 
-// PackageProcesses returns the scripted process inventory. An unset inventory
-// is a known empty one for the current boot and default test uid.
-func (f *fakeDevice) PackageProcesses(_ context.Context, pkg string) (device.PackageProcesses, error) {
+// PackageProcesses returns the scripted or current process inventory of one
+// package for one Android user. An unset inventory is a known empty one.
+func (f *fakeDevice) PackageProcesses(_ context.Context, pkg string, androidUserID int) (device.PackageProcesses, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.processCalls++
+	call := f.processCalls
+	if hook := f.processHook; hook != nil {
+		defer func() { hook(call) }()
+	}
+	defer f.mu.Unlock()
+	if len(f.processScript) > 0 {
+		step := f.processScript[0]
+		f.processScript = f.processScript[1:]
+		if step.err != nil {
+			return device.PackageProcesses{}, step.err
+		}
+		if step.fail {
+			return device.PackageProcesses{Known: false, ReadFailed: true}, nil
+		}
+		result := step.processes
+		result.Known = true
+		result.ReadFailed = false
+		if result.AndroidUserID == 0 {
+			result.AndroidUserID = androidUserID
+		}
+		if result.BootID == "" {
+			result.BootID = f.processes.BootID
+			if result.BootID == "" {
+				result.BootID = fakeKillBootID
+			}
+		}
+		return result, nil
+	}
 	if f.processFail || f.processErr != nil {
 		return device.PackageProcesses{Known: false, ReadFailed: true}, f.processErr
 	}
 	result := f.processes
 	result.Known = true
-	if result.UserID == 0 {
-		result.UserID = 10
+	if result.AppUID == 0 {
+		result.AppUID = 10123
 	}
+	result.AndroidUserID = androidUserID
 	if result.BootID == "" {
 		result.BootID = f.bootID
 		if result.BootID == "" {
-			result.BootID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+			result.BootID = fakeKillBootID
 		}
 	}
 	if result.Instances == nil {

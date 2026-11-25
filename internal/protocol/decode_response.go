@@ -715,11 +715,15 @@ func (a *AppView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 		ForegroundRestore member[string] `json:"foreground_restore"`
 		Tasks             jsontext.Value `json:"tasks"`
 		Complete          *bool          `json:"complete"`
+		AndroidUserID     member[int]    `json:"android_user_id"`
 		SourceTaskID      *int           `json:"source_task_id"`
+		TargetTaskIDs     jsontext.Value `json:"target_task_ids"`
+		RemainingTaskIDs  jsontext.Value `json:"remaining_task_ids"`
 		TargetPIDs        jsontext.Value `json:"target_pids"`
 		KilledPIDs        jsontext.Value `json:"killed_pids"`
 		RemainingPIDs     jsontext.Value `json:"remaining_pids"`
 		Restarted         jsontext.Value `json:"restarted"`
+		PackageState      member[string] `json:"package_state"`
 	}
 	if err := readObject(dec, "app", &wire); err != nil {
 		return err
@@ -744,6 +748,10 @@ func (a *AppView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 		ForegroundRestore: wire.ForegroundRestore.Value,
 		Complete:          wire.Complete,
 		SourceTaskID:      wire.SourceTaskID,
+		PackageState:      wire.PackageState.Value,
+	}
+	if wire.AndroidUserID.Present {
+		view.AndroidUserID = &wire.AndroidUserID.Value
 	}
 	if len(wire.StatePreserved) > 0 {
 		view.HasStatePreserved = true
@@ -777,6 +785,8 @@ func (a *AppView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 		target *[]int
 		has    *bool
 	}{
+		{"target_task_ids", wire.TargetTaskIDs, &view.TargetTaskIDs, &view.HasTargetTaskIDs},
+		{"remaining_task_ids", wire.RemainingTaskIDs, &view.RemainingTaskIDs, &view.HasRemainingTaskIDs},
 		{"target_pids", wire.TargetPIDs, &view.TargetPIDs, &view.HasTargetPIDs},
 		{"killed_pids", wire.KilledPIDs, &view.KilledPIDs, &view.HasKilledPIDs},
 		{"remaining_pids", wire.RemainingPIDs, &view.RemainingPIDs, &view.HasRemainingPIDs},
@@ -787,11 +797,14 @@ func (a *AppView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 		if isJSONNull(field.raw) {
 			return fmt.Errorf("response member %q must not be null", "app."+field.name)
 		}
-		var ids []int
+		var ids []member[int]
 		if err := json.Unmarshal(field.raw, &ids); err != nil {
 			return err
 		}
-		*field.target = ids
+		*field.target = make([]int, len(ids))
+		for i, id := range ids {
+			(*field.target)[i] = id.Value
+		}
 		*field.has = true
 	}
 	*a = view

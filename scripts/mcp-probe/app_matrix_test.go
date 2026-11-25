@@ -210,14 +210,28 @@ func appMatrixFixtures() []appFixture {
 		{
 			name: "kill",
 			expected: `{"operation_id":"Pkill00000000000000000006","outcome":"executed","app":{"kind":"kill",` +
-				`"package":"com.example.probe","source_task_id":42,"display_id":12,` +
-				`"target_pids":[1234,1235],"killed_pids":[1234,1235],"remaining_pids":[],"restarted":null}}`,
+				`"package":"com.example.probe","android_user_id":0,"source_task_id":42,` +
+				`"target_task_ids":[42],"display_id":12,"remaining_task_ids":[42],` +
+				`"target_pids":[1234,1235],"killed_pids":[1234,1235],"remaining_pids":[],` +
+				`"restarted":false,"package_state":"still_present"}}`,
 			text: "result v4 ok op=Pkill00000000000000000006\n" +
-				"app kill pkg=com.example.probe src_task=42 display=12 " +
-				"target_pids=[1234,1235] killed_pids=[1234,1235] remaining_pids=[] restarted=null\n" +
+				"app kill pkg=com.example.probe user=0 src_task=42 target_tasks=[42] display=12 " +
+				"remaining_tasks=[42] target_pids=[1234,1235] killed_pids=[1234,1235] " +
+				"remaining_pids=[] restarted=false package_state=still_present\n" +
 				"end result\n",
 			verify: func(t *testing.T, app *appView) {
-				if app == nil || app.Kind != "kill" || !app.HasTargetPIDs ||
+				if app == nil || app.Kind != "kill" ||
+					app.AndroidUserID == nil || *app.AndroidUserID != 0 {
+					t.Fatalf("kill user = %+v", app)
+				}
+				if !app.HasTargetTaskIDs || !reflect.DeepEqual(app.TargetTaskIDs, []int{42}) ||
+					!app.HasRemainingTaskIDs || !reflect.DeepEqual(app.RemainingTaskIDs, []int{42}) {
+					t.Fatalf("kill task sets = %+v", app)
+				}
+				if app.PackageState != "still_present" {
+					t.Fatalf("package_state = %q", app.PackageState)
+				}
+				if !app.HasTargetPIDs ||
 					!reflect.DeepEqual(app.TargetPIDs, []int{1234, 1235}) ||
 					!app.HasKilledPIDs || !reflect.DeepEqual(app.KilledPIDs, []int{1234, 1235}) {
 					t.Fatalf("kill pids = %+v", app)
@@ -226,7 +240,7 @@ func appMatrixFixtures() []appFixture {
 				if !app.HasRemainingPIDs || app.RemainingPIDs == nil || len(app.RemainingPIDs) != 0 {
 					t.Fatalf("remaining_pids = %+v", app.RemainingPIDs)
 				}
-				if !app.HasRestarted || app.Restarted != nil {
+				if !app.HasRestarted || app.Restarted == nil || *app.Restarted {
 					t.Fatalf("restarted = %+v", app.Restarted)
 				}
 			},
@@ -280,11 +294,13 @@ func TestAppResultModesMatrix(t *testing.T) {
 func checkTypedAppGolden(t *testing.T, text string) {
 	t.Helper()
 	aliases := map[string]bool{
-		"pkg": true, "task": true, "src_task": true, "src_display": true,
-		"display": true, "ownership": true, "reused": true, "state_preserved": true,
-		"fg_restore": true, "complete": true, "target_pids": true, "killed_pids": true,
-		"remaining_pids": true, "restarted": true, "total": true, "truncated": true,
-		"fg": true, "at": true,
+		"pkg": true, "task": true, "user": true, "src_task": true,
+		"target_tasks": true, "src_display": true, "display": true,
+		"remaining_tasks": true, "ownership": true, "reused": true,
+		"state_preserved": true, "fg_restore": true, "complete": true,
+		"target_pids": true, "killed_pids": true, "remaining_pids": true,
+		"restarted": true, "package_state": true, "total": true,
+		"truncated": true, "fg": true, "at": true,
 	}
 	for _, line := range strings.Split(text, "\n") {
 		if strings.HasPrefix(line, `json v1 path="/app/`) {
@@ -421,20 +437,24 @@ func TestAppErrorAndEdgeFixtures(t *testing.T) {
 		{
 			name: "kill_unconfirmed",
 			expected: `{"operation_id":"Pkill20000000000000000013","outcome":"uncertain",` +
-				`"app":{"kind":"kill","package":"com.example.probe","source_task_id":42,` +
-				`"display_id":12,"target_pids":[1234],"killed_pids":[],"restarted":null},` +
+				`"app":{"kind":"kill","package":"com.example.probe","android_user_id":0,` +
+				`"source_task_id":42,"target_task_ids":[42],"display_id":12,` +
+				`"target_pids":[1234],"restarted":null,"package_state":"unknown"},` +
 				`"error":{"code":"kill_unconfirmed","message":"进程终止未确认"},` +
 				`"recovery":{"entry":"observe","reference":"P","input_state":"retired"}}`,
 			text: "result v4 err op=Pkill20000000000000000013 outcome=uncertain\n" +
-				"app kill pkg=com.example.probe src_task=42 display=12 " +
-				"target_pids=[1234] killed_pids=[] restarted=null\n" +
+				"app kill pkg=com.example.probe user=0 src_task=42 target_tasks=[42] display=12 " +
+				"target_pids=[1234] restarted=null package_state=unknown\n" +
 				"error kill_unconfirmed \"进程终止未确认\"\n" +
 				"recovery entry=observe ref=P input=retired\n" +
 				"end result\n",
 			isError: true,
 			verify: func(t *testing.T, app *appView) {
-				if app == nil || app.HasRemainingPIDs || !app.HasRestarted || app.Restarted != nil ||
-					!app.HasKilledPIDs || app.KilledPIDs == nil || len(app.KilledPIDs) != 0 {
+				// A final read that stayed unknown omits both final PID arrays and
+				// keeps restarted as an explicit null.
+				if app == nil || app.HasRemainingTaskIDs || app.HasKilledPIDs ||
+					app.HasRemainingPIDs || !app.HasRestarted || app.Restarted != nil ||
+					app.AndroidUserID == nil || app.PackageState != "unknown" {
 					t.Fatalf("unconfirmed kill facts = %+v", app)
 				}
 			},
@@ -565,8 +585,8 @@ func TestAppTypedFieldGates(t *testing.T) {
 	})
 	t.Run("missing restarted leaves no fact", func(t *testing.T) {
 		text := "result v4 ok\n" +
-			"app kill pkg=com.example.probe src_task=42 display=12 " +
-			"target_pids=[1234] killed_pids=[1234] remaining_pids=[]\n" +
+			"app kill pkg=com.example.probe user=0 src_task=42 target_tasks=[42] display=12 " +
+			"target_pids=[1234] remaining_pids=[] package_state=unknown\n" +
 			"end result\n"
 		decoded, failure := decodeResultText(text)
 		if failure != nil {
@@ -574,6 +594,19 @@ func TestAppTypedFieldGates(t *testing.T) {
 		}
 		if decoded.view.App == nil || decoded.view.App.HasRestarted {
 			t.Fatal("omitted restarted must not become a fact")
+		}
+	})
+	t.Run("known kill field via fallback", func(t *testing.T) {
+		for _, field := range []string{"android_user_id", "target_task_ids",
+			"remaining_task_ids", "package_state"} {
+			text := "result v4 err\n" +
+				"app kill\n" +
+				`json v1 path="/app/` + field + "\" value=1\n" +
+				"end result\n"
+			if _, failure := decodeResultText(text); failure == nil ||
+				failure.reason != "text_result_app_field_typed_required" {
+				t.Fatalf("%s via fallback: failure = %v", field, failure)
+			}
 		}
 	})
 	t.Run("dropped nested recents breaks equality", func(t *testing.T) {
@@ -591,6 +624,82 @@ func TestAppTypedFieldGates(t *testing.T) {
 			t.Fatal("dropping nested recents_cleaned was not detected")
 		}
 	})
+}
+
+// killFixture returns the one kill matrix fixture used by the head-order test.
+func killFixture(t *testing.T) appFixture {
+	t.Helper()
+	for _, fixture := range appMatrixFixtures() {
+		if fixture.name == "kill" {
+			return fixture
+		}
+	}
+	t.Fatal("kill fixture missing")
+	return appFixture{}
+}
+
+// TestAppKillHeadOrder pins the dispatched kill head order and proves that a
+// reordered, unsorted or out-of-domain member is rejected instead of projected.
+func TestAppKillHeadOrder(t *testing.T) {
+	fixture := killFixture(t)
+	lines := strings.Split(fixture.text, "\n")
+	if len(lines) < 2 || !strings.HasPrefix(lines[1], "app kill ") {
+		t.Fatalf("kill head missing: %q", lines)
+	}
+	head := lines[1]
+	fields := strings.Fields(head)[2:]
+	got := make([]string, 0, len(fields))
+	for _, token := range fields {
+		key, _, found := strings.Cut(token, "=")
+		if !found {
+			t.Fatalf("kill head token has no value: %q", token)
+		}
+		got = append(got, key)
+	}
+	want := []string{"pkg", "user", "src_task", "target_tasks", "display",
+		"remaining_tasks", "target_pids", "killed_pids", "remaining_pids",
+		"restarted", "package_state"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("kill head order = %v, want %v", got, want)
+	}
+	for _, rewrite := range []struct{ name, from, to string }{
+		{"user before src_task", "user=0 src_task=42", "src_task=42 user=0"},
+		{"remaining_tasks before display", "display=12 remaining_tasks=[42]", "remaining_tasks=[42] display=12"},
+		{"target_tasks unsorted", "target_tasks=[42]", "target_tasks=[43,42]"},
+		{"package_state out of domain", "package_state=still_present", "package_state=terminated"},
+	} {
+		swapped := strings.Replace(head, rewrite.from, rewrite.to, 1)
+		if swapped == head {
+			t.Fatalf("%s: rewrite did not apply", rewrite.name)
+		}
+		text := strings.Replace(fixture.text, head, swapped, 1)
+		if _, failure := decodeResultText(text); failure == nil ||
+			failure.reason != "text_result_app_invalid" {
+			t.Fatalf("%s: failure = %v", rewrite.name, failure)
+		}
+	}
+}
+
+// TestAppKillPackageHeadFacts asserts the package-entry head: no source task,
+// an empty known target set, and the stopped package state.
+func TestAppKillPackageHeadFacts(t *testing.T) {
+	text := "result v4 ok\n" +
+		"app kill pkg=com.example.probe user=0 target_tasks=[] display=12 " +
+		"remaining_tasks=[] target_pids=[1234] killed_pids=[1234] " +
+		"remaining_pids=[] restarted=false package_state=stopped_at_check\n" +
+		"end result\n"
+	decoded, failure := decodeResultText(text)
+	if failure != nil {
+		t.Fatalf("decode: %s %v", failure.reason, failure.fields)
+	}
+	app := decoded.view.App
+	if app == nil || app.SourceTaskID != nil || !app.HasTargetTaskIDs ||
+		app.TargetTaskIDs == nil || len(app.TargetTaskIDs) != 0 ||
+		app.AndroidUserID == nil || *app.AndroidUserID != 0 ||
+		!app.HasRemainingTaskIDs || len(app.RemainingTaskIDs) != 0 ||
+		app.PackageState != "stopped_at_check" {
+		t.Fatalf("package kill facts = %+v", app)
+	}
 }
 
 // TestAppGoldenCoversEveryTypedField asserts every declared app member appears

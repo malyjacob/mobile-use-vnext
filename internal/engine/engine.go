@@ -278,7 +278,10 @@ type Device interface {
 	// engine decides ownership, guards, outcome and every exclusion.
 	MoveTask(ctx context.Context, rootID, leafTaskID, targetDisplayID int) (device.TaskMoveResult, error)
 	RemoveTask(ctx context.Context, taskID int) (device.TaskRemoveResult, error)
-	PackageProcesses(ctx context.Context, pkg string) (device.PackageProcesses, error)
+	TaskSnapshot(ctx context.Context) (device.TaskSnapshot, error)
+	PackageIdentity(ctx context.Context, pkg string, androidUserID int) (device.PackageIdentity, error)
+	PackageProcesses(ctx context.Context, pkg string, androidUserID int) (device.PackageProcesses, error)
+	ForceStopPackage(ctx context.Context, pkg string, androidUserID int) (device.ForceStopResult, error)
 	KillProcess(ctx context.Context, pid int, startTicks uint64) (device.DispatchReceipt, error)
 	MediaPlayback(ctx context.Context) (device.MediaState, error)
 	ForegroundService(ctx context.Context, pkg string) (device.ServiceState, error)
@@ -503,6 +506,9 @@ type sessionState struct {
 	// Tasks is the virtual-session window registry. It is a cache rebuilt from
 	// live task reads, keyed by task id; primary sessions never populate it.
 	Tasks []taskEntry
+	// CloseEligibilities grants short-lived package authorization after close.
+	// It is local to this session and never written to the recovery ledger.
+	CloseEligibilities []closeEligibility
 }
 
 type baselineState struct {
@@ -997,6 +1003,7 @@ func (e *Engine) revokeSessionLocked(reason string, now time.Time) *sessionState
 		return session
 	}
 	session.State = SessionEnded
+	session.CloseEligibilities = nil
 	session.EndedAt = now
 	session.Reason = reason
 	if session.ExpireTimer != nil {

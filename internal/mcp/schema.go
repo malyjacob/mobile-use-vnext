@@ -608,14 +608,25 @@ var toolCatalog = []toolDefinition{
 	{
 		name: "app",
 		description: "按 kind 发现应用、查询任务或变更应用生命周期。" +
+			"\n分支矩阵（kind｜必填（另均需 kind）｜生效选项｜消费 ready O）：" +
+			"\nfind｜无｜query｜否" +
+			"\nlist｜reference｜scope、app｜否" +
+			"\nopen｜reference、target.app｜无｜是" +
+			"\nclaim｜reference、target｜无｜是" +
+			"\nhandoff｜reference、target｜restore_foreground｜是" +
+			"\nclose｜reference、target｜allow_borrowed｜是" +
+			"\nkill｜reference、target.task_id 或 target.app｜allow_stop_playback｜是" +
+			"\n七个分支都接受其余已声明顶层成员，但只按上表生效；冗余成员不进入服务端请求。" +
 			"\nfind 无需会话，query 可按应用名称或包名做字面折叠子串过滤。" +
-			"\nlist 查询原会话的 live 任务，reference 用 ready O 或定位活动原会话的 P。scope=session 列会话任务，scope=primary 列主屏候选，可按 app 包名过滤。find/list 省略 outcome。" +
+			"\nlist 必须 reference：活动会话 O 或能解析到活动原会话的 P，缺省或空串以 invalid_request 点名 list 与 reference。" +
+			"scope=session 列会话任务，scope=primary 列主屏候选，可按 app 包名过滤。find/list 省略 outcome。" +
 			"\n变更分支使用当前 ready O。主屏会话只允许 find/list/open，其余分支在消费 O 前拒绝。" +
 			"\n- open 用 target={app:包名} 复用同包窗口或新建。" +
 			"\n- claim 将主屏的精确 live 任务移入本会话虚屏并登记 borrowed。" +
 			"\n- handoff 将本会话虚屏的单个任务移回主屏 0，可选恢复前台。" +
-			"\n- close 关闭本会话虚屏目标窗口，可显式允许关闭 borrowed。" +
-			"\n- kill 用 task_id 终止本会话同屏唯一的 live owned 任务，并连同其任务窗口容器一并移除；虚拟屏上处于当前前台也可终止，但该应用在主屏或其他显示屏仍有任务时拒绝，可显式允许停止播放。" +
+			"\n- close 关闭本会话虚屏目标窗口，可显式允许关闭 borrowed；确认移除的自有任务按包留下最多 5 分钟的资格供 kill 按包定位。" +
+			"\n- kill 用 target.task_id 或 target.app 定位：task 入口要求精确 live owned 任务，且全部同包 live 任务均属本会话；app 入口在存在同包 live 任务时要求其全部由本会话自有，无 live 任务时须凭 close 留下的资格。按已核实的 Android 用户对整包只执行一次 force-stop，不再逐个移除任务窗口。存在非本会话任务、控制 App 保护、前台服务或播放未显式允许、root、安装身份或任务枚举不完整时拒绝。" +
+			"\nkill 结果按证据报告 pkg、user、src_task、target_tasks、remaining_tasks、target_pids、killed_pids、remaining_pids、restarted、package_state；集合读取完整才出现（空集合为 []），未知省略，restarted 不可比较时为 null。MCP 摘要按执行、任务/归属、进程、前台观察顺序投影。" +
 			"\nclaim/handoff/close 的 target 用 task_id 或包名二选一，仍须通过服务准入。" +
 			"find/list 的 items 以 `app_items v1` 块、close 的 tasks 以 `app_tasks v1` 块交付，空集合输出 count=0，与未获得集合区分。" +
 			"变更结果按 outcome 与 recovery 处理。已执行后尝试发布原会话屏 full 无图观察；" +
@@ -638,7 +649,7 @@ var toolCatalog = []toolDefinition{
       "minLength": 1,
       "maxLength": 64,
       "pattern": "^[OP]",
-      "description": "list 可为 ready O 或能解析到本 Agent 活动原会话的 P；open/claim/handoff/close/kill 必须是当前 ready O。"
+      "description": "list 必须：活动会话 O 或能解析到本 Agent 活动原会话的 P；open/claim/handoff/close/kill 必须是当前 ready O。缺省或空串返回 invalid_request，details.field=reference。"
     },
     "scope": {
       "type": "string",
@@ -651,7 +662,7 @@ var toolCatalog = []toolDefinition{
       "minLength": 1,
       "maxLength": 255,
       "pattern": "^[A-Za-z0-9_]+(\\.[A-Za-z0-9_]+)*$",
-      "description": "仅 list 接受：明确的包名过滤。open 的包名放在 target.app，其他 kind 不接受顶层 app。"
+      "description": "仅 list 生效：明确的包名过滤；其他分支接受但不生效。open 的包名放在 target.app，kill 的包名可放 target.app。"
     },
     "target": {
       "type": "object",
@@ -670,7 +681,7 @@ var toolCatalog = []toolDefinition{
         }
       },
       "additionalProperties": false,
-      "description": "open 只接受 {app}；claim/handoff/close 接受 {task_id} 或 {app} 恰好一种；kill 只接受 {task_id}。"
+      "description": "open 只接受 {app}；claim/handoff/close 接受 {task_id} 或 {app} 恰好一种；kill 接受 {task_id} 或 {app} 恰好一种（task 入口按精确 live owned 任务，app 入口按全部自有同包任务，无 live 任务时按 close 后短程资格）。"
     },
     "restore_foreground": {
       "type": "boolean",
@@ -690,7 +701,7 @@ var toolCatalog = []toolDefinition{
   },
   "required": ["kind"],
   "additionalProperties": false,
-  "description": "app 的扁平根只声明成员集合；每个 kind 的必填与禁止成员由服务端严格解码矩阵执行，跨 kind 成员返回 invalid_request。"
+  "description": "app 的扁平根只声明成员集合；每个 kind 的必填与生效成员由服务端解码矩阵执行，冗余成员接受但只做类型检查。"
 }`),
 	},
 	{

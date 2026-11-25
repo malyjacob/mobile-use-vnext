@@ -39,6 +39,12 @@ var fakeTranscripts = []string{
 	"processes-kill-no-root", "processes-kill-denied",
 	"media-playing", "media-stopped", "media-unknown",
 	"fgs-hit", "fgs-none", "fgs-unknown",
+	"tasks", "tasks-incomplete",
+	"package-identity", "package-identity-empty-signature",
+	"package-identity-not-installed", "package-identity-user10",
+	"package-identity-uid-mismatch", "package-identity-ambiguous",
+	"package-processes-user10", "package-processes-identity-unknown",
+	"force-stop", "force-stop-exit", "force-stop-transport",
 }
 
 // fakeDigestOf returns the sentinel value for one transcript.
@@ -328,6 +334,7 @@ var stubTranscripts = map[string][]stubAnswer{
 	},
 	"processes": {
 		{contains: "cat /proc/sys/kernel/random/boot_id", stdout: testBootID + "\n"},
+		{contains: "dumpsys package ", stdout: standardPackageDump},
 		{contains: "list packages -U", stdout: "package:com.example.app uid:10140\n"},
 		{contains: "ps -A -o PID,UID,NAME", stdout: processListingFixture},
 		{contains: "for p in 101 202; do", stdout: processTicksFixture},
@@ -348,12 +355,14 @@ var stubTranscripts = map[string][]stubAnswer{
 	},
 	"processes-empty": {
 		{contains: "cat /proc/sys/kernel/random/boot_id", stdout: testBootID + "\n"},
+		{contains: "dumpsys package ", stdout: standardPackageDump},
 		{contains: "list packages -U", stdout: "package:com.example.app uid:10140\n"},
 		{contains: "ps -A -o PID,UID,NAME", stdout: processHeaderFixture +
 			"1   0     init\n"},
 	},
 	"processes-unreadable": {
 		{contains: "cat /proc/sys/kernel/random/boot_id", stdout: testBootID + "\n"},
+		{contains: "dumpsys package ", stdout: standardPackageDump},
 		{contains: "list packages -U", stdout: "package records unavailable\n"},
 	},
 	"processes-ticks-changed": {
@@ -362,6 +371,7 @@ var stubTranscripts = map[string][]stubAnswer{
 	},
 	"processes-root": {
 		{contains: "cat /proc/sys/kernel/random/boot_id", stdout: testBootID + "\n"},
+		{contains: "dumpsys package ", stdout: standardPackageDump},
 		{contains: "list packages -U", stdout: "package:com.example.app uid:10140\n"},
 		{contains: "ps -A -o PID,UID,NAME", stdout: processListingFixture},
 		// The direct read sees neither /proc entry; the root path reads both.
@@ -370,6 +380,7 @@ var stubTranscripts = map[string][]stubAnswer{
 	},
 	"processes-no-root": {
 		{contains: "cat /proc/sys/kernel/random/boot_id", stdout: testBootID + "\n"},
+		{contains: "dumpsys package ", stdout: standardPackageDump},
 		{contains: "list packages -U", stdout: "package:com.example.app uid:10140\n"},
 		{contains: "ps -A -o PID,UID,NAME", stdout: processListingFixture},
 		{contains: "for p in 101 202; do", stdout: "stat 101 -\nstat 202 -\n"},
@@ -392,6 +403,75 @@ var stubTranscripts = map[string][]stubAnswer{
 	},
 	"fgs-unknown": {
 		{contains: "dumpsys activity services", stdout: "unexpected services dump\n"},
+	},
+	"tasks": {
+		{contains: "am stack list", stdout: tasksListing},
+	},
+	"tasks-incomplete": {
+		{contains: "am stack list", stdout: incompleteTasksListing},
+	},
+	"package-identity": {
+		{contains: "dumpsys package ", stdout: dumpsysPackageFixture("com.example.app", 10388,
+			"fc909ae5", nil)},
+		{contains: "list packages -U --user 0", stdout: "package:com.example.app uid:10388\n"},
+	},
+	"package-identity-empty-signature": {
+		{contains: "dumpsys package ", stdout: dumpsysPackageFixture("com.example.app", 10388,
+			"", nil)},
+		{contains: "list packages -U --user 0", stdout: "package:com.example.app uid:10388\n"},
+	},
+	"package-identity-not-installed": {
+		{contains: "dumpsys package ", stdout: dumpsysPackageFixture("com.example.app", 10388,
+			"fc909ae5", []fakeInstalledUser{{ID: 0, Installed: false,
+				FirstInstall: "2026-11-09 03:45:47"}})},
+		{contains: "list packages -U --user 0", stdout: "package:com.example.app uid:10388\n"},
+	},
+	"package-identity-user10": {
+		{contains: "dumpsys package ", stdout: dumpsysPackageFixture("com.example.app", 10317,
+			"fc909ae5", []fakeInstalledUser{
+				{ID: 0, Installed: true, FirstInstall: "2026-08-04 19:53:47"},
+				{ID: 10, Installed: true, FirstInstall: "2026-11-10 10:10:10"},
+			})},
+		{contains: "list packages -U --user 10", stdout: "package:com.example.app uid:1010317\n"},
+	},
+	"package-identity-uid-mismatch": {
+		{contains: "dumpsys package ", stdout: dumpsysPackageFixture("com.example.app", 10317,
+			"fc909ae5", []fakeInstalledUser{{ID: 10, Installed: true,
+				FirstInstall: "2026-11-10 10:10:10"}})},
+		// The user-10 listing reports user 0's full uid: the identity is never
+		// assembled from a mismatching record.
+		{contains: "list packages -U --user 10", stdout: "package:com.example.app uid:10317\n"},
+	},
+	"package-identity-ambiguous": {
+		{contains: "dumpsys package ", stdout: ambiguousPackageFixture("com.example.app", 10388)},
+		{contains: "list packages -U --user 0", stdout: "package:com.example.app uid:10388\n"},
+	},
+	"package-processes-user10": {
+		{contains: "cat /proc/sys/kernel/random/boot_id", stdout: testBootID + "\n"},
+		{contains: "dumpsys package ", stdout: dumpsysPackageFixture("com.example.app", 10317,
+			"fc909ae5", []fakeInstalledUser{
+				{ID: 0, Installed: true, FirstInstall: "2026-08-04 19:53:47"},
+				{ID: 10, Installed: true, FirstInstall: "2026-11-10 10:10:10"},
+			})},
+		{contains: "list packages -U --user 10", stdout: "package:com.example.app uid:1010317\n"},
+		{contains: "ps -A -o PID,UID,NAME", stdout: userProcessListingFixture},
+		{contains: "for p in 101 202; do", stdout: userProcessTicksFixture},
+	},
+	"package-processes-identity-unknown": {
+		{contains: "cat /proc/sys/kernel/random/boot_id", stdout: testBootID + "\n"},
+		{contains: "dumpsys package ", stdout: dumpsysPackageFixture("com.example.app", 10388,
+			"", nil)},
+		{contains: "list packages -U --user 0", stdout: "package:com.example.app uid:10388\n"},
+		{contains: "ps -A -o PID,UID,NAME", stdout: processListingFixture},
+	},
+	"force-stop": {
+		{contains: "am force-stop", stdout: ""},
+	},
+	"force-stop-exit": {
+		{contains: "am force-stop", stderr: "Error: force stop denied\n", exit: 5},
+	},
+	"force-stop-transport": {
+		{contains: "am force-stop", stderr: "adb: device offline\n", exit: 1},
 	},
 }
 
@@ -515,3 +595,125 @@ func serviceForegroundFixture(foreground bool) string {
 		"    isForeground=" + flag + "\n" +
 		"    foregroundId=" + notificationID + "\n"
 }
+
+// Package-identity fixtures reproduce the measured `dumpsys package` shape of
+// Android 16: the record lives in the `Packages:` section and a later `Queries:`
+// section repeats an appId and a user record, so a parser that ignores the
+// section boundary is caught.
+
+// fakeInstalledUser is one `User <id>:` block of a stubbed package dump.
+type fakeInstalledUser struct {
+	ID           int
+	Installed    bool
+	FirstInstall string
+}
+
+// dumpsysPackageFixture renders one package dump with the given installed-user
+// blocks. A second section repeats the first user so section-bounded parsing is
+// exercised by every transcript built from it.
+func dumpsysPackageFixture(pkg string, appID int, signature string, users []fakeInstalledUser) string {
+	if len(users) == 0 {
+		users = []fakeInstalledUser{{ID: 0, Installed: true, FirstInstall: "2026-11-09 03:45:47"}}
+	}
+	var builder strings.Builder
+	builder.WriteString("Activity Resolver Table:\n")
+	builder.WriteString("  Non-Data Actions:\n")
+	builder.WriteString("      android.intent.action.MAIN:\n")
+	builder.WriteString("        a1b2c3 " + pkg + "/.Main\n")
+	builder.WriteString("\nDomain verification status:\n")
+	builder.WriteString("\nKey Set Manager:\n")
+	builder.WriteString("  [" + pkg + "]\n")
+	builder.WriteString("      Signing KeySets: 1\n")
+	builder.WriteString("\nPackages:\n")
+	writePackageRecord(&builder, pkg, appID, signature)
+	for _, user := range users {
+		writePackageUser(&builder, pkg, user)
+	}
+	builder.WriteString("\nQueries:\n")
+	builder.WriteString("  " + pkg + ":\n")
+	builder.WriteString("    appId=" + strconv.Itoa(appID) + "\n")
+	builder.WriteString("    User " + strconv.Itoa(users[0].ID) + ":\n")
+	return builder.String()
+}
+
+// writePackageRecord renders one `Package [<pkg>] (<hex>):` section record.
+func writePackageRecord(builder *strings.Builder, pkg string, appID int, signature string) {
+	builder.WriteString("  Package [" + pkg + "] (f07413c):\n")
+	builder.WriteString("    appId=" + strconv.Itoa(appID) + "\n")
+	builder.WriteString("    pkg=Package{29bd3c2 " + pkg + "}\n")
+	builder.WriteString("    codePath=/data/app/~~a==/" + pkg + "-b==\n")
+	builder.WriteString("    versionCode=37 minSdk=26 targetSdk=36\n")
+	builder.WriteString("    flags=[ DEBUGGABLE HAS_CODE ALLOW_CLEAR_USER_DATA ALLOW_BACKUP ]\n")
+	builder.WriteString("    install permissions:\n")
+	builder.WriteString("      android.permission.INTERNET: granted=true\n")
+	builder.WriteString("    signatures=PackageSignatures{5346d19 version:3, signatures:[" +
+		signature + "], past signatures:[8f53736c]}\n")
+}
+
+// writePackageUser renders one per-user block with a deeper firstInstallTime.
+func writePackageUser(builder *strings.Builder, pkg string, user fakeInstalledUser) {
+	installed := "false"
+	if user.Installed {
+		installed = "true"
+	}
+	id := strconv.Itoa(user.ID)
+	builder.WriteString("    User " + id +
+		": ceDataInode=198549 deDataInode=450607 installed=" + installed +
+		" hidden=false suspended=false distractionFlags=0 stopped=true notLaunched=false" +
+		" enabled=0 instant=false virtual=false quarantined=false\n")
+	builder.WriteString("      installReason=0\n")
+	builder.WriteString("      dataDir=/data/user/" + id + "/" + pkg + "\n")
+	builder.WriteString("      firstInstallTime=" + user.FirstInstall + "\n")
+	builder.WriteString("      uninstallReason=0\n")
+	builder.WriteString("      gids=[3003]\n")
+}
+
+// ambiguousPackageFixture repeats one package record inside the Packages
+// section so the record count is not exactly one.
+func ambiguousPackageFixture(pkg string, appID int) string {
+	var builder strings.Builder
+	builder.WriteString("Packages:\n")
+	writePackageRecord(&builder, pkg, appID, "fc909ae5")
+	writePackageUser(&builder, pkg, fakeInstalledUser{ID: 0, Installed: true,
+		FirstInstall: "2026-11-09 03:45:47"})
+	writePackageRecord(&builder, pkg, appID, "fc909ae5")
+	writePackageUser(&builder, pkg, fakeInstalledUser{ID: 0, Installed: true,
+		FirstInstall: "2026-11-09 03:45:47"})
+	return builder.String()
+}
+
+// tasksListing reproduces the measured `am stack list` shape: a root segment per
+// container, one leaf per task, and one unknown leaf that still belongs to a
+// container.
+const tasksListing = "RootTask id=297 bounds=[0,0][1080,2400] displayId=0 userId=0\n" +
+	" configuration={1.0 460mcc1mnc [en_US] ldltr sw384dp w384dp h853dp 450dpi}\n" +
+	"  taskId=297: com.example.app/com.example.app.Main bounds=[0,0][1080,2400] userId=0 visible=true topActivity=ComponentInfo{com.example.app/.Main}\n" +
+	"\n" +
+	"RootTask id=3 bounds=[0,0][1080,2400] displayId=0 userId=0\n" +
+	"  taskId=4: unknown bounds=[0,0][1080,2400] userId=0 visible=false\n" +
+	"\n" +
+	"RootTask id=88 bounds=[0,0][720,1280] displayId=61 userId=10\n" +
+	"  taskId=88: com.example.app/com.example.app.Main bounds=[0,0][720,1280] userId=10 visible=true\n"
+
+// incompleteTasksListing carries one leaf before any root segment, so the
+// enumeration cannot be trusted even though the readable task is returned.
+const incompleteTasksListing = "  taskId=7: com.example.app/.Main visible=true\n" +
+	"RootTask id=297 bounds=[0,0][1080,2400] displayId=0 userId=0\n" +
+	"  taskId=297: com.example.app/.Main visible=true\n"
+
+// userProcessListingFixture holds the same package under user 0 and user 10 plus
+// one unrelated entry of user 10. Only the user-10 full uid is the target.
+var userProcessListingFixture = processHeaderFixture +
+	"1   0       init\n" +
+	"101 1010317 com.example.app\n" +
+	"202 1010317 com.example.app:remote\n" +
+	"303 10317   com.example.app\n" +
+	"404 1010318 com.example.other\n"
+
+// userProcessTicksFixture is the batched start-tick read of the two user-10 PIDs.
+var userProcessTicksFixture = "stat " + processStatFixture(101, "com.example.app", 98765) + "\n" +
+	"stat " + processStatFixture(202, "com.example.app:remote", 98800) + "\n"
+
+// standardPackageDump is the installed identity the process transcripts report:
+// application id 10140, installed for user 0.
+var standardPackageDump = dumpsysPackageFixture("com.example.app", 10140, "fc909ae5", nil)

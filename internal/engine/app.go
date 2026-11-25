@@ -29,8 +29,14 @@ func (e *Engine) App(ctx context.Context, agent, p string, req *protocol.AppRequ
 			return nil, protocol.Invalid(req.Kind + " 需要 reference 与 target")
 		}
 	case protocol.AppKindKill:
-		if req.Reference == "" || req.Target == nil || !req.Target.UseTask {
-			return nil, protocol.Invalid("kill 需要 reference 与 target.task_id")
+		if req.Reference == "" {
+			return nil, protocol.Invalid("kill 需要 reference").WithDetail("field", "reference")
+		}
+		target := req.Target
+		if target == nil ||
+			target.UseTask && (target.TaskID <= 0 || target.App != "") ||
+			!target.UseTask && (target.TaskID != 0 || !protocol.ValidPackageName(target.App)) {
+			return nil, protocol.Invalid("kill 需要 target.task_id 或 target.app，二选一")
 		}
 	}
 	var (

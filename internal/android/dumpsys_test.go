@@ -179,14 +179,16 @@ func TestParseTasksRootID(t *testing.T) {
 			listing: "RootTask id=42 bounds=[0,0][1080,2400] displayId=0 userId=0\n" +
 				"  taskId=42: com.example/com.example.Main visible=true\n",
 			want: []device.Task{{TaskID: 42, RootID: 42, DisplayID: 0,
-				Package: "com.example", Component: "com.example/com.example.Main", Visible: true}},
+				Package: "com.example", Component: "com.example/com.example.Main",
+				Visible: true, UserID: 0, HasUserID: true}},
 		},
 		{
 			name: "unreadable root id stays zero",
 			listing: "RootTask id=? bounds=[0,0][720,1280] displayId=61 userId=0\n" +
 				"  taskId=9: com.example/.Main visible=true\n",
 			want: []device.Task{{TaskID: 9, RootID: 0, DisplayID: 61,
-				Package: "com.example", Component: "com.example/com.example.Main", Visible: true}},
+				Package: "com.example", Component: "com.example/com.example.Main",
+				Visible: true, UserID: 0, HasUserID: true}},
 		},
 		{
 			name:    "leaf outside a root header",
@@ -201,9 +203,11 @@ func TestParseTasksRootID(t *testing.T) {
 				"  taskId=9: com.example/.Main visible=true\n",
 			want: []device.Task{
 				{TaskID: 42, RootID: 42, DisplayID: 0,
-					Package: "com.example", Component: "com.example/com.example.Main", Visible: true},
+					Package: "com.example", Component: "com.example/com.example.Main",
+					Visible: true, UserID: 0, HasUserID: true},
 				{TaskID: 9, RootID: 0, DisplayID: 61,
-					Package: "com.example", Component: "com.example/com.example.Main", Visible: true},
+					Package: "com.example", Component: "com.example/com.example.Main",
+					Visible: true, UserID: 0, HasUserID: true},
 			},
 		},
 		{
@@ -238,6 +242,251 @@ func TestParseTasksIgnoresRecentsAndUnknownLeaves(t *testing.T) {
 	}
 	if tasks := parseTasks(""); len(tasks) != 0 {
 		t.Fatalf("empty listing: %+v", tasks)
+	}
+}
+
+// TestParseTaskSnapshot covers the completeness and user-attribution rules of
+// one `am stack list` read. The sample reproduces the measured shape of this
+// phone's Android 16 output with placeholder packages only.
+func TestParseTaskSnapshot(t *testing.T) {
+	const realShape = "RootTask id=297 bounds=[0,0][1080,2400] displayId=0 userId=0\n" +
+		" configuration={1.0 460mcc1mnc [en_US] ldltr sw384dp w384dp h853dp 450dpi}\n" +
+		"  taskId=297: com.example/com.example.Main bounds=[0,0][1080,2400] userId=0 visible=false topActivity=ComponentInfo{com.example/com.example.Proxy}\n" +
+		"RootTask id=3 bounds=[0,0][1080,2400] displayId=0 userId=0\n" +
+		"  taskId=4: unknown bounds=[0,0][1080,2400] userId=0 visible=false\n"
+	cases := []struct {
+		name     string
+		listing  string
+		complete bool
+		want     []device.Task
+	}{
+		{
+			name:     "real shape keeps unknown leaves in the snapshot",
+			listing:  realShape,
+			complete: true,
+			want: []device.Task{
+				{TaskID: 297, RootID: 297, DisplayID: 0,
+					Package: "com.example", Component: "com.example/com.example.Main",
+					UserID: 0, HasUserID: true},
+				{TaskID: 4, RootID: 3, DisplayID: 0, UserID: 0, HasUserID: true},
+			},
+		},
+		{
+			name:     "empty listing is a complete empty inventory",
+			listing:  "",
+			complete: true,
+			want:     []device.Task{},
+		},
+		{
+			name: "leaf user is used when the root names none",
+			listing: "RootTask id=42 bounds=[0,0][1080,2400] displayId=0\n" +
+				"  taskId=42: com.example/.Main userId=10 visible=true\n",
+			complete: true,
+			want: []device.Task{{TaskID: 42, RootID: 42, DisplayID: 0,
+				Package: "com.example", Component: "com.example/com.example.Main",
+				Visible: true, UserID: 10, HasUserID: true}},
+		},
+		{
+			name: "root user fills a missing leaf user",
+			listing: "RootTask id=42 bounds=[0,0][1080,2400] displayId=0 userId=10\n" +
+				"  taskId=42: com.example/.Main visible=true\n",
+			complete: true,
+			want: []device.Task{{TaskID: 42, RootID: 42, DisplayID: 0,
+				Package: "com.example", Component: "com.example/com.example.Main",
+				Visible: true, UserID: 10, HasUserID: true}},
+		},
+		{
+			name: "conflicting users keep the task but never prove the user",
+			listing: "RootTask id=42 bounds=[0,0][1080,2400] displayId=0 userId=0\n" +
+				"  taskId=42: com.example/.Main userId=10 visible=true\n",
+			complete: true,
+			want: []device.Task{{TaskID: 42, RootID: 42, DisplayID: 0,
+				Package: "com.example", Component: "com.example/com.example.Main",
+				Visible: true, UserID: 10}},
+		},
+		{
+			name: "missing user stays unproven",
+			listing: "RootTask id=42 bounds=[0,0][1080,2400] displayId=0\n" +
+				"  taskId=42: com.example/.Main visible=true\n",
+			complete: true,
+			want: []device.Task{{TaskID: 42, RootID: 42, DisplayID: 0,
+				Package: "com.example", Component: "com.example/com.example.Main",
+				Visible: true}},
+		},
+		{
+			name: "unreadable user token stays unproven",
+			listing: "RootTask id=42 bounds=[0,0][1080,2400] displayId=0 userId=?\n" +
+				"  taskId=42: com.example/.Main userId=? visible=true\n",
+			complete: true,
+			want: []device.Task{{TaskID: 42, RootID: 42, DisplayID: 0,
+				Package: "com.example", Component: "com.example/com.example.Main",
+				Visible: true}},
+		},
+		{
+			name: "user zero is a real user",
+			listing: "RootTask id=42 bounds=[0,0][1080,2400] displayId=0\n" +
+				"  taskId=42: com.example/.Main userId=0 visible=true\n",
+			complete: true,
+			want: []device.Task{{TaskID: 42, RootID: 42, DisplayID: 0,
+				Package: "com.example", Component: "com.example/com.example.Main",
+				Visible: true, UserID: 0, HasUserID: true}},
+		},
+		{
+			name: "carriage returns are tolerated",
+			listing: "RootTask id=42 bounds=[0,0][1080,2400] displayId=61 userId=0\r\n" +
+				"  taskId=42: com.example/.Main userId=0 visible=true\r\n",
+			complete: true,
+			want: []device.Task{{TaskID: 42, RootID: 42, DisplayID: 61,
+				Package: "com.example", Component: "com.example/com.example.Main",
+				Visible: true, UserID: 0, HasUserID: true}},
+		},
+		{
+			name:     "leaf before any root is incomplete",
+			listing:  "  taskId=7: com.example/.Main visible=true\n",
+			complete: false,
+			want:     []device.Task{},
+		},
+		{
+			name: "root without a readable display makes the snapshot incomplete",
+			listing: "RootTask id=42 bounds=[0,0][1080,2400] userId=0\n" +
+				"  taskId=42: com.example/.Main visible=true\n",
+			complete: false,
+			want:     []device.Task{},
+		},
+		{
+			name: "an unattributable target is incomplete but keeps the task id",
+			listing: "RootTask id=42 bounds=[0,0][1080,2400] displayId=0 userId=0\n" +
+				"  taskId=9: com.example bounds=[0,0][1080,2400] userId=0 visible=true\n",
+			complete: false,
+			want: []device.Task{{TaskID: 9, RootID: 42, DisplayID: 0,
+				Visible: true, UserID: 0, HasUserID: true}},
+		},
+		{
+			name: "an unreadable task id is incomplete",
+			listing: "RootTask id=42 bounds=[0,0][1080,2400] displayId=0 userId=0\n" +
+				"  taskId=?: com.example/.Main visible=true\n",
+			complete: false,
+			want:     []device.Task{},
+		},
+		{
+			name: "a second root never inherits the first user",
+			listing: "RootTask id=42 bounds=[0,0][1080,2400] displayId=0 userId=7\n" +
+				"  taskId=42: com.example/.Main visible=true\n" +
+				"RootTask id=9 bounds=[0,0][720,1280] displayId=61\n" +
+				"  taskId=9: com.example/.Main visible=true\n",
+			complete: true,
+			want: []device.Task{
+				{TaskID: 42, RootID: 42, DisplayID: 0,
+					Package: "com.example", Component: "com.example/com.example.Main",
+					Visible: true, UserID: 7, HasUserID: true},
+				{TaskID: 9, RootID: 9, DisplayID: 61,
+					Package: "com.example", Component: "com.example/com.example.Main",
+					Visible: true},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			snapshot := parseTaskSnapshot(tc.listing)
+			if snapshot.Complete != tc.complete {
+				t.Fatalf("complete=%v want=%v (tasks=%+v)",
+					snapshot.Complete, tc.complete, snapshot.Tasks)
+			}
+			if snapshot.Tasks == nil {
+				t.Fatal("a snapshot always carries a task slice")
+			}
+			if len(snapshot.Tasks) != len(tc.want) {
+				t.Fatalf("tasks=%+v want=%+v", snapshot.Tasks, tc.want)
+			}
+			for index := range tc.want {
+				if snapshot.Tasks[index] != tc.want[index] {
+					t.Fatalf("task %d=%+v want=%+v", index,
+						snapshot.Tasks[index], tc.want[index])
+				}
+			}
+		})
+	}
+}
+
+// TestParseTasksFiltersUnknownLeaves proves the historical TaskList contract is
+// preserved: the snapshot keeps an unknown leaf, the public task list drops it.
+func TestParseTasksFiltersUnknownLeaves(t *testing.T) {
+	listing := "RootTask id=3 bounds=[0,0][1080,2400] displayId=0 userId=0\n" +
+		"  taskId=4: unknown bounds=[0,0][1080,2400] userId=0 visible=false\n" +
+		"  taskId=5: com.example/.Main bounds=[0,0][1080,2400] userId=0 visible=true\n"
+	snapshot := parseTaskSnapshot(listing)
+	if !snapshot.Complete || len(snapshot.Tasks) != 2 {
+		t.Fatalf("snapshot=%+v", snapshot)
+	}
+	if tasks := parseTasks(listing); len(tasks) != 1 || tasks[0].TaskID != 5 {
+		t.Fatalf("tasks=%+v", tasks)
+	}
+}
+
+// TestTaskSnapshotReadsUsers drives the snapshot and the filtered task list
+// against the stubbed device.
+func TestTaskSnapshotReadsUsers(t *testing.T) {
+	d := newStubDevice(t, "tasks")
+	snapshot, err := d.TaskSnapshot(t.Context())
+	if err != nil {
+		t.Fatalf("TaskSnapshot: %v", err)
+	}
+	if !snapshot.Complete {
+		t.Fatalf("snapshot must be complete: %+v", snapshot)
+	}
+	if len(snapshot.Tasks) != 3 {
+		t.Fatalf("tasks=%+v", snapshot.Tasks)
+	}
+	if got := snapshot.Tasks[0]; got.TaskID != 297 || got.DisplayID != 0 ||
+		got.UserID != 0 || !got.HasUserID || !got.Visible {
+		t.Fatalf("first task=%+v", got)
+	}
+	if got := snapshot.Tasks[1]; got.TaskID != 4 || got.Package != "" ||
+		got.DisplayID != 0 || got.UserID != 0 || !got.HasUserID {
+		t.Fatalf("unknown leaf=%+v", got)
+	}
+	if got := snapshot.Tasks[2]; got.TaskID != 88 || got.DisplayID != 61 ||
+		got.UserID != 10 || !got.HasUserID || got.Package != "com.example.app" {
+		t.Fatalf("virtual display task=%+v", got)
+	}
+
+	tasks, err := d.TaskList(t.Context())
+	if err != nil {
+		t.Fatalf("TaskList: %v", err)
+	}
+	if len(tasks) != 2 || tasks[0].TaskID != 297 || tasks[1].TaskID != 88 {
+		t.Fatalf("tasks=%+v", tasks)
+	}
+	if tasks[1].UserID != 10 || !tasks[1].HasUserID {
+		t.Fatalf("second user task=%+v", tasks[1])
+	}
+}
+
+// TestTaskSnapshotReportsIncompleteEnumeration proves a structurally unreadable
+// listing is reported as incomplete instead of being silently shrunk.
+func TestTaskSnapshotReportsIncompleteEnumeration(t *testing.T) {
+	d := newStubDevice(t, "tasks-incomplete")
+	snapshot, err := d.TaskSnapshot(t.Context())
+	if err != nil {
+		t.Fatalf("TaskSnapshot: %v", err)
+	}
+	if snapshot.Complete {
+		t.Fatalf("snapshot must be incomplete: %+v", snapshot)
+	}
+	if len(snapshot.Tasks) != 1 || snapshot.Tasks[0].TaskID != 297 {
+		t.Fatalf("tasks=%+v", snapshot.Tasks)
+	}
+	if snapshot.Tasks[0].UserID != 0 || !snapshot.Tasks[0].HasUserID {
+		t.Fatalf("task=%+v", snapshot.Tasks[0])
+	}
+	// The list path keeps its historical behavior: readable tasks are still
+	// returned, because list/open/close never needed the completeness fact.
+	tasks, err := d.TaskList(t.Context())
+	if err != nil {
+		t.Fatalf("TaskList: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].TaskID != 297 {
+		t.Fatalf("tasks=%+v", tasks)
 	}
 }
 

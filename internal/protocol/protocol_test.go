@@ -111,6 +111,43 @@ func TestStrictAdmission(t *testing.T) {
 	}
 }
 
+func TestDecodeAppRejectsInvalidMemberShapes(t *testing.T) {
+	for _, member := range []string{
+		`"extra":true`,
+		`"Reference":"O1"`,
+		`"reference":"O1","reference":"O2"`,
+		`"reference":null`,
+		`"scope":1`,
+		`"app":false`,
+		`"restore_foreground":null`,
+		`"allow_borrowed":"true"`,
+		`"allow_stop_playback":1`,
+		`"target":null`,
+		`"target":[]`,
+		`"target":{"extra":true}`,
+		`"target":{"App":"com.example"}`,
+		`"target":{"Task_id":1}`,
+		`"target":{"app":"com.example","app":"com.other"}`,
+		`"target":{"task_id":1,"task_id":2}`,
+		`"target":{"app":null}`,
+		`"target":{"task_id":null}`,
+		`"target":{"app":1}`,
+		`"target":{"task_id":"1"}`,
+		`"target":{"task_id":true}`,
+		`"target":{"task_id":1.5}`,
+		`"target":{"task_id":1.0}`,
+		`"target":{"task_id":1e0}`,
+	} {
+		t.Run(member, func(t *testing.T) {
+			// find ignores the value of target and the other branch members.
+			body := `{"kind":"find",` + member + `}`
+			if req, err := DecodeApp([]byte(body)); req != nil || err == nil || err.Code != CodeInvalidRequest || err.HTTPStatus != 422 {
+				t.Fatalf("DecodeApp = %+v, %v, want invalid_request", req, err)
+			}
+		})
+	}
+}
+
 func TestTextTooLong(t *testing.T) {
 	text := strings.Repeat("测", MaxTextRunes+1)
 	body := `{"reference":"O1","operation":{"type":"text","target":{"ref":"n1"},"text":"` + text + `"}}`

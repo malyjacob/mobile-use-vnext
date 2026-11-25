@@ -19,8 +19,10 @@ func (e *Engine) appClose(ctx context.Context, op *operationState, req *protocol
 		staticErr = e.appModeGuardLocked(session, req.Kind)
 	}
 	var epoch int64
+	var display device.Display
 	if staticErr == nil {
 		epoch = session.Epoch
+		display = session.Display
 	}
 	e.mu.Unlock()
 	if staticErr != nil {
@@ -61,8 +63,10 @@ func (e *Engine) appClose(ctx context.Context, op *operationState, req *protocol
 			appViewWithDisplay(req.Kind, session.Display.ID), claimErr)
 	}
 
+	identities, execution := e.readCloseIdentities(work, targets)
 	items := make([]protocol.AppCloseTask, 0, len(targets))
 	removed := map[int]bool{}
+	eligible := map[int]bool{}
 	var firstErr *protocol.APIError
 	halted := false
 	for _, target := range targets {
@@ -81,7 +85,8 @@ func (e *Engine) appClose(ctx context.Context, op *operationState, req *protocol
 			halted = true
 			continue
 		}
-		if guardErr := e.revalidateCloseTarget(work, session, target); guardErr != nil {
+		userUnchanged, guardErr := e.revalidateCloseTarget(work, session, target)
+		if guardErr != nil {
 			item.Outcome = OutcomeNotExecuted
 			item.Error = guardErr.Public()
 			items = append(items, item)
@@ -105,6 +110,7 @@ func (e *Engine) appClose(ctx context.Context, op *operationState, req *protocol
 			} else {
 				item.Outcome = OutcomeExecuted
 				removed[target.task.TaskID] = true
+				eligible[target.task.TaskID] = userUnchanged && target.ownership == TaskOwned
 			}
 		case device.DispatchNotDispatched:
 			item.Outcome = OutcomeNotExecuted
@@ -159,8 +165,28 @@ func (e *Engine) appClose(ctx context.Context, op *operationState, req *protocol
 
 	e.mu.Lock()
 	if e.session != nil && e.session.Epoch == epoch {
-		for id := range removed {
-			e.removeSessionTaskLocked(id)
+		now := time.Now()
+		canEstablish := e.workAuthorizedLocked(work, now) &&
+			e.session.Display.ID == display.ID && e.session.Display.Generation == display.Generation
+		for _, target := range targets {
+			task := target.task
+			if !removed[task.TaskID] {
+				continue
+			}
+			identity := identities[closeIdentityKey{task.Package, task.UserID}]
+			entry := e.sessionTaskLocked(e.session, task.TaskID)
+			if canEstablish && eligible[task.TaskID] && identity.Known &&
+				entry != nil && entry.Ownership == TaskOwned && entry.Proven && entry.Package == task.Package &&
+				entry.DisplayID == display.ID && entry.Generation == display.Generation {
+				addCloseEligibilityLocked(e.session, closeEligibility{
+					Package: task.Package, AndroidUserID: task.UserID,
+					AppID: identity.AppID, AppUID: identity.AppUID,
+					FirstInstallTime: identity.FirstInstallTime, SignatureHash: identity.SignatureHash,
+					DisplayID: display.ID, DisplayGeneration: display.Generation, SessionEpoch: epoch,
+					ClosedAt: now, ExecutionIdentity: execution,
+				})
+			}
+			e.removeSessionTaskLocked(task.TaskID)
 		}
 	}
 	e.mu.Unlock()
@@ -209,15 +235,15 @@ func (e *Engine) freezeCloseTargets(ctx context.Context, session *sessionState,
 		return nil, protocol.NewError(503, protocol.CodeDeviceUnavailable, "无法读取任务清单")
 	}
 	e.mu.Lock()
+	if e.session == nil || e.session.Epoch != session.Epoch {
+		e.mu.Unlock()
+		return nil, protocol.NewError(409, protocol.CodeSessionEnded, "原会话已结束")
+	}
 	entries := map[int]taskEntry{}
 	for _, entry := range e.session.Tasks {
 		entries[entry.TaskID] = entry
 	}
-	epochSession := e.session != nil && e.session.Epoch == session.Epoch
 	e.mu.Unlock()
-	if !epochSession {
-		return nil, protocol.NewError(409, protocol.CodeSessionEnded, "原会话已结束")
-	}
 	var targets []closeTarget
 	if req.Target.UseTask {
 		var found *device.Task
@@ -257,15 +283,58 @@ func (e *Engine) freezeCloseTargets(ctx context.Context, session *sessionState,
 	return targets, nil
 }
 
-// revalidateCloseTarget proves the exact task is still live on the session
-// display, still managed by this session and not protected by a transfer.
-func (e *Engine) revalidateCloseTarget(work *workState, session *sessionState, target closeTarget) *protocol.APIError {
+type closeIdentityKey struct {
+	pkg  string
+	user int
+}
+
+func (e *Engine) readCloseIdentities(work *workState, targets []closeTarget) (map[closeIdentityKey]device.PackageIdentity, device.BootIdentity) {
+	identities := make(map[closeIdentityKey]device.PackageIdentity)
+	// Supplemental identity reads leave the ordinary work budget available
+	// for the window removals and recents verification.
+	ctx, cancel := context.WithDeadline(work.Ctx, work.Deadline.Add(-e.cfg.WorkTimeout))
+	defer cancel()
+	var execution device.BootIdentity
+	for _, target := range targets {
+		task := target.task
+		if target.ownership != TaskOwned || !task.HasUserID {
+			continue
+		}
+		if ctx.Err() != nil || e.workRevoked(work) {
+			break
+		}
+		if len(identities) == 0 {
+			var err *protocol.APIError
+			execution, err = e.transferIdentity(ctx)
+			if err != nil {
+				break
+			}
+		}
+		key := closeIdentityKey{task.Package, task.UserID}
+		if _, seen := identities[key]; seen {
+			continue
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		identity, err := e.dev.PackageIdentity(ctx, task.Package, task.UserID)
+		if err != nil || ctx.Err() != nil || !validKillPackageIdentity(identity, task.Package, task.UserID) {
+			identity = device.PackageIdentity{}
+		}
+		identities[key] = identity
+	}
+	return identities, execution
+}
+
+// revalidateCloseTarget verifies the existing removal guards. It separately
+// reports whether the Android user is still known and unchanged for eligibility.
+func (e *Engine) revalidateCloseTarget(work *workState, session *sessionState, target closeTarget) (bool, *protocol.APIError) {
 	if e.workRevoked(work) {
-		return protocol.NewError(409, protocol.CodeStopped, "任务关闭已撤销")
+		return false, protocol.NewError(409, protocol.CodeStopped, "任务关闭已撤销")
 	}
 	all, err := e.dev.TaskList(work.Ctx)
 	if err != nil {
-		return protocol.NewError(503, protocol.CodeDeviceUnavailable, "无法读取任务清单")
+		return false, protocol.NewError(503, protocol.CodeDeviceUnavailable, "无法读取任务清单")
 	}
 	var found *device.Task
 	for i := range all {
@@ -274,18 +343,18 @@ func (e *Engine) revalidateCloseTarget(work *workState, session *sessionState, t
 		}
 	}
 	if found == nil || found.DisplayID != session.Display.ID || found.Package != target.task.Package {
-		return protocol.NewError(409, protocol.CodeTaskNotTracked, "任务已不在本会话显示屏")
+		return false, protocol.NewError(409, protocol.CodeTaskNotTracked, "任务已不在本会话显示屏")
 	}
 	e.mu.Lock()
 	entry := e.sessionTaskLocked(e.session, target.task.TaskID)
 	protected := e.transferProtectsLocked(target.task.TaskID)
 	e.mu.Unlock()
 	if entry == nil || (entry.Ownership != TaskOwned && entry.Ownership != TaskBorrowed) {
-		return protocol.NewError(409, protocol.CodeTaskNotTracked, "任务已不再受本会话管理")
+		return false, protocol.NewError(409, protocol.CodeTaskNotTracked, "任务已不再受本会话管理")
 	}
 	if protected {
-		return protocol.NewError(409, protocol.CodeTaskLifecycleBusy,
+		return false, protocol.NewError(409, protocol.CodeTaskLifecycleBusy,
 			"任务仍有未确认的迁移责任")
 	}
-	return nil
+	return target.task.HasUserID && found.HasUserID && found.UserID == target.task.UserID, nil
 }

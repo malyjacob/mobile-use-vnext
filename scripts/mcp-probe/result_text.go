@@ -1512,9 +1512,11 @@ var appTextFields = map[string]appTextFieldKind{
 	"kind":               appTextFieldToken,
 	"ownership":          appTextFieldToken,
 	"foreground_restore": appTextFieldToken,
+	"package_state":      appTextFieldToken,
 	"captured_at":        appTextFieldToken,
 	"package":            appTextFieldString,
 	"task_id":            appTextFieldInt,
+	"android_user_id":    appTextFieldInt,
 	"source_task_id":     appTextFieldInt,
 	"display_id":         appTextFieldInt,
 	"source_display_id":  appTextFieldInt,
@@ -1527,6 +1529,8 @@ var appTextFields = map[string]appTextFieldKind{
 	"items":              appTextFieldArray,
 	"tasks":              appTextFieldArray,
 	"foreground":         appTextFieldObject,
+	"target_task_ids":    appTextFieldIntArray,
+	"remaining_task_ids": appTextFieldIntArray,
 	"target_pids":        appTextFieldIntArray,
 	"killed_pids":        appTextFieldIntArray,
 	"remaining_pids":     appTextFieldIntArray,
@@ -1542,6 +1546,9 @@ var (
 	}
 	appForegroundRestoreSet = map[string]bool{
 		"not_requested": true, "confirmed": true, "unconfirmed": true,
+	}
+	appPackageStateSet = map[string]bool{
+		"stopped_at_check": true, "still_present": true, "unknown": true,
 	}
 )
 
@@ -1604,6 +1611,10 @@ func validateAppTextValue(name string, kind appTextFieldKind, rawValue string, v
 		case "foreground_restore":
 			if !appForegroundRestoreSet[text] {
 				return failf("text_result_app_foreground_restore_invalid", field("state", text))
+			}
+		case "package_state":
+			if !appPackageStateSet[text] {
+				return failf("text_result_app_package_state_invalid", field("package_state", text))
 			}
 		}
 	case appTextFieldString:

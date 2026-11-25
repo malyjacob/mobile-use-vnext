@@ -76,15 +76,21 @@ type appView struct {
 	Complete *bool
 
 	// kill
-	SourceTaskID     *int
-	TargetPIDs       []int
-	KilledPIDs       []int
-	RemainingPIDs    []int
-	HasTargetPIDs    bool
-	HasKilledPIDs    bool
-	HasRemainingPIDs bool
-	Restarted        *bool
-	HasRestarted     bool
+	AndroidUserID       *int
+	SourceTaskID        *int
+	TargetTaskIDs       []int
+	RemainingTaskIDs    []int
+	TargetPIDs          []int
+	KilledPIDs          []int
+	RemainingPIDs       []int
+	HasTargetTaskIDs    bool
+	HasRemainingTaskIDs bool
+	HasTargetPIDs       bool
+	HasKilledPIDs       bool
+	HasRemainingPIDs    bool
+	Restarted           *bool
+	HasRestarted        bool
+	PackageState        string
 }
 
 // UnmarshalJSONFrom records member presence while decoding the typed app
@@ -180,10 +186,19 @@ func (a *appView) load(raw []byte) error {
 		if a.Package, _, err = rawStringField(members, "package"); err != nil {
 			return err
 		}
+		if a.AndroidUserID, _, err = rawIntPtrField(members, "android_user_id"); err != nil {
+			return err
+		}
 		if a.SourceTaskID, _, err = rawIntPtrField(members, "source_task_id"); err != nil {
 			return err
 		}
+		if a.TargetTaskIDs, a.HasTargetTaskIDs, err = rawIntSliceField(members, "target_task_ids"); err != nil {
+			return err
+		}
 		if a.DisplayID, _, err = rawIntPtrField(members, "display_id"); err != nil {
+			return err
+		}
+		if a.RemainingTaskIDs, a.HasRemainingTaskIDs, err = rawIntSliceField(members, "remaining_task_ids"); err != nil {
 			return err
 		}
 		if a.TargetPIDs, a.HasTargetPIDs, err = rawIntSliceField(members, "target_pids"); err != nil {
@@ -196,6 +211,9 @@ func (a *appView) load(raw []byte) error {
 			return err
 		}
 		if a.Restarted, a.HasRestarted, err = rawNullableBoolField(members, "restarted"); err != nil {
+			return err
+		}
+		if a.PackageState, _, err = rawStringField(members, "package_state"); err != nil {
 			return err
 		}
 	}

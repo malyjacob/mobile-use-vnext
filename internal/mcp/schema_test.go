@@ -20,8 +20,9 @@ import (
 const compatibilityProtocolVersion = "2025-11-25"
 
 // baselineDiscoveryBytes caps the instructions plus the complete tools/list
-// JSON. Contract 30 adds observation change and hint guidance to this budget.
-const baselineDiscoveryBytes = 38200
+// JSON. Contract 31 adds the app seven-branch tolerance matrix and the
+// package-state kill result fields to this budget.
+const baselineDiscoveryBytes = 40000
 
 // TestTreeTextGuideStatesTriStateOmission pins the shared tree legend to the
 // complete-node defaults and the different set semantics.
@@ -681,6 +682,43 @@ func TestActGuidanceDropsRetiredDetailKeys(t *testing.T) {
 	for name, text := range surfaces {
 		if containsRetiredActDetailKey(text) {
 			t.Errorf("%s retains a retired act detail key", name)
+		}
+	}
+}
+
+// TestAppDescriptionPublishesBranchMatrix pins the published seven-branch
+// matrix row by row, including that every row occupies its own line and that
+// the tolerance sentence names the declared-member set without claiming the
+// redundant members are forwarded.
+func TestAppDescriptionPublishesBranchMatrix(t *testing.T) {
+	description := testDefinitionByName(t, "app").description
+	rows := []string{
+		"find｜无｜query｜否",
+		"list｜reference｜scope、app｜否",
+		"open｜reference、target.app｜无｜是",
+		"claim｜reference、target｜无｜是",
+		"handoff｜reference、target｜restore_foreground｜是",
+		"close｜reference、target｜allow_borrowed｜是",
+		"kill｜reference、target.task_id 或 target.app｜allow_stop_playback｜是",
+	}
+	for _, row := range rows {
+		if got := strings.Count(description, row); got != 1 {
+			t.Errorf("app description carries matrix row %q %d times, want 1", row, got)
+		}
+		if !strings.Contains(description, "\n"+row+"\n") {
+			t.Errorf("app description does not keep matrix row %q on its own line", row)
+		}
+	}
+	for _, fragment := range []string{
+		"七个分支都接受其余已声明顶层成员，但只按上表生效；冗余成员不进入服务端请求。",
+		"list 必须 reference",
+		"target.task_id 或 target.app",
+		"一次 force-stop",
+		"package_state",
+		"MCP 摘要按执行、任务/归属、进程、前台观察顺序投影",
+	} {
+		if !strings.Contains(description, fragment) {
+			t.Errorf("app description lacks %q", fragment)
 		}
 	}
 }

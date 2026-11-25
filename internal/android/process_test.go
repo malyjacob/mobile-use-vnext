@@ -13,15 +13,15 @@ import (
 
 func TestPackageProcessesMainAndRemote(t *testing.T) {
 	d := newStubDevice(t, "processes")
-	got, err := d.PackageProcesses(t.Context(), "com.example.app")
+	got, err := d.PackageProcesses(t.Context(), "com.example.app", 0)
 	if err != nil {
 		t.Fatalf("PackageProcesses: %v", err)
 	}
 	if !got.Known || got.ReadFailed {
 		t.Fatalf("known=%v read_failed=%v", got.Known, got.ReadFailed)
 	}
-	if got.UserID != 10140 || got.BootID != testBootID {
-		t.Fatalf("uid=%d boot=%q", got.UserID, got.BootID)
+	if got.AppUID != 10140 || got.AndroidUserID != 0 || got.BootID != testBootID {
+		t.Fatalf("app uid=%d user=%d boot=%q", got.AppUID, got.AndroidUserID, got.BootID)
 	}
 	if len(got.Instances) != 2 {
 		t.Fatalf("instances=%+v", got.Instances)
@@ -38,7 +38,7 @@ func TestPackageProcessesMainAndRemote(t *testing.T) {
 
 func TestPackageProcessesEmptyIsKnown(t *testing.T) {
 	d := newStubDevice(t, "processes-empty")
-	got, err := d.PackageProcesses(t.Context(), "com.example.app")
+	got, err := d.PackageProcesses(t.Context(), "com.example.app", 0)
 	if err != nil {
 		t.Fatalf("PackageProcesses: %v", err)
 	}
@@ -51,8 +51,8 @@ func TestPackageProcessesEmptyIsKnown(t *testing.T) {
 	if len(got.Instances) != 0 {
 		t.Fatalf("instances=%+v", got.Instances)
 	}
-	if got.UserID != 10140 || got.BootID != testBootID {
-		t.Fatalf("uid=%d boot=%q", got.UserID, got.BootID)
+	if got.AppUID != 10140 || got.AndroidUserID != 0 || got.BootID != testBootID {
+		t.Fatalf("app uid=%d user=%d boot=%q", got.AppUID, got.AndroidUserID, got.BootID)
 	}
 }
 
@@ -63,11 +63,12 @@ func TestPackageProcessesReadFailuresAreUnknown(t *testing.T) {
 	}{
 		{"package uid unreadable", "processes-unreadable"},
 		{"start ticks need an unavailable root", "processes-no-root"},
+		{"installed identity unreadable", "package-processes-identity-unknown"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			d := newStubDevice(t, tc.transcript)
-			got, err := d.PackageProcesses(t.Context(), "com.example.app")
+			got, err := d.PackageProcesses(t.Context(), "com.example.app", 0)
 			if err != nil {
 				t.Fatalf("a failed read is a fact, not a transport error: %v", err)
 			}
@@ -83,7 +84,7 @@ func TestPackageProcessesReadFailuresAreUnknown(t *testing.T) {
 
 func TestPackageProcessesRootFallback(t *testing.T) {
 	d := newStubDevice(t, "processes-root")
-	got, err := d.PackageProcesses(t.Context(), "com.example.app")
+	got, err := d.PackageProcesses(t.Context(), "com.example.app", 0)
 	if err != nil {
 		t.Fatalf("PackageProcesses: %v", err)
 	}
@@ -96,14 +97,53 @@ func TestPackageProcessesRootFallback(t *testing.T) {
 	}
 }
 
+// TestPackageProcessesFiltersByAndroidUser proves the process inventory is bound
+// to the requested user: the same package under user 0 shares the application id
+// but not the full uid, so its processes must never be reported.
+func TestPackageProcessesFiltersByAndroidUser(t *testing.T) {
+	d := newStubDevice(t, "package-processes-user10")
+	got, err := d.PackageProcesses(t.Context(), "com.example.app", 10)
+	if err != nil {
+		t.Fatalf("PackageProcesses: %v", err)
+	}
+	if !got.Known || got.ReadFailed {
+		t.Fatalf("known=%v read_failed=%v", got.Known, got.ReadFailed)
+	}
+	if got.AndroidUserID != 10 || got.AppUID != 10317 {
+		t.Fatalf("user=%d app uid=%d", got.AndroidUserID, got.AppUID)
+	}
+	if len(got.Instances) != 2 {
+		t.Fatalf("instances=%+v", got.Instances)
+	}
+	if got.Instances[0].PID != 101 || got.Instances[1].PID != 202 {
+		t.Fatalf("a user-0 process leaked into the user-10 inventory: %+v", got.Instances)
+	}
+	if got.Instances[0].StartTicks != 98765 || got.Instances[1].StartTicks != 98800 {
+		t.Fatalf("instances=%+v", got.Instances)
+	}
+}
+
 func TestPackageProcessesRejectsInvalidPackage(t *testing.T) {
 	d := newStubDevice(t, "processes")
-	got, err := d.PackageProcesses(t.Context(), "com.example app")
+	got, err := d.PackageProcesses(t.Context(), "com.example app", 0)
 	if CodeOf(err) != CodeInvalidArgs {
 		t.Fatalf("code=%q err=%v", CodeOf(err), err)
 	}
 	if got.Known || !got.ReadFailed {
 		t.Fatalf("known=%v read_failed=%v", got.Known, got.ReadFailed)
+	}
+}
+
+func TestPackageProcessesRejectsInvalidUser(t *testing.T) {
+	d := newStubDevice(t, "processes")
+	for _, user := range []int{-1, -100000} {
+		got, err := d.PackageProcesses(t.Context(), "com.example.app", user)
+		if CodeOf(err) != CodeInvalidArgs {
+			t.Fatalf("user %d: code=%q err=%v", user, CodeOf(err), err)
+		}
+		if got.AndroidUserID != user || got.Known || !got.ReadFailed {
+			t.Fatalf("user %d: %+v", user, got)
+		}
 	}
 }
 
@@ -356,59 +396,6 @@ func TestParseProcessListing(t *testing.T) {
 				if got[index] != tc.want[index] {
 					t.Fatalf("row %d=%+v want=%+v", index, got[index], tc.want[index])
 				}
-			}
-		})
-	}
-}
-
-func TestParsePackageUID(t *testing.T) {
-	cases := []struct {
-		name   string
-		output string
-		pkg    string
-		uid    int
-		ok     bool
-	}{
-		{
-			name:   "exact record",
-			output: "package:com.example.app uid:10140\npackage:com.example.other uid:10141\n",
-			pkg:    "com.example.app",
-			uid:    10140,
-			ok:     true,
-		},
-		{
-			name:   "trailing gids",
-			output: "package:com.example.app uid:10140 gids:[3003,9997]\n",
-			pkg:    "com.example.app",
-			uid:    10140,
-			ok:     true,
-		},
-		{
-			name:   "substring package is not the target",
-			output: "package:com.example.app.debug uid:10141\n",
-			pkg:    "com.example.app",
-		},
-		{
-			name:   "two uids are ambiguous",
-			output: "package:com.example.app uid:10140\npackage:com.example.app uid:10141\n",
-			pkg:    "com.example.app",
-		},
-		{
-			name:   "system uid is not an application",
-			output: "package:com.example.app uid:1000\n",
-			pkg:    "com.example.app",
-		},
-		{
-			name:   "no record",
-			output: "package records unavailable\n",
-			pkg:    "com.example.app",
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			uid, ok := parsePackageUID(tc.output, tc.pkg)
-			if ok != tc.ok || uid != tc.uid {
-				t.Fatalf("uid=%d ok=%v want=%d/%v", uid, ok, tc.uid, tc.ok)
 			}
 		})
 	}

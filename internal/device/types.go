@@ -204,6 +204,11 @@ type Input struct {
 // Task is one live leaf task fact from the activity container listing. RootID is
 // the containing root task id; zero means the source did not report it and the
 // task must not be moved.
+//
+// UserID is the Android user the task belongs to; user 0 is a valid user, so
+// HasUserID records whether the listing actually named one trustworthy user.
+// When a leaf and its root segment disagree, the task is kept but HasUserID is
+// false: the value is then unproven evidence, never a command argument.
 type Task struct {
 	TaskID    int
 	RootID    int
@@ -211,6 +216,19 @@ type Task struct {
 	Package   string
 	Component string
 	Visible   bool
+	UserID    int
+	HasUserID bool
+}
+
+// TaskSnapshot is one activity-container inventory plus its completeness fact.
+// Complete is true only when every task line and every containing root segment
+// was structurally parsed. A caller must not treat an incomplete snapshot as a
+// full enumeration: a task that could not be read is missing from Tasks rather
+// than guessed. Unknown leaves are retained here with an empty Package so the
+// engine can keep their task identity without matching a package.
+type TaskSnapshot struct {
+	Tasks    []Task
+	Complete bool
 }
 
 // TaskMoveResult is one `am display move-stack` dispatch fact. The adapter
@@ -239,15 +257,53 @@ type ProcessInstance struct {
 	Name       string
 }
 
-// PackageProcesses is one bounded process inventory of a package. Known is
-// false when the read could not be completed; an empty known inventory is a
-// proven absence, not a failed read.
+// PackageProcesses is one bounded process inventory of one package for one
+// Android user. Known is false when the read could not be completed; an empty
+// known inventory is a proven absence, not a failed read.
+//
+// AppUID is the application id (a full Linux UID modulo the per-user range), not
+// the full uid and never a command user argument; AndroidUserID is the user the
+// listing was filtered by. The two are deliberately separate fields: the same
+// package has a different full uid per user, so a caller must never reuse one as
+// the other.
 type PackageProcesses struct {
-	Known      bool
-	UserID     int
-	BootID     string
-	Instances  []ProcessInstance
-	ReadFailed bool
+	Known         bool
+	AppUID        int
+	AndroidUserID int
+	BootID        string
+	Instances     []ProcessInstance
+	ReadFailed    bool
+}
+
+// PackageIdentity is the installed-package identity of one package for one
+// Android user, read from the package manager and cross-checked against the
+// per-user UID list. Known is false for every unreadable or ambiguous source;
+// an identity is never assembled from partial evidence.
+//
+// AppID is the application id (for example 10317); AppUID is the full Linux uid
+// (AndroidUserID*100000 + AppID, for example 10317 for user 0 or 1010317 for
+// user 10). FirstInstallTime is the device string with surrounding whitespace
+// removed, and SignatureHash is the first hash token of the current signature
+// list. All four are compared as opaque evidence: the adapter never interprets
+// them.
+type PackageIdentity struct {
+	Known            bool
+	Package          string
+	AndroidUserID    int
+	AppID            int
+	AppUID           int
+	FirstInstallTime string
+	SignatureHash    string
+}
+
+// ForceStopResult is one package-level force-stop dispatch fact. Receipt is the
+// command boundary; ExitCode is only meaningful when HasExitCode is set, which
+// happens only when the command completed (terminated) and its device exit
+// status is therefore the command's own.
+type ForceStopResult struct {
+	Receipt     DispatchReceipt
+	ExitCode    int
+	HasExitCode bool
 }
 
 // MediaState is the device-wide media playback fact used by the kill guard.
