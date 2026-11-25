@@ -1,6 +1,7 @@
 # 提案：动作树变化事实、加载与媒体视觉分类及观察级 snap/wait_for 提示（契约 30）
 
-状态：提案，未实现。
+状态：已实现（实现提交 `31019462c98bb57d641caacd21aec0ad7dcf30fc`，`2026-11-25`）。
+实现与验证记录：[observation-change-loading-and-snap-hint.md](../../verification/observation-change-loading-and-snap-hint.md)。
 基线提交：`2628b106a14b661479236f7045deb43552f0ecd8`（分支 `master`，`2026-11-25`）。
 适用范围：`act` 动作后树变化客观判定（`internal/engine`）、页面加载/媒体面/稀疏树视觉分类（`internal/observation`）、观察级只读提示 `tree_change`/`hint` 与 `visual` 扩充（`internal/protocol`、`internal/engine`）、MCP `result v4` `obs` 行投影与发现说明/工具描述（`internal/mcp`）、独立探针（`scripts/mcp-probe`）、正式文档（`docs/`）、整组发布交付以及 GitHub Issue `#44`/`#45`/`#46` 推送与关闭收口。
 影响范围：`release/versions.json`、4 个生成版本文件、`internal/protocol`、`internal/observation`、`internal/engine`、`internal/mcp`、`scripts/mcp-probe`、`README.md` 及相关 `docs/` 正式文档。
@@ -44,16 +45,16 @@
 
 | 既有链路与行为 | 源码与文档位置（基线 `2628b10`） |
 | --- | --- |
-| 层级 XML 仅提供节点属性（含 `ClassName`/`Bounds`/`Visible`）与 `Foreground`，不含 `AccessibilityWindowInfo.type`，且默认采集不含像素对比 | [`hierarchy.go`](../../internal/android/hierarchy.go#L200-L232)、[`device/types.go`](../../internal/device/types.go#L79-L128) |
-| Stage 1 公开树构造中，无文字/无动作/无非默认状态的 `ProgressBar`/`SurfaceView`/`TextureView`/`VideoView` 因 `hasSemantics == false` 不进入公开树，但完整保存在 `device.Capture.Nodes` 中 | [`build.go`](../../internal/observation/build.go#L237-L390) |
-| `act` 认领时已持有不可变前置观察 `obs`（含 `Foreground`/`Screen`/`Compact`/`Projection.Tree`），重验读取 `fresh`，派发确认后经 `captureAndPublish` 发布后观察，除 `scroll` 算 `effect` 外不对其他动作计算前后树变化；统一 `app` 后观察入口在 `app.go`，`act` `text` 的 `partial` 交付路径在 `text_partial.go` | [`act.go`](../../internal/engine/act.go#L82-L160)、[`act.go`](../../internal/engine/act.go#L207-L249)、[`act.go`](../../internal/engine/act.go#L622-L666)、[`app.go`](../../internal/engine/app.go#L208)、[`text_partial.go`](../../internal/engine/text_partial.go#L35)、[`text_partial.go`](../../internal/engine/text_partial.go#L92) |
-| `settleCapture` 已在 `start`/`act`/`app` 变更路径产出 `quality`（`stable`/`unstable`/`unknown`），并在 `captureAndPublish` 将其传入 `publishTreeAttempt`；`result v4` 文本显式省略整份 `observation.quality` | [`settle.go`](../../internal/engine/settle.go#L45-L51)、[`settle.go`](../../internal/engine/settle.go#L250-L279)、[`settle.go`](../../internal/engine/settle.go#L298-L308)、[`capture.go`](../../internal/engine/capture.go#L174-L266)、[`result_text.go`](../../internal/mcp/result_text.go#L134-L143) |
-| `wait_for(stable=false)` 第 2 帧及以后首次命中条件（`samples >= 2` 且 `consecutive < StableFrames`）立即以 `StopReason=condition` 早停，产出 `Quality{State:"unstable", StopReason:"condition"}` | [`wait_for.go`](../../internal/engine/wait_for.go#L292-L325)、[`wait_for.go`](../../internal/engine/wait_for.go#L552-L570) |
-| 多基线池（`1主+4副`）在 `publishTreeAttempt` 中跨历史基线选最短 `tree v5` delta；`publicCandidate` 在每个基线候选上重复调用 `InferVisualHint(projection.Tree, cap.Foreground.State)`；`observationVisual` 对全部 `visual` 种类统一做 `delta` 同态省略；`ReadDelta.IsEmpty()` 已存在（不判空接收者） | [`capture.go`](../../internal/engine/capture.go#L299-L586)、[`capture.go`](../../internal/engine/capture.go#L1061-L1114)、[`capture.go`](../../internal/engine/capture.go#L1276-L1310)、[`read_tree.go`](../../internal/protocol/read_tree.go#L887-L890) |
-| `InferVisualHint` 现仅支持 `image_heavy(<pct>%)` 与 `sparse_tree`（阈值 `textRunes < 20 && interactive < 5`），未读取 `Capture.Nodes` 类名与 `quality`；`equalReadNode` 已实现完整 `ReadNode` 字段比较（含 `Ref`），`ReadEqual` 先展开历史 `Chain` 再比较 | [`visual.go`](../../internal/observation/visual.go#L16-L93)、[`visual.go`](../../internal/observation/visual.go#L158-L210)、[`visual.go`](../../internal/observation/visual.go#L284-L351)、[`read.go`](../../internal/observation/read.go#L661-L748) |
-| `protocol.Recovery` 为 6 元协议状态机入口（`retry`/`observe`/`status`/`end`/`user`/`update`），常规成功固定返回 `nil`，JSON `reference` 仅为抽象词 `"O"|"P"|"none"`；`target_changed` 认领后拒发免费交付新 `O` 并输出 `recovery entry=retry ref=<新O>` | [`responses.go`](../../internal/protocol/responses.go#L602-L642)、[`recovery.go`](../../internal/engine/recovery.go#L57-L150)、[`delivery.go`](../../internal/engine/delivery.go#L25-L74)、[`result_text.go`](../../internal/mcp/result_text.go#L1524-L1562) |
-| `Observation` 现有可选 `Visual string` 字段；`decode_response.go` 对 `observation.visual` 拒收显式 `null` 与空串；`result_text.go`、`result_text_test.go` 与 `result_manifest_test.go` 强制全字段反射登记与反向解码；`mcp-probe` 独立验证 `obs` 行列序、token 合法性与无树禁现约束 | [`responses.go`](../../internal/protocol/responses.go#L312-L456)、[`decode_response.go`](../../internal/protocol/decode_response.go#L356-L404)、[`result_text.go`](../../internal/mcp/result_text.go#L33-L143)、[`result_text.go`](../../internal/mcp/result_text.go#L813-L967)、[`result_text_test.go`](../../internal/mcp/result_text_test.go#L868-L945)、[`result_manifest_test.go`](../../internal/mcp/result_manifest_test.go#L97-L218)、[`result_v4.go`](../../scripts/mcp-probe/result_v4.go#L1034-L1183)、[`tree_body_consistency.go`](../../scripts/mcp-probe/tree_body_consistency.go#L18-L66) |
-| MCP 发现说明 `treeTextGuide`、`callerGuidance`、`act`/`snap` 描述当前无 `change`/`hint` 与 `snap`/`wait_for` 分流规则；`baselineDiscoveryBytes = 37500` 在契约 29 实测总量已达 `37498 B`（仅余 2 B），且门禁严禁发现文本出现 `quality`/`unstable`/`effect` 等内部词 | [`schema.go`](../../internal/mcp/schema.go#L28-L158)、[`schema.go`](../../internal/mcp/schema.go#L258-L280)、[`schema.go`](../../internal/mcp/schema.go#L342-L375)、[`schema_test.go`](../../internal/mcp/schema_test.go#L22-L31)、[`schema_test.go`](../../internal/mcp/schema_test.go#L134-L200)、[`schema_test.go`](../../internal/mcp/schema_test.go#L401-L422)、[`catalog_test.go`](../../internal/mcp/catalog_test.go#L29-L47)、[`catalog.go`](../../scripts/mcp-probe/catalog.go#L74-L108) |
+| 层级 XML 仅提供节点属性（含 `ClassName`/`Bounds`/`Visible`）与 `Foreground`，不含 `AccessibilityWindowInfo.type`，且默认采集不含像素对比 | [`hierarchy.go`](../../../internal/android/hierarchy.go#L200-L232)、[`device/types.go`](../../../internal/device/types.go#L79-L128) |
+| Stage 1 公开树构造中，无文字/无动作/无非默认状态的 `ProgressBar`/`SurfaceView`/`TextureView`/`VideoView` 因 `hasSemantics == false` 不进入公开树，但完整保存在 `device.Capture.Nodes` 中 | [`build.go`](../../../internal/observation/build.go#L237-L390) |
+| `act` 认领时已持有不可变前置观察 `obs`（含 `Foreground`/`Screen`/`Compact`/`Projection.Tree`），重验读取 `fresh`，派发确认后经 `captureAndPublish` 发布后观察，除 `scroll` 算 `effect` 外不对其他动作计算前后树变化；统一 `app` 后观察入口在 `app.go`，`act` `text` 的 `partial` 交付路径在 `text_partial.go` | [`act.go`](../../../internal/engine/act.go#L82-L160)、[`act.go`](../../../internal/engine/act.go#L207-L249)、[`act.go`](../../../internal/engine/act.go#L622-L666)、[`app.go`](../../../internal/engine/app.go#L208)、[`text_partial.go`](../../../internal/engine/text_partial.go#L35)、[`text_partial.go`](../../../internal/engine/text_partial.go#L92) |
+| `settleCapture` 已在 `start`/`act`/`app` 变更路径产出 `quality`（`stable`/`unstable`/`unknown`），并在 `captureAndPublish` 将其传入 `publishTreeAttempt`；`result v4` 文本显式省略整份 `observation.quality` | [`settle.go`](../../../internal/engine/settle.go#L45-L51)、[`settle.go`](../../../internal/engine/settle.go#L250-L279)、[`settle.go`](../../../internal/engine/settle.go#L298-L308)、[`capture.go`](../../../internal/engine/capture.go#L174-L266)、[`result_text.go`](../../../internal/mcp/result_text.go#L134-L143) |
+| `wait_for(stable=false)` 第 2 帧及以后首次命中条件（`samples >= 2` 且 `consecutive < StableFrames`）立即以 `StopReason=condition` 早停，产出 `Quality{State:"unstable", StopReason:"condition"}` | [`wait_for.go`](../../../internal/engine/wait_for.go#L292-L325)、[`wait_for.go`](../../../internal/engine/wait_for.go#L552-L570) |
+| 多基线池（`1主+4副`）在 `publishTreeAttempt` 中跨历史基线选最短 `tree v5` delta；`publicCandidate` 在每个基线候选上重复调用 `InferVisualHint(projection.Tree, cap.Foreground.State)`；`observationVisual` 对全部 `visual` 种类统一做 `delta` 同态省略；`ReadDelta.IsEmpty()` 已存在（不判空接收者） | [`capture.go`](../../../internal/engine/capture.go#L299-L586)、[`capture.go`](../../../internal/engine/capture.go#L1061-L1114)、[`capture.go`](../../../internal/engine/capture.go#L1276-L1310)、[`read_tree.go`](../../../internal/protocol/read_tree.go#L887-L890) |
+| `InferVisualHint` 现仅支持 `image_heavy(<pct>%)` 与 `sparse_tree`（阈值 `textRunes < 20 && interactive < 5`），未读取 `Capture.Nodes` 类名与 `quality`；`equalReadNode` 已实现完整 `ReadNode` 字段比较（含 `Ref`），`ReadEqual` 先展开历史 `Chain` 再比较 | [`visual.go`](../../../internal/observation/visual.go#L16-L93)、[`visual.go`](../../../internal/observation/visual.go#L158-L210)、[`visual.go`](../../../internal/observation/visual.go#L284-L351)、[`read.go`](../../../internal/observation/read.go#L661-L748) |
+| `protocol.Recovery` 为 6 元协议状态机入口（`retry`/`observe`/`status`/`end`/`user`/`update`），常规成功固定返回 `nil`，JSON `reference` 仅为抽象词 `"O"|"P"|"none"`；`target_changed` 认领后拒发免费交付新 `O` 并输出 `recovery entry=retry ref=<新O>` | [`responses.go`](../../../internal/protocol/responses.go#L602-L642)、[`recovery.go`](../../../internal/engine/recovery.go#L57-L150)、[`delivery.go`](../../../internal/engine/delivery.go#L25-L74)、[`result_text.go`](../../../internal/mcp/result_text.go#L1524-L1562) |
+| `Observation` 现有可选 `Visual string` 字段；`decode_response.go` 对 `observation.visual` 拒收显式 `null` 与空串；`result_text.go`、`result_text_test.go` 与 `result_manifest_test.go` 强制全字段反射登记与反向解码；`mcp-probe` 独立验证 `obs` 行列序、token 合法性与无树禁现约束 | [`responses.go`](../../../internal/protocol/responses.go#L312-L456)、[`decode_response.go`](../../../internal/protocol/decode_response.go#L356-L404)、[`result_text.go`](../../../internal/mcp/result_text.go#L33-L143)、[`result_text.go`](../../../internal/mcp/result_text.go#L813-L967)、[`result_text_test.go`](../../../internal/mcp/result_text_test.go#L868-L945)、[`result_manifest_test.go`](../../../internal/mcp/result_manifest_test.go#L97-L218)、[`result_v4.go`](../../../scripts/mcp-probe/result_v4.go#L1034-L1183)、[`tree_body_consistency.go`](../../../scripts/mcp-probe/tree_body_consistency.go#L18-L66) |
+| MCP 发现说明 `treeTextGuide`、`callerGuidance`、`act`/`snap` 描述当前无 `change`/`hint` 与 `snap`/`wait_for` 分流规则；`baselineDiscoveryBytes = 37500` 在契约 29 实测总量已达 `37498 B`（仅余 2 B），且门禁严禁发现文本出现 `quality`/`unstable`/`effect` 等内部词 | [`schema.go`](../../../internal/mcp/schema.go#L28-L158)、[`schema.go`](../../../internal/mcp/schema.go#L258-L280)、[`schema.go`](../../../internal/mcp/schema.go#L342-L375)、[`schema_test.go`](../../../internal/mcp/schema_test.go#L22-L31)、[`schema_test.go`](../../../internal/mcp/schema_test.go#L134-L200)、[`schema_test.go`](../../../internal/mcp/schema_test.go#L401-L422)、[`catalog_test.go`](../../../internal/mcp/catalog_test.go#L29-L47)、[`catalog.go`](../../../scripts/mcp-probe/catalog.go#L74-L108) |
 
 ### 1.3 为什么直觉会出错
 
@@ -436,20 +437,31 @@ act(O_prev, op)
 
 ---
 
-## 11. 实现结果（归档时补写）
+## 11. 实现结果
 
-实现提交：`<hash>`。实现与验证记录：`../../verification/observation-change-loading-and-snap-hint.md`
-（本节在归档移动之后补写，届时文件在 `implemented/` 下，故链接比新建时多一层）。
+实现提交：`31019462c98bb57d641caacd21aec0ad7dcf30fc`（`2026-11-25`，分支 `master`）。
+实现与验证记录：[observation-change-loading-and-snap-hint.md](../../verification/observation-change-loading-and-snap-hint.md)。
 
 ### 11.1 已落地
 
 | 提案条目 | 落点 |
 | --- | --- |
+| 协议字段、编码顺序与闭集校验（§4.4.1、§6.1） | `internal/protocol/responses.go`：`Observation.TreeChange`/`Hint`、编码顺序 `visual → tree_change → hint → tree`、`TreeChangeUnchanged/DetailOnly/MatchedBase`、`HintSnap/HintWaitFor`、`ValidObservationVisual/ValidTreeChange/ValidObservationHint`；`internal/protocol/decode_response.go`：三字段可选非空解码并拒绝显式 `null` 与空串；`internal/protocol/observation_classification_test.go` |
+| 视觉分类四分支与阈值（§4.2、§6.2） | `internal/observation/visual.go`：`ClassifyVisual` 优先级 `loading → image_heavy → media_surface → sparse_tree`、`ProgressBar`/`SeekBar` 类名判定、媒体面后缀/5% 碎片/16 个上限/精确并集、阈值 80/8、40/8、25、80/10、30/7 与 `InferVisualHint` 兼容入口；`internal/observation/visual_test.go` |
+| 忽略 `ref` 的树内容判等（§4.1.2、§6.1） | `internal/observation/read.go`：`EqualCompactContent`（`View`、忽略 `Ref`、历史 `Chain` 等价展开、无链零分配快路径）、`EqualPublicTreeContent`；`internal/observation/read_content_equal_test.go` |
+| 引擎锁外比较与锁内派生（§5.1、§5.2） | `internal/engine/capture.go`：`publishTreeAttempt`/`captureAndPublish` 新增 `previousObs`、锁外 `ClassifyVisual` 与 `sameForeground`/`sameScreenGeometry` + 内容判等、锁内 `observationVisual`（`loading` 不省略）、`observationHint`、`tree_change` 四态判定与 `observationPublicLocked` 三字段投影；`internal/engine/act.go` 仅常规成功传被消费 `obs`，`observe`/`start`/`wait_for`/`app`/`act.delivery`/`text` partial 全传 `nil`；`tree_change_test.go`、`observation_hint_test.go`、`wait_for_test.go` |
+| result v4、MCP 说明与独立探针（§4.4.2、§4.4.3、§6.1） | `internal/mcp/result_text.go`：`visual` 后新增 `change=`/`hint=`、不可打印 token 的 `json v1` 回退与跳过表、v3/v4 反射登记；`internal/mcp/schema.go`：`treeTextGuide`/`callerGuidance`/`act`/`snap` 指引；`scripts/mcp-probe/result.go`、`result_v4.go`、`tree_body_consistency.go`：独立列序、闭集、无树禁现与有效图抑制 `snap` 校验；`schema_test.go`、`result_manifest_test.go`、`result_text_test.go`、`result_parity_test.go` |
+| 版本源、文档与整组发布（§6.5、§8.2） | `release/versions.json` 与 4 个生成文件 `0.34.0/30/36`；`README.md` 与 9 份 `docs/`；发布清单、手机整组覆盖部署、主机双 exe、双入口独立探针与验证记录 |
 
 ### 11.2 与提案不同或未执行
 
 | 项 | 结论与理由 |
 | --- | --- |
+| `equalIntPtr` 助手不存在 | 基线仓库无该函数；`sameForeground` 直接实现等价的可空 `task_id` 比较，并与公开前景投影共享未知 `reason` 归一化。提案 §4.1.1 的语义未变。 |
+| 树内容判等的位置 | 提案 §5.1 伪码把判等放在基线候选循环之前；实现放在候选循环之后、提交锁之前。两者都在 `e.mu` 锁外，判定输入与结果不变，理由是与候选选择共用同一份只读快照。 |
+| 发现说明预算与目录指纹 | `baselineDiscoveryBytes` 由 `37500` 调整为 `38200`（提案已定），实测总量 `38149 B`；因 `act`/`snap` 描述变化，工具目录指纹由 `df6afaa…` 变为 `25a09a66…`，`result_parity_test.go` 基线与 `docs/mcp.md` 同步；发现说明禁词门禁保持。 |
+| 实机未构造 `loading`/`media_surface` | 已实测 `unchanged + hint=snap`、`snap` 不消费 O、`matched_base` 无 `hint`、`sparse_tree + hint=snap`（见验证记录）。`loading`/`media_surface` 未能在本机稳定构造：相机预览 `SurfaceView` 未进入 uiautomator 树、B 站视频卡片/分区页在虚拟屏未稳定进入播放器、本地视频播放器任务 `app.claim` 返回 `task_not_found`；两者判据由 `internal/observation` 与 `internal/engine` 单测覆盖，验证记录区分“已实测”与“仅单测覆盖”。 |
+| 仅单测覆盖的边界 | `previousObs.Projection == nil` 的防御分支、`image_heavy` 不需要前台非 `none` 的边界、`wait_for` 第二帧 `unstable+condition` 与采样上限 `unstable+max_samples` 的 cue 反向对照，均只由单测覆盖；正常已发布观察都有投影，不受该防御分支影响。 |
 
 ---
 
