@@ -1,12 +1,13 @@
 # 提案：解除 text(ref) 对 tap 能力的绑定并增加写后有界异步读回确认
 
-状态：提案，未实现。
+状态：已实现（契约 32）。实现提交：`964c93a4f2b08894db54a1fbac5b192b7a6ca941`。
 基线提交：`1259cba7145d8b26536d963d7cf860ed3d3ae85c`（分支 `master`，`2026-11-27`）。
+验证记录：[text-ref-focus-and-async-readback](../../verification/text-ref-focus-and-async-readback.md)。
 适用范围：`act.operation.type=text` 的 `target.ref` 静态校验、候选干跑与认领后重验，以及 ref 与坐标 `text` 在 `SetTextOnDisplay` 派发后的写后读回确认（含 `auto_submit=false` 与 `auto_submit=true`）；覆盖 GitHub Issue #49 与 #50。
 影响范围：`internal/engine`、`internal/mcp/schema.go`、相关单测、`release/versions.json` 及生成版本文件、同步的 `docs/`；不修改固定制品 `third_party/uiautomator/u2.jar`（SHA-256 `28361193DE3D13303543C13BDC7268C22EDECABFA4E68E6FBDFC35FFFE1406A3`）。
 契约（`/api/*` 字段与 `contract_version`）：改变。`/api/act` 请求形状与成功响应结构不新增字段，但改变 `text(ref)` 静态拒绝规则（不再要求 `ActionTap`；阻塞非输入子节点归入 `blocking_refs`）、写入完成证据语义（在 `SetTextOnDisplay` 同步读回未匹配时允许有界只读二次读回与 `candidate_count=0` 至多一次严格重绑定读回）以及 MCP 工具描述与工具目录指纹；基线版本 `0.35.0` / `contract_version=31` / Android `versionCode=37`，实施目标升级为 `0.36.0` / `contract_version=32` / Android `versionCode=38`。
 
-本文引用的函数名、行号、常量与默认值均以该基线提交为准；实现落地前若代码已前进，须按当时的 `HEAD` 重新核对（重点：[tap_scope.go](../../internal/engine/tap_scope.go)、[act.go](../../internal/engine/act.go)、[text_stage.go](../../internal/engine/text_stage.go)、[text_submit.go](../../internal/engine/text_submit.go)、[schema.go](../../internal/mcp/schema.go)、[versions.json](../../release/versions.json)、[u2 README](../../third_party/uiautomator/README.md)）。
+本文引用的函数名、行号、常量与默认值均以该基线提交为准；实现落地前若代码已前进，须按当时的 `HEAD` 重新核对（重点：[tap_scope.go](../../../internal/engine/tap_scope.go)、[act.go](../../../internal/engine/act.go)、[text_stage.go](../../../internal/engine/text_stage.go)、[text_submit.go](../../../internal/engine/text_submit.go)、[schema.go](../../../internal/mcp/schema.go)、[versions.json](../../../release/versions.json)、[u2 README](../../../third_party/uiautomator/README.md)）。
 
 ---
 
@@ -26,13 +27,13 @@
 1. **Issue #49（`text(ref)` 被迫充当“点击目标”）**：
    - 公开树正确投影出正文框 `n31 input actions=["text"]`（无 `tap`），但调用 `act(type="text", target={"ref":"n31"}, auto_submit=false)` 时，接口静态返回 `422 unsupported_node_action`、`reason="target_has_other_action"`、`target_actions=["text"]`、中文提示 `"目标节点不支持点击，公开动作：文本输入"`，并把重叠的标题输入框 `n36` 当成建议候选。
    - 即使该输入框（或其聚焦态）已满足文本输入条件，只要不具备 `ActionTap`，调用方就完全无法通过公开 `ref` 写入，只能改猜坐标、消耗额外观察与重试。
-   - **分诊结论**：现行实现完全忠实于契约 24 规范（见 [act-target-resolution-and-error-contract.md](implemented/act-target-resolution-and-error-contract.md#L189-L190) 与 [architecture.md](../../docs/architecture.md#L245-L247)），根因落在现行规范把“聚焦点规划”等价成了“要求 `clickable=true`”，属于**取舍/规范类**变更。
+   - **分诊结论**：现行实现完全忠实于契约 24 规范（见 [act-target-resolution-and-error-contract.md](act-target-resolution-and-error-contract.md#L189-L190) 与 [architecture.md](../../../docs/architecture.md#L245-L247)），根因落在现行规范把“聚焦点规划”等价成了“要求 `clickable=true`”，属于**取舍/规范类**变更。
 
 2. **Issue #50（同步 `0ms` 读回与编辑器异步落地的时序冲突）**：
    - 改用中心坐标 `(539, 604)` 调用 `act(type="text", target={"x":539,"y":604}, text="诊断测试草稿：一二三四五", auto_submit=false)`，结果返回 `409`、`outcome="uncertain"`、`code="text_result_uncertain"`、`details.stage="verify"`、`details.reason="readback_mismatch"`、`details.candidate_count=1`、`details.dispatch={focus:"dispatched",write:"dispatched",submit:"not_attempted"}`。
    - 紧接着调用 `observe(P)`，新观察中正文框（ref 变为 `n117`）`focused=true`、`value="诊断测试草稿：一二三四五"` 已精确一致。
    - 每次写入都迫使调用方多消费一轮 `observe` 调用，且 `uncertain` 使调用方不敢安全重试，无法在 `text` 调用本身获得 `executed` 事实。
-   - **分诊结论**：现行实现忠实于契约 18 规范（见 [text-write-verification-and-recovery.md](implemented/text-write-verification-and-recovery.md#L437-L441) 与 [interface.md](../../docs/interface.md#L800-L806)），问题源于现行规范禁止写入后任何二次只读核对，属于**取舍/规范类**变更，按用户共识与 #49 合并提案推进。
+   - **分诊结论**：现行实现忠实于契约 18 规范（见 [text-write-verification-and-recovery.md](text-write-verification-and-recovery.md#L437-L441) 与 [interface.md](../../../docs/interface.md#L800-L806)），问题源于现行规范禁止写入后任何二次只读核对，属于**取舍/规范类**变更，按用户共识与 #49 合并提案推进。
 
 ### 1.2 证据链
 
@@ -40,26 +41,26 @@
 
 | 落点 / 现场证据 | 核实事实 |
 | --- | --- |
-| [hierarchy.go:213,218](../../internal/android/hierarchy.go#L213-L218) | `Clickable` 来自 XML `clickable` 属性；`Editable` 按 `strings.HasSuffix(ClassName, "EditText")` 推导 |
-| [build.go:354-357,531-546](../../internal/observation/build.go#L531-L546) | `Editable=true` 投影为 `role=input` 与 `actions=["text"]`；仅当 `Clickable=true` 才附带 `tap` |
-| [tap_scope.go:2543-2558](../../internal/engine/tap_scope.go#L2543-L2558) | `staticTextRefCheck` 在校验 `RoleInput + ActionText + !Protected` 后，硬性检查 `if !hasAction(target, protocol.ActionTap)` 并构造 `ActionTap` 的 `target_has_other_action` 错误 |
-| [tap_scope.go:865-880](../../internal/engine/tap_scope.go#L865-L880)、[tap_scope.go:1800-1814](../../internal/engine/tap_scope.go#L1800-L1814) | `tryPlanTextDirectBase` 与 `isValidTextPublicTarget` 同样要求 `hasAction(node, ActionText) && hasAction(node, ActionTap)`，使 `actions=["text"]` 输入框既不可执行也不被纳入 `text` 候选 |
-| [tap_scope.go:1995-2069](../../internal/engine/tap_scope.go#L2015-L2067) | `collectDirectBlockingDiagnostics` 的 `occludingNodes`（L2015）与 `ambiguousNodes`（L2064）两处均调用 `validTapPublicTarget(owner, action)` 分流阻塞子树子节点；若 `action` 设为 `ActionText`，具备 `ActionText` 但非 `RoleInput` 或受保护的异常节点必须统一改由同一步骤的文本候选资格判断过滤，非输入阻塞控件只进 `blocking_refs` |
-| [act.go:599-608,643-665,1414-1418](../../internal/engine/act.go#L599-L608) | `revalidateActTarget` 要求 `tap != nil` 并调用 `revalidateTapTargetFrame`；后者在 `revalidateTapTargetFrameWith` 内部调用 `framePublicTargetError` 拿 `plan.action`（当前为 `"tap"`）再次通过 `validTapPublicTarget` 拦截无 `ActionTap` 的目标；公开节点投影在 `revalidateTapTargetFrameWith` 返回后不再保留 |
-| [act.go:1782-1800](../../internal/engine/act.go#L1782-L1800) | `dispatchText` 本身已支持新鲜帧 `focused=true` 经 `bindFocusedText` 零点击直写，但静态检查与重验不看焦点，在之前就拦截了请求 |
-| [point.go:288-300](../../internal/engine/point.go#L288-L300) | 同类核查：坐标 `text` 路径的 `pointOwnerMatchesOperation` 只检查 `RoleInput + ActionText + Enabled + !Protected`，不要求 `ActionTap`，形成 `ref` 拒而坐标通的割裂 |
-| [act_proposal_tap_bubble_test.go:491-544](../../internal/engine/act_proposal_tap_bubble_test.go#L491-L544) | 单测 `input_without_tap_action` 将“缺 `tap` 报 `target_has_other_action`”固化为回归断言；`focus_blocked_returns_candidates` 把阻塞 `Button` 放入 `candidates`（因旧测试误用 `ActionTap` 当作文本规划动作） |
+| [hierarchy.go:213,218](../../../internal/android/hierarchy.go#L213-L218) | `Clickable` 来自 XML `clickable` 属性；`Editable` 按 `strings.HasSuffix(ClassName, "EditText")` 推导 |
+| [build.go:354-357,531-546](../../../internal/observation/build.go#L531-L546) | `Editable=true` 投影为 `role=input` 与 `actions=["text"]`；仅当 `Clickable=true` 才附带 `tap` |
+| [tap_scope.go:2543-2558](../../../internal/engine/tap_scope.go#L2543-L2558) | `staticTextRefCheck` 在校验 `RoleInput + ActionText + !Protected` 后，硬性检查 `if !hasAction(target, protocol.ActionTap)` 并构造 `ActionTap` 的 `target_has_other_action` 错误 |
+| [tap_scope.go:865-880](../../../internal/engine/tap_scope.go#L865-L880)、[tap_scope.go:1800-1814](../../../internal/engine/tap_scope.go#L1800-L1814) | `tryPlanTextDirectBase` 与 `isValidTextPublicTarget` 同样要求 `hasAction(node, ActionText) && hasAction(node, ActionTap)`，使 `actions=["text"]` 输入框既不可执行也不被纳入 `text` 候选 |
+| [tap_scope.go:1995-2069](../../../internal/engine/tap_scope.go#L2015-L2067) | `collectDirectBlockingDiagnostics` 的 `occludingNodes`（L2015）与 `ambiguousNodes`（L2064）两处均调用 `validTapPublicTarget(owner, action)` 分流阻塞子树子节点；若 `action` 设为 `ActionText`，具备 `ActionText` 但非 `RoleInput` 或受保护的异常节点必须统一改由同一步骤的文本候选资格判断过滤，非输入阻塞控件只进 `blocking_refs` |
+| [act.go:599-608,643-665,1414-1418](../../../internal/engine/act.go#L599-L608) | `revalidateActTarget` 要求 `tap != nil` 并调用 `revalidateTapTargetFrame`；后者在 `revalidateTapTargetFrameWith` 内部调用 `framePublicTargetError` 拿 `plan.action`（当前为 `"tap"`）再次通过 `validTapPublicTarget` 拦截无 `ActionTap` 的目标；公开节点投影在 `revalidateTapTargetFrameWith` 返回后不再保留 |
+| [act.go:1782-1800](../../../internal/engine/act.go#L1782-L1800) | `dispatchText` 本身已支持新鲜帧 `focused=true` 经 `bindFocusedText` 零点击直写，但静态检查与重验不看焦点，在之前就拦截了请求 |
+| [point.go:288-300](../../../internal/engine/point.go#L288-L300) | 同类核查：坐标 `text` 路径的 `pointOwnerMatchesOperation` 只检查 `RoleInput + ActionText + Enabled + !Protected`，不要求 `ActionTap`，形成 `ref` 拒而坐标通的割裂 |
+| [act_proposal_tap_bubble_test.go:491-544](../../../internal/engine/act_proposal_tap_bubble_test.go#L491-L544) | 单测 `input_without_tap_action` 将“缺 `tap` 报 `target_has_other_action`”固化为回归断言；`focus_blocked_returns_candidates` 把阻塞 `Button` 放入 `candidates`（因旧测试误用 `ActionTap` 当作文本规划动作） |
 | 实机复现（2026-11-27，主屏） | 知乎正文 `EditText` 原始 XML 为 `class="android.widget.EditText"`、`clickable="false"`、`focusable="true"`、`focused="true"`、`enabled="true"`、`password="false"`、`bounds="[0,441][1079,768]"`；HTTP `/api/act` 对 `n31` 返回 `422 unsupported_node_action/target_has_other_action` |
 
 #### 证据链 B：Issue #50（`0ms` 同步刷新读回与异步提交冲突）
 
 | 落点 / 现场证据 | 核实事实 |
 | --- | --- |
-| [act.go:1830-1895](../../internal/engine/act.go#L1830-L1895) | 全仓唯一产生 `stage="verify"` + `reason="readback_mismatch"` 的位置：`SetTextOnDisplay` 返回后直接比较 `if *result.Value != operation.Text`，不等待也不做二次读回 |
+| [act.go:1830-1895](../../../internal/engine/act.go#L1830-L1895) | 全仓唯一产生 `stage="verify"` + `reason="readback_mismatch"` 的位置：`SetTextOnDisplay` 返回后直接比较 `if *result.Value != operation.Text`，不等待也不做二次读回 |
 | `u2.jar` (`classes8.dex` `DisplayBoundTextService`) | `setTextOnDisplay` 在指令偏移 `0x0047` 调用 `performAction(ACTION_SET_TEXT)` 后，紧跟在 `0x004b` 调用 `readValue(node)`（零等待）；`readValue` 调 `refresh()` → `isShowingHintText()` → `getText()`；`matches` 要求 `package`/`resourceId`/`class`/`contentDescription`/`getVisibleBoundsInScreen.toShortString()` 全相等 |
-| [build.go:480-487](../../internal/observation/build.go#L480-L487)、[read.go:162-165](../../internal/observation/read.go#L162-L165)、[encode.go:431-433](../../internal/treetext/encode.go#L431-L433) | 公开树中 `RoleInput.Value` 原样保留字节，不做 trim 或归一化 |
-| [text_submit.go:177-219,289-358](../../internal/engine/text_submit.go#L177-L219) | `enter_key` 提交路径已具备 `rebindPostWriteTextTarget`（当写后 `GetTextOnDisplay` 返回 `CandidateCount=0` 时，至多做一次 `Capture` 严格重绑定 + `GetTextOnDisplay`），但 `verify` 阶段未复用 |
-| [text-write-verification-and-recovery.md](implemented/text-write-verification-and-recovery.md#L437-L441) | 原契约 18 明确将“控件异步提交导致 `set` 内 `refresh` 返回旧值/`null`”列为未治项，验证记录也标注未实测异步更新控件 |
+| [build.go:480-487](../../../internal/observation/build.go#L480-L487)、[read.go:162-165](../../../internal/observation/read.go#L162-L165)、[encode.go:431-433](../../../internal/treetext/encode.go#L431-L433) | 公开树中 `RoleInput.Value` 原样保留字节，不做 trim 或归一化 |
+| [text_submit.go:177-219,289-358](../../../internal/engine/text_submit.go#L177-L219) | `enter_key` 提交路径已具备 `rebindPostWriteTextTarget`（当写后 `GetTextOnDisplay` 返回 `CandidateCount=0` 时，至多做一次 `Capture` 严格重绑定 + `GetTextOnDisplay`），但 `verify` 阶段未复用 |
+| [text-write-verification-and-recovery.md](text-write-verification-and-recovery.md#L437-L441) | 原契约 18 明确将“控件异步提交导致 `set` 内 `refresh` 返回旧值/`null`”列为未治项，验证记录也标注未实测异步更新控件 |
 | 实机直连 `u2.jar` 取证（2026-11-27，主屏知乎编辑器） | 1）写前 `getTextOnDisplay`（`49.9ms`）返回 `candidateCount=1`、旧值 `'诊断测试草稿：一二三四五'`，排除 `isShowingHintText()` 常驻误判；2）随后 `setTextOnDisplay`（`21.5ms`）返回 `candidateCount=1, issued=true, accepted=true`，但 **`0ms` 读回 `value` 仍为写入前的旧值 `'诊断测试草稿：一二三四五'`**；3）紧接着在 `20.6ms` 发起的第一次只读 `getTextOnDisplay`（耗时 `62.9ms`）及后续 `60/120/250/500ms` 轮询均返回 `candidateCount=1` 且文本已切换为新写入内容（注：诊断脚本直传 raw UTF-8 给 `u2.jar` NanoHTTPD 导致该次写入字符在服务端按单字节解码为 36 个 `\ufffd`，与写前 12 字旧值明显区分，时间窗口事实清晰成立） |
 
 ### 1.3 为什么直觉会出错
@@ -243,13 +244,13 @@ verifyTextWriteReadback(work, op, session, obs, &bound, text, setResult):
 
 | 文件 | 改动 |
 | --- | --- |
-| [tap_scope.go](../../internal/engine/tap_scope.go) | `staticTextRefCheck` 移除 `!hasAction(target, ActionTap)` 校验，改为传 `protocol.ActionText` 进 `planDirectTapRef`；`isValidTextPublicTarget` 与 `tryPlanTextDirectBase` 移除 `ActionTap` 要求；`collectDirectBlockingDiagnostics` 对 `occludingNodes` 与 `ambiguousNodes` 统一按 `ActionText`/`isValidTextPublicTarget` 分流，非输入阻塞节点归入 `blocking_refs` |
-| [act.go](../../internal/engine/act.go) | `framePublicTargetError` 在 `action == protocol.ActionText` 时调用 `isValidTextPublicTarget` 完成新鲜公开节点复验；`revalidateActTarget` 将 `actTargetLog` 移至 `freshTextTargetSafe` 通过之后；`dispatchText` 在 `noteTextWriteDispatched` 后调用 `verifyTextWriteReadback`，支持写后 `bound` 更新供 `dispatchTextEnterSubmit` 复用 |
-| [text_submit.go](../../internal/engine/text_submit.go) | 将 `verifyViaPostWriteRebind` 抽为清晰辅函数与现有 `rebindPostWriteTextTarget` / `textSubmitCaptureTrusted` / `textSubmitDisplayCurrent` 共享守卫，不重复写第二套重绑定逻辑 |
-| [schema.go](../../internal/mcp/schema.go) | 同步 `callerGuidance` 与 `act` 描述（说明 `text(ref)` 不要求节点带 `tap`，写后读回覆盖短时异步更新与几何变化） |
-| [act_proposal_tap_bubble_test.go](../../internal/engine/act_proposal_tap_bubble_test.go)、[text_write_evidence_test.go](../../internal/engine/text_write_evidence_test.go)、其他受影响测试 | 更新 `input_without_tap_action`（改为无 `tap` 可直写）、`focus_blocked_returns_candidates`（非输入阻塞进 `blocking_refs`）及 `text_write_evidence_test.go` 两处显式 `get == 0` 断言（`TestTextReadbackMismatchAndUnavailable` 与 `TestTextAlreadyFocusedStillRequiresExactSetValue`，并显式脚本化 `Value: nil` 的 `getSteps` 避免回退到 `fakeDevice` 空串；同文件 L466/514/685 三用例走完 270ms 退避但结论不变）；新增 #49 与 #50 先红回归、边界与 STOP 测试 |
-| [versions.json](../../release/versions.json) 及版本生成脚本输出 | 仅修改 `versions.json` 到 `0.36.0` / `contract_version=32` / `android_version_code=38`，运行 `scripts/generate-version.ps1` 更新 Go/Java/XML 常量 |
-| [README.md](../../README.md) 与 `docs/`（`interface.md`、`architecture.md`、`mcp.md`、`integration.md`、`client.md`、`control-protocol.md`、`runbook.md`、`phone-operations.md`、`release.md`） | 同步 `text(ref)` 无 `tap` 聚焦规划、`stage=verify` 有界只读确认契约与全量版本/契约号引用（`0.36.0` / `32` / `38`），实施提交前通过独立只读文档审计 |
+| [tap_scope.go](../../../internal/engine/tap_scope.go) | `staticTextRefCheck` 移除 `!hasAction(target, ActionTap)` 校验，改为传 `protocol.ActionText` 进 `planDirectTapRef`；`isValidTextPublicTarget` 与 `tryPlanTextDirectBase` 移除 `ActionTap` 要求；`collectDirectBlockingDiagnostics` 对 `occludingNodes` 与 `ambiguousNodes` 统一按 `ActionText`/`isValidTextPublicTarget` 分流，非输入阻塞节点归入 `blocking_refs` |
+| [act.go](../../../internal/engine/act.go) | `framePublicTargetError` 在 `action == protocol.ActionText` 时调用 `isValidTextPublicTarget` 完成新鲜公开节点复验；`revalidateActTarget` 将 `actTargetLog` 移至 `freshTextTargetSafe` 通过之后；`dispatchText` 在 `noteTextWriteDispatched` 后调用 `verifyTextWriteReadback`，支持写后 `bound` 更新供 `dispatchTextEnterSubmit` 复用 |
+| [text_submit.go](../../../internal/engine/text_submit.go) | 将 `verifyViaPostWriteRebind` 抽为清晰辅函数与现有 `rebindPostWriteTextTarget` / `textSubmitCaptureTrusted` / `textSubmitDisplayCurrent` 共享守卫，不重复写第二套重绑定逻辑 |
+| [schema.go](../../../internal/mcp/schema.go) | 同步 `callerGuidance` 与 `act` 描述（说明 `text(ref)` 不要求节点带 `tap`，写后读回覆盖短时异步更新与几何变化） |
+| [act_proposal_tap_bubble_test.go](../../../internal/engine/act_proposal_tap_bubble_test.go)、[text_write_evidence_test.go](../../../internal/engine/text_write_evidence_test.go)、其他受影响测试 | 更新 `input_without_tap_action`（改为无 `tap` 可直写）、`focus_blocked_returns_candidates`（非输入阻塞进 `blocking_refs`）及 `text_write_evidence_test.go` 两处显式 `get == 0` 断言（`TestTextReadbackMismatchAndUnavailable` 与 `TestTextAlreadyFocusedStillRequiresExactSetValue`，并显式脚本化 `Value: nil` 的 `getSteps` 避免回退到 `fakeDevice` 空串；同文件 L466/514/685 三用例走完 270ms 退避但结论不变）；新增 #49 与 #50 先红回归、边界与 STOP 测试 |
+| [versions.json](../../../release/versions.json) 及版本生成脚本输出 | 仅修改 `versions.json` 到 `0.36.0` / `contract_version=32` / `android_version_code=38`，运行 `scripts/generate-version.ps1` 更新 Go/Java/XML 常量 |
+| [README.md](../../../README.md) 与 `docs/`（`interface.md`、`architecture.md`、`mcp.md`、`integration.md`、`client.md`、`control-protocol.md`、`runbook.md`、`phone-operations.md`、`release.md`） | 同步 `text(ref)` 无 `tap` 聚焦规划、`stage=verify` 有界只读确认契约与全量版本/契约号引用（`0.36.0` / `32` / `38`），实施提交前通过独立只读文档审计 |
 
 ### 6.2 配置与取值
 
@@ -261,7 +262,7 @@ verifyTextWriteReadback(work, op, session, obs, &bound, text, setResult):
 
 ### 6.3 日志与可观测性
 
-- 在 `verifyTextWriteReadback` 收口处发射一条有界 `Debug` 事件 `engine.text.verify`（复用 [internal/eventlog/log.go](../../internal/eventlog/log.go#L63-L108) **已有白名单键**，不新增输入内容、长度、hash 或 ref）：
+- 在 `verifyTextWriteReadback` 收口处发射一条有界 `Debug` 事件 `engine.text.verify`（复用 [internal/eventlog/log.go](../../../internal/eventlog/log.go#L63-L108) **已有白名单键**，不新增输入内容、长度、hash 或 ref）：
   - 字段：`operation_id`、`mode`（`"direct"` / `"poll"` / `"rebind"`）、`attempt`（`0..3`）、`outcome`（`"executed"` / `"uncertain"` / `"stopped"`）、`reason`（失败时为闭集 `readback_mismatch` / `readback_unavailable` / `authorization_revoked`）、`count`（已知时附）、`ms`（`verify` 阶段耗时毫秒）。
 - `engine.text.finished` 保持既有字段与契约不变。
 
@@ -280,10 +281,10 @@ verifyTextWriteReadback(work, op, session, obs, &bound, text, setResult):
 ### 6.5 契约与文档影响
 
 - `contract_version` 递增至 `32`，同步更新：
-  - [docs/interface.md](../../docs/interface.md)：`text(ref)` 不要求 `ActionTap`；`text` 写入完成证据说明（同步快路径 + 有界只读退避轮询 + `CandidateCount=0` 至多一次严格重绑定）。
-  - [docs/architecture.md](../../docs/architecture.md)：更新 `text(ref)` 焦点规划说明与 `text` 复合输入阶段验证说明。
-  - [docs/mcp.md](../../docs/mcp.md) 与 [docs/integration.md](../../docs/integration.md)：同步 `text(ref)` 适用范围与写后异步读回行为。
-  - [README.md](../../README.md)、[docs/client.md](../../docs/client.md)、[docs/control-protocol.md](../../docs/control-protocol.md)、[docs/runbook.md](../../docs/runbook.md)、[docs/phone-operations.md](../../docs/phone-operations.md)、[docs/release.md](../../docs/release.md)：同步 `0.36.0` / `contract_version=32` / Android `versionCode=38` 版本与示例引用，避免硬编码版本漂移。
+  - [docs/interface.md](../../../docs/interface.md)：`text(ref)` 不要求 `ActionTap`；`text` 写入完成证据说明（同步快路径 + 有界只读退避轮询 + `CandidateCount=0` 至多一次严格重绑定）。
+  - [docs/architecture.md](../../../docs/architecture.md)：更新 `text(ref)` 焦点规划说明与 `text` 复合输入阶段验证说明。
+  - [docs/mcp.md](../../../docs/mcp.md) 与 [docs/integration.md](../../../docs/integration.md)：同步 `text(ref)` 适用范围与写后异步读回行为。
+  - [README.md](../../../README.md)、[docs/client.md](../../../docs/client.md)、[docs/control-protocol.md](../../../docs/control-protocol.md)、[docs/runbook.md](../../../docs/runbook.md)、[docs/phone-operations.md](../../../docs/phone-operations.md)、[docs/release.md](../../../docs/release.md)：同步 `0.36.0` / `contract_version=32` / Android `versionCode=38` 版本与示例引用，避免硬编码版本漂移。
 - 更新 `internal/mcp/schema.go` 会改变工具目录指纹，需按 `AGENTS.md` 第 13/19 条重新生成版本、构建发布清单并重启宿主 MCP 进程。
 
 ## 7. 预期效果与能力边界
@@ -372,7 +373,7 @@ verifyTextWriteReadback(work, op, session, obs, &bound, text, setResult):
 2. 实施 `internal/engine/tap_scope.go`、`act.go`、`text_submit.go` 的代码改动（步骤 1 后顺序执行）；
 3. 更新受影响的既有旧契约单测与 `internal/mcp/schema.go` caller 指南，运行定向测试；
 4. 编辑 `release/versions.json` 为 `0.36.0` / `32` / `38` 并运行 `scripts/generate-version.ps1`；
-5. 同步更新 [docs/interface.md](../../docs/interface.md)、[docs/architecture.md](../../docs/architecture.md)、[docs/mcp.md](../../docs/mcp.md)、[docs/integration.md](../../docs/integration.md)、[README.md](../../README.md)、[docs/client.md](../../docs/client.md)、[docs/control-protocol.md](../../docs/control-protocol.md)、[docs/runbook.md](../../docs/runbook.md)、[docs/phone-operations.md](../../docs/phone-operations.md) 与 [docs/release.md](../../docs/release.md)；
+5. 同步更新 [docs/interface.md](../../../docs/interface.md)、[docs/architecture.md](../../../docs/architecture.md)、[docs/mcp.md](../../../docs/mcp.md)、[docs/integration.md](../../../docs/integration.md)、[README.md](../../../README.md)、[docs/client.md](../../../docs/client.md)、[docs/control-protocol.md](../../../docs/control-protocol.md)、[docs/runbook.md](../../../docs/runbook.md)、[docs/phone-operations.md](../../../docs/phone-operations.md) 与 [docs/release.md](../../../docs/release.md)；
 6. 主代理亲自执行全量测试 `GOEXPERIMENT=jsonv2 go test ./cmd/... ./internal/... ./scripts/... -count=1 -timeout 900s` 并确认全部通过；
 7. 发起独立、只读的文档审计 subagent 审核本次涉及的 `docs/`（含上述全部升级文档），修正发现项直至取得 `CLEAN` 结论；
 8. 提交 1：将处于 `状态：提案，未实现。` 的本提案文件与实现、测试、版本生成、`README.md` 及同步后的 `docs/` 一并纳入 git 提交（保证工作树完全干净无 untracked 文件，使步骤 9 发布构建的 `source_dirty=false` 且清单校验通过）；
@@ -381,20 +382,36 @@ verifyTextWriteReadback(work, op, session, obs, &bound, text, setResult):
 11. 在归档提交 HEAD 按仓库惯例复建核验发布包并确认一致；
 12. 推送远端分支并在 GitHub 回复及关闭 Issue #49 与 #50。
 
-## 11. 实现结果（归档时补写）
+## 11. 实现结果
 
-实现提交：`<hash>`。实现与验证记录：`../../verification/text-ref-focus-and-async-readback.md`
-（本节在归档移动之后补写，届时文件在 `implemented/` 下，故链接比新建时多一层）。
+实现提交：`964c93a4f2b08894db54a1fbac5b192b7a6ca941`。实现与验证记录：
+[text-ref-focus-and-async-readback](../../verification/text-ref-focus-and-async-readback.md)。
 
 ### 11.1 已落地
 
 | 提案条目 | 落点 |
 | --- | --- |
+| §4.1 静态准入解除 `ActionTap` | `internal/engine/tap_scope.go:2506` 删除 `hasAction(target, ActionTap)` 拒绝，改以 `role=input`+`text`+几何/启用/保护判定，并以 `protocol.ActionText` 进 `planDirectTapRef`（`bubble` 关闭、无 `coextensive_child`）。 |
+| §4.1 候选资格与阻塞诊断 | `isValidTextPublicTarget`（`tap_scope.go:1800`）只按 `text` 能力；`tryPlanTextDirectBase`（`:865`）同样；新增 `directBlockingCandidate`（`:1986`）供 `collectDirectBlockingDiagnostics` 两处 owner 分类共用，`tap`/`long_press` 分支保持原表达式。 |
+| §4.1 认领后重验 | `internal/engine/act.go:599` 的 `framePublicTargetError` 对非 submit 的 `text` 帧调用 `isValidTextPublicTarget`；`revalidateActTarget`（`:626`）把 `unique` 日志移到 `freshTextTargetSafe` 通过之后。 |
+| §4.2 `stage=verify` 有界确认 | `internal/engine/text_submit.go:12` 定义 `textVerifyDelays=[40,80,150]ms`、`textVerifyMaxElapsed=1000ms`、`textVerifyMaxRebinds=1`；`:19` `verifyTextWriteReadback` 实现快路径 + 轮询 + 多候选失败 + 单次重绑定分派；`:79` `verifyViaPostWriteRebind` 复用 `rebindPostWriteTextTarget`/`textSubmitCaptureTrusted`/`textSubmitDisplayCurrent`/`validateTapRawTopology`/`sameTextTaskContext`，成功回写 `bound.raw`/`bound.capture`。退避与 RPC 共用从 `work.Ctx` 派生的绝对截止子上下文，`1000ms` 覆盖 RPC 本身；撤销仍以 `CodeStopped`+`authorization_revoked` 收口。 |
+| §4.2 写入完成证据接线 | `internal/engine/act.go:1887` 在 `noteTextWriteDispatched` 之后调用 `verifyTextWriteReadback(&bound, …)`，成功才 `commitTextWrite`；`auto_submit` 两条提交路径与 `enter_key` 复用更新后的绑定。`setTextOnDisplay` 仍是唯一调用点。 |
+| §6.3 有界事件 | `internal/engine/text_submit.go:153` 发射 `Debug` 事件 `engine.text.verify`，字段 `operation_id`/`mode`/`attempt`/`outcome`/`reason`/`count`/`ms` 全部为 `internal/eventlog` 既有白名单键。 |
+| §6.1 MCP 描述 | `internal/mcp/schema.go` caller 指南与 `act` 描述补充「`text(ref)` 不要求节点带 `tap`」与「写后读回覆盖短时异步落地与几何变化」两条事实；工具目录指纹随之为 `13/5578041a…`。 |
+| §6.1 版本与文档 | `release/versions.json` 与 4 个生成文件升为 `0.36.0/32/38`；`README.md` 与 9 份 `docs/` 同步两条契约与全部版本引用。 |
+| §8.1 先红用例 | 新增 `internal/engine/text_ref_focus_test.go`（7 例）与 `internal/engine/text_verify_readback_test.go`（10 例）；改写 `act_proposal_tap_bubble_test.go` 两个旧子用例、`text_write_evidence_test.go` 六处旧断言。先红证据、实现后绿测与全量单次结果见验证记录。 |
+| §8.2 发布交付 | 干净实现提交上的整组发布构建与清单核验 PASS；手机整组覆盖部署（保留 App 私有数据）；虚拟屏实机闭环（探针 App 同步写/非 BMP/默认提交、知乎无 `tap` 正文写入、异步首跳确认、长文撑高单次重采集）；主机 `device-mcp.exe`/`mcp-probe.exe` 替换与 stdio/http-remote 双入口独立探针均 PASS。 |
 
 ### 11.2 与提案不同或未执行
 
 | 项 | 结论与理由 |
 | --- | --- |
+| `verifyTextWriteReadback` 的落点 | 提案 §6.1 把主循环写在 `act.go`、辅助函数写在 `text_submit.go`；实现把两者一起放在 `text_submit.go`（`act.go` 只保留调用）。理由：与既有 `dispatchTextEnterSubmit` 的写后重绑定共用同一组守卫与错误构造，集中在一处避免两套流程漂移，`act.go` 只保留一个接线点。 |
+| 发现字节预算不扩 | 提案未提该限制。首轮指南使 `internal/mcp` 的 discovery 预算超限（`41161 > 40000`）；未按上一个提案的先例抬高上限，而是把对外指南收敛为两条调用方事实（不要求 `tap`、写后读回覆盖短时异步落地与几何变化），详细契约留在 `docs/`。 |
+| `engine.text.verify` 的 `outcome` 取值 | 日志里的 `stopped` 是事件专用枚举（区分 `executed`/`uncertain`），不是协议 `outcome`；未新增协议取值。 |
+| 未实测项 | 100% 遮挡的 `no_safe_point`/`blocking_refs`、部分遮挡绕开、真实格式化负例、STOP 打断退避的实机时序未构造，均由单测覆盖；未跑 `-race`（Windows 无 cgo）。 |
+| 依赖方进程 | 依赖 Agent 托管的 MCP 进程与重连未操作（`start` 仍返回 `409 contract_mismatch`），实机验证改用 HTTP 直调与独立探针；宿主重启由用户处理。 |
+
 
 ---
 
