@@ -864,19 +864,10 @@ func tryPlanTapDirectBase(obs *observationState, view *tapPublicView,
 
 func tryPlanTextDirectBase(obs *observationState, view *tapPublicView,
 	node *protocol.Node) bool {
-	if obs == nil || view == nil || node == nil || node.Context || node.Role != protocol.RoleInput {
+	if !isValidTextPublicTarget(node) {
 		return false
 	}
-	if !hasAction(node, protocol.ActionText) || !hasAction(node, protocol.ActionTap) {
-		return false
-	}
-	if node.Enabled != nil && !*node.Enabled {
-		return false
-	}
-	if node.Protected == nil || *node.Protected {
-		return false
-	}
-	return tryPlanTapDirectBase(obs, view, node, protocol.ActionTap)
+	return tryPlanTapDirectBase(obs, view, node, protocol.ActionText)
 }
 
 func externalInteractiveOwnersAt(view *tapPublicView, ancestor *protocol.Node,
@@ -1810,7 +1801,7 @@ func isValidTextPublicTarget(node *protocol.Node) bool {
 	if node.Protected == nil || *node.Protected {
 		return false
 	}
-	return hasAction(node, protocol.ActionText) && hasAction(node, protocol.ActionTap)
+	return hasAction(node, protocol.ActionText)
 }
 
 func collectTapFallbackCandidates(view *tapPublicView, target *protocol.Node,
@@ -1992,6 +1983,15 @@ func collectTextFallbackCandidates(view *tapPublicView, target *protocol.Node,
 	return entries
 }
 
+// directBlockingCandidate uses the editable-input gate for text candidates and
+// the ordinary public action gate for tap and long_press candidates.
+func directBlockingCandidate(node *protocol.Node, action protocol.Action) bool {
+	if action == protocol.ActionText {
+		return isValidTextPublicTarget(node)
+	}
+	return validTapPublicTarget(node, action)
+}
+
 func collectDirectBlockingDiagnostics(view *tapPublicView, target *protocol.Node,
 	action protocol.Action, screen device.Rect, diagnosis *tapStaticDiagnosis) ([]candidateEntry, []string) {
 	if view == nil || target == nil || diagnosis == nil {
@@ -2012,7 +2012,7 @@ func collectDirectBlockingDiagnostics(view *tapPublicView, target *protocol.Node
 		if owner == nil || owner.Ref == "" || owner == target {
 			continue
 		}
-		if validTapPublicTarget(owner, action) {
+		if directBlockingCandidate(owner, action) {
 			if _, dup := seenCandidate[owner.Ref]; dup {
 				continue
 			}
@@ -2061,7 +2061,7 @@ func collectDirectBlockingDiagnostics(view *tapPublicView, target *protocol.Node
 		if _, isCand := seenCandidate[node.Ref]; isCand {
 			continue
 		}
-		if !validTapPublicTarget(node, action) {
+		if !directBlockingCandidate(node, action) {
 			blockingRefs = append(blockingRefs, node.Ref)
 		}
 	}
@@ -2500,9 +2500,9 @@ func staticTapRefCheckWithOptions(obs *observationState, operation *protocol.Ope
 	return planDirectTapRef(obs, view, operation, target, action, true, started, options)
 }
 
-// staticTextRefCheck validates topology, unified structural/geometry/disabled
-// rejections, text editability/protection checks, and direct 4-tier focus tap
-// planning without coextensive-child delegation.
+// staticTextRefCheck validates topology, geometry, and editable-input capability,
+// then plans a direct four-tier focus point in the input subtree without requiring
+// ActionTap or allowing coextensive-child delegation.
 func staticTextRefCheck(obs *observationState, operation *protocol.Operation) (
 	*pointCheck, *scrollPlan, *tapPlan, *protocol.APIError) {
 	if operation == nil || operation.Type != "text" ||
@@ -2546,14 +2546,6 @@ func staticTextRefCheck(obs *observationState, operation *protocol.Operation) (
 	if target.Protected == nil || *target.Protected {
 		return nil, nil, nil, staticTextError(textReasonTargetProtected)
 	}
-	if !hasAction(target, protocol.ActionTap) {
-		errOut := newTapStaticUnsupportedError(tapStaticReasonTargetHasOtherAction,
-			protocol.ActionTap, tapStaticScopeTarget, target.Ref,
-			tapPublicActions(target), nil, "")
-		entries := collectTextFallbackCandidates(view, target, screen)
-		attachStaticCandidates(errOut, buildStaticCandidates(obs, view, operation, entries))
-		return nil, nil, nil, errOut
-	}
-	return planDirectTapRef(obs, view, operation, target, protocol.ActionTap, false, started,
+	return planDirectTapRef(obs, view, operation, target, protocol.ActionText, false, started,
 		tapPlanOptions{})
 }

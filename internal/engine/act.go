@@ -592,13 +592,17 @@ func (e *Engine) probeTapFrameNode(ctx context.Context, revoked func() bool,
 	return match, state
 }
 
-// framePublicTargetError applies the ordinary public action gate and, for a
-// write-submit plan, classifies an explicitly disabled execution target as
-// submit_disabled. A disabled target is still rejected: the classification only
-// names the reason.
+// framePublicTargetError checks the fresh public action capability. Text input
+// also requires an editable role and explicit proof the node is unprotected.
+// A write-submit plan reports an explicitly disabled execution target as
+// submit_disabled.
 func framePublicTargetError(node *protocol.Node, action protocol.Action,
 	execution bool, opts tapFrameOptions) *protocol.APIError {
-	if validTapPublicTarget(node, action) {
+	if action == protocol.ActionText && !opts.submit {
+		if isValidTextPublicTarget(node) {
+			return nil
+		}
+	} else if validTapPublicTarget(node, action) {
 		return nil
 	}
 	if execution && opts.submit && explicitlyDisabledPublic(node) {
@@ -651,13 +655,13 @@ func (e *Engine) revalidateActTarget(work *workState, obs *observationState,
 	if apiErr != nil {
 		return capture, nil, took, apiErr
 	}
-	if frame != nil {
-		e.actTargetLog(work.OperationID, actTargetProbeOutcome(actProbeUnique), frame.tier)
-	}
 	if operation.Type == "text" {
 		if frame == nil || !freshTextTargetSafe(frame.raw) {
 			return capture, nil, took, tapTargetChangedReason(targetChangedReasonCapabilityChanged)
 		}
+	}
+	if frame != nil {
+		e.actTargetLog(work.OperationID, actTargetProbeOutcome(actProbeUnique), frame.tier)
 	}
 	if e.workRevoked(work) || work.Ctx.Err() != nil {
 		return capture, nil, took, stoppedActRevalidation()
@@ -1754,10 +1758,9 @@ func (e *Engine) dispatchAct(work *workState, operation *protocol.Operation,
 
 // dispatchText performs at most one focus tap, one display-bound set and one
 // independent submission. A ref that is already focused in the fresh frame and
-// passes the complete binding gate skips the focus tap. The set call's own
-// refreshed value of the same node is the write completion evidence; no second
-// tree acquisition or GetText is used to re-prove the write. The set is never
-// replayed and text is never rolled back. A confirmed write whose submission
+// passes the complete binding gate skips the focus tap. A unique issued set
+// requires exact readback, either in its receipt or through bounded read-only
+// verification. The set is never replayed. A confirmed write whose submission
 // definitely never left the engine returns OutcomePartial with the last fresh
 // capture for on-the-spot delivery.
 func (e *Engine) dispatchText(work *workState, op *operationState, session *sessionState,
@@ -1881,16 +1884,8 @@ func (e *Engine) dispatchText(work *workState, op *operationState, session *sess
 			"原工作已撤销", e.textCurrentStage(op), textReasonAuthorizationRevoked,
 			OutcomeUncertain, nil)
 	}
-	count := 1
-	if result.Value == nil {
-		return OutcomeUncertain, nil, e.textError(op, 409, protocol.CodeTextResultUnknown,
-			"文字写入结果无法确认", textStageVerify, textReasonReadbackUnavailable,
-			OutcomeUncertain, &count)
-	}
-	if *result.Value != operation.Text {
-		return OutcomeUncertain, nil, e.textError(op, 409, protocol.CodeTextResultUnknown,
-			"目标输入框的完整内容与请求不一致", textStageVerify, textReasonReadbackMismatch,
-			OutcomeUncertain, &count)
+	if apiErr := e.verifyTextWriteReadback(work, op, session, obs, &bound, operation.Text, result); apiErr != nil {
+		return OutcomeUncertain, nil, apiErr
 	}
 	if !e.commitTextWrite(work, op) {
 		return OutcomeUncertain, nil, e.textError(op, 409, protocol.CodeStopped,

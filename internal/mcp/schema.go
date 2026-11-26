@@ -142,6 +142,7 @@ const callerGuidance = "会话与推进：首次可直接 start({})。已有 act
 	"取 error.details.candidates 中第一个 executable=true 的 ref，用同一 O 和新 P 重试，无需重观察或手算坐标。" +
 	"text 默认 auto_submit=true、submit_ref=\"enter_key\"：写入全文并读回后至多一次 ENTER；" +
 	"仅填字时 operation.auto_submit=false，不发送 ENTER。" +
+	"text(ref) 不要求节点带 tap；写后读回覆盖短时异步落地与几何变化（≤1 秒）。" +
 	"已知提交按钮用 operation.submit_ref=\"n<ref>\"，一次调用完成填写与提交。" +
 	"text_input 报告 write 与 submit；write=executed 且 submit 未派发时 outcome=partial（text_submit_not_executed）。" +
 	"业务结果用页面事实核对。\n\n" +
@@ -358,7 +359,9 @@ var toolCatalog = []toolDefinition{
 			"candidates 项含 ref、role、actions、bounds、relation、executable。" +
 			"candidates 非空时，直接取第一个 executable=true 的 ref，用同一 O、新 P 重试，无需重观察或手算坐标。" +
 			"诊断 ref 若因 compact 不在普通树中，可用 inspect({reference:原 O,node:诊断 ref}) 补看详细子树。" +
-			"\n文本：默认 auto_submit=true、submit_ref=\"enter_key\"。聚焦、全文写入、同节点精确读回，随后至多一次 ENTER；写后提交失败不补发 ENTER。" +
+			"\n文本：默认 auto_submit=true、submit_ref=\"enter_key\"。" +
+			"text(ref) 不要求节点带 tap；写后读回覆盖短时异步落地与几何变化（≤1 秒、至多 3 次只读读回），仍只写一次且要求全文精确相等。" +
+			"聚焦、全文写入、读回确认后至多一次 ENTER，写后提交失败不补发 ENTER。" +
 			"普通输入无需先 tap 或另发 ENTER。仅填字、草稿、多行、清空或逐字段编辑时显式 operation.auto_submit=false，只写入并读回，submit_ref 忽略。" +
 			"已知提交按钮用 operation.submit_ref=\"n<ref>\"：认领前按 tap 同一静态规划校验（写前灰置也接受），写后重验启用与点击安全点，再至多点击一次。" +
 			"默认分支返回 text_input:{write,submit}，auto_submit=false 时省略。" +

@@ -1,11 +1,186 @@
 package engine
 
 import (
+	"context"
 	"time"
 
 	"github.com/malyjacob/mobile-use-vnext/internal/device"
+	"github.com/malyjacob/mobile-use-vnext/internal/eventlog"
 	"github.com/malyjacob/mobile-use-vnext/internal/protocol"
 )
+
+var textVerifyDelays = []time.Duration{40 * time.Millisecond, 80 * time.Millisecond, 150 * time.Millisecond}
+
+const textVerifyMaxElapsed = 1000 * time.Millisecond
+const textVerifyMaxRebinds = 1
+
+// verifyTextWriteReadback runs after the unique set dispatch has been recorded.
+// Only an exact value from a device text read can confirm the write.
+func (e *Engine) verifyTextWriteReadback(work *workState, op *operationState, session *sessionState,
+	obs *observationState, bound *textBinding, text string, result device.TextResult) (apiErr *protocol.APIError) {
+	started := time.Now()
+	mode, attempt := "direct", 0
+	defer func() {
+		e.logTextVerify(op, mode, attempt, time.Since(started), apiErr)
+	}()
+	if result.Value != nil && *result.Value == text {
+		return nil
+	}
+
+	mode = "poll"
+	deadline := started.Add(textVerifyMaxElapsed)
+	lastReason := textVerifyReadbackReason(result.Value)
+	lastCount := 1
+	for _, delay := range textVerifyDelays {
+		if !e.textSubmitWorkUsable(work) {
+			return e.textVerifyStopped(op)
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		if !pauseInterruptible(work.Ctx, min(delay, remaining)) || !e.textSubmitWorkUsable(work) {
+			return e.textVerifyStopped(op)
+		}
+		if time.Until(deadline) <= 0 {
+			break
+		}
+
+		attempt++
+		readCtx, cancel := context.WithDeadline(work.Ctx, deadline)
+		read, readErr := e.dev.GetTextOnDisplay(readCtx, textTargetOf(bound.raw, session.Display))
+		cancel()
+		if !e.textSubmitWorkUsable(work) {
+			return e.textVerifyStopped(op)
+		}
+		if readErr != nil || time.Until(deadline) <= 0 {
+			return e.textVerifyError(op, textReasonReadbackUnavailable, nil)
+		}
+		switch read.CandidateCount {
+		case 1:
+			if read.Value != nil && *read.Value == text {
+				return nil
+			}
+			lastReason = textVerifyReadbackReason(read.Value)
+		case 0:
+			mode = "rebind"
+			// Returning directly enforces textVerifyMaxRebinds (one) and
+			// keeps the rebind result authoritative for this verify phase.
+			return e.verifyViaPostWriteRebind(work, op, session, obs, bound, text, deadline)
+		default:
+			return e.textVerifyError(op, textReasonReadbackUnavailable, &read.CandidateCount)
+		}
+	}
+	return e.textVerifyError(op, lastReason, &lastCount)
+}
+
+// verifyViaPostWriteRebind uses the captured tree to establish identity. The
+// targeted read of that node is still required as the write evidence.
+func (e *Engine) verifyViaPostWriteRebind(work *workState, op *operationState, session *sessionState,
+	obs *observationState, bound *textBinding, text string, deadline time.Time) *protocol.APIError {
+	if !e.textSubmitWorkUsable(work) {
+		return e.textVerifyStopped(op)
+	}
+	if obs == nil || time.Until(deadline) <= 0 {
+		return e.textVerifyError(op, textReasonReadbackUnavailable, nil)
+	}
+
+	readCtx, cancel := context.WithDeadline(work.Ctx, deadline)
+	defer cancel()
+	afterWrite, captureErr := e.dev.Capture(readCtx, session.Display)
+	if !e.textSubmitWorkUsable(work) {
+		return e.textVerifyStopped(op)
+	}
+	if captureErr != nil || readCtx.Err() != nil || !textSubmitCaptureTrusted(&afterWrite, session.Display) ||
+		!e.textSubmitDisplayCurrent(work, session.Display) {
+		return e.textVerifyError(op, textReasonReadbackUnavailable, nil)
+	}
+	if _, topologyErr := validateTapRawTopology(&afterWrite); topologyErr != nil {
+		return e.textVerifyError(op, textReasonReadbackUnavailable, nil)
+	}
+	if !sameTextTaskContext(obs.Foreground, afterWrite.Foreground) {
+		return e.textVerifyError(op, textReasonReadbackUnavailable, nil)
+	}
+	rebound, ok := rebindPostWriteTextTarget(bound.capture, bound.raw, &afterWrite, text)
+	if !e.textSubmitWorkUsable(work) {
+		return e.textVerifyStopped(op)
+	}
+	if time.Until(deadline) <= 0 {
+		return e.textVerifyError(op, textReasonReadbackUnavailable, nil)
+	}
+	if !ok {
+		zero := 0
+		return e.textVerifyError(op, textReasonReadbackUnavailable, &zero)
+	}
+
+	read, readErr := e.dev.GetTextOnDisplay(readCtx, textTargetOf(rebound, session.Display))
+	if !e.textSubmitWorkUsable(work) {
+		return e.textVerifyStopped(op)
+	}
+	if readErr != nil || time.Until(deadline) <= 0 {
+		return e.textVerifyError(op, textReasonReadbackUnavailable, nil)
+	}
+	if read.CandidateCount != 1 {
+		return e.textVerifyError(op, textReasonReadbackUnavailable, &read.CandidateCount)
+	}
+	if read.Value == nil || *read.Value != text {
+		return e.textVerifyError(op, textVerifyReadbackReason(read.Value), &read.CandidateCount)
+	}
+	bound.raw, bound.capture = rebound, &afterWrite
+	return nil
+}
+
+func textVerifyReadbackReason(value *string) string {
+	if value == nil {
+		return textReasonReadbackUnavailable
+	}
+	return textReasonReadbackMismatch
+}
+
+func (e *Engine) textVerifyError(op *operationState, reason string, count *int) *protocol.APIError {
+	message := "文字写入结果无法确认"
+	if reason == textReasonReadbackMismatch {
+		message = "目标输入框的完整内容与请求不一致"
+	}
+	return e.textError(op, 409, protocol.CodeTextResultUnknown, message, textStageVerify, reason, OutcomeUncertain, count)
+}
+
+func (e *Engine) textVerifyStopped(op *operationState) *protocol.APIError {
+	return e.textError(op, 409, protocol.CodeStopped, "原工作已撤销",
+		e.textCurrentStage(op), textReasonAuthorizationRevoked, OutcomeUncertain, nil)
+}
+
+func (e *Engine) logTextVerify(op *operationState, mode string, attempt int, elapsed time.Duration,
+	apiErr *protocol.APIError) {
+	if e.log == nil {
+		return
+	}
+	outcome := OutcomeExecuted
+	if apiErr != nil {
+		outcome = OutcomeUncertain
+		if apiErr.Code == protocol.CodeStopped {
+			outcome = "stopped"
+		}
+	}
+	fields := []eventlog.Field{
+		eventlog.Str("operation_id", op.ID),
+		eventlog.Str("mode", mode),
+		eventlog.Int("attempt", attempt),
+		eventlog.Str("outcome", outcome),
+		eventlog.Duration("ms", elapsed),
+	}
+	if apiErr == nil {
+		fields = append(fields, eventlog.Int("count", 1))
+	} else {
+		if reason, ok := apiErr.Details["reason"].(string); ok {
+			fields = append(fields, eventlog.Str("reason", reason))
+		}
+		if count, ok := apiErr.Details["candidate_count"].(int); ok {
+			fields = append(fields, eventlog.Int("count", count))
+		}
+	}
+	e.log.Event(eventlog.Debug, "engine.text.verify", fields...)
+}
 
 // textSubmitRetryDelay bounds the one post-write re-capture a node submit_ref
 // may use. It covers an App enabling a greyed button and the keyboard animation

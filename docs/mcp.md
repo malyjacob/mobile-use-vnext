@@ -65,12 +65,15 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
 ref；无法唯一定位、祖先是 `root` 或计算失败时省略，不编造。该字段只进入错误详情，不写入
 事件日志；坐标目标与裸 `swipe` 的重验不返回 `changed_ref`。
 
-`text` 默认 `auto_submit=true`、`submit_ref="enter_key"`：一次调用完成必要聚焦（已聚焦 ref
-不重复点击）、将目标框全文设为 text、以同一次写入调用中同一节点的刷新值精确读回，随后至多
-发送一次 ENTER；普通输入不需要先 tap 或另发 ENTER。显式 `operation.auto_submit=false` 只做
-必要聚焦、写入并读回，不发送提交原语，也不返回 `text_input`；此时 `submit_ref` 即使出现也
-只做语法校验。已知页面提交按钮时用 `operation.submit_ref="n<ref>"`：认领前按完整 `tap` 规划
-校验该按钮（写前显式灰置也接受），写后重验其启用状态与安全落点，再至多点击一次；单次调用
+`text` 的 `ref` 目标只要求 `role=input`、公开动作含 `text`、未禁用、`protected=false` 与正面积
+几何，不要求 `tap` 动作。`text` 默认 `auto_submit=true`、`submit_ref="enter_key"`：一次调用
+完成必要聚焦（已聚焦 ref 走零点击快路径，未聚焦时在目标子树内规划唯一安全落点并至多点击
+一次）、将目标框全文设为 text、确认写入，随后至多发送一次 ENTER；普通输入不需要先 tap 或
+另发 ENTER。写入确认以写后刷新值精确相等为准；不可读或不等时至多 3 次只读读回（`40ms`/
+`80ms`/`150ms` 退避，墙钟上限 `1000ms`），几何变化时允许一次严格写后重绑定，仍不成立返回
+`uncertain`。显式 `operation.auto_submit=false` 只做必要聚焦、写入并读回，不发送提交原语，
+也不返回 `text_input`；此时 `submit_ref` 即使出现也只做语法校验。已知页面提交按钮时用
+`operation.submit_ref="n<ref>"`：认领前按完整 `tap` 规划校验该按钮（写前显式灰置也接受），写后重验其启用状态与安全落点，再至多点击一次；单次调用
 至多一种提交原语，节点提交失败绝不补发 ENTER。
 
 复合 text 的 `text_input` 是 `{write,submit}` 快照，在首次结果、运行中 `status(P)`、重复 P

@@ -547,8 +547,11 @@ func TestCatalogFingerprintBaseline(t *testing.T) {
 	// four-tier scroll amount with scroll axis-fallback guidance. Contract 30
 	// adds observation change and hint guidance to the act and snap descriptions.
 	// Contract 31 replaces the app kill wording and publishes the seven-branch
-	// tolerance matrix plus kill package-state result fields.
-	const baseline = "ee88b255e393d2538d68a0fd01aa9da816ccf8d5754a2436b99d642fc52ac427"
+	// tolerance matrix plus kill package-state result fields. Contract 32
+	// publishes the text(ref) editable-input admission without a tap action and
+	// the bounded read-only post-write readback, including the single strict
+	// post-write re-acquisition when the readback reports no candidate.
+	const baseline = "5578041adf04bcd8670a95b731667b85832957de4990f49e2dbf4eae6845d9b9"
 	if got := CatalogFingerprint(); got != baseline {
 		t.Fatalf("catalog changed: %s", got)
 	}

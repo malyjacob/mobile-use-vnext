@@ -243,8 +243,10 @@ engine 的状态锁只做有限内存检查与转换：锁内不等待 ADB、u2 
 
 `bubble=false` 禁用 `bubble_ancestor` 与 `bubble_colocated`（直接 `ref` 目标自身已有请求动作时仍走直接规划并可使用
 `coextensive_child`）。`text(ref)` 焦点规划不做祖先提升、共位吸附与 `coextensive_child` 委托，先过统一
-`invalid_target`/`node_disabled`，再做可编辑/受保护校验（`422 text_target_uncertain`），最后复用直接
-4 级 `tap` 焦点规划。除参数语法、节点存在/禁用及 `text` 自身输入能力/保护拒绝外，`act` 静态目标解析与规划拒绝统一收口为 5 个正交 `422` 错误码（`invalid_target`、`unsupported_node_action`、
+`invalid_target`/`node_disabled`，再做可编辑/受保护校验（`422 text_target_uncertain`），静态准入不要求
+`tap` 动作，最后按 `text` 能力在目标子树内规划唯一 4 级聚焦落点；无落点时返回 `422 no_safe_point`，
+遮挡的非输入控件列入 `blocking_refs`。已聚焦目标走零点击快路径，未聚焦时至多点击一次并由 `afterTap`
+与严格绑定证明获焦。除参数语法、节点存在/禁用及 `text` 自身输入能力/保护拒绝外，`act` 静态目标解析与规划拒绝统一收口为 5 个正交 `422` 错误码（`invalid_target`、`unsupported_node_action`、
 `ambiguous_point`、`no_safe_point`、`no_safe_trajectory`），有候选时附统一 `candidates`（至多 4 项，干跑计算 `executable`，
 不含文本/标签）与可选 `blocking_refs`（至多 3 项）。
 
@@ -280,16 +282,22 @@ focus/write/submit 原语状态、三个原语的 dispatch 事实（`not_attempt
 持久化与最终授权失败回退为确定未派发，回执返回后再按终止/确定未派发/不可用分别推进。
 ref 目标在新鲜帧中已聚焦且通过完整绑定时跳过焦点 tap，其他目标只做一次必要聚焦。
 
-写入完成证据是一次 SetText 的完整终止回执、`candidateCount=1`、`issued=true`，以及固定
-helper 对同一候选节点刷新后的完整 value 与请求精确相等；`accepted` 只是框架回执，不单独
-否决。engine 不做写前 GetText，也不以另一棵树的重新采集、重绑定或 GetText 证明写入。候选成立后
-在同一短锁提交 `write=executed`；`auto_submit=false` 同时提交 `KnownOutcome=executed`，复合分支
-保留提交的独立门禁。
+写入完成证据在一次 SetText 的完整终止回执、`candidateCount=1`、`issued=true` 之后判定：固定
+helper 的 `0ms` 刷新值已与请求精确相等即完成，零额外 RPC、零等待；不可读或不等时至多 3 次只读
+`GetTextOnDisplay`，退避 `40ms`/`80ms`/`150ms`，总墙钟上限 `1000ms`，受 STOP/取消立即中断，
+不发送第二次写原语。轮询期间 `candidateCount=0`（写入撑高或重排导致几何变化）时至多 1 次
+严格写后重绑定：一次 `Capture`，要求同显示、同前台任务、唯一锚点或全局唯一同值聚焦框与
+几何守卫，并对重绑定节点再做 1 次只读读回；该分支至多进入一次。`candidateCount>1` 立即按
+多候选失败收口。判据仍是精确全文相等，普通 `observe` 不作为执行证据，同一动作至多一次
+SetText；`accepted` 只是框架回执，不单独否决。engine 不做写前 GetText，写后只以同目标刷新值、
+有界只读读回或唯一严格写后重绑定证明写入。候选成立后在同一短锁提交 `write=executed`；
+`auto_submit=false` 同时提交 `KnownOutcome=executed`，复合分支保留提交的独立门禁。
 
 复合提交在 write 已确认后进入 `stage=submit`，至多执行一种提交原语：
 
 - `submit_ref="enter_key"`：先核对前台任务与观察时相同，再用写前目标做一次精确
-  `GetTextOnDisplay`；候选唯一且完整值相等时直接进入 ENTER 门禁。仅当传输无错且
+  `GetTextOnDisplay`（写入确认阶段完成严格写后重绑定时用更新后的目标）；候选唯一且完整值相等时
+  直接进入 ENTER 门禁。仅当传输无错且
   `candidate_count=0` 时，允许一次写后 `Capture` 重绑定：新帧须同显示、同前台任务且拓扑完整；
   候选须为同包同类、可见、可编辑、已知聚焦/启用且非密码的输入框，完整值等于请求文本。有资源或
   描述锚点时，该锚点在写前帧与写后帧中都须唯一；无锚点时，全局满足安全条件且值相等的候选须唯一。
@@ -830,7 +838,8 @@ P 已无法定位时，`end(P)` 返回 `409 operation_unknown`、`phase=referenc
 `primary` 表示当前基线候选胜出，`historical` 表示备用 full 候选胜出，`full` 表示未选 delta；
 该事件只在成功提交后记录，不包含候选 ID、树或差分。
 text 完成事件记 `focus_dispatch`/`write_dispatch`/`submit_dispatch` 与受控 `stage`/`reason`/`count`；
-`changed_ref`、输入正文与读回值绝不进入日志。
+写入确认事件 `engine.text.verify` 记 `mode`（`direct`/`poll`/`rebind`）、`attempt`、`outcome`、失败时的闭集
+`reason`、已知的 `count` 与阶段耗时 `ms`；`changed_ref`、输入正文与读回值绝不进入日志。
 新增键必须先进入 `internal/eventlog` 的单一白名单，否则事件被静默丢弃。
 
 ## 10. 消息投递与发布边界
@@ -846,7 +855,7 @@ text 完成事件记 `focus_dispatch`/`write_dispatch`/`submit_dispatch` 与受�
 ### 发布
 
 `release/versions.json` 是发行号、共同契约号与 Android versionCode 的唯一来源；当前为
-`release_version=0.35.0`、`contract_version=31`、`android_version_code=37`，构建生成
+`release_version=0.36.0`、`contract_version=32`、`android_version_code=38`，构建生成
 Go/Java 常量。`scripts/build-release.ps1` 产出整组产物与 `build/release/manifest.json`
 （源码提交、Go 版本、MCP SDK/协议、各产物 SHA-256/大小、Android 包名/版本、工具目录指纹）。
 工具目录固定为 `scripts/toolcatalog` 投影的 13 个工具，指纹是该目录注册顺序、名称、描述与

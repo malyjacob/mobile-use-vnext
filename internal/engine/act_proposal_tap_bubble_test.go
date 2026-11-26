@@ -492,27 +492,28 @@ func TestProposalTextRefUnifiedStaticErrorsAndPreservedTextContract(testingHandl
 		inputBounds := device.Rect{Left: 100, Top: 300, Right: 900, Bottom: 400}
 		pageStep := proposalCaptureStep(func(display device.Display) device.Capture {
 			input := tapTextProposalEditable(1, 0, 1, display, inputBounds, false, false)
+			input.HasFocused, input.Focused = true, true
 			return revalCapture(display, revalRoot(display.ID, 1), input)
 		})
 		harnessUnderTest := newTapScopeHarness(testingHandle)
 		harnessUnderTest.device.scriptCaptures(pageStep)
 		start := harnessUnderTest.startSession()
 		input := tapPublicBoundsNode(currentTree(testingHandle, harnessUnderTest.engine).Root, inputBounds)
-		if input == nil {
-			testingHandle.Fatal("text input without tap action not found")
+		if input == nil || !hasAction(input, protocol.ActionText) || hasAction(input, protocol.ActionTap) {
+			testingHandle.Fatalf("expected input with text but no tap, got %+v", input)
 		}
 
-		result := harnessUnderTest.actWith(testingHandle, "Ptextother",
-			textFlowRequest(start.Observation.ID, input.Ref, "hello", nil))
-		details := proposalRequireStaticReason(testingHandle, result,
-			protocol.CodeNodeUnsupported, "target_has_other_action")
-		proposalRequireDetailString(testingHandle, details, "scope", "target")
-		proposalRequireDetailString(testingHandle, details, "scope_ref", input.Ref)
-		proposalRequireNoDispatch(testingHandle, harnessUnderTest)
-		requireReadyObservation(testingHandle, harnessUnderTest, start.Observation.ID)
+		autoSubmit := false
+		result := harnessUnderTest.actWith(testingHandle, "Ptextdirect",
+			textFlowRequest(start.Observation.ID, input.Ref, "hello", &autoSubmit))
+		proposalRequireExecuted(testingHandle, result)
+		dev := harnessUnderTest.device
+		if len(dev.taps) != 0 || len(dev.texts) != 1 || dev.texts[0] != "hello" || len(dev.keys) != 0 {
+			testingHandle.Fatalf("want one direct write, got taps=%v texts=%v keys=%v", dev.taps, dev.texts, dev.keys)
+		}
 	})
 
-	testingHandle.Run("focus_blocked_returns_candidates", func(testingHandle *testing.T) {
+	testingHandle.Run("focus_blocked_reports_blocking_ref", func(testingHandle *testing.T) {
 		inputBounds := device.Rect{Left: 100, Top: 300, Right: 900, Bottom: 400}
 		pageStep := proposalCaptureStep(func(display device.Display) device.Capture {
 			input := tapTextProposalEditable(1, 0, 1, display, inputBounds, true, false, 2)
@@ -536,9 +537,8 @@ func TestProposalTextRefUnifiedStaticErrorsAndPreservedTextContract(testingHandl
 			protocol.CodeNoSafePoint, "blocked")
 		proposalRequireDetailString(testingHandle, details, "scope", "target")
 		proposalRequireDetailString(testingHandle, details, "scope_ref", input.Ref)
-		candidates := proposalCandidates(testingHandle, details)
-		proposalRequireCandidateRefs(testingHandle, candidates, cover.Ref)
-		proposalRequireCandidateRelation(testingHandle, candidates, cover.Ref, "child")
+		requireDetailStringSlice(testingHandle, details, "blocking_refs", cover.Ref)
+		requireDetailAbsent(testingHandle, details, "candidates")
 		proposalRequireNoDispatch(testingHandle, harnessUnderTest)
 		requireReadyObservation(testingHandle, harnessUnderTest, start.Observation.ID)
 	})

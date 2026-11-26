@@ -262,8 +262,8 @@ func TestTextSetNoUniqueTargetReportsUndispatchedFacts(t *testing.T) {
 }
 
 // TestTextReadbackMismatchAndUnavailable proves a dispatched write with an
-// unusable exact readback is uncertain at the verify stage, never retried, and
-// never followed by ENTER.
+// persistently unusable readback is uncertain at the verify stage. Three
+// read-only attempts leave the set and ENTER call counts at one and zero.
 func TestTextReadbackMismatchAndUnavailable(t *testing.T) {
 	bounds := device.Rect{Left: 100, Top: 300, Right: 900, Bottom: 400}
 	cases := []struct {
@@ -290,6 +290,8 @@ func TestTextReadbackMismatchAndUnavailable(t *testing.T) {
 			h.device.scriptCaptures(textFlowBuild(0, bounds, "", false),
 				textFlowBuild(0, bounds, "", true))
 			dev.setSteps = []textSetStep{{result: tc.result}}
+			read := textGetStep{result: device.TextResult{CandidateCount: 1, Value: tc.result.Value}}
+			dev.getSteps = []textGetStep{read, read, read}
 			result := h.actWith(t, "PtextVerify", textFlowRequest(obsRef, ref, "hello", nil))
 			if result.Outcome != OutcomeUncertain {
 				t.Fatalf("outcome = %q, want uncertain (%+v)", result.Outcome, result)
@@ -304,8 +306,8 @@ func TestTextReadbackMismatchAndUnavailable(t *testing.T) {
 			requireTextDetail(t, details, "candidate_count", 1)
 			requireTextDispatch(t, details, "dispatched", "dispatched", "not_attempted")
 			tap, set, get, key := dev.counts()
-			if tap != 1 || set != 1 || get != 0 || key != 0 {
-				t.Fatalf("primitive calls tap=%d set=%d get=%d key=%d, want 1/1/0/0",
+			if tap != 1 || set != 1 || get != 3 || key != 0 {
+				t.Fatalf("primitive calls tap=%d set=%d get=%d key=%d, want 1/1/3/0",
 					tap, set, get, key)
 			}
 		})
@@ -391,6 +393,8 @@ func TestTextAlreadyFocusedStillRequiresExactSetValue(t *testing.T) {
 	dev.setSteps = []textSetStep{{result: device.TextResult{
 		CandidateCount: 1, Value: nil, Issued: true, Receipt: device.DispatchTerminated,
 	}}}
+	read := textGetStep{result: device.TextResult{CandidateCount: 1}}
+	dev.getSteps = []textGetStep{read, read, read}
 	falseValue := false
 	result := h.actWith(t, "PtextFocusedNull", textFlowRequest(obsRef, ref, "hello", &falseValue))
 	if result.Outcome != OutcomeUncertain {
@@ -401,8 +405,8 @@ func TestTextAlreadyFocusedStillRequiresExactSetValue(t *testing.T) {
 	requireTextDetail(t, details, "reason", "readback_unavailable")
 	requireTextDispatch(t, details, "not_attempted", "dispatched", "not_attempted")
 	tap, set, get, key := dev.counts()
-	if tap != 0 || set != 1 || get != 0 || key != 0 {
-		t.Fatalf("primitive calls tap=%d set=%d get=%d key=%d, want 0/1/0/0",
+	if tap != 0 || set != 1 || get != 3 || key != 0 {
+		t.Fatalf("primitive calls tap=%d set=%d get=%d key=%d, want 0/1/3/0",
 			tap, set, get, key)
 	}
 }
@@ -471,6 +475,8 @@ func TestTextFinishedUncertainPlansObserveForFirstStatusAndDuplicate(t *testing.
 	dev.setSteps = []textSetStep{{result: device.TextResult{
 		CandidateCount: 1, Value: strPtr("other"), Issued: true, Receipt: device.DispatchTerminated,
 	}}}
+	read := textGetStep{result: device.TextResult{CandidateCount: 1, Value: strPtr("other")}}
+	dev.getSteps = []textGetStep{read, read, read}
 	result := h.actWith(t, "PtextRecovery", textFlowRequest(obsRef, ref, "hello", nil))
 	if result.Outcome != OutcomeUncertain {
 		t.Fatalf("outcome = %q, want uncertain", result.Outcome)
@@ -521,6 +527,8 @@ func TestTextFinishedUncertainLiveOverrides(t *testing.T) {
 		dev.setSteps = []textSetStep{{result: device.TextResult{
 			CandidateCount: 1, Value: strPtr("other"), Issued: true, Receipt: device.DispatchTerminated,
 		}}}
+		read := textGetStep{result: device.TextResult{CandidateCount: 1, Value: strPtr("other")}}
+		dev.getSteps = []textGetStep{read, read, read}
 		result := h.actWith(t, "PtextLive", textFlowRequest(obsRef, ref, "hello", nil))
 		if result.Outcome != OutcomeUncertain {
 			t.Fatalf("outcome = %q, want uncertain", result.Outcome)
@@ -699,6 +707,8 @@ func TestTextFinishedEventIsBounded(t *testing.T) {
 	dev.setSteps = []textSetStep{{result: device.TextResult{
 		CandidateCount: 1, Value: strPtr("other-secret"), Issued: true, Receipt: device.DispatchTerminated,
 	}}}
+	read := textGetStep{result: device.TextResult{CandidateCount: 1, Value: strPtr("other-secret")}}
+	dev.getSteps = []textGetStep{read, read, read}
 	result := h.actWith(t, "PtextLog", textFlowRequest(start.Observation.ID, input.Ref, "top-secret", nil))
 	if result.Outcome != OutcomeUncertain {
 		t.Fatalf("outcome = %q, want uncertain", result.Outcome)
