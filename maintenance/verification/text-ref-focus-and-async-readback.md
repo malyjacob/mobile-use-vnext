@@ -108,8 +108,7 @@
     `release=0.36.0`、目录指纹一致，`app_kill`/`app_close`/`app_kill_package` 执行，
     `app_kill_primary_refused` 与 `app_claim` 因主屏无受控任务 SKIP（环境，不是制品）。
 - 磁盘替换、独立进程验证与依赖方切换分别记录：探针启动本次主机 exe 并连接本次手机适配器
-  进程；依赖 Agent 的 MCP 托管进程与重连未操作，由用户处理。部署脚本提示宿主必须实际重启
-  才能重新发现工具。
+  进程；依赖 Agent 的 MCP 托管进程与重连未操作，由用户处理。部署脚本提示宿主必须实际重启  才能重新发现工具。
 
 ## 实机行为（虚拟屏会话）
 
@@ -166,3 +165,21 @@
 - 依赖方 Agent 托管的 MCP 进程与重连未操作：本次交互式 MCP 工具仍指向旧进程（`start` 返回
   `409 contract_mismatch`），验证改用 HTTP 直调与独立探针；宿主必须实际重启才能重新发现
   13 个工具。部署脚本两次提示手机 MCP stdio 旧映像可能仍被其他进程占用。
+
+## 归档 HEAD 的发布包复建
+
+在归档提交 `5555936dc43b2d68bc2f59533b0b6c33ec922517`（工作树干净）上重新执行
+`build-release.ps1`、`verify-manifest.ps1` 与 `build-host-tools.ps1`：
+
+- `device-service` `b31dc58a…`（9,568,416 B）、`device-mcp` `b579eb9a…`（9,371,808 B）、
+  `u2.jar` `28361193…`、`applist.dex` `63818f32…`、`service.sh` `4b568a9a…` 与实现提交构建
+  **逐字节一致**；主机 `device-mcp.exe` `25dfeb46…`、`mcp-probe.exe` `e8a81e8f…`、目录指纹
+  `13/5578041a…` 同样一致；`verify-manifest` 与 `build-host-tools` 均 PASS
+  （`source_commit=5555936…`、`source_dirty=false`）。
+- `control.apk` 由 `085983b8…` 变为 `500c4d4b…`，字节数同为 103,965 B：APK 构建含签名与打包
+  时间戳，不是逐字节可复现产物；两个归档提交之间源码差异仅为 `maintenance/` 文档。
+- 手机上的部署来自实现提交清单（`source_commit=964c93a…`、`control.apk=085983b8…`），部署
+  脚本按该清单核验了 chroot 产物哈希与安装后的 App `versionName=0.36.0`/`versionCode=38`；
+  归档 HEAD 复建未重新部署，因为 Go 与固定制品哈希未变、APK 仅签名时间戳不同，重新安装不
+  增加证据。当前 `build/` 下的清单以归档提交为上界记录，后续归档记录提交只改 `maintenance/`。
+
