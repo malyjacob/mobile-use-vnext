@@ -149,6 +149,14 @@
    `end` 返回 `cleanup=pending`，随后 `status` 为 `can_start=true`、
    `cleanup={state:complete, execution:confirmed, tasks:confirmed, display:confirmed}`。
 
+## Issue 收尾
+
+- Issue #49 与 #50 各回复一条完整说明：根因（规范把聚焦规划等价成 `clickable=true`；契约 18
+  禁止写后二次只读核对）、契约 32 的新判据、虚拟屏实机证据（`mode=direct` / `poll ms=98` /
+  `rebind ms=370`）、实现提交与归档/验证记录链接；#50 另说明未采纳其建议的
+  `verification`/`readback` 新字段（完成证据已收敛为 `write=executed`）。两条随后按
+  `completed` 关闭，复核状态为 `CLOSED`。
+
 ## 未执行项与原因
 
 - 未实测「无 `tap` 输入框 100% 被可点击子控件覆盖 → `422 no_safe_point` + `blocking_refs`」与
