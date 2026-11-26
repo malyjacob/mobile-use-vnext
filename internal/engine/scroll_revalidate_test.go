@@ -423,7 +423,10 @@ func TestRawSwipeStillRejectsMovedStartLeaf(t *testing.T) {
 	h := newHarness(t)
 	h.device.scriptCaptures(defaultCaptureStep)
 	start := h.startSession()
-	h.device.scriptCaptures(movedButtonCaptureStep(), defaultCaptureStep)
+	// Both revalidation frames must carry the move. A raw swipe proves its start
+	// point through the coordinate proof, which disables the Tier 5 translation
+	// recovery, so the same-band move still rejects.
+	h.device.scriptCaptures(movedButtonCaptureStep())
 
 	result := h.actP(t, "", start.Observation.ID, protocol.Operation{
 		Type: "swipe", From: &protocol.Point{X: 500, Y: 150}, To: &protocol.Point{X: 500, Y: 1000},

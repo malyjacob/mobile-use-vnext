@@ -1746,7 +1746,7 @@ func sameScrollScope(oldRect, freshRect, oldScreen, freshScreen device.Rect,
 // returns the frame it already read so the caller path can deliver it as fresh
 // evidence.
 func (e *Engine) revalidateScrollTarget(work *workState, obs *observationState,
-	plan *scrollPlan) (*device.Capture, *scrollFrame, *protocol.APIError) {
+	plan *scrollPlan, attempt int) (*device.Capture, *scrollFrame, *protocol.APIError) {
 	if work == nil || plan == nil || plan.container == nil {
 		return nil, nil, protocol.NewError(503, protocol.CodeHierarchyFailed,
 			"实时目标重验失败")
@@ -1776,25 +1776,25 @@ func (e *Engine) revalidateScrollTarget(work *workState, obs *observationState,
 	switch matchState {
 	case actProbeUnique:
 	case actProbeCancelled:
-		e.actTargetLog(work.OperationID, actTargetProbeOutcome(matchState), 0)
+		e.actTargetLog(work.OperationID, actTargetProbeOutcome(matchState), 0, attempt)
 		return capture, nil, stoppedActRevalidation()
 	case actProbeBudgetExhausted, actProbeMalformed:
-		e.actTargetLog(work.OperationID, actTargetProbeOutcome(matchState), 0)
+		e.actTargetLog(work.OperationID, actTargetProbeOutcome(matchState), 0, attempt)
 		return capture, nil, protocol.NewError(503, protocol.CodeHierarchyFailed,
 			"实时目标重验失败")
 	case actProbeNone, actProbeAmbiguous:
-		e.actTargetLog(work.OperationID, actTargetProbeOutcome(matchState), 0)
+		e.actTargetLog(work.OperationID, actTargetProbeOutcome(matchState), 0, attempt)
 		changedErr := probeTargetChangedError(matchState, match, "滚动容器或实际轨迹已变化，本次未派发")
 		attachChangedRef(work.Ctx, changedErr, obs, capture, plan.container)
 		reason, _ := changedErr.Details["reason"].(string)
 		e.logScrollRevalidate(work.OperationID, false, false, false, false, qualityState, reason)
 		return capture, nil, changedErr
 	default:
-		e.actTargetLog(work.OperationID, actTargetProbeOutcome(matchState), 0)
+		e.actTargetLog(work.OperationID, actTargetProbeOutcome(matchState), 0, attempt)
 		return capture, nil, protocol.NewError(503, protocol.CodeHierarchyFailed,
 			"实时目标重验失败")
 	}
-	e.actTargetLog(work.OperationID, actTargetProbeOutcome(matchState), match.tier)
+	e.actTargetLog(work.OperationID, actTargetProbeOutcome(matchState), match.tier, attempt)
 	freshContainer := match.raw
 	freshIndex := indexOf(capture, freshContainer)
 	if freshIndex < 0 {

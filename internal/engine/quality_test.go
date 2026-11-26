@@ -517,7 +517,9 @@ func TestQualityRejectionDeliveryIsNotSampled(t *testing.T) {
 	if button == nil {
 		t.Fatal("button not found in tree")
 	}
-	h.device.scriptCaptures(movedButtonCaptureStep())
+	// A same-band vertical move is now re-acquired by Tier 5, so this rejection
+	// case uses a target text change: it fails the structure match at every tier.
+	h.device.scriptCaptures(markerCapture("OK-changed"))
 
 	result := h.actWith(t, "Pqualitydelivered",
 		h.tapRefRequest(t, start.Observation.ID, button.Ref))
@@ -568,7 +570,9 @@ func TestQualityDeliveryLogsOperationID(t *testing.T) {
 	if button == nil {
 		t.Fatal("button not found in tree")
 	}
-	h.device.scriptCaptures(movedButtonCaptureStep())
+	// A same-band vertical move is now re-acquired by Tier 5, so this rejection
+	// case uses a target text change: it fails the structure match at every tier.
+	h.device.scriptCaptures(markerCapture("OK-changed"))
 
 	result := h.actWith(t, "Pqualitydeliverylog",
 		h.tapRefRequest(t, start.Observation.ID, button.Ref))

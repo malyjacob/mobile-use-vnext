@@ -3,7 +3,9 @@ package engine
 import (
 	"context"
 	"sort"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/malyjacob/mobile-use-vnext/internal/device"
 	"github.com/malyjacob/mobile-use-vnext/internal/protocol"
@@ -102,22 +104,46 @@ func structureKeyOf(raw *device.RawNode) structureKey {
 	}
 }
 
-// actMatchMode selects the operation-specific Tier 4 evidence policy.
+type ancestorStructureKey struct {
+	Package, Class string
+	Resource       optionalString
+	Editable       bool
+	Clickable      tri
+	LongClickable  tri
+	Scrollable     tri
+	Enabled        tri
+	Password       tri
+	Checkable      tri
+}
+
+func ancestorStructureKeyOf(raw *device.RawNode) ancestorStructureKey {
+	key := structureKeyOf(raw)
+	return ancestorStructureKey{
+		Package: key.Package, Class: key.Class, Resource: key.Resource,
+		Editable: key.Editable, Clickable: key.Clickable,
+		LongClickable: key.LongClickable, Scrollable: key.Scrollable,
+		Enabled: key.Enabled, Password: key.Password, Checkable: key.Checkable,
+	}
+}
+
+// actMatchMode selects the operation-specific strong identity evidence policy.
 type actMatchMode uint8
 
 const (
-	// actMatchTapLike is the tap, long_press and text policy: Tier 4 requires
-	// E1, E2 or an equal non-empty readable-text multiset over the subtree (E3).
+	// actMatchTapLike accepts exact readable multiset or numeric-skeleton E3.
 	actMatchTapLike actMatchMode = iota
 	// actMatchScroll is the scroll-container policy: a scrolled container's
 	// readable subtree legitimately changes, so E3 accepts a non-empty readable
 	// intersection or the same non-empty resource with strong coverage.
 	actMatchScroll
+	// actMatchTapLikeExact preserves exact E3 for the write-submit soft-keyboard
+	// recovery path.
+	actMatchTapLikeExact
 )
 
 // actMatchOptions is the complete policy of one action-target match. The zero
-// value keeps the historical Tier 1-3 behavior and adds the bounded Tier 4
-// anti-rebuild proof; an absent limit field means the default limit.
+// value enables the ordinary tap-like policy through Tier 5. An absent limit
+// field means the default limit.
 type actMatchOptions struct {
 	mode   actMatchMode
 	limits actMatchLimits
@@ -127,6 +153,11 @@ type actMatchOptions struct {
 	// true -> false, and never authorizes dispatch by itself: the caller must
 	// still prove the explicit enabled state on the fresh frame.
 	allowEnabledTransition bool
+	// disableTranslation disables the Tier 5 same-lineage horizontal-band
+	// translation recovery. The zero value keeps it enabled for ordinary
+	// actions; the coordinate owner-conservation fallback disables it so a
+	// moved owner can never be accepted at a far position.
+	disableTranslation bool
 }
 
 func defaultActMatchOptions() actMatchOptions {
@@ -153,6 +184,23 @@ func (options actMatchOptions) withLimits(limits actMatchLimits) actMatchOptions
 // option set. Callers apply it to the execution binding only.
 func (options actMatchOptions) withEnabledTransition() actMatchOptions {
 	options.allowEnabledTransition = true
+	return options
+}
+
+// withoutTranslation disables the Tier 5 translation recovery on this option
+// set. The coordinate owner-conservation fallback uses it so an owner that only
+// stayed on the same horizontal band can never be accepted after a real move.
+func (options actMatchOptions) withoutTranslation() actMatchOptions {
+	options.disableTranslation = true
+	return options
+}
+
+// withExactTapLikeEvidence keeps the exact readable multiset as the only
+// tap-like subtree evidence. The write-submit revalidation path uses it so its
+// evidence rule stays exactly what it was before the numeric-skeleton policy was
+// introduced.
+func (options actMatchOptions) withExactTapLikeEvidence() actMatchOptions {
+	options.mode = actMatchTapLikeExact
 	return options
 }
 
@@ -266,6 +314,14 @@ type lineageEntry struct {
 	root   bool
 }
 
+func isSyntheticDisplayRoot(raw *device.RawNode) bool {
+	return raw != nil && raw.Parent == -1 && raw.Package == "" && raw.ClassName == "" &&
+		!raw.TextSet && !raw.DescSet && !raw.ResourceSet && !raw.Editable &&
+		raw.HasEnabled && raw.Enabled && !raw.HasClickable && !raw.HasLongClick &&
+		!raw.HasScrollable && !raw.HasChecked && !raw.HasSelected && !raw.HasFocused &&
+		!raw.HasCheckable && !raw.HasPassword
+}
+
 // lineageL1 is the nearest-first ancestor chain without Bounds, Focused or
 // Selected. The depth bound and visited set turn malformed cycles into a
 // hierarchy failure instead of an unbounded walk.
@@ -299,6 +355,12 @@ func lineageL1(capture *device.Capture, index int,
 		if node.Parent < -1 {
 			budget.failMalformed()
 			return nil, false
+		}
+		if isSyntheticDisplayRoot(node) {
+			if len(lineage) > 0 {
+				lineage[len(lineage)-1].root = true
+			}
+			break
 		}
 		lineage = append(lineage, lineageEntry{
 			parent: parent,
@@ -367,6 +429,47 @@ func lineageL2(capture *device.Capture, index int,
 	return out, true
 }
 
+type lineageEntryForAct struct {
+	parent int
+	key    ancestorStructureKey
+	root   bool
+}
+
+// lineageL2ForAct preserves the same boundaries as lineageL2 while comparing
+// only stable ancestor structure.
+func lineageL2ForAct(capture *device.Capture, index int,
+	budget *matchBudget) ([]lineageEntryForAct, bool) {
+	all, ok := lineageL1(capture, index, budget)
+	if !ok {
+		return nil, false
+	}
+	out := make([]lineageEntryForAct, 0, len(all))
+	for _, entry := range all {
+		if budget == nil || !budget.checkActive() {
+			return nil, false
+		}
+		if entry.parent < 0 || entry.parent >= len(capture.Nodes) {
+			budget.failMalformed()
+			return nil, false
+		}
+		node := &capture.Nodes[entry.parent]
+		if !entry.root && transparentWrapper(node) {
+			continue
+		}
+		out = append(out, lineageEntryForAct{
+			parent: entry.parent, key: ancestorStructureKeyOf(node), root: entry.root,
+		})
+	}
+	return out, true
+}
+
+func strongLineageAnchorForAct(key ancestorStructureKey) bool {
+	return (key.Resource.set && key.Resource.value != "") ||
+		knownTrue(key.Clickable) || knownTrue(key.LongClickable) ||
+		knownTrue(key.Scrollable) || key.Editable ||
+		knownTrue(key.Password) || knownTrue(key.Checkable)
+}
+
 func strongLineageAnchor(entry lineageEntry) bool {
 	key := entry.key
 	return (key.Resource.set && key.Resource.value != "") ||
@@ -418,6 +521,10 @@ type actMatch struct {
 	raw                *device.RawNode
 	tier               int
 	independentContent bool
+	// independentSubtree reports that the matched target's own subtree carried
+	// the strong identity evidence of the match (the E3 readable multiset or the
+	// numeric-skeleton conservation), not only its own text or resource.
+	independentSubtree bool
 	lineageMismatch    bool
 	stats              actMatchStats
 }
@@ -451,6 +558,7 @@ const (
 type actProbeResult struct {
 	candidateIndex     int
 	independentContent bool
+	independentSubtree bool
 	lineageMismatch    bool
 	state              actProbeState
 }
@@ -557,6 +665,11 @@ type lineageAtTier struct {
 	ok      bool
 }
 
+type lineageAtTierForAct struct {
+	entries []lineageEntryForAct
+	ok      bool
+}
+
 type resourceAnchor struct {
 	displayID     int
 	pkg, resource string
@@ -569,15 +682,17 @@ type resourceCounts struct {
 }
 
 type tierMatcher struct {
-	ctx      context.Context
-	original *device.Capture
-	fresh    *device.Capture
-	tier     int
-	screen   device.Rect
-	budget   matchBudget
-	oldLines map[int]lineageAtTier
-	newLines map[int]lineageAtTier
-	opts     actMatchOptions
+	ctx            context.Context
+	original       *device.Capture
+	fresh          *device.Capture
+	tier           int
+	screen         device.Rect
+	budget         matchBudget
+	oldLines       map[int]lineageAtTier
+	newLines       map[int]lineageAtTier
+	oldLinesForAct map[int]lineageAtTierForAct
+	newLinesForAct map[int]lineageAtTierForAct
+	opts           actMatchOptions
 	// geometryTier4 selects the Tier 4 geometry gate: tight bidirectional
 	// coverage or the soft-keyboard horizontal band.
 	geometryTier4 tier4Geometry
@@ -602,7 +717,7 @@ func newTierMatcher(ctx context.Context, original, fresh *device.Capture,
 	if lineageDepth <= 0 {
 		lineageDepth = maxActLineageDepth
 	}
-	return &tierMatcher{
+	matcher := &tierMatcher{
 		ctx: ctx, original: original, fresh: fresh, tier: tier,
 		screen: fresh.Display.Bounds(),
 		budget: matchBudget{
@@ -610,25 +725,39 @@ func newTierMatcher(ctx context.Context, original, fresh *device.Capture,
 			lineageLimit: lineageLimit, lineageDepth: lineageDepth,
 			evidenceLimit: maxTier4EvidenceSteps,
 		},
-		oldLines: make(map[int]lineageAtTier),
-		newLines: make(map[int]lineageAtTier),
-		opts:     options,
+		opts: options,
 	}
+	if tier == 1 || tier == 2 || tier == 5 {
+		matcher.oldLines = make(map[int]lineageAtTier)
+		matcher.newLines = make(map[int]lineageAtTier)
+	}
+	if tier == 3 || tier == 5 {
+		matcher.oldLinesForAct = make(map[int]lineageAtTierForAct)
+		matcher.newLinesForAct = make(map[int]lineageAtTierForAct)
+	}
+	return matcher
 }
 
-func (matcher *tierMatcher) lineage(capture *device.Capture,
+func (matcher *tierMatcher) strictLineage(capture *device.Capture,
 	memo map[int]lineageAtTier, index int) (lineageAtTier, bool) {
 	if cached, ok := memo[index]; ok {
 		return cached, cached.ok
 	}
-	var cached lineageAtTier
-	if matcher.tier == 3 {
-		cached.entries, cached.ok = lineageL2(capture, index, &matcher.budget)
-	} else {
-		cached.entries, cached.ok = lineageL1(capture, index, &matcher.budget)
-	}
+	entries, ok := lineageL1(capture, index, &matcher.budget)
+	cached := lineageAtTier{entries: entries, ok: ok}
 	memo[index] = cached
-	return cached, cached.ok
+	return cached, ok
+}
+
+func (matcher *tierMatcher) lineage(capture *device.Capture,
+	memo map[int]lineageAtTierForAct, index int) (lineageAtTierForAct, bool) {
+	if cached, ok := memo[index]; ok {
+		return cached, cached.ok
+	}
+	entries, ok := lineageL2ForAct(capture, index, &matcher.budget)
+	cached := lineageAtTierForAct{entries: entries, ok: ok}
+	memo[index] = cached
+	return cached, ok
 }
 
 func (matcher *tierMatcher) sameLineageKeysBudgeted(
@@ -647,17 +776,61 @@ func (matcher *tierMatcher) sameLineageKeysBudgeted(
 	return true, true
 }
 
+func (matcher *tierMatcher) sameStrictLineage(oldIndex, newIndex int) (bool, bool) {
+	oldLineage, ok := matcher.strictLineage(matcher.original, matcher.oldLines, oldIndex)
+	if !ok {
+		return false, false
+	}
+	newLineage, ok := matcher.strictLineage(matcher.fresh, matcher.newLines, newIndex)
+	if !ok {
+		return false, false
+	}
+	return matcher.sameLineageKeysBudgeted(newLineage.entries, oldLineage.entries)
+}
+
+func (matcher *tierMatcher) sameLineageKeysForActBudgeted(
+	a, b []lineageEntryForAct) (equal, complete bool) {
+	if len(a) != len(b) {
+		return false, true
+	}
+	for index := range a {
+		if !matcher.budget.consumeLineage(0) {
+			return false, false
+		}
+		if a[index].key != b[index].key {
+			return false, true
+		}
+	}
+	return true, true
+}
+
 func (matcher *tierMatcher) hasStrongNonRootAnchorBudgeted(
-	chain []lineageEntry) (found, complete bool) {
+	chain []lineageEntryForAct) (found, complete bool) {
 	for _, entry := range chain {
 		if !matcher.budget.consumeLineage(0) {
 			return false, false
 		}
-		if !entry.root && strongLineageAnchor(entry) {
+		if !entry.root && strongLineageAnchorForAct(entry.key) {
 			return true, true
 		}
 	}
 	return false, true
+}
+
+func (matcher *tierMatcher) sameAnchoredLineageForAct(oldIndex, newIndex int) (bool, bool) {
+	oldLineage, ok := matcher.lineage(matcher.original, matcher.oldLinesForAct, oldIndex)
+	if !ok {
+		return false, false
+	}
+	newLineage, ok := matcher.lineage(matcher.fresh, matcher.newLinesForAct, newIndex)
+	if !ok {
+		return false, false
+	}
+	equal, complete := matcher.sameLineageKeysForActBudgeted(newLineage.entries, oldLineage.entries)
+	if !complete || !equal {
+		return equal, complete
+	}
+	return matcher.hasStrongNonRootAnchorBudgeted(newLineage.entries)
 }
 
 // edgeAtTier evaluates one old-to-fresh edge. complete=false preserves the
@@ -695,30 +868,16 @@ func (matcher *tierMatcher) edgeAtTier(oldIndex, newIndex int) (matched, lineage
 		return false, false, matcher.budget.failMalformed()
 	}
 
-	oldLineage, ok := matcher.lineage(matcher.original, matcher.oldLines, oldIndex)
-	if !ok {
-		return false, false, false
+	var equal bool
+	if matcher.tier == 3 {
+		equal, complete = matcher.sameAnchoredLineageForAct(oldIndex, newIndex)
+	} else {
+		equal, complete = matcher.sameStrictLineage(oldIndex, newIndex)
 	}
-	newLineage, ok := matcher.lineage(matcher.fresh, matcher.newLines, newIndex)
-	if !ok {
-		return false, false, false
-	}
-	equal, complete := matcher.sameLineageKeysBudgeted(
-		newLineage.entries, oldLineage.entries)
 	if !complete {
 		return false, false, false
 	}
-	if !equal {
-		return false, true, true
-	}
-	if matcher.tier == 3 {
-		found, complete := matcher.hasStrongNonRootAnchorBudgeted(newLineage.entries)
-		if !complete {
-			return false, false, false
-		}
-		return found, !found, true
-	}
-	return true, false, true
+	return equal, !equal, true
 }
 
 func stableNonEmptyContent(aSet bool, a string, bSet bool, b string) bool {
@@ -827,9 +986,15 @@ func (matcher *tierMatcher) probeWant(wantIndex int) actProbeResult {
 		return actProbeResult{
 			state: matcher.budget.terminalState(), candidateIndex: -1}
 	}
+	independentSubtree, complete := subtreeEvidence(matcher.original, wantIndex,
+		matcher.fresh, candidate, matcher.opts.mode, &matcher.budget)
+	if !complete || !matcher.budget.checkActive() {
+		return actProbeResult{
+			state: matcher.budget.terminalState(), candidateIndex: -1}
+	}
 	return actProbeResult{
 		candidateIndex: candidate, independentContent: independent,
-		state: actProbeUnique,
+		independentSubtree: independentSubtree, state: actProbeUnique,
 	}
 }
 
@@ -848,9 +1013,8 @@ func matchActTargetWithLimits(ctx context.Context, revoked func() bool,
 		defaultActMatchOptions().withLimits(limits))
 }
 
-// matchActTargetWithOptions is the pure bounded matcher. Tiers 1-3 stay exactly
-// as before. Only when all three return None and at least one of them observed a
-// lineage mismatch does the bounded Tier 4 anti-rebuild proof run.
+// matchActTargetWithOptions tries each eligible tier in order. Tier 4 requires
+// a lineage mismatch, and Tier 5 runs only after the preceding tiers find no match.
 func matchActTargetWithOptions(ctx context.Context, revoked func() bool,
 	original, fresh *device.Capture, want *device.RawNode,
 	options actMatchOptions) (actMatch, actProbeState) {
@@ -886,7 +1050,8 @@ func matchActTargetWithOptions(ctx context.Context, revoked func() bool,
 		case actProbeUnique:
 			return actMatch{
 				raw: &fresh.Nodes[probe.candidateIndex], tier: tier,
-				independentContent: probe.independentContent, stats: stats,
+				independentContent: probe.independentContent,
+				independentSubtree: probe.independentSubtree, stats: stats,
 			}, actProbeUnique
 		case actProbeAmbiguous:
 			return actMatch{stats: stats}, actProbeAmbiguous
@@ -898,37 +1063,40 @@ func matchActTargetWithOptions(ctx context.Context, revoked func() bool,
 			return actMatch{stats: stats}, actProbeMalformed
 		}
 	}
-	if !sawLineageMismatch {
-		return actMatch{stats: stats}, actProbeNone
+	for tier := 4; tier <= 5; tier++ {
+		if (tier == 4 && !sawLineageMismatch) || (tier == 5 && options.disableTranslation) {
+			continue
+		}
+		if ctx.Err() != nil || (revoked != nil && revoked()) {
+			return actMatch{stats: stats}, actProbeCancelled
+		}
+		matcher := newTierMatcher(ctx, original, fresh, tier, options)
+		var probe actProbeResult
+		if tier == 4 {
+			probe = matcher.probeWantTier4(tier4TightGeometry, options.mode, originalIndex)
+		} else {
+			probe = matcher.probeWantTier5(options.mode, originalIndex)
+		}
+		stats.candidateVisits += matcher.budget.candidateVisits
+		stats.lineageSteps += matcher.budget.lineageSteps
+		stats.tiers = tier
+		if ctx.Err() != nil || (revoked != nil && revoked()) {
+			return actMatch{stats: stats}, actProbeCancelled
+		}
+		switch probe.state {
+		case actProbeNone:
+			continue
+		case actProbeUnique:
+			return actMatch{
+				raw: &fresh.Nodes[probe.candidateIndex], tier: tier,
+				independentContent: probe.independentContent,
+				independentSubtree: probe.independentSubtree, stats: stats,
+			}, actProbeUnique
+		default:
+			return actMatch{stats: stats}, probe.state
+		}
 	}
-	if ctx.Err() != nil || (revoked != nil && revoked()) {
-		return actMatch{stats: stats}, actProbeCancelled
-	}
-	matcher := newTierMatcher(ctx, original, fresh, 4, options)
-	probe := matcher.probeWantTier4(tier4TightGeometry, options.mode, originalIndex)
-	stats.candidateVisits += matcher.budget.candidateVisits
-	stats.lineageSteps += matcher.budget.lineageSteps
-	stats.tiers = 4
-	if ctx.Err() != nil || (revoked != nil && revoked()) {
-		return actMatch{stats: stats}, actProbeCancelled
-	}
-	switch probe.state {
-	case actProbeUnique:
-		return actMatch{
-			raw: &fresh.Nodes[probe.candidateIndex], tier: 4,
-			independentContent: probe.independentContent, stats: stats,
-		}, actProbeUnique
-	case actProbeAmbiguous:
-		return actMatch{stats: stats}, actProbeAmbiguous
-	case actProbeCancelled:
-		return actMatch{stats: stats}, actProbeCancelled
-	case actProbeBudgetExhausted:
-		return actMatch{stats: stats}, actProbeBudgetExhausted
-	case actProbeMalformed:
-		return actMatch{stats: stats}, actProbeMalformed
-	default:
-		return actMatch{stats: stats, lineageMismatch: true}, actProbeNone
-	}
+	return actMatch{stats: stats, lineageMismatch: sawLineageMismatch}, actProbeNone
 }
 
 func matchActTarget(ctx context.Context, revoked func() bool,
@@ -1163,6 +1331,65 @@ func sameReadableMultiset(left, right []string) bool {
 	return true
 }
 
+func isDynamicNumericToken(s string) bool {
+	hasDigit := false
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9':
+			hasDigit = true
+		case strings.ContainsRune(".,:+-/% ", r):
+		default:
+			return false
+		}
+	}
+	return hasDigit
+}
+
+func numericSkeleton(s string) string {
+	var skeleton strings.Builder
+	inDigits := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= '0' && c <= '9' {
+			if !inDigits {
+				skeleton.WriteByte('#')
+			}
+			inDigits = true
+			continue
+		}
+		skeleton.WriteByte(c)
+		inDigits = false
+	}
+	return skeleton.String()
+}
+
+func subtreeSkeletonMatch(oldTexts, newTexts []string) bool {
+	skeletons := func(texts []string) []string {
+		result := make([]string, 0, len(texts))
+		for _, text := range texts {
+			if text != "" && !isDynamicNumericToken(text) {
+				result = append(result, numericSkeleton(text))
+			}
+		}
+		return result
+	}
+	if !sameReadableMultiset(skeletons(oldTexts), skeletons(newTexts)) {
+		return false
+	}
+	anchors := make(map[string]struct{})
+	for _, text := range oldTexts {
+		if text != "" && strings.IndexFunc(text, unicode.IsDigit) < 0 {
+			anchors[text] = struct{}{}
+		}
+	}
+	for _, text := range newTexts {
+		if _, ok := anchors[text]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 // sharesReadableText reports whether both sides share at least one readable
 // entry. It is the scroll-container relaxation of E3.
 func sharesReadableText(left, right []string) bool {
@@ -1195,9 +1422,9 @@ func coverageAtLeastPercent(a, b device.Rect, minPercent int64) bool {
 	return areaInter*100 >= areaA*minPercent && areaInter*100 >= areaB*minPercent
 }
 
-// subtreeEvidence applies E3 for one target pair. A tap-like target needs the
-// same non-empty readable multiset; a scroll container accepts a shared entry or
-// the same non-empty resource with strong coverage.
+// subtreeEvidence applies E3 for one target pair. Tap-like actions can use
+// numeric conservation after an exact multiset miss. A scroll container accepts
+// a shared entry or the same non-empty resource with strong coverage.
 func subtreeEvidence(original *device.Capture, oldIndex int,
 	fresh *device.Capture, newIndex int, mode actMatchMode,
 	budget *matchBudget) (bool, bool) {
@@ -1228,7 +1455,10 @@ func subtreeEvidence(original *device.Capture, oldIndex int,
 		}
 		return sameNonEmptyResourceCoverage(oldNode, newNode, actTier4ScrollCoverage), true
 	}
-	return sameReadableMultiset(oldTexts, newTexts), true
+	if sameReadableMultiset(oldTexts, newTexts) {
+		return true, true
+	}
+	return mode == actMatchTapLike && subtreeSkeletonMatch(oldTexts, newTexts), true
 }
 
 // sameNonEmptyResourceCoverage accepts the same non-empty resource identity when
@@ -1287,13 +1517,52 @@ func (matcher *tierMatcher) tier4Edge(gate tier4Geometry, mode actMatchMode,
 // both directions of the complete trees.
 func (matcher *tierMatcher) probeWantTier4(gate tier4Geometry,
 	mode actMatchMode, wantIndex int) actProbeResult {
+	return matcher.probeWantWithEvidence(wantIndex, func(oldIndex, newIndex int) (bool, bool) {
+		return matcher.tier4Edge(gate, mode, oldIndex, newIndex)
+	})
+}
+
+func (matcher *tierMatcher) tier5Edge(mode actMatchMode,
+	oldIndex, newIndex int) (matched, complete bool) {
+	if !matcher.budget.consumeCandidate() {
+		return false, false
+	}
+	oldNode := &matcher.original.Nodes[oldIndex]
+	newNode := &matcher.fresh.Nodes[newIndex]
+	if oldNode.DisplayID != newNode.DisplayID {
+		return false, true
+	}
+	compatible, _ := sameStructureForAct(oldNode, newNode, matcher.opts)
+	if !compatible || !rectValidOnScreen(newNode.Bounds, matcher.screen) ||
+		!sameHorizontalBand(oldNode.Bounds, newNode.Bounds) {
+		return false, true
+	}
+	aligned, complete := matcher.sameStrictLineage(oldIndex, newIndex)
+	if complete && !aligned {
+		aligned, complete = matcher.sameAnchoredLineageForAct(oldIndex, newIndex)
+	}
+	if !complete || !aligned {
+		return false, complete
+	}
+	return matcher.tier4Evidence(oldIndex, newIndex, mode)
+}
+
+func (matcher *tierMatcher) probeWantTier5(mode actMatchMode, wantIndex int) actProbeResult {
+	return matcher.probeWantWithEvidence(wantIndex, func(oldIndex, newIndex int) (bool, bool) {
+		return matcher.tier5Edge(mode, oldIndex, newIndex)
+	})
+}
+
+// probeWantWithEvidence shares one budget across the forward and reverse scans.
+func (matcher *tierMatcher) probeWantWithEvidence(wantIndex int,
+	edge func(oldIndex, newIndex int) (matched, complete bool)) actProbeResult {
 	if wantIndex < 0 || wantIndex >= len(matcher.original.Nodes) {
 		matcher.budget.failMalformed()
 		return actProbeResult{state: actProbeMalformed, candidateIndex: -1}
 	}
 	candidate := -1
 	for newIndex := range matcher.fresh.Nodes {
-		matched, complete := matcher.tier4Edge(gate, mode, wantIndex, newIndex)
+		matched, complete := edge(wantIndex, newIndex)
 		if !complete {
 			return actProbeResult{
 				state: matcher.budget.terminalState(), candidateIndex: -1}
@@ -1312,7 +1581,7 @@ func (matcher *tierMatcher) probeWantTier4(gate tier4Geometry,
 	incomingCount := 0
 	soleOldIndex := -1
 	for oldIndex := range matcher.original.Nodes {
-		matched, complete := matcher.tier4Edge(gate, mode, oldIndex, candidate)
+		matched, complete := edge(oldIndex, candidate)
 		if !complete {
 			return actProbeResult{
 				state: matcher.budget.terminalState(), candidateIndex: -1}
@@ -1336,7 +1605,7 @@ func (matcher *tierMatcher) probeWantTier4(gate tier4Geometry,
 	}
 	return actProbeResult{
 		candidateIndex: candidate, independentContent: true,
-		state: actProbeUnique,
+		independentSubtree: true, state: actProbeUnique,
 	}
 }
 
@@ -1364,7 +1633,7 @@ func matchKeyboardShiftedSubmitNode(ctx context.Context, revoked func() bool,
 		return actMatch{}, actProbeCancelled
 	}
 	matcher := newTierMatcher(ctx, original, fresh, 4, options)
-	probe := matcher.probeWantTier4(tier4HorizontalBand, actMatchTapLike, wantIndex)
+	probe := matcher.probeWantTier4(tier4HorizontalBand, actMatchTapLikeExact, wantIndex)
 	stats := actMatchStats{
 		candidateVisits: matcher.budget.candidateVisits,
 		lineageSteps:    matcher.budget.lineageSteps,

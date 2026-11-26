@@ -105,8 +105,10 @@ func TestActRejectionDeliveryKeepsVisualHintAndRetry(t *testing.T) {
 		step         captureStep
 		visual, hint string
 	}{
-		{"sparse full delivery", movedButtonCaptureStep(), observation.VisualKindSparseTree, protocol.HintSnap},
-		{"loading full delivery", withObservationProgress(movedButtonCaptureStep()), observation.VisualKindLoading, protocol.HintWaitFor},
+		// A same-band vertical move is now re-acquired by Tier 5, so both
+		// rejection deliveries use a target text change instead.
+		{"sparse full delivery", markerCapture("OK-changed"), observation.VisualKindSparseTree, protocol.HintSnap},
+		{"loading full delivery", withObservationProgress(markerCapture("OK-changed")), observation.VisualKindLoading, protocol.HintWaitFor},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := settleHarness(t)

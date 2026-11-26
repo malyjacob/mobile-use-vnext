@@ -46,9 +46,14 @@ func overlayCaptureStep() captureStep {
 	}
 }
 
-// nestedChildCaptureStep adds a deeper visible child inside the observed
-// button. The button itself keeps its identity and ancestry, but the point now
-// resolves to a different (deeper) node.
+// nestedChildCaptureStep adds a deeper visible interactive child inside the
+// observed button. The button itself keeps its identity and ancestry, but the
+// point now resolves to a different (deeper) node.
+//
+// The child is interactive on purpose: a deeper passive decoration child (no
+// readable content, no action) is tolerated by the coordinate single-owner
+// conservation (§7.1.5, decoration growth under an unchanged unique owner), so
+// only a deeper interactive owner exercises the rejection this test claims.
 func nestedChildCaptureStep() captureStep {
 	return func(f *fakeDevice, display device.Display) (device.Capture, error) {
 		capture, err := f.captureLocked(display)
@@ -61,7 +66,8 @@ func nestedChildCaptureStep() captureStep {
 			Index: index, Parent: 1, Depth: 2, DisplayID: display.ID,
 			Visible: true, RawBounds: bounds, Bounds: bounds,
 			Package: "com.example", ClassName: "android.widget.TextView",
-			Text: "tip", TextSet: true, HasEnabled: true, Enabled: true,
+			Text: "tip", TextSet: true,
+			HasClickable: true, Clickable: true, HasEnabled: true, Enabled: true,
 		})
 		capture.Nodes[1].Children = append(capture.Nodes[1].Children, index)
 		return capture, nil
@@ -160,7 +166,9 @@ func observationStatus(h *harness, id string) string {
 func TestActCoordinatePointRejectsOverlayOnFreshFrame(t *testing.T) {
 	h := newHarness(t)
 	start := h.startSession()
-	h.device.scriptCaptures(overlayCaptureStep(), defaultCaptureStep)
+	// Both revalidation frames must carry the change, so the single queued step
+	// (which repeats forever) is the whole fixture.
+	h.device.scriptCaptures(overlayCaptureStep())
 
 	result := h.actCoordinate(t, start.Observation.ID, protocol.Operation{
 		Type: "tap", Target: &protocol.Target{X: 500, Y: 150},
@@ -178,7 +186,8 @@ func TestActCoordinatePointRejectsOverlayOnFreshFrame(t *testing.T) {
 func TestActCoordinatePointRejectsDeeperNodeOnFreshFrame(t *testing.T) {
 	h := newHarness(t)
 	start := h.startSession()
-	h.device.scriptCaptures(nestedChildCaptureStep(), defaultCaptureStep)
+	// Both revalidation frames must carry the deeper interactive owner.
+	h.device.scriptCaptures(nestedChildCaptureStep())
 
 	result := h.actCoordinate(t, start.Observation.ID, protocol.Operation{
 		Type: "long_press", Target: &protocol.Target{X: 500, Y: 150},
@@ -193,7 +202,9 @@ func TestActCoordinatePointRejectsDeeperNodeOnFreshFrame(t *testing.T) {
 func TestActCoordinatePointRejectsMovedBounds(t *testing.T) {
 	h := newHarness(t)
 	start := h.startSession()
-	h.device.scriptCaptures(movedButtonCaptureStep(), defaultCaptureStep)
+	// Both revalidation frames must carry the move. The coordinate proof disables
+	// the Tier 5 translation recovery, so the same-band move still rejects.
+	h.device.scriptCaptures(movedButtonCaptureStep())
 
 	result := h.actCoordinate(t, start.Observation.ID, protocol.Operation{
 		Type: "tap", Target: &protocol.Target{X: 500, Y: 150},
@@ -208,7 +219,8 @@ func TestActCoordinatePointRejectsMovedBounds(t *testing.T) {
 func TestActCoordinatePointRejectsUnpublishedTarget(t *testing.T) {
 	h := newHarness(t)
 	start := h.startSession()
-	h.device.scriptCaptures(invisibleButtonCaptureStep(), defaultCaptureStep)
+	// Both revalidation frames must keep the target unpublished.
+	h.device.scriptCaptures(invisibleButtonCaptureStep())
 
 	result := h.actCoordinate(t, start.Observation.ID, protocol.Operation{
 		Type: "tap", Target: &protocol.Target{X: 500, Y: 150},
@@ -225,7 +237,8 @@ func TestActCoordinatePointRejectsUnpublishedTarget(t *testing.T) {
 func TestActCoordinatePointRequiresUniqueFreshIdentity(t *testing.T) {
 	h := newHarness(t)
 	start := h.startSession()
-	h.device.scriptCaptures(duplicateButtonCaptureStep(), defaultCaptureStep)
+	// Both revalidation frames must carry the duplicate node.
+	h.device.scriptCaptures(duplicateButtonCaptureStep())
 
 	result := h.actCoordinate(t, start.Observation.ID, protocol.Operation{
 		Type: "tap", Target: &protocol.Target{X: 500, Y: 150},
@@ -393,7 +406,8 @@ func TestActCoordinatePointRecordsDecisionFacts(t *testing.T) {
 func TestActCoordinatePointKeepsObservationWhenProofFails(t *testing.T) {
 	h := newHarness(t)
 	start := h.startSession()
-	h.device.scriptCaptures(overlayCaptureStep(), defaultCaptureStep)
+	// Both revalidation frames must carry the change; the proof keeps failing.
+	h.device.scriptCaptures(overlayCaptureStep())
 
 	first := h.actCoordinate(t, start.Observation.ID, protocol.Operation{
 		Type: "tap", Target: &protocol.Target{X: 500, Y: 150},
@@ -441,7 +455,9 @@ func TestActRefTargetStillUsesIdentityOnly(t *testing.T) {
 func TestActCoordinatePointRejectsChangedTextFocusPoint(t *testing.T) {
 	h := newHarness(t)
 	start := h.startSession()
-	h.device.scriptCaptures(overlayCaptureStep(), defaultCaptureStep)
+	// Both revalidation frames must carry the change, so the focus point proof
+	// fails on each of them.
+	h.device.scriptCaptures(overlayCaptureStep())
 
 	result := h.actCoordinate(t, start.Observation.ID, protocol.Operation{
 		Type: "text", Target: &protocol.Target{X: 500, Y: 350}, Text: "hello",

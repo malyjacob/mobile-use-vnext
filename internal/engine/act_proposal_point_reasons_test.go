@@ -11,12 +11,18 @@ import (
 func proposalPointSetPage(display device.Display, variant string) device.Capture {
 	bounds := device.Rect{Left: 100, Top: 300, Right: 900, Bottom: 700}
 	root := revalRoot(display.ID, 1)
+	ownerText := "point-set-owner"
+	if variant == "owner-text" {
+		ownerText = "point-set-owner-changed"
+	}
 	owner := proposalClickableNode(1, 0, 1, display, bounds,
-		"android.widget.Button", "point-set-owner")
+		"android.widget.Button", ownerText)
 	firstText := proposalNode(2, 1, 2, display, bounds,
 		"android.widget.TextView", "alpha")
 	secondLabel := "bravo"
-	if variant == "replaced" {
+	// "owner-text" also carries the decoration label change of "replaced": the
+	// owner's own Text is only compared once the plain hit-set proof fails.
+	if variant == "replaced" || variant == "owner-text" {
 		secondLabel = "charlie"
 	}
 	secondText := proposalNode(3, 1, 2, display, bounds,
@@ -311,10 +317,14 @@ func TestProposalPointSetFreshFrameDriftReturnsPointChanged(t *testing.T) {
 	cases := []struct {
 		name    string
 		variant string
+		rejects bool
 	}{
-		{name: "added_overlay", variant: "overlay"},
+		{name: "added_overlay", variant: "overlay", rejects: true},
 		{name: "deleted_node", variant: "deleted"},
 		{name: "replaced_node", variant: "replaced"},
+		// The owner's own Text no longer binds, so the decoration-level change
+		// that "replaced_node" tolerates is rejected here.
+		{name: "owner_text_changed", variant: "owner-text", rejects: true},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -336,6 +346,13 @@ func TestProposalPointSetFreshFrameDriftReturnsPointChanged(t *testing.T) {
 						X: pointX, Y: pointY,
 					},
 				})
+			if !testCase.rejects {
+				// A decoration-level change under an unchanged unique owner is
+				// accepted while the coordinates stay fixed.
+				proposalRequireExecuted(t, result)
+				proposalRequireTap(t, harnessUnderTest, [2]int{pointX, pointY})
+				return
+			}
 			proposalRequireTargetChanged(t, result, "point_changed")
 			proposalRequireNoDispatch(t, harnessUnderTest)
 		})

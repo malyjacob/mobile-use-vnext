@@ -63,7 +63,9 @@ func TestActRevalidationDeliversFreshObservation(t *testing.T) {
 	if button == nil {
 		t.Fatal("button not found in tree")
 	}
-	h.device.scriptCaptures(movedButtonCaptureStep())
+	// A same-band vertical move is now re-acquired by Tier 5, so this rejection
+	// case uses a target text change: it fails the structure match at every tier.
+	h.device.scriptCaptures(markerCapture("OK-changed"))
 
 	result := h.actWith(t, "Pfirst", h.tapRefRequest(t, start.Observation.ID, button.Ref))
 	requireNotExecuted(t, result, protocol.CodeTargetChanged)
@@ -132,7 +134,9 @@ func TestActRevalidationDeliveryUsesFullForDeltaReference(t *testing.T) {
 	if button == nil {
 		t.Fatal("button not found in tree")
 	}
-	h.device.scriptCaptures(movedButtonCaptureStep())
+	// A same-band vertical move is now re-acquired by Tier 5, so this rejection
+	// case uses a target text change: it fails the structure match at every tier.
+	h.device.scriptCaptures(markerCapture("OK-changed"))
 
 	result := h.actWith(t, "Pdelta", h.tapRefRequest(t, observed.Observation.ID, button.Ref))
 	requireNotExecuted(t, result, protocol.CodeTargetChanged)
@@ -227,7 +231,9 @@ func TestActRevalidationDeliveryReverseControl(t *testing.T) {
 	if button == nil {
 		t.Fatal("button not found in tree")
 	}
-	h.device.scriptCaptures(movedButtonCaptureStep())
+	// A same-band vertical move is now re-acquired by Tier 5, so this rejection
+	// case uses a target text change: it fails the structure match at every tier.
+	h.device.scriptCaptures(markerCapture("OK-changed"))
 
 	result := h.actWith(t, "Pnogrant", h.tapRefRequest(t, start.Observation.ID, button.Ref))
 	requireNotExecuted(t, result, protocol.CodeTargetChanged)
@@ -320,7 +326,9 @@ func TestActDuplicateAfterDeliveryDoesNotPromiseTheObservation(t *testing.T) {
 	if button == nil {
 		t.Fatal("button not found in tree")
 	}
-	h.device.scriptCaptures(movedButtonCaptureStep())
+	// A same-band vertical move is now re-acquired by Tier 5, so this rejection
+	// case uses a target text change: it fails the structure match at every tier.
+	h.device.scriptCaptures(markerCapture("OK-changed"))
 	request := h.tapRefRequest(t, start.Observation.ID, button.Ref)
 	first := h.actWith(t, "Pdup", request)
 	requireRecovery(t, first, protocol.RecoveryEntryRetry, protocol.RecoveryReferenceO,

@@ -10,6 +10,29 @@ import (
 	"github.com/malyjacob/mobile-use-vnext/internal/protocol"
 )
 
+const (
+	actRevalidateMaxAttempts = 2
+	actRevalidateRetryDelay  = 150 * time.Millisecond
+)
+
+// isTransientRevalidateError reports whether one revalidation rejection may be
+// re-checked once on a second frame.
+func isTransientRevalidateError(apiErr *protocol.APIError) bool {
+	if apiErr == nil || apiErr.Code != protocol.CodeTargetChanged {
+		return false
+	}
+	reason, _ := apiErr.Details["reason"].(string)
+	switch reason {
+	case targetChangedReasonTargetMissing, targetChangedReasonLineageChanged,
+		targetChangedReasonChildChanged, targetChangedReasonScopeBlocked,
+		targetChangedReasonScrollScopeChanged, targetChangedReasonTrajectoryBlocked,
+		targetChangedReasonPointChanged:
+		return true
+	default:
+		return false
+	}
+}
+
 // Act performs one strict action branch against the current ready observation.
 // Static rejection happens before claiming; after claiming the old observation
 // is never returned to ready, even when no input was dispatched.
@@ -51,7 +74,7 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 		point, scroll, tap, submit, staticErr = staticActContentCheckWithTap(staticObs, &req.Operation)
 	}
 	if staticErr != nil {
-		e.logActPoint(op.ID, point, false)
+		e.logActPoint(op.ID, point, false, 0)
 		if tap != nil {
 			e.logTapPlan(op.ID, tap.action, tap.strategy, false, tap.took)
 		}
@@ -106,13 +129,26 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 	var tapFrame *tapFrame
 	var frame *scrollFrame
 	var revalidateErr *protocol.APIError
-	if scroll != nil {
-		fresh, frame, revalidateErr = e.revalidateScrollTarget(work, obs, scroll)
-	} else {
-		var proofTook time.Duration
-		fresh, tapFrame, proofTook, revalidateErr =
-			e.revalidateActTarget(work, obs, &req.Operation, point, tap)
-		tapTook += proofTook
+	attempt := 1
+	for ; attempt <= actRevalidateMaxAttempts; attempt++ {
+		if scroll != nil {
+			fresh, frame, revalidateErr = e.revalidateScrollTarget(work, obs, scroll, attempt)
+		} else {
+			var proofTook time.Duration
+			fresh, tapFrame, proofTook, revalidateErr =
+				e.revalidateActTarget(work, obs, &req.Operation, point, tap, attempt)
+			tapTook += proofTook
+		}
+		if revalidateErr == nil || e.workRevoked(work) || work.Ctx.Err() != nil ||
+			attempt == actRevalidateMaxAttempts || !isTransientRevalidateError(revalidateErr) {
+			break
+		}
+		pauseInterruptible(work.Ctx, actRevalidateRetryDelay)
+		if e.workRevoked(work) || work.Ctx.Err() != nil {
+			break
+		}
+		// The next attempt owns every result, including a capture failure.
+		fresh, tapFrame, frame, revalidateErr = nil, nil, nil, nil
 	}
 	if revalidateErr != nil {
 		if e.workRevoked(work) || work.Ctx.Err() != nil {
@@ -121,11 +157,10 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 		if req.Operation.Type == "text" {
 			e.decorateTextRevalidateError(op, revalidateErr)
 		}
-		e.logActPoint(op.ID, point, false)
+		e.logActPoint(op.ID, point, false, attempt)
 		revalidateErr.Outcome = OutcomeNotExecuted
-		// The rejected revalidation has already read one frame. Publishing it
-		// hands the caller fresh evidence instead of making it observe again;
-		// nothing was dispatched, so the recovery becomes retry against that O.
+		// Publish the final rejected frame when available so the caller can
+		// retry against that O without a separate observation.
 		var public *protocol.Observation
 		if deliverableRejection(revalidateErr.Code) &&
 			!e.workRevoked(work) && work.Ctx.Err() == nil {
@@ -141,7 +176,7 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 		return result, nil
 	}
 	tapProven = true
-	e.logActPoint(op.ID, point, point != nil && (point.state == pointUnique || point.state == pointSet))
+	e.logActPoint(op.ID, point, point != nil && (point.state == pointUnique || point.state == pointSet), attempt)
 
 	e.setOperationPhase(op, "dispatch")
 	var outcome string
@@ -529,7 +564,7 @@ func (e *Engine) probeActNodeWith(ctx context.Context, revoked func() bool,
 }
 
 // tapFrameOptions is the optional policy of one tap-frame revalidation. The zero
-// value is the ordinary tap/long_press contract: Tier 1-4 with no enabled
+// value is the ordinary tap/long_press contract: Tier 1-5 with no enabled
 // transition, no soft-keyboard shift and no write-submit classification.
 type tapFrameOptions struct {
 	// match selects the target policy of every binding probe. Its
@@ -547,9 +582,14 @@ type tapFrameOptions struct {
 	keyboardShift bool
 }
 
-// submitTapFrameOptions is the complete write-submit revalidation policy.
+// submitTapFrameOptions is the complete write-submit revalidation policy. The
+// write-submit path keeps exactly the Tier 1-4 surface and the exact readable
+// multiset evidence it had before the tap-like numeric-skeleton policy: Tier 5
+// translation recovery stays disabled and its own single 150ms re-capture keeps
+// the soft-keyboard horizontal-band fallback with exact subtree evidence.
 func submitTapFrameOptions(initiallyDisabled bool) tapFrameOptions {
 	options := tapFrameOptions{
+		match:         defaultActMatchOptions().withExactTapLikeEvidence().withoutTranslation(),
 		submit:        true,
 		keyboardShift: true,
 	}
@@ -619,12 +659,13 @@ func explicitlyDisabledPublic(node *protocol.Node) bool {
 
 // revalidateActTarget re-reads the live display and maps a requested target to
 // the fresh frame. Coordinate targets keep the original point proof. Ref tap,
-// long_press and text targets go through the Tier 1-3 matcher and receive an
+// long_press and text targets go through the Tier 1-5 matcher and receive an
 // immutable frame carrying the actual point and carrier used by dispatch. A
 // content rejection returns the fresh capture already read so the caller may
 // deliver it as evidence, unless STOP has since revoked the work.
 func (e *Engine) revalidateActTarget(work *workState, obs *observationState,
-	operation *protocol.Operation, point *pointCheck, tap *tapPlan) (
+	operation *protocol.Operation, point *pointCheck, tap *tapPlan,
+	attempt int) (
 	*device.Capture, *tapFrame, time.Duration, *protocol.APIError) {
 	capture, _, apiErr := e.captureForActRevalidation(work)
 	if apiErr != nil {
@@ -661,7 +702,8 @@ func (e *Engine) revalidateActTarget(work *workState, obs *observationState,
 		}
 	}
 	if frame != nil {
-		e.actTargetLog(work.OperationID, actTargetProbeOutcome(actProbeUnique), frame.tier)
+		e.actTargetLog(work.OperationID, actTargetProbeOutcome(actProbeUnique),
+			frame.tier, attempt)
 	}
 	if e.workRevoked(work) || work.Ctx.Err() != nil {
 		return capture, nil, took, stoppedActRevalidation()
@@ -829,7 +871,8 @@ func probeTapTargetChangedError(ctx context.Context, obs *observationState,
 
 // revalidateBubbleTapFrame re-proves both identities of a C->A target lift on
 // the fresh frame. The child stays the authorization selector: if it is lost,
-// even a uniquely matched ancestor cannot silently inherit the action.
+// even a uniquely matched ancestor cannot silently inherit the action. A
+// Tier 4 or higher ancestor match requires a whole-tree occlusion proof.
 func (e *Engine) revalidateBubbleTapFrame(ctx context.Context,
 	revoked func() bool, workProjector Projector, obs *observationState,
 	fresh *device.Capture, plan *tapPlan,
@@ -961,7 +1004,7 @@ func (e *Engine) revalidateBubbleTapFrame(ctx context.Context,
 	if !ok {
 		return nil, tapTargetChangedReason(targetChangedReasonScopeBlocked)
 	}
-	if matchAncestor.tier == 4 &&
+	if matchAncestor.tier >= 4 &&
 		!tapFrameTier4OcclusionProven(view, ancestorPublic, x, y) {
 		return nil, tapTargetChangedReason(targetChangedReasonScopeBlocked)
 	}
@@ -1106,9 +1149,14 @@ func (e *Engine) revalidateCoextensiveChildFrame(ctx context.Context,
 		}
 		return nil, tapTargetChangedReason(targetChangedReasonScopeBlocked)
 	}
-	return e.resolveDirectTapScopeFrame(ctx, revoked, obs, fresh, topology, view,
+	frame, apiErr := e.resolveDirectTapScopeFrame(ctx, revoked, obs, fresh, topology, view,
 		plan, matchDelegate, freshDelegate, delegateIndex, delegateInput,
 		delegateScope, opts)
+	if frame != nil && matchParent.tier >= 4 &&
+		!tapFrameTier4OcclusionProven(view, freshDelegate, frame.x, frame.y) {
+		return nil, tapTargetChangedReason(targetChangedReasonScopeBlocked)
+	}
+	return frame, apiErr
 }
 
 // revalidateColocatedTapFrame re-proves both identities and the co-location
@@ -1159,6 +1207,11 @@ func (e *Engine) revalidateColocatedTapFrame(ctx context.Context,
 	}
 	if stop() {
 		return nil, stoppedActRevalidation()
+	}
+	if (matchChild.tier == 5 || matchColocated.tier == 5) &&
+		!colocatedSyncShiftOK(plan.targetRaw.Bounds, matchChild.raw.Bounds,
+			plan.colocatedRaw.Bounds, matchColocated.raw.Bounds) {
+		return nil, tapTargetChangedReason(targetChangedReasonChildChanged)
 	}
 	projector := workProjector
 	if projector == nil {
@@ -1263,7 +1316,7 @@ func (e *Engine) revalidateColocatedTapFrame(ctx context.Context,
 		if stop() {
 			return nil, stoppedActRevalidation()
 		}
-		if matchColocated.tier == 4 &&
+		if (matchColocated.tier >= 4 || matchChild.tier >= 4) &&
 			!tapFrameTier4OcclusionProven(view, freshColocated, plan.x, plan.y) {
 			return nil, tapTargetChangedReason(targetChangedReasonScopeBlocked)
 		}
@@ -1281,7 +1334,7 @@ func (e *Engine) revalidateColocatedTapFrame(ctx context.Context,
 	if !ok || !provesSubtreeTapPoint(colocatedScope, x, y) {
 		return nil, tapTargetChangedReason(targetChangedReasonScopeBlocked)
 	}
-	if matchColocated.tier == 4 &&
+	if (matchColocated.tier >= 4 || matchChild.tier >= 4) &&
 		!tapFrameTier4OcclusionProven(view, freshColocated, x, y) {
 		return nil, tapTargetChangedReason(targetChangedReasonScopeBlocked)
 	}
@@ -1439,13 +1492,12 @@ func (e *Engine) revalidateTapTargetFrameWith(ctx context.Context,
 }
 
 // directFrameOcclusionProven guards the direct and coextensive landing points
-// resolved by resolveDirectTapScopeFrame. A Tier 4 execution target lost its
-// stable ancestry, so the subtree scope alone no longer proves the point; a
-// newly inserted external owner or a deepest hit outside the target subtree
-// rejects the frame. Tier 1-3 frames are never affected.
+// resolved by resolveDirectTapScopeFrame. A Tier 4 or higher execution match
+// can accept rebuilt ancestry or vertical translation, so the whole-tree proof
+// must rule out external interactive owners and hits outside the target subtree.
 func directFrameOcclusionProven(match actMatch, view *tapPublicView,
 	target *protocol.Node, x, y int) bool {
-	return match.tier != 4 || tapFrameTier4OcclusionProven(view, target, x, y)
+	return match.tier < 4 || tapFrameTier4OcclusionProven(view, target, x, y)
 }
 
 func (e *Engine) resolveDirectTapScopeFrame(ctx context.Context,
@@ -1492,7 +1544,7 @@ func (e *Engine) resolveDirectTapScopeFrame(ctx context.Context,
 	}
 
 	if originalPointOK &&
-		(plan.carrierRaw == nil || fixedCarrier != nil || match.independentContent) {
+		(plan.carrierRaw == nil || fixedCarrier != nil || match.independentContent || match.independentSubtree) {
 		if stop() {
 			return nil, stoppedActRevalidation()
 		}
@@ -1522,7 +1574,7 @@ func (e *Engine) resolveDirectTapScopeFrame(ctx context.Context,
 		}
 	}
 
-	if plan.carrierRaw != nil && !match.independentContent {
+	if plan.carrierRaw != nil && !(match.independentContent || match.independentSubtree) {
 		return nil, tapTargetChangedReason(targetChangedReasonScopeBlocked)
 	}
 	unbound, apiErr := chooseUnboundTapPlan(
@@ -1558,6 +1610,14 @@ func (e *Engine) resolveDirectTapScopeFrame(ctx context.Context,
 //   - coordinate tap/long_press/text: the target's own structure stays strictly
 //     equal, while ancestors and geometry follow the ref tiers, and the fresh
 //     point must not introduce a new competing interactive owner.
+//
+// A coordinate tap/long_press whose strict hit set no longer pairs may still
+// keep its original point under the owner-conservation fallback: the point must
+// name one and the same interactive owner that carries the requested action on
+// both frames, the two owners must bind through Tier 1-4 with translation
+// disabled, and an owner without independent content must also conserve its
+// readable subtree. The fallback never yields coordinates and never runs for
+// raw swipe, coordinate text or a point that is not authorized to begin with.
 //
 // The projection is pure CPU and never advances ref continuity.
 func (e *Engine) provePointTarget(ctx context.Context, revoked func() bool,
@@ -1596,7 +1656,20 @@ func (e *Engine) provePointTarget(ctx context.Context, revoked func() bool,
 	}
 	freshNodes := resolvePointSet(projection.Tree.Root, point.x, point.y)
 	if len(freshNodes) != len(observedIndices) {
-		return finish(targetChangedAtPoint())
+		if emptyPoint {
+			// A blank observed point never gains an owner fallback: an
+			// authorized blank point stays authorized only while it is still
+			// blank.
+			return finish(targetChangedAtPoint())
+		}
+		// The hit-set size changed. A coordinate tap/long_press may still keep
+		// its original point when that point still names one and the same
+		// interactive owner on both frames; nothing else is relaxed and the
+		// coordinates never move.
+		ownerProof := newPointProof(ctx, revoked, obs.Projection.Capture, fresh,
+			fresh.Display.Bounds())
+		return finish(ownerProof.provePointOwnerFallback(obs, projection,
+			freshNodes, point.x, point.y, operation))
 	}
 	if emptyPoint {
 		// A blank point stays authorized only while it is still blank. A node
@@ -1632,8 +1705,25 @@ func (e *Engine) provePointTarget(ctx context.Context, revoked func() bool,
 		}
 		return finish(targetChangedAtPoint())
 	}
-	return finish(proof.proveTargetSet(observedIndices, freshIndices, point.x, point.y,
-		view, freshNodes, operation))
+	apiErr := proof.proveTargetSet(observedIndices, freshIndices, point.x, point.y,
+		view, freshNodes, operation)
+	if apiErr == nil {
+		return finish(nil)
+	}
+	if apiErr.Code != protocol.CodeTargetChanged ||
+		apiErr.Details["reason"] != targetChangedReasonPointChanged {
+		// STOP, a hierarchy failure and every other attribution keep their own
+		// category: the owner fallback only ever re-checks the plain
+		// point_changed content rejection.
+		return finish(apiErr)
+	}
+	if owners := collectPointOwners(view, freshNodes); len(owners) > 1 &&
+		len(filterMatchingPointOwners(owners, operation)) != 1 {
+		// A competing interactive owner is never re-checked by the fallback.
+		return finish(apiErr)
+	}
+	return finish(proof.provePointOwnerFallback(obs, projection, freshNodes,
+		point.x, point.y, operation))
 }
 
 func targetChangedAtPoint() *protocol.APIError {
@@ -1643,7 +1733,7 @@ func targetChangedAtPoint() *protocol.APIError {
 // logActPoint records one coordinate-target decision. Only the operation, the
 // resolution state, whether the node-level proof succeeded and the pure-CPU
 // cost are written; the point, refs, labels and tree content never are.
-func (e *Engine) logActPoint(operationID string, point *pointCheck, proven bool) {
+func (e *Engine) logActPoint(operationID string, point *pointCheck, proven bool, attempt int) {
 	if point == nil {
 		return
 	}
@@ -1652,6 +1742,9 @@ func (e *Engine) logActPoint(operationID string, point *pointCheck, proven bool)
 		eventlog.Str("state", string(point.state)),
 		eventlog.Bool("proven", proven),
 		eventlog.Duration("ms", point.took),
+	}
+	if attempt >= 1 && attempt <= 2 {
+		fields = append(fields, eventlog.Int("attempt", attempt))
 	}
 	if point.mode != "" {
 		fields = append(fields, eventlog.Str("mode", point.mode))

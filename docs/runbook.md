@@ -119,8 +119,9 @@ STOP 可用与 MCP 宿主已重新发现工具。手机适配器的安装/监听
 部署过程不触发手机重启。设备服务通过 `service.sh stop/start` 重启；APK 使用
 `adb install -r` 覆盖安装并保留 App 私有数据。
 
-共同契约是 `contract_version=32`：服务端、Go 客户端、控制 App 与手机/主机 MCP 适配器必须
-成套升级。旧版任一组件会因 `409 contract_mismatch` 被拒绝接入，只有最小 STOP 仍可用；升级
+共同契约是 `contract_version=33`：服务端、Go 客户端、控制 App 与手机/主机 MCP 适配器必须
+成套升级。普通 `/api/*` 调用与 App 普通同步在契约不匹配时按 `409 contract_mismatch` 拒绝；
+`/health` 仍可应答，最小 STOP 不参与普通契约校验、仍可送达。升级
 后必须重启实际 MCP 宿主进程并重新 `tools/list`，让宿主看到 13 个工具。
 
 版本 1–4 账本由当前服务读取并保存为版本 5；旧 session 直接转入退休记录，待保存迁移快照后
@@ -176,7 +177,7 @@ adb -s 127.0.0.1:5555 forward tcp:18881 tcp:18880
 curl -s http://127.0.0.1:18881/health
 ```
 
-`/health` 无认证，返回 `status`、`contract_version`（当前 `"32"`）、`service_instance_id`、
+`/health` 无认证，返回 `status`、`contract_version`（当前 `"33"`）、`service_instance_id`、
 `release_version`。它只证明进程能应答，**不是** `can_start`。
 
 就绪以 `POST /api/status` 为准（令牌从 `.state/deploy.json` 读取，下面用占位符）：
@@ -184,7 +185,7 @@ curl -s http://127.0.0.1:18881/health
 ```bash
 curl -s -X POST http://127.0.0.1:18881/api/status \
   -H "Authorization: Bearer $AGENT_TOKEN" \
-  -H "X-Mobile-Use-Contract: 32" \
+  -H "X-Mobile-Use-Contract: 33" \
   -H "Content-Type: application/json" -d '{}'
 ```
 
@@ -198,7 +199,7 @@ curl -s -X POST http://127.0.0.1:18881/api/status \
 ```bash
 curl -s -X POST http://127.0.0.1:18881/api/wait_for \
   -H "Authorization: Bearer $AGENT_TOKEN" \
-  -H "X-Mobile-Use-Contract: 32" \
+  -H "X-Mobile-Use-Contract: 33" \
   -H "Content-Type: application/json" -d '{"reference":"O1","timeout":1}'
 ```
 
@@ -215,7 +216,7 @@ curl -s -X POST http://127.0.0.1:18881/api/wait_for \
 ```bash
 curl -s -X POST http://127.0.0.1:18881/api/snap \
   -H "Authorization: Bearer $AGENT_TOKEN" \
-  -H "X-Mobile-Use-Contract: 32" \
+  -H "X-Mobile-Use-Contract: 33" \
   -H "Content-Type: application/json" -d '{"reference":"O1"}'
 ```
 
@@ -271,7 +272,7 @@ adb -s 127.0.0.1:5555 shell su -c 'tail -n 100 /data/data/com.mobileuse.vnext/fi
 | `can_start=false`、`blocking_code=device_locked` / `device_not_interactive` | 锁屏或熄屏 | 解锁并点亮屏幕；服务不绕过锁屏 |
 | `can_start=false`、`blocking_code=control_revoked` | 收到 STOP 后未完成一次新同步 | 等 App 下一拍同步（不再携带 `stop_pending`）后再 `start` |
 | `can_start=false`、`blocking_code=mode_not_selected`/`stop_unavailable` | App 模式/通知/停止通道不可用 | 在 App 选择虚拟屏或确认主屏共享；授予通知权限并确认通知频道可用 |
-| `409 contract_mismatch` | `X-Mobile-Use-Contract` 缺失/不是 `32`，或 App 契约版本不符；错误体带 `recovery`（`entry=update`、`reference=none`） | 服务与客户端必须同为 `contract_version=32`；升级整组产物，不要只升一侧 |
+| `409 contract_mismatch` | `X-Mobile-Use-Contract` 缺失/不是 `33`，或 App 契约版本不符；错误体带 `recovery`（`entry=update`、`reference=none`） | 服务与客户端必须同为 `contract_version=33`；升级整组产物，不要只升一侧 |
 | 服务启动即退出（退出码 `2`） | `config.json` 的 `adb.timeout_seconds` 大于 15，或其它配置项被拒 | 把该值改回 ≤15（默认 8）后重启；不要用放宽上限的方式绕过 |
 | `409 session_expired` | 引用指向的原会话租约已到期；条件等待在准入时不续租已过期的会话 | 重新 `start`，不要重试同一引用；等待期间需要更长租约时先显式 `keepalive` |
 | `409 control_revoked`（`wait_for`） | 等待中途 STOP 或 `end` 撤权；MCP 取消与客户端断连同样关闭等待并释放工作位，但由适配器（`call_cancelled`）或传输层收尾 | 用 `status(P)` 确认没有迟到观察；需要继续等待时用新 P 重试，不重放同一 P |
@@ -280,7 +281,7 @@ adb -s 127.0.0.1:5555 shell su -c 'tail -n 100 /data/data/com.mobileuse.vnext/fi
 | MCP 客户端 403 | `Origin` 未在 `allowed_origins` | 部署时用 `-McpAllowedOrigins` 精确放行并重启适配器；不要填 `*` |
 | 手机 `18882` 启动失败 | 端口被占用或配置/二进制不匹配 | 只保留一个适配器进程；检查 `mcp-config.json` 与日志 |
 | `409 device_busy` | 已有普通工作占用工作位置 | 读 `blocking_operation_id`；串行化调用 |
-| `409 observation_expired`/`target_changed`/`foreground_changed` | 观察已过期（60 秒）或界面变化 | `target_changed`/`foreground_changed` 的重验失败结果通常已带新观察：用它的 O 与新 P 再 `act`；没有 `observation` 时先 `observe`。`reason=lineage_changed` 时 `error.details.changed_ref` 指向第一个失配的具体公开祖先；不要重放旧动作 |
+| `409 observation_expired`/`target_changed`/`foreground_changed` | 观察已过期（60 秒）或界面变化 | `target_changed`/`foreground_changed` 的重验失败结果通常已带新观察：用它的 O 与新 P 再 `act`；没有 `observation` 时先 `observe`。`reason=lineage_changed` 且返回 `error.details.changed_ref` 时，它指向第一个确实缺失、能唯一确定的具体公开祖先（仅平移的祖先不会被指名）；`bubble_ancestor` 的最近交互祖先变化时指向原先的交互祖先，即使它仍存在；不要重放旧动作 |
 | `409 text_submit_not_executed` | 复合 `text` 写入已确认、提交确定未派发（`outcome=partial`） | 结果通常已带新的 ready O，直接用它继续；没有新 O 时按 `recovery entry=observe` 获取现场；不要重放原文字，也不要自动补发 ENTER |
 | `504 action_result_uncertain` | 输入已派发但结果无法确认 | 用 `status(P)` 查询原结果，再用一次新 `observe` 收窄不确定性；不重放。窗口在调用返回时已关闭，不阻止后续普通工具；该事实保留在原 P 的 `uncertain` 与账本窗口状态中，不等于 `cleanup.execution` 未确认 |
 | App 进程重建或服务重启 | 服务实例变化、App 实例变化 | 服务实例变化后 App 会作废旧命令；App 实例变化会按 `app_restarted` 撤销旧会话，服务正常退出按 `service_shutdown` 撤权。等待新的恢复结果，不沿用缓存状态 |

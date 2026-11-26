@@ -583,11 +583,15 @@ func TestActTapCardRejectsFreshCompetingChildAtFixedPoint(t *testing.T) {
 	if len(h.device.taps) != 0 {
 		t.Fatalf("rejected fixed point dispatched input: %v", h.device.taps)
 	}
-	if delta := h.device.probeCount() - probes; delta != 1 {
-		t.Fatalf("probe delta = %d, want one fresh display probe", delta)
+	// scope_blocked is retried, so both revalidation attempts read their own
+	// probe and frame.
+	if delta := h.device.probeCount() - probes; delta != actRevalidateMaxAttempts {
+		t.Fatalf("probe delta = %d, want %d, one fresh display probe per revalidation attempt",
+			delta, actRevalidateMaxAttempts)
 	}
-	if delta := h.device.captureCount() - captures; delta != 1 {
-		t.Fatalf("capture delta = %d, want one fresh capture", delta)
+	if delta := h.device.captureCount() - captures; delta != actRevalidateMaxAttempts {
+		t.Fatalf("capture delta = %d, want %d, one fresh capture per revalidation attempt",
+			delta, actRevalidateMaxAttempts)
 	}
 	if result.Observation == nil {
 		logger.Close()
@@ -607,11 +611,15 @@ func TestActTapCardRejectsFreshCarrierIdentityChange(t *testing.T) {
 	if len(h.device.taps) != 0 {
 		t.Fatalf("carrier identity rejection dispatched input: %v", h.device.taps)
 	}
-	if delta := h.device.probeCount() - probes; delta != 1 {
-		t.Fatalf("probe delta = %d, want one", delta)
+	// scope_blocked is retried, so both revalidation attempts read their own
+	// probe and frame.
+	if delta := h.device.probeCount() - probes; delta != actRevalidateMaxAttempts {
+		t.Fatalf("probe delta = %d, want %d, one fresh display probe per revalidation attempt",
+			delta, actRevalidateMaxAttempts)
 	}
-	if delta := h.device.captureCount() - captures; delta != 1 {
-		t.Fatalf("capture delta = %d, want one", delta)
+	if delta := h.device.captureCount() - captures; delta != actRevalidateMaxAttempts {
+		t.Fatalf("capture delta = %d, want %d, one fresh capture per revalidation attempt",
+			delta, actRevalidateMaxAttempts)
 	}
 	if result.Observation == nil {
 		t.Fatal("carrier identity rejection did not deliver its fresh frame")
@@ -620,11 +628,14 @@ func TestActTapCardRejectsFreshCarrierIdentityChange(t *testing.T) {
 
 func TestActTapCardRejectsFreshDuplicateTargetOrCarrierIdentity(t *testing.T) {
 	variants := []struct {
-		name string
-		step captureStep
+		name   string
+		step   captureStep
+		frames int
 	}{
-		{"target", tapCardWithFreshTargetDuplicateStep()},
-		{"carrier", tapCardWithFreshCarrierDuplicateStep()},
+		// A target_ambiguous rejection is not on the retry whitelist, so this
+		// subtest proves the whitelist is scoped.
+		{"target", tapCardWithFreshTargetDuplicateStep(), 1},
+		{"carrier", tapCardWithFreshCarrierDuplicateStep(), actRevalidateMaxAttempts},
 	}
 	for _, variant := range variants {
 		t.Run(variant.name, func(t *testing.T) {
@@ -641,11 +652,13 @@ func TestActTapCardRejectsFreshDuplicateTargetOrCarrierIdentity(t *testing.T) {
 				t.Fatalf("duplicate %s identity dispatched input: %v",
 					variant.name, h.device.taps)
 			}
-			if delta := h.device.probeCount() - probes; delta != 1 {
-				t.Fatalf("probe delta = %d, want one", delta)
+			if delta := h.device.probeCount() - probes; delta != variant.frames {
+				t.Fatalf("duplicate %s probe delta = %d, want %d",
+					variant.name, delta, variant.frames)
 			}
-			if delta := h.device.captureCount() - captures; delta != 1 {
-				t.Fatalf("capture delta = %d, want one", delta)
+			if delta := h.device.captureCount() - captures; delta != variant.frames {
+				t.Fatalf("duplicate %s capture delta = %d, want %d",
+					variant.name, delta, variant.frames)
 			}
 		})
 	}
@@ -664,12 +677,15 @@ func TestActTapCardKeepsPlannedPointWhenFreshAddsSafeAlternative(t *testing.T) {
 	requireTapPoint(t, h, tapSafePoint)
 }
 
+// TestActTapCardRejectsFreshCarrierMutationsWithoutReselecting proves a carrier
+// that can no longer be re-proven is rejected without reselecting another
+// carrier, while a carrier that only moved away is unbound in favour of the
+// target's own conserved subtree at the original point.
 func TestActTapCardRejectsFreshCarrierMutationsWithoutReselecting(t *testing.T) {
 	variants := []struct {
 		name string
 		step captureStep
 	}{
-		{"moved", tapCardWithFreshCarrierMoveStep()},
 		{"disappeared", tapCardWithFreshCarrierMissingStep()},
 		{"became_context", tapCardWithFreshCarrierContextStep()},
 		{"under_interactive_boundary", tapCardWithFreshCarrierUnderBoundaryStep()},
@@ -687,17 +703,34 @@ func TestActTapCardRejectsFreshCarrierMutationsWithoutReselecting(t *testing.T) 
 			if len(h.device.taps) != 0 {
 				t.Fatalf("carrier mutation %s dispatched input: %v", variant.name, h.device.taps)
 			}
-			if delta := h.device.probeCount() - probes; delta != 1 {
-				t.Fatalf("probe delta = %d, want one", delta)
+			if delta := h.device.probeCount() - probes; delta != actRevalidateMaxAttempts {
+				t.Fatalf("carrier mutation %s probe delta = %d, want %d",
+					variant.name, delta, actRevalidateMaxAttempts)
 			}
-			if delta := h.device.captureCount() - captures; delta != 1 {
-				t.Fatalf("capture delta = %d, want one", delta)
+			if delta := h.device.captureCount() - captures; delta != actRevalidateMaxAttempts {
+				t.Fatalf("carrier mutation %s capture delta = %d, want %d",
+					variant.name, delta, actRevalidateMaxAttempts)
 			}
 			if result.Observation == nil {
 				t.Fatalf("carrier mutation %s did not deliver its fresh frame", variant.name)
 			}
 		})
 	}
+
+	// The stale carrier is unbound and the origin point is kept because the
+	// target's own readable subtree is conserved.
+	t.Run("moved_keeps_original_point", func(t *testing.T) {
+		h := newTapScopeHarness(t)
+		h.device.scriptCaptures(tapCardStep(), tapCardWithFreshCarrierMoveStep())
+		start := h.startSession()
+		card := tapCardNode(t, h)
+
+		result := h.actWith(t, "Pcarriermoved", tapRefRequest(start.Observation.ID, card.Ref))
+		if result.Outcome != OutcomeExecuted {
+			t.Fatalf("outcome = %q error %+v, want executed", result.Outcome, result.Error)
+		}
+		requireTapPoint(t, h, tapSafePoint)
+	})
 }
 
 func TestActTapCardKeepsFixedPointWhenFreshMovesOutsideElement(t *testing.T) {

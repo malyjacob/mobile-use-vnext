@@ -200,10 +200,12 @@ func actTargetProbeOutcome(state actProbeState) string {
 }
 
 // actTargetLog records one ref-target match decision. tier is the bounded
-// integer level that actually proved the target (1-4) and is present only for a
-// unique match; a rejection carries no tier. No ref, label, text or tree
-// content is ever written.
-func (e *Engine) actTargetLog(operationID, outcome string, tier int) {
+// integer level that actually proved the target (1-5) and is present only for a
+// unique match; a rejection carries no tier. attempt is the bounded revalidation
+// attempt that produced the decision (1 or 2) and separates a first-frame pass
+// from a transient re-check. No ref, label, text or tree content is ever
+// written.
+func (e *Engine) actTargetLog(operationID, outcome string, tier, attempt int) {
 	if e == nil || e.log == nil || operationID == "" || outcome == "" {
 		return
 	}
@@ -211,8 +213,11 @@ func (e *Engine) actTargetLog(operationID, outcome string, tier int) {
 		eventlog.Str("operation_id", operationID),
 		eventlog.Str("outcome", outcome),
 	}
-	if tier > 0 && tier <= 4 {
+	if tier > 0 && tier <= 5 {
 		fields = append(fields, eventlog.Int("tier", tier))
+	}
+	if attempt >= 1 && attempt <= 2 {
+		fields = append(fields, eventlog.Int("attempt", attempt))
 	}
 	e.log.Event(eventlog.Debug, "act.target", fields...)
 }
@@ -229,12 +234,10 @@ func bubbleRelationChangedError(ancestorRef string) *protocol.APIError {
 	return apiErr
 }
 
-// tapFrameTier4OcclusionProven reports whether a Tier 4 landing point still
-// reaches the proven target subtree and no interactive public node outside that
-// subtree covers it. Tier 4 accepts a rebuilt ancestor, so the subtree scope
-// alone can no longer prove that a newly inserted sibling overlay does not own
-// the point; the whole-tree deepest hit must stay inside the target subtree.
-// Tier 1-3 never call this and keep their exact previous gates.
+// tapFrameTier4OcclusionProven reports whether a Tier 4 or higher landing
+// point has a unique whole-tree deepest hit inside the proven target subtree
+// and no external interactive owner covers it. Rebuilt ancestors and vertical
+// translations require the whole-tree proof in addition to the subtree scope.
 func tapFrameTier4OcclusionProven(view *tapPublicView, target *protocol.Node,
 	x, y int) bool {
 	if view == nil || view.tree == nil || view.tree.Root == nil || target == nil {
@@ -525,6 +528,23 @@ func isPublicAncestor(view *tapPublicView, ancestor, descendant *protocol.Node) 
 		current = info.parent
 	}
 	return false
+}
+
+// colocatedSyncShiftOK checks that both bindings moved vertically together.
+func colocatedSyncShiftOK(oldChild, freshChild, oldColocated, freshColocated device.Rect) bool {
+	oldChildH, freshChildH := oldChild.Height(), freshChild.Height()
+	oldColocatedH, freshColocatedH := oldColocated.Height(), freshColocated.Height()
+	if min(oldChildH, freshChildH, oldColocatedH, freshColocatedH) <= 0 {
+		return false
+	}
+	maxH := max(oldChildH, freshChildH, oldColocatedH, freshColocatedH)
+	_, oldChildY := oldChild.Center()
+	_, freshChildY := freshChild.Center()
+	_, oldColocatedY := oldColocated.Center()
+	_, freshColocatedY := freshColocated.Center()
+	childShift := freshChildY - oldChildY
+	colocatedShift := freshColocatedY - oldColocatedY
+	return absInt(childShift-colocatedShift) <= max(16, maxH/4)
 }
 
 func colocatedMatchGuard(view *tapPublicView, child, candidate *protocol.Node, screen device.Rect) bool {

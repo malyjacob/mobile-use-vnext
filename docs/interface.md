@@ -15,7 +15,7 @@
 | 方法 | 所有业务端点只接受 `POST`；其他方法返回 `405`，错误码 `invalid_request` |
 | 认证 | `/api/*` 用 `agent_token`；`/v1/control/*` 用 `control_token`；`Authorization: Bearer <token>` |
 | 身份隔离 | agent token 不能访问 `/v1/control/*`，control token 不能访问 `/api/*`；错误为 `401 unauthorized` |
-| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 32`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
+| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 33`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
 | 预分配 P | `/api/*` 可带 `X-Mobile-Use-Operation: P…`；缺省由服务分配。`status` 不使用该头 |
 | 请求体 | 必须是一个 JSON 对象；大小上限：`start`/`status`/`end`/`wait_for` 16 KiB，`observe` 32 KiB，`snap` 8 KiB，`act` 64 KiB，`inspect`/`keepalive`/`diagnose`/`app` 8 KiB，`notify` 16 KiB，`shell` 32 KiB，`sync` 32 KiB，`stop` 8 KiB |
 | 响应 | `Content-Type: application/json; charset=utf-8`，`Cache-Control: no-store` |
@@ -42,8 +42,10 @@
 这些观察最多多花该阶段的预算（`act(image=true)` 另加一次刷新读取）。这些观察发布
 `observation.quality`，记录收敛状态与有效样本数（见 §11）。
 
-`act` 的重验在派发前失败时另有一个交付观察点：重验已经读取的那一帧直接发布为新的 `ready`
-观察，随失败结果返回（见 §6）。该点不做收敛采样，也不重新采集，其质量固定为
+`act` 的重验在派发前失败时另有一个交付观察点：在 `target_changed`/`foreground_changed`/
+`node_not_found`、取得可用帧、原会话未撤权，并通过交付提交门禁后，最后一次重验读取的那一帧
+（发生瞬态复检时为第 2 帧）发布为新的 `ready` 观察，随失败结果返回（见 §6）；不满足这些条件的
+失败不发布观察。两次尝试之间不发布中间观察；该点不做收敛采样，也不重新采集，其质量固定为
 `unknown`/`0`/`not_sampled`。`observe` 由调用方决定节奏（`wait_ms` 与 `full`），不做收敛
 采样；`snap` 只读一张图，不取树，也不参与这些采样点；`wait_for` 不在这几个采样点之列，它的观察质量来自自身的条件等待（见 §14）；
 `shell` 不发布观察，命令是否改变屏幕由下一次 `act` 的实时重验或一次 `observe` 回答。
@@ -501,7 +503,10 @@ STOP、原租期、请求与工作期限、会话绑定显示 ID/代次与几何
 具备请求动作与有效 bounds：`bubble_ancestor` 另须证明 A 仍是 fresh C 的最近交互祖先且不在重验
 阶段跨模式切到 `bubble_colocated`；`bubble_colocated` 另须证明 fresh B 非 fresh C 祖先且仍满
 足共位与反底板守卫。任一条件不成立时返回 `409 target_changed` 并附归因 `reason`，零派发；C
-丢失时即使 A 或 B 仍唯一也不能解绑授权。有效 `bubble=false` 禁用 `bubble_ancestor` 与
+丢失时即使 A 或 B 仍唯一也不能解绑授权。认领后各模式的全树遮挡证明触发条件（直接目标模式的执行
+绑定、`coextensive_child` 父绑定、`bubble_colocated` 任一绑定、`bubble_ancestor` 执行祖先），以及
+`bubble_colocated` 两侧任一命中 Tier 5 时的双节点纵向共同位移守卫，见 §6 与后文 Tier 4/Tier 5 段。
+有效 `bubble=false` 禁用 `bubble_ancestor` 与
 `bubble_colocated`（原目标自身已有请求动作时仍走直接 4 级规划并可使用 `coextensive_child`），缺动作时
 返回 `422 unsupported_node_action` 并在 `candidates` 中附可用交互祖先与共位可点击候选；坐标
 目标不进入 `bubble` 分支。
@@ -684,13 +689,28 @@ bounds、非 root、非 context 且处于最大深度的全部公开节点）：
 不继承显式时长） → 实时重验（目标显示仍存在、
 重新采集、原始拓扑完整、前台包/任务与观察时一致；ref 目标使用下面的分层重验；坐标目标绑定
 单节点或命中集合时，要求新鲜帧内对应对象全部通过匹配，且原点解析得到的最深命中集合与期望集合
-完全相等）→ 派发本次动作所需的输入（`text` 为必要聚焦、显示绑定写入并以写入调用内同节点刷新值
+完全相等——这些是严格证明的条件，坐标 `tap`/`long_press` 在严格证明失败后仍可能由 §6 的唯一交互
+拥有者守恒放行，坐标 `text` 与 raw `swipe` 保持严格）→ 派发本次动作所需的输入（`text` 为必要聚焦、
+显示绑定写入并以写入调用内同节点刷新值
 或有界只读读回确认；`auto_submit=true` 时再按 `submit_ref` 在独立前台/节点证据门禁后至多派发
 一次提交原语，任何一步失败都不重放，节点提交失败也不补发 `ENTER`）。
 
-ref 目标按 Tier 1→2→3→4 匹配：Tier 1 要求目标 bounds 相同，祖先链 L1 不比较祖先 bounds、
+重验至多读取两帧：第 1 帧被拒且归因属于 `target_missing`、`lineage_changed`、`child_changed`、
+`scope_blocked`、`scroll_scope_changed`、`trajectory_blocked`、`point_changed` 这 7 类瞬态时，经一次
+可中断的 `150ms` 暂停后复检第 2 帧；第 1 帧成功不增加等待、采集或日志。`control_revoked`、
+`session_ended`、`foreground_changed`、`foreground_unknown`、`display_unavailable`、
+`hierarchy_unavailable`、`node_not_found`、`capability_changed`、`target_ambiguous` 与空 `reason`
+不复检。暂停期间 STOP 到达立即返回 `409 control_revoked`，不读第 2 帧、不交付、不派发；派发与拒绝
+交付都只使用最后读取的那一帧，第 2 次采集自身失败时返回该真实错误且不交付帧。
+
+ref 目标按 Tier 1→2→3→4→5 匹配：Tier 1 要求目标 bounds 相同，祖先链 L1 不比较祖先 bounds、
 Focused/Selected；Tier 2 在 L1 相同时允许受限目标微移（重叠率至少 0.50，并检查尺寸、中心与
 屏内几何）；Tier 3 使用去掉可证明透明层的 L2（重叠率至少 0.60），且要求非根强锚点。
+Tier 3 的祖先比较忽略非目标祖先的 `Text`/`Description`/`Checked`，只比较包、类、带 presence 的
+资源身份、可编辑性与点击/长按/滚动/启用/密码/勾选三态；非根强锚点也只采信非空资源身份或
+点击/长按/滚动/可编辑/密码/勾选能力。
+祖先链上溯不计入采集为多顶层窗口插入的合成显示根：到该层即终止并把最近的真实窗口根作为链根，
+第二个顶层窗口出现或消失因此不改变目标的祖先深度。
 透明层的 text/description/resource 必须三项均已知为空，交互与状态均已知安全。每 Tier 都要求
 旧→新及新→旧双向唯一；多候选立即拒绝，只有零候选才进入下一 Tier。目标内容/能力的已知
 冲突或 presence 变化不允许靠几何猜测；动态文案改写不提供额外 Tier。
@@ -699,29 +719,53 @@ Tier 4 只在 Tier 1–3 全部零候选且观察到祖先链失配时进入：�
 矩形在屏内且双向面积覆盖均 ≥80%、尺寸差不超过 `max(8, 较大边/5)`、中心位移不超过
 `max(16, 较大边/4)`，并满足 E1 自身非空文案/描述
 精确相等、E2 全树双向唯一的非空资源，或 E3 有界子树可读文案指纹（点击/长按/输入目标要求两侧
-非空且排序后完全相等）之一。E3 每侧最多访问 64 个后代并计入同一匹配预算。正向与反向扫描都
-要求全树唯一；Tier 4 命中的点击/长按/输入执行目标实际落点还须通过全树最深命中与外部竞争交互拥有者检查
-（`tapFrameTier4OcclusionProven`），Tier 1–3 保持原有目标子树与双绑定关系边界。
+非空且排序后完全相等，精确多重集不成立时接受数字骨架守恒）之一。E3 只在两侧目标源节点都没有
+自身非空 `Text`/`Description` 且都有后代时适用，否则适用的是 E1/E2。数字骨架守恒只允许"含至少
+1 个 ASCII 数字、且只由 ASCII 数字与 `.` `,` `:` `+` `-` `/` `%` 和空格组成"的条目增删（`12ms`
+这类含字母的条目不在其列），其余条目把每段 ASCII 数字折叠为单个 `#` 后两侧排序列表相等，且两侧都存在至少 1 条不含
+任何数字的不变可读文案。E3 每侧最多访问 64 个后代并计入同一匹配预算。正向与反向扫描都
+要求全树唯一；Tier 4 与 Tier 5 命中的点击/长按/输入执行目标实际落点还须通过全树遮挡证明
+（`tapFrameTier4OcclusionProven`）：全树唯一最深公开命中必须落在已证明的执行子树内，且没有
+外部交互拥有者覆盖落点。触发条件按模式区分：直接目标模式的执行绑定、`coextensive_child` 的执行
+绑定与 `bubble_colocated` 的任一绑定命中 Tier 4/5 时都须通过；`coextensive_child` 的父绑定命中
+Tier 4/5 时在此之上**额外**要求同一证明，而执行绑定自身的 Tier 4/5 落点已由直接目标检查覆盖；
+`bubble_ancestor` 只在其执行祖先命中这些层级时触发，触发子节点命中不单独触发。
+Tier 1–3 保持原有目标子树与双绑定关系边界。
+
+Tier 5 只在 Tier 1–3（以及已进入的 Tier 4）全部零候选后运行：要求同显示、目标结构无已知冲突、
+新矩形在屏内且与旧矩形同水平带（左右边差 ≤ `max(8, 最大宽/50)`，宽高差 ≤ `max(8, 最大边/5)`），
+祖先链先按 L1 精确相等，或按上面去噪后的 L2 相等且含至少 1 个非根强锚点，并满足 E1/E2/E3 之一。
+正向与反向扫描都要求全树唯一，命中后按新鲜矩形派发。`scroll` 容器的强证据是 E1（自身非空可读
+文案/描述两侧相等）、E2（全树双向唯一的非空资源）或滚动 E3（共享文案；或同一非空资源且双向面积
+覆盖 ≥85%），不适用多重集与数字骨架规则。
+`bubble_colocated` 两侧任一命中 Tier 5 时，两节点还须纵向共同位移
+（`|Δ子节点中心Y − Δ共位节点中心Y| ≤ max(16, maxH/4)`，`maxH` 取四者高度最大值），否则按
+`409 target_changed`、`reason=child_changed` 拒绝。
 
 `tap`/`long_press`/`text` 的 ref 在新鲜公开树中先证明原点，仍安全则保留；原点失效时可在
-已匹配载体内重算安全点。原载体失效后，只有目标自身的稳定非空 text/description 或双端唯一
-resource 能独立证明身份，才可在同一目标子树内重新选点/载体；共享祖先不是该身份证据。
+已匹配载体内重算安全点。原载体失效后，只有目标自身的稳定非空 text/description、双端唯一
+resource，或目标自身子树的 E3 证据（精确可读多重集或数字骨架守恒）能独立证明身份，才可在同一
+目标子树内重新选点/载体；共享祖先与失效载体本身都不是该身份证据。
 `coextensive_child` 双绑定 C 与 B，要求 B 仍是 C 的顶层唯一阻塞边界且保持双向同视口；
 `bubble_ancestor` 与 `bubble_colocated` 各自只在其原模式下双绑定重验，不跨模式切换。所有点
 均受同一子树安全谓词约束，不越过 blocker、不越权晋升。实际派发使用新鲜 frame 给出的坐标。
 无候选、歧义、祖先链/能力/作用域/点集变化为 `409 target_changed`；预算耗尽、畸形父链、环路
 或投影损坏为 `503 hierarchy_unavailable`。STOP 优先为 `control_revoked`，不交付重试 O、不再派发。
 
-这组证明只覆盖公开树模型内的目标子树，不覆盖子树外同级或跨窗口 z 序、未发布的透明拦截层、
-应用自定义触摸代理或业务回调。子树外同级重叠不导致该 `ref` 规划自拒，也不在树模型中证明
+这组静态落点、双绑定与子树证明只覆盖公开树模型内的目标子树，不覆盖子树外同级或跨窗口 z 序、
+未发布的透明拦截层、应用自定义触摸代理或业务回调；全树遮挡证明只补上落点上的最深公开命中与
+外部交互拥有者，仍不覆盖真实 z 序、未发布拦截层或应用内业务消费者。子树外同级重叠不导致该
+`ref` 规划自拒，也不在树模型中证明
 谁消费真实触摸；`executed` 只证明输入已派发，不证明 Android 实际事件消费者或应用业务结果。
 
-`scroll` 的授权单位是同一可证明的滚动容器，不要求起点叶身份不变。容器通过同一 Tier 1–4
+`scroll` 的授权单位是同一可证明的滚动容器，不要求起点叶身份不变。容器通过同一 Tier 1–5
 双向唯一匹配后，仍须有公开滚动能力、裁剪矩形和沿轴至少 0.50 的重叠；离轴两边变化不得超过
 `max(8px, min(旧宽/高, 新宽/高)/50)`。允许轴向伸缩，先在原选定轴线以双向同视口规则证明原段
 仍安全；失效时只在该容器的新鲜安全区间中按 `50% → 25% → 75%` 居中重算起终点，再证明整段。
-Tier 4 的滚动容器证据允许容器内文案变化：唯一资源，或两侧非空可读文案至少有 1 项重合（或相同
-非空资源且双向覆盖 ≥85%）。失败按具体原因返回 `409 target_changed`。新鲜帧上容器公开 `axis`
+Tier 4/5 的滚动容器证据允许容器内文案变化，其强证据是 E1（容器自身非空可读文案/描述两侧相等）、
+E2（同屏同包全树双向唯一的非空资源）或滚动 E3（两侧非空可读文案至少有 1 项重合；或同一非空资源
+且双向面积覆盖 ≥85%），不适用多重集与数字骨架规则。失败按具体原因返回 `409 target_changed`。
+新鲜帧上容器公开 `axis`
 与请求方向显式冲突时，按 `409 target_changed`（`reason=capability_changed`）拒绝并零派发。
 ref 与坐标容器选择器都按此处理，实际 Swipe 使用新鲜 frame 与按 `amount` 档位固定的滚动时长。
 
@@ -733,36 +777,46 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms），
 差异不参与判定。观察时命中超过 64 个节点则不做集合证明，只保留前台级校验；观察时命中为空时，
 新鲜帧同一点也必须仍为空。坐标 `tap`/`long_press`/`text` 保持原点授权，目标自身文案与能力严格
 一致，祖先链重建时使用 Tier 4 的紧几何与 E1/E2/E3 证据，并在新鲜命中集合上确认没有新的竞争交互
-拥有者；不因 ref 匹配获得改点能力。`scroll` 不证明真实滚动方向、触摸消费者或业务安全。
+拥有者；不因 ref 匹配获得改点能力。严格命中集合证明失败时，坐标 `tap`/`long_press` 仍可在原点始终
+不变、绝不重定向的前提下接受唯一交互拥有者守恒：新旧两帧在该点各恰有 1 个交互拥有者且都支持请求
+动作，该点最深命中的每个节点都是该拥有者本身或其公开后代，两帧都没有覆盖该点的外部交互拥有者，
+新拥有者矩形在屏内且包含该点，ref 匹配器在禁用 Tier 5 平移找回、只允许 Tier 1–4 的条件下把旧拥有者
+唯一映射到新拥有者，且旧拥有者既无自身可读文案/描述、也无全树唯一资源身份时目标子树再满足 E3
+（含数字骨架守恒）。其余任一条件不成立仍是 `409 target_changed`（`reason=point_changed`），STOP、
+预算耗尽与畸形树保持既有终态；坐标 `text` 与 raw `swipe` 不走该兜底。
+`scroll` 不证明真实滚动方向、触摸消费者或业务安全。
 
 非 `text` 动作在认领后实时重验返回 `409 target_changed` 时，固定在 `error.details.reason`
 给出封闭归因（原始/公开拓扑损坏先返回 `503 hierarchy_unavailable`）：
 
 | `reason` | 含义 |
 | --- | --- |
-| `child_changed` | `bubble_ancestor`/`bubble_colocated` 中触发子节点 C 丢失、歧义、Role/Label 变化、新增交互能力、缺失公开映射或与 B 失去共位/反底板守卫 |
+| `child_changed` | `bubble_ancestor`/`bubble_colocated` 中触发子节点 C 丢失、歧义、Role/Label 变化、新增交互能力、缺失公开映射或与 B 失去共位/反底板守卫；`bubble_colocated` 两侧任一命中 Tier 5、但两节点纵向位移不一致时同样归因于此 |
 | `target_missing` | 目标或滚动容器在新鲜帧中零候选且非祖先链失配 |
-| `target_ambiguous` | 目标或滚动容器在新鲜帧中出现多候选歧义 |
-| `lineage_changed` | 目标仅因祖先链/强锚点失配被拒，或 `bubble_ancestor` 的最近交互祖先变更 |
+| `target_ambiguous` | 目标或滚动容器在新鲜帧中出现多候选歧义；`bubble_ancestor` 的执行祖先或 `bubble_colocated` 的共位绑定出现多候选时同样归因于此（触发子节点的多候选归 `child_changed`） |
+| `lineage_changed` | 目标仅因祖先链/强锚点失配被拒，或 `bubble_ancestor` 的最近交互祖先变更；Tier 3 与 Tier 5 的祖先比较只对保留的 L2 条目采信稳定祖先结构（Tier 5 先试精确 L1），被忽略的 `Text`/`Description`/`Checked` 仍参与透明层判定，其变化会改变透明层资格从而可能阻止匹配 |
 | `capability_changed` | 目标匹配成功但新鲜公开映射、动作/滚动能力、`role` 或同视口/非祖先关系失效；`scroll` 还包含新鲜容器公开 `axis` 与请求方向显式冲突（已失去该方向的滚动能力） |
 | `scroll_scope_changed` | 滚动容器几何轴向重叠不足 `0.50`，或离轴边变化超过容差 |
 | `trajectory_blocked` | 滚动容器与作用域有效，但原轨迹失效且 3 条轴线均无法重规划出可证安全段 |
-| `scope_blocked` | 点击目标及能力有效，但原点、固定载体与兜底安全区均未通过安全谓词 |
-| `point_changed` | 坐标目标或起点最深命中集合在新鲜帧中不再满足对应动作证明：坐标点击/输入的目标结构、语义证据、几何或竞争拥有者失配，或 raw `swipe` 的命中集合大小、结构、遮挡或几何不再成立 |
+| `scope_blocked` | 点击目标及能力有效，但原点、固定载体与兜底安全区均未通过安全谓词，或 Tier 4/5 命中的落点未通过全树最深命中与外部竞争交互拥有者检查 |
+| `point_changed` | 坐标目标或起点最深命中集合在新鲜帧中不再满足对应动作证明：坐标点击/输入的目标结构、语义证据、几何或竞争拥有者失配，坐标 `tap`/`long_press` 的唯一交互拥有者守恒兜底也不成立，或 raw `swipe` 的命中集合大小、结构、遮挡或几何不再成立 |
 
 `409 target_changed` 且 `reason=lineage_changed` 时，服务可在 `error.details.changed_ref` 附带
-原目标公开祖先链中第一个与新鲜帧失配、且能唯一确定的具体祖先 ref；`bubble_ancestor` 的最近交互
-祖先变化时，该字段指向原先的交互祖先。无法唯一定位、祖先为 `root` 或计算失败时省略该字段。
-`changed_ref` 不进入日志或事件。
+原目标公开祖先链中第一个**确实缺失**且能唯一确定的具体祖先 ref：仍在新帧祖先链里有恰好一个结构
+对应层的祖先只算平移（例如被插入的包装层挤位），不算失配，也不被指名；`bubble_ancestor` 的最近交互
+祖先变化时，该字段指向原先的交互祖先，即使它仍然存在。无法唯一定位、祖先为 `root` 或计算失败时省略该字段。
+合成显示根不进入祖先链，因此不会被指名。`changed_ref` 不进入日志或事件。
 
 `text` 在重验阶段返回 `409 target_changed` 时仍保持 `text` 专属的 `stage=target`、
-`reason=target_unconfirmed`、`dispatch` 结构，不使用上述非 `text` 枚举。
+`reason=target_unconfirmed`、`dispatch` 结构，不使用上述非 `text` 枚举；该分类在复检循环结束后
+统一应用一次。
 
 重验失败且已取得可用新帧并完成交付时，服务把该帧发布为新的 `ready` 观察随结果返回：
 `target_changed`、`foreground_changed` 与重验阶段的 `node_not_found` 返回 `409`，结果带
 `observation`（`status=complete`）与 `recovery`（`entry=retry`、`reference=O`、
-`input_state=effective`）；调用方用该新 O 与新 `P` 重试同一工具。交付复用同一次读取的帧，
-不额外采集、不做收敛采样，也不确认基线。未交付时结果不带 `observation`，见下段。
+`input_state=effective`）；调用方用该新 O 与新 `P` 重试同一工具。交付复用最后一次重验读取的帧
+（发生瞬态复检时为第 2 帧），两次尝试之间不发布中间观察，也不额外采集、不做收敛采样、不确认基线。
+未交付时结果不带 `observation`，见下段。
 
 重验失败时的 `recovery` 按错误码保持：`display_unavailable`、`hierarchy_unavailable`、
 `foreground_unknown` 为 `entry=observe`、`reference=P`、`input_state=retired`；
@@ -827,8 +881,12 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms），
     时保留 `write=executed,submit=not_executed`，安全停在 `partial`。
   - 节点 `submit_ref="n…"`：写后重新采集新鲜帧，核对同显示与同前台任务，对静态计划涉及的执行
     节点（含 `coextensive_child`、`bubble_ancestor`、`bubble_colocated` 的委托节点）走 Tier 1–4
-    与安全落点重验；键盘顶起导致仅 Y 轴平移时允许同水平带的唯一匹配回退。写前显式禁用的执行
-    目标必须在新帧中显式启用；首次帧仍禁用或布局尚未落定时，可在可中断等待 150ms 后复采一次。
+    与安全落点重验；该路径任何层级都不采用数字骨架守恒，子树证据一律要求精确可读多重集，键盘顶起
+    导致仅 Y 轴平移时允许同水平带的唯一匹配回退，该回退的子树证据同样是精确可读多重集。该路径不
+    启用 Tier 5 平移找回。认领后重验的复检循环与写后 `submit_ref` 的复采是同一次 `act(text)` 的
+    两个独立阶段：各自最多执行一次可中断的 `150ms` 等待，互不复用，也不递归触发对方。写前显式
+    禁用的执行目标必须在新帧中显式启用；首次帧仍禁用或布局尚未落定时，可在可中断等待 150ms 后
+    复采一次。
     通过后发送至多一次 `Tap`；节点提交失败绝不补发 ENTER。
 - 两条提交路径都要求同 TaskID 的前台上下文与具体节点证据：`enter_key` 以写前目标/重绑定目标的
   `GetTextOnDisplay` 完整读回为准，`submit_ref` 以 Tier 1–4 的节点匹配、启用状态与安全落点为准；
@@ -958,7 +1016,7 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms），
 
 | 字段 | 必填 | 类型 | 说明 |
 | --- | --- | --- | --- |
-| `contract_version` | 是 | 字符串 | 必须为 `"32"`，否则 `409 contract_mismatch` |
+| `contract_version` | 是 | 字符串 | 必须为 `"33"`，否则 `409 contract_mismatch` |
 | `app_instance_id` | 是 | UUID | App 进程实例；变化会撤销旧归属 |
 | `app_version` | 否（App 应发送） | 字符串 | 仅发行标识 |
 | `selected_mode` | 是 | `virtual`/`primary` | 用户选择 |
@@ -985,7 +1043,7 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms），
 
 ```json
 {
-  "contract_version": "32",
+  "contract_version": "33",
   "service_instance_id": "…",
   "control": {
     "revision": 42,
@@ -1021,7 +1079,7 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms），
 ## 9. `POST /v1/control/stop`
 
 ```json
-{"contract_version":"32","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
+{"contract_version":"33","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
 ```
 
 - **不校验普通契约**：`contract_version` 字段存在但不参与准入，服务与 App 契约版本
@@ -1031,7 +1089,7 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms），
 - 重复或过期 `seq` 不报错，只返回 `state=duplicate`。
 
 ```json
-{"contract_version":"32","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
+{"contract_version":"33","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
 ```
 
 `accepted` 恒为 `true`；`state` 为 `revoked`（绑定时撤销了活动会话）、`recorded`
@@ -1044,7 +1102,7 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms），
 无认证，只表示进程可应答，不代表设备就绪或资源干净：
 
 ```json
-{"status":"ok","contract_version":"32","service_instance_id":"…","release_version":"…"}
+{"status":"ok","contract_version":"33","service_instance_id":"…","release_version":"…"}
 ```
 
 ## 11. 数据对象
@@ -1177,7 +1235,7 @@ Observation 的编码顺序固定为 `status`、`id`、`origin`、`revision`、`
 | `not_observed` | 只在观察质量为 `stable`、至少 2 个匹配内容单元、前后内容单元计数相同且 100% 唯一匹配、容器四边与沿请求轴的中心位移及尺寸变化都不超过固定容差时成立；不证明到达边界或手势失败 |
 | `unknown` | 无后观察树、后观察失败或撤销、容器不唯一或已失去滚动能力、正交边或容器身份变化、匹配不足、无法解释的尺寸变化，或一致位移不足；不表示“未移动” |
 
-固定判据由服务策略界定，不是请求字段。派发前的 `pre` 必须是本次重验读到的帧，`post` 是后
+固定判据由服务策略界定，不是请求字段。派发前的 `pre` 必须是最后一次重验读到的帧，`post` 是后
 观察帧；请求轴由 `direction` 决定。
 
 - **容器守卫**：`pre`/`post` 必须唯一匹配同一容器内容键与祖先链，且两侧公开节点都仍是

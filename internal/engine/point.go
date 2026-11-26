@@ -622,6 +622,221 @@ func (proof *pointProof) proveTargetSet(observedIndices, freshIndices []int,
 	return nil
 }
 
+// pointFallbackOwner accepts one hit set only when it names exactly one
+// interactive owner that can carry the operation, every hit is that owner
+// itself or a public descendant of it, and no external interactive owner covers
+// the point. Two owners, a hit outside the owner subtree and a foreign overlay
+// never pass. It is the shared rule of both frames of the owner fallback.
+func pointFallbackOwner(view *tapPublicView, hits []*protocol.Node,
+	x, y int, operation *protocol.Operation) (*protocol.Node, bool) {
+	if view == nil || len(hits) == 0 {
+		return nil, false
+	}
+	owners := collectPointOwners(view, hits)
+	if len(owners) != 1 {
+		return nil, false
+	}
+	owner := owners[0]
+	if owner == nil || !pointOwnerMatchesOperation(owner, operation) {
+		return nil, false
+	}
+	for _, hit := range hits {
+		if hit == nil {
+			return nil, false
+		}
+		if hit == owner {
+			continue
+		}
+		if !isPublicAncestor(view, owner, hit) {
+			return nil, false
+		}
+	}
+	if len(externalInteractiveOwnersAt(view, owner, x, y)) != 0 {
+		return nil, false
+	}
+	return owner, true
+}
+
+// pointFallbackRawOwner resolves one public owner to the raw node it was read
+// from. A missing, negative, out-of-range or duplicated-to-another-node index is
+// a content rejection: the fallback never guesses which raw node an owner is.
+func pointFallbackRawOwner(capture *device.Capture, source map[string]int,
+	owner *protocol.Node) (*device.RawNode, int, bool) {
+	if capture == nil || source == nil || owner == nil || owner.Ref == "" {
+		return nil, -1, false
+	}
+	index, mapped := source[owner.Ref]
+	if !mapped || index < 0 || index >= len(capture.Nodes) {
+		return nil, -1, false
+	}
+	for ref, other := range source {
+		if ref != owner.Ref && other == index {
+			return nil, -1, false
+		}
+	}
+	return &capture.Nodes[index], index, true
+}
+
+// pointFallbackHierarchyError is the 503 terminal error of a stopped point
+// proof. Budget exhaustion and a malformed or corrupt tree share it with the
+// rest of the point proof.
+func pointFallbackHierarchyError() *protocol.APIError {
+	return protocol.NewError(503, protocol.CodeHierarchyFailed, "实时目标重验失败")
+}
+
+// pointFallbackViewError keeps the point proof's terminal categories for a
+// public-view failure: one hierarchy failure stays the 503 terminal error and
+// every other build failure is the ordinary content rejection.
+func pointFallbackViewError(apiErr *protocol.APIError) *protocol.APIError {
+	if apiErr != nil && apiErr.Code == protocol.CodeHierarchyFailed {
+		return pointFallbackHierarchyError()
+	}
+	return targetChangedAtPoint()
+}
+
+// provePointOwnerFallback is the coordinate tap/long_press owner-conservation
+// fallback of one already-failed point proof. The caller reaches it only after
+// the strict hit-set proof rejected the fresh frame, and it can only ever
+// authorize the original point: it returns no coordinates, redirects no target
+// and publishes nothing.
+//
+// The rule is the §4.5 owner conservation of the act revalidation proposal. Both
+// frames must resolve the point to exactly one interactive owner that can carry
+// the requested action, every hit must belong to that owner's public subtree, no
+// external interactive owner may cover the point, both owners must map to a raw
+// node, the two raw owners must prove the same binding through Tier 1-4 with
+// translation disabled, and an owner without independent content must also
+// conserve its readable subtree.
+//
+// A nil result means "the original (x, y) may still be used unchanged". Every
+// rejection is the ordinary point_changed content rejection, while STOP, budget
+// exhaustion and a corrupt tree keep the existing terminal categories. STOP
+// always wins over a content rejection. Nothing is logged here; the caller logs.
+func (proof *pointProof) provePointOwnerFallback(obs *observationState,
+	projection *Projection, freshNodes []*protocol.Node, x, y int,
+	operation *protocol.Operation) *protocol.APIError {
+	if operation == nil ||
+		(operation.Type != "tap" && operation.Type != "long_press") {
+		return targetChangedAtPoint()
+	}
+	if proof == nil || proof.budget == nil || proof.original == nil ||
+		proof.fresh == nil || len(freshNodes) == 0 ||
+		obs == nil || obs.Projection == nil || obs.Projection.Tree == nil ||
+		obs.Projection.Tree.Root == nil || obs.Projection.Capture == nil ||
+		obs.Projection.Source == nil ||
+		projection == nil || projection.Tree == nil ||
+		projection.Tree.Root == nil || projection.Capture == nil ||
+		projection.Source == nil {
+		return targetChangedAtPoint()
+	}
+	if apiErr := proof.gate(); apiErr != nil {
+		return apiErr
+	}
+	oldView, viewErr := collectTapPublicView(obs)
+	if viewErr != nil {
+		return pointFallbackViewError(viewErr)
+	}
+	freshView, viewErr := buildTapPublicView(projection.Tree, proof.fresh,
+		projection.Source)
+	if viewErr != nil {
+		return pointFallbackViewError(viewErr)
+	}
+
+	// 1. Old side: the observed point resolves to exactly one interactive owner
+	// that owns every observed hit and has no foreign interactive competitor.
+	if apiErr := proof.gate(); apiErr != nil {
+		return apiErr
+	}
+	oldHits := resolvePointSet(obs.Projection.Tree.Root, x, y)
+	oldOwner, ok := pointFallbackOwner(oldView, oldHits, x, y, operation)
+	if !ok {
+		return targetChangedAtPoint()
+	}
+
+	// 2. Fresh side: the same conservation holds on the fresh frame, so no
+	// sibling or outer node took a share of the point.
+	if apiErr := proof.gate(); apiErr != nil {
+		return apiErr
+	}
+	freshOwner, ok := pointFallbackOwner(freshView, freshNodes, x, y, operation)
+	if !ok {
+		return targetChangedAtPoint()
+	}
+
+	// 3. Raw mapping: both owners must resolve to the capture they were read
+	// from, and the fresh owner must still be on screen and contain the point
+	// the caller asked for.
+	if apiErr := proof.gate(); apiErr != nil {
+		return apiErr
+	}
+	oldOwnerRaw, oldOwnerIdx, ok := pointFallbackRawOwner(
+		obs.Projection.Capture, obs.Projection.Source, oldOwner)
+	if !ok || indexOf(proof.original, oldOwnerRaw) != oldOwnerIdx {
+		return targetChangedAtPoint()
+	}
+	freshOwnerRaw, freshOwnerIdx, ok := pointFallbackRawOwner(
+		projection.Capture, projection.Source, freshOwner)
+	if !ok || indexOf(proof.fresh, freshOwnerRaw) != freshOwnerIdx {
+		return targetChangedAtPoint()
+	}
+	if !rectValidOnScreen(freshOwnerRaw.Bounds, proof.screen) ||
+		!freshOwnerRaw.Bounds.Contains(x, y) {
+		return targetChangedAtPoint()
+	}
+
+	// 4. Identity: Tier 1-4 only. Translation is disabled, so an owner that
+	// merely stayed on the same horizontal band can never be accepted after a
+	// real move.
+	if apiErr := proof.gate(); apiErr != nil {
+		return apiErr
+	}
+	match, state := matchActTargetWithOptions(proof.ctx, proof.revoked,
+		proof.original, proof.fresh, &proof.original.Nodes[oldOwnerIdx],
+		defaultActMatchOptions().withoutTranslation())
+	if apiErr := proof.gate(); apiErr != nil {
+		return apiErr
+	}
+	switch state {
+	case actProbeUnique:
+		// The single acceptable outcome; the binding is checked below.
+	case actProbeCancelled:
+		return stoppedActRevalidation()
+	case actProbeBudgetExhausted, actProbeMalformed:
+		return pointFallbackHierarchyError()
+	default:
+		return targetChangedAtPoint()
+	}
+	if indexOf(proof.fresh, match.raw) != freshOwnerIdx {
+		return targetChangedAtPoint()
+	}
+
+	// 5. Subtree evidence: an owner without its own readable content and without
+	// a whole-tree unique resource must conserve its subtree business content,
+	// so a textless container cannot silently swap what sits underneath it.
+	if apiErr := proof.gate(); apiErr != nil {
+		return apiErr
+	}
+	if hasOwnReadableText(oldOwnerRaw) {
+		return nil
+	}
+	counts, ok := proof.resourceCounts()
+	if !ok {
+		return pointProofTerminalError(proof.budget)
+	}
+	if tier4UniqueResource(oldOwnerRaw, freshOwnerRaw, counts) {
+		return nil
+	}
+	conserved, complete := subtreeEvidence(proof.original, oldOwnerIdx,
+		proof.fresh, freshOwnerIdx, actMatchTapLike, proof.budget)
+	if !complete {
+		return pointProofTerminalError(proof.budget)
+	}
+	if !conserved {
+		return targetChangedAtPoint()
+	}
+	return nil
+}
+
 func rankPointCandidateNodes(view *tapPublicView, nodes []*protocol.Node, screen device.Rect) []*protocol.Node {
 	type scoredNode struct {
 		node  *protocol.Node

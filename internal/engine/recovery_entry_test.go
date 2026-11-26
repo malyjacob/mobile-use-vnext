@@ -574,7 +574,9 @@ func TestRecoveryDeliveryAfterClaim(t *testing.T) {
 	if button == nil {
 		t.Fatal("button not found in tree")
 	}
-	h.device.scriptCaptures(movedButtonCaptureStep())
+	// A same-band vertical move is now re-acquired by Tier 5, so this rejection
+	// case uses a target text change: it fails the structure match at every tier.
+	h.device.scriptCaptures(markerCapture("OK-changed"))
 	result, apiErr := h.engine.Act(context.Background(), "agent", "Ptarget", &protocol.ActRequest{
 		Reference: start.Observation.ID,
 		Operation: protocol.Operation{Type: "tap",

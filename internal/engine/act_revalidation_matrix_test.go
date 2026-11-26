@@ -284,13 +284,15 @@ func TestActRevalidationTierMatrix(t *testing.T) {
 		fresh, _ := tierFreshCapture(display, "tier3_ambiguous")
 		assertTierMatch(t, original, fresh, 2, -1, actProbeAmbiguous, 3)
 	})
-	t.Run("tier4_text_change_stays_disabled", func(t *testing.T) {
+	// Target structure conflicts rule out every edge in Tiers 1–3 and 5.
+	// With no lineage mismatch, Tier 4 is skipped and Tier 5 is the last scan.
+	t.Run("target_text_change_rejected", func(t *testing.T) {
 		fresh, _ := tierFreshCapture(display, "changed_text")
-		assertTierMatch(t, original, fresh, 2, -1, actProbeNone, 3)
+		assertTierMatch(t, original, fresh, 2, -1, actProbeNone, 5)
 	})
 	t.Run("known_state_change_rejected", func(t *testing.T) {
 		fresh, _ := tierFreshCapture(display, "changed_enabled")
-		assertTierMatch(t, original, fresh, 2, -1, actProbeNone, 3)
+		assertTierMatch(t, original, fresh, 2, -1, actProbeNone, 5)
 	})
 }
 

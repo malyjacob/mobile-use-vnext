@@ -101,7 +101,7 @@ var allowedKeys = map[string]struct{}{
 	"issued": {}, "accepted": {}, "stage": {},
 	"focus_dispatch": {}, "write_dispatch": {}, "submit_dispatch": {},
 	// Target revalidation and continuity facts. tier is the bounded integer
-	// match level (1-4) and baseline_pool is the closed enum
+	// match level (1-5) and baseline_pool is the closed enum
 	// primary/historical/full; a ref, a changed_ref, a text or a tree is never
 	// whitelisted here.
 	"tier": {}, "baseline_pool": {},

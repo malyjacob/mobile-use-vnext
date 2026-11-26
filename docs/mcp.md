@@ -61,8 +61,11 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
 除参数语法、`409 node_not_found`/`node_disabled` 及 `text` 的非可编辑/受保护拒绝（`422 text_target_uncertain`）外，全 `act` 静态目标解析与规划拒绝统一收口为 5 个正交 `422` 错误码：`invalid_target`、`unsupported_node_action`、`ambiguous_point`、`no_safe_point`、`no_safe_trajectory`（`scroll` 的轴向失配为 `unsupported_node_action` + `reason=axis_mismatch`）。静态拒绝不认领 O，结果为 `not_executed`；`error.details` 携带封闭 `reason`、按出口约定的 `scope`/`scope_ref`，有候选时附至多 4 项经当前同一 O 干跑计算的 `candidates`（含 `ref`/`role`/`actions`/`bounds`/`relation`/`executable`），以及可选 `blocking_refs`（至多 3 项）。原 O 仍 ready 且 `candidates` 中存在 `executable=true` 的项时，可直接取首个 `executable=true` 的 `ref` 用同一 O 与新 P 重试，无需重观察或手算坐标；需要查看诊断子树时仍可用 `inspect({reference: 原 act 的 O, node: ref})` 补看。
 
 非 `text` 动作在认领后重验因祖先链失配返回 `409 target_changed (reason=lineage_changed)` 时，
-`error.details.changed_ref` 可给出原目标公开祖先链中第一个与新鲜帧失配且能唯一确定的公开祖先
-ref；无法唯一定位、祖先是 `root` 或计算失败时省略，不编造。该字段只进入错误详情，不写入
+`error.details.changed_ref` 可给出原目标公开祖先链中第一个确实缺失且能唯一确定的公开祖先
+ref（在新帧链里仍有恰好一个结构对应层的祖先只算平移，不被指名）；`bubble_ancestor` 的最近交互
+祖先变化时，该字段指向原先的交互祖先，即使它仍然存在；无法唯一定位、祖先是 `root`
+或计算失败时省略，不编造；合成显示根不进入该祖先链，因此不会被
+指名。该字段只进入错误详情，不写入
 事件日志；坐标目标与裸 `swipe` 的重验不返回 `changed_ref`。
 
 `text` 的 `ref` 目标只要求 `role=input`、公开动作含 `text`、未禁用、`protected=false` 与正面积

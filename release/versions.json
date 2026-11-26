@@ -1,6 +1,6 @@
 {
-  "release_version": "0.36.0",
-  "contract_version": 32,
-  "android_version_code": 38,
+  "release_version": "0.37.0",
+  "contract_version": 33,
+  "android_version_code": 39,
   "source_commit": "d65c97653adb262e750b1e8879e1937a3b8035d7"
 }

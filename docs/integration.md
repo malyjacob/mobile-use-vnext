@@ -41,7 +41,7 @@ adb forward          主机 18881 → 服务；主机 18883 → 手机 MCP
    `adb forward`，也不需要 Agent token。
 
 只需要直连 HTTP 的 Agent 则使用 `http://127.0.0.1:18881/api/<tool>`、`agent_token` 与
-`X-Mobile-Use-Contract: 32`。
+`X-Mobile-Use-Contract: 33`。
 
 ## 1. 默认部署后的网络与进程
 
@@ -346,7 +346,7 @@ HTTP 宿主在原有 `Authorization` 头之外按需添加：
 
 ```text
 Authorization: Bearer <agent_token>
-X-Mobile-Use-Contract: 32
+X-Mobile-Use-Contract: 33
 Content-Type: application/json; charset=utf-8
 ```
 
@@ -354,7 +354,7 @@ Content-Type: application/json; charset=utf-8
 $deploy = Get-Content .state/deploy.json -Raw | ConvertFrom-Json
 $headers = @{
     Authorization           = "Bearer $($deploy.agent_token)"
-    'X-Mobile-Use-Contract' = '32'
+    'X-Mobile-Use-Contract' = '33'
 }
 Invoke-RestMethod http://127.0.0.1:18881/api/status -Method Post `
   -Headers $headers -ContentType 'application/json' -Body '{}'
@@ -605,7 +605,7 @@ Header: Authorization: Bearer <mcp_token>
 两种选择：
 
 ```text
-直连 HTTP:  http://127.0.0.1:18880/api/<tool>   + agent_token + X-Mobile-Use-Contract: 32
+直连 HTTP:  http://127.0.0.1:18880/api/<tool>   + agent_token + X-Mobile-Use-Contract: 33
 MCP HTTP:   http://127.0.0.1:18882/mcp          + mcp_token
 ```
 
@@ -685,7 +685,7 @@ adb shell su -c 'tail -n 50 /data/local/chroots/debian13/var/lib/mobile-use-vnex
 
 升级后：
 
-- 服务、App、适配器与客户端共同使用同一个 `contract_version`（当前 `32`）；
+- 服务、App、适配器与客户端共同使用同一个 `contract_version`（当前 `33`）；
 - 重新建立可能失效的转发；
 - 重启实际 MCP 宿主进程，不能只替换磁盘文件；
 - 旧会话转退休记录，不恢复旧 O/P 或主屏授权；旧 cleanup 的 `pending`/`unconfirmed` 可继续
@@ -774,7 +774,7 @@ GET 判断工具是否可用。
 | `409 task_lifecycle_busy` | 该 task 仍有未确认的旧搬移/删除责任 | 用 `status` 与 `app.list` 核验现状；只限制该任务，稍后新 P 重试 |
 | `503 app_list_unavailable` | 应用清单读取失败 | 条件恢复后用新 P 重新 `app.find`，不伪造空列表 |
 | `504 app_launch_unconfirmed` | `app.open` 已派发启动但归属未确认 | 按 `recovery entry=observe`、`reference=P` 用 `observe`/`app.list` 核验（仅传输超时且未知操作结果时先用 `status(P)` 确认是否已完成）；不重放启动 |
-| `409 observation_expired`/`target_changed` | O 过期或目标变化 | `target_changed` 的重验失败结果通常已带新观察：用它的 O 加新 P 重试；没有 `observation` 时再 `observe`。`reason=lineage_changed` 时 `error.details.changed_ref` 指向第一个失配的具体公开祖先；不要据此重放旧动作 |
+| `409 observation_expired`/`target_changed` | O 过期或目标变化 | `target_changed` 的重验失败结果通常已带新观察：用它的 O 加新 P 重试；没有 `observation` 时再 `observe`。`reason=lineage_changed` 且结果返回 `error.details.changed_ref` 时，它指向第一个确实缺失、能唯一确定的具体公开祖先（仅平移的祖先不会被指名）；`bubble_ancestor` 的最近交互祖先变化时指向原先的交互祖先，即使它仍存在；不要据此重放旧动作 |
 | `409 text_submit_not_executed` | 复合 text 写入已确认、提交确定未派发（`outcome=partial`） | 结果通常已附带新的 ready O，直接用它继续；没有新 O 时按 `recovery entry=observe` 获取现场；不要重放原文字，也不要自动补发 ENTER |
 | `503 delivery_unavailable` | 慢交付额度不足 | 等待既有结果交付后再试，不排队 |
 | `504 action_result_uncertain` | 输入已派发但结果未知 | `status(P)`/重新观察，不重放 |
@@ -792,7 +792,7 @@ GET 判断工具是否可用。
 $deploy = Get-Content .state/deploy.json -Raw | ConvertFrom-Json
 $headers = @{
     Authorization           = "Bearer $($deploy.agent_token)"
-    'X-Mobile-Use-Contract' = '32'
+    'X-Mobile-Use-Contract' = '33'
 }
 $start = Invoke-RestMethod http://127.0.0.1:18881/api/start -Method Post `
   -Headers $headers -ContentType 'application/json' -Body '{}'
