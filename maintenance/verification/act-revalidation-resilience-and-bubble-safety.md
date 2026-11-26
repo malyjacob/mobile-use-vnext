@@ -101,8 +101,65 @@ fixture 迁移批次 `ok ... 20.026s`（16 个用例）、断言迁移批次 `ok
 
 ## 5. 实机与发布
 
-（占位，按归档顺序在其后执行并回填：整组覆盖部署、最小实机闭环、Windows 双工具替换、
-主机 stdio 与手机 HTTP 独立探针。）
+从干净归档提交 `4b1bd7a4cdcfaaab71ca6a93cb3d761049117767` 执行：
+
+```powershell
+./scripts/build-release.ps1
+./scripts/verify-manifest.ps1 -Manifest build/release/manifest.json
+./scripts/build-host-tools.ps1
+./scripts/deploy.ps1 -SkipBuild -Manifest build/release/manifest.json -McpAllowedOrigins http://127.0.0.1:3000
+```
+
+- **发布清单与主机清单同源干净**：`source_commit=4b1bd7a4…`、`source_dirty=false`、
+  `release=0.37.0`、`contract=33`、`android=0.37.0/39`、
+  `tool_catalog=13/5578041adf04bcd8670a95b731667b85832957de4990f49e2dbf4eae6845d9b9`；
+  `verify-manifest` 输出 `PASS … artifacts=6 … head=4b1bd7a4…`。
+- **手机产物**：`device-service` `f922ffbe…` 9,633,952 B；`device-mcp` `915f29ae…` 9,371,808 B；
+  `control.apk` `2e690668…` 103,965 B；`u2.jar` `28361193…`（未改动）；`applist.dex` `63818f32…`；
+  `service.sh` `4b568a9a…`。
+- **主机产物（磁盘替换）**：`build/device-mcp.exe` `2c5c37f5…` 10,306,560 B；
+  `build/mcp-probe.exe` `5b9cbfbd…` 10,118,656 B；`build-host-tools.ps1` 输出 `RESULT PASS`。
+- **手机整组覆盖部署 PASS**（`adb install -r`，保留 App 私有数据）：安装 App 为
+  `versionName=0.37.0`、`versionCode=39`；`/health` 返回 `release=0.37.0`、`contract=33`；
+  配对、恢复屏障与 STOP 可用性 PASS；手机 MCP HTTP 适配器
+  `PASS listen=127.0.0.1:18882 url=http://127.0.0.1:18883/mcp`，运行映像 SHA-256 与清单一致。
+- **独立探针（本次新 `build/mcp-probe.exe`，同一双清单）**：
+  - 主机 stdio：`-transport stdio -binary build/device-mcp.exe -config .state/mcp-config.json -result-mode text`
+    为 `RESULT PASS`。13 工具、目录指纹 `5578041a…`、schema 语义相等，
+    `status`/`start`/`app_find`/`app_list`/`observe`/`snap`/`wait_for`/`shell`/`inspect`/
+    `act(key=BACK, executed)`/`end`/`cancel` 全部 PASS。
+  - 手机 Streamable HTTP：`-transport http-remote -config .state/probe-phone-config.json -result-mode text -suite app-lifecycle -timeout 600`
+    为 `RESULT PASS`。`origin_denied=403`、`origin_allowed=200`、`agent_token_rejected=401`、
+    `contract=33`、13 工具与目录指纹一致，`app_open`/`app_list_controlled`/`app_kill`（用户 0 整包
+    force-stop，`killed_pids=27067`）/`app_close`/`app_kill_package` 执行；
+    `app_kill_primary_refused` 与 `app_claim` 因主屏无受控任务 SKIP（环境，不是制品）。
+- **实机最小闭环（虚拟屏 `display_id=285`，受控探针 App `com.mobileuse.probe`）**：
+  - `start` 返回 `session.mode=virtual`、屏幕 `1080x2400`；`observe` 得到第 1 页 full 树。
+  - **坐标 `tap` 成功样本**：`act(tap, x=540, y=468)`（TAP 按钮中心）→ `executed`，
+    交付新 `O`，`observation.status=complete`。
+  - **ref `tap` 成功样本**：`act(tap, ref=n7)` → `executed`。
+  - **`text(ref)` 写入**：`act(text, ref=n6, text="probe-ime", auto_submit=false)` → `executed`，
+    省略 `text_input`，未发送 `ENTER`。
+  - **重验拒绝与交付**：先 `observe` 得到第 1 页 `O`，再用受管 `shell` 执行
+    `input -d 285 tap 540 820` 打开第二页（`shell` 不消费 `O`、不发布观察），随后
+    `act(tap, ref=n34)` 对这帧旧 `O` 请求 → `outcome=not_executed`、
+    `error.code=target_changed`、`error.details.reason=target_missing`，随错交付
+    `O`（第二页 full，`quality.state=unknown`/`samples=0`/`stop_reason=not_sampled`），
+    `recovery={entry:retry, reference:O, input_state:effective}`。`target_missing` 属于七类
+    瞬态归因，因此这条路径实际经过了"至多两帧复检"，并且交付的是第 2 帧。
+  - **交付的 `O` 立即可用**：对交付的 `O` 直接 `act(tap, ref=n47)`（关闭此页）→ `executed`。
+  - `end` → `session.ended`、`reason=client_end`、`cleanup.state=pending`。
+  - **未构造（明确记录）**：外窗/输入法合成显示根的过渡场景——虚拟屏上软键盘不显示
+    （`dumpsys input_method` 的 `mInputShown` 恒为 `false`，即使输入框已获焦并能接收
+    `input -d 285 text`），无法在不消费 `O` 的前提下制造第二个顶层窗口；纵向平移 Tier 5——
+    探针页为单屏不可滚动；受控 `scroll`——未驱动用户应用。这三项仅由单测覆盖
+    （其中合成根有去掉实现即失败的反向对照）。
+- **责任边界**：探针启动的是本次 `build/device-mcp.exe` 并连接本次手机适配器进程；
+  部署脚本提示宿主 MCP 进程需实际重启才能重新发现工具（部署输出含
+  `restart the host MCP process to load the deployed device-mcp`），该重启与依赖 Agent 的
+  MCP 托管进程、重连由用户处理，本次未操作。磁盘替换、独立进程验证与依赖方切换三者分开
+  记录，不互相替代。
+
 
 ## 6. 文档审计
 
