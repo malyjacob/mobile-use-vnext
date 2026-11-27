@@ -200,11 +200,23 @@ func (e *Engine) diagnoseOwnLocked(agent string, now time.Time) *protocol.Diagno
 	}
 	e.appendCleanupIssueLocked(&view.Issues, cleanup)
 
+	var activeSession *sessionState
+	if e.session != nil && e.session.Agent == agent && e.session.State != SessionEnded {
+		activeSession = e.session
+	}
 	failed := make([]*operationState, 0, len(e.operations))
 	running := make([]*operationState, 0, 4)
 	for _, op := range e.operations {
 		if op.Agent != agent {
 			continue
+		}
+		if activeSession != nil {
+			inSession := op.SessionOrigin == activeSession.Origin ||
+				(op.SessionOrigin == "" && !activeSession.StartedAt.IsZero() &&
+					!op.CreatedAt.Before(activeSession.StartedAt))
+			if !inSession {
+				continue
+			}
 		}
 		if op.State == OperationRunning {
 			running = append(running, op)
@@ -214,29 +226,39 @@ func (e *Engine) diagnoseOwnLocked(agent string, now time.Time) *protocol.Diagno
 			failed = append(failed, op)
 		}
 	}
-	sort.Slice(failed, func(i, j int) bool { return operationFinishedAt(failed[i]).Before(operationFinishedAt(failed[j])) })
-	// Newest failures first, but never push out the higher-priority
-	// availability/cleanup facts at the front.
-	added := 0
-	for i := len(failed) - 1; i >= 0 && len(view.Issues) < maxDiagnosisEntries; i-- {
-		code := failed[i].Outcome
-		if failed[i].Error != nil {
-			code = failed[i].Error.Code
+	sort.Slice(failed, func(i, j int) bool {
+		a, b := failed[i], failed[j]
+		if cmp := operationFinishedAt(a).Compare(operationFinishedAt(b)); cmp != 0 {
+			return cmp < 0
 		}
-		view.Issues = append(view.Issues, protocol.DiagnosisIssue{
-			Phase: failed[i].Phase, Code: code,
-		})
-		added++
-	}
-	if added < len(failed) {
-		view.Truncated = true
+		return a.ID < b.ID
+	})
+	// Newest distinct failures fill the slots left by availability and cleanup.
+	seenOpIssue := make(map[protocol.DiagnosisIssue]bool, maxDiagnosisEntries)
+	uniqueOverflow := false
+	for i := len(failed) - 1; i >= 0; i-- {
+		op := failed[i]
+		issue := protocol.DiagnosisIssue{Phase: op.Phase, Code: diagnosisFailureCode(op)}
+		if seenOpIssue[issue] {
+			continue
+		}
+		if len(view.Issues) == maxDiagnosisEntries {
+			uniqueOverflow = true
+			break
+		}
+		seenOpIssue[issue] = true
+		view.Issues = append(view.Issues, issue)
 	}
 
 	events := make([]diagnosisEvent, 0, len(running)+len(failed))
 	for _, op := range running {
 		events = append(events, diagnosisEvent{at: op.CreatedAt, phase: op.Kind, code: "running"})
 	}
+	counts := make(map[string]int)
 	for _, op := range failed {
+		if code := diagnosisFailureCode(op); code != "" {
+			counts[code]++
+		}
 		code := op.Outcome
 		if op.Error != nil {
 			code = op.Error.Code
@@ -245,11 +267,12 @@ func (e *Engine) diagnoseOwnLocked(agent string, now time.Time) *protocol.Diagno
 			at: operationFinishedAt(op), phase: op.Kind, code: code,
 		})
 	}
+	if len(counts) > 0 {
+		view.ErrorCounts = counts
+	}
 	var dropped bool
 	view.Timeline, dropped = diagnosisEvents(events, maxDiagnosisEntries)
-	if dropped {
-		view.Truncated = true
-	}
+	view.Truncated = uniqueOverflow || dropped
 	switch {
 	case len(view.Issues) > 0:
 		view.Summary = "记录到近期问题"
@@ -312,6 +335,13 @@ func (e *Engine) appendCleanupIssueLocked(issues *[]protocol.DiagnosisIssue, cle
 	}
 }
 
+func diagnosisFailureCode(op *operationState) string {
+	if op.Error != nil && op.Error.Code != "" {
+		return op.Error.Code
+	}
+	return op.Outcome
+}
+
 func operationFinishedAt(op *operationState) time.Time {
 	if !op.FinishedAt.IsZero() {
 		return op.FinishedAt
@@ -336,8 +366,8 @@ func diagnosisEvents(events []diagnosisEvent, limit int) ([]protocol.DiagnosisEv
 	return out, dropped
 }
 
-// trimDiagnosisBudget drops the oldest timeline events and then the oldest
-// issues until the canonical JSON object fits its byte budget.
+// trimDiagnosisBudget drops timeline events and issues from the front, then
+// drops the aggregate counts if the canonical JSON object still exceeds its budget.
 func trimDiagnosisBudget(view *protocol.DiagnosisView, limit int) {
 	if view == nil || limit <= 0 {
 		return
@@ -352,6 +382,8 @@ func trimDiagnosisBudget(view *protocol.DiagnosisView, limit int) {
 			view.Timeline = view.Timeline[1:]
 		case len(view.Issues) > 0:
 			view.Issues = view.Issues[1:]
+		case len(view.ErrorCounts) > 0:
+			view.ErrorCounts = nil
 		default:
 			return
 		}

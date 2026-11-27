@@ -13,9 +13,10 @@ import (
 // blocking_operation_id, start_operation_id, reason, target_actions,
 // ancestor_ref, ancestor_actions, scope, scope_ref, candidates, blocking_refs,
 // changed_ref, stage, dispatch (focus/write/submit closed-state object),
-// candidate_count (non-negative integer). The act static rejection taxonomy
-// owns reason, target_actions, ancestor_ref, ancestor_actions, scope, scope_ref,
-// candidates, and blocking_refs. Non-text target_changed uses reason with its
+// candidate_count (non-negative integer), target_center (objective center point
+// []int), retry_parameter (controlled parameter name). The act static rejection
+// taxonomy owns reason, target_actions, ancestor_ref, ancestor_actions, scope,
+// scope_ref, candidates, and blocking_refs. Non-text target_changed uses reason with its
 // own closed enum. changed_ref is the one optional public n-prefixed ancestor
 // ref that attributes a target_changed rejection to the concrete changed
 // ancestor; it is omitted whenever it cannot be located uniquely. candidates
