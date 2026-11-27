@@ -122,7 +122,8 @@ type diagnosisEvent struct {
 }
 
 type diagnosisView struct {
-	Timeline []diagnosisEvent `json:"timeline"`
+	Timeline    []diagnosisEvent `json:"timeline"`
+	ErrorCounts map[string]int   `json:"error_counts"`
 }
 
 // treeView keeps only the tree format and delta base.

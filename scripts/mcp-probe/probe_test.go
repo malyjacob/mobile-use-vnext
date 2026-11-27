@@ -933,6 +933,9 @@ func (f *fakeAdapter) handle(ctx context.Context, name string, request *sdk.Call
 			"diagnosis": map[string]any{
 				"summary": "probe diagnosis",
 				"issues":  []any{},
+				"error_counts": map[string]any{
+					"no_safe_point": 2, "uncertain": 1,
+				},
 				"timeline": []any{
 					map[string]any{
 						"at": "2026-01-01T00:00:00Z", "phase": "session", "code": sessionActive,
@@ -1660,6 +1663,10 @@ func writeFakeDiagnosis(builder *strings.Builder, diagnosis map[string]any) {
 	if issues, present := diagnosis["issues"]; present {
 		encoded, _ := json.Marshal(issues)
 		builder.WriteString("diagnosis.issues=" + string(encoded) + "\n")
+	}
+	if counts, present := diagnosis["error_counts"]; present {
+		encoded, _ := json.Marshal(counts)
+		builder.WriteString("diagnosis.error_counts=" + string(encoded) + "\n")
 	}
 	if timing, present := diagnosis["timing_ms"]; present {
 		encoded, _ := json.Marshal(timing)
