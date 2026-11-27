@@ -553,6 +553,13 @@ func (p *v4Parser) decodeLine(lines []string, index int) (int, *checkError) {
 		if failure := p.decodeJSONField(line, "diagnosis.issues=", []string{"diagnosis", "issues"}); failure != nil {
 			return 0, failure
 		}
+	case strings.HasPrefix(line, "diagnosis.error_counts="):
+		if failure := p.enter(21); failure != nil {
+			return 0, failure
+		}
+		if failure := p.decodeDiagnosisErrorCounts(line); failure != nil {
+			return 0, failure
+		}
 	case strings.HasPrefix(line, "diagnosis.timing_ms="):
 		if failure := p.enter(21); failure != nil {
 			return 0, failure
@@ -680,6 +687,28 @@ func (p *v4Parser) decodeJSONField(line, prefix string, path []string) *checkErr
 		return failure
 	}
 	return p.set(path, value)
+}
+
+// decodeDiagnosisErrorCounts parses the bounded controlled-code count map. The
+// documented result v4 line carries a non-empty JSON object whose keys are
+// non-empty control codes and whose values are positive integers; null, empty
+// objects, empty keys and non-positive or non-integer counts are rejected.
+func (p *v4Parser) decodeDiagnosisErrorCounts(line string) *checkError {
+	value, failure := decodeJSONValue(strings.TrimPrefix(line, "diagnosis.error_counts="))
+	if failure != nil {
+		return failure
+	}
+	counts, ok := value.(map[string]any)
+	if !ok || len(counts) == 0 {
+		return failf("text_result_diagnosis_error_counts_invalid")
+	}
+	for code, raw := range counts {
+		count, valid := valueInteger(raw)
+		if code == "" || !valid || count <= 0 {
+			return failf("text_result_diagnosis_error_counts_invalid")
+		}
+	}
+	return p.set([]string{"diagnosis", "error_counts"}, value)
 }
 
 // decodeErrorLine parses `<prefix><code> "<message>"` and stores an error

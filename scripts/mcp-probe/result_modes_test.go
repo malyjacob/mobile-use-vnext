@@ -1567,12 +1567,13 @@ func TestDecodeResultTextCleanupAndAppTaskError(t *testing.T) {
 	}
 }
 
-// TestDecodeResultTextDiagnosis pins the diagnosis head plus its two JSON
+// TestDecodeResultTextDiagnosis pins the diagnosis head plus its three JSON
 // sub-lines and the timeline block.
 func TestDecodeResultTextDiagnosis(t *testing.T) {
 	text := "result v4 ok\n" +
 		"diagnosis summary=\"probe diagnosis\" coverage=original_record truncated=true op=P7391_1 outcome=uncertain\n" +
 		"diagnosis.issues=[{\"phase\":\"session\",\"code\":\"drift\"}]\n" +
+		"diagnosis.error_counts={\"no_safe_point\":2,\"uncertain\":1}\n" +
 		"diagnosis.timing_ms={\"total\":12}\n" +
 		"\n" +
 		"timeline v1 events=1\n" +
@@ -1586,16 +1587,146 @@ func TestDecodeResultTextDiagnosis(t *testing.T) {
 	if decoded.view.Diagnosis == nil || len(decoded.view.Diagnosis.Timeline) != 1 {
 		t.Fatalf("timeline = %+v", decoded.view.Diagnosis)
 	}
+	if decoded.view.Diagnosis.ErrorCounts["no_safe_point"] != 2 ||
+		decoded.view.Diagnosis.ErrorCounts["uncertain"] != 1 ||
+		len(decoded.view.Diagnosis.ErrorCounts) != 2 {
+		t.Fatalf("error counts = %+v", decoded.view.Diagnosis.ErrorCounts)
+	}
 	issues, found := lookupPath(decoded.object, []string{"diagnosis", "issues"})
 	items, ok := issues.([]any)
 	if !found || !ok || len(items) != 1 {
 		t.Fatalf("issues = %#v", issues)
+	}
+	counts, found := lookupPath(decoded.object, []string{"diagnosis", "error_counts"})
+	countObject, ok := counts.(map[string]any)
+	if !found || !ok || len(countObject) != 2 {
+		t.Fatalf("error counts object = %#v", counts)
 	}
 	timing, found := lookupPath(decoded.object, []string{"diagnosis", "timing_ms"})
 	timingObject, ok := timing.(map[string]any)
 	if !found || !ok || len(timingObject) != 1 {
 		t.Fatalf("timing = %#v", timing)
 	}
+}
+
+// TestDecodeResultTextDiagnosisErrorCountsStrict pins the bounded count-map
+// contract: a non-empty object with non-empty string keys and positive integer
+// counts only. Malformed JSON keeps the shared JSON error reason.
+func TestDecodeResultTextDiagnosisErrorCountsStrict(t *testing.T) {
+	accepted := []string{
+		`{"no_safe_point":2,"uncertain":1}`,
+		`{"drift":10}`,
+	}
+	for _, value := range accepted {
+		text := "result v4 ok\n" +
+			"diagnosis summary=\"probe diagnosis\" coverage=original_record truncated=false\n" +
+			"diagnosis.error_counts=" + value + "\n" +
+			"end result\n"
+		decoded, failure := decodeResultText(text)
+		if failure != nil {
+			t.Fatalf("valid counts %s rejected: %s %v", value, failure.reason, failure.fields)
+		}
+		if decoded.view.Diagnosis == nil || len(decoded.view.Diagnosis.ErrorCounts) == 0 {
+			t.Fatalf("valid counts %s not projected: %+v", value, decoded.view.Diagnosis)
+		}
+	}
+	rejected := []struct {
+		name   string
+		value  string
+		reason string
+	}{
+		{"null", `null`, "text_result_diagnosis_error_counts_invalid"},
+		{"empty object", `{}`, "text_result_diagnosis_error_counts_invalid"},
+		{"array", `[]`, "text_result_diagnosis_error_counts_invalid"},
+		{"empty key", `{"":1}`, "text_result_diagnosis_error_counts_invalid"},
+		{"zero count", `{"no_safe_point":0}`, "text_result_diagnosis_error_counts_invalid"},
+		{"negative count", `{"uncertain":-1}`, "text_result_diagnosis_error_counts_invalid"},
+		{"fractional count", `{"uncertain":1.5}`, "text_result_diagnosis_error_counts_invalid"},
+		{"string count", `{"uncertain":"1"}`, "text_result_diagnosis_error_counts_invalid"},
+		{"malformed", `{"uncertain":1`, "text_result_json_invalid"},
+		{"duplicate key", `{"uncertain":1,"uncertain":2}`, "text_result_json_invalid"},
+	}
+	for _, testCase := range rejected {
+		t.Run(testCase.name, func(t *testing.T) {
+			text := "result v4 ok\n" +
+				"diagnosis summary=\"probe diagnosis\" coverage=original_record truncated=false\n" +
+				"diagnosis.error_counts=" + testCase.value + "\n" +
+				"end result\n"
+			if _, failure := decodeResultText(text); failure == nil ||
+				failure.reason != testCase.reason {
+				t.Fatalf("failure = %v, want %s", failure, testCase.reason)
+			}
+		})
+	}
+}
+
+// TestProjectDiagnosisErrorCountsModes proves the count map survives all three
+// result modes and that both mode still rejects a text/structured disagreement.
+func TestProjectDiagnosisErrorCountsModes(t *testing.T) {
+	payload := map[string]any{
+		"diagnosis": map[string]any{
+			"summary":      "probe diagnosis",
+			"issues":       []any{},
+			"error_counts": map[string]any{"no_safe_point": 2, "uncertain": 1},
+			"coverage":     "original_record",
+			"truncated":    false,
+		},
+	}
+	text := fakeResultText(payload, false)
+
+	for _, mode := range []string{resultModeBoth, resultModeText, resultModeStructured} {
+		t.Run(mode, func(t *testing.T) {
+			result := &sdk.CallToolResult{}
+			switch mode {
+			case resultModeText:
+				result.Content = []sdk.Content{&sdk.TextContent{Text: text}}
+			case resultModeStructured:
+				result.Content = []sdk.Content{}
+				result.StructuredContent = payload
+			default:
+				result.Content = []sdk.Content{&sdk.TextContent{Text: text}}
+				result.StructuredContent = payload
+			}
+			projected, failure := project(result, mode)
+			if failure != nil {
+				t.Fatalf("project: %s", failure.reason)
+			}
+			if projected.view.Diagnosis == nil ||
+				projected.view.Diagnosis.ErrorCounts["no_safe_point"] != 2 ||
+				projected.view.Diagnosis.ErrorCounts["uncertain"] != 1 ||
+				len(projected.view.Diagnosis.ErrorCounts) != 2 {
+				t.Fatalf("error counts = %+v", projected.view.Diagnosis)
+			}
+		})
+	}
+
+	t.Run("different counts mismatch", func(t *testing.T) {
+		structured := deepCloneObject(payload)
+		structured["diagnosis"].(map[string]any)["error_counts"] =
+			map[string]any{"no_safe_point": 3, "uncertain": 1}
+		result := &sdk.CallToolResult{
+			Content:           []sdk.Content{&sdk.TextContent{Text: text}},
+			StructuredContent: structured,
+		}
+		if _, failure := project(result, resultModeBoth); failure == nil ||
+			failure.reason != "both_mode_object_mismatch" {
+			t.Fatalf("different counts = %v, want both_mode_object_mismatch", failure)
+		}
+	})
+
+	t.Run("omitted counts mismatch", func(t *testing.T) {
+		withoutCounts := deepCloneObject(payload)
+		delete(withoutCounts["diagnosis"].(map[string]any), "error_counts")
+		withoutText := fakeResultText(withoutCounts, false)
+		result := &sdk.CallToolResult{
+			Content:           []sdk.Content{&sdk.TextContent{Text: withoutText}},
+			StructuredContent: payload,
+		}
+		if _, failure := project(result, resultModeBoth); failure == nil ||
+			failure.reason != "both_mode_object_mismatch" {
+			t.Fatalf("omitted counts = %v, want both_mode_object_mismatch", failure)
+		}
+	})
 }
 
 // TestDecodeResultTextRecoveryExactRef pins the recovery line grammar including
