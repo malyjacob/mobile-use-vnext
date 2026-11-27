@@ -74,7 +74,7 @@ var v4ResultFields = func() map[string]resultV4FieldKind {
 	add("notification.", "error", v4Object)
 	add("cleanup.", "error", v4Object)
 	add("diagnosis.", "summary", v4String)
-	add("diagnosis.", "issues timing_ms", v4JSON)
+	add("diagnosis.", "issues error_counts timing_ms", v4JSON)
 	add("diagnosis.", "timeline", v4Block)
 	add("diagnosis.", "coverage operation_id outcome", v4Token)
 	add("diagnosis.", "truncated", v4Literal)
@@ -1449,6 +1449,13 @@ func renderDiagnosisV4(w *resultV4Writer, raw []byte) bool {
 			w.line("diagnosis.issues=" + compactResultJSON(rawValue))
 		}
 	}
+	if rawValue, present := values["error_counts"]; present {
+		if rawIsNull(rawValue) {
+			w.fallback("/diagnosis/error_counts", rawValue)
+		} else {
+			w.line("diagnosis.error_counts=" + compactResultJSON(rawValue))
+		}
+	}
 	if rawValue, present := values["timing_ms"]; present {
 		if rawIsNull(rawValue) {
 			w.fallback("/diagnosis/timing_ms", rawValue)
@@ -1458,7 +1465,7 @@ func renderDiagnosisV4(w *resultV4Writer, raw []byte) bool {
 	}
 	for _, member := range members {
 		switch member.name {
-		case "summary", "issues", "timing_ms", "timeline", "coverage", "truncated", "operation_id", "outcome":
+		case "summary", "issues", "error_counts", "timing_ms", "timeline", "coverage", "truncated", "operation_id", "outcome":
 			continue
 		}
 		w.fallback("/diagnosis/"+pointerPart(member.name), member.value)
@@ -2100,7 +2107,7 @@ var resultFields = func() map[string]resultFieldKind {
 	add("notification.", "state", fieldToken)
 	add("notification.", "error", fieldJSON)
 	add("diagnosis.", "summary", fieldString)
-	add("diagnosis.", "issues timing_ms", fieldJSON)
+	add("diagnosis.", "issues error_counts timing_ms", fieldJSON)
 	add("diagnosis.", "coverage truncated operation_id outcome", fieldToken)
 	add("diagnosis.", "timeline", fieldBlock)
 	add("", "request_closed can_start saved", fieldLiteral)

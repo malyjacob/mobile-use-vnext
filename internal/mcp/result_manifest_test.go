@@ -1097,7 +1097,8 @@ func rmfResultFixtures() []rmfFixture {
 				Issues: []protocol.DiagnosisIssue{
 					{Phase: "capture", Code: "missing"},
 				},
-				TimingMS: map[string]int64{"capture": 7, "encode": 3},
+				ErrorCounts: map[string]int{"no_safe_point": 2, "uncertain": 1},
+				TimingMS:    map[string]int64{"capture": 7, "encode": 3},
 				Timeline: []protocol.DiagnosisEvent{
 					{At: "2026-11-10T00:00:03Z", Phase: "capture", Code: "complete"},
 				},
@@ -1683,6 +1684,7 @@ func rmfDeterministicResult(iteration int) *protocol.Result {
 	rotate := iteration % len(keys)
 	details := make(map[string]any, len(keys))
 	timing := make(map[string]int64, len(keys))
+	counts := make(map[string]int, len(keys))
 	set := make(map[string]protocol.ReadSetNode, len(keys))
 	children := make(map[string][]string, len(keys))
 	replace := make(map[string]*protocol.ReadNode, len(keys))
@@ -1690,6 +1692,7 @@ func rmfDeterministicResult(iteration int) *protocol.Result {
 		key := keys[(offset+rotate)%len(keys)]
 		details[key] = values[key]
 		timing[key] = values[key]
+		counts[key] = int(values[key]) + 1
 		set[key] = rmfSetNode()
 		children[key] = []string{"n1", "n2"}
 		replace[key] = rmfNode(key, protocol.RoleButton, false)
@@ -1716,9 +1719,10 @@ func rmfDeterministicResult(iteration int) *protocol.Result {
 			}},
 		},
 		Diagnosis: &protocol.DiagnosisView{
-			Issues:   []protocol.DiagnosisIssue{},
-			TimingMS: timing,
-			Coverage: "request",
+			Issues:      []protocol.DiagnosisIssue{},
+			ErrorCounts: counts,
+			TimingMS:    timing,
+			Coverage:    "request",
 		},
 	}
 }
