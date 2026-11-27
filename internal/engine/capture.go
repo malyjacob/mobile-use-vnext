@@ -489,9 +489,12 @@ func (e *Engine) publishTreeAttempt(work *workState, session *sessionState, phas
 		return nil, nil, budgetError("retained_snapshots", e.cfg.MaxRetainedSnapshotCostBytes)
 	}
 	// Derive the public fields after every commit gate has passed, using the
-	// selected delta and the previous frame's committed visual kind.
+	// selected delta and the previous frame's committed visual kind. The phase
+	// is the only source of the condition-wait fact: wait_for.go is the single
+	// publication entry that publishes "wait_for".
+	fromWaitFor := phase == "wait_for"
 	publishedVisual := observationVisual(delta != nil, visualHint{kind: chosenKind, raw: chosenRaw},
-		e.previousVisualKindLocked(delta))
+		e.previousVisualKindLocked(delta), fromWaitFor)
 	publishedTreeChange := ""
 	if previousObs != nil {
 		switch {
@@ -504,7 +507,7 @@ func (e *Engine) publishTreeAttempt(work *workState, session *sessionState, phas
 		}
 	}
 	hasValidImage := image != nil && image.Error == nil
-	publishedHint := observationHint(publishedVisual, publishedTreeChange, hasValidImage)
+	publishedHint := observationHint(publishedVisual, publishedTreeChange, hasValidImage, fromWaitFor)
 	prunedBaselines := baselineIDsMissingFrom(e.baselines, finalPool)
 	retainedBefore := len(e.observations)
 	e.baselines = finalPool
@@ -571,22 +574,48 @@ func (e *Engine) publishTreeAttempt(work *workState, session *sessionState, phas
 }
 
 // observationVisual always publishes a full frame's classification. A delta
-// suppresses an unchanged kind except loading, which remains visible until
-// the classification changes.
-func observationVisual(delta bool, hint visualHint, previousKind string) string {
+// suppresses an unchanged kind except two cases: loading stays visible until the
+// classification changes, and the terminal frame of a condition wait keeps
+// sparse_tree even when the kind is unchanged. Both exceptions exist so the
+// derived hint is never computed from a field the same frame omitted.
+func observationVisual(delta bool, hint visualHint, previousKind string, fromWaitFor bool) string {
 	if hint.kind == "" {
 		return ""
 	}
-	if delta && hint.kind == previousKind && hint.kind != observation.VisualKindLoading {
-		return ""
+	if !delta {
+		return hint.raw
 	}
-	return hint.raw
+	if hint.kind == observation.VisualKindLoading ||
+		(fromWaitFor && hint.kind == observation.VisualKindSparseTree) {
+		return hint.raw
+	}
+	if hint.kind != previousKind {
+		return hint.raw
+	}
+	return ""
 }
 
 // observationHint derives the read-only follow-up from the published facts.
-func observationHint(visual, treeChange string, hasValidImage bool) string {
+//
+// loading always recommends waiting. sparse_tree recommends waiting only when
+// this is not the terminal frame of a condition wait and the tree visibly moved:
+// a page that stayed sparse after walking the tree once must break the loop with
+// one read-only screenshot instead of another wait. Every other case falls back
+// to the single rule that a missing image plus a reason to look again is snap;
+// a valid image never asks for another screenshot.
+func observationHint(visual, treeChange string, hasValidImage, fromWaitFor bool) string {
 	if visual == observation.VisualKindLoading {
 		return protocol.HintWaitFor
+	}
+	if visual == observation.VisualKindSparseTree {
+		if !fromWaitFor && treeChange != protocol.TreeChangeUnchanged &&
+			treeChange != protocol.TreeChangeDetailOnly {
+			return protocol.HintWaitFor
+		}
+		if !hasValidImage {
+			return protocol.HintSnap
+		}
+		return ""
 	}
 	if !hasValidImage && (visual != "" || treeChange == protocol.TreeChangeUnchanged ||
 		treeChange == protocol.TreeChangeDetailOnly) {

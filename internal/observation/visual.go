@@ -48,8 +48,8 @@ const (
 	visualMaxMediaRects             = 16
 	visualMediaMaxTextRunes         = 80
 	visualMediaMaxInteractive       = 10
-	visualSparseMaxTextRunes        = 30
-	visualSparseMaxInteractive      = 7
+	visualSparseMaxTextRunes        = 20
+	visualSparseMaxInteractive      = 4
 )
 
 // visualRect is one screen-clipped rectangle with its area and center.

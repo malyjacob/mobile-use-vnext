@@ -265,7 +265,9 @@ func TestQualityAppPostObservation(t *testing.T) {
 	}
 	requireQuality(t, result.Observation.Quality, protocol.QualityStable, 3,
 		protocol.QualityStopStable)
-	requireObservationCue(t, result.Observation, "sparse_tree", "", protocol.HintSnap)
+	// The mutating app branch publishes a first sparse frame with no tree change,
+	// so the calibrated routing recommends waiting instead of a screenshot.
+	requireObservationCue(t, result.Observation, "sparse_tree", "", protocol.HintWaitFor)
 }
 
 // TestQualityImageRefreshEqualCompletesPair is the behavior fix of the image
