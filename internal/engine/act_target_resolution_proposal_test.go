@@ -159,6 +159,9 @@ func proposalRequireStatic422Contract(t *testing.T, result *protocol.Result) {
 		"reason": true, "scope": true, "scope_ref": true,
 		"target_actions": true, "ancestor_ref": true, "ancestor_actions": true,
 		"candidates": true, "blocking_refs": true,
+		// Contract 35 §4.2 adds exactly one objective geometry key to the
+		// no_interactive_ancestor rejection; every other reason still omits it.
+		"target_center": true,
 	}
 	for key := range details {
 		if !allowed[key] {

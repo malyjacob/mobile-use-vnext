@@ -1718,6 +1718,22 @@ func newTapStaticUnsupportedError(reason string, action protocol.Action,
 	return apiErr
 }
 
+// attachStaticTargetCenter records the objective center of the original target
+// on the no_interactive_ancestor static rejection. The value is the truncated
+// midpoint (x, y) of the target's screen-clipped rectangle, computed by
+// publicNodeClippedRect and tapSafeCenter in the same planner, so it is always
+// an on-screen integer pair. It states geometry only: it is not a safe point, it
+// does not prove any business response, and no other static reason may carry it.
+// A target whose clipped rectangle has no positive area has no center, and the
+// key must be omitted entirely rather than written as null or [0, 0].
+func attachStaticTargetCenter(apiErr *protocol.APIError, centerX, centerY int,
+	hasCenter bool) {
+	if apiErr == nil || !hasCenter {
+		return
+	}
+	apiErr.WithDetail("target_center", []int{centerX, centerY})
+}
+
 func newTapNoSafePointError(action protocol.Action, scope, scopeRef,
 	ancestorRef, reason string) *protocol.APIError {
 	if reason == "" {
@@ -2366,6 +2382,12 @@ func planBubbleOrColocated(obs *observationState, view *tapPublicView,
 	case bubbleStepANoAncestor:
 		errOut := newTapStaticUnsupportedError(tapStaticReasonNoInteractiveAncestor,
 			action, tapStaticScopeTarget, child.Ref, targetActions, nil, "")
+		// This is the one reason that states the objective clipped center of the
+		// untouched target: Step B already computed it from the same screen-clipped
+		// rectangle the tree delivers for a known rectangle. It stays pure
+		// geometry, so it is never attached to a reason that already proved a
+		// blocked, ambiguous or otherwise unsafe area.
+		attachStaticTargetCenter(errOut, centerX, centerY, hasCenter)
 		attachStaticCandidates(errOut, buildStaticCandidates(obs, view, operation, fallback))
 		return nil, errOut
 	case bubbleStepAAncestorInvalid:
