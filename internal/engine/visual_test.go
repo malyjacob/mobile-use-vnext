@@ -101,32 +101,36 @@ func visualPollutedPage() ([]rawNodeSpec, string) {
 
 // TestObservationVisualStatesFullAndDeltaDedup pins the publication rule itself:
 // a full tree states its own classification, while a delta repeats it when
-// the kind is new, switched, or still loading.
+// the kind is new, switched, still loading, or still sparse at the end of a
+// condition wait.
 func TestObservationVisualStatesFullAndDeltaDedup(t *testing.T) {
 	heavy := visualHint{kind: "image_heavy", raw: visualGalleryHint}
 	sparse := visualHint{kind: "sparse_tree", raw: "sparse_tree"}
 	loading := visualHint{kind: "loading", raw: "loading"}
 	media := visualHint{kind: "media_surface", raw: "media_surface"}
 	for _, testCase := range []struct {
-		name     string
-		delta    bool
-		hint     visualHint
-		previous string
-		want     string
+		name        string
+		delta       bool
+		hint        visualHint
+		previous    string
+		fromWaitFor bool
+		want        string
 	}{
-		{"full states its own hint", false, heavy, "", heavy.raw},
-		{"full states an unchanged kind again", false, heavy, "image_heavy", heavy.raw},
-		{"full without a hint stays empty", false, visualHint{}, "sparse_tree", ""},
-		{"delta suppresses an unchanged kind", true, heavy, "image_heavy", ""},
-		{"delta suppresses unchanged media", true, media, media.kind, ""},
-		{"delta repeats loading", true, loading, loading.kind, loading.raw},
-		{"delta states a kind that appeared", true, heavy, "", heavy.raw},
-		{"delta states a switched kind", true, sparse, "image_heavy", sparse.raw},
-		{"delta without a hint stays empty", true, visualHint{}, "sparse_tree", ""},
+		{"full states its own hint", false, heavy, "", false, heavy.raw},
+		{"full states an unchanged kind again", false, heavy, "image_heavy", false, heavy.raw},
+		{"full without a hint stays empty", false, visualHint{}, "sparse_tree", false, ""},
+		{"delta suppresses an unchanged kind", true, heavy, "image_heavy", false, ""},
+		{"delta suppresses unchanged media", true, media, media.kind, false, ""},
+		{"delta suppresses an unchanged sparse kind", true, sparse, sparse.kind, false, ""},
+		{"delta repeats loading", true, loading, loading.kind, false, loading.raw},
+		{"delta repeats a wait terminal sparse kind", true, sparse, sparse.kind, true, sparse.raw},
+		{"delta states a kind that appeared", true, heavy, "", false, heavy.raw},
+		{"delta states a switched kind", true, sparse, "image_heavy", false, sparse.raw},
+		{"delta without a hint stays empty", true, visualHint{}, "sparse_tree", false, ""},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			if got := observationVisual(testCase.delta, testCase.hint,
-				testCase.previous); got != testCase.want {
+				testCase.previous, testCase.fromWaitFor); got != testCase.want {
 				t.Fatalf("visual = %q, want %q", got, testCase.want)
 			}
 		})
@@ -135,13 +139,14 @@ func TestObservationVisualStatesFullAndDeltaDedup(t *testing.T) {
 
 // TestObserveVisualHintOnlyOnStateChange drives the real publication funnel: the
 // first frame is a full tree and states its hint, the unchanged follow-up frame is
-// a delta and stays silent, and a forced full states the same hint again.
+// a delta and stays silent, and a forced full states the same hint again. A first
+// sparse frame recommends waiting, not a screenshot.
 func TestObserveVisualHintOnlyOnStateChange(t *testing.T) {
 	h := newHarness(t)
 	start := h.startSession()
 	// The default page carries ten runes and three interactive controls, which is
 	// exactly the sparse branch of the fixed classification.
-	requireObservationCue(t, start.Observation, "sparse_tree", "", protocol.HintSnap)
+	requireObservationCue(t, start.Observation, "sparse_tree", "", protocol.HintWaitFor)
 
 	next := baselineObserve(t, h, "PvisualDelta", start.Observation.ID)
 	if next.Tree == nil || next.Tree.Delta == nil {
@@ -157,7 +162,7 @@ func TestObserveVisualHintOnlyOnStateChange(t *testing.T) {
 	if forced.Observation.Tree == nil || forced.Observation.Tree.Full == nil {
 		t.Fatalf("full=true did not publish a full tree: %+v", forced.Observation.Tree)
 	}
-	requireObservationCue(t, forced.Observation, "sparse_tree", "", protocol.HintSnap)
+	requireObservationCue(t, forced.Observation, "sparse_tree", "", protocol.HintWaitFor)
 }
 
 // TestObserveVisualHintOnFullTree covers the imagery branch end to end and the
@@ -265,7 +270,7 @@ func TestPartialObservationKeepsTreeVisual(t *testing.T) {
 	if observation.Image == nil || observation.Image.Error == nil {
 		t.Fatalf("partial acquisition lost its image failure: %+v", observation.Image)
 	}
-	requireObservationCue(t, observation, "sparse_tree", "", protocol.HintSnap)
+	requireObservationCue(t, observation, "sparse_tree", "", protocol.HintWaitFor)
 }
 
 // TestWaitForQueryMatchesPurifiedPublicLabel proves the query contract of the

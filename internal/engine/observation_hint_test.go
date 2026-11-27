@@ -15,20 +15,35 @@ func TestObservationHint(t *testing.T) {
 	for _, tc := range []struct {
 		name, visual, change string
 		validImage           bool
+		fromWaitFor          bool
 		want                 string
 	}{
-		{"loading without image", observation.VisualKindLoading, "", false, protocol.HintWaitFor},
-		{"loading with image and unchanged tree", observation.VisualKindLoading, protocol.TreeChangeUnchanged, true, protocol.HintWaitFor},
-		{"unchanged without image", "", protocol.TreeChangeUnchanged, false, protocol.HintSnap},
-		{"detail only without image", "", protocol.TreeChangeDetailOnly, false, protocol.HintSnap},
-		{"unchanged with image", "", protocol.TreeChangeUnchanged, true, ""},
-		{"matched base alone", "", protocol.TreeChangeMatchedBase, false, ""},
-		{"matched base with visual", observation.VisualKindMediaSurface, protocol.TreeChangeMatchedBase, false, protocol.HintSnap},
-		{"visual with image", observation.VisualKindSparseTree, "", true, ""},
-		{"no cues", "", "", false, ""},
+		{"loading without image", observation.VisualKindLoading, "", false, false, protocol.HintWaitFor},
+		{"loading with image and unchanged tree", observation.VisualKindLoading, protocol.TreeChangeUnchanged, true, false, protocol.HintWaitFor},
+		{"loading on a wait terminal frame", observation.VisualKindLoading, "", false, true, protocol.HintWaitFor},
+		{"unchanged without image", "", protocol.TreeChangeUnchanged, false, false, protocol.HintSnap},
+		{"detail only without image", "", protocol.TreeChangeDetailOnly, false, false, protocol.HintSnap},
+		{"unchanged with image", "", protocol.TreeChangeUnchanged, true, false, ""},
+		{"matched base alone", "", protocol.TreeChangeMatchedBase, false, false, ""},
+		{"matched base with visual", observation.VisualKindMediaSurface, protocol.TreeChangeMatchedBase, false, false, protocol.HintSnap},
+		{"media surface without image", observation.VisualKindMediaSurface, "", false, false, protocol.HintSnap},
+		{"media surface with image", observation.VisualKindMediaSurface, "", true, false, ""},
+		{"sparse with image", observation.VisualKindSparseTree, "", true, false, protocol.HintWaitFor},
+		{"sparse without image", observation.VisualKindSparseTree, "", false, false, protocol.HintWaitFor},
+		{"sparse after a matched base", observation.VisualKindSparseTree, protocol.TreeChangeMatchedBase, false, false, protocol.HintWaitFor},
+		{"sparse after a matched base with image", observation.VisualKindSparseTree, protocol.TreeChangeMatchedBase, true, false, protocol.HintWaitFor},
+		{"sparse unchanged without image", observation.VisualKindSparseTree, protocol.TreeChangeUnchanged, false, false, protocol.HintSnap},
+		{"sparse unchanged with image", observation.VisualKindSparseTree, protocol.TreeChangeUnchanged, true, false, ""},
+		{"sparse detail only without image", observation.VisualKindSparseTree, protocol.TreeChangeDetailOnly, false, false, protocol.HintSnap},
+		{"sparse detail only with image", observation.VisualKindSparseTree, protocol.TreeChangeDetailOnly, true, false, ""},
+		{"sparse wait terminal frame without image", observation.VisualKindSparseTree, "", false, true, protocol.HintSnap},
+		{"sparse wait terminal frame with image", observation.VisualKindSparseTree, "", true, true, ""},
+		{"sparse wait terminal unchanged without image", observation.VisualKindSparseTree, protocol.TreeChangeUnchanged, false, true, protocol.HintSnap},
+		{"sparse wait terminal matched base without image", observation.VisualKindSparseTree, protocol.TreeChangeMatchedBase, false, true, protocol.HintSnap},
+		{"no cues", "", "", false, false, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := observationHint(tc.visual, tc.change, tc.validImage); got != tc.want {
+			if got := observationHint(tc.visual, tc.change, tc.validImage, tc.fromWaitFor); got != tc.want {
 				t.Fatalf("hint = %q, want %q", got, tc.want)
 			}
 		})
@@ -106,8 +121,10 @@ func TestActRejectionDeliveryKeepsVisualHintAndRetry(t *testing.T) {
 		visual, hint string
 	}{
 		// A same-band vertical move is now re-acquired by Tier 5, so both
-		// rejection deliveries use a target text change instead.
-		{"sparse full delivery", markerCapture("OK-changed"), observation.VisualKindSparseTree, protocol.HintSnap},
+		// rejection deliveries use a target text change instead. A delivered
+		// full frame carries no tree change, so a sparse page is routed to
+		// wait_for: the transition frame may still be loading its content.
+		{"sparse full delivery", markerCapture("OK-changed"), observation.VisualKindSparseTree, protocol.HintWaitFor},
 		{"loading full delivery", withObservationProgress(markerCapture("OK-changed")), observation.VisualKindLoading, protocol.HintWaitFor},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
