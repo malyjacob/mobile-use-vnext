@@ -15,7 +15,7 @@
 | 方法 | 所有业务端点只接受 `POST`；其他方法返回 `405`，错误码 `invalid_request` |
 | 认证 | `/api/*` 用 `agent_token`；`/v1/control/*` 用 `control_token`；`Authorization: Bearer <token>` |
 | 身份隔离 | agent token 不能访问 `/v1/control/*`，control token 不能访问 `/api/*`；错误为 `401 unauthorized` |
-| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 34`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
+| 普通契约 | `/api/*` 必须带 `X-Mobile-Use-Contract: 35`，精确相等；缺失或不匹配返回 `409 contract_mismatch` |
 | 预分配 P | `/api/*` 可带 `X-Mobile-Use-Operation: P…`；缺省由服务分配。`status` 不使用该头 |
 | 请求体 | 必须是一个 JSON 对象；大小上限：`start`/`status`/`end`/`wait_for` 16 KiB，`observe` 32 KiB，`snap` 8 KiB，`act` 64 KiB，`inspect`/`keepalive`/`diagnose`/`app` 8 KiB，`notify` 16 KiB，`shell` 32 KiB，`sync` 32 KiB，`stop` 8 KiB |
 | 响应 | `Content-Type: application/json; charset=utf-8`，`Cache-Control: no-store` |
@@ -87,14 +87,16 @@ app, shell, wait, notification, diagnosis, cleanup, error, recovery
   `app_code`、`field`、
   `task_ids`、`allowed_kinds`、`allowed_scopes`、`blocking_operation_id`、`start_operation_id`、
   `reason`、`target_actions`、`ancestor_ref`、`ancestor_actions`、`scope`、`scope_ref`、
-  `candidates`、`blocking_refs`、`changed_ref`、`stage`、`dispatch`、`candidate_count`；
+  `candidates`、`blocking_refs`、`changed_ref`、`stage`、`dispatch`、`candidate_count`、
+  `target_center`、`retry_parameter`；
   `ancestor_ref`、`scope_ref`、`changed_ref` 与 `reason`/`scope`/`stage` 是字符串，`target_actions`、
   `ancestor_actions`、`blocking_refs` 是字符串数组，`candidates` 是至多 4 项的对象数组
   （每项固定含 `ref`、`role`、`actions`、`bounds`、`relation`、`executable`，其中 `bounds`
   为 `[left, top, right, bottom]` 4 整数数组、`executable` 为布尔，绝不含 `label`/
   `value`/`text` 正文），
   `dispatch` 是只含 `focus`、`write`、`submit` 三个字符串成员的 JSON 对象，
-  `candidate_count` 是非负整数；均不得字符串化。`act` 静态拒绝的 `reason`、`scope`、
+  `candidate_count` 是非负整数，`target_center` 是 `[x, y]` 非负整数数组；均不得字符串化。
+  `retry_parameter` 是受控请求参数名字符串。`act` 静态拒绝的 `reason`、`scope`、
   `scope_ref`、`target_actions`、`ancestor_ref`、`ancestor_actions`、`candidates`、
   `blocking_refs` 与非 `text` 重验 `409 target_changed` 的归因 `reason` 枚举见 §6；
   `changed_ref` 只在 `reason=lineage_changed` 且能唯一确定变动的公开祖先时出现。
@@ -576,6 +578,13 @@ STOP、原租期、请求与工作期限、会话绑定显示 ID/代次与几何
 新 P 重试必能通过静态准入，但仍须经正常准入与认领后实时重验；O 过期、被消费、替换或撤权后不
 能继续使用。`scroll` 的静态候选另受下面的遮罩/浮层过滤与同前景分支排序约束，全部被剔除时
 同样省略 `candidates`，绝不回退被遮挡的背景页面。
+
+只有 `422 unsupported_node_action` 的 `reason=no_interactive_ancestor` 可带
+`error.details.target_center: [x, y]`，包括 `text` 的 `submit_ref` 使用同一静态点按规划时。
+该坐标是目标自身屏内裁剪矩形的整数中心。裁剪后无正面积时省略字段，其他静态拒绝也省略；
+不会用 `null` 或 `[0, 0]` 代替缺失值。这条静态拒绝不认领 O。中心坐标只表达几何事实；
+用它发起新的坐标 `tap`/`long_press` 时须省略 `bubble`，独立通过坐标准入与认领后的重验，
+是否派发与业务响应各以该次调用的结果和后观察为准。
 
 `scroll` 是受控滚动尝试：`container` 与 `direction` 必填，`amount` 省略为 `page`，取值为
 闭合四档 `step`/`half`/`page`/`full`；`direction` 是调用方声明的阅读/视口方向，不是服务证明
@@ -1081,7 +1090,7 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms），
 
 | 字段 | 必填 | 类型 | 说明 |
 | --- | --- | --- | --- |
-| `contract_version` | 是 | 字符串 | 必须为 `"34"`，否则 `409 contract_mismatch` |
+| `contract_version` | 是 | 字符串 | 必须为 `"35"`，否则 `409 contract_mismatch` |
 | `app_instance_id` | 是 | UUID | App 进程实例；变化会撤销旧归属 |
 | `app_version` | 否（App 应发送） | 字符串 | 仅发行标识 |
 | `selected_mode` | 是 | `virtual`/`primary` | 用户选择 |
@@ -1108,7 +1117,7 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms），
 
 ```json
 {
-  "contract_version": "34",
+  "contract_version": "35",
   "service_instance_id": "…",
   "control": {
     "revision": 42,
@@ -1144,7 +1153,7 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms），
 ## 9. `POST /v1/control/stop`
 
 ```json
-{"contract_version":"34","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
+{"contract_version":"35","app_instance_id":"…","stop_seq":7,"reason":"user_stop"}
 ```
 
 - **不校验普通契约**：`contract_version` 字段存在但不参与准入，服务与 App 契约版本
@@ -1154,7 +1163,7 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms），
 - 重复或过期 `seq` 不报错，只返回 `state=duplicate`。
 
 ```json
-{"contract_version":"34","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
+{"contract_version":"35","service_instance_id":"…","accepted":true,"stop_seq":7,"state":"revoked"}
 ```
 
 `accepted` 恒为 `true`；`state` 为 `revoked`（绑定时撤销了活动会话）、`recorded`
@@ -1167,7 +1176,7 @@ raw `swipe` 保持原 from/to 与显式 `duration_ms`（省略默认 300ms），
 无认证，只表示进程可应答，不代表设备就绪或资源干净：
 
 ```json
-{"status":"ok","contract_version":"34","service_instance_id":"…","release_version":"…"}
+{"status":"ok","contract_version":"35","service_instance_id":"…","release_version":"…"}
 ```
 
 ## 11. 数据对象
@@ -1241,7 +1250,7 @@ Observation 的编码顺序固定为 `status`、`id`、`origin`、`revision`、`
 | `loading` | 前台状态不是 `none`，且满足任一条件：① 原始采集中存在 `ProgressBar` 类名节点（简单类名取最后一个 `.` 之后的部分，以 `ProgressBar` 结尾且不含 `SeekBar`；目标显示、可见、按树根矩形裁屏后宽高都 `>4` 像素），且全树可读文字 `<80` 个非空白码点、可交互控件 `<8` 个；② `quality.state=unstable` 且 `quality.stop_reason` 不是 `condition`，且可读文字 `<40`、可交互控件 `<8`。`SeekBar` 不命中；`wait_for stable=false` 的条件命中早停（`unstable` + `condition`）不判加载 |
 | `image_heavy(<pct>%)` | 完整公开树中非 `context`、无 label/value/hint/resource/axis、无动作、无子节点且五布尔为已知默认的 `image` 叶，剔除占屏 `<5%` 的碎片图、占屏 `>=90%` 的全屏底图，以及内部含至少 3 个面积更小且有可读 label/非空 value/动作控件的承载图后，取面积最大的至多 64 张求精确并集；并集面积 `>=45%` 屏幕面积且全树可读文字 `<150` 个非空白码点时命中。`<pct>` 为并集占屏四舍五入的整数，夹在 `45`–`100`。该分类不要求前台状态不是 `none` |
 | `media_surface` | 前台状态不是 `none`；原始采集节点（目标显示、可见、非根、按树根矩形裁屏后正面积）中简单类名以 `SurfaceView`/`TextureView`/`VideoView`/`PlayerView` 结尾的矩形，剔除占屏 `<5%` 的碎片后至多取面积最大的 16 个求精确并集；并集 `>=25%` 屏幕面积且全树可读文字 `<80`、可交互控件 `<10` 时命中 |
-| `sparse_tree` | 前台状态不是 `none`，全树可读文字 `<30` 个非空白码点且可交互控件 `<7` 个时命中 |
+| `sparse_tree` | 前台状态不是 `none`，全树可读文字 `<20` 个非空白码点且可交互控件 `<4` 个时命中 |
 
 统计口径固定：非 `root`、非 `context` 节点的非空 label 段、非受保护节点的 `value` 与已知
 `hint` 计入可读文字，空白码点不计，已被祖先复合 label 覆盖的 label 段不重复计数；可交互
@@ -1250,9 +1259,9 @@ Observation 的编码顺序固定为 `status`、`id`、`origin`、`revision`、`
 原始采集的目标显示可见节点，跳过采集根。`visual` 同时使用完整公开树、原始采集类名与收敛
 质量，不增加设备读取、截图或请求字段，也不改变 O 的输入授权。
 
-`full` 观察输出本次计算的 `visual`（无命中则省略）。`delta` 观察中 `loading` 永不省略；其余
-三类仅当本次分类与同会话、同显示代次紧邻上一已发布帧（该帧已不在留存集合时取该差分的
-`base` 观察）的分类不同时输出，否则省略；因此同一页面的连续差分不会重复刷同一提示。
+`full` 观察输出本次计算的 `visual`（无命中则省略）。`delta` 始终保留 `loading`，也保留
+`wait_for` 终帧的 `sparse_tree`。其他情况仅在本次分类与同会话、同显示代次紧邻上一已发布帧的
+分类不同时输出；该帧已不在留存集合时以本次差分的 `base` 观察为准。
 无树或树根缺少可用屏幕矩形的观察不产生 `visual`。
 
 **`tree_change`。** 可选非可空字符串，只在 `act` 常规成功（`outcome=executed` 且成功发布
@@ -1271,11 +1280,13 @@ Observation 的编码顺序固定为 `status`、`id`、`origin`、`revision`、`
 差分大小相对所选基线。`start`、`observe`、`wait_for`、`app`、`act.delivery`、`text` 的
 `partial` 交付与无树失败观察恒省略该成员。
 
-**`hint`。** 可选非可空字符串，取值只有 `snap` 与 `wait_for`，完全由本次发布的
-`(visual, tree_change, 是否已成功交付有效图片)` 推导：
+**`hint`。** 可选非可空字符串，取值只有 `snap` 与 `wait_for`。按观察是否为 `wait_for` 终帧，
+以本次实际发布的 `visual`、`tree_change` 和有效图片事实依次判定：
 
-- `visual=loading` → `wait_for`（即使本次观察带图也一样）；
-- 否则，没有有效图片且（`tree_change` 为 `unchanged`/`detail_only`，或 `visual` 非空）→ `snap`；
+- `visual=loading` 时给出 `wait_for`，带有效图片时也适用。
+- `visual=sparse_tree` 时，若观察不是 `wait_for` 终帧且 `tree_change` 既不是 `unchanged` 也不是
+  `detail_only`，给出 `wait_for`，带有效图片时也适用。其余稀疏帧仅在无有效图片时给出 `snap`。
+- 其他情况下，有非空 `visual` 或 `tree_change` 为 `unchanged`/`detail_only`，且无有效图片时，给出 `snap`。
 - 其余省略。
 
 衍生不变式：`matched_base` 且无 `visual` 时 `hint` 恒为空；本次观察已交付有效图片时 `hint`
@@ -1619,11 +1630,21 @@ compact 的二元中心点只用于阅读、方位判断与手工坐标参考。
 {"reference":"O2"}
 ```
 
-无参数查看自身近期有界事实；指定 O/P 时只查原归属。输出只有
-`diagnosis.summary`、`issues`（`phase`/`code`）、白名单 `timing_ms`、必要时短 `timeline`、
-`coverage` 与 `truncated`，不返回树、日志、输入、命令或输出，也不修复任何状态。
-未知或他人引用是正常查询事实：`coverage=record_unavailable`，不返回顶层错误。
-指定 P 且原操作仍可解析时，`diagnosis` 另带 `operation_id` 与已知 `outcome`。
+无参数查看自身近期有界事实。本 Agent 有未结束会话（含 `starting` 与 `active`）时，操作记录
+只纳入该会话所属操作，以及会话起点 `StartedAt` 已知时从该时刻（含）起创建的无会话归属操作。
+没有未结束的本 Agent 会话时，查看自身全部近期操作记录。全局可用性、收尾与耗时事实不受操作过滤影响。
+
+`diagnosis` 返回 `summary`、`issues`、白名单 `timing_ms`、必要时短 `timeline`、`coverage` 与
+`truncated`。`issues` 每项仍只含 `phase`、`code`，操作级问题按 `(phase, code)` 去重并优先保留
+最新项。无参数查询的可选 `diagnosis.error_counts` 按受控错误码汇总当前窗口所有已结束的失败或
+不确定操作，无错误码时用已知 outcome。计数为正整数，键按字典序编码，统计不受 `issues` 和
+`timeline` 各至多 8 条的限制。无计数时省略该字段；严格响应解码拒绝 `null`、空对象、空键及非正计数。
+超过 16 KiB 诊断预算时，依序从列表头裁剪 `timeline`、`issues`，必要时省略整个计数表，并置
+`truncated=true`。
+
+指定 O/P 时只查原归属，不返回 `error_counts`。未知或他人引用返回 `coverage=record_unavailable`，
+无顶层错误。指定 P 且原操作仍可解析时，`diagnosis` 另带 `operation_id` 与已知 `outcome`。
+诊断不返回树、日志、输入、命令或输出，也不修复状态。
 
 ### `POST /api/app`
 
@@ -1775,6 +1796,9 @@ O。认领后、派发前再次重验原会话、期限、任务集合、用户�
 `close`/`kill` 的目标选择失败按 `task_not_found`、`task_not_tracked`、
 `task_target_ambiguous`、`close_refused_borrowed` 或对应的 `kill_refused_*` 返回。所有
 拒绝都保留已证明的身份与作用屏，不伪造已派发事实。
+`close_refused_borrowed` 带 `error.details.retry_parameter="allow_borrowed"`；由已确认的前台
+服务或播放触发的 `kill_refused_playback` 带 `error.details.retry_parameter="allow_stop_playback"`。
+服务或播放状态未知触发的 `kill_refused_playback` 无法用该开关越过，省略此字段。其他 app 拒绝也省略。
 
 每次已提交变更后（含 `outcome=uncertain` 的已派发变更）服务发布原会话屏的一次 full 无图观察；
 后观察失败保留主 outcome 与已证明字段，`observation.status=failed` 与 `error` 表达采集失败。
@@ -1783,9 +1807,15 @@ STOP 撤权后的迟到结果不发布新观察。
 `app` 的七种 kind 在 MCP 适配器都预分配 P。HTTP 每次新调用同样分配自己的 P；`reference`
 只用于定位既有会话，不是本次调用的 P。`find` 使用 detached P，不因调用时恰有全局活动会话
 而绑定；`list` 的 P 绑定 `reference` 解析到的原会话。查询成功与失败都不带 `outcome`，
-`status(P)`/重复 P 只返回操作摘要（`app.kind`）而不重新读取或补回集合；查询取消的摘要为
+`find`/`list` 的 `status(P)` 与重复 P 仅回 `app.kind`，且不读取查询集合。查询取消的摘要为
 `operation_state=finished`、`phase=query_cancelled`、无 outcome/error/集合，只表示该查询
 已关闭，需要集合的调用方以新 P 重做 `find`/`list`。
+
+`open`/`claim`/`handoff`/`close`/`kill` 的 `status(P)` 与重复 P 重放操作终态时定格的 `AppView`。
+`executed`、`uncertain` 或 `not_executed` 均只保留首次结果已证明的字段，保留已知空集合与显式
+`null` 的语义。运行态和 `work_deadline` 冻结终态仅回 `app.kind`，迟到回调不回填冻结摘要。
+服务重启后不恢复内存中的定格摘要：仅有分支记录时回 `app.kind`，原 P 无可用记录时按未知操作处理。
+重放不附 `observation`，也不读设备。
 
 `app` 业务错误的 HTTP 状态：`window_action_not_supported_on_primary_display`、
 `task_not_found`、`task_not_tracked`、`task_target_ambiguous`（`details.task_ids`）、

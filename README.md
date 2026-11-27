@@ -7,8 +7,8 @@ HTTP 协议配对。
 
 - 模块：`github.com/malyjacob/mobile-use-vnext`
 - Go：1.27.1，启用 `GOEXPERIMENT=jsonv2`
-- 契约：`contract_version = "34"`，服务、HTTP 客户端、控制 App 精确相等才做普通工作
-- 发行：`0.38.0`；`release/versions.json` 是发行号、契约号与 Android versionCode（40）的唯一
+- 契约：`contract_version = "35"`，服务、HTTP 客户端、控制 App 精确相等才做普通工作
+- 发行：`0.39.0`；`release/versions.json` 是发行号、契约号与 Android versionCode（41）的唯一
   来源，构建生成 Go/Java 常量
 
 ## 能力边界
@@ -37,9 +37,10 @@ HTTP 协议配对。
   坐标换卡仍分配新号。`inspect` 的 `detailed` 视图仍交付保留快照的全部节点、完整未截断的
   label 与已知四元矩形，节点定义不出现 `truncated`。
 - 观察可带可选 `visual` 分类（`loading`、`image_heavy(<pct>%)`、`media_surface` 或
-  `sparse_tree`）：`full` 给出本次值（空则省略），`delta` 中 `loading` 不省略、其余三类仅在
-  分类变化时给出；`act` 常规成功另可带 `tree_change`（`unchanged`/`detail_only`/`matched_base`）
-  与只读 `hint`（`snap`/`wait_for`），用于按需截图核对或等待。普通树文本块为 `tree v5`。
+  `sparse_tree`）。`full` 给出本次非空分类；`delta` 始终保留 `loading` 和 `wait_for` 终帧的
+  `sparse_tree`，其余同态分类省略。`act` 常规成功另可带 `tree_change`
+  （`unchanged`/`detail_only`/`matched_base`）。服务按[观察契约](docs/interface.md#observation-与-quality)
+  给出只读 `hint`（`snap`/`wait_for`）。普通树文本块为 `tree v5`。
 - 控制端为 `POST /v1/control/sync|stop`；同步下发控制视图、至多一条显示命令与未确认的 Agent
   消息，独立 STOP 只绑定停止边界，见 [控制端协议](docs/control-protocol.md)。
 - `notify` 保存的消息通过控制同步进入 App 消息中心与系统通知；`notification.state=pending`
@@ -181,7 +182,7 @@ $env:GOEXPERIMENT = 'jsonv2'; go test ./...
 ## 接口
 
 Agent 工具（`POST /api/<tool>`，`Authorization: Bearer <agent_token>`，
-`X-Mobile-Use-Contract: 34`）：
+`X-Mobile-Use-Contract: 35`）：
 
 | 工具 | 说明 |
 | --- | --- |
@@ -190,14 +191,14 @@ Agent 工具（`POST /api/<tool>`，`Authorization: Bearer <agent_token>`，
 | `observe` | `reference`（O/P）；按服务端基线池返回 full 或 delta。当前基线跨度为 1–12，其他备用 full 为 1–10，采集龄 `< 180s`，池为 1 条当前基线加至多 4 条备用 full（容量 5）；合格候选按实际 `tree v5` 树块字节数取最短 delta，平手优先当前基线、再取较新修订，默认差分必须严格小于对应 full 的 80%；`observe(P)` 与 `full=true` 强制 full；`image=true` 附加本次图片 |
 | `snap` | `reference`（O/P）；立即读取当前屏的一张图，不读树、不发布观察；成功只含 `operation_id` 与顶层 `image` |
 | `wait_for` | `reference` + `timeout`（必填 1～40，`stable=true` 时至少 2）+ 可选 `query`/`absent_query`/`stable`/`full`/`image`；在唯一工作位上等待后发布一个新 `O` |
-| `act` | `reference` + `operation`：`tap`、`long_press`、`swipe`（可选 `duration_ms`）、`scroll`（`container`/`direction`/`amount`）、`key`、`text`；`tap`/`long_press` 的 ref 目标支持 4 级定位（含 3×3 网格）与同视口子容器委托，默认 `bubble=true` 时按视觉区锚定提升最近交互祖先或吸附唯一局部共位控件；`scroll` 的 `amount` 为闭合四档 `step`/`half`/`page`/`full`（可用跨度 15%/30%/60%/85%，注入 500/450/400/300ms，省略为 `page`，不接受 `duration_ms`）；支持双向同视口滚动栈、非滚动 ref 自动祖先提升、坐标最内层/回退/消歧与居中 3 轴线轨迹；容器轴向与请求方向不兼容时自动回退兼容外层滚动祖先，无解返回 `422 unsupported_node_action`（`reason=axis_mismatch`）；`act` 目标解析与规划类静态 422 使用 `invalid_target`/`unsupported_node_action`/`ambiguous_point`/`no_safe_point`/`no_safe_trajectory`，有候选时附统一 `candidates`；`text` 默认 `auto_submit=true`、`submit_ref="enter_key"`：`text(ref)` 准入只要求 `role=input`、公开动作含 `text`、未禁用、非受保护与正面积几何（不要求 `tap`），已聚焦零点击直写、未聚焦在目标子树内点按一次可证明的安全位置；写入后 `0ms` 读回精确相等即完成，否则至多 3 次短退避只读读回（总上限约 1 秒，候选数变为 0 时至多一次严格的写后重新采集与读回），始终只写一次并要求全文精确相等；聚焦、写入、读回确认后至多一次 ENTER；`submit_ref="n…"` 写后点击提交按钮且失败不补发 ENTER；`auto_submit=false` 只写不提；`text_input` 报告 `write`/`submit`，`write=executed` 且提交确定未派发时 `outcome=partial` 并附新的 ready O；`image=true` 为后观察附图 |
+| `act` | `reference` + `operation`：`tap`、`long_press`、`swipe`（可选 `duration_ms`）、`scroll`（`container`/`direction`/`amount`）、`key`、`text`；`tap`/`long_press` 的 ref 目标支持 4 级定位（含 3×3 网格）与同视口子容器委托，默认 `bubble=true` 时按视觉区锚定提升最近交互祖先或吸附唯一局部共位控件；`scroll` 的 `amount` 为闭合四档 `step`/`half`/`page`/`full`（可用跨度 15%/30%/60%/85%，注入 500/450/400/300ms，省略为 `page`，不接受 `duration_ms`）；支持双向同视口滚动栈、非滚动 ref 自动祖先提升、坐标最内层/回退/消歧与居中 3 轴线轨迹；容器轴向与请求方向不兼容时自动回退兼容外层滚动祖先，无解返回 `422 unsupported_node_action`（`reason=axis_mismatch`）；`act` 目标解析与规划类静态 422 使用 `invalid_target`/`unsupported_node_action`/`ambiguous_point`/`no_safe_point`/`no_safe_trajectory`，有候选时附统一 `candidates`，无交互祖先且有屏内裁剪几何时可带 `target_center`；`text` 默认 `auto_submit=true`、`submit_ref="enter_key"`：`text(ref)` 准入只要求 `role=input`、公开动作含 `text`、未禁用、非受保护与正面积几何（不要求 `tap`），已聚焦零点击直写、未聚焦在目标子树内点按一次可证明的安全位置；写入后 `0ms` 读回精确相等即完成，否则至多 3 次短退避只读读回（总上限约 1 秒，候选数变为 0 时至多一次严格的写后重新采集与读回），始终只写一次并要求全文精确相等；聚焦、写入、读回确认后至多一次 ENTER；`submit_ref="n…"` 写后点击提交按钮且失败不补发 ENTER；`auto_submit=false` 只写不提；`text_input` 报告 `write`/`submit`，`write=executed` 且提交确定未派发时 `outcome=partial` 并附新的 ready O；`image=true` 为后观察附图 |
 | `inspect` | `reference` 可选 `node` 或 `query`；只读历史树 |
 | `keepalive` | `reference`（O/P）+ 可选 `duration_minutes`（1～120，默认 2）；从应用时重设当前活动会话租期，可延长或缩短；普通活动仅按两分钟取最大值 |
 | `end` | `reference`（O/P）；撤权并启动独立收尾 |
-| `app` | `kind` + 七个分支；根对象与 `target` 嵌套对象严格封闭，七个 kind 都接受全部已声明顶层成员而只按生效成员处理（`find` 的 `query`；`list` 的 `reference`/`scope`/`app`；`open` 的 `target.app`；`claim`/`handoff`/`close`/`kill` 的 `target`；`handoff` 的 `restore_foreground`；`close` 的 `allow_borrowed`；`kill` 的 `allow_stop_playback`）；`find`/`list` 查询应用与 live task 且不消费 O，`open`/`claim`/`handoff`/`close` 管理会话窗口，`kill` 按 Android 用户对整个包执行一次 `force-stop` 并支持 `target.task_id` 或 `target.app` 两入口与关闭资格；引用字段统一为 `reference` |
+| `app` | `kind` + 七个分支；根对象与 `target` 嵌套对象严格封闭，七个 kind 都接受全部已声明顶层成员而只按生效成员处理（`find` 的 `query`；`list` 的 `reference`/`scope`/`app`；`open` 的 `target.app`；`claim`/`handoff`/`close`/`kill` 的 `target`；`handoff` 的 `restore_foreground`；`close` 的 `allow_borrowed`；`kill` 的 `allow_stop_playback`）；`find`/`list` 查询应用与 live task 且不消费 O，`open`/`claim`/`handoff`/`close` 管理会话窗口，`kill` 按 Android 用户对整个包执行一次 `force-stop` 并支持 `target.task_id` 或 `target.app` 两入口与关闭资格；引用字段统一为 `reference`，变更的终态定格摘要可由 `status(P)` 或重复 P 重放 |
 | `notify` | `text`；保存一条 Agent 消息，经控制同步投递到 App 消息中心 |
 | `shell` | `reference` + `command` + 可选 `root`；受管命令执行（不发布观察，原 O 仍可用） |
-| `diagnose` | 可选 `reference`；有界诊断事实 |
+| `diagnose` | 可选 `reference`；无参时优先查看当前未结束会话的有界记录，可返回 `error_counts` |
 
 普通 `observe`、`wait_for(O)`、`act` 后观察与文本 `partial` 交付共享同一基线池选择。
 `start`、`observe(P)`、`wait_for(P)`、`full=true` 与 app 变更后的强制 full 观察不参与全池选择；

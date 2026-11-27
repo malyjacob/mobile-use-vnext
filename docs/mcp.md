@@ -60,6 +60,11 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
 
 除参数语法、`409 node_not_found`/`node_disabled` 及 `text` 的非可编辑/受保护拒绝（`422 text_target_uncertain`）外，全 `act` 静态目标解析与规划拒绝统一收口为 5 个正交 `422` 错误码：`invalid_target`、`unsupported_node_action`、`ambiguous_point`、`no_safe_point`、`no_safe_trajectory`（`scroll` 的轴向失配为 `unsupported_node_action` + `reason=axis_mismatch`）。静态拒绝不认领 O，结果为 `not_executed`；`error.details` 携带封闭 `reason`、按出口约定的 `scope`/`scope_ref`，有候选时附至多 4 项经当前同一 O 干跑计算的 `candidates`（含 `ref`/`role`/`actions`/`bounds`/`relation`/`executable`），以及可选 `blocking_refs`（至多 3 项）。原 O 仍 ready 且 `candidates` 中存在 `executable=true` 的项时，可直接取首个 `executable=true` 的 `ref` 用同一 O 与新 P 重试，无需重观察或手算坐标；需要查看诊断子树时仍可用 `inspect({reference: 原 act 的 O, node: ref})` 补看。
 
+`unsupported_node_action` 的 `reason=no_interactive_ancestor` 在目标有有效屏内裁剪几何时可带
+`error.details.target_center: [x, y]`，也适用于 `text` 的 `submit_ref` 静态校验。它只表达
+目标整数中心，其他静态拒绝或无有效裁剪几何时省略。若据此尝试坐标点按或长按，省略 `bubble`，
+并用仍有效的原 O 发起独立准入和重验；该字段不证明安全或业务响应。
+
 非 `text` 动作在认领后重验因祖先链失配返回 `409 target_changed (reason=lineage_changed)` 时，
 `error.details.changed_ref` 可给出原目标公开祖先链中第一个确实缺失且能唯一确定的公开祖先
 ref（在新帧链里仍有恰好一个结构对应层的祖先只算平移，不被指名）；`bubble_ancestor` 的最近交互
@@ -142,6 +147,11 @@ text 失败（含 `outcome=partial` 与 `outcome=uncertain`）的 `error.details
 `annotations.readOnlyHint=true`。前三项查询无本次 P，`snap` 仍预分配 P 并占用工作位。
 注解表达操作意图，实时查询的结果仍取自调用时的状态。
 
+工具目录固定为 13 项，入参 Schema 保持严格约束。完整结果与树图例只在 server instructions
+发布，工具说明各自保留调用前置、分支与恢复边界；Schema 根对象省略机械复述。发现预算按 UTF-8
+计量，`tools/list` 以序列化的工具数组计，最多 20,500 B；与 instructions 合计小于 31,000 B。
+目录指纹由 [目录基线测试](../internal/mcp/result_parity_test.go) 与发布清单核验。
+
 `snap` 的 schema 只有一个必填 `reference`（`O…`/`P…`，≤64）。它与 `observe` 共用
 引用解析口径，额外拒绝本次请求 P 的自引用。它只读取一张图，不读取树或发布观察；`obs` 行
 `hint=snap` 指的就是用同一 O 这样只读核对画面（不消费 O、不发布新 O、不续租）。
@@ -198,6 +208,9 @@ allow_stop_playback}`、`required=["kind"]` 与 `additionalProperties=false`；`
 `total`/`truncated` 说明预算前数量与截断。其余五个 kind 认领时消费当前 ready O，已执行后
 尝试发布原会话屏的 full 无图观察，整体 `outcome` 仍按 `executed`/`not_executed`/`uncertain`
 三态表达。查询与变更的 P 绑定、IsError 与取消差异见第 3、6 节。
+
+`close_refused_borrowed` 的 `error.details.retry_parameter` 为 `allow_borrowed`。已知播放或
+前台服务触发 `kill_refused_playback` 时为 `allow_stop_playback`；播放或前台服务状态未知时省略。
 
 `kill` 按从任务清单解析并核验的 Android 用户，对整个包执行一次
 `am force-stop --user <id> <package>`。`task_id` 入口要求实时精确匹配本会话显示屏的 live
@@ -346,7 +359,7 @@ end result
 7. `app` 行与 `app_items v1`、`app_tasks v1` 块。
 8. `shell v1` 块。
 9. `wait` 行。
-10. `diagnosis` 行、`diagnosis.issues`/`diagnosis.timing_ms` 行与 `timeline v1` 块。
+10. `diagnosis` 行、`diagnosis.issues`/`diagnosis.error_counts`/`diagnosis.timing_ms` 行与 `timeline v1` 块。
 11. `cleanup` 行及其错误子行。
 12. `error` 行。
 13. `recovery` 行。
@@ -489,17 +502,19 @@ obs [<O>] [status=<partial|failed|…>] [fg=<前景>] [at=HH:MM:SS] [visual=<loa
 - `visual` 仅在观察携带该字段时输出，取值为 `loading`、`image_heavy(<pct>%)`（45–100）、
   `media_surface` 或 `sparse_tree`，判据与 `structuredContent` 完全一致（见
   [接口契约](interface.md#observation-与-quality)）。`full` 观察输出本次分类；`delta` 中
-  `loading` 不省略，其余三类仅在同会话、同显示代次的分类变化时输出，同态省略。适配器不
-  重算、不补默认值。
+  始终保留 `loading` 及 `wait_for` 终帧的 `sparse_tree`。其余非空分类在同会话、同显示代次
+  的分类变化时输出。适配器按服务返回值投影。
 - `change` 映射 `observation.tree_change`，只在 `act` 常规成功（比较动作前后树内容与公开语境）
   时出现：`unchanged` 前后紧凑树与完整树均相同，`detail_only` 紧凑树相同但完整树细节有变，
   `matched_base` 前后树内容或公开语境有变、差分零差异命中历史基线，不是动作没生效。常规
   内容变化（发布非空差分或 full）时省略该列；`change=unchanged` 不要求本次差分为空，可与
   非空历史基线差分同时出现。`start`、`observe`、`wait_for`、`app`、`act.delivery`、`text`
   的 `partial` 交付与无树观察省略该列。
-- `hint` 映射 `observation.hint`，由已发布的 `visual`、`change` 与是否交付有效图片推导：
-  `snap` 表示用同一 O 只读截图核对（不消费 O、不发布新 O、不续租）；`wait_for` 表示页面
-  可能仍在加载或过渡，应等待条件或稳定；`matched_base` 且无 `visual` 时不提示。
+- `hint` 映射 `observation.hint`，按是否为 `wait_for` 终帧，以已发布的 `visual`、`change`
+  和有效图片事实[判定](interface.md#observation-与-quality)。`loading` 或符合等待条件的稀疏帧
+  提示 `wait_for`，有图时也适用；`wait_for` 终帧仍为 `sparse_tree` 且无有效图时提示 `snap`。
+  `snap` 表示用同一 O 只读截图核对（不消费 O、不发布新 O、不续租）；带有效图时不提示 `snap`。
+  `matched_base` 且无 `visual` 时不提示。
 - 例如 `obs O4821_80 fg=com.example.gallery at=22:05:18 visual=image_heavy(52%) hint=snap`。
 - `screen` 仅在顶层 `session` 非空或观察没有树时输出；`screen` 存在时，无论 `screen=` 是否
   省略，`rotation != 0` 都一律输出 `rot=<rotation>`。
@@ -561,6 +576,11 @@ app <kind> [pkg=<package>] [task=<task_id>] [user=<android_user_id>] [src_task=<
   `/app/tasks/<i>/<name>` 兜底。`items`/`tasks` 不是数组时按 `/app/items`、`/app/tasks`
   兜底。
 
+`status(P)` 与重复 P 沿用上述投影。`open`/`claim`/`handoff`/`close`/`kill` 的正常终态可
+重放定格 `AppView`，包括 `close` 已保存的 `app_tasks v1` 块。`find`/`list`、运行态、
+`work_deadline` 冻结记录仅回 `app.kind`。服务重启不恢复定格摘要；仍有分支记录时仅回
+`app.kind`，原 P 无可用记录时按未知操作处理。重放不带观察，不读设备。
+
 适配器严格解码成功并预分配 P、但服务结果未知时，只能从已接纳的请求补 `app.kind` 作为调用
 元数据；不得补 `task_id`、`display_id`、PID、`ownership` 或其他设备事实，也不得声称服务已
 登记或已 finished。适配器自身的参数接入拒绝不分配 P，也不补 `app`。
@@ -574,17 +594,20 @@ wait trigger=<trigger> [matched=<a,b>] elapsed=<elapsed_ms>ms
 `matched` 为空时省略；`trigger` 不是合法 token、`elapsed_ms` 不是整数、`matched` 不可表示
 或出现未知成员时，整值按 `json v1 path="/wait"` 兜底。验证采集失败时 `matched` 不出现。
 
-**`diagnosis`。** 首行后按存在性输出两个 JSON 行，`timeline` 非空时以空行接
+**`diagnosis`。** 首行后按存在性依序输出下列 JSON 行，`timeline` 非空时以空行接
 `timeline v1 … end timeline`：
 
 ```text
 diagnosis summary="<summary>" coverage=<coverage> truncated=<true|false> [op=<operation_id>] [outcome=<outcome>]
 diagnosis.issues=<紧凑 JSON>
+diagnosis.error_counts=<紧凑 JSON>
 diagnosis.timing_ms=<紧凑 JSON>
 ```
 
-`summary` 使用双引号 JSON 字符串；`issues`/`timing_ms` 为 `null` 时按
-`/diagnosis/issues`、`/diagnosis/timing_ms` 兜底；`summary`、`coverage`、`truncated` 或
+`error_counts` 仅在无参诊断返回计数时出现，位于 `diagnosis.issues=` 之后、
+`diagnosis.timing_ms=` 之前，解码为 JSON 对象。`summary` 使用双引号 JSON 字符串。
+`issues`/`error_counts`/`timing_ms` 为 `null` 时按各自的 `/diagnosis/<name>` 兜底；
+`summary`、`coverage`、`truncated` 或
 可选 `op`/`outcome` 不可表示时整值按 `json v1 path="/diagnosis"` 兜底；未知成员按
 `/diagnosis/<name>` 兜底。`timeline` 为空数组时不输出块，其内容仍是 `structuredContent`
 的事实；`timeline` 为 `null` 或不可表示时按 `/diagnosis/timeline` 兜底。
@@ -854,7 +877,7 @@ root..parent 的 ref 序列，
 ### 3.4 shell 与 timeline 块
 
 `shell v1` 块自带头行；`timeline v1` 块前接 `diagnosis` 行与可选的
-`diagnosis.issues`/`diagnosis.timing_ms` 行，块前恰好一个空行：
+`diagnosis.issues`/`diagnosis.error_counts`/`diagnosis.timing_ms` 行，块前恰好一个空行：
 
 ```text
 shell v1 termination=exited exit_code=0 truncated=false output_bytes=6

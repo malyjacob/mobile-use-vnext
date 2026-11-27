@@ -124,6 +124,11 @@ engine 的状态锁只做有限内存检查与转换：锁内不等待 ADB、u2 
 - 同一 P 重复到达只返回原操作的公开视图，不再次派发（包括已失败的操作）。
 - 已完成操作的公开视图（重复 P、`status(P)` 与冻结结果）不带 `observation`；原操作交付过新
   观察时，视图中的 `recovery` 退化为 `observe`/`P`，不指向该视图无法定位的 O。
+- 五种 `app` 变更的终态转换与 `AppView` 摘要在同一锁内提交。首次结果与查询各自复制已证明
+  字段，包括集合的空值与三态。`status(P)` 与重复 P 直接读定格摘要，不访问设备。`find`、`list`、
+  运行态与 `work_deadline` 冻结结果仅有 `app.kind`，迟到回调不回填。摘要仅存内存，重启不恢复。
+- 无参 `diagnose` 按本 Agent 未结束会话过滤操作记录，包含自该会话起点创建的无会话归属操作。
+  操作级问题按 `(phase, code)` 去重，错误码计数按完整过滤窗口聚合。全局可用性和收尾事实独立投影。
 - P 记录上限 `MaxOperations=256`；淘汰只针对最旧的已完成、且不被会话/工作/O 保护的记录。
 - 已结束或显式封闭的 P（`end` 对未接纳/已结束的引用等）进入有界 `closed` 集合（最多 512）。
   有“未接纳”正面证据时返回 `request_closed=true`、`outcome=not_executed`；记录淘汰后只剩
@@ -524,21 +529,21 @@ Android 时为 `uncertain`；全部确定未派发时为 `not_executed`。`parti
 `act` 常规成功传入被消费的前置观察时，另按公开前景投影与屏幕宽/高/旋转语境，忽略 `ref`
 比较紧凑树内容（展开历史链）与完整公开树内容。锁外候选与多基线 delta 选择都不发布状态。
 锁内对派生事实只做 O(1) 决策：候选分类按 delta 同态去重，由前后内容判等得出 `tree_change`，
-再由已发布 `visual`、`tree_change` 与本次是否交付有效图片推导 `hint`。这些派生事实不新增
-设备读取、截图、请求字段或日志事件；提交门禁失败或撤销时，锁外候选整份丢弃，不更新当前观察
-或视觉状态。
+再按是否为 `wait_for` 终帧，以已发布 `visual`、`tree_change` 与有效图片事实推导 `hint`。
+这些派生事实不新增设备读取、截图、请求字段或日志事件；提交门禁失败或撤销时，锁外候选
+整份丢弃，不更新当前观察或视觉状态。
 
 最终 `Observation.visual` 的发布值也在该提交门禁内决定：`full` 观察输出本次分类，`delta`
-观察对 `loading` 始终输出，其余三类仅当本次分类非空且与同会话、同显示代次的紧邻上一已发布帧
-（该帧已不在留存集合时回退到 `delta.base` 对应观察）不同时输出，否则省略。撤销、超时或采集
+观察始终保留 `loading` 和 `wait_for` 终帧的 `sparse_tree`。其余非空分类仅在与同会话、同显示代次
+紧邻上一已发布帧不同（该帧已不在留存集合时与 `delta.base` 对应观察比较）时输出。撤销、超时或采集
 失败的候选不更新这一状态；无树观察永不设置 `visual`。`act` 常规成功的
 `Observation.tree_change` 取 `unchanged`/`detail_only`/`matched_base`；紧凑树内容有变化且发布
 非空 delta 或 full 时省略该成员，`unchanged` 不要求本次差分为空（差分大小相对所选基线）。
 `start`、`observe`、`wait_for`、`app`、`act.delivery`、`text` 的 `partial` 交付与无树失败观察
-恒省略。`Observation.hint` 由已发布 `visual`、`tree_change` 与有效图片派生：`loading` 给
-`wait_for`；无有效图片且 `tree_change` 为 `unchanged`/`detail_only` 或 `visual` 非空时给
-`snap`；其余省略。`hint` 只是观察级只读建议，不进入 `recovery` 的 6 元入口，不改变 O 状态机
-与输入授权。
+恒省略。`loading` 始终提示等待。`sparse_tree` 在非 `wait_for` 终帧且 `tree_change` 既非
+`unchanged` 也非 `detail_only` 时也提示等待，其余稀疏帧仅在无有效图时提示截图。完整判据见
+[观察契约](interface.md#observation-与-quality)。`hint` 只表达观察建议，不改变 `recovery`、
+O 状态机或输入授权。
 
 `wait_for` 的验证采集直接进入同一 `publishTreeAttempt`，不经过本节的收敛采样：等待期的只读
 采样不发布、不推进基线；命中或稳态退出复用候选帧，到时或采样守卫退出时若最新成功帧仍新鲜
@@ -939,10 +944,11 @@ text 完成事件记 `focus_dispatch`/`write_dispatch`/`submit_dispatch` 与受�
 ### 发布
 
 `release/versions.json` 是发行号、共同契约号与 Android versionCode 的唯一来源；当前为
-`release_version=0.38.0`、`contract_version=34`、`android_version_code=40`，构建生成
+`release_version=0.39.0`、`contract_version=35`、`android_version_code=41`，构建生成
 Go/Java 常量。`scripts/build-release.ps1` 产出整组产物与 `build/release/manifest.json`
 （源码提交、Go 版本、MCP SDK/协议、各产物 SHA-256/大小、Android 包名/版本、工具目录指纹）。
-工具目录固定为 `scripts/toolcatalog` 投影的 13 个工具，指纹是该目录注册顺序、名称、描述与
+工具目录固定为 `scripts/toolcatalog` 投影的 13 个工具。工具说明自包含关键调用规则，完整图例
+只发布于 server instructions。指纹覆盖该目录的注册顺序、名称、描述与
 入参 schema 的 canonical SHA-256；描述或 schema 变化都会改变指纹，因此清单必须在对应源码
 树上重建。该指纹不覆盖 server instructions；`mcp-probe` 把 live `server/discover` 返回的
 说明与构建内固定说明源逐字节比较，并附加兼容 `initialize` 检查。

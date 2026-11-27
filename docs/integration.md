@@ -41,7 +41,7 @@ adb forward          主机 18881 → 服务；主机 18883 → 手机 MCP
    `adb forward`，也不需要 Agent token。
 
 只需要直连 HTTP 的 Agent 则使用 `http://127.0.0.1:18881/api/<tool>`、`agent_token` 与
-`X-Mobile-Use-Contract: 34`。
+`X-Mobile-Use-Contract: 35`。
 
 ## 1. 默认部署后的网络与进程
 
@@ -242,13 +242,14 @@ obs [<O>] [status=…] [fg=…] [at=HH:MM:SS] [visual=…] [change=…] [hint=�
 结构化结果中该编号仍是 `observation.id`。`visual` 仅在观察带该字段时出现，取值为
 `loading`/`image_heavy(<pct>%)`/`media_surface`/`sparse_tree`（判据见
 [接口契约](interface.md#observation-与-quality)）；`full` 观察输出本次分类，`delta` 中
-`loading` 不省略、其余三类仅在同会话、同显示代次的分类变化时输出，`structured` 的
+`loading` 及 `wait_for` 终帧的 `sparse_tree` 均保留，其余同态省略。`structured` 的
 `observation.visual` 使用同一值。`change` 映射 `observation.tree_change`，只在 `act` 常规
 成功时出现（`unchanged`/`detail_only`/`matched_base`；常规内容变化时省略，`unchanged` 不
 要求本次差分为空）；`hint` 映射 `observation.hint`
 （`snap`/`wait_for`）。调用方按 `hint` 分流：`hint=snap` 用同一 O 调 `snap` 核对画面（只读，
-不消费也不发布 O）；`hint=wait_for` 用 `wait_for` 等条件或稳定；`change=matched_base` 表示
-前后树内容或公开语境有变、只是差分零差异命中历史基线，不是动作没生效。可见 O/P 形如
+不消费也不发布 O）；`hint=wait_for` 用 `wait_for` 等条件或稳定。稀疏帧可能提示等待；
+`wait_for` 终帧仍稀疏且无有效图时改为提示截图。`change=matched_base` 表示
+前后树内容或公开语境有变且差分零差异命中历史基线。可见 O/P 形如
 `O4821_72` 与 `P7391_12`：
 `O`/`P` 后接 4 位十进制实例标签（`1000`–`9999`，无前导零）、`_` 与单调序号，与 `/api/*`
 使用同一编号。`start` 首帧的会话屏 `display_id` 从 `obs` 行的
@@ -346,7 +347,7 @@ HTTP 宿主在原有 `Authorization` 头之外按需添加：
 
 ```text
 Authorization: Bearer <agent_token>
-X-Mobile-Use-Contract: 34
+X-Mobile-Use-Contract: 35
 Content-Type: application/json; charset=utf-8
 ```
 
@@ -354,7 +355,7 @@ Content-Type: application/json; charset=utf-8
 $deploy = Get-Content .state/deploy.json -Raw | ConvertFrom-Json
 $headers = @{
     Authorization           = "Bearer $($deploy.agent_token)"
-    'X-Mobile-Use-Contract' = '34'
+    'X-Mobile-Use-Contract' = '35'
 }
 Invoke-RestMethod http://127.0.0.1:18881/api/status -Method Post `
   -Headers $headers -ContentType 'application/json' -Body '{}'
@@ -389,7 +390,7 @@ Invoke-RestMethod http://127.0.0.1:18881/api/status -Method Post `
 或 `target.app`，`claim`/`handoff`/`close` 接受两者之一。`find`/`list` 是查询，成功或失败
 都不返回 `outcome`；其余五个 kind 成功返回 `outcome=executed` 与原会话屏的一次 full 无图
 观察。`find` 使用 detached P；`list` 的 P 绑定 `reference` 解析到的原会话。每次新调用都
-使用自己的新 P；重复 P 只返回原摘要。`kill` 按从任务清单解析并核验的 Android 用户对整个
+使用自己的新 P。`kill` 按从任务清单解析并核验的 Android 用户对整个
 包执行一次 `force-stop`；包入口需要全设备同包 live 任务均属本会话，或凭 `close` 留下的
 关闭资格进入。`act`、`inspect` 与 `app` 的引用字段都是 `reference`；旧 `observation_id`
 按未知成员拒绝。
@@ -411,7 +412,16 @@ ref 点按/长按默认 `bubble=true`，原目标无 `tap`/`long_press`/`text` �
 
 P 的两种用法：`observe({"reference":"P7391_4"})` 的 `reference` 引用本 Agent 已有的
 `P7391_4` 原操作，不是本次 `observe` 的请求体 P；本次调用仍使用自己的新 P。
-`status(P7391_4)` 只返回操作摘要，不重新采集，也不补回业务集合。
+`status(P7391_4)` 和重复 P 查询保存的操作事实。五种 `app` 变更的终态可返回定格 `AppView`；
+查询 `find`/`list` 的旧 P 只带 `app.kind`，需要实时集合时以新 P 发起查询。重放不重新采集。
+
+如果 `act` 静态拒绝为 `unsupported_node_action` 且 `reason=no_interactive_ancestor`，有效屏内
+裁剪中心可能出现在 `error.details.target_center`。尝试坐标点按或长按时省略 `bubble`，用仍有效
+的原 O 和新 P 发起独立准入；坐标本身只提供几何事实。
+
+`diagnose({})` 在本 Agent 有未结束会话时聚焦该会话及其期间发起的无会话归属操作。
+用 `diagnosis.error_counts`（文本行 `diagnosis.error_counts=`）查看整个诊断窗口的错误码计数。
+要查特定历史操作或观察，传原 O/P 作为 `reference`；该查询不附汇总计数。
 
 ### 5.2 `wait_for` 条件等待示例
 
@@ -605,7 +615,7 @@ Header: Authorization: Bearer <mcp_token>
 两种选择：
 
 ```text
-直连 HTTP:  http://127.0.0.1:18880/api/<tool>   + agent_token + X-Mobile-Use-Contract: 34
+直连 HTTP:  http://127.0.0.1:18880/api/<tool>   + agent_token + X-Mobile-Use-Contract: 35
 MCP HTTP:   http://127.0.0.1:18882/mcp          + mcp_token
 ```
 
@@ -685,7 +695,7 @@ adb shell su -c 'tail -n 50 /data/local/chroots/debian13/var/lib/mobile-use-vnex
 
 升级后：
 
-- 服务、App、适配器与客户端共同使用同一个 `contract_version`（当前 `34`）；
+- 服务、App、适配器与客户端共同使用同一个 `contract_version`（当前 `35`）；
 - 重新建立可能失效的转发；
 - 重启实际 MCP 宿主进程，不能只替换磁盘文件；
 - 旧会话转退休记录，不恢复旧 O/P 或主屏授权；旧 cleanup 的 `pending`/`unconfirmed` 可继续
@@ -769,7 +779,8 @@ GET 判断工具是否可用。
 | `409 contract_mismatch` | 普通契约版本不一致 | 整组更新服务/App/客户端，不要只升一侧 |
 | `409 device_busy` | 已有普通工作 | 读 `blocking_operation_id`，串行化后重试 |
 | `409 task_target_ambiguous` | `claim`/`handoff`/`close` 按包名匹配到多个任务 | 读 `details.task_ids`，用精确 `task_id` 加新 P 重试；不取第一个 |
-| `409 close_refused_borrowed` | 关闭目标含借入窗口且 `allow_borrowed=false` | 先 `handoff` 该窗口，或显式传 `allow_borrowed=true` 并接受销毁 |
+| `409 close_refused_borrowed` | 关闭目标含借入窗口且 `allow_borrowed=false`，详情给出 `retry_parameter="allow_borrowed"` | 先 `handoff` 该窗口，或显式传 `allow_borrowed=true` 并接受销毁 |
+| `409 kill_refused_playback` | 播放或前台服务已确认时详情给出 `retry_parameter="allow_stop_playback"`；状态未知时省略 | 仅已知状态的拒绝可通过显式传 `allow_stop_playback=true` 越过 |
 | `409 kill_refused_*` / `409 root_unavailable` | 无本会话 owned 任务或有效关闭资格、同包任务并非全部 owned、他屏仍有同包任务、FGS/播放门禁，或 root 不可用 | 按受控原因处理，不绕过身份与播放检查；`close` 确认关闭 owned 任务后可在 5 分钟内按包请求 `kill`，同包多窗口不再单独拒绝 |
 | `409 task_lifecycle_busy` | 该 task 仍有未确认的旧搬移/删除责任 | 用 `status` 与 `app.list` 核验现状；只限制该任务，稍后新 P 重试 |
 | `503 app_list_unavailable` | 应用清单读取失败 | 条件恢复后用新 P 重新 `app.find`，不伪造空列表 |
@@ -792,7 +803,7 @@ GET 判断工具是否可用。
 $deploy = Get-Content .state/deploy.json -Raw | ConvertFrom-Json
 $headers = @{
     Authorization           = "Bearer $($deploy.agent_token)"
-    'X-Mobile-Use-Contract' = '34'
+    'X-Mobile-Use-Contract' = '35'
 }
 $start = Invoke-RestMethod http://127.0.0.1:18881/api/start -Method Post `
   -Headers $headers -ContentType 'application/json' -Body '{}'

@@ -19,7 +19,7 @@ instance, err := c.Discover(ctx)
 `POST /api/status {}` 取得当前准入事实（`can_start`、`blocking_code`、本 Agent 的
 `session`、`start_operation_id` 与 `cleanup`）。它不生成 P、不续租、不创建会话。
 
-当前共同契约为 `"34"`。契约版本不等时返回 `contract_mismatch`；客户端不刷新版本、不重发
+当前共同契约为 `"35"`。契约版本不等时返回 `contract_mismatch`；客户端不刷新版本、不重发
 业务动作。端口可应答、`/health` 正常都不等于 `can_start=true`。
 
 公开树与 detailed inspection 使用相同的完整节点布尔默认/unknown 规则，不携带 defaults。
@@ -91,7 +91,8 @@ type Response struct {
 （常规内容变化时省略，`unchanged` 不要求本次差分为空）；`observation.hint` 是可选字符串，
 取值为 `snap`/`wait_for`。客户端按原值透明解码并保留，不
 重算分类或建议、不补默认值，也不用它们替代 `observation.quality`、树或图片事实。`full` 观察
-直接携带本次 `visual`，`delta` 中 `loading` 仍会携带，其余三类只在该视觉状态变化时携带。
+输出本次非空 `visual`。`delta` 始终保留 `loading`，也保留 `wait_for` 终帧的 `sparse_tree`；
+其余同态分类省略。提示路由见[观察契约](interface.md#observation-与-quality)。
 `tree_change` 是动作前后树内容与公开语境的对比结果（忽略 `ref`）；`hint` 是只读核对建议
 （`snap` 表示可用同一 O 只读截图，`wait_for` 表示可等待条件或稳定）；两者都不改变 O 状态或
 输入授权。客户端结构中
@@ -120,6 +121,12 @@ type Response struct {
 `input_state=retired`），撤权或实时阻塞按服务端投影覆盖。客户端同样必须在错误响应上解码
 `text_input` 与 `observation`。
 重复 `P`、`status(P)` 与冻结结果的视图不带 O 编号。
+
+`Client.Status` 查询 P 时，五种 `app` 变更可以返回终态定格 `AppView`。`find`、`list` 或无定格
+摘要的记录仅回 `app.kind`；获取实时集合须用新 P 查询。`act` 的 `error.details.target_center` 与
+`app` 的 `error.details.retry_parameter` 按服务响应解码，触发条件见[接口契约](interface.md)。
+`Client.Diagnose` 返回的 `DiagnosisView.ErrorCounts` 是可选计数表。指定引用或无计数时省略，严格
+响应解码拒绝显式 `null`、空对象、空键、非正整数计数。
 
 | 方法 | 请求参数 | P |
 | --- | --- | --- |
