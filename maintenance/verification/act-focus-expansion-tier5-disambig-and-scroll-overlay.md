@@ -11,9 +11,9 @@
 | 已实现 | 提案 §4.1–§4.3 三项全部落地，落点见提案 §11.1 |
 | 已单测 | 新增 3 个测试文件、10 个测试函数、22 个子用例；先红与转绿证据见 §2 |
 | 已全量 | `internal/engine` 整包 `885.736s` 通过；非 engine 15 包全部 `ok`；交叉编译通过（§3） |
-| 已实测 | 待交付阶段补记（§5） |
-| 磁盘替换 | 待交付阶段补记（§5） |
-| 独立探针 | 待交付阶段补记（§5） |
+| 已实测 | 见 §5.3（基础闭环、展开评论栏、抽屉与 `v_mask` 下的候选过滤、反误杀对照） |
+| 磁盘替换 | 见 §5.1–§5.2（发布产物、整组覆盖部署与手机适配器哈希逐项 match） |
+| 独立探针 | 见 §5.4（主机 stdio 与手机 HTTP 均 `RESULT PASS`） |
 
 ---
 
@@ -100,13 +100,55 @@
 
 ## 5. 实机部署、最小闭环与双端探针
 
-（交付阶段执行后补记：手机整组覆盖部署、虚拟屏基础闭环、展开输入框 `text(ref)`、Issue #48 抽屉/遮罩 `scroll` 候选、列表卡片 `ref tap` 复验、Windows 双产物替换、主机 stdio 与手机 HTTP 独立探针。）
+### 5.1 发布构建与清单核验（干净树 `a36497d`）
+
+| 命令 | 真实结果 |
+| --- | --- |
+| `./scripts/build-release.ps1` | `release=0.38.0 contract=34 android=40 source_commit=a36497de236af159c0c34b8eab4433ad583ecef5 source_dirty=False`；工具目录 `13/5578041adf04bcd8670a95b731667b85832957de4990f49e2dbf4eae6845d9b9` |
+| 产物 SHA-256 | `device-service 8408702e…`、`device-mcp 8c3ab945…`、`control.apk 502e22fd…`、`u2.jar 28361193…`（与基线相同）、`applist.dex 63818f32…`、`service.sh 4b568a9a…` |
+| `./scripts/verify-manifest.ps1 -Manifest build/release/manifest.json` | `PASS`，`artifacts=6`、`head=a36497de…`、`source_dirty=False` |
+| `./scripts/build-host-tools.ps1` | `RESULT PASS`；`device-mcp 8ea96c3b…`、`mcp-probe 01a4b66a…`、`source_dirty=False`、`contract=34` |
+| `./scripts/build-host-tools.ps1 -VerifyOnly` | `PASS`，与手机发布清单同源 `a36497d`、工具目录指纹一致 |
+
+### 5.2 手机整组覆盖部署（保留 App 私有数据）
+
+`./scripts/deploy.ps1 -Manifest build/release/manifest.json -SkipBuild` 输出：`version match: PASS (health release=0.38.0 contract=34)`、`installed App: package=com.mobileuse.vnext versionName=0.38.0 versionCode=40`（`adb install -r`）、`App pairing: PASS`、`recovery barrier: PASS`、`STOP availability: PASS`、`phone MCP HTTP adapter: PASS sha256=8c3ab945…`，所有 `deployed artifact` 逐项 `(match)`。
+
+如实记录一次口径修正：首次部署时手机适配器的 `allowed_origins` 未包含独立探针使用的 `http://127.0.0.1:3000`，手机 HTTP 探针在 `origin_allowed` 得到 `403`；按部署脚本参数 `-McpAllowedOrigins 'http://127.0.0.1:3000'` 重部署后复跑 PASS。该参数此前几次发布同样使用，属部署参数遗漏而非代码缺陷。
+
+### 5.3 最小实机闭环（虚拟屏，`display_id=287/292`）
+
+| 场景 | 结果 |
+| --- | --- |
+| 基础闭环 | `start` → `O1332_1`（`display_id=287`）→ `shell` 启动探针 App → `observe` 得 15 节点树 → `act(text, ref=n6, auto_submit=false)` → `executed`，delta `n6 {focused:true, value:"契约34实机验证"}` |
+| 聚焦复查事件 | 服务日志：`engine.text.focus operation_id="P34text1" mode="near" attempt=1 outcome="proven" ms=239`（首帧绑定、单次 Tap） |
+| 展开评论栏（小黑盒） | 帖子详情页 `n173` 为底栏左侧半宽输入胶囊（中心 `x=363, y=2290`）；`act(text, ref=n173, auto_submit=false)` → **单次 `executed`**；delta：`n173 bounds 由 363,2290 → 540,2096`（全宽展开并上移）、`focused:true`、`value:"契约34展开验证"`，同时新增 `n200 view resource="v_mask"`、编辑器工具条（`iv_expression`/`iv_pic`/`iv_at`/`iv_game`/`iv_cy`）与 `发送` 按钮；日志 `engine.text.focus operation_id="P34text2" mode="expanded" attempt=1 outcome="proven" ms=318`。基线（契约 33）在同一路径返回 `409 text_target_uncertain (stage=focus, reason=focus_unconfirmed)` |
+| `v_mask` 下的滚动候选 | 同帧对顶部标签 `n159`（非滚动）请求 `scroll(up, half)` → `422 unsupported_node_action (reason=not_scrollable)`，**`candidates` 整体省略**（`v_mask` 下的背景滚动容器被排除） |
+| 侧边抽屉（网易云音乐，Issue #48 原始场景） | 打开抽屉后 `scroll(n250 抽屉列表, down, half)` → `422 no_safe_trajectory (reason=trajectory_blocked)`，**`candidates` 整体省略**（原 `n7405`/`n7416` 类底层页面容器不再出现） |
+| 抽屉内非滚动控件 | 抽屉顶栏控件 `scroll(n246, half)` → `422 unsupported_node_action (reason=not_scrollable)`，候选只剩抽屉自身列表 `n250` 且 `executable=false`，不回退底层页 |
+| 反误杀对照（同一设备、关闭抽屉） | 正常页面 `scroll(n193, up, half)` → `422 not_scrollable`，候选 `n28`/`n34`/`n42` 均 `executable=true` |
+| `end` 与收尾 | `end` → `executed`，`cleanup` 由 `pending` 收敛为 `complete`，`can_start=true` |
+
+### 5.4 双端独立探针（新产物）
+
+| 探针 | 结果 |
+| --- | --- |
+| `./build/mcp-probe.exe -transport stdio -binary ./build/device-mcp.exe -config .state/mcp-config.json -result-mode text` | `RESULT PASS`：13 工具 schema/`additional_properties_false`、`status`、`result_error`、`start`（`tree=v5`、`session=virtual`）、`app` 查询与准入、`observe`/`snap`/`wait_for`/`shell`/`inspect`、`act(key=BACK)`、`end`、取消投影全部 PASS |
+| `./build/mcp-probe.exe -transport http-remote -config .state/probe-phone-config.json -result-mode text` | `RESULT PASS`：`service_remote transport=http-remote contract=34 release=0.38.0 process_managed=false` + 同一套件全部 PASS |
+
+依赖方切换边界：本次只完成磁盘替换与独立进程验证；**托管 MCP 宿主进程未重启**（构建脚本提示旧 `device-mcp.exe` 仍在使用并保留备份），宿主重新发现 13 个工具与重连由用户处理。
 
 ## 6. Issue #48
 
-（交付阶段执行后补记：回复根因、契约 34 方案取舍与验证结论，关闭并复核 `CLOSED`。）
+在 GitHub Issue #48 回复完整根因、契约 34 的跨窗口等值隔离/遮罩叶/实体浮层/同前景排序规则、不改 `u2.jar` 与 `candidates` 6 字段的取舍、单测与上述实机结果，并关闭：
+
+- 回复：`https://github.com/malyjacob/mobile-use-vnext/issues/48#issuecomment-7220548124`
+- 关闭复核：`state=CLOSED`、`stateReason=COMPLETED`、`closedAt=2026-11-27T14:15:21Z`
+- 推送：`a1e2c7a..a36497d master`（实现与归档提交）
 
 ## 7. 未执行与缺口
 
-- 归档提交时尚未执行：整组覆盖部署、实机最小闭环、主机双产物替换、双端独立探针、推送与 Issue #48 关闭（见 §5–§6，交付阶段补记）。
-- 议题 2 的“真实 App 154px 平移竞态”与议题 3 的“真机侧边抽屉/遮罩”在单测中已稳定复现；实机部分只验证可稳定构造的场景，无法稳定构造的差异在 §5 如实区分“已单测”与“已实测”。
+- 依赖方 MCP 宿主进程的重启与重连未执行（由用户处理）；本记录只主张“磁盘替换 + 独立进程探针”。
+- 议题 2 的“真实 App 154px 卡片平移竞态”未在真机稳定构造，仅单测覆盖；实机只做了 ref 卡片/按钮点击的闭环。
+- 议题 3 的多窗口（合成显示根 ≥2 顶层窗口）等值隔离未在真机构造，仅单测覆盖；真机覆盖的是单窗口抽屉与 `v_mask` 两类。
+- 1C 父容器锚点兜底未在真机命中（真机命中 `expanded` 与 `near`），其正确性由单测覆盖。

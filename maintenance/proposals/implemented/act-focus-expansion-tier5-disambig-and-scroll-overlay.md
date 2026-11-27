@@ -595,7 +595,7 @@ func buildFilteredScrollCandidates(obs, view, operation, want, entries):
 | 议题 2 的准入矩阵用例在实现后补入 | `canDisambiguateViaTier5` 在基线不存在，直接调用矩阵在基线不可编译；先红证据只落在端到端用例，矩阵用例在实现后加入并全绿。 |
 | 议题 1 的辅助函数放入新文件 `internal/engine/text_focus_binding.go` | 提案 §6.1 将其列在 `act.go`；仅为文件布局差异，`act.go` 仍承载 `bindFocusedText` 与复查循环，行为与判据不变。 |
 | 议题 3 的 `planScrollContainer` 增加 `container` 参数 | 为实现“容器几何”与“前景请求目标”分离（候选过滤与排序需要 `want`），原单一 `want` 语义拆为 `container` + `want`；派发、轨迹证明与错误形状不变。 |
-| 整组发布、手机覆盖部署、实机闭环、主机双产物替换、双端独立探针与 Issue #48 回复关闭 | 在归档提交之后按 §8.2 与 §10 第 9–10 步执行，结果补记于验证记录与本表。 |
+| 整组发布、手机覆盖部署、实机闭环、主机双产物替换、双端独立探针与 Issue #48 回复关闭 | 已按 §8.2 与 §10 第 9–10 步执行并补记于验证记录 §5–§6：`0.38.0`/`34`/`40` 发布清单与主机清单 `source_dirty=false`、工具目录 `13/5578041a…`；手机整组覆盖部署（保留 App 私有数据）PASS；实机覆盖展开评论栏 `mode=expanded` 单次 `executed`、网易云抽屉与 `v_mask` 下候选整体省略、正常页面候选保持 `executable=true`；主机 stdio 与手机 HTTP 独立探针 `RESULT PASS`；Issue #48 已回复并 `CLOSED`。托管 MCP 宿主进程重启与重连按约定由用户处理。 |
 
 ---
 
