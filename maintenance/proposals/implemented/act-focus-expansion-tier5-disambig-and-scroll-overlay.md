@@ -1,12 +1,12 @@
 # 提案：补齐展开输入框聚焦绑定、Tier 2/3 容器歧义转 Tier 5 与遮罩感知的滚动候选（含 Issue #48）
 
-状态：提案，未实现。
+状态：已实现（契约 34）。实现提交：`7f8ef834078dfd097f32c1f8ab59b0f754b6445f`。
 基线提交：`a1e2c7a55e02677a48e55b0601862921d7a90b8e`（分支 `master`，`2026-11-27`）。
 适用范围：`act` 的三类核心执行与静态规划路径——① `text(ref)` / 坐标 `text` 的点击获焦与展开框绑定（`stage=focus`）；② `act` 认领后 ref 目标重验的 Tier 2/3 同构容器歧义消歧；③ `scroll` 全部静态 `422` 候选的跨窗口隔离与遮罩/浮层覆盖感知过滤排序（覆盖 GitHub Issue #48）。不改变 `observe`/`snap`/`wait_for`/`app`/`shell`/`notify`/`diagnose`，不修改固定制品 `u2.jar` 与 MCP 13 工具 schema。
 影响范围：`internal/engine/{act.go,act_revalidation_policy.go,act_target_shared.go,scroll.go}`、相关单元测试、`release/versions.json` 及生成版本常量、`README.md` 与 `docs/{interface.md,architecture.md,integration.md,client.md,control-protocol.md,phone-operations.md,release.md,runbook.md}`（并核对 `docs/mcp.md` 无漂移）、归档与验证记录及 GitHub Issue #48 回复关闭。
 契约（`/api/*` 字段与 `contract_version`）：改变共同行为契约，不增删 `/api/*` 请求/响应字段、错误码、`error.details.candidates` 6 字段结构、`error.details.reason` 闭集或 MCP 13 工具 schema 与目录指纹；因 `text` 聚焦绑定/复查、`act` 重验消歧与 `scroll` 静态候选过滤排序语义变化，发版时通过单一版本源 `release/versions.json` 将版本由 `0.37.0` / `contract_version=33` / `android_version_code=39` 升级为 `0.38.0` / `contract_version=34` / `android_version_code=40`，并同步生成 Go/Java/XML 常量与发布清单。
 
-本文引用的函数名、行号、常量与默认值均以该基线提交为准；实现落地前若代码已前进，须按当时的 `HEAD` 重新核对（重点：[act.go](../../internal/engine/act.go)、[act_revalidation_policy.go](../../internal/engine/act_revalidation_policy.go)、[act_target_shared.go](../../internal/engine/act_target_shared.go)、[scroll.go](../../internal/engine/scroll.go)、[point.go](../../internal/engine/point.go)、[text_submit.go](../../internal/engine/text_submit.go)、[hierarchy.go](../../internal/android/hierarchy.go)、[log.go](../../internal/eventlog/log.go)、[versions.json](../../release/versions.json)）。
+本文引用的函数名、行号、常量与默认值均以该基线提交为准；实现落地前若代码已前进，须按当时的 `HEAD` 重新核对（重点：[act.go](../../../internal/engine/act.go)、[act_revalidation_policy.go](../../../internal/engine/act_revalidation_policy.go)、[act_target_shared.go](../../../internal/engine/act_target_shared.go)、[scroll.go](../../../internal/engine/scroll.go)、[point.go](../../../internal/engine/point.go)、[text_submit.go](../../../internal/engine/text_submit.go)、[hierarchy.go](../../../internal/android/hierarchy.go)、[log.go](../../../internal/eventlog/log.go)、[versions.json](../../../release/versions.json)）。
 
 ---
 
@@ -45,37 +45,37 @@
 
 | 落点 / 现场证据 | 核实事实 |
 | --- | --- |
-| [act.go:1872-1896](../../internal/engine/act.go#L1872-L1896) | `dispatchText` 对 ref 目标先在已聚焦时走零点击快路径（`bindFocusedText(obs.Projection.Capture, fresh, want, obs.Foreground, tapX, tapY)`，注意此处 `want` 为 `fresh` 中节点指针）；未聚焦则调 `focusTextRef` |
-| [act.go:1999-2046](../../internal/engine/act.go#L1999-L2046)、[act.go:2050-2096](../../internal/engine/act.go#L2050-L2096) | `focusTextRef` 与 `focusTextPoint` 在 `Tap` 返回 `DispatchTerminated` 后均仅做 **1 次立即 `Capture`**，没有任何聚焦收敛等待；失败直接报 `409 text_target_uncertain (stage=focus, reason=focus_unconfirmed)`，`Tap` 终止后撤权返回 `409 control_revoked` 并保持 `OutcomeUncertain` |
-| [act.go:2275-2284](../../internal/engine/act.go#L2275-L2284)、[act.go:2299-2380](../../internal/engine/act.go#L2299-L2380) | `bindFocusedText` 虽在 focus 过滤前完成双帧 `anchorCount == 1` 与 `sameTextTaskContext` 检查，但：① 有自身锚点时 `shifted` 路径在 `L2370` 硬性调用 `sameHorizontalBand`（左右边容差 `±2%`、宽高差上限 `±20%`），拦截一切横向展开/多行撑高输入框；② 无自身锚点（`!hasAnchor`）时 `L2320-L2323` 在 `noAnchorNearCount(fresh, ...) != 1` 时即直接 `return false`，既不支持位移也不支持父容器锚点 |
-| [act_revalidation_policy.go:317-323,359-363](../../internal/engine/act_revalidation_policy.go#L359-L363) | 点击输入框弹出软键盘后，采集可能由单窗口切换为多窗口（`connectDisplayWindows` 追加 `isSyntheticDisplayRoot`），导致原窗口根的 `Parent` 由 `-1` 变为 `syntheticRoot`，因此父锚点逻辑必须统一识别真实窗口根 |
-| [build.go:474-477,509-514](../../internal/observation/build.go#L474-L477) | `newPublicNode` 对带文本的 `input` 隐藏公开 `resource` 显示，因此紧缩树样本 `O55/O56` 不能证明 `n1345` 自身必有 `resource-id`；同时具备自身锚点展开（1B）与唯一父容器 `resource-id` 兜底（1C）才能覆盖两类真实控件 |
-| [act_revalidation_matrix_test.go:471-473](../../internal/engine/act_revalidation_matrix_test.go#L471-L473)、[act_revalidation_test.go:1387-1390](../../internal/engine/act_revalidation_test.go#L1387-L1390) | 两处现有单测 `source_mismatch_horizontal_width`（`Right: 900→500`）与 `width_changed_on_shift`（匿名框 `Right: 980→500`）均测试**大幅缩窄**须被拒绝 |
-| [ui_execution_test.go:295-323](../../internal/engine/ui_execution_test.go#L295-L323) | `TestTextFocusReadFailureDoesNotReopenEndedTap` 注入 `Capture` 传输失败并要求立即以 `uncertain` 收口且不重开已终止 tap |
-| [docs/interface.md:901-905](../../docs/interface.md#L901-L905) | 现行契约 33 明确限定 `shifted` 为“同一水平带与受限尺寸的纵向位移” |
+| [act.go:1872-1896](../../../internal/engine/act.go#L1872-L1896) | `dispatchText` 对 ref 目标先在已聚焦时走零点击快路径（`bindFocusedText(obs.Projection.Capture, fresh, want, obs.Foreground, tapX, tapY)`，注意此处 `want` 为 `fresh` 中节点指针）；未聚焦则调 `focusTextRef` |
+| [act.go:1999-2046](../../../internal/engine/act.go#L1999-L2046)、[act.go:2050-2096](../../../internal/engine/act.go#L2050-L2096) | `focusTextRef` 与 `focusTextPoint` 在 `Tap` 返回 `DispatchTerminated` 后均仅做 **1 次立即 `Capture`**，没有任何聚焦收敛等待；失败直接报 `409 text_target_uncertain (stage=focus, reason=focus_unconfirmed)`，`Tap` 终止后撤权返回 `409 control_revoked` 并保持 `OutcomeUncertain` |
+| [act.go:2275-2284](../../../internal/engine/act.go#L2275-L2284)、[act.go:2299-2380](../../../internal/engine/act.go#L2299-L2380) | `bindFocusedText` 虽在 focus 过滤前完成双帧 `anchorCount == 1` 与 `sameTextTaskContext` 检查，但：① 有自身锚点时 `shifted` 路径在 `L2370` 硬性调用 `sameHorizontalBand`（左右边容差 `±2%`、宽高差上限 `±20%`），拦截一切横向展开/多行撑高输入框；② 无自身锚点（`!hasAnchor`）时 `L2320-L2323` 在 `noAnchorNearCount(fresh, ...) != 1` 时即直接 `return false`，既不支持位移也不支持父容器锚点 |
+| [act_revalidation_policy.go:317-323,359-363](../../../internal/engine/act_revalidation_policy.go#L359-L363) | 点击输入框弹出软键盘后，采集可能由单窗口切换为多窗口（`connectDisplayWindows` 追加 `isSyntheticDisplayRoot`），导致原窗口根的 `Parent` 由 `-1` 变为 `syntheticRoot`，因此父锚点逻辑必须统一识别真实窗口根 |
+| [build.go:474-477,509-514](../../../internal/observation/build.go#L474-L477) | `newPublicNode` 对带文本的 `input` 隐藏公开 `resource` 显示，因此紧缩树样本 `O55/O56` 不能证明 `n1345` 自身必有 `resource-id`；同时具备自身锚点展开（1B）与唯一父容器 `resource-id` 兜底（1C）才能覆盖两类真实控件 |
+| [act_revalidation_matrix_test.go:471-473](../../../internal/engine/act_revalidation_matrix_test.go#L471-L473)、[act_revalidation_test.go:1387-1390](../../../internal/engine/act_revalidation_test.go#L1387-L1390) | 两处现有单测 `source_mismatch_horizontal_width`（`Right: 900→500`）与 `width_changed_on_shift`（匿名框 `Right: 980→500`）均测试**大幅缩窄**须被拒绝 |
+| [ui_execution_test.go:295-323](../../../internal/engine/ui_execution_test.go#L295-L323) | `TestTextFocusReadFailureDoesNotReopenEndedTap` 注入 `Capture` 传输失败并要求立即以 `uncertain` 收口且不重开已终止 tap |
+| [docs/interface.md:901-905](../../../docs/interface.md#L901-L905) | 现行契约 33 明确限定 `shifted` 为“同一水平带与受限尺寸的纵向位移” |
 
 #### 证据链 B：Tier 2/3 无自有文案容器歧义短路阻塞 Tier 5
 
 | 落点 / 现场证据 | 核实事实 |
 | --- | --- |
-| [act_revalidation_policy.go:501-515,838-881](../../internal/engine/act_revalidation_policy.go#L838-L881) | Tier 2（`overlap >= 0.50`）与 Tier 3（`overlap >= 0.60`）的 `edgeAtTier` 只比较 `sameStructureForAct`、`geometryCompatible` 与祖先链，完全不检查子树可读文案 |
-| [act.go:2431-2444](../../internal/engine/act.go#L2431-L2444) | `overlapRatio` 以**两矩形中较小面积**为分母；推荐流中紧邻的贴边裁切短卡（如 `O35` 顶部 `n105`）与平移后的长卡 `n75` 局部交叠即达到 `>= 0.50`，令 `probeWant`（[act_revalidation_policy.go:920-974](../../internal/engine/act_revalidation_policy.go#L920-L974)）在正向或反向扫描中发现 ≥2 条同构边并返回 `actProbeAmbiguous` |
-| [act_revalidation_policy.go:1056-1057,1066-1099](../../internal/engine/act_revalidation_policy.go#L1056-L1057) | `matchActTargetWithOptions` 遇到 `actProbeAmbiguous` 无条件直接 `return`，从未进入 [L1525-L1554](../../internal/engine/act_revalidation_policy.go#L1525-L1554) 的 Tier 5（`sameHorizontalBand` + `L1/L2` + `E1/E2/E3` 双向唯一）；另 `L1099` 在返回 `actProbeNone` 时透传 `sawLineageMismatch`，需防止 Tier 3 歧义转入 Tier 5 失败后误标 `lineage_changed` |
-| [act.go:20-34](../../internal/engine/act.go#L20-L34) | `isTransientRevalidateError` 将 `target_ambiguous` 排除在 150ms 瞬态复检之外 |
-| [act.go:590-601,1007-1010,1155-1158,1211-1215,1319-1340,1498-1501](../../internal/engine/act.go#L1498-L1501)、[point.go:795](../../internal/engine/point.go#L795) | `submitTapFrameOptions`（`act.go:592`）与坐标拥有者兜底 `provePointOwnerFallback`（`point.go:795`）均置 `disableTranslation=true`；凡命中 `tier >= 4`（含 Tier 5）的目标均自动强制通过 `tapFrameTier4OcclusionProven` 全树遮挡证明，且 `bubble_colocated` 命中 Tier 5 自动触发 `colocatedSyncShiftOK` |
-| [act_revalidation_matrix_test.go:275-286](../../internal/engine/act_revalidation_matrix_test.go#L275-L286)、[docs/interface.md:715,735](../../docs/interface.md#L715) | 现有矩阵测试中 `tierOriginalCapture` 目标节点为带自身文本的叶子按钮（无子节点）；现行规范要求任一 Tier 多候选立即拒绝、Tier 5 仅在零候选后运行 |
+| [act_revalidation_policy.go:501-515,838-881](../../../internal/engine/act_revalidation_policy.go#L838-L881) | Tier 2（`overlap >= 0.50`）与 Tier 3（`overlap >= 0.60`）的 `edgeAtTier` 只比较 `sameStructureForAct`、`geometryCompatible` 与祖先链，完全不检查子树可读文案 |
+| [act.go:2431-2444](../../../internal/engine/act.go#L2431-L2444) | `overlapRatio` 以**两矩形中较小面积**为分母；推荐流中紧邻的贴边裁切短卡（如 `O35` 顶部 `n105`）与平移后的长卡 `n75` 局部交叠即达到 `>= 0.50`，令 `probeWant`（[act_revalidation_policy.go:920-974](../../../internal/engine/act_revalidation_policy.go#L920-L974)）在正向或反向扫描中发现 ≥2 条同构边并返回 `actProbeAmbiguous` |
+| [act_revalidation_policy.go:1056-1057,1066-1099](../../../internal/engine/act_revalidation_policy.go#L1056-L1057) | `matchActTargetWithOptions` 遇到 `actProbeAmbiguous` 无条件直接 `return`，从未进入 [L1525-L1554](../../../internal/engine/act_revalidation_policy.go#L1525-L1554) 的 Tier 5（`sameHorizontalBand` + `L1/L2` + `E1/E2/E3` 双向唯一）；另 `L1099` 在返回 `actProbeNone` 时透传 `sawLineageMismatch`，需防止 Tier 3 歧义转入 Tier 5 失败后误标 `lineage_changed` |
+| [act.go:20-34](../../../internal/engine/act.go#L20-L34) | `isTransientRevalidateError` 将 `target_ambiguous` 排除在 150ms 瞬态复检之外 |
+| [act.go:590-601,1007-1010,1155-1158,1211-1215,1319-1340,1498-1501](../../../internal/engine/act.go#L1498-L1501)、[point.go:795](../../../internal/engine/point.go#L795) | `submitTapFrameOptions`（`act.go:592`）与坐标拥有者兜底 `provePointOwnerFallback`（`point.go:795`）均置 `disableTranslation=true`；凡命中 `tier >= 4`（含 Tier 5）的目标均自动强制通过 `tapFrameTier4OcclusionProven` 全树遮挡证明，且 `bubble_colocated` 命中 Tier 5 自动触发 `colocatedSyncShiftOK` |
+| [act_revalidation_matrix_test.go:275-286](../../../internal/engine/act_revalidation_matrix_test.go#L275-L286)、[docs/interface.md:715,735](../../../docs/interface.md#L715) | 现有矩阵测试中 `tierOriginalCapture` 目标节点为带自身文本的叶子按钮（无子节点）；现行规范要求任一 Tier 多候选立即拒绝、Tier 5 仅在零候选后运行 |
 
 #### 证据链 C：遮罩/浮层感知的 `scroll` 静态候选过滤与排序（Issue #48）
 
 | 落点 / 现场证据 | 核实事实 |
 | --- | --- |
-| [scroll.go:260-419](../../internal/engine/scroll.go#L260-L419) | `scrollSafeSpansAt` 遍历整棵公开树，对所有 `scope == scrollScopeNone`（一切非滚动节点，含顶层弹窗遮罩 `v_mask`/`shadow`、抽屉非滚动顶栏 `n7613..n7624`）在 `L373` 直接忽略 |
-| [scroll.go:989,1038,1045,1053,1063,1070,1105,1137,1200,1255,1327,1348,1354,1367,1373,1383](../../internal/engine/scroll.go#L1381-L1385)、[scroll.go:1515-1588](../../internal/engine/scroll.go#L1515-L1588) | `scroll.go` 共 16 处静态 `422` 出口调用 `buildStaticCandidates`；其中 `collectNoSafeTrajectoryCandidates` 将 `failure.blockingScrollNodes`（底层 `n7405`/`n7416`/`n7026`/`n7479`）仅按面积降序与先序排序，未感知前景浮层或遮挡关系 |
-| [act_target_shared.go:581-660,693-735](../../internal/engine/act_target_shared.go#L581-L660) | `collectPageScrollCandidates` 扫描全树 `isScrollContainer` 仅按面积降序排布；`buildStaticCandidates` 对 `scroll` 仅调用 `tryPlanScrollBase`（即仅走 `scrollSafeSpansAt`）计算 `executable`，再按 `executable=true` 置顶截取前 4 项 |
+| [scroll.go:260-419](../../../internal/engine/scroll.go#L260-L419) | `scrollSafeSpansAt` 遍历整棵公开树，对所有 `scope == scrollScopeNone`（一切非滚动节点，含顶层弹窗遮罩 `v_mask`/`shadow`、抽屉非滚动顶栏 `n7613..n7624`）在 `L373` 直接忽略 |
+| [scroll.go:989,1038,1045,1053,1063,1070,1105,1137,1200,1255,1327,1348,1354,1367,1373,1383](../../../internal/engine/scroll.go#L1381-L1385)、[scroll.go:1515-1588](../../../internal/engine/scroll.go#L1515-L1588) | `scroll.go` 共 16 处静态 `422` 出口调用 `buildStaticCandidates`；其中 `collectNoSafeTrajectoryCandidates` 将 `failure.blockingScrollNodes`（底层 `n7405`/`n7416`/`n7026`/`n7479`）仅按面积降序与先序排序，未感知前景浮层或遮挡关系 |
+| [act_target_shared.go:581-660,693-735](../../../internal/engine/act_target_shared.go#L581-L660) | `collectPageScrollCandidates` 扫描全树 `isScrollContainer` 仅按面积降序排布；`buildStaticCandidates` 对 `scroll` 仅调用 `tryPlanScrollBase`（即仅走 `scrollSafeSpansAt`）计算 `executable`，再按 `executable=true` 置顶截取前 4 项 |
 | `3e7a393a` 实机现场（`O5641_167`，网易云侧边抽屉） | `n7400`（DrawerLayout）有两子分支：`[n7402(主页面 n7405/n7416 0,0,1080,2248), n7611(抽屉 0,0,864,2400，含顶栏 y=0..273、实体滚动列表 n7628 0,273,864,2214（单节点即占 n7611 面积 80.9%）与底栏 y=2214..2400)]`。`n7405` 的 3 条探测轴线（`x=540,270,810`）100% 落在抽屉 `n7611` 之下，却因 `scrollSafeSpansAt` 忽略非滚动顶栏 `y=0..273` 而凑出 `65px >= 48px` 的假安全段，获得 `executable=true` 并排在 `candidates[0]` |
 | `10ca6f7e` 实机现场（`O56` 小黑盒遮罩、`O77` B 站弹窗） | `O56` 中无子无文案点击遮罩 `n1507 (tap resource="v_mask")` 在 XML 先序位于底层 `n1360/n1418 (scroll)` **之前**（由 `elevation`/布局绘制序抬高），`O77` 中 `n2799 (tap resource="shadow")` 亦为全屏无子无文案点击遮罩；证明单窗口内不能盲目把“先序在后=视觉在上”当作派发级真理 |
-| 固定制品 `third_party/uiautomator/u2.jar`（`classes8.dex`）、[hierarchy.go:201-288](../../internal/android/hierarchy.go#L201-L288)、[types.go:79-119](../../internal/device/types.go#L79-L119) | `u2.jar` 的 `AccessibilityNodeInfoDumper.getWindowRoots()` 使用 **`java.util.HashSet`** 收集 `getRootInActiveWindow()` 与 `getWindows()` 根节点后直接 `toArray()` 序列化，且 XML 不含 `window-id`/`window-layer`/`elevation`/`drawingOrder`。因此：**多顶层窗口下，合成显示根 `isSyntheticDisplayRoot` 下的顶层分支代表不同窗口（可做等值隔离 `winA != winB`），但子窗口下标序是 `HashSet` 桶序而非真实 z 序**，绝不能以 `winA < winB` 推断谁在顶层 |
-| [protocol/errors.go:21-24](../../internal/protocol/errors.go#L21-L24)、[docs/interface.md:568-577,654-660,755-759](../../docs/interface.md#L568-L577) | `candidates` 每项固定 6 字段（`ref`/`role`/`actions`/`bounds`/`relation`/`executable`），`candidates[i].executable == true` 承诺同一 O 上重试必过静态准入；树模型不作为真实 z 序派发证明 |
+| 固定制品 `third_party/uiautomator/u2.jar`（`classes8.dex`）、[hierarchy.go:201-288](../../../internal/android/hierarchy.go#L201-L288)、[types.go:79-119](../../../internal/device/types.go#L79-L119) | `u2.jar` 的 `AccessibilityNodeInfoDumper.getWindowRoots()` 使用 **`java.util.HashSet`** 收集 `getRootInActiveWindow()` 与 `getWindows()` 根节点后直接 `toArray()` 序列化，且 XML 不含 `window-id`/`window-layer`/`elevation`/`drawingOrder`。因此：**多顶层窗口下，合成显示根 `isSyntheticDisplayRoot` 下的顶层分支代表不同窗口（可做等值隔离 `winA != winB`），但子窗口下标序是 `HashSet` 桶序而非真实 z 序**，绝不能以 `winA < winB` 推断谁在顶层 |
+| [protocol/errors.go:21-24](../../../internal/protocol/errors.go#L21-L24)、[docs/interface.md:568-577,654-660,755-759](../../../docs/interface.md#L568-L577) | `candidates` 每项固定 6 字段（`ref`/`role`/`actions`/`bounds`/`relation`/`executable`），`candidates[i].executable == true` 承诺同一 O 上重试必过静态准入；树模型不作为真实 z 序派发证明 |
 
 ### 1.3 为什么直觉会出错
 
@@ -165,7 +165,7 @@
 4. Y 轴位置与高度增幅不受 `sameHorizontalBand` 的 `±20%` 上限约束（容忍软键盘顶起与多行编辑器增高）。
 
 #### 4.1.2 真实窗口根统一判定 `isRawWindowRoot(capture *device.Capture, index int) bool`
-与 `lineageL1`（[act_revalidation_policy.go:359-363](../../internal/engine/act_revalidation_policy.go#L359-L363)）严格对齐：当 `index < 0 || index >= len(capture.Nodes)` 返回 `true`；否则当节点自身为 `capture.Root`、`Parent == -1`、`isSyntheticDisplayRoot(node)`、或其 `Parent`（有效下标）满足 `isSyntheticDisplayRoot(&capture.Nodes[node.Parent])` 时返回 `true`。由此保证点击聚焦导致单窗口切多窗口（软键盘/悬浮窗出现）时，1C 对真实窗口根的排除在双帧完全一致。
+与 `lineageL1`（[act_revalidation_policy.go:359-363](../../../internal/engine/act_revalidation_policy.go#L359-L363)）严格对齐：当 `index < 0 || index >= len(capture.Nodes)` 返回 `true`；否则当节点自身为 `capture.Root`、`Parent == -1`、`isSyntheticDisplayRoot(node)`、或其 `Parent`（有效下标）满足 `isSyntheticDisplayRoot(&capture.Nodes[node.Parent])` 时返回 `true`。由此保证点击聚焦导致单窗口切多窗口（软键盘/悬浮窗出现）时，1C 对真实窗口根的排除在双帧完全一致。
 
 #### 4.1.3 `bindFocusedText` 绑定顺序与 1B / 1C 判据
 前置条件不变：`original`/`fresh`/`want` 非空、`want` 可见/可编辑/启用/非密码、同 `Display.ID`、且 `sameTextTaskContext(expected, fresh.Foreground)` 为真。
@@ -197,11 +197,11 @@
 #### 4.1.4 有界只读聚焦复查（`focusTextRef` 与 `focusTextPoint`）
 - 常量/变量（参考 `textVerifyDelays` 设计为包内 `var` 以便单测覆写，不对外暴露）：
   - `var textFocusPollDelays = []time.Duration{60 * time.Millisecond, 120 * time.Millisecond}`（总休眠至多 `180ms`，含首帧共至多 3 次 `Capture`）；
-  - `const textFocusRecheckMaxElapsed = 1200 * time.Millisecond`（**从第 1 次 `Capture` 返回且未绑定后开始计时**，避免第 1 次正常真机 `Capture` 耗去 300–500ms 后截断复查；且单次 `e.dev.Capture` 直接传 `work.Ctx`，不用几十毫秒残余子 deadline 中途掐死在途 RPC，与 `dispatchTextSubmitTap` [text_submit.go:565](../../internal/engine/text_submit.go#L565) 一致）。
+  - `const textFocusRecheckMaxElapsed = 1200 * time.Millisecond`（**从第 1 次 `Capture` 返回且未绑定后开始计时**，避免第 1 次正常真机 `Capture` 耗去 300–500ms 后截断复查；且单次 `e.dev.Capture` 直接传 `work.Ctx`，不用几十毫秒残余子 deadline 中途掐死在途 RPC，与 `dispatchTextSubmitTap` [text_submit.go:565](../../../internal/engine/text_submit.go#L565) 一致）。
 - 一次 `act(text)` 至多派发 **1 次**聚焦 `Tap`；仅在 `Tap` 返回 `DispatchTerminated && tapErr == nil` 且未撤权后进入聚焦读帧循环：
   - 第 1 次抓取（`attempt = 1`，`0ms`）：立即 `Capture`（不睡眠）；若绑定成功直接进入 `stage=write`（0ms 额外等待）。
   - 每次 `Capture` 返回后的即时中止条件（**不睡眠、不再重试**）：
-    1. `e.workRevoked(work) || work.Ctx.Err() != nil` → 返回 `409 control_revoked`（`reason=authorization_revoked`，**因聚焦 `Tap` 已终止，整体保持 `OutcomeUncertain`**，与 [act.go:2035-2037](../../internal/engine/act.go#L2035-L2037) 一致）；
+    1. `e.workRevoked(work) || work.Ctx.Err() != nil` → 返回 `409 control_revoked`（`reason=authorization_revoked`，**因聚焦 `Tap` 已终止，整体保持 `OutcomeUncertain`**，与 [act.go:2035-2037](../../../internal/engine/act.go#L2035-L2037) 一致）；
     2. `captureErr != nil` → 返回 `409 text_target_uncertain`（`stage=focus, reason=focus_unconfirmed, outcome=uncertain`）；
     3. `!textSubmitCaptureTrusted(&afterTap, session.Display) || !e.textSubmitDisplayCurrent(work, session.Display)` → 返回 `focus_unconfirmed`；
     4. 上下文变化：`focusTextRef` 检查 `!sameTextTaskContext(fresh.Foreground, afterTap.Foreground)`，`focusTextPoint` 检查 `foregroundMatches(fresh.Foreground, afterTap.Foreground) != nil` → 返回 `focus_unconfirmed`；
@@ -214,7 +214,7 @@
 
 ### 4.2 Tier 2/3 无自有文案容器歧义转入 Tier 5（议题 2）
 
-在 [act_revalidation_policy.go](../../internal/engine/act_revalidation_policy.go#L1018-L1100) 定义确定性准入函数 `canDisambiguateViaTier5(want *device.RawNode, tier int, options actMatchOptions) bool`：
+在 [act_revalidation_policy.go](../../../internal/engine/act_revalidation_policy.go#L1018-L1100) 定义确定性准入函数 `canDisambiguateViaTier5(want *device.RawNode, tier int, options actMatchOptions) bool`：
 - 返回 `true` 当且仅当以下 4 条同时成立：
   1. `tier == 2 || tier == 3`（Tier 1 歧义永不进入）；
   2. `!options.disableTranslation`（`submit_ref` 与坐标拥有者兜底禁用 Tier 5，保持立即返回 `actProbeAmbiguous`）；
@@ -231,7 +231,7 @@
 
 ### 4.3 遮罩/浮层感知的 `scroll` 静态候选过滤与排序（议题 3 / Issue #48）
 
-**保持 `scrollSafeSpansAt` 现有派发逻辑完全不变**。本节规则统一封装为 `buildFilteredScrollCandidates(obs, view, operation, want, entries)` 并接入 [scroll.go](../../internal/engine/scroll.go) 的**全部 16 处** `buildStaticCandidates` 静态 `422` 出口（包括 `ancestor_invalid`/`ancestor_missing_action`/祖先 `axis_mismatch` 出口统一传 `want = target` 以保持最贴近用户目标的前景上下文；坐标无单目标出口传 `want = nil`），且不改变 `candidates` 既有的 6 字段契约。
+**保持 `scrollSafeSpansAt` 现有派发逻辑完全不变**。本节规则统一封装为 `buildFilteredScrollCandidates(obs, view, operation, want, entries)` 并接入 [scroll.go](../../../internal/engine/scroll.go) 的**全部 16 处** `buildStaticCandidates` 静态 `422` 出口（包括 `ancestor_invalid`/`ancestor_missing_action`/祖先 `axis_mismatch` 出口统一传 `want = target` 以保持最贴近用户目标的前景上下文；坐标无单目标出口传 `want = nil`），且不改变 `candidates` 既有的 6 字段契约。
 
 单次调用先在 `O(N)` 内对 `view` 预计算每个公开节点的深度、公开父链、所属顶层窗口号 `winID`（当原始 `capture.Root` 为 `isSyntheticDisplayRoot` 且有 ≥2 个顶层窗口时，从原始 `capture.Nodes[capture.Root].Children` 推导并经 `projection.Source` 及后代原始源映射到每个公开节点；单窗口全为 `0`），确保即使 `observation/build.go` 折叠透明窗口根，也能精确识别任意两公开节点是否属于同一顶层窗口，**绝不跨越不同顶层窗口比较兄弟顺序**。
 
@@ -417,13 +417,13 @@ func buildFilteredScrollCandidates(obs, view, operation, want, entries):
 
 | 文件 | 改动 |
 | --- | --- |
-| [internal/engine/act.go](../../internal/engine/act.go) | 在 `bindFocusedText` 新增 `textExpanded`、`textParentAnchor`、`textPoint`、`expandedTextGeometry`、`isRawWindowRoot`、`nearestParentResourceAnchor`、`bindFocusedTextByParentAnchor`（`expanded` 保留 `anchor`/`anchorKind`，Branch B 拦截 `freshNear > 1`）；将 `focusTextRef` 与 `focusTextPoint` 接入有界只读复查 `textFocusPollDelays`/`textFocusRecheckMaxElapsed`、前置显示/前景/拓扑校验与 `defer logTextFocus` |
-| [internal/engine/act_revalidation_policy.go](../../internal/engine/act_revalidation_policy.go) | 新增 `canDisambiguateViaTier5`；在 `matchActTargetWithOptions` 中允许满足条件的容器于 Tier 2/3 `actProbeAmbiguous` 后跳出并直入 Tier 5（跳过 Tier 4），且终态 `actProbeNone` 返回 `lineageMismatch: sawLineageMismatch && !disambiguateInTier5` |
-| [internal/engine/scroll.go](../../internal/engine/scroll.go) | 保持 `scrollSafeSpansAt` 不变；新增 `scrollOverlayContext`、`rectUnionArea64`、`isBackdropScrimNode`、`isSolidOverlayPanel`、`isScrollCandidateOverlayOccluded`（O1/O2/O3）与 `buildFilteredScrollCandidates`，统一接入 `scroll.go` 全部 16 处 `buildStaticCandidates` 静态 `422` 出口（祖先失败出口传 `want = target`） |
-| [internal/engine/act_target_shared.go](../../internal/engine/act_target_shared.go) | 复用公共矩形面积/重叠辅助；保持 `buildStaticCandidates` 输出固定 6 字段与既有 `candidates` 排序截取契约不变 |
+| [internal/engine/act.go](../../../internal/engine/act.go) | 在 `bindFocusedText` 新增 `textExpanded`、`textParentAnchor`、`textPoint`、`expandedTextGeometry`、`isRawWindowRoot`、`nearestParentResourceAnchor`、`bindFocusedTextByParentAnchor`（`expanded` 保留 `anchor`/`anchorKind`，Branch B 拦截 `freshNear > 1`）；将 `focusTextRef` 与 `focusTextPoint` 接入有界只读复查 `textFocusPollDelays`/`textFocusRecheckMaxElapsed`、前置显示/前景/拓扑校验与 `defer logTextFocus` |
+| [internal/engine/act_revalidation_policy.go](../../../internal/engine/act_revalidation_policy.go) | 新增 `canDisambiguateViaTier5`；在 `matchActTargetWithOptions` 中允许满足条件的容器于 Tier 2/3 `actProbeAmbiguous` 后跳出并直入 Tier 5（跳过 Tier 4），且终态 `actProbeNone` 返回 `lineageMismatch: sawLineageMismatch && !disambiguateInTier5` |
+| [internal/engine/scroll.go](../../../internal/engine/scroll.go) | 保持 `scrollSafeSpansAt` 不变；新增 `scrollOverlayContext`、`rectUnionArea64`、`isBackdropScrimNode`、`isSolidOverlayPanel`、`isScrollCandidateOverlayOccluded`（O1/O2/O3）与 `buildFilteredScrollCandidates`，统一接入 `scroll.go` 全部 16 处 `buildStaticCandidates` 静态 `422` 出口（祖先失败出口传 `want = target`） |
+| [internal/engine/act_target_shared.go](../../../internal/engine/act_target_shared.go) | 复用公共矩形面积/重叠辅助；保持 `buildStaticCandidates` 输出固定 6 字段与既有 `candidates` 排序截取契约不变 |
 | 单元测试（`internal/engine/`） | 新增先红复现、反向对照与边界回归用例，覆盖 1B/1C 展开聚焦、多窗口根一致、有界复查与 STOP 中断、Tier 2/3 歧义转 Tier 5（含 Tier 3 `none` 归因 `target_missing`）与遮挡/双绑定守卫、O1/O2/O3 候选排除（含网易云抽屉 `O5641_167`、小黑盒 `O56`、空心透明 HUD、视频播放器前序容器与多窗口乱序测试） |
-| [release/versions.json](../../release/versions.json) 及生成产物 | 仅改单一版本源为 `0.38.0` / `contract_version=34` / `android_version_code=40`，运行 `scripts/generate-version.ps1` 更新 Go/Java/XML 常量 |
-| [README.md](../../README.md) 与 `docs/`（`interface.md`、`architecture.md`、`integration.md`、`client.md`、`control-protocol.md`、`phone-operations.md`、`release.md`、`runbook.md`；核对 `mcp.md`） | 同步契约 `34` 行为描述（`text` 展开聚焦与有界复查、Tier 2/3 无字容器歧义转 Tier 5、`scroll` 静态候选跨窗口隔离与前景遮罩过滤排序）及全量版本号引用（`0.38.0` / `34` / `40`）；实现提交前通过独立只读文档审计 |
+| [release/versions.json](../../../release/versions.json) 及生成产物 | 仅改单一版本源为 `0.38.0` / `contract_version=34` / `android_version_code=40`，运行 `scripts/generate-version.ps1` 更新 Go/Java/XML 常量 |
+| [README.md](../../../README.md) 与 `docs/`（`interface.md`、`architecture.md`、`integration.md`、`client.md`、`control-protocol.md`、`phone-operations.md`、`release.md`、`runbook.md`；核对 `mcp.md`） | 同步契约 `34` 行为描述（`text` 展开聚焦与有界复查、Tier 2/3 无字容器歧义转 Tier 5、`scroll` 静态候选跨窗口隔离与前景遮罩过滤排序）及全量版本号引用（`0.38.0` / `34` / `40`）；实现提交前通过独立只读文档审计 |
 
 ### 6.2 配置与取值
 
@@ -436,7 +436,7 @@ func buildFilteredScrollCandidates(obs, view, operation, want, entries):
 
 ### 6.3 日志与可观测性
 
-- 全部复用 [internal/eventlog/log.go](../../internal/eventlog/log.go#L63-L108) **已有白名单键**，无需新增日志键，绝不写入文本、节点 `ref`、`resource-id`、坐标或树内容：
+- 全部复用 [internal/eventlog/log.go](../../../internal/eventlog/log.go#L63-L108) **已有白名单键**，无需新增日志键，绝不写入文本、节点 `ref`、`resource-id`、坐标或树内容：
   - 新增 `Debug` 事件 `engine.text.focus`（由 `defer` 统一记录）：`operation_id`、`mode`（`"exact"`/`"near"`/`"shifted"`/`"expanded"`/`"parent_anchor"`/`"point"`/`"none"`）、`attempt`（`1..3`）、`outcome`（`"proven"`/`"uncertain"`/`"stopped"`）、`reason`（失败/撤销时为闭集 `focus_unconfirmed`/`authorization_revoked`）、`ms`；
   - Tier 2/3 歧义转 Tier 5 命中后，既有 `act.target` 事件照常记录 `outcome="proven", tier=5, attempt=1|2`；
   - `scroll` 候选过滤为纯静态拒绝逻辑，不增加冗余日志事件。
@@ -457,7 +457,7 @@ func buildFilteredScrollCandidates(obs, view, operation, want, entries):
 
 - `/api/*` JSON 请求/响应字段、错误码、`error.details.candidates` 6 字段结构及 MCP 13 工具 schema 与目录指纹**均不变**；
 - 共同行为契约随 `release/versions.json` 递增至 `contract_version=34`（`release_version=0.38.0`、`android_version_code=40`）；
-- 必改正式文档：[README.md](../../README.md)、[docs/interface.md](../../docs/interface.md)、[docs/architecture.md](../../docs/architecture.md)、[docs/integration.md](../../docs/integration.md)、[docs/client.md](../../docs/client.md)（含共同契约版本号）、[docs/control-protocol.md](../../docs/control-protocol.md)、[docs/phone-operations.md](../../docs/phone-operations.md)、[docs/release.md](../../docs/release.md)、[docs/runbook.md](../../docs/runbook.md)；核对 `docs/mcp.md` 无版本号与语义漂移则不改；实现提交前通过 `AGENTS.md` 第 15 条独立只读文档审计。
+- 必改正式文档：[README.md](../../../README.md)、[docs/interface.md](../../../docs/interface.md)、[docs/architecture.md](../../../docs/architecture.md)、[docs/integration.md](../../../docs/integration.md)、[docs/client.md](../../../docs/client.md)（含共同契约版本号）、[docs/control-protocol.md](../../../docs/control-protocol.md)、[docs/phone-operations.md](../../../docs/phone-operations.md)、[docs/release.md](../../../docs/release.md)、[docs/runbook.md](../../../docs/runbook.md)；核对 `docs/mcp.md` 无版本号与语义漂移则不改；实现提交前通过 `AGENTS.md` 第 15 条独立只读文档审计。
 
 ---
 
@@ -480,7 +480,7 @@ func buildFilteredScrollCandidates(obs, view, operation, want, entries):
 | 点击聚焦后动画耗时超过 3 次 `Capture` 或 `1200ms` 复查窗口仍未报告 `focused=true` | 聚焦复查受有限步数与时间窗口约束，超时后诚实返回 `uncertain` |
 | 列表中相邻两张无字卡片连子树可读文案也完全一致，或均为纯图片无任何可读文案 | 前者为真实歧义（Tier 5 仍报 `target_ambiguous`），后者 E3 无语义证据（Tier 5 报 `target_missing`），均绝不猜测 |
 | 多窗口顶层弹窗内 `scroll` 被底层窗口容器阻塞，或无点击遮罩的多窗口场景下坐标 `no_scroll_container` 无法判别窗口上下序 | 核实固定 `u2.jar` 的 `AccessibilityNodeInfoDumper.getWindowRoots()` 使用 `java.util.HashSet` 且未输出 `window-layer`，XML 顶层顺序不代表真实 z 序；本提案不修改 `u2.jar`，故保持 `scrollSafeSpansAt` 保守不变（如需多窗口确定 z 序，须另案补丁 `u2.jar`） |
-| 单窗口侧边抽屉 `n7628` 自身请求受控 `scroll` 仍返回 `422 no_safe_trajectory`；或单窗口对抽屉区域发**坐标 `scroll`** 时若底层存在未阻塞缝隙导致 `competing` 仅剩 1 个可执行项（[scroll.go:1212-1260](../../internal/engine/scroll.go#L1212-L1260)） | Android 无障碍 XML 不提供单窗口兄弟真实 z 序，本提案故意不改动 `scrollSafeSpansAt` 的单窗口派发逻辑；静态 `422` 候选不再误推底层 `n7405`/`n7416`，调用方可明确使用 raw `swipe` 滚动抽屉 |
+| 单窗口侧边抽屉 `n7628` 自身请求受控 `scroll` 仍返回 `422 no_safe_trajectory`；或单窗口对抽屉区域发**坐标 `scroll`** 时若底层存在未阻塞缝隙导致 `competing` 仅剩 1 个可执行项（[scroll.go:1212-1260](../../../internal/engine/scroll.go#L1212-L1260)） | Android 无障碍 XML 不提供单窗口兄弟真实 z 序，本提案故意不改动 `scrollSafeSpansAt` 的单窗口派发逻辑；静态 `422` 候选不再误推底层 `n7405`/`n7416`，调用方可明确使用 raw `swipe` 滚动抽屉 |
 | 单窗口内被 `elevation` 抬到滚动容器之上、但自身**非 `clickable`** 且排在滚动容器**之前**的纯静态遮罩面板 | 既不满足后序兄弟规则（O3）也不属于触摸遮罩叶（O2），无障碍树中与普通背景静态底图不可区分 |
 
 ### 7.3 成本
@@ -567,22 +567,35 @@ func buildFilteredScrollCandidates(obs, view, operation, want, entries):
 
 ---
 
-## 11. 实现结果（归档时补写）
+## 11. 实现结果
 
-实现提交：`<hash>`。实现与验证记录：`../../verification/act-focus-expansion-tier5-disambig-and-scroll-overlay.md`
-（本节在归档移动之后补写，届时文件在 `implemented/` 下，故链接比新建时多一层）。
+实现提交：`7f8ef834078dfd097f32c1f8ab59b0f754b6445f`。实现与验证记录：
+[act-focus-expansion-tier5-disambig-and-scroll-overlay](../../verification/act-focus-expansion-tier5-disambig-and-scroll-overlay.md)。
 
 ### 11.1 已落地
 
 | 提案条目 | 落点 |
 | --- | --- |
-| （归档时补写） | — |
+| 议题 1 / 1B：`expandedTextGeometry` 与 `expanded` 绑定分支（稳定锚点、双帧唯一性先于 focus、不缩窄、X 轴投影交叠 ≥ 原宽一半、Y 位置不参与水平带判定） | `internal/engine/text_focus_binding.go:21`、`internal/engine/act.go:2302` |
+| 议题 1 / 1C：`isRawWindowRoot`、`nearestParentResourceAnchor`、`uniqueTextParentAnchor`、`uniqueTextDescendant`、`bindFocusedTextByParentAnchor`（父锚点双帧唯一、父下同类可编辑子框双帧各 1 个、`freshNear > 1` 拒绝、全屏唯一安全聚焦框、跨帧指针不启用） | `internal/engine/text_focus_binding.go:36,49,74,93,134`、`internal/engine/act.go:2302` |
+| 议题 1 / 1-Poll：`focusTextWithRecheck` 有界只读复查（至多 1 次 Tap、至多 3 次 Capture、`60/120ms` 退避、`1200ms` 窗口自首帧未绑定起算、`work.Ctx` 直连、STOP 立即撤权） | `internal/engine/act.go:2016`、`internal/engine/text_focus_binding.go:11-17` |
+| 议题 1 / 日志：`engine.text.focus`（`operation_id`/`mode`/`attempt`/`outcome`/`reason`/`ms`，复用既有白名单键） | `internal/engine/text_focus_binding.go:163` |
+| 议题 2：`canDisambiguateViaTier5` 准入四条、Tier 2/3 歧义直入 Tier 5（跳过 Tier 4）与 Tier 5 零候选清除 `sawLineageMismatch`（归因 `target_missing`） | `internal/engine/act_revalidation_policy.go:1281,1034-1114` |
+| 议题 3：`scrollOverlayContext`、`rectUnionArea64`、`isBackdropScrimNode`、`isSolidOverlayPanel`、`isScrollCandidateOverlayOccluded`（O1/O2/O3 + 轴向联合判定）、`buildFilteredScrollCandidates` 与同前景分支稳定排序 | `internal/engine/scroll_overlay.go:32,198,134,146,259,402` |
+| 议题 3：`scroll.go` 全部 16 处静态 `422` 候选出口接入（祖先/目标出口传请求目标，坐标无单一目标出口传 `nil`），`candidates` 6 字段、至多 4 项与 `executable=true` 优先不变 | `internal/engine/scroll.go:989,1038,1045,1053,1063,1070,1105,1137,1200,1255,1327,1348,1354,1367,1373,1383` |
+| 先红复现、反向对照与边界回归用例 | `internal/engine/text_focus_binding_test.go`、`internal/engine/scroll_overlay_test.go`、`internal/engine/act_revalidation_tier5_disambig_test.go` |
+| 版本源与正式文档 | `release/versions.json`（`0.38.0`/`34`/`40`）、生成常量、`README.md`、`docs/{interface,architecture,integration,client,control-protocol,phone-operations,release,runbook}.md` |
 
 ### 11.2 与提案不同或未执行
 
 | 项 | 结论与理由 |
 | --- | --- |
-| （归档时补写） | — |
+| 议题 2 的“154px 平移 + 同构列表”复现夹具几何为合成建模 | 严格无重叠竖排列表在 154px 位移下无法同时满足 `sizeCompatible`（贴边短卡须 ≥350px）与 `overlapRatio ≥ 0.5 × 较小面积`（须 ≤308px）。夹具改为“短卡在双帧内都与长卡局部重叠”的贴边短卡，其余提案要素（3 张同构无文案容器卡、上移 154px、重叠 ≥50%、水平带与子树文案不变、`want` 无自有文案且有子节点、未禁用平移、`actMatchTapLike`）全部保留。 |
+| 议题 2 的 ⑥（Tier 3 歧义转 Tier 5 后归因 `target_missing`）构造方式 | Tier 3 的 0.6 门限高于 Tier 2 的 0.5，直接叠卡无法产生 Tier 3 歧义；改以“前端两层透明包装造成 L1/L2 张力”构造 Tier 3 歧义，断言保持不变。 |
+| 议题 2 的准入矩阵用例在实现后补入 | `canDisambiguateViaTier5` 在基线不存在，直接调用矩阵在基线不可编译；先红证据只落在端到端用例，矩阵用例在实现后加入并全绿。 |
+| 议题 1 的辅助函数放入新文件 `internal/engine/text_focus_binding.go` | 提案 §6.1 将其列在 `act.go`；仅为文件布局差异，`act.go` 仍承载 `bindFocusedText` 与复查循环，行为与判据不变。 |
+| 议题 3 的 `planScrollContainer` 增加 `container` 参数 | 为实现“容器几何”与“前景请求目标”分离（候选过滤与排序需要 `want`），原单一 `want` 语义拆为 `container` + `want`；派发、轨迹证明与错误形状不变。 |
+| 整组发布、手机覆盖部署、实机闭环、主机双产物替换、双端独立探针与 Issue #48 回复关闭 | 在归档提交之后按 §8.2 与 §10 第 9–10 步执行，结果补记于验证记录与本表。 |
 
 ---
 
