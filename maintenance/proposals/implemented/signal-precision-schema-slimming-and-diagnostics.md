@@ -1,12 +1,12 @@
 # 提案：校准稀疏树提示、补齐无交互祖先坐标、精简 MCP 工具目录并补强 app/diagnose 诊断摘要（契约 35）
 
-状态：提案，未实现。
+状态：已实现（契约 35，0.39.0）。实现提交：`c60769edaddfc6b7489ec95e8d2bc60d3b59bd9a`。
 基线提交：`34209ef545302036f8efc194856d0a46f54880ef`（分支 `master`，`2026-11-28`）。
 适用范围：观察视觉分类与提示路由（`internal/observation`、`internal/engine`）、`act` 静态无交互祖先拒绝详情（`internal/engine`、`internal/protocol`）、MCP 13 工具发现说明与 Schema 瘦身及 `result v4` 投影（`internal/mcp`）、`app.close`/`app.kill` 安全拒绝参数提示与变更 `status(P)`/重复 `P` 摘要重放（`internal/engine`、`internal/protocol`）、`diagnose()` 会话过滤与错误码聚合（`internal/engine`、`internal/protocol`、`internal/mcp`）、独立探针（`scripts/mcp-probe`）、正式文档（`docs/`）与整组发布交付。不包含研究报告阶段 1（宿主侧上下文治理）、树微剪枝（`N1`/`N2a`/`N3`）与 `inspect(query)` 路径格式改动。
 影响范围：`release/versions.json` 及 4 个生成版本文件、`internal/observation/{visual.go,visual_test.go}`、`internal/protocol/{errors.go,surface.go,decode_response.go,*_test.go}`、`internal/engine/{capture.go,tap_scope.go,app.go,app_close.go,app_kill.go,engine.go,diagnose.go,*_test.go}`、`internal/mcp/{schema.go,schema_test.go,catalog_test.go,result_text.go,result_text_test.go,result_text_v4_test.go,result_manifest_test.go,result_parity_test.go,app_test.go}`、`scripts/mcp-probe/{result.go,result_v4.go,catalog.go,probe_test.go,*_test.go}`、`README.md` 与 `docs/{interface.md,mcp.md,architecture.md,client.md,control-protocol.md,integration.md,phone-operations.md,release.md,runbook.md}`。
-契约（`/api/*` 字段与 `contract_version`）：改变（通过单一版本源 [release/versions.json](../../release/versions.json) 将版本由 `0.38.0` / `contract_version=34` / `android_version_code=40` 升级为 `0.39.0` / `contract_version=35` / `android_version_code=41`：`Observation.visual=sparse_tree` 阈值与 `Observation.hint` 路由演进；`error.details` 白名单新增 `target_center` 与 `retry_parameter`；`status(P)` 与重复 `P` 对 5 种变更 `app` 保留终态定格 `AppView`；`DiagnosisView` 新增可选 `error_counts` 且无参 `diagnose()` 有活动会话时聚焦当前会话并按 `(phase, code)` 去重 `issues`；`result v4` 增 `diagnosis.error_counts=<JSON>` 行，外壳头 `result v4` 与 `tree v5` 语法不变；MCP 13 工具发现目录瘦身并刷新工具目录 SHA-256 指纹）。
+契约（`/api/*` 字段与 `contract_version`）：改变（通过单一版本源 [release/versions.json](../../../release/versions.json) 将版本由 `0.38.0` / `contract_version=34` / `android_version_code=40` 升级为 `0.39.0` / `contract_version=35` / `android_version_code=41`：`Observation.visual=sparse_tree` 阈值与 `Observation.hint` 路由演进；`error.details` 白名单新增 `target_center` 与 `retry_parameter`；`status(P)` 与重复 `P` 对 5 种变更 `app` 保留终态定格 `AppView`；`DiagnosisView` 新增可选 `error_counts` 且无参 `diagnose()` 有活动会话时聚焦当前会话并按 `(phase, code)` 去重 `issues`；`result v4` 增 `diagnosis.error_counts=<JSON>` 行，外壳头 `result v4` 与 `tree v5` 语法不变；MCP 13 工具发现目录瘦身并刷新工具目录 SHA-256 指纹）。
 
-本文引用的函数名、行号、常量与默认值均以该基线提交为准；实现落地前若代码已前进，须按当时的 `HEAD` 重新核对（重点：[visual.go](../../internal/observation/visual.go)、[capture.go](../../internal/engine/capture.go)、[wait_for.go](../../internal/engine/wait_for.go)、[tap_scope.go](../../internal/engine/tap_scope.go)、[errors.go](../../internal/protocol/errors.go)、[surface.go](../../internal/protocol/surface.go)、[decode_response.go](../../internal/protocol/decode_response.go)、[app.go](../../internal/engine/app.go)、[app_close.go](../../internal/engine/app_close.go)、[app_kill.go](../../internal/engine/app_kill.go)、[engine.go](../../internal/engine/engine.go)、[operations.go](../../internal/engine/operations.go)、[diagnose.go](../../internal/engine/diagnose.go)、[schema.go](../../internal/mcp/schema.go)、[result_text.go](../../internal/mcp/result_text.go)、[result_v4.go](../../scripts/mcp-probe/result_v4.go)）。
+本文引用的函数名、行号、常量与默认值均以该基线提交为准；实现落地前若代码已前进，须按当时的 `HEAD` 重新核对（重点：[visual.go](../../../internal/observation/visual.go)、[capture.go](../../../internal/engine/capture.go)、[wait_for.go](../../../internal/engine/wait_for.go)、[tap_scope.go](../../../internal/engine/tap_scope.go)、[errors.go](../../../internal/protocol/errors.go)、[surface.go](../../../internal/protocol/surface.go)、[decode_response.go](../../../internal/protocol/decode_response.go)、[app.go](../../../internal/engine/app.go)、[app_close.go](../../../internal/engine/app_close.go)、[app_kill.go](../../../internal/engine/app_kill.go)、[engine.go](../../../internal/engine/engine.go)、[operations.go](../../../internal/engine/operations.go)、[diagnose.go](../../../internal/engine/diagnose.go)、[schema.go](../../../internal/mcp/schema.go)、[result_text.go](../../../internal/mcp/result_text.go)、[result_v4.go](../../../scripts/mcp-probe/result_v4.go)）。
 
 ---
 
@@ -50,12 +50,12 @@
 
 | 议题 | 基线源码与测试落点 | 核实事实 |
 | :--- | :--- | :--- |
-| **1. `sparse_tree` 与 `hint`** | [visual.go:51-52,109-111](../../internal/observation/visual.go#L51-L52)、[observation/visual_test.go:198-210,306-308,334-335,355-374,391-404](../../internal/observation/visual_test.go#L306-L308)、[capture.go:493-507,576-596](../../internal/engine/capture.go#L493-L507)、[wait_for.go:407,505-506](../../internal/engine/wait_for.go#L407)、[observation_hint_test.go:14-36,102-135](../../internal/engine/observation_hint_test.go#L14-L36)、[engine/visual_test.go:105-160,268](../../internal/engine/visual_test.go#L105-L160)、[quality_test.go:268](../../internal/engine/quality_test.go#L268) | `visualSparseMaxTextRunes=30`、`visualSparseMaxInteractive=7`；`observationVisual` 仅对 `loading` 在 `delta` 免省略；`observationHint` 仅 `visual=="loading"` 出 `wait_for`，其余 `visual!=""` 一律出 `snap`；`wait_for` 调 `publishTreeAttempt` 固定传 `phase="wait_for"`（唯一使用该 phase 的发布入口）；`scripts/mcp-probe/tree_body_consistency.go:37,55` 仅校验 `hint` 闭集、无树禁现与有效图禁 `snap`（允许有效图配 `wait_for`）；上述既有单测夹具需同步更新预期 |
-| **2. `target_center`** | [tap_scope.go:544-550,1691-1719,2236-2237,2366-2370,2473](../../internal/engine/tap_scope.go#L2236-L2237)、[text_submit.go:207-230](../../internal/engine/text_submit.go#L207-L230)、[tap_static_error_test.go:315-328](../../internal/engine/tap_static_error_test.go#L315-L328)、[errors.go:9-28](../../internal/protocol/errors.go#L9-L28)、[schema_test.go:478-488](../../internal/mcp/schema_test.go#L478-L488) | `planBubbleOrColocated`（含 `text_submit.go:207-230` 对 `submit_ref` 的复用调用）已提前算好 `childRect, hasChildRect := publicNodeClippedRect(child, screen)` 与 `centerX, centerY, hasCenter := tapSafeCenter(childRect)`，但 `bubbleStepANoAncestor` 仅调 `newTapStaticUnsupportedError` 与 `attachStaticCandidates`，未附坐标；`tap_scope.go:2473` 只检查未裁屏正尺寸，完全离屏节点可到达此处并使 `hasCenter == false`；历史废弃键表 `retiredActDetailKeys` 含 `safe_point`/`suggested_point`（语义为安全建议），不含客观坐标 `target_center` |
-| **3. MCP 目录瘦身** | [schema.go:28-792](../../internal/mcp/schema.go)、[schema_test.go:25,30-1298](../../internal/mcp/schema_test.go#L25)、[catalog_test.go:36-47](../../internal/mcp/catalog_test.go#L36-L47)、[result_parity_test.go:554](../../internal/mcp/result_parity_test.go#L554)、[mcp-tool-descriptions-governance.md](implemented/mcp-tool-descriptions-governance.md#L56-L60) | 实跑 `TestDiscoveryByteBudget` 得 `instructions=12557`、`tools_list=27369`（`descriptions=14030`、`schemas=12252`）、`total=39926 < 40000`；`act` 的 `scroll`/`bubble`/`text` 在 `callerGuidance`、`act.description`、`operation.*.description` 存在 3–4 重复述；13 工具 Schema 根级 `"description"` 全部机械复述 `required`/`properties`；`base=_72` 替换步骤在 4 处重复；全仓唯一硬编码目录 SHA-256 指纹位于 `result_parity_test.go:554` |
-| **4. `retry_parameter`** | [app_close.go:48-55](../../internal/engine/app_close.go#L48-L55)、[app_kill.go:342-349](../../internal/engine/app_kill.go#L342-L349)、[errors.go:9-28,232,236](../../internal/protocol/errors.go#L9-L28)、[engine.go:1305-1310](../../internal/engine/engine.go#L1305-L1310) | `app_close.go:52`（`close_refused_borrowed`）无 `details`；`app_kill.go:344-346`（未知状态拒绝）先于 `req.AllowStopPlayback` 判断、传参也不可越过，而 `app_kill.go:347-349`（已知前景服务或播放）在 `!req.AllowStopPlayback` 时拒绝；`operationViewLocked` 通过 `CloneErrorDetails` 自动重放 `op.Error.Details` |
-| **5. `status(P)` 保留 `app` 摘要** | [engine.go:574-576,1294-1304](../../internal/engine/engine.go#L1294-L1304)、[app.go:91-100,183-294](../../internal/engine/app.go#L183-L294)、[operations.go:184-240](../../internal/engine/operations.go#L184-L240)、[retirement.go:626-646](../../internal/engine/retirement.go#L626-L646)、[app_lifecycle_test.go:431-449](../../internal/engine/app_lifecycle_test.go#L431-L449)、[surface.go:543-589](../../internal/protocol/surface.go#L543-L589) | `operationState` 仅存 `AppKind`，`operationViewLocked` 硬编码返回 `&protocol.AppView{Kind: op.AppKind}`（`TestAppDuplicatePRepublishesOnlyKind` 显式断言旧行为）；`finishAppExecuted` 有 4 处 `finishOperation` 出口（`app.go:231,236,245,248`）；`finishAppUncertainWorkAfter` 的 `after()` 钩子（如 `openapp.go:309`）会就地补充 `view`；`applyFrozenResult` 对已因 `work_deadline` 冻结的 `op` 重放 `operationViewLocked(op)`；`AppView` 依赖 6 个集合 `Has*` 标志区分已知空切片 `[]` 与未知省略 |
-| **6. `diagnose()` 过滤与聚合** | [diagnose.go:184-262,341-360](../../internal/engine/diagnose.go#L184-L262)、[operations.go:96-105](../../internal/engine/operations.go#L96-L105)、[start.go:16,85-87](../../internal/engine/start.go#L16)、[surface.go:1215-1374](../../internal/protocol/surface.go#L1215-L1374)、[decode_response.go:978-1040](../../internal/protocol/decode_response.go#L978-L1040)、[result_text.go:76-80,1418-1479,2102-2105](../../internal/mcp/result_text.go#L1418-L1479)、[result_manifest_test.go:1095-1108,1680-1723](../../internal/mcp/result_manifest_test.go#L1095-L1108)、[scripts/mcp-probe/result_v4.go:549-569](../../scripts/mcp-probe/result_v4.go#L549-L569)、[scripts/mcp-probe/probe_test.go:1646-1684](../../scripts/mcp-probe/probe_test.go#L1646-L1684)、[readonly_test.go:840-1032](../../internal/engine/readonly_test.go#L840-L1032) | `diagnoseOwnLocked` 遍历全部同 Agent 操作不区分 `SessionOrigin`，同 `(phase, code)` 逐条塞入 `Issues` 至上限 8；所有绑定会话操作（含活动态重复 `start`）注册时均写 `op.SessionOrigin = e.session.Origin`，detached 操作（`app.find`、`notify`、准入前被拒的 `snap`）`SessionOrigin == ""` 并带 `CreatedAt`；`DiagnosisView` 无聚合计数成员，MCP 侧存在 `v4ResultFields`（L77）与 `resultFields`（L2103）两张反射清单注册表 |
+| **1. `sparse_tree` 与 `hint`** | [visual.go:51-52,109-111](../../../internal/observation/visual.go#L51-L52)、[observation/visual_test.go:198-210,306-308,334-335,355-374,391-404](../../../internal/observation/visual_test.go#L306-L308)、[capture.go:493-507,576-596](../../../internal/engine/capture.go#L493-L507)、[wait_for.go:407,505-506](../../../internal/engine/wait_for.go#L407)、[observation_hint_test.go:14-36,102-135](../../../internal/engine/observation_hint_test.go#L14-L36)、[engine/visual_test.go:105-160,268](../../../internal/engine/visual_test.go#L105-L160)、[quality_test.go:268](../../../internal/engine/quality_test.go#L268) | `visualSparseMaxTextRunes=30`、`visualSparseMaxInteractive=7`；`observationVisual` 仅对 `loading` 在 `delta` 免省略；`observationHint` 仅 `visual=="loading"` 出 `wait_for`，其余 `visual!=""` 一律出 `snap`；`wait_for` 调 `publishTreeAttempt` 固定传 `phase="wait_for"`（唯一使用该 phase 的发布入口）；`scripts/mcp-probe/tree_body_consistency.go:37,55` 仅校验 `hint` 闭集、无树禁现与有效图禁 `snap`（允许有效图配 `wait_for`）；上述既有单测夹具需同步更新预期 |
+| **2. `target_center`** | [tap_scope.go:544-550,1691-1719,2236-2237,2366-2370,2473](../../../internal/engine/tap_scope.go#L2236-L2237)、[text_submit.go:207-230](../../../internal/engine/text_submit.go#L207-L230)、[tap_static_error_test.go:315-328](../../../internal/engine/tap_static_error_test.go#L315-L328)、[errors.go:9-28](../../../internal/protocol/errors.go#L9-L28)、[schema_test.go:478-488](../../../internal/mcp/schema_test.go#L478-L488) | `planBubbleOrColocated`（含 `text_submit.go:207-230` 对 `submit_ref` 的复用调用）已提前算好 `childRect, hasChildRect := publicNodeClippedRect(child, screen)` 与 `centerX, centerY, hasCenter := tapSafeCenter(childRect)`，但 `bubbleStepANoAncestor` 仅调 `newTapStaticUnsupportedError` 与 `attachStaticCandidates`，未附坐标；`tap_scope.go:2473` 只检查未裁屏正尺寸，完全离屏节点可到达此处并使 `hasCenter == false`；历史废弃键表 `retiredActDetailKeys` 含 `safe_point`/`suggested_point`（语义为安全建议），不含客观坐标 `target_center` |
+| **3. MCP 目录瘦身** | [schema.go:28-792](../../../internal/mcp/schema.go)、[schema_test.go:25,30-1298](../../../internal/mcp/schema_test.go#L25)、[catalog_test.go:36-47](../../../internal/mcp/catalog_test.go#L36-L47)、[result_parity_test.go:554](../../../internal/mcp/result_parity_test.go#L554)、[mcp-tool-descriptions-governance.md](mcp-tool-descriptions-governance.md#L56-L60) | 实跑 `TestDiscoveryByteBudget` 得 `instructions=12557`、`tools_list=27369`（`descriptions=14030`、`schemas=12252`）、`total=39926 < 40000`；`act` 的 `scroll`/`bubble`/`text` 在 `callerGuidance`、`act.description`、`operation.*.description` 存在 3–4 重复述；13 工具 Schema 根级 `"description"` 全部机械复述 `required`/`properties`；`base=_72` 替换步骤在 4 处重复；全仓唯一硬编码目录 SHA-256 指纹位于 `result_parity_test.go:554` |
+| **4. `retry_parameter`** | [app_close.go:48-55](../../../internal/engine/app_close.go#L48-L55)、[app_kill.go:342-349](../../../internal/engine/app_kill.go#L342-L349)、[errors.go:9-28,232,236](../../../internal/protocol/errors.go#L9-L28)、[engine.go:1305-1310](../../../internal/engine/engine.go#L1305-L1310) | `app_close.go:52`（`close_refused_borrowed`）无 `details`；`app_kill.go:344-346`（未知状态拒绝）先于 `req.AllowStopPlayback` 判断、传参也不可越过，而 `app_kill.go:347-349`（已知前景服务或播放）在 `!req.AllowStopPlayback` 时拒绝；`operationViewLocked` 通过 `CloneErrorDetails` 自动重放 `op.Error.Details` |
+| **5. `status(P)` 保留 `app` 摘要** | [engine.go:574-576,1294-1304](../../../internal/engine/engine.go#L1294-L1304)、[app.go:91-100,183-294](../../../internal/engine/app.go#L183-L294)、[operations.go:184-240](../../../internal/engine/operations.go#L184-L240)、[retirement.go:626-646](../../../internal/engine/retirement.go#L626-L646)、[app_lifecycle_test.go:431-449](../../../internal/engine/app_lifecycle_test.go#L431-L449)、[surface.go:543-589](../../../internal/protocol/surface.go#L543-L589) | `operationState` 仅存 `AppKind`，`operationViewLocked` 硬编码返回 `&protocol.AppView{Kind: op.AppKind}`（`TestAppDuplicatePRepublishesOnlyKind` 显式断言旧行为）；`finishAppExecuted` 有 4 处 `finishOperation` 出口（`app.go:231,236,245,248`）；`finishAppUncertainWorkAfter` 的 `after()` 钩子（如 `openapp.go:309`）会就地补充 `view`；`applyFrozenResult` 对已因 `work_deadline` 冻结的 `op` 重放 `operationViewLocked(op)`；`AppView` 依赖 6 个集合 `Has*` 标志区分已知空切片 `[]` 与未知省略 |
+| **6. `diagnose()` 过滤与聚合** | [diagnose.go:184-262,341-360](../../../internal/engine/diagnose.go#L184-L262)、[operations.go:96-105](../../../internal/engine/operations.go#L96-L105)、[start.go:16,85-87](../../../internal/engine/start.go#L16)、[surface.go:1215-1374](../../../internal/protocol/surface.go#L1215-L1374)、[decode_response.go:978-1040](../../../internal/protocol/decode_response.go#L978-L1040)、[result_text.go:76-80,1418-1479,2102-2105](../../../internal/mcp/result_text.go#L1418-L1479)、[result_manifest_test.go:1095-1108,1680-1723](../../../internal/mcp/result_manifest_test.go#L1095-L1108)、[scripts/mcp-probe/result_v4.go:549-569](../../../scripts/mcp-probe/result_v4.go#L549-L569)、[scripts/mcp-probe/probe_test.go:1646-1684](../../../scripts/mcp-probe/probe_test.go#L1646-L1684)、[readonly_test.go:840-1032](../../../internal/engine/readonly_test.go#L840-L1032) | `diagnoseOwnLocked` 遍历全部同 Agent 操作不区分 `SessionOrigin`，同 `(phase, code)` 逐条塞入 `Issues` 至上限 8；所有绑定会话操作（含活动态重复 `start`）注册时均写 `op.SessionOrigin = e.session.Origin`，detached 操作（`app.find`、`notify`、准入前被拒的 `snap`）`SessionOrigin == ""` 并带 `CreatedAt`；`DiagnosisView` 无聚合计数成员，MCP 侧存在 `v4ResultFields`（L77）与 `resultFields`（L2103）两张反射清单注册表 |
 
 ### 1.3 为什么直觉会出错
 
@@ -67,7 +67,7 @@
 3. **为什么不能为了极限省字节把工具关键规则全删光只留 `serverInstructions`？**
    - 契约 19 配对回放已证实部分宿主会剥离或弱化 `serverInstructions` 仅注入 `tools/list`。瘦身必须主要靠消除单工具内 2–4 重复述、删根级机械 `schema.description` 与跨工具长图例照抄，而非牺牲单工具自包含防误用红线。
 4. **为什么不能对 `app_kill.go:345`（状态未知）也附 `retry_parameter: "allow_stop_playback"`？**
-   - [app_kill.go:344-346](../../internal/engine/app_kill.go#L344-L346) 在 `!services.Known || !media.Known` 时根本不检查 `req.AllowStopPlayback`，传 `true` 依然拒绝。只给 L348（已知前台服务或播放）附 `retry_parameter`，才能保证该字段 100% 诚实可执行。
+   - [app_kill.go:344-346](../../../internal/engine/app_kill.go#L344-L346) 在 `!services.Known || !media.Known` 时根本不检查 `req.AllowStopPlayback`，传 `true` 依然拒绝。只给 L348（已知前台服务或播放）附 `retry_parameter`，才能保证该字段 100% 诚实可执行。
 5. **为什么不能把 `find`/`list` 集合也缓存进 `op.App`，也不能在 `finishOperationLocked` 锁外提前写 `op.App`？**
    - `find`/`list` 的 `items` 单次可达 32 KiB 且包含本地化应用名与易变实时列表，缓存会导致内存膨胀与陈旧列表冒充实时快照；
    - 若在锁外先写 `op.App`，已因 5 秒 `work_deadline` 冻结的迟到 `app` 回调会污染 `applyFrozenResult` 重放的冻结摘要，必须在锁内检查 `op.State != OperationFinished` 后原子写入。
@@ -132,7 +132,7 @@
      - **`fromWaitFor && hint.kind == observation.VisualKindSparseTree`** → `hint.raw`（**新增**：`wait_for` 终帧若仍为稀疏树，即使以 `delta` 发布也必须显式保留 `visual=sparse_tree`，以便与回落的 `hint=snap` 一致）；
      - 其余：`hint.kind != previousKind` 时输出 `hint.raw`，同态省略返回 `""`。
 3. **观察级提示推导（`observationHint(visual, treeChange string, hasValidImage, fromWaitFor bool) string`）**：
-   - 调用方按 `fromWaitFor := (phase == "wait_for")` 传入（[wait_for.go:407](../../internal/engine/wait_for.go#L407) 是唯一传入 `"wait_for"` 的发布入口）。
+   - 调用方按 `fromWaitFor := (phase == "wait_for")` 传入（[wait_for.go:407](../../../internal/engine/wait_for.go#L407) 是唯一传入 `"wait_for"` 的发布入口）。
    - 互斥优先判据：
      1. `visual == observation.VisualKindLoading` → `"wait_for"`（即使 `hasValidImage == true`）；
      2. `visual == observation.VisualKindSparseTree`：
@@ -145,24 +145,24 @@
 
 ### 4.2 `no_interactive_ancestor` 的客观 `target_center`（议题 2）
 
-- **触发条件**：仅在 [tap_scope.go:2366-2370](../../internal/engine/tap_scope.go#L2366-L2370) `planBubbleOrColocated` 落入 `case bubbleStepANoAncestor` 返回 `422 unsupported_node_action (reason=no_interactive_ancestor)`，且同函数 L2236-2237 已算出的 `hasCenter == true` 时生效。该规划器同时服务于普通 `tap`/`long_press` 与 [text_submit.go:207-230](../../internal/engine/text_submit.go#L207-L230) 的 `text(submit_ref)`（静态拒绝、不认领 `O`），因此 `submit_ref` 指向无交互祖先被动节点时亦按同一规则附带客观 `target_center`。
+- **触发条件**：仅在 [tap_scope.go:2366-2370](../../../internal/engine/tap_scope.go#L2366-L2370) `planBubbleOrColocated` 落入 `case bubbleStepANoAncestor` 返回 `422 unsupported_node_action (reason=no_interactive_ancestor)`，且同函数 L2236-2237 已算出的 `hasCenter == true` 时生效。该规划器同时服务于普通 `tap`/`long_press` 与 [text_submit.go:207-230](../../../internal/engine/text_submit.go#L207-L230) 的 `text(submit_ref)`（静态拒绝、不认领 `O`），因此 `submit_ref` 指向无交互祖先被动节点时亦按同一规则附带客观 `target_center`。
 - **字段形状与语义**：
   - 键名：`error.details["target_center"]`；
   - 值类型：`[]int{centerX, centerY}`（JSON 为长度 2 的非负整数数组 `[x, y]`，由 `publicNodeClippedRect(child, screen)` 裁屏后再经 `tapSafeCenter` 得出，保证 `0 <= centerX < screen.Right` 且 `0 <= centerY < screen.Bottom`）；
-  - `hasCenter == false`（[tap_scope.go:2473](../../internal/engine/tap_scope.go#L2473) 仅校验未裁屏正尺寸，完全离屏的正尺寸节点可真实到达此处并使 `publicNodeClippedRect` 返回空交集）时**必须省略**，绝不写 `null` 或 `[0, 0]`；
+  - `hasCenter == false`（[tap_scope.go:2473](../../../internal/engine/tap_scope.go#L2473) 仅校验未裁屏正尺寸，完全离屏的正尺寸节点可真实到达此处并使 `publicNodeClippedRect` 返回空交集）时**必须省略**，绝不写 `null` 或 `[0, 0]`；
   - **严格排他**：`no_safe_point`、`invalid_target`、`ambiguous_point`、`no_safe_trajectory`、`target_missing_action`、`target_has_other_action`、`ancestor_missing_action`、`ancestor_invalid`、`axis_mismatch`、`not_scrollable` 均**不**输出 `target_center`；
   - **事实分层**：仅陈述目标自身在当前屏幕内的客观几何中心，不认领 `O`，不承诺坐标点击安全或业务有效；调用方据此发起 `act(tap/long_press, target={x, y})`（须省略 `bubble`）仍走独立坐标准入与认领后重验。
-- **白名单登记**：在 [errors.go](../../internal/protocol/errors.go#L9-L28) 注释的 `Details` 白名单与 `docs/interface.md` 静态拒绝节正式登记 `target_center`。
+- **白名单登记**：在 [errors.go](../../../internal/protocol/errors.go#L9-L28) 注释的 `Details` 白名单与 `docs/interface.md` 静态拒绝节正式登记 `target_center`。
 
 ### 4.3 MCP 13 工具目录与发现说明瘦身（议题 3）
 
-- **量化验收判据**（以 [TestDiscoveryByteBudget](../../internal/mcp/schema_test.go#L1164-L1202) 同口径 UTF-8 字节计量，注意源码断言为严格小于 `total < baselineDiscoveryBytes`）：
+- **量化验收判据**（以 [TestDiscoveryByteBudget](../../../internal/mcp/schema_test.go#L1164-L1202) 同口径 UTF-8 字节计量，注意源码断言为严格小于 `total < baselineDiscoveryBytes`）：
   - `tools_list`（13 工具序列化 JSON 数组）：自 `27,369 B` 降至 **`<= 20,500 B`**（净降幅 **>= 25.1%**，目标区间 25%–35%，即 `~17,800–20,500 B`）；
   - `total`（`len(instructions) + len(toolsJSON)`）：自 `39,926 B` 降至 **`< 31,000 B`**；
   - `baselineDiscoveryBytes` 常量由 `40000` 收紧至 **`31000`**（防后续回弹）。
 - **必须保留的语义守卫（单工具自包含防误用红线）**：
   1. **结构零缩水**：13 个工具名称、顺序、JSON Schema 全部类型/枚举/范围/`minLength`/`maxLength`/`pattern`/`required`/`additionalProperties: false`/`oneOf`/`not` 与 4 项 `readOnlyHint=true` 注解 100% 保持不变；
-  2. **`treeTextGuide` 完整图例**：唯一发布于 `ServerInstructions()`，保留 `result v4`、`obs`（含同步后的 `sparse_tree` / `hint` 规则）、`diagnosis.error_counts=`、`app_items v1`/`app_tasks v1`、`tree v5`、`inspect v3`、3 个可解码应用示例（`TestDiscoveryTreeExamplesDecodeAndApply` 必过）以及 [catalog_test.go:36-47](../../internal/mcp/catalog_test.go#L36-L47) 的 `TestCatalogSnapshotCarriesResultV4Discovery` 断言；
+  2. **`treeTextGuide` 完整图例**：唯一发布于 `ServerInstructions()`，保留 `result v4`、`obs`（含同步后的 `sparse_tree` / `hint` 规则）、`diagnosis.error_counts=`、`app_items v1`/`app_tasks v1`、`tree v5`、`inspect v3`、3 个可解码应用示例（`TestDiscoveryTreeExamplesDecodeAndApply` 必过）以及 [catalog_test.go:36-47](../../../internal/mcp/catalog_test.go#L36-L47) 的 `TestCatalogSnapshotCarriesResultV4Discovery` 断言；
   3. **单工具关键自包含边界**（即使宿主剥离 `serverInstructions` 也不缺）：
      - `start`：空对象、首次 `full`、从 `obs` 取 `O` 与 `screen=<W>x<H>@<display_id>`、重放不重获五分钟；
      - `status`：只读不续租、`state=`/`can_start=`/`blocking_operation_id=`/`recovery ref=`、`app` 变更保留定格摘要；
@@ -182,12 +182,12 @@
 
 ### 4.4 `app.close` / `app.kill` 安全拒绝的 `retry_parameter`（议题 4）
 
-- **白名单登记**：在 [errors.go](../../internal/protocol/errors.go#L9-L28) 登记 `retry_parameter`（受控非空字符串，仅允许声明存在的请求参数名）。
+- **白名单登记**：在 [errors.go](../../../internal/protocol/errors.go#L9-L28) 登记 `retry_parameter`（受控非空字符串，仅允许声明存在的请求参数名）。
 - **精确触发点（仅 2 处）**：
-  1. [app_close.go:52](../../internal/engine/app_close.go#L52)：`target.ownership == TaskBorrowed && !req.AllowBorrowed` 返回 `409 close_refused_borrowed` 时附加 `.WithDetail("retry_parameter", "allow_borrowed")`；
-  2. [app_kill.go:348](../../internal/engine/app_kill.go#L348)：`(services.Foreground || media.Playing) && !req.AllowStopPlayback` 返回 `409 kill_refused_playback` 时附加 `.WithDetail("retry_parameter", "allow_stop_playback")`。
+  1. [app_close.go:52](../../../internal/engine/app_close.go#L52)：`target.ownership == TaskBorrowed && !req.AllowBorrowed` 返回 `409 close_refused_borrowed` 时附加 `.WithDetail("retry_parameter", "allow_borrowed")`；
+  2. [app_kill.go:348](../../../internal/engine/app_kill.go#L348)：`(services.Foreground || media.Playing) && !req.AllowStopPlayback` 返回 `409 kill_refused_playback` 时附加 `.WithDetail("retry_parameter", "allow_stop_playback")`。
 - **严格排除点**：
-  - [app_kill.go:345](../../internal/engine/app_kill.go#L345)（`serviceErr != nil || mediaErr != nil || !services.Known || !media.Known`）返回 `409 kill_refused_playback` 时**严禁**附加 `retry_parameter`；
+  - [app_kill.go:345](../../../internal/engine/app_kill.go#L345)（`serviceErr != nil || mediaErr != nil || !services.Known || !media.Known`）返回 `409 kill_refused_playback` 时**严禁**附加 `retry_parameter`；
   - 其余 `app` 拒绝（`kill_refused_not_owned`、`kill_refused_task_elsewhere`、`control_ui_on_virtual_display`、`root_unavailable`、`window_action_not_supported_on_primary_display`、`task_lifecycle_busy` 等）均不附加。
 - **重放一致性**：因 `finishOperationLocked` 保存 `op.Error = apiErr.Public()` 且 `operationViewLocked` 使用 `protocol.CloneErrorDetails`，`status(P)` 与重复 `P` 自动保留相同的 `retry_parameter` 且不共享底层 map。
 
@@ -205,7 +205,7 @@
    - `operationState` 新增 `App *protocol.AppView`；
    - `cloneAppSummary(view *protocol.AppView) *protocol.AppView`：对 `view == nil` 或 `view.Kind ∈ {AppKindFind, AppKindList, ""}` 返回 `nil`；对其余 5 种变更 kind 完整深拷贝全部已设置字段——包括字符串（`Kind`/`Package`/`Ownership`/`ForegroundRestore`/`PackageState`）、全部 `*int`/`*bool` 标量指针（`DisplayID`/`TaskID`/`SourceDisplayID`/`AndroidUserID`/`SourceTaskID`/`Reused`/`StatePreserved`/`Complete`/`Restarted`）、全部三态与集合存在标志（`HasStatePreserved`/`HasRestarted`/`HasTasks`/`HasTargetTaskIDs`/`HasRemainingTaskIDs`/`HasTargetPIDs`/`HasKilledPIDs`/`HasRemainingPIDs`）、经 `slices.Clone` 保留非 nil 空切片语义的 5 个 `[]int` 切片、以及 `Tasks` 切片内每项的 `RecentsCleaned`/`HasRecentsCleaned` 与 `Error`（含 `protocol.CloneErrorDetails`），确保 `op.App`、首次返回、`status(P)` 与重复 `P` 互不共享可变切片或 map，且完整保持 `[]` vs 省略与 `null` vs 省略的三态边界；
    - 统一封装 `finishAppOperation(op, outcome, phase, apiErr, view)` 在 `e.mu` 内检查 `if op.State == OperationFinished { return op.Recovery }`，仅当本次赢得终态转换时执行 `op.App = cloneAppSummary(view)` 并调用 `e.finishOperationLocked(...)`；
-   - `finishAppError`、`finishAppExecuted` 的全部 4 处终态出口（[app.go:231,236,245,248](../../internal/engine/app.go#L225-L250)）以及 `finishAppUncertainWorkAfter`（必须在 `after()` 钩子如 `reconcileOpenVirtualTask` 完成后）全部统一改调 `finishAppOperation`，确保含 `executed_revoked` 在内的所有正常终态与 `after()` 回填字段一并原子定格；
+   - `finishAppError`、`finishAppExecuted` 的全部 4 处终态出口（[app.go:231,236,245,248](../../../internal/engine/app.go#L225-L250)）以及 `finishAppUncertainWorkAfter`（必须在 `after()` 钩子如 `reconcileOpenVirtualTask` 完成后）全部统一改调 `finishAppOperation`，确保含 `executed_revoked` 在内的所有正常终态与 `after()` 回填字段一并原子定格；
    - `operationViewLocked`：当 `op.State == OperationFinished && op.App != nil` 时设 `result.App = cloneAppSummary(op.App)`；否则若 `op.AppKind != ""` 设 `result.App = &protocol.AppView{Kind: op.AppKind}`。
 3. **既有不附观察不变式**：`status(P)` 与重复 `P` 依然永不附带 `observation`，也不执行任何设备读。
 
@@ -224,7 +224,7 @@
    - 统计口径：仅在无参 `diagnoseOwnLocked` 中，对当前过滤窗口内**全部**失败或不确定操作（`op.State != OperationRunning && (op.Error != nil || op.Outcome == OutcomeUncertain)`）按非空控制码计数——有 `op.Error != nil && op.Error.Code != ""` 时计 `op.Error.Code`，否则若 `op.Outcome != ""` 计 `op.Outcome`（如 `"uncertain"`）；**不受 `maxDiagnosisEntries = 8` 截断影响**；
    - 空 map（0 条匹配失败/不确定操作）或 `diagnoseReferenceLocked` 路径下省略 `"error_counts"`（绝不写 `{}` 或 `null`）；
    - 序列化按 key 字典序稳定编码（`sort.Strings(keys)`），满足字节确定性；
-   - 严格响应解码（[decode_response.go:978-1019](../../internal/protocol/decode_response.go#L978-L1019)）：`ErrorCounts member[map[string]int] \`json:"error_counts"\`` 拒收 `null`，并在存在时校验非空、每个键非空且计数 `> 0`（不接受空对象或非正计数）。
+   - 严格响应解码（[decode_response.go:978-1019](../../../internal/protocol/decode_response.go#L978-L1019)）：`ErrorCounts member[map[string]int] \`json:"error_counts"\`` 拒收 `null`，并在存在时校验非空、每个键非空且计数 `> 0`（不接受空对象或非正计数）。
 4. **操作级 `issues` 按 `(phase, code)` 去重**：
    - 在 `diagnoseOwnLocked` 中，全局高优先级问题（`retired_cleanup_dropped`、`availability`、`cleanup`）仍固定置顶；
    - 对 `failed` 切片按 `(operationFinishedAt, op.ID)` 升序确定性排序（解决随机序 map 遍历下同时间戳抖动），再从最新往前扫，用 `seenOpIssue[protocol.DiagnosisIssue]bool` 按 `(Phase, Code)` 去重：相同 `(phase, code)` 只占 1 个 `view.Issues` 槽位（保留最新不同问题），最多填满 `maxDiagnosisEntries = 8`；
@@ -233,9 +233,9 @@
 5. **字节预算裁剪（`trimDiagnosisBudget`）**：
    - 维持 `maxDiagnosisBytes = 16 * 1024`，超限时沿用既有顺序优先裁剪：① 丢弃最旧 `Timeline[0]`；② 从队首裁剪 `Issues[0]`；③ 极端兜底清空 `ErrorCounts = nil`，每次裁剪均置 `Truncated = true`，保证输出永不越界。
 6. **`result v4` 文本投影、双清单注册与 `mcp-probe` 独立解析**：
-   - [internal/mcp/result_text.go](../../internal/mcp/result_text.go#L76-L80) 与 [result_text.go:2102-2105](../../internal/mcp/result_text.go#L2102-L2105)：**同时**在 `v4ResultFields` 注册 `"diagnosis.error_counts": v4JSON` 并在 `resultFields` 注册 `"diagnosis.error_counts": fieldJSON`（分别供 `TestResultFieldManifest` 与 `TestCanonicalJSONCoversManifest` 检查）；`renderDiagnosisV4` 在 `diagnosis.issues=...` 之后、`diagnosis.timing_ms=...` 之前渲染 `diagnosis.error_counts=<compactJSON>`（若值为 `null` 则回退 `json v1 path="/diagnosis/error_counts"`），并将 `"error_counts"` 加入已知字段跳过表；
-   - [internal/mcp/result_manifest_test.go:1095-1108,1680-1723](../../internal/mcp/result_manifest_test.go#L1095-L1108)：在 `rmfResultFixtures` 的诊断夹具与 `rmfDeterministicResult` 中补充 `ErrorCounts`（后者按迭代轮换插入序以锁死字典序字节确定性）；
-   - [scripts/mcp-probe/result_v4.go](../../scripts/mcp-probe/result_v4.go#L549-L563)：在节段 21 支持 `diagnosis.error_counts=` 并解码至 `["diagnosis", "error_counts"]`；[scripts/mcp-probe/result.go](../../scripts/mcp-probe/result.go#L124-L126) 的 `diagnosisView` 同步补充 `ErrorCounts map[string]int`；[scripts/mcp-probe/probe_test.go:1646-1684](../../scripts/mcp-probe/probe_test.go#L1646-L1684) 的 `writeFakeDiagnosis` 同步输出 `diagnosis.error_counts=`；
+   - [internal/mcp/result_text.go](../../../internal/mcp/result_text.go#L76-L80) 与 [result_text.go:2102-2105](../../../internal/mcp/result_text.go#L2102-L2105)：**同时**在 `v4ResultFields` 注册 `"diagnosis.error_counts": v4JSON` 并在 `resultFields` 注册 `"diagnosis.error_counts": fieldJSON`（分别供 `TestResultFieldManifest` 与 `TestCanonicalJSONCoversManifest` 检查）；`renderDiagnosisV4` 在 `diagnosis.issues=...` 之后、`diagnosis.timing_ms=...` 之前渲染 `diagnosis.error_counts=<compactJSON>`（若值为 `null` 则回退 `json v1 path="/diagnosis/error_counts"`），并将 `"error_counts"` 加入已知字段跳过表；
+   - [internal/mcp/result_manifest_test.go:1095-1108,1680-1723](../../../internal/mcp/result_manifest_test.go#L1095-L1108)：在 `rmfResultFixtures` 的诊断夹具与 `rmfDeterministicResult` 中补充 `ErrorCounts`（后者按迭代轮换插入序以锁死字典序字节确定性）；
+   - [scripts/mcp-probe/result_v4.go](../../../scripts/mcp-probe/result_v4.go#L549-L563)：在节段 21 支持 `diagnosis.error_counts=` 并解码至 `["diagnosis", "error_counts"]`；[scripts/mcp-probe/result.go](../../../scripts/mcp-probe/result.go#L124-L126) 的 `diagnosisView` 同步补充 `ErrorCounts map[string]int`；[scripts/mcp-probe/probe_test.go:1646-1684](../../../scripts/mcp-probe/probe_test.go#L1646-L1684) 的 `writeFakeDiagnosis` 同步输出 `diagnosis.error_counts=`；
    - 严格满足 AGENTS.md #10 日志白名单：`error_counts` 只含批准控制码与正整数，绝不携带节点文本、包名、命令、日志或原始异常字符串。
 
 ---
@@ -294,7 +294,7 @@ func (e *Engine) finishAppOperation(op *operationState, outcome, phase string,
     return e.finishOperationLocked(op, outcome, phase, apiErr)
 ```
 
-- `finishAppError`、`finishAppExecuted` 的全部 4 处终态出口（[app.go:231,236,245,248](../../internal/engine/app.go#L225-L250)）与 `finishAppUncertainWorkAfter`（在 `after()` 执行完成后）全部统一改调 `finishAppOperation`；
+- `finishAppError`、`finishAppExecuted` 的全部 4 处终态出口（[app.go:231,236,245,248](../../../internal/engine/app.go#L225-L250)）与 `finishAppUncertainWorkAfter`（在 `after()` 执行完成后）全部统一改调 `finishAppOperation`；
 - `finishAppQuerySuccess`、`finishAppQueryError`、`appQueryClosed`、`appQueryCancelled` 继续走 `finishOperation`（`op.App` 恒为 `nil`）；
 - 若操作在运行中遇到 5 秒 `work_deadline` 冻结，冻结逻辑先置 `op.State = OperationFinished, op.Phase = "work_deadline"`（`op.App == nil`），迟到回调调 `finishAppOperation` 时短路返回，随后 `defer applyFrozenResult` 按 `operationViewLocked` 返回干净的仅含 `app.kind` 冻结视图。
 
@@ -397,9 +397,9 @@ func (e *Engine) diagnoseOwnLocked(agent string, now time.Time) *protocol.Diagno
 
 - **共同契约变化**：`contract_version` 由 `34` 升至 `35`，`release_version` 由 `0.38.0` 升至 `0.39.0`，`android_version_code` 由 `40` 升至 `41`（Java 控制 App 仅同步版本常量与清单契约号，不改业务行为）。
 - **需同步的正式文档**：
-  - [docs/interface.md](../../docs/interface.md)：更新 `sparse_tree` 阈值与 `delta`/`hint` 规则、`unsupported_node_action (no_interactive_ancestor)` 的 `target_center`、`app` 拒绝的 `retry_parameter`、`status(P)`/重复 `P` 的 `app` 变更摘要边界、`diagnose` 当前会话过滤/去重/`error_counts` 及版本号；
-  - [docs/mcp.md](../../docs/mcp.md)：更新 `result v4` 的 `diagnosis.error_counts=` 行、`obs` 行 `hint` 规则、`app` 重放摘要口径与工具发现瘦身说明（字面 SHA-256 指纹仅在 `result_parity_test.go:554` 与发布清单中核验）；
-  - [docs/architecture.md](../../docs/architecture.md)、[docs/client.md](../../docs/client.md)、[docs/control-protocol.md](../../docs/control-protocol.md)、[docs/integration.md](../../docs/integration.md)、[docs/phone-operations.md](../../docs/phone-operations.md)、[docs/release.md](../../docs/release.md)、[docs/runbook.md](../../docs/runbook.md) 与 [README.md](../../README.md)：同步 `0.39.0` / 契约 `35` 版本表述及对应行为/示例，确保零漂移。
+  - [docs/interface.md](../../../docs/interface.md)：更新 `sparse_tree` 阈值与 `delta`/`hint` 规则、`unsupported_node_action (no_interactive_ancestor)` 的 `target_center`、`app` 拒绝的 `retry_parameter`、`status(P)`/重复 `P` 的 `app` 变更摘要边界、`diagnose` 当前会话过滤/去重/`error_counts` 及版本号；
+  - [docs/mcp.md](../../../docs/mcp.md)：更新 `result v4` 的 `diagnosis.error_counts=` 行、`obs` 行 `hint` 规则、`app` 重放摘要口径与工具发现瘦身说明（字面 SHA-256 指纹仅在 `result_parity_test.go:554` 与发布清单中核验）；
+  - [docs/architecture.md](../../../docs/architecture.md)、[docs/client.md](../../../docs/client.md)、[docs/control-protocol.md](../../../docs/control-protocol.md)、[docs/integration.md](../../../docs/integration.md)、[docs/phone-operations.md](../../../docs/phone-operations.md)、[docs/release.md](../../../docs/release.md)、[docs/runbook.md](../../../docs/runbook.md) 与 [README.md](../../../README.md)：同步 `0.39.0` / 契约 `35` 版本表述及对应行为/示例，确保零漂移。
 
 ---
 
@@ -529,21 +529,33 @@ func (e *Engine) diagnoseOwnLocked(agent string, now time.Time) *protocol.Diagno
 
 ---
 
-## 11. 实现结果（归档时补写）
+## 11. 实现结果
 
-实现提交：`<hash>`。实现与验证记录：`../../verification/signal-precision-schema-slimming-and-diagnostics.md`
-（本节在归档移动之后补写，届时文件在 `implemented/` 下，故链接比新建时多一层）。
+实现提交：`c60769edaddfc6b7489ec95e8d2bc60d3b59bd9a`。实现与验证记录：
+[signal-precision-schema-slimming-and-diagnostics](../../verification/signal-precision-schema-slimming-and-diagnostics.md)。
 
 ### 11.1 已落地
 
 | 提案条目 | 落点 |
-| :--- | :--- |
+| --- | --- |
+| 议题 1：`visualSparseMaxTextRunes=20`、`visualSparseMaxInteractive=4`；`observationVisual`/`observationHint` 的 `fromWaitFor` 分流与 `wait_for` 终帧 `delta` 保留 | `internal/observation/visual.go:51-52`、`internal/engine/capture.go:495,581,606` |
+| 议题 2：`attachStaticTargetCenter` 仅在 `bubbleStepANoAncestor` 且 `hasCenter` 时附 `target_center` | `internal/engine/tap_scope.go:1729,2390` |
+| 议题 3：13 工具发现说明去重瘦身、预算门禁 `toolsListByteBudget=20500`/`baselineDiscoveryBytes=31000`；`tools_list=18,247 B`、`total=28,419 B` | `internal/mcp/schema.go`、`internal/mcp/schema_test.go:24-25`、`internal/mcp/schema_slimming_test.go`、`internal/mcp/result_parity_test.go` |
+| 议题 4：`retry_parameter` 仅 `close_refused_borrowed` 与已知前台服务/播放的 `kill_refused_playback` | `internal/engine/app_close.go:54`、`internal/engine/app_kill.go:349` |
+| 议题 5：`operationState.App`、`cloneAppSummary`、`finishAppOperation`、`operationViewLocked` 定格重放 | `internal/engine/app.go:189,244`、`internal/engine/engine.go:577,1295-1302` |
+| 议题 6：活动会话过滤、`(phase, code)` 去重、`ErrorCounts` 聚合与裁剪、严格编解码、`result v4` 投影与探针解析 | `internal/engine/diagnose.go:203-275,386`、`internal/protocol/surface.go:1215-1241`、`internal/protocol/decode_response.go:978`、`internal/mcp/result_text.go:77,1418-1456,2109`、`scripts/mcp-probe/result_v4.go:556` |
+| 版本源与正式文档 | `release/versions.json`（`0.39.0`/`35`/`41`）、`README.md`、`docs/{interface,mcp,architecture,client,control-protocol,integration,phone-operations,release,runbook}.md` |
+| 发布交付 | 手机整组覆盖部署（保留 App 私有数据）、Windows `device-mcp.exe`/`mcp-probe.exe` 替换、双入口独立探针、最小实机闭环 |
 
 ### 11.2 与提案不同或未执行
 
 | 项 | 结论与理由 |
-| :--- | :--- |
-
+| --- | --- |
+| 完全离屏节点 `hasCenter=false` 的端到端路径 | 公开构建路径不可达（公开 `Bounds` 已裁到 `capture.Display`，且显示尺寸校验使裁剪恒非空）；实现保留守卫，省略分支在规划器边界单测覆盖，未扩大改动 observation 构建不变式。 |
+| `act.delivery`/`app.open` full 稀疏帧提示 `wait_for` | 按 §4.1 规则 2.1（非 `wait_for` 且 `tree_change` 为空）推导，既有测试预期同步更新。 |
+| 目录瘦身保留一处短重复 | 既有 `server_test.go` 显式要求 `act.reference` 字段与主描述含静态拒绝消费提示、分支短标签；其余多段复述已移除。另校准 `close` 按包名匹配多个托管窗口的历史文案漂移。 |
+| 集成修正 `3480a96` | 独立探针要求全局指引保留 `inspect({reference:原 act 的 O,node:诊断 ref})` 举例，恢复 1 行；`tools/list` 指纹不变、总量仍低于门禁。 |
+| `target_center`、已知播放 `kill_refused_playback`、`wait_for` 终帧稀疏保留的实机自然触发 | 本轮实机未自然构造，均由单测与反向对照覆盖；验证记录 §8 已如实标注。 |
 ---
 
 ## 附：本提案不改变的事项
