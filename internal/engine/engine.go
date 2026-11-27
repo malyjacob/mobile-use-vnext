@@ -571,9 +571,10 @@ type operationState struct {
 	ID              string
 	Agent           string
 	Kind            string
-	// AppKind is the app branch of this operation. It is the only fact a
-	// duplicate P or status(P) summary republishes.
+	// AppKind identifies the app branch even when no terminal summary exists.
 	AppKind string
+	// App is the in-memory snapshot committed with a mutating app terminal.
+	App     *protocol.AppView
 	State   string
 	Phase   string
 	Outcome string
@@ -1297,9 +1298,9 @@ func (e *Engine) operationViewLocked(op *operationState) *protocol.Result {
 		result.Outcome = op.Outcome
 		result.Phase = op.Phase
 	}
-	if op.AppKind != "" {
-		// A replay is a summary, never a fresh business result: only the kind is
-		// republished, no identity, landing point or device fact.
+	if op.State == OperationFinished && op.App != nil {
+		result.App = cloneAppSummary(op.App)
+	} else if op.AppKind != "" {
 		result.App = &protocol.AppView{Kind: op.AppKind}
 	}
 	if op.Error != nil {

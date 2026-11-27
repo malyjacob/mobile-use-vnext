@@ -262,12 +262,9 @@ func TestAppHandoffMovesTaskBackAndDropsOwnership(t *testing.T) {
 	h.addTask(device.Task{TaskID: 77, RootID: 77, DisplayID: 12, Package: "com.example.app",
 		Component: "com.example.app/.Main"})
 	h.ownTask(device.Task{TaskID: 77, RootID: 77, DisplayID: 12, Package: "com.example.app"}, TaskOwned, nil)
-	result, apiErr := h.engine.App(context.Background(), "agent", "Phandoff",
-		&protocol.AppRequest{Kind: protocol.AppKindHandoff, Reference: first.Observation.ID,
-			Target: &protocol.AppTarget{TaskID: 77, UseTask: true}})
-	if apiErr != nil {
-		t.Fatalf("app handoff: %v", apiErr)
-	}
+	request := &protocol.AppRequest{Kind: protocol.AppKindHandoff, Reference: first.Observation.ID,
+		Target: &protocol.AppTarget{TaskID: 77, UseTask: true}}
+	result := h.callApp("Phandoff", request)
 	if result.Outcome != OutcomeExecuted || result.App.Ownership != TaskShared ||
 		intValue(t, result.App.SourceDisplayID, "source_display_id") != 12 ||
 		intValue(t, result.App.DisplayID, "display_id") != 0 {
@@ -276,6 +273,9 @@ func TestAppHandoffMovesTaskBackAndDropsOwnership(t *testing.T) {
 	if result.App.ForegroundRestore != protocol.ForegroundRestoreNotRequested {
 		t.Fatalf("foreground_restore=%q", result.App.ForegroundRestore)
 	}
+	requireAppReplayIsolation(t, h, request, result, "finished", func(view *protocol.AppView) {
+		*view.DisplayID, *view.SourceDisplayID = 909, 919
+	})
 	h.engine.mu.Lock()
 	defer h.engine.mu.Unlock()
 	if entry := h.engine.sessionTaskLocked(h.engine.session, 77); entry != nil {
@@ -318,13 +318,14 @@ func TestAppCloseBorrowedRefusedBeforeClaim(t *testing.T) {
 	first := h.startSession()
 	h.addTask(device.Task{TaskID: 77, RootID: 77, DisplayID: 12, Package: "com.example.app"})
 	h.ownTask(device.Task{TaskID: 77, RootID: 77, DisplayID: 12, Package: "com.example.app"}, TaskBorrowed, intPtr(0))
-	result, _ := h.engine.App(context.Background(), "agent", "Pclose",
-		&protocol.AppRequest{Kind: protocol.AppKindClose, Reference: first.Observation.ID,
-			Target: &protocol.AppTarget{TaskID: 77, UseTask: true}})
+	request := v31CloseTask(first.Observation, 77)
+	result := h.callApp("Pclose", request)
 	if result.Error == nil || result.Error.Code != protocol.CodeCloseBorrowed ||
 		result.App.HasTasks {
 		t.Fatalf("borrowed close result=%+v", result)
 	}
+	requireAppSummary(t, h, result.OperationID, request, OperationFinished, "preflight", OutcomeNotExecuted, result.App)
+	requireAppRetryParameter(t, h, request, result, "allow_borrowed")
 	h.device.mu.Lock()
 	removes := len(h.device.removeCalls)
 	h.device.mu.Unlock()
@@ -375,9 +376,9 @@ func TestAppClosePartialReportsPerItemFacts(t *testing.T) {
 	h.device.recentIDs = map[int]bool{}
 	h.device.recentKnown = true
 	h.device.mu.Unlock()
-	result, _ := h.engine.App(context.Background(), "agent", "Pclose",
-		&protocol.AppRequest{Kind: protocol.AppKindClose, Reference: first.Observation.ID,
-			Target: &protocol.AppTarget{App: "com.example"}})
+	request := &protocol.AppRequest{Kind: protocol.AppKindClose, Reference: first.Observation.ID,
+		Target: &protocol.AppTarget{App: "com.example"}}
+	result := h.callApp("Pclose", request)
 	if result.Outcome != OutcomeUncertain || result.Error == nil ||
 		result.Error.Code != protocol.CodeAppTaskUnconfirmed {
 		t.Fatalf("partial close result=%+v", result)
@@ -390,6 +391,11 @@ func TestAppClosePartialReportsPerItemFacts(t *testing.T) {
 	if result.App.Complete == nil || *result.App.Complete {
 		t.Fatalf("partial close must not report complete")
 	}
+	requireAppReplayIsolation(t, h, request, result, "dispatch", func(view *protocol.AppView) {
+		*view.Complete = true
+		*view.Tasks[0].RecentsCleaned = false
+		view.Tasks[1].Error.Code = protocol.CodeStopped
+	})
 	if h.device.removeCalls[0] != 71 || len(h.device.removeCalls) != 2 {
 		t.Fatalf("remove order=%v", h.device.removeCalls)
 	}
@@ -428,25 +434,22 @@ func (e taskEntry) OwnedProven() taskEntry {
 	return e
 }
 
-func TestAppDuplicatePRepublishesOnlyKind(t *testing.T) {
+func TestAppDuplicatePRepublishesClaimSummary(t *testing.T) {
 	h := newHarness(t)
 	first := h.startSession()
 	h.addTask(device.Task{TaskID: 41, RootID: 41, DisplayID: 0, Package: "com.example.app"})
 	request := &protocol.AppRequest{Kind: protocol.AppKindClaim, Reference: first.Observation.ID,
 		Target: &protocol.AppTarget{TaskID: 41, UseTask: true}}
-	result, _ := h.engine.App(context.Background(), "agent", "Pdupclaim", request)
-	if result.Outcome != OutcomeExecuted {
-		t.Fatalf("first claim=%+v", result)
+	result := h.callApp("Pdupclaim", request)
+	if result.Outcome != OutcomeExecuted || result.App.Ownership != TaskBorrowed ||
+		intValue(t, result.App.TaskID, "task_id") != 41 {
+		t.Fatalf("first claim=%+v, app=%+v", result, result.App)
 	}
-	duplicate, apiErr := h.engine.App(context.Background(), "agent", "Pdupclaim", request)
-	if apiErr != nil {
-		t.Fatalf("duplicate: %v", apiErr)
-	}
-	if duplicate.App == nil || duplicate.App.Kind != protocol.AppKindClaim ||
-		duplicate.App.TaskID != nil {
-		t.Fatalf("duplicate summary must carry only app.kind: %+v", duplicate)
-	}
+	requireAppReplayIsolation(t, h, request, result, "finished", func(view *protocol.AppView) {
+		*view.TaskID, *view.SourceDisplayID = 909, 919
+	})
 }
+
 func TestAppListAcceptsOperationReference(t *testing.T) {
 	h := newHarness(t)
 	first := h.startSession()

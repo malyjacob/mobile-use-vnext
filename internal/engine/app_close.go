@@ -50,7 +50,8 @@ func (e *Engine) appClose(ctx context.Context, op *operationState, req *protocol
 			return e.finishAppError(op, "preflight",
 				appViewWithDisplay(req.Kind, session.Display.ID),
 				protocol.NewError(409, protocol.CodeCloseBorrowed,
-					"目标包含借入窗口；默认不销毁会话借入的任务"))
+					"目标包含借入窗口；默认不销毁会话借入的任务").
+					WithDetail("retry_parameter", "allow_borrowed"))
 		}
 	}
 

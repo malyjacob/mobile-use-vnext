@@ -102,7 +102,8 @@ func TestAppKillTaskEntryWholePackageFacts(t *testing.T) {
 	}}
 	h.device.mu.Unlock()
 
-	result := h.callApp("Pkillfacts", v31KillTask(first.Observation, 77))
+	request := v31KillTask(first.Observation, 77)
+	result := h.callApp("Pkillfacts", request)
 	app := result.App
 	if result.Outcome != OutcomeExecuted || result.Error != nil {
 		t.Fatalf("outcome=%q error=%+v", result.Outcome, result.Error)
@@ -120,6 +121,11 @@ func TestAppKillTaskEntryWholePackageFacts(t *testing.T) {
 		app.PackageState != "stopped_at_check" {
 		t.Fatalf("kill app=%+v", app)
 	}
+	requireAppReplayIsolation(t, h, request, result, "finished", func(view *protocol.AppView) {
+		*view.AndroidUserID, *view.SourceTaskID = 9, 909
+		view.TargetTaskIDs[0], view.TargetPIDs[0], view.KilledPIDs[0] = 909, 919, 929
+		*view.Restarted = true
+	})
 	stops := h.forceStops()
 	if len(stops) != 1 || stops[0].pkg != "com.example.app" || stops[0].userID != 0 {
 		t.Fatalf("force-stop calls=%+v", stops)
@@ -490,6 +496,43 @@ func TestAppKillRefusalsKeepObservation(t *testing.T) {
 	})
 }
 
+func TestAppKillPlaybackRetryParameter(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		service device.ServiceState
+		media   device.MediaState
+		allow   bool
+		want    string
+	}{
+		{name: "known foreground service", service: device.ServiceState{Known: true, Foreground: true}, want: "allow_stop_playback"},
+		{name: "known playback", media: device.MediaState{Known: true, Playing: true}, want: "allow_stop_playback"},
+		{name: "unknown foreground service", service: device.ServiceState{Foreground: true}},
+		{name: "unknown playback despite override", media: device.MediaState{Playing: true}, allow: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			first := h.startSession()
+			task := v31Task(77, 12, "com.example.app")
+			h.addTask(task)
+			h.ownTask(task, TaskOwned, nil)
+			h.device.mu.Lock()
+			h.device.service, h.device.media = tc.service, tc.media
+			h.device.mu.Unlock()
+			req := v31KillTask(first.Observation, task.TaskID)
+			req.AllowStopPlayback = tc.allow
+			result := h.callApp("Pkillplayback", req)
+			if result.Error == nil || result.Error.Code != protocol.CodeKillPlayback || result.Outcome != OutcomeNotExecuted {
+				t.Fatalf("playback refusal = %+v, error=%+v", result, result.Error)
+			}
+			requireAppSummary(t, h, result.OperationID, req, OperationFinished, "preflight", OutcomeNotExecuted, result.App)
+			requireAppRetryParameter(t, h, req, result, tc.want)
+			if h.observationStatus(first.Observation.ID) != ObservationReady || len(h.forceStops()) != 0 {
+				t.Fatal("playback refusal consumed O or dispatched force-stop")
+			}
+		})
+	}
+}
+
 // TestAppKillStopBeforeDispatchNeverSignals proves a STOP in the last
 // pre-dispatch window keeps the call not_executed and never sends force-stop.
 func TestAppKillStopBeforeDispatchNeverSignals(t *testing.T) {
@@ -621,7 +664,8 @@ func TestAppKillEmptyOriginalProcessesDispatchesOnce(t *testing.T) {
 	h.device.processes = device.PackageProcesses{AppUID: 10123, Instances: []device.ProcessInstance{}}
 	h.device.mu.Unlock()
 
-	result := h.callApp("Pkillemptyorig", v31KillTask(first.Observation, 77))
+	request := v31KillTask(first.Observation, 77)
+	result := h.callApp("Pkillemptyorig", request)
 	if result.Outcome != OutcomeExecuted || result.Error != nil {
 		t.Fatalf("empty original result=%+v", result)
 	}
@@ -633,6 +677,10 @@ func TestAppKillEmptyOriginalProcessesDispatchesOnce(t *testing.T) {
 		app.PackageState != "stopped_at_check" {
 		t.Fatalf("empty original app=%+v", app)
 	}
+	if app.TargetPIDs == nil || app.KilledPIDs == nil || app.RemainingPIDs == nil || app.RemainingTaskIDs == nil {
+		t.Fatalf("known empty sets must be non-nil: %+v", app)
+	}
+	requireAppSummary(t, h, result.OperationID, request, OperationFinished, "finished", OutcomeExecuted, app)
 	if stops := h.forceStops(); len(stops) != 1 {
 		t.Fatalf("empty original dispatched %d force-stops", len(stops))
 	}
@@ -673,7 +721,8 @@ func TestAppKillFinalReadUnknownKeepsCommandFact(t *testing.T) {
 	}
 	h.device.mu.Unlock()
 
-	result := h.callApp("Pkillpostunknown", v31KillTask(first.Observation, 77))
+	request := v31KillTask(first.Observation, 77)
+	result := h.callApp("Pkillpostunknown", request)
 	if result.Outcome != OutcomeExecuted || result.Error != nil {
 		t.Fatalf("post-read unknown result=%+v code=%+v phase=%q", result, result.Error, result.Phase)
 	}
@@ -683,6 +732,10 @@ func TestAppKillFinalReadUnknownKeepsCommandFact(t *testing.T) {
 		app.PackageState != "unknown" {
 		t.Fatalf("post-read unknown app=%+v", app)
 	}
+	if app.RemainingTaskIDs != nil || app.KilledPIDs != nil || app.RemainingPIDs != nil {
+		t.Fatalf("unknown sets must be nil: %+v", app)
+	}
+	requireAppSummary(t, h, result.OperationID, request, OperationFinished, "finished", OutcomeExecuted, app)
 	if stops := h.forceStops(); len(stops) != 1 {
 		t.Fatalf("post-read unknown calls=%+v", stops)
 	}
