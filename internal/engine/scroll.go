@@ -986,7 +986,7 @@ func resolveScrollRefPlan(obs *observationState, view *tapPublicView,
 		apiErr := newScrollInvalidTargetError(tapStaticReasonNoGeometry,
 			tapStaticScopeTarget, target.Ref, "")
 		entries := collectScrollAncestorAndPageCandidates(obs, view, target)
-		attachStaticCandidates(apiErr, buildStaticCandidates(obs, view, operation, entries))
+		attachStaticCandidates(apiErr, buildFilteredScrollCandidates(obs, view, operation, target, entries))
 		return nil, apiErr
 	}
 	if target.Enabled != nil && !*target.Enabled {
@@ -996,7 +996,7 @@ func resolveScrollRefPlan(obs *observationState, view *tapPublicView,
 	targetRect, _ := publicNodeClippedRect(target, screen)
 	if isScrollContainer(target) {
 		if scrollContainerAxisCompatible(obs, view, target, operation.Direction) {
-			return planScrollContainer(obs, view, operation, target, "ref", scrollModeDirect,
+			return planScrollContainer(obs, view, operation, target, target, "ref", scrollModeDirect,
 				true, false)
 		}
 		// Step 1: fall back to the nearest axis-compatible parent scroll
@@ -1012,7 +1012,7 @@ func resolveScrollRefPlan(obs *observationState, view *tapPublicView,
 			if !scrollContainerAxisCompatible(obs, view, parent, operation.Direction) {
 				continue
 			}
-			plan, planErr := planScrollContainer(obs, view, operation, parent, "ref",
+			plan, planErr := planScrollContainer(obs, view, operation, parent, target, "ref",
 				scrollModeAxisFallback, false, false)
 			if planErr == nil {
 				return plan, nil
@@ -1035,14 +1035,14 @@ func resolveScrollRefPlan(obs *observationState, view *tapPublicView,
 		apiErr := newScrollUnsupportedError(staticReasonAxisMismatch,
 			tapStaticScopeTarget, target.Ref, "", targetActions, nil)
 		entries := collectScrollAncestorAndPageCandidates(obs, view, target)
-		attachStaticCandidates(apiErr, buildStaticCandidates(obs, view, operation, entries))
+		attachStaticCandidates(apiErr, buildFilteredScrollCandidates(obs, view, operation, target, entries))
 		return nil, apiErr
 	}
 	if target.Role == protocol.RoleScroll {
 		apiErr := newScrollUnsupportedError(tapStaticReasonTargetMissingAction,
 			tapStaticScopeTarget, target.Ref, "", targetActions, nil)
 		entries := collectScrollAncestorAndPageCandidates(obs, view, target)
-		attachStaticCandidates(apiErr, buildStaticCandidates(obs, view, operation, entries))
+		attachStaticCandidates(apiErr, buildFilteredScrollCandidates(obs, view, operation, target, entries))
 		return nil, apiErr
 	}
 	ancestors := scrollRoleAncestors(view, target)
@@ -1050,7 +1050,7 @@ func resolveScrollRefPlan(obs *observationState, view *tapPublicView,
 		apiErr := newScrollUnsupportedError(staticReasonNotScrollable,
 			tapStaticScopeTarget, target.Ref, "", targetActions, nil)
 		entries := collectPageScrollCandidates(obs, view, target.Ref)
-		attachStaticCandidates(apiErr, buildStaticCandidates(obs, view, operation, entries))
+		attachStaticCandidates(apiErr, buildFilteredScrollCandidates(obs, view, operation, target, entries))
 		return nil, apiErr
 	}
 	nearest := ancestors[0]
@@ -1060,14 +1060,14 @@ func resolveScrollRefPlan(obs *observationState, view *tapPublicView,
 		apiErr := newScrollUnsupportedError(tapStaticReasonAncestorInvalid,
 			tapStaticScopeAncestor, nearest.Ref, nearest.Ref, targetActions, ancestorActions)
 		entries := collectPageScrollCandidates(obs, view, nearest.Ref)
-		attachStaticCandidates(apiErr, buildStaticCandidates(obs, view, operation, entries))
+		attachStaticCandidates(apiErr, buildFilteredScrollCandidates(obs, view, operation, target, entries))
 		return nil, apiErr
 	}
 	if !hasAction(nearest, protocol.ActionSwipe) {
 		apiErr := newScrollUnsupportedError(tapStaticReasonAncestorMissingAction,
 			tapStaticScopeAncestor, nearest.Ref, nearest.Ref, targetActions, ancestorActions)
 		entries := collectPageScrollCandidates(obs, view, nearest.Ref)
-		attachStaticCandidates(apiErr, buildStaticCandidates(obs, view, operation, entries))
+		attachStaticCandidates(apiErr, buildFilteredScrollCandidates(obs, view, operation, target, entries))
 		return nil, apiErr
 	}
 	// Ancestor promotion: an axis-incompatible nearer ancestor is skipped
@@ -1087,7 +1087,7 @@ func resolveScrollRefPlan(obs *observationState, view *tapPublicView,
 		if index > 0 {
 			mode = scrollModeAxisFallback
 		}
-		plan, planErr := planScrollContainer(obs, view, operation, ancestor, "ref", mode,
+		plan, planErr := planScrollContainer(obs, view, operation, ancestor, target, "ref", mode,
 			false, true)
 		if planErr == nil {
 			return plan, nil
@@ -1102,7 +1102,7 @@ func resolveScrollRefPlan(obs *observationState, view *tapPublicView,
 	apiErr := newScrollUnsupportedError(staticReasonAxisMismatch,
 		tapStaticScopeAncestor, nearest.Ref, nearest.Ref, targetActions, ancestorActions)
 	entries := collectPageScrollCandidates(obs, view, nearest.Ref)
-	attachStaticCandidates(apiErr, buildStaticCandidates(obs, view, operation, entries))
+	attachStaticCandidates(apiErr, buildFilteredScrollCandidates(obs, view, operation, target, entries))
 	return nil, apiErr
 }
 
@@ -1134,7 +1134,7 @@ func resolveScrollPointPlan(obs *observationState, view *tapPublicView,
 		apiErr := newScrollInvalidTargetError(staticReasonNoScrollContainer,
 			tapStaticScopePoint, "", "")
 		entries := collectPageScrollCandidates(obs, view, "")
-		attachStaticCandidates(apiErr, buildStaticCandidates(obs, view, operation, entries))
+		attachStaticCandidates(apiErr, buildFilteredScrollCandidates(obs, view, operation, nil, entries))
 		return nil, apiErr
 	}
 	innermost := make([]*protocol.Node, 0, len(hitNodes))
@@ -1156,7 +1156,7 @@ func resolveScrollPointPlan(obs *observationState, view *tapPublicView,
 		compatibleAttempted := false
 		if scrollContainerAxisCompatible(obs, view, primary, operation.Direction) {
 			compatibleAttempted = true
-			plan, planErr := planScrollContainer(obs, view, operation, primary, "point",
+			plan, planErr := planScrollContainer(obs, view, operation, primary, primary, "point",
 				scrollModePointInnermost, false, false)
 			if planErr == nil {
 				return plan, nil
@@ -1177,7 +1177,7 @@ func resolveScrollPointPlan(obs *observationState, view *tapPublicView,
 			if hitSet[parent] &&
 				scrollContainerAxisCompatible(obs, view, parent, operation.Direction) {
 				compatibleAttempted = true
-				fallbackPlan, fallbackErr := planScrollContainer(obs, view, operation, parent,
+				fallbackPlan, fallbackErr := planScrollContainer(obs, view, operation, parent, primary,
 					"point", scrollModePointFallback, false, false)
 				if fallbackErr == nil {
 					return fallbackPlan, nil
@@ -1197,7 +1197,7 @@ func resolveScrollPointPlan(obs *observationState, view *tapPublicView,
 			apiErr := newScrollUnsupportedError(staticReasonAxisMismatch,
 				tapStaticScopePoint, "", "", tapPublicActions(primary), nil)
 			entries := collectPageScrollCandidates(obs, view, primary.Ref)
-			attachStaticCandidates(apiErr, buildStaticCandidates(obs, view, operation, entries))
+			attachStaticCandidates(apiErr, buildFilteredScrollCandidates(obs, view, operation, primary, entries))
 			return nil, apiErr
 		}
 		if primaryErr != nil &&
@@ -1252,7 +1252,7 @@ func resolveScrollPointPlan(obs *observationState, view *tapPublicView,
 		apiErr := newScrollUnsupportedError(staticReasonAxisMismatch,
 			tapStaticScopePoint, "", "", tapPublicActions(innermost[0]), nil)
 		entries := collectPageScrollCandidates(obs, view, "")
-		attachStaticCandidates(apiErr, buildStaticCandidates(obs, view, operation, entries))
+		attachStaticCandidates(apiErr, buildFilteredScrollCandidates(obs, view, operation, nil, entries))
 		return nil, apiErr
 	}
 	if executableCount == 1 && uniquePlan != nil {
@@ -1324,34 +1324,34 @@ func resolveScrollPointPlan(obs *observationState, view *tapPublicView,
 		}
 	}
 	apiErr := newScrollAmbiguousPointError()
-	attachStaticCandidates(apiErr, buildStaticCandidates(obs, view, operation, entries))
+	attachStaticCandidates(apiErr, buildFilteredScrollCandidates(obs, view, operation, nil, entries))
 	return nil, apiErr
 }
 
 func planScrollContainer(obs *observationState, view *tapPublicView,
-	operation *protocol.Operation, want *protocol.Node, selector, baseMode string,
+	operation *protocol.Operation, container, want *protocol.Node, selector, baseMode string,
 	allowInnerFallback, liftedFromAncestor bool) (*scrollPlan, *protocol.APIError) {
 	projection := obs.Projection
 	screen := projection.Capture.Display.Bounds()
-	index, mapped := projection.Source[want.Ref]
+	index, mapped := projection.Source[container.Ref]
 	if !mapped || index < 0 || index >= len(projection.Capture.Nodes) {
 		return nil, tapHierarchyError()
 	}
 	raw := &projection.Capture.Nodes[index]
 	clipped := raw.Bounds.Intersect(screen)
-	publicRect, hasPublic := publicNodeClippedRect(want, screen)
+	publicRect, hasPublic := publicNodeClippedRect(container, screen)
 	if !hasPublic || clipped.Empty() || clipped.Intersect(publicRect).Empty() {
 		if liftedFromAncestor {
 			apiErr := newScrollInvalidTargetError(tapStaticReasonNoGeometry,
-				tapStaticScopeAncestor, want.Ref, want.Ref)
-			entries := collectPageScrollCandidates(obs, view, want.Ref)
-			attachStaticCandidates(apiErr, buildStaticCandidates(obs, view, operation, entries))
+				tapStaticScopeAncestor, container.Ref, container.Ref)
+			entries := collectPageScrollCandidates(obs, view, container.Ref)
+			attachStaticCandidates(apiErr, buildFilteredScrollCandidates(obs, view, operation, want, entries))
 			return nil, apiErr
 		}
 		apiErr := newScrollInvalidTargetError(tapStaticReasonNoGeometry,
-			tapStaticScopeTarget, want.Ref, "")
-		entries := collectScrollAncestorAndPageCandidates(obs, view, want)
-		attachStaticCandidates(apiErr, buildStaticCandidates(obs, view, operation, entries))
+			tapStaticScopeTarget, container.Ref, "")
+		entries := collectScrollAncestorAndPageCandidates(obs, view, container)
+		attachStaticCandidates(apiErr, buildFilteredScrollCandidates(obs, view, operation, want, entries))
 		return nil, apiErr
 	}
 	plan, failure := planScrollOnAxes(projection, index, clipped,
@@ -1362,25 +1362,25 @@ func planScrollContainer(obs *observationState, view *tapPublicView,
 	if failure.noGeometry {
 		if liftedFromAncestor {
 			apiErr := newScrollInvalidTargetError(tapStaticReasonNoGeometry,
-				tapStaticScopeAncestor, want.Ref, want.Ref)
-			entries := collectPageScrollCandidates(obs, view, want.Ref)
-			attachStaticCandidates(apiErr, buildStaticCandidates(obs, view, operation, entries))
+				tapStaticScopeAncestor, container.Ref, container.Ref)
+			entries := collectPageScrollCandidates(obs, view, container.Ref)
+			attachStaticCandidates(apiErr, buildFilteredScrollCandidates(obs, view, operation, want, entries))
 			return nil, apiErr
 		}
 		apiErr := newScrollInvalidTargetError(tapStaticReasonNoGeometry,
-			tapStaticScopeTarget, want.Ref, "")
-		entries := collectScrollAncestorAndPageCandidates(obs, view, want)
-		attachStaticCandidates(apiErr, buildStaticCandidates(obs, view, operation, entries))
+			tapStaticScopeTarget, container.Ref, "")
+		entries := collectScrollAncestorAndPageCandidates(obs, view, container)
+		attachStaticCandidates(apiErr, buildFilteredScrollCandidates(obs, view, operation, want, entries))
 		return nil, apiErr
 	}
 	if allowInnerFallback {
-		if innerPlan := tryUniqueInnerScrollFallback(obs, view, operation, want, publicRect); innerPlan != nil {
+		if innerPlan := tryUniqueInnerScrollFallback(obs, view, operation, container, publicRect); innerPlan != nil {
 			return innerPlan, nil
 		}
 	}
-	apiErr := newScrollNoSafeTrajectoryError(failure.reason, want.Ref)
-	entries := collectNoSafeTrajectoryCandidates(obs, view, want, failure.blockingScrollNodes)
-	attachStaticCandidates(apiErr, buildStaticCandidates(obs, view, operation, entries))
+	apiErr := newScrollNoSafeTrajectoryError(failure.reason, container.Ref)
+	entries := collectNoSafeTrajectoryCandidates(obs, view, container, failure.blockingScrollNodes)
+	attachStaticCandidates(apiErr, buildFilteredScrollCandidates(obs, view, operation, want, entries))
 	attachStaticBlockingRefs(apiErr, failure.blockingRefs)
 	return nil, apiErr
 }

@@ -1889,7 +1889,7 @@ func (e *Engine) dispatchText(work *workState, op *operationState, session *sess
 			}
 		}
 		if bound.raw == nil {
-			bound, apiErr = e.focusTextRef(work, op, session, obs, fresh, want, tapX, tapY)
+			bound, apiErr = e.focusTextRef(work, op, session, fresh, want, tapX, tapY)
 			if apiErr != nil {
 				return apiErr.Outcome, nil, apiErr
 			}
@@ -1994,65 +1994,30 @@ func (e *Engine) dispatchText(work *workState, op *operationState, session *sess
 	return e.dispatchTextEnterSubmit(work, op, session, obs, bound, operation.Text)
 }
 
-// focusTextRef performs the one allowed focus tap for a ref target and binds
-// the focused field in the after-tap frame under the current strict rules.
+// focusTextRef binds a ref against the frame that authorized its focus point.
 func (e *Engine) focusTextRef(work *workState, op *operationState, session *sessionState,
-	obs *observationState, fresh *device.Capture, want *device.RawNode,
-	tapX, tapY int) (textBinding, *protocol.APIError) {
-	if !e.setTextStage(work, op, textStageFocus) {
-		return textBinding{}, e.textError(op, 409, protocol.CodeStopped,
-			"原工作已撤销", textStageFocus, textReasonAuthorizationRevoked,
-			OutcomeUncertain, nil)
-	}
-	if apiErr := e.beginUIDispatchStage(work, "tap", "focus"); apiErr != nil {
-		return textBinding{}, e.focusTextBeginError(op, apiErr)
-	}
-	receipt, tapErr := e.dev.Tap(work.Ctx, session.Display.ID, tapX, tapY)
-	e.recordUIReceipt(work, receipt)
-	e.commitTextReceipt(work, op, "focus", receipt, tapErr)
-	if receipt == device.DispatchNotDispatched {
-		return textBinding{}, e.textError(op, 503, protocol.CodeDeviceUnavailable,
-			"输入未派发", textStageFocus, textReasonFocusNotSent,
-			e.textFailureOutcome(op), nil)
-	}
-	if tapErr != nil || receipt != device.DispatchTerminated {
-		return textBinding{}, e.textError(op, 504, protocol.CodeActionUnknown,
-			"输入已派发，但完成结果无法确认", textStageFocus, textReasonFocusUnconfirmed,
-			OutcomeUncertain, nil)
-	}
-	if e.workRevoked(work) {
-		return textBinding{}, e.textError(op, 409, protocol.CodeStopped,
-			"原工作已撤销", textStageFocus, textReasonAuthorizationRevoked,
-			OutcomeUncertain, nil)
-	}
-	afterTap, err := e.dev.Capture(work.Ctx, session.Display)
-	if err != nil {
-		return textBinding{}, e.textError(op, 409, protocol.CodeTextTargetUnknown,
-			"无法唯一绑定目标输入对象", textStageFocus, textReasonFocusUnconfirmed,
-			OutcomeUncertain, nil)
-	}
-	if e.workRevoked(work) || work.Ctx.Err() != nil {
-		return textBinding{}, e.textError(op, 409, protocol.CodeStopped,
-			"原工作已撤销", textStageFocus, textReasonAuthorizationRevoked,
-			OutcomeUncertain, nil)
-	}
-	bound, ok := bindFocusedText(fresh, &afterTap, want, fresh.Foreground, tapX, tapY)
-	if !ok {
-		return textBinding{}, e.textError(op, 409, protocol.CodeTextTargetUnknown,
-			"无法唯一绑定目标输入对象", textStageFocus, textReasonFocusUnconfirmed,
-			OutcomeUncertain, nil)
-	}
-	return bound, nil
+	fresh *device.Capture, want *device.RawNode, tapX, tapY int) (textBinding, *protocol.APIError) {
+	return e.focusTextWithRecheck(work, op, session, fresh, tapX, tapY, true,
+		func(afterTap *device.Capture) (textBinding, bool) {
+			return bindFocusedText(fresh, afterTap, want, fresh.Foreground, tapX, tapY)
+		})
 }
 
-// focusTextPoint preserves the coordinate-text path: the authorized point is
-// focused once and only a unique safe focused field covering it can bind.
+// focusTextPoint requires a unique safe focused field covering the authorized point.
 func (e *Engine) focusTextPoint(work *workState, op *operationState, session *sessionState,
 	fresh *device.Capture, tapX, tapY int) (textBinding, *protocol.APIError) {
+	return e.focusTextWithRecheck(work, op, session, fresh, tapX, tapY, false,
+		func(afterTap *device.Capture) (textBinding, bool) {
+			raw, ok := bindFocusedTextAtPoint(afterTap, nil, tapX, tapY)
+			return textBinding{raw: raw, mode: textPoint, capture: afterTap}, ok
+		})
+}
+
+func (e *Engine) focusTextWithRecheck(work *workState, op *operationState, session *sessionState,
+	fresh *device.Capture, tapX, tapY int, isRef bool,
+	bind func(*device.Capture) (textBinding, bool)) (bound textBinding, apiErr *protocol.APIError) {
 	if !e.setTextStage(work, op, textStageFocus) {
-		return textBinding{}, e.textError(op, 409, protocol.CodeStopped,
-			"原工作已撤销", textStageFocus, textReasonAuthorizationRevoked,
-			OutcomeUncertain, nil)
+		return textBinding{}, e.focusTextStopped(op)
 	}
 	if apiErr := e.beginUIDispatchStage(work, "tap", "focus"); apiErr != nil {
 		return textBinding{}, e.focusTextBeginError(op, apiErr)
@@ -2070,29 +2035,67 @@ func (e *Engine) focusTextPoint(work *workState, op *operationState, session *se
 			"输入已派发，但完成结果无法确认", textStageFocus, textReasonFocusUnconfirmed,
 			OutcomeUncertain, nil)
 	}
-	if e.workRevoked(work) {
-		return textBinding{}, e.textError(op, 409, protocol.CodeStopped,
-			"原工作已撤销", textStageFocus, textReasonAuthorizationRevoked,
-			OutcomeUncertain, nil)
+
+	started := time.Now()
+	attempt := 1
+	defer func() {
+		e.logTextFocus(op.ID, bound.mode, attempt, time.Since(started), apiErr)
+	}()
+	var deadline time.Time
+	for {
+		if e.workRevoked(work) || work.Ctx.Err() != nil {
+			return textBinding{}, e.focusTextStopped(op)
+		}
+		afterTap, captureErr := e.dev.Capture(work.Ctx, session.Display)
+		if e.workRevoked(work) || work.Ctx.Err() != nil {
+			return textBinding{}, e.focusTextStopped(op)
+		}
+		if captureErr != nil || !textSubmitCaptureTrusted(&afterTap, session.Display) ||
+			!e.textSubmitDisplayCurrent(work, session.Display) {
+			break
+		}
+		if isRef {
+			if !sameTextTaskContext(fresh.Foreground, afterTap.Foreground) {
+				break
+			}
+			if _, topologyErr := validateTapRawTopology(&afterTap); topologyErr != nil {
+				break
+			}
+		} else if foregroundMatches(fresh.Foreground, afterTap.Foreground) != nil {
+			break
+		}
+		binding, ok := bind(&afterTap)
+		if e.workRevoked(work) || work.Ctx.Err() != nil {
+			return textBinding{}, e.focusTextStopped(op)
+		}
+		if ok {
+			return binding, nil
+		}
+		if attempt == 1 {
+			// The first capture does not consume the retry window.
+			deadline = time.Now().Add(textFocusRecheckMaxElapsed)
+		}
+		remaining := time.Until(deadline)
+		if attempt >= textFocusMaxAttempts || attempt > len(textFocusPollDelays) || remaining <= 0 {
+			break
+		}
+		if !pauseInterruptible(work.Ctx, min(textFocusPollDelays[attempt-1], remaining)) ||
+			e.workRevoked(work) || work.Ctx.Err() != nil {
+			return textBinding{}, e.focusTextStopped(op)
+		}
+		if time.Until(deadline) <= 0 {
+			break
+		}
+		attempt++
 	}
-	afterTap, err := e.dev.Capture(work.Ctx, session.Display)
-	if err != nil {
-		return textBinding{}, e.textError(op, 409, protocol.CodeTextTargetUnknown,
-			"无法唯一绑定目标输入对象", textStageFocus, textReasonFocusUnconfirmed,
-			OutcomeUncertain, nil)
-	}
-	if e.workRevoked(work) || work.Ctx.Err() != nil {
-		return textBinding{}, e.textError(op, 409, protocol.CodeStopped,
-			"原工作已撤销", textStageFocus, textReasonAuthorizationRevoked,
-			OutcomeUncertain, nil)
-	}
-	raw, ok := bindFocusedTextAtPoint(&afterTap, nil, tapX, tapY)
-	if !ok {
-		return textBinding{}, e.textError(op, 409, protocol.CodeTextTargetUnknown,
-			"无法唯一绑定目标输入对象", textStageFocus, textReasonFocusUnconfirmed,
-			OutcomeUncertain, nil)
-	}
-	return textBinding{raw: raw, mode: textNear, capture: &afterTap}, nil
+	return textBinding{}, e.textError(op, 409, protocol.CodeTextTargetUnknown,
+		"无法唯一绑定目标输入对象", textStageFocus, textReasonFocusUnconfirmed,
+		OutcomeUncertain, nil)
+}
+
+func (e *Engine) focusTextStopped(op *operationState) *protocol.APIError {
+	return e.textError(op, 409, protocol.CodeStopped,
+		"原工作已撤销", textStageFocus, textReasonAuthorizationRevoked, OutcomeUncertain, nil)
 }
 
 func (e *Engine) focusTextBeginError(op *operationState, apiErr *protocol.APIError) *protocol.APIError {
@@ -2178,9 +2181,12 @@ func (e *Engine) textDetails(op *operationState, stage, reason string, count *in
 type textBindingMode string
 
 const (
-	textExact   textBindingMode = "exact"
-	textNear    textBindingMode = "near"
-	textShifted textBindingMode = "shifted"
+	textExact        textBindingMode = "exact"
+	textNear         textBindingMode = "near"
+	textShifted      textBindingMode = "shifted"
+	textExpanded     textBindingMode = "expanded"
+	textParentAnchor textBindingMode = "parent_anchor"
+	textPoint        textBindingMode = "point"
 )
 
 type textBinding struct {
@@ -2291,92 +2297,73 @@ func sameTextTaskContext(expected, fresh device.Foreground) bool {
 		*expected.TaskID == *fresh.TaskID
 }
 
-// bindFocusedText binds one focused editable field to a stable source anchor
-// and geometry. Exact and near are tried first; shifted permits only the
-// vertical movement caused by an on-screen keyboard. Anchor uniqueness is
-// counted before the focused-only safety filter, so a unique focus can never
-// disambiguate two source fields.
+// bindFocusedText counts identity matches before filtering for focus, so focus
+// alone cannot disambiguate fields with the same source identity.
 func bindFocusedText(original, fresh *device.Capture, want *device.RawNode,
 	expected device.Foreground, tapX, tapY int) (textBinding, bool) {
-	if original == nil || fresh == nil || want == nil ||
-		!want.Visible || !want.Editable ||
-		!want.HasEnabled || !want.Enabled ||
-		!want.HasPassword || want.Password {
-		return textBinding{}, false
-	}
-	if original.Display.ID != fresh.Display.ID ||
-		want.DisplayID != fresh.Display.ID ||
+	if original == nil || fresh == nil || !freshTextTargetSafe(want) ||
+		original.Display.ID != fresh.Display.ID || want.DisplayID != fresh.Display.ID ||
 		!sameTextTaskContext(expected, fresh.Foreground) {
 		return textBinding{}, false
 	}
 	kind, anchor, hasAnchor := stableTextAnchor(want)
-	anchorUnique := false
+	near := func(node *device.RawNode) bool {
+		return node.Bounds.Contains(tapX, tapY) && overlapRatio(node.Bounds, want.Bounds) >= 0.8
+	}
 	if hasAnchor {
-		anchorUnique = anchorCount(original, want, kind, anchor) == 1 &&
-			anchorCount(fresh, want, kind, anchor) == 1
-		if !anchorUnique {
+		if anchorCount(original, want, kind, anchor) != 1 || anchorCount(fresh, want, kind, anchor) != 1 {
 			return textBinding{}, false
 		}
-	} else if noAnchorNearCount(original, want, tapX, tapY) != 1 ||
-		noAnchorNearCount(fresh, want, tapX, tapY) != 1 {
-		return textBinding{}, false
-	}
-
-	var exact, near []*device.RawNode
-	for i := range fresh.Nodes {
-		node := &fresh.Nodes[i]
-		if node.DisplayID != want.DisplayID || !textCandidateSafe(node) ||
-			!sameTextSourcePresence(want, node) {
-			continue
-		}
-		if hasAnchor {
+		for i := range fresh.Nodes {
+			node := &fresh.Nodes[i]
+			if node.DisplayID != want.DisplayID || !textCandidateSafe(node) ||
+				!sameTextSourcePresence(want, node) {
+				continue
+			}
 			gotKind, gotAnchor, ok := stableTextAnchor(node)
 			if !ok || gotKind != kind || gotAnchor != anchor {
 				continue
 			}
-			if want.Bounds == node.Bounds {
-				exact = append(exact, node)
+			// The pre-focus count proves this is the only anchor match.
+			binding := textBinding{raw: node, anchor: anchor, anchorKind: kind, capture: fresh}
+			switch {
+			case want.Bounds == node.Bounds:
+				binding.mode = textExact
+			case near(node):
+				return textBinding{raw: node, mode: textNear, capture: fresh}, true
+			case sameHorizontalBand(want.Bounds, node.Bounds):
+				binding.mode = textShifted
+			case rectValidOnScreen(node.Bounds, fresh.Display.Bounds()) && expandedTextGeometry(want.Bounds, node.Bounds):
+				binding.mode = textExpanded
+			default:
+				return textBinding{}, false
 			}
+			return binding, true
 		}
-		if node.Package == want.Package && node.Bounds.Contains(tapX, tapY) &&
-			overlapRatio(node.Bounds, want.Bounds) >= 0.8 {
-			near = append(near, node)
-		}
-	}
-	switch {
-	case len(exact) == 1:
-		return textBinding{raw: exact[0], mode: textExact,
-			anchor: anchor, anchorKind: kind, capture: fresh}, true
-	case len(exact) > 1:
-		return textBinding{}, false
-	case len(near) == 1:
-		return textBinding{raw: near[0], mode: textNear, capture: fresh}, true
-	case len(near) > 1:
-		return textBinding{}, false
-	}
-	if !hasAnchor || !anchorUnique {
 		return textBinding{}, false
 	}
 
-	var shifted []*device.RawNode
-	for i := range fresh.Nodes {
-		node := &fresh.Nodes[i]
-		if node.DisplayID != want.DisplayID || !textCandidateSafe(node) ||
-			!sameTextSourcePresence(want, node) {
-			continue
-		}
-		gotKind, gotAnchor, ok := stableTextAnchor(node)
-		if !ok || gotKind != kind || gotAnchor != anchor ||
-			!sameHorizontalBand(want.Bounds, node.Bounds) {
-			continue
-		}
-		shifted = append(shifted, node)
-	}
-	if len(shifted) != 1 {
+	if noAnchorNearCount(original, want, tapX, tapY) != 1 {
 		return textBinding{}, false
 	}
-	return textBinding{raw: shifted[0], mode: textShifted,
-		anchor: anchor, anchorKind: kind, capture: fresh}, true
+	freshNear := noAnchorNearCount(fresh, want, tapX, tapY)
+	if freshNear > 1 {
+		return textBinding{}, false
+	}
+	if freshNear == 1 {
+		for i := range fresh.Nodes {
+			node := &fresh.Nodes[i]
+			if node.DisplayID == want.DisplayID && textCandidateSafe(node) &&
+				sameTextSourcePresence(want, node) && near(node) {
+				return textBinding{raw: node, mode: textNear, capture: fresh}, true
+			}
+		}
+	}
+	// The no-tap path passes a fresh node with a different original frame.
+	if wantIdx := indexOf(original, want); wantIdx >= 0 {
+		return bindFocusedTextByParentAnchor(original, fresh, wantIdx, want)
+	}
+	return textBinding{}, false
 }
 
 // bindFocusedTextAtPoint preserves the coordinate-text path: no ref anchor

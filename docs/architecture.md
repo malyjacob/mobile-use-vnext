@@ -216,7 +216,20 @@ engine 的状态锁只做有限内存检查与转换：锁内不等待 ADB、u2 
 - 认领后容器走 Tier 1–5 双向唯一匹配，校验新鲜 `isScrollContainer`、`sameScrollScope`（轴向重叠与离轴容差）及公开 `axis` 未与请求方向显式冲突（冲突按 `409 target_changed`、`reason=capability_changed` 零派发）；Tier 4/5 的滚动容器证据是 E1（容器自身非空可读文案/描述两侧相等）、E2（同屏同包全树双向唯一的非空资源）或滚动容器专用的 E3（两侧非空可读文案至少有 1 项共享；或同一非空资源且双向面积覆盖 ≥85%）之一，不要求容器内全部文案不变；
   新鲜树按相同双向同视口规则先证明原段，失效时在同一容器内按 3 轴线与居中规则重规划；失败返回
   `409 target_changed` 并附封闭归因 `details.reason`（`target_missing`/`target_ambiguous`/`lineage_changed`/`capability_changed`/`scroll_scope_changed`/`trajectory_blocked`）；
-- 静态不可执行在认领前拒绝，新鲜不成立走重验失败的交付路径。单次 `act(scroll)` 最多派发一次手势，不按派发后观察补滑。
+- 静态不可执行在认领前拒绝，新鲜不成立走重验失败的交付路径。单次 `act(scroll)` 最多派发一次手势，不按派发后观察补滑；
+- 静态 `422` 的 `candidates` 先按前景上下文过滤再排序：剔除与请求目标不属于同一顶层窗口的容器
+  （窗口顺序来自固定 `u2.jar` 的 `HashSet`，不代表 z 序，因此只比较窗口归属等值）；剔除被无文案
+  的外部点击遮罩叶覆盖的容器（`v_mask`/`shadow`/`touch_outside` 一类，候选与请求目标的
+  公共祖先比遮罩更深时不计，以免掩盖同前景分支内更贴近目标的容器）；剔除被同窗口后序实体浮层
+  面板覆盖的容器（交互或可滚动控件，或内部顶层内容矩形在屏内的精确 2D 并集面积达到该节点矩形
+  50% 的容器；空心透明包装层不按整框计遮挡，只递归看其内部真实的顶栏、底栏、悬浮按钮或实体
+  子面板）。叠加遮挡后 3 条轴线均无法满足档位最小行程、且原本至少 1 条可满足或遮挡与候选矩形
+  的精确 2D 并集覆盖候选 ≥50% 的候选同样剔除；保留项按与请求目标的公共祖先深度降序稳定排序
+  （同前景分支优先于跨分支），再按 `executable=true` 优先截取前 4 项。全部被剔除时省略
+  `candidates`，绝不回退被遮挡的背景页面。轨迹证明仍按 `scrollSafeSpansAt` 的保守规则（3 条
+  轴线与安全区间扣除，取第一条整段通过的轨迹），遮挡信息只用于剔除静态候选、不参与派发；
+  固定 `u2.jar` 只提供窗口根集合、不提供真实 z 序，单窗口侧边抽屉对自身请求受控 `scroll`
+  仍可能返回 `422 no_safe_trajectory`。
 
 坐标 `tap`/`long_press`/`text` 与 raw `swipe` 都以最深命中集合为授权单位：认领前在观察公开树中解析原点，认领后在新鲜帧重新取得命中集合，并按动作类型分别证明。集合匹配使用有界二分图最大匹配（Kuhn 增广路，命中集合顶点数上限 64），不要求逐边一一对应。
 
@@ -247,10 +260,22 @@ engine 的状态锁只做有限内存检查与转换：锁内不等待 ADB、u2 
 `coextensive_child`）。`text(ref)` 焦点规划不做祖先提升、共位吸附与 `coextensive_child` 委托，先过统一
 `invalid_target`/`node_disabled`，再做可编辑/受保护校验（`422 text_target_uncertain`），静态准入不要求
 `tap` 动作，最后按 `text` 能力在目标子树内规划唯一 4 级聚焦落点；无落点时返回 `422 no_safe_point`，
-遮挡的非输入控件列入 `blocking_refs`。已聚焦目标走零点击快路径，未聚焦时至多点击一次并由 `afterTap`
-与严格绑定证明获焦。除参数语法、节点存在/禁用及 `text` 自身输入能力/保护拒绝外，`act` 静态目标解析与规划拒绝统一收口为 5 个正交 `422` 错误码（`invalid_target`、`unsupported_node_action`、
+遮挡的非输入控件列入 `blocking_refs`。已聚焦目标走零点击快路径，未聚焦时至多点击一次，并由
+`afterTap` 与严格绑定证明获焦：ref 目标按 exact → near → shifted → expanded 依次绑定，
+`expanded` 允许点击后横向展开或多行撑高（新框宽度不小于原宽减 `max(8, 原宽/5)`、高度
+不小于原高减 `max(8, 原高/5)`，与原点 X 轴投影交叠至少覆盖原宽一半；纵向位置本就不参与
+水平带判定，`expanded` 放宽的是左右边差与高度增长上限）；坐标目标沿用覆盖点击点的绑定
+（`mode=point`）。ref 目标自身无稳定锚点时退到最近非
+窗口根、非滚动/可编辑父容器的双帧唯一 `resource-id` 锚点（父下同类可编辑子框在双帧各恰有
+1 个，新鲜帧同显示恰有 1 个安全聚焦输入框，点击后原位附近出现 ≥2 个重叠匿名框即拒绝），
+各分支唯一性都在 focus 过滤前统计。聚焦 `Tap` 终止后，ref 目标与坐标目标都做至多
+3 次只读 `Capture` 复查（首帧立即、其后 `60ms`/`120ms` 退避，复查窗口上限 `1200ms` 从首帧
+返回后计时），全程只读、绝不派发第二次 `Tap`；采集错误、前台切换或采集显示与绑定显示不一致
+立即收口 `focus_unconfirmed`，STOP 立即 `control_revoked` 并保持整体 `uncertain`；仍未确认
+仍是 `409 text_target_uncertain`（`stage=focus`、`reason=focus_unconfirmed`）。除参数语法、节点存在/禁用及 `text` 自身输入能力/保护拒绝外，`act` 静态目标解析与规划拒绝统一收口为 5 个正交 `422` 错误码（`invalid_target`、`unsupported_node_action`、
 `ambiguous_point`、`no_safe_point`、`no_safe_trajectory`），有候选时附统一 `candidates`（至多 4 项，干跑计算 `executable`，
-不含文本/标签）与可选 `blocking_refs`（至多 3 项）。
+不含文本/标签）与可选 `blocking_refs`（至多 3 项）；`scroll` 的静态候选另按受控滚动段的遮罩/浮层
+过滤与同前景分支排序收口，全部被剔除时省略 `candidates`。
 
 认领后 ref 目标使用有界 Tier 1–5 双向唯一匹配（L1 不比较祖先 bounds、Focused/Selected；Tier 1 保持目标
 bounds；Tier 2 允许受限微移；Tier 3 仅移除已知空透明层并要求非根强锚点）。Tier 3 的祖先比较忽略非目标
@@ -258,8 +283,9 @@ bounds；Tier 2 允许受限微移；Tier 3 仅移除已知空透明层并要求
 启用/密码/勾选三态；非根强锚点同样只采信非空资源身份或点击/长按/滚动/可编辑/密码/勾选能力，不再由
 `Text`/`Description` 提供。祖先链
 上溯不计入采集为多顶层窗口插入的合成显示根：到该层即终止并把最近的真实窗口根作为链根，因此第二个
-顶层窗口出现或消失不再改变所有目标的祖先深度。Tier 4 只在 Tier 1–3 全部零候选
-且观察到祖先链失配时进入：要求同显示、`sameStructure` 无已知冲突、矩形在屏内且双向面积覆盖均 ≥80%、
+顶层窗口出现或消失不再改变所有目标的祖先深度。Tier 4 只在 Tier 1–3 全部零候选、观察到祖先链
+失配且未触发 Tier 2/3 歧义直入通道时进入：要求同显示、`sameStructure` 无已知冲突、矩形在屏内
+且双向面积覆盖均 ≥80%、
 尺寸差不超过 `max(8, 较大边/5)`、中心位移不超过 `max(16, 较大边/4)`，并满足任一强语义证据：E1 自身非空文案/描述精确相等；E2 同屏同包全树双向
 唯一的非空资源；E3 有界子树（每侧至多 64 个后代）可读文案指纹：仅当两侧目标源节点都没有自身非空
 `Text`/`Description` 且都有后代时才适用，否则适用的是 E1/E2。点击/长按/输入目标要求两侧非空且排序后
@@ -267,10 +293,18 @@ bounds；Tier 2 允许受限微移；Tier 3 仅移除已知空透明层并要求
 `.` `,` `:` `+` `-` `/` `%` 和空格组成"的条目可以增删（`12ms` 这类含字母的条目不在其列），其余条目把
 每段 ASCII 数字折叠为单个 `#` 后两侧排序列表相等，且两侧都存在至少 1 条不含任何数字的不变可读文案。
 滚动容器不适用多重集与数字骨架规则，其强证据按 scroll 段的 E1/E2/滚动 E3 判定。Tier 5 只在 Tier 1–3
-（以及已进入的 Tier 4）全部零候选后运行：同显示、`sameStructure` 无已知冲突、新矩形在屏内且与旧
+（以及已进入的 Tier 4）全部零候选后，或按 Tier 2/3 歧义直入通道提前进入时运行：同显示、
+`sameStructure` 无已知冲突、新矩形在屏内且与旧
 矩形同水平带（左右边差 ≤ `max(8, 最大宽/50)`、宽高差 ≤ `max(8, 最大边/5)`），祖先链按 L1 精确相等或按
-上面去噪后的 L2 相等且含至少 1 个非根强锚点，并满足 E1/E2/E3 之一；命中后按新鲜矩形派发。Tier 4 与
-Tier 5 都要求正向与反向扫描在全树唯一；任一 Tier 出现 ≥2 个候选即结束本次绑定搜索，由调用方分类：
+上面去噪后的 L2 相等且含至少 1 个非根强锚点，并满足 E1/E2/E3 之一；命中后按新鲜矩形派发。
+Tier 2/3 的无自有可读文案容器可跳过 Tier 3 余下尝试与 Tier 4 直入 Tier 5：仅当歧义发生在
+Tier 2 或 Tier 3、目标自身没有可读文案/描述且有子节点、动作是点击/长按/输入类、且本次匹配
+未禁用平移找回时适用，由 Tier 5 的 E3 子树证据与 `tier>=4` 全树遮挡证明裁决，该通道 Tier 5
+零候选归因 `target_missing`、不带 `changed_ref`；目标自带可读文案/描述、无子叶子、Tier 1 歧义、
+`scroll` 容器，以及 `submit_ref` 写后提交路径与坐标拥有者守恒兜底（两者禁用 Tier 5 平移找回）
+仍立即拒绝多候选。Tier 4 与
+Tier 5 都要求正向与反向扫描在全树唯一；该通道之外，任一 Tier 出现 ≥2 个候选即结束本次绑定搜索，
+由调用方分类：
 普通 ref 目标、滚动容器以及 `bubble_ancestor`/`bubble_colocated` 的执行祖先或共位绑定的歧义是
 `target_ambiguous`，两种 `bubble` 模式下触发子节点的歧义归 `child_changed`，`text` 整体仍按
 `target_unconfirmed` 收口；预算耗尽或畸形树返回
@@ -319,7 +353,9 @@ focus/write/submit 原语状态、三个原语的 dispatch 事实（`not_attempt
 `currentStage`（target/focus/write/verify/submit）。焦点 tap、SetText 与提交原语各自在创建
 `may_dispatch` 令牌的同一短锁内把原语推进为 `uncertain`、dispatch 推进为 `unknown`；
 持久化与最终授权失败回退为确定未派发，回执返回后再按终止/确定未派发/不可用分别推进。
-ref 目标在新鲜帧中已聚焦且通过完整绑定时跳过焦点 tap，其他目标只做一次必要聚焦。
+ref 目标在新鲜帧中已聚焦且通过完整绑定时跳过焦点 tap，其他目标只做一次必要聚焦，并由至多
+3 次只读 `Capture`（首帧立即，其后 `60ms`/`120ms` 退避，窗口上限 `1200ms`）确认获焦，
+绝不派发第二次 `Tap`。
 
 写入完成证据在一次 SetText 的完整终止回执、`candidateCount=1`、`issued=true` 之后判定：固定
 helper 的 `0ms` 刷新值已与请求精确相等即完成，零额外 RPC、零等待；不可读或不等时至多 3 次只读
@@ -883,7 +919,11 @@ P 已无法定位时，`end(P)` 返回 `409 operation_unknown`、`phase=referenc
 提交为前提；都不包含候选 ID、树或差分。
 text 完成事件记 `focus_dispatch`/`write_dispatch`/`submit_dispatch` 与受控 `stage`/`reason`/`count`；
 写入确认事件 `engine.text.verify` 记 `mode`（`direct`/`poll`/`rebind`）、`attempt`、`outcome`、失败时的闭集
-`reason`、已知的 `count` 与阶段耗时 `ms`；`changed_ref`、输入正文与读回值绝不进入日志。
+`reason`、已知的 `count` 与阶段耗时 `ms`；聚焦复查事件 `engine.text.focus` 记 `operation_id`、
+`mode`（`exact`/`near`/`shifted`/`expanded`/`parent_anchor`/`point`/`none`）、`attempt`（1–3）、
+`outcome`（`proven`/`uncertain`/`stopped`）、失败或撤销时的闭集 `reason`
+（`focus_unconfirmed`/`authorization_revoked`）与耗时 `ms`；这三个 text 事件只用既有白名单键，
+绝不写入输入正文、回读值、`changed_ref`、`ref`、`resource-id` 或坐标。
 新增键必须先进入 `internal/eventlog` 的单一白名单，否则事件被静默丢弃。
 
 ## 10. 消息投递与发布边界
@@ -899,7 +939,7 @@ text 完成事件记 `focus_dispatch`/`write_dispatch`/`submit_dispatch` 与受�
 ### 发布
 
 `release/versions.json` 是发行号、共同契约号与 Android versionCode 的唯一来源；当前为
-`release_version=0.37.0`、`contract_version=33`、`android_version_code=39`，构建生成
+`release_version=0.38.0`、`contract_version=34`、`android_version_code=40`，构建生成
 Go/Java 常量。`scripts/build-release.ps1` 产出整组产物与 `build/release/manifest.json`
 （源码提交、Go 版本、MCP SDK/协议、各产物 SHA-256/大小、Android 包名/版本、工具目录指纹）。
 工具目录固定为 `scripts/toolcatalog` 投影的 13 个工具，指纹是该目录注册顺序、名称、描述与

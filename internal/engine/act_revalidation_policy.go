@@ -1014,7 +1014,9 @@ func matchActTargetWithLimits(ctx context.Context, revoked func() bool,
 }
 
 // matchActTargetWithOptions tries each eligible tier in order. Tier 4 requires
-// a lineage mismatch, and Tier 5 runs only after the preceding tiers find no match.
+// a lineage mismatch, and Tier 5 runs only after the preceding tiers find no
+// match. A Tier 2/3 ambiguity between text-less sibling containers may instead
+// skip Tier 4 and be decided by the Tier 5 semantic-evidence scan.
 func matchActTargetWithOptions(ctx context.Context, revoked func() bool,
 	original, fresh *device.Capture, want *device.RawNode,
 	options actMatchOptions) (actMatch, actProbeState) {
@@ -1029,6 +1031,8 @@ func matchActTargetWithOptions(ctx context.Context, revoked func() bool,
 
 	var stats actMatchStats
 	sawLineageMismatch := false
+	disambiguateInTier5 := false
+lowerTiers:
 	for tier := 1; tier <= 3; tier++ {
 		if ctx.Err() != nil || (revoked != nil && revoked()) {
 			return actMatch{stats: stats}, actProbeCancelled
@@ -1054,6 +1058,13 @@ func matchActTargetWithOptions(ctx context.Context, revoked func() bool,
 				independentSubtree: probe.independentSubtree, stats: stats,
 			}, actProbeUnique
 		case actProbeAmbiguous:
+			if canDisambiguateViaTier5(want, tier, options) {
+				// The collision is between text-less sibling containers, so the
+				// Tier 5 subtree evidence is the only remaining discriminator:
+				// leave the lower tiers at once and never fall through Tier 4.
+				disambiguateInTier5 = true
+				break lowerTiers
+			}
 			return actMatch{stats: stats}, actProbeAmbiguous
 		case actProbeCancelled:
 			return actMatch{stats: stats}, actProbeCancelled
@@ -1064,7 +1075,8 @@ func matchActTargetWithOptions(ctx context.Context, revoked func() bool,
 		}
 	}
 	for tier := 4; tier <= 5; tier++ {
-		if (tier == 4 && !sawLineageMismatch) || (tier == 5 && options.disableTranslation) {
+		if (tier == 4 && (!sawLineageMismatch || disambiguateInTier5)) ||
+			(tier == 5 && options.disableTranslation) {
 			continue
 		}
 		if ctx.Err() != nil || (revoked != nil && revoked()) {
@@ -1096,7 +1108,11 @@ func matchActTargetWithOptions(ctx context.Context, revoked func() bool,
 			return actMatch{stats: stats}, probe.state
 		}
 	}
-	return actMatch{stats: stats, lineageMismatch: sawLineageMismatch}, actProbeNone
+	// A Tier 2/3 collision that was handed to Tier 5 must not inherit an earlier
+	// lineage mismatch: the target is missing, not renamed.
+	return actMatch{
+		stats: stats, lineageMismatch: sawLineageMismatch && !disambiguateInTier5,
+	}, actProbeNone
 }
 
 func matchActTarget(ctx context.Context, revoked func() bool,
@@ -1254,6 +1270,23 @@ func hasOwnReadableText(node *device.RawNode) bool {
 	return node != nil &&
 		((node.TextSet && node.Text != "") ||
 			(node.DescSet && node.Description != ""))
+}
+
+// canDisambiguateViaTier5 reports whether one Tier 2/3 ambiguity may be handed to
+// the Tier 5 semantic-evidence scan instead of being reported immediately. Only a
+// text-less container with readable descendants on the ordinary tap-like policy
+// qualifies: a control that already carries its own readable text, a leaf without
+// descendants, the write-submit and coordinate-owner policy (translation
+// disabled) and the scroll policy all keep the immediate rejection.
+func canDisambiguateViaTier5(want *device.RawNode, tier int,
+	options actMatchOptions) bool {
+	if tier != 2 && tier != 3 {
+		return false
+	}
+	if options.disableTranslation || options.mode != actMatchTapLike {
+		return false
+	}
+	return want != nil && !hasOwnReadableText(want) && len(want.Children) > 0
 }
 
 // readableSubtree collects the non-empty readable Text and Description values of
