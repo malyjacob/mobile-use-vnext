@@ -345,7 +345,8 @@ func (e *Engine) killGuard(work *workState, epoch int64, display device.Display,
 		return plan, protocol.NewError(409, protocol.CodeKillPlayback, "无法确认前台服务与播放状态，拒绝强停应用")
 	}
 	if (services.Foreground || media.Playing) && !req.AllowStopPlayback {
-		return plan, protocol.NewError(409, protocol.CodeKillPlayback, "应用有前台服务或正在播放；需要显式允许才能中断")
+		return plan, protocol.NewError(409, protocol.CodeKillPlayback, "应用有前台服务或正在播放；需要显式允许才能中断").
+			WithDetail("retry_parameter", "allow_stop_playback")
 	}
 	root, rootErr := e.dev.RootAvailable(work.Ctx)
 	if rootErr != nil || !root {

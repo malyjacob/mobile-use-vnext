@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"time"
 
 	"github.com/malyjacob/mobile-use-vnext/internal/device"
@@ -88,8 +89,7 @@ func (e *Engine) App(ctx context.Context, agent, p string, req *protocol.AppRequ
 	return nil, protocol.Invalid("不支持的 app kind").WithDetail("allowed_kinds", protocol.AppKinds)
 }
 
-// setOperationAppKind records the app branch of this operation. It is the only
-// fact a duplicate-P or status(P) summary republishes.
+// setOperationAppKind records the app branch before terminal facts are available.
 func (e *Engine) setOperationAppKind(op *operationState, kind string) {
 	if op == nil {
 		return
@@ -177,6 +177,84 @@ func appBoolPtr(value bool) *bool {
 	return &copy
 }
 
+func cloneAppScalar[T int | bool](value *T) *T {
+	if value == nil {
+		return nil
+	}
+	return new(*value)
+}
+
+// cloneAppSummary copies the facts of a mutating app branch and preserves their
+// presence flags. Query inventories are only returned on the original call.
+func cloneAppSummary(view *protocol.AppView) *protocol.AppView {
+	if view == nil {
+		return nil
+	}
+	switch view.Kind {
+	case protocol.AppKindOpen, protocol.AppKindClaim, protocol.AppKindHandoff,
+		protocol.AppKindClose, protocol.AppKindKill:
+	default:
+		return nil
+	}
+
+	cloned := &protocol.AppView{
+		Kind:                view.Kind,
+		DisplayID:           cloneAppScalar(view.DisplayID),
+		Package:             view.Package,
+		TaskID:              cloneAppScalar(view.TaskID),
+		Ownership:           view.Ownership,
+		Reused:              cloneAppScalar(view.Reused),
+		StatePreserved:      cloneAppScalar(view.StatePreserved),
+		HasStatePreserved:   view.HasStatePreserved,
+		SourceDisplayID:     cloneAppScalar(view.SourceDisplayID),
+		ForegroundRestore:   view.ForegroundRestore,
+		Tasks:               slices.Clone(view.Tasks),
+		HasTasks:            view.HasTasks,
+		Complete:            cloneAppScalar(view.Complete),
+		AndroidUserID:       cloneAppScalar(view.AndroidUserID),
+		SourceTaskID:        cloneAppScalar(view.SourceTaskID),
+		TargetTaskIDs:       slices.Clone(view.TargetTaskIDs),
+		HasTargetTaskIDs:    view.HasTargetTaskIDs,
+		RemainingTaskIDs:    slices.Clone(view.RemainingTaskIDs),
+		HasRemainingTaskIDs: view.HasRemainingTaskIDs,
+		TargetPIDs:          slices.Clone(view.TargetPIDs),
+		KilledPIDs:          slices.Clone(view.KilledPIDs),
+		RemainingPIDs:       slices.Clone(view.RemainingPIDs),
+		HasTargetPIDs:       view.HasTargetPIDs,
+		HasKilledPIDs:       view.HasKilledPIDs,
+		HasRemainingPIDs:    view.HasRemainingPIDs,
+		Restarted:           cloneAppScalar(view.Restarted),
+		HasRestarted:        view.HasRestarted,
+		PackageState:        view.PackageState,
+	}
+	for i := range cloned.Tasks {
+		item := &cloned.Tasks[i]
+		item.RecentsCleaned = cloneAppScalar(item.RecentsCleaned)
+		if item.Error != nil {
+			clonedError := *item.Error
+			clonedError.Details = protocol.CloneErrorDetails(item.Error.Details)
+			item.Error = &clonedError
+		}
+	}
+	return cloned
+}
+
+// finishAppOperation commits the snapshot and terminal state together. A
+// callback that arrives after the work was frozen cannot publish new facts.
+func (e *Engine) finishAppOperation(op *operationState, outcome, phase string,
+	apiErr *protocol.APIError, view *protocol.AppView) *protocol.Recovery {
+	if op == nil {
+		return nil
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if op.State == OperationFinished {
+		return op.Recovery
+	}
+	op.App = cloneAppSummary(view)
+	return e.finishOperationLocked(op, outcome, phase, apiErr)
+}
+
 // finishAppError is the single funnel of a mutating app branch that did not
 // execute. The outcome must be explicit; the app object carries only the facts
 // the caller had already proven.
@@ -189,9 +267,9 @@ func (e *Engine) finishAppError(op *operationState, phase string, view *protocol
 	}
 	result := newResult(op)
 	result.Outcome = apiErr.Outcome
-	result.App = view
+	result.App = cloneAppSummary(view)
 	result.Error = apiErr.Public()
-	result.Recovery = e.finishOperation(op, apiErr.Outcome, phase, apiErr)
+	result.Recovery = e.finishAppOperation(op, apiErr.Outcome, phase, apiErr, view)
 	if apiErr.Details != nil {
 		if blocking, ok := apiErr.Details["blocking_operation_id"].(string); ok {
 			result.BlockingOperationID = blocking
@@ -226,14 +304,14 @@ func (e *Engine) finishAppExecuted(work *workState, op *operationState, view *pr
 	e.noteKnownOutcome(op, OutcomeExecuted)
 	result := newResult(op)
 	result.Outcome = OutcomeExecuted
-	result.App = view
+	result.App = cloneAppSummary(view)
 	if e.detachedWorkRevoked(work) {
-		result.Recovery = e.finishOperation(op, OutcomeExecuted, "executed_revoked", nil)
+		result.Recovery = e.finishAppOperation(op, OutcomeExecuted, "executed_revoked", nil, view)
 		e.addSessionIfEnded(result)
 		return result, nil
 	}
 	if e.sessionForWork(work) == nil {
-		result.Recovery = e.finishOperation(op, OutcomeExecuted, "executed_revoked", nil)
+		result.Recovery = e.finishAppOperation(op, OutcomeExecuted, "executed_revoked", nil, view)
 		e.addSessionIfEnded(result)
 		return result, nil
 	}
@@ -242,10 +320,10 @@ func (e *Engine) finishAppExecuted(work *workState, op *operationState, view *pr
 		result.Observation = public
 	}
 	if phase == "post_observation_failed" {
-		result.Recovery = e.finishOperation(op, OutcomeExecuted, "post_observation_failed", nil)
+		result.Recovery = e.finishAppOperation(op, OutcomeExecuted, "post_observation_failed", nil, view)
 		return result, nil
 	}
-	result.Recovery = e.finishOperation(op, OutcomeExecuted, "finished", nil)
+	result.Recovery = e.finishAppOperation(op, OutcomeExecuted, "finished", nil, view)
 	return result, nil
 }
 
@@ -276,7 +354,6 @@ func (e *Engine) finishAppUncertainWorkAfter(work *workState, op *operationState
 	}
 	result := newResult(op)
 	result.Outcome = OutcomeUncertain
-	result.App = view
 	result.Error = apiErr.Public()
 	phase := "dispatch"
 	if work != nil {
@@ -288,7 +365,8 @@ func (e *Engine) finishAppUncertainWorkAfter(work *workState, op *operationState
 	if after != nil {
 		after()
 	}
-	result.Recovery = e.finishOperation(op, OutcomeUncertain, phase, apiErr)
+	result.App = cloneAppSummary(view)
+	result.Recovery = e.finishAppOperation(op, OutcomeUncertain, phase, apiErr, view)
 	e.addSessionIfEnded(result)
 	return result, nil
 }
