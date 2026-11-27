@@ -120,6 +120,7 @@ const callerGuidance = "首次可直接 start({})；沿用 active 会话，状�
 	"有 ready O 就 act；无可用 O 或需查看外部变化时 observe。新 O 取 `obs` 行完整编号（structured 为 observation.id）。\n\n" +
 	"O 是观察，默认约 60 秒输入期限（以会话租期截断），精确截止时间见 structured JSON；P 是幂等/查询编号，新工作用新 P。请求引用统一用 reference。\n" +
 	"当前 ready O 用于 act 和 app 五个变更 kind；历史 O 用于 inspect；活动原会话 O/P 用于 observe、snap、wait_for、keepalive、shell、app.list；end 定位原会话；status/diagnose 可省略引用；app.find/notify 可无会话。\n" +
+	"静态拒绝的 ref 若不在 compact，可用 inspect({reference:原 act 的 O,node:诊断 ref}) 补看；O 过期后仍可能可读。\n" +
 	"start 租期五分钟；普通活动续期只增不减，至少续至两分钟后。status、inspect、diagnose、snap、app 查询不续租。缺 delta 基线时用 observe(full=true)。\n\n" +
 	"恢复按 `recovery` 行给出的精确 `ref=` 编号调用 `entry`；抽象 O/P 按场景换成实际编号。retry/O 表示尚未派发，用新 O 或仍适用的原 O；observe/P 用原活动会话 session.origin 或同会话 P。" +
 	"status/P 取本次 operation_id、阻塞 blocking_operation_id、自身恢复 start_operation_id，或收尾 target_reference/刚查的 P。status(O) 撤销时对同一 O 调 end；end/P 用原会话 P；user/update 无引用。\n" +
