@@ -299,6 +299,10 @@ func decodeResultTextV4(t *testing.T, text string) (map[string]any, bool, error)
 			if err := putJSON("/diagnosis/issues", []byte(strings.TrimPrefix(line, "diagnosis.issues="))); err != nil {
 				return nil, false, err
 			}
+		case strings.HasPrefix(line, "diagnosis.error_counts="):
+			if err := putJSON("/diagnosis/error_counts", []byte(strings.TrimPrefix(line, "diagnosis.error_counts="))); err != nil {
+				return nil, false, err
+			}
 		case strings.HasPrefix(line, "diagnosis.timing_ms="):
 			if err := putJSON("/diagnosis/timing_ms", []byte(strings.TrimPrefix(line, "diagnosis.timing_ms="))); err != nil {
 				return nil, false, err

@@ -292,11 +292,18 @@ func TestResultV4WaitDiagnosisCleanupError(t *testing.T) {
 	wait := assertResultTextParity(t, []byte(`{"wait":{"trigger":"query","matched":["query","absent_query"],"elapsed_ms":1200}}`), false)
 	requireTestContains(t, wait, "wait trigger=query matched=query,absent_query elapsed=1200ms\n")
 
-	diagnosis := assertResultTextParity(t, []byte(`{"diagnosis":{"summary":"诊断","issues":[],"timing_ms":{"capture":7},`+
+	diagnosis := assertResultTextParity(t, []byte(`{"diagnosis":{"summary":"诊断","issues":[],`+
+		`"error_counts":{"no_safe_point":2,"uncertain":1},"timing_ms":{"capture":7},`+
 		`"coverage":"request","truncated":false,"operation_id":"P1","outcome":"executed"}}`), false)
 	requireTestContains(t, diagnosis, `diagnosis summary="诊断" coverage=request truncated=false op=P1 outcome=executed`+"\n")
-	requireTestContains(t, diagnosis, "diagnosis.issues=[]\n")
-	requireTestContains(t, diagnosis, `diagnosis.timing_ms={"capture":7}`+"\n")
+	requireTestContains(t, diagnosis, "diagnosis.issues=[]\n"+
+		`diagnosis.error_counts={"no_safe_point":2,"uncertain":1}`+"\n"+
+		`diagnosis.timing_ms={"capture":7}`+"\n")
+
+	// An unexpected null still keeps its fact through the documented fallback.
+	nullCounts := assertResultTextParity(t, []byte(`{"diagnosis":{"summary":"诊断","error_counts":null,`+
+		`"coverage":"request","truncated":false}}`), false)
+	requireTestContains(t, nullCounts, `json v1 path="/diagnosis/error_counts" value=null`+"\n")
 
 	cleanup := assertResultTextParity(t, []byte(`{"cleanup":{"state":"pending","execution":"confirmed","tasks":"pending",`+
 		`"error":{"code":"cleanup_unconfirmed","message":"收尾未确认"}}}`), false)
