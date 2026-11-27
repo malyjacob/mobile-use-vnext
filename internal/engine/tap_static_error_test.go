@@ -267,6 +267,7 @@ func TestActTapTargetMissingActionReportsEmptyActionsAndGuidance(t *testing.T) {
 	requireGuidanceCandidate(t, details, card.Ref, candidateRelationAncestor,
 		[]int{tapCardBounds.Left, tapCardBounds.Top, tapCardBounds.Right, tapCardBounds.Bottom}, true)
 	requireDetailAbsent(t, details, "ancestor_ref")
+	requireDetailAbsent(t, details, "target_center")
 	requireNoLegacyTapDetailKeys(t, details)
 	requireReadyObservation(t, h, start.Observation.ID)
 }
@@ -305,6 +306,7 @@ func TestActTapTargetHasOtherActionReportsPublicActions(t *testing.T) {
 	requireDetailStringSlice(t, details, "target_actions", "long_press")
 	requireDetailAbsent(t, details, "ancestor_ref")
 	requireDetailAbsent(t, details, "nearest_actionable_ref")
+	requireDetailAbsent(t, details, "target_center")
 	requireReadyObservation(t, h, start.Observation.ID)
 }
 
@@ -324,6 +326,8 @@ func TestActBubbleAncestorStaticReasons(t *testing.T) {
 		details := requireStaticRejection(t, result, "unsupported_node_action", "no_interactive_ancestor")
 		requireDetailStringSlice(t, details, "target_actions")
 		requireDetailAbsent(t, details, "ancestor_ref")
+		// Contract 35 §4.2: this reason alone states the objective clipped center.
+		requireDetailIntSlice(t, details, "target_center", 450, 500)
 		requireReadyObservation(t, h, start.Observation.ID)
 	})
 
@@ -344,6 +348,7 @@ func TestActBubbleAncestorStaticReasons(t *testing.T) {
 		requireDetailString(t, details, "ancestor_ref", card.Ref)
 		requireDetailStringSlice(t, details, "ancestor_actions", "long_press")
 		requireDetailStringSlice(t, details, "target_actions")
+		requireDetailAbsent(t, details, "target_center")
 		requireReadyObservation(t, h, start.Observation.ID)
 	})
 
@@ -362,6 +367,7 @@ func TestActBubbleAncestorStaticReasons(t *testing.T) {
 		details := requireStaticRejection(t, result, "unsupported_node_action", "ancestor_invalid")
 		requireDetailString(t, details, "ancestor_ref", card.Ref)
 		requireDetailStringSlice(t, details, "ancestor_actions", "tap", "long_press")
+		requireDetailAbsent(t, details, "target_center")
 		requireReadyObservation(t, h, start.Observation.ID)
 	})
 
@@ -384,6 +390,7 @@ func TestActBubbleAncestorStaticReasons(t *testing.T) {
 		details := requireStaticRejection(t, result, "unsupported_node_action", "ancestor_invalid")
 		requireDetailString(t, details, "ancestor_ref", card.Ref)
 		requireDetailStringSlice(t, details, "ancestor_actions", "tap", "long_press")
+		requireDetailAbsent(t, details, "target_center")
 		requireReadyObservation(t, h, start.Observation.ID)
 	})
 }
@@ -417,6 +424,7 @@ func TestActBubbleOwnerMismatchReportsUniqueExternalOwner(t *testing.T) {
 	details := requireStaticRejection(t, result, "no_safe_point", "owner_mismatch")
 	requireDetailString(t, details, "scope", "ancestor")
 	requireDetailStringSlice(t, details, "blocking_refs", external.Ref)
+	requireDetailAbsent(t, details, "target_center")
 	requireNoLegacyTapDetailKeys(t, details)
 	if len(h.device.taps) != 0 {
 		t.Fatalf("owner mismatch dispatched input: %v", h.device.taps)
