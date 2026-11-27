@@ -20,9 +20,9 @@ import (
 const compatibilityProtocolVersion = "2025-11-25"
 
 // baselineDiscoveryBytes caps the instructions plus the complete tools/list
-// JSON. Contract 31 adds the app seven-branch tolerance matrix and the
-// package-state kill result fields to this budget.
-const baselineDiscoveryBytes = 40000
+// JSON. Contract 35 also caps the tool array independently.
+const baselineDiscoveryBytes = 31000
+const toolsListByteBudget = 20500
 
 // TestTreeTextGuideStatesTriStateOmission pins the shared tree legend to the
 // complete-node defaults and the different set semantics.
@@ -138,13 +138,17 @@ func TestTreeTextGuideStatesResultV4AndTreeV5(t *testing.T) {
 		"`fg` 写 `<包名>#<task_id>`、`<包名>`、`#<task_id>`、`present`、`none` 或 `unknown(<reason>)`",
 		"`visual` 为视觉提示",
 		"`loading`/`image_heavy(<pct>%)`（45–100）/`media_surface`/`sparse_tree`",
-		"`loading` 在 `delta` 也保留，其余同态 `delta` 省略",
+		"`loading` 与 `wait_for` 终帧的 `sparse_tree` 在 `delta` 也保留，其余同态 `delta` 省略",
 		"`change` 仅见于 `act` 常规成功且比较前后树",
 		"`unchanged` 前后紧凑树与完整树均相同",
 		"`detail_only` 紧凑树相同但完整树细节有变",
 		"`matched_base` 前后树内容或公开语境有变且零差异命中历史基线",
-		"`hint=snap` 建议用同一 O 截图核对（只读，不消费、不发布 O）",
-		"`hint=wait_for` 表示可能仍在加载或过渡",
+		"`hint` 只由已发布字段推导",
+		"`loading` 提示 `hint=wait_for`",
+		"`sparse_tree` 在非 `wait_for` 终帧且 `change` 非 `unchanged`/`detail_only` 时也提示等待，即使带图",
+		"`wait_for` 终帧仍稀疏，或稀疏且 `change=unchanged`/`detail_only`，无有效图时转 `hint=snap`",
+		"`hint=snap` 用同一 O 截图核对",
+		"`hint=wait_for` 用 wait_for 等条件或稳定",
 		"`obs.image` 与顶层 `image` 同字段同顺序",
 		"`screen` 仅在带 `session` 或无树帧输出",
 		"`rot` 在非零旋转时始终输出",
@@ -339,54 +343,15 @@ func TestServerInstructionsCarryCrossToolRules(t *testing.T) {
 		t.Fatalf("tree guide occurrences = %d, want 1", got)
 	}
 	for _, required := range []string{
-		"start({})",
-		"can_start=false",
-		"`recovery entry=observe`",
-		"默认约 60 秒输入期限（以会话租期截断）",
-		"精确截止时间见 structured JSON",
-		"幂等",
-		"五分钟",
-		"两分钟",
-		"不续租",
-		"keepalive",
-		"wait.trigger",
-		"wait.matched",
-		"写入全文",
-		"app.list",
-		"diagnose",
-		"notify 无 reference",
-		"同一 base 的每条 delta",
-		"不发送 ENTER",
-		"auto_submit",
-		"submit_ref",
-		"text_input",
-		"bubble",
-		"统一用 reference",
-		"not_executed",
-		"uncertain",
-		"executed",
-		"blocking_operation_id",
-		"start_operation_id",
-		"target_reference",
-		"device_busy",
-		"pending cleanup",
-		"no_safe_point",
-		"自动按 3×3 网格选点",
-		"竞争遮挡时停止外扩并自动吸附唯一局部共位可点击控件",
-		"最深命中集合",
-		"raw swipe 不报 ambiguous_point",
-		"同视口嵌套滚动栈",
-		"50%/25%/75%",
-		"no_safe_trajectory",
-		"error.details.candidates",
-		"第一个 executable=true 的 ref",
-		"同一 O 和新 P",
-		"无需重观察或手算坐标",
-		"session.origin",
-		"全裁无标注非交互 `image` 叶",
-		"inspect({reference:原 act 的 O,node:诊断 ref})",
-		"O 过期后仍可能可读",
-		"`recovery` 行给出的精确 `ref=` 编号",
+		"start({})", "can_start=false", "`recovery entry=observe`",
+		"默认约 60 秒输入期限（以会话租期截断）", "精确截止时间见 structured JSON",
+		"observation.id", "幂等", "五分钟", "两分钟", "不续租", "keepalive",
+		"app.list", "diagnose", "app.find/notify 可无会话", "请求引用统一用 reference",
+		"缺 delta 基线时用 observe(full=true)", "同一 base 的每条 delta",
+		"`recovery` 行给出的精确 `ref=` 编号", "retry/O", "session.origin",
+		"blocking_operation_id", "start_operation_id", "target_reference",
+		"通常 uncertain 先用 status", "text_input.submit=uncertain", "取得新 O 后按需单发 ENTER",
+		"避免原样重发或自动 end/restart", "not_executed", "executed", "device_busy", "pending cleanup",
 	} {
 		if !strings.Contains(instructions, required) {
 			t.Errorf("server instructions lack %q", required)
@@ -414,6 +379,7 @@ func TestDiscoveryOmitsObservationInternals(t *testing.T) {
 		"not_observed",
 		"unstable",
 		"内容位移状态",
+		"默认中心", "default_center", "carrier_node", "center_span", "exact → near", "shifted", "tier",
 		"观察采样状态",
 	} {
 		if strings.Contains(discovery, forbidden) {
@@ -421,31 +387,9 @@ func TestDiscoveryOmitsObservationInternals(t *testing.T) {
 		}
 	}
 
-	waitFor := testDefinitionByName(t, "wait_for")
-	for _, required := range []string{"内容稳定", "忽略 bounds 与无动作叶子文本", "连续 3 帧"} {
-		requireTestContains(t, waitFor.description, required)
-	}
-	requireTestNotContains(t, waitFor.description, "整树连续 3 帧一致")
-
-	var schema struct {
-		Properties map[string]struct {
-			Description string `json:"description"`
-		} `json:"properties"`
-	}
-	if err := json.Unmarshal(waitFor.schema, &schema); err != nil {
-		t.Fatalf("decode wait_for schema: %v", err)
-	}
-	stable := schema.Properties["stable"].Description
-	for _, required := range []string{"内容稳定", "忽略 bounds 与无动作叶子文本", "连续 3 帧"} {
-		requireTestContains(t, stable, required)
-	}
-	requireTestNotContains(t, stable, "整树连续 3 帧一致")
 }
 
-// TestServerInstructionsKeepContractBoundary proves the instructions publish
-// the reference unification and the branch-qualified defaults, while never
-// naming the rejected alternative (allow_ancestor_fallback) or claiming a
-// top-level default that would apply to coordinates or other actions.
+// TestServerInstructionsKeepContractBoundary keeps retired request and recovery spellings out.
 func TestServerInstructionsKeepContractBoundary(t *testing.T) {
 	instructions := ServerInstructions()
 	for _, forbidden := range []string{
@@ -456,21 +400,6 @@ func TestServerInstructionsKeepContractBoundary(t *testing.T) {
 	} {
 		if strings.Contains(instructions, forbidden) {
 			t.Errorf("server instructions publish forbidden wording %q", forbidden)
-		}
-	}
-	if !strings.Contains(instructions, "observation.id") {
-		t.Error("server instructions do not identify the observation id to reuse")
-	}
-	for _, required := range []string{
-		"请求引用统一用 reference",
-		"默认 bubble=true",
-		"默认 auto_submit=true",
-		"operation.bubble=false",
-		"operation.auto_submit=false",
-		"operation.submit_ref=",
-	} {
-		if !strings.Contains(instructions, required) {
-			t.Errorf("server instructions lack %q", required)
 		}
 	}
 }
@@ -516,29 +445,6 @@ func isDetailKeyCharacter(character byte) bool {
 		character >= 'a' && character <= 'z'
 }
 
-func actOperationParameterDescriptions(t *testing.T) map[string]string {
-	t.Helper()
-	var schema struct {
-		Properties map[string]struct {
-			Properties map[string]struct {
-				Description string `json:"description"`
-			} `json:"properties"`
-		} `json:"properties"`
-	}
-	if err := json.Unmarshal(testDefinitionByName(t, "act").schema, &schema); err != nil {
-		t.Fatalf("decode act schema: %v", err)
-	}
-	operation, ok := schema.Properties["operation"]
-	if !ok {
-		t.Fatal("act schema has no operation member")
-	}
-	out := make(map[string]string, len(operation.Properties))
-	for name, property := range operation.Properties {
-		out[name] = property.Description
-	}
-	return out
-}
-
 // actOperationPropertySchema decodes one act operation member schema so a test
 // can assert published enum and default values instead of description prose.
 func actOperationPropertySchema(t *testing.T, member string) map[string]any {
@@ -566,7 +472,7 @@ func actOperationPropertySchema(t *testing.T, member string) map[string]any {
 
 // TestActAmountSchemaPublishesFourTiers pins the closed four-tier travel amount
 // contract: the exact enum order, the page default and every tier's travel and
-// duration. scroll never accepts a caller-supplied duration.
+// duration. The branch rejects duration_ms in the local act guidance.
 func TestActAmountSchemaPublishesFourTiers(t *testing.T) {
 	property := actOperationPropertySchema(t, "amount")
 	enum, ok := property["enum"].([]any)
@@ -590,11 +496,10 @@ func TestActAmountSchemaPublishesFourTiers(t *testing.T) {
 		t.Fatal("amount description missing")
 	}
 	for _, required := range []string{
-		"step（15%，500ms，最小行程 32px）",
-		"half（30%，450ms）",
-		"page（默认，60%，400ms）",
-		"full（85%，300ms）",
-		"scroll 不接受 duration_ms",
+		"step 15%/500ms（最小 32px）",
+		"half 30%/450ms",
+		"page 60%/400ms",
+		"full 85%/300ms",
 	} {
 		if !strings.Contains(description, required) {
 			t.Errorf("amount description lacks %q", required)
@@ -602,87 +507,15 @@ func TestActAmountSchemaPublishesFourTiers(t *testing.T) {
 	}
 }
 
-// TestActScrollDescriptionsPublishFourTiersAndAxisFallback proves the act tool
-// description and the published server instructions repeat the four-tier amount
-// and the axis-compatibility fallback the input schema declares.
-func TestActScrollDescriptionsPublishFourTiersAndAxisFallback(t *testing.T) {
-	act := testDefinitionByName(t, "act").description
-	for _, required := range []string{
-		"amount 四档 step 15%/500ms（最小 32px）",
-		"half 30%/450ms",
-		"page 60%/400ms（默认）",
-		"full 85%/300ms",
-		"scroll 不接受 duration_ms",
-		"轴向不兼容时自动回退兼容外层滚动祖先",
-		"422 unsupported_node_action（reason=axis_mismatch）",
-	} {
-		if !strings.Contains(act, required) {
-			t.Errorf("act description lacks %q", required)
-		}
-	}
-	instructions := ServerInstructions()
-	for _, required := range []string{
-		"amount 四档 step 15%/500ms、half 30%/450ms、page 60%/400ms（默认）、full 85%/300ms",
-		"scroll 不接受时长参数",
-		"轴向不兼容时自动回退兼容外层滚动祖先",
-		"422 unsupported_node_action（reason=axis_mismatch）",
-	} {
-		if !strings.Contains(instructions, required) {
-			t.Errorf("server instructions lack %q", required)
-		}
-	}
-}
-
-// TestActBranchDescriptionsPublishAutomaticResolution pins the caller-facing
-// automatic selection behavior and keeps the retired detail vocabulary out of
-// both branch parameters.
-func TestActBranchDescriptionsPublishAutomaticResolution(t *testing.T) {
-	descriptions := actOperationParameterDescriptions(t)
-	for _, required := range []string{
-		"省略按 true",
-		"3×3",
-		"视觉区",
-		"竞争遮挡时停止外扩",
-		"局部共位可点击控件",
-		"false 只点原目标",
-		"不做提升或吸附",
-	} {
-		if !strings.Contains(descriptions["bubble"], required) {
-			t.Errorf("bubble description lacks %q", required)
-		}
-	}
-	for _, required := range []string{
-		"同视口嵌套滚动栈",
-		"最近 role=scroll 祖先",
-		"最内层滚动容器",
-		"回退外层滚动祖先",
-		"轴向与请求方向不兼容时自动回退兼容外层滚动祖先",
-		"422 unsupported_node_action（reason=axis_mismatch）",
-	} {
-		if !strings.Contains(descriptions["container"], required) {
-			t.Errorf("container description lacks %q", required)
-		}
-	}
-	if containsRetiredActDetailKey(descriptions["bubble"]) ||
-		containsRetiredActDetailKey(descriptions["container"]) {
-		t.Fatal("act branch descriptions retain a retired detail key")
-	}
-}
-
-// TestActGuidanceDropsRetiredDetailKeys proves every caller-facing guidance
-// surface uses the candidates contract instead of the removed per-failure keys.
+// TestActGuidanceDropsRetiredDetailKeys checks all descriptions, including
+// nested input Schema fields, and the shared instructions.
 func TestActGuidanceDropsRetiredDetailKeys(t *testing.T) {
-	descriptions := actOperationParameterDescriptions(t)
-	surfaces := map[string]string{
-		"server instructions": ServerInstructions(),
-		"act":                 testDefinitionByName(t, "act").description,
-		"bubble":              descriptions["bubble"],
-		"container":           descriptions["container"],
+	catalog, err := json.Marshal(CatalogSnapshot())
+	if err != nil {
+		t.Fatal(err)
 	}
-	for name, text := range surfaces {
-		if containsRetiredActDetailKey(text) {
-			t.Errorf("%s retains a retired act detail key", name)
-		}
+	if containsRetiredActDetailKey(ServerInstructions() + "\n" + string(catalog)) {
+		t.Fatal("discovery retains a retired act detail key")
 	}
 }
 
@@ -715,7 +548,7 @@ func TestAppDescriptionPublishesBranchMatrix(t *testing.T) {
 		"target.task_id 或 target.app",
 		"一次 force-stop",
 		"package_state",
-		"MCP 摘要按执行、任务/归属、进程、前台观察顺序投影",
+		"kill 摘要按执行、任务/归属、进程、前台观察分层",
 	} {
 		if !strings.Contains(description, fragment) {
 			t.Errorf("app description lacks %q", fragment)
@@ -736,384 +569,120 @@ func TestToolDescriptionsExcludeTreeGuide(t *testing.T) {
 	}
 }
 
-// TestToolDescriptionsAreCallerOriented asserts every description states its
-// own purpose, key parameters/defaults, result or action boundary and minimal
-// recovery, and that internal algorithms and the rejected ancestor-fallback
-// name stay out.
+// TestToolDescriptionsAreCallerOriented checks the local boundaries in isolation
+// from ServerInstructions. TestDiscoveryByteBudget also verifies that the live
+// discovery description exactly matches its source for every tool.
 func TestToolDescriptionsAreCallerOriented(t *testing.T) {
 	required := map[string][]string{
 		"start": {
-			"请求体必须是空对象",
-			"`obs` 行",
-			"`screen=<W>x<H>@<display_id>`",
-			"`session` 行的 `expires`",
-			"重放原 start 不重新获得五分钟",
-			"可消费观察",
-			"幂等/查询编号",
-			"`tree v5 full`",
-			"base 指向的 full 加本次 delta",
+			"空对象", "`tree v5 full`", "`obs` 行取完整 O", "`screen=<W>x<H>@<display_id>`",
+			"`session` 行的 `expires`", "重放原 start 不重新获得五分钟", "可消费观察", "幂等/查询编号",
 		},
 		"status": {
-			"`state=`",
-			"`can_start=`",
-			"`blocking_operation_id=`",
-			"`recovery ref=`",
-			"不续租",
-		},
-		"snap": {
-			"`hint=snap` 只读核对",
-			"不读取树、不消费 O、不发布新 O",
-			"ImageContent",
-			"`image <W>x<H> read_only screen=",
-			"不续租",
-			"无图摘要",
+			"只读", "不访问设备、不续租、不认领 O", "`state=`", "`can_start=`", "`blocking_operation_id=`", "`recovery ref=`",
+			"status(P) 可重放 open/claim/handoff/close/kill 的终态定格 app 摘要", "find/list 或无定格时仅 app.kind", "重放不附观察",
 		},
 		"observe": {
-			"reference 必填",
-			"0–10000",
-			"`obs` 行",
-			"`recovery entry=observe ref=<P>`",
-			"`base=_72`",
-			"full=true",
-			"同一 full 上的多个差分各自应用",
+			"reference 必填", "full=true 强制 full", "wait_ms（0–10000 毫秒）仅延迟本次采集",
+			"等待公开树条件应选 wait_for", "`obs` 行取完整 O", "`recovery entry=observe ref=<P>`",
+		},
+		"snap": {
+			"`hint=snap` 只读核对", "不读取树、不消费 O、不发布新 O、不续租", "JPEG ImageContent",
+			"`image <W>x<H> read_only screen=", "同一 P 重放或 status(P) 仅无图摘要",
 		},
 		"wait_for": {
-			"1..40",
-			"stable=true",
-			"内容稳定",
-			"忽略 bounds 与无动作叶子文本",
-			"连续 3 帧",
-			"wait.trigger",
-			"wait.matched",
-			"35 秒",
-			"`obs` 行",
-			"`recovery entry=… ref=…`",
-			"`base=_72`",
-			"full=true",
-			"同一 full 上的多个差分各自应用",
+			"timeout 为 1..40 秒（stable=true 时至少 2）", "query/absent_query", "任一条件成立",
+			"内容稳定（忽略 bounds 与无动作叶子文本）连续 3 帧", "有查询时须同时满足查询条件和稳定门槛",
+			"发布新 O 即成功，包括 wait.trigger=timeout", "`obs` 行取完整 O", "wait.matched 含终帧命中项",
+			"超时时追加 timeout", "未发布按 `recovery entry=… ref=…`", "elapsed_ms 含终帧采集", "可超 timeout 至多约 35 秒",
 		},
 		"act": {
-			"reference",
-			"auto_submit",
-			"submit_ref",
-			"text_input",
-			"bubble",
-			"另发 ENTER",
-			"invalid_target",
-			"unsupported_node_action",
-			"no_safe_point",
-			"reason",
-			"no_safe_trajectory",
-			"candidates",
-			"blocking_refs",
-			"executable=true",
-			"3×3 网格选点",
-			"竞争控件遮挡时停止向祖先其他区域漂移",
-			"唯一的局部共位可点击控件",
-			"最深命中集合",
-			"raw swipe 不返回 ambiguous_point",
-			"同视口嵌套滚动栈",
-			"最近滚动祖先",
-			"最内层滚动容器",
-			"50%/25%/75%",
-			"同一 O、新 P",
-			"inspect({reference:原 O,node:诊断 ref})",
-			"target_changed",
-			"`obs` 行",
-			"`change=` 树变化",
-			"`matched_base` 为前后有变、零差异命中历史基线，不是没生效",
-			"`hint=` 建议截图或等待",
-			"`!tap`/`!text`/`!swipe`",
-			"`@` 表示",
-			"uncertain",
-			"partial",
-			"text_submit_not_executed",
-			"dispatch（focus/write/submit）",
-			"`recovery entry=observe ref=<P>`",
-			"无需重观察或手算坐标",
+			"当前 ready O。静态拒绝不认领 O，认领即消费", "tap/long_press 用 target", "text 用 target 与 text", "key 用 key 白名单",
+			"scroll 用 container/direction，可选 amount", "swipe 用 from/to，可选 duration_ms",
+			"默认 bubble=true", "3×3 网格选点", "视觉区锚定最近交互祖先", "竞争遮挡时停止外扩并吸附唯一局部共位可点击控件",
+			"bubble=false 只点原目标", "坐标点按/长按一律省略 bubble", "最深命中集合", "raw swipe 不报 ambiguous_point",
+			"静态 422（invalid_target/unsupported_node_action/ambiguous_point/no_safe_point/no_safe_trajectory）均为 not_executed，原 O 可用于重试",
+			"reason、scope/scope_ref、candidates 和可选 blocking_refs", "首个 candidates[].executable=true", "同一 O、新 P 重试",
+			"unsupported_node_action（reason=no_interactive_ancestor）且目标有屏内裁剪几何时，error.details 可含 target_center: [x, y]",
+			"仅是裁剪中心，无安全或业务响应保证", "独立准入与重验",
+			"默认 auto_submit=true、submit_ref=\"enter_key\"", "全文写入一次，精确读回后至多一次 ENTER", "另发 ENTER",
+			"text(ref) 可用于无 tap 能力的输入", "auto_submit=false，只写并读回，忽略 submit_ref", "submit_ref=\"n<ref>\"",
+			"自动提交分支返回 text_input:{write,submit}", "写入确认而提交未派发为 partial（text_submit_not_executed）",
+			"可能仅派发了聚焦", "已认领 text 的 partial/uncertain", "`recovery entry=observe ref=<P>`", "session.origin 或同会话 operation_id",
+			"直接 observe 核对当前框值/页面", "避免原样重发", "dispatch（focus/write/submit：",
+			"同视口嵌套滚动栈", "最近滚动祖先", "最内层滚动容器", "规划失败回退外层滚动祖先",
+			"轴向不兼容时回退兼容外层滚动祖先", "422 unsupported_node_action（reason=axis_mismatch）", "50%/25%/75%", "scroll 不接受 duration_ms",
+			"target_changed 若附新观察", "`obs` 行取完整 O，用新 O 和新 P 重试", "`change=` 比较前后树", "零差异命中历史基线", "`hint=` 建议截图或等待",
+			"`!tap`/`!text`/`!swipe`", "`@` 沿最近有已交付几何的祖先", "诊断 ref 可用原 O 调 inspect(node)",
 		},
 		"inspect": {
-			"node 与 query 互斥",
-			"原 act 请求的 O",
-			"该 ref 作 node",
-			"O 过期后仍可能可读",
-			"content_unavailable",
-			"inspection_too_large",
-			"inspect v3",
-			"两格缩进",
-			"不使用普通树 v5 的默认动作、`@` 或短 base",
+			"node 与 query 互斥", "原 act 请求的 O 和诊断 ref 作 node", "详细子树", "O 过期后仍可能可读",
+			"content_unavailable", "inspection_too_large", "inspect v3",
 		},
 		"keepalive": {
-			"1～120",
-			"默认 2",
-			"缩短",
-			"输入期限（60 秒）",
-			"session_ended",
-			"reference_has_no_session",
-			"session_expired",
-			"status",
+			"duration_minutes（1～120，默认 2）", "覆盖截止时间，可缩短租约", "输入期限（60 秒）或工作期限",
+			"session_ended、session_expired 为终态，勿重试", "reference_has_no_session，用 status",
 		},
 		"end": {
-			"`session ended …`",
-			"`cleanup …`",
-			"pending",
-			"不保证撤回",
-			"`recovery`",
+			"先撤权并封闭派发，再独立收尾", "`session ended …`", "`cleanup …`", "通常先 pending", "不保证撤回", "`recovery`",
 		},
 		"app": {
-			"find 无需会话",
-			"scope=primary",
-			"当前 ready O",
-			"live owned",
-			"outcome",
-			"`app_items v1`",
-			"`app_tasks v1`",
-			"`obs` 行",
+			"find 无需会话", "list 必须 reference", "当前 ready O", "live owned", "一次 force-stop", "package_state",
+			"close_refused_borrowed 带 error.details.retry_parameter=\"allow_borrowed\"",
+			"已知播放/前台服务的 kill_refused_playback 带 retry_parameter=\"allow_stop_playback\"，状态未知时拒绝且省略该字段",
+			"status(P)/重复 P 重放 open/claim/handoff/close/kill 的终态定格 app 摘要", "find/list、运行中或无定格摘要时仅 app.kind",
+			"outcome 与 recovery", "`app_items v1`", "`app_tasks v1`", "`obs` 行取新 O",
 		},
 		"notify": {
-			"executed 只表示消息已保存",
-			"notification.state",
-			"`notify [id=…] [saved=…] [state=pending]`",
-			"无需活动会话",
-			"无 reference 参数",
+			"无需活动会话，无 reference 参数", "executed 只表示消息已保存入队", "显示和已读均未确认",
+			"`notify [id=…] [saved=…] [state=pending]`", "无需重发",
 		},
 		"shell": {
-			"root=true",
-			"exit_code",
-			"observe",
-			"status(P)",
-			"finished",
-			"blocking_operation_id",
-			"blocking_code",
-			"shell_pending",
-			"`start` 首帧 `obs` 行",
-			"`screen=<W>x<H>@<display_id>`",
-			"`app(list)` 的 `display=`",
+			"root=true", "命令不绑定会话屏", "input -d <display_id>", "`start` 首帧 `obs` 行", "`screen=<W>x<H>@<display_id>`",
+			"`snap` 的 `image`", "`app(list)` 的 `display=`", "exit_code", "observe 核对",
+			"uncertain 按 recovery 查原 P", "status(P) 即使 finished", "blocking_operation_id", "blocking_code 可为 shell_pending", "短暂退避",
 		},
 		"diagnose": {
-			"coverage=record_unavailable",
-			"status",
+			"只读", "不修复状态", "无参默认聚焦本 Agent 未结束会话（含会话期间独立发起的操作）",
+			"操作级 issues 按 (phase, code) 去重", "可选 error_counts", "全部失败/不确定次数，独立于 issues 截断", "coverage=record_unavailable 时改用 status",
 		},
 	}
 	if len(required) != len(toolCatalog) {
 		t.Fatalf("description expectations cover %d tools, want %d", len(required), len(toolCatalog))
 	}
 	for _, definition := range toolCatalog {
-		fragments, declared := required[definition.name]
-		if !declared {
-			t.Fatalf("%s: no description expectations", definition.name)
-		}
-		for _, fragment := range fragments {
-			if !strings.Contains(definition.description, fragment) {
-				t.Errorf("%s description lacks %q", definition.name, fragment)
-			}
-		}
-		for _, forbidden := range []string{"allow_ancestor_fallback", "server instructions", "账本"} {
-			if strings.Contains(definition.description, forbidden) {
-				t.Errorf("%s description publishes A-phase-forbidden %q", definition.name, forbidden)
-			}
-		}
-	}
-}
-
-// TestLiveToolDescriptionsClarifyWaitAndTextRecovery checks the descriptions
-// and instructions actually returned by live discovery, not only the source
-// catalog.
-func TestLiveToolDescriptionsClarifyWaitAndTextRecovery(t *testing.T) {
-	fake := newTestDeviceService(t)
-	session := connectTestInMemory(t, newTestMCPServer(t, fake))
-	ctx, cancel := testCallContext(t)
-	defer cancel()
-
-	catalog, err := session.ListTools(ctx, nil)
-	if err != nil {
-		t.Fatalf("ListTools: %v", err)
-	}
-	descriptions := make(map[string]string, len(catalog.Tools))
-	for _, tool := range catalog.Tools {
-		descriptions[tool.Name] = tool.Description
-	}
-
-	const textRecoveryTrigger = "已认领 text 的整体 outcome=uncertain"
-	required := map[string][]string{
-		"observe": {
-			"wait_ms",
-			"毫秒",
-			"等待公开树条件应选 wait_for",
-			"`obs` 行",
-			"`recovery entry=observe ref=<P>`",
-			"`base=_72`",
-			"full=true",
-			"同一 full 上的多个差分各自应用",
-		},
-		"wait_for": {
-			"轮询当前会话的公开树条件",
-			"任一条件成立",
-			"stable=true",
-			"内容稳定",
-			"忽略 bounds 与无动作叶子文本",
-			"连续 3 帧",
-			"发布新观察时调用成功",
-			"`obs` 行",
-			"`recovery entry=… ref=…`",
-			"`base=_72`",
-			"full=true",
-			"同一 full 上的多个差分各自应用",
-			"wait.trigger=timeout",
-			"wait.matched 包含终帧命中的条件",
-			"超时时还包含 timeout",
-			"最终未发布新 O",
-		},
-		"act": {
-			textRecoveryTrigger,
-			"仅已派发聚焦",
-			"`recovery entry=observe ref=<P>`",
-			"直接 observe 核对当前框值/页面",
-			"原活动会话的具体归属 P",
-			"session.origin",
-			"属于该会话的 operation_id",
-			"避免原样重发",
-			"submit_ref",
-			"text_submit_not_executed",
-			"`!tap`/`!text`/`!swipe`",
-			"`@` 表示",
-			"3×3 网格选点",
-			"no_safe_trajectory",
-			"candidates",
-			"executable=true",
-		},
-		"inspect": {
-			"原 act 请求的 O",
-			"诊断 ref",
-			"该 ref 作 node",
-			"详细子树",
-			"O 过期后仍可能可读",
-			"两格缩进",
-			"不使用普通树 v5 的默认动作、`@` 或短 base",
-		},
-	}
-	for name, fragments := range required {
-		t.Run(name, func(t *testing.T) {
-			description, ok := descriptions[name]
-			if !ok {
-				t.Fatalf("%s missing from live tools/list", name)
+		t.Run(definition.name, func(t *testing.T) {
+			fragments, declared := required[definition.name]
+			if !declared {
+				t.Fatal("no description expectations")
 			}
 			for _, fragment := range fragments {
-				if !strings.Contains(description, fragment) {
-					t.Errorf("live %s description lacks %q", name, fragment)
-				}
+				requireTestContains(t, definition.description, fragment)
+			}
+			for _, forbidden := range []string{
+				"allow_ancestor_fallback", "server instructions", "账本", "base=_72", "两格缩进",
+			} {
+				requireTestNotContains(t, definition.description, forbidden)
 			}
 		})
 	}
-
-	initialize := session.InitializeResult()
-	if initialize == nil {
-		t.Fatal("initialize result missing")
-	}
-	for _, fragment := range []string{
-		textRecoveryTrigger,
-		"直接 observe 核对当前框值/页面",
-		"`recovery entry=observe ref=<P>`",
-		"通常 uncertain 先用 status",
-		"全裁无标注非交互 `image` 叶",
-		"inspect({reference:原 act 的 O,node:诊断 ref})",
-		"链下缩进的孩子属于链尾",
-		"`result v4 <ok|err> [op=…] [state=…] [outcome=…] [phase=…]`",
-		"`obs [<O>] [status=…] [fg=…] [at=HH:MM:SS] [visual=<token>] [change=<token>] [hint=<token>]",
-		"`hint=snap` 用同一 O 调 snap 核对画面",
-		"`hint=wait_for` 用 wait_for 等条件或稳定",
-		"`change` 表示 `act` 前后树比较",
-		"`detail_only` 仅完整树细节有变",
-		"`matched_base` 前后有变、零差异命中历史基线",
-		"tree v5 full nodes=<n>",
-		"`base=_72`",
-		"`@` 表示与同一定义中最近已交付几何的严格祖先同形同值",
-		"`!tap`、`!text` 或 `!swipe`",
-		"3×3 网格选点",
-		"同视口嵌套滚动栈",
-		"no_safe_trajectory",
-		"executable=true",
-	} {
-		if !strings.Contains(initialize.Instructions, fragment) {
-			t.Errorf("live server instructions lack %q", fragment)
-		}
-	}
 }
 
-// TestActDescriptionKeepsCallerRecovery removes the internal landing and focus
-// binding algorithm from the public text while keeping the actionable recovery
-// contract and the explicit no-ENTER boundary.
+// TestActDescriptionKeepsCallerRecovery also keeps the internal selector
+// vocabulary out of the local recovery guidance.
 func TestActDescriptionKeepsCallerRecovery(t *testing.T) {
 	description := testDefinitionByName(t, "act").description
-	for _, forbidden := range []string{
-		"default_center",
-		"carrier_node",
-		"center_span",
-		"exact → near",
-		"shifted",
-		"safe_carrier_ref",
-		"occluding_ref",
-		"Tier",
-		"落点",
-		"绑定",
-		"同 Display",
-	} {
-		if strings.Contains(description, forbidden) {
-			t.Errorf("act description retains internal algorithm wording %q", forbidden)
-		}
-	}
-	for _, required := range []string{
-		"全文写入",
-		"另发 ENTER",
-		"auto_submit=false",
-		"submit_ref",
-		"text_submit_not_executed",
-		"text_input",
-		"bubble=true",
-		"3×3",
-		"no_safe_trajectory",
-		"candidates",
-		"executable=true",
-		"同一 O、新 P",
-		"用新 O 和新 P 重试",
-		"uncertain",
-		"避免原样重发",
-	} {
-		if !strings.Contains(description, required) {
-			t.Errorf("act description lacks caller recovery %q", required)
-		}
+	for _, forbidden := range []string{"落点", "绑定", "同 Display"} {
+		requireTestNotContains(t, description, forbidden)
 	}
 }
 
-// TestKeepaliveDescriptionKeepsCallerContract removes the internal renewal
-// comparison and history dedup wording while keeping the range, default,
-// shortening behaviour and error recovery.
 func TestKeepaliveDescriptionKeepsCallerContract(t *testing.T) {
 	description := testDefinitionByName(t, "keepalive").description
 	for _, forbidden := range []string{
-		"max(现有截止时间",
-		"历史去重",
-		"同一可识别 P 重试",
-		"P 记录仍有界保留",
-		"actionable_until",
-		"账本",
+		"max(现有截止时间", "历史去重", "同一可识别 P 重试", "P 记录仍有界保留", "actionable_until",
 	} {
-		if strings.Contains(description, forbidden) {
-			t.Errorf("keepalive description retains internal wording %q", forbidden)
-		}
-	}
-	for _, required := range []string{
-		"1～120",
-		"默认 2",
-		"缩短",
-		"输入期限（60 秒）",
-		"session_ended",
-		"reference_has_no_session",
-		"session_expired",
-	} {
-		if !strings.Contains(description, required) {
-			t.Errorf("keepalive description lacks %q", required)
-		}
+		requireTestNotContains(t, description, forbidden)
 	}
 }
 
@@ -1160,7 +729,7 @@ func TestLiveQuerySchemaMinimum(t *testing.T) {
 
 // TestDiscoveryByteBudget measures the live in-memory SDK discovery the same way
 // the baseline was measured and proves the deduplicated text stays below it.
-// Sub-items explain where the bytes went; they are not separate thresholds.
+// Descriptions and schemas are logged for comparison with the baseline.
 func TestDiscoveryByteBudget(t *testing.T) {
 	fake := newTestDeviceService(t)
 	session := connectTestInMemory(t, newTestMCPServer(t, fake))
@@ -1197,6 +766,9 @@ func TestDiscoveryByteBudget(t *testing.T) {
 	total := len(instructions) + len(toolsJSON)
 	t.Logf("discovery bytes: instructions=%d tools_list=%d descriptions=%d schemas=%d total=%d baseline=%d",
 		len(instructions), len(toolsJSON), descriptions, schemas, total, baselineDiscoveryBytes)
+	if len(toolsJSON) > toolsListByteBudget {
+		t.Errorf("tools/list bytes = %d, want <= %d", len(toolsJSON), toolsListByteBudget)
+	}
 	if total >= baselineDiscoveryBytes {
 		t.Fatalf("discovery total = %d, want < %d", total, baselineDiscoveryBytes)
 	}

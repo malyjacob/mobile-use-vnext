@@ -536,22 +536,10 @@ func TestHTTPModesSelectProjectionPerCall(t *testing.T) {
 }
 
 func TestCatalogFingerprintBaseline(t *testing.T) {
-	// The catalog has thirteen tools. This baseline covers the caller-oriented
-	// descriptions after result v4/tree v5 local guidance was added to start,
-	// observe, wait_for, act, app and inspect, including content-stability
-	// guidance and omission of the two structured evidence objects. It also
-	// covers app kill stating that a virtual-display foreground task is
-	// terminated together with its task window container, while the same app
-	// still having a task on the primary or another display refuses, the
-	// act(text) auto_submit/submit_ref contract with outcome=partial, and the
-	// four-tier scroll amount with scroll axis-fallback guidance. Contract 30
-	// adds observation change and hint guidance to the act and snap descriptions.
-	// Contract 31 replaces the app kill wording and publishes the seven-branch
-	// tolerance matrix plus kill package-state result fields. Contract 32
-	// publishes the text(ref) editable-input admission without a tap action and
-	// the bounded read-only post-write readback, including the single strict
-	// post-write re-acquisition when the readback reports no candidate.
-	const baseline = "5578041adf04bcd8670a95b731667b85832957de4990f49e2dbf4eae6845d9b9"
+	// Contract 35 trims duplicate tool and Schema descriptions and publishes
+	// the new act, app, status and diagnose guidance. The pre-slimming request
+	// structure is checked separately by TestDiscoverySchemaStructureBaseline.
+	const baseline = "19cb4aa389e227cda892d727a270aa118c57951d0434c282169a819c6526ebae"
 	if got := CatalogFingerprint(); got != baseline {
 		t.Fatalf("catalog changed: %s", got)
 	}
