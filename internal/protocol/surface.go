@@ -1213,14 +1213,15 @@ func (v *InspectionView) MarshalJSONTo(enc *jsontext.Encoder) error {
 // DiagnosisView is the bounded diagnose report. It contains only controlled
 // phases, codes, times and coverage, never raw logs or user content.
 type DiagnosisView struct {
-	Summary   string
-	Issues    []DiagnosisIssue
-	TimingMS  map[string]int64
-	Timeline  []DiagnosisEvent
-	Coverage  string
-	Truncated bool
-	Operation string
-	Outcome   string
+	Summary     string
+	Issues      []DiagnosisIssue
+	ErrorCounts map[string]int
+	TimingMS    map[string]int64
+	Timeline    []DiagnosisEvent
+	Coverage    string
+	Truncated   bool
+	Operation   string
+	Outcome     string
 }
 
 // DiagnosisIssue is one controlled phase/code pair.
@@ -1278,6 +1279,30 @@ func (d *DiagnosisView) MarshalJSONTo(enc *jsontext.Encoder) error {
 	}
 	if err := enc.WriteToken(jsontext.EndArray); err != nil {
 		return err
+	}
+	if len(d.ErrorCounts) > 0 {
+		if err := writeName(enc, "error_counts"); err != nil {
+			return err
+		}
+		if err := enc.WriteToken(jsontext.BeginObject); err != nil {
+			return err
+		}
+		keys := make([]string, 0, len(d.ErrorCounts))
+		for key := range d.ErrorCounts {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			if err := writeName(enc, key); err != nil {
+				return err
+			}
+			if err := writeInt(enc, d.ErrorCounts[key]); err != nil {
+				return err
+			}
+		}
+		if err := enc.WriteToken(jsontext.EndObject); err != nil {
+			return err
+		}
 	}
 	if len(d.TimingMS) > 0 {
 		if err := writeName(enc, "timing_ms"); err != nil {

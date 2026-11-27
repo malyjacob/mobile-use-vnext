@@ -850,7 +850,7 @@ func TestDiagnoseOwnCleanState(t *testing.T) {
 	if view == nil || view.Coverage != "own_records" || view.Summary != "未记录到近期问题" {
 		t.Fatalf("clean diagnosis: %+v", view)
 	}
-	if len(view.Issues) != 0 || len(view.Timeline) != 0 || view.Truncated {
+	if len(view.Issues) != 0 || view.ErrorCounts != nil || len(view.Timeline) != 0 || view.Truncated {
 		t.Fatalf("clean diagnosis carried entries: %+v", view)
 	}
 	if _, ok := view.TimingMS["since_start"]; !ok {
@@ -940,7 +940,7 @@ func TestDiagnoseReferenceCoverage(t *testing.T) {
 		t.Fatalf("diagnose observation rejected: %v", apiErr)
 	}
 	if byObservation.Diagnosis.Coverage != "original_record" ||
-		byObservation.Diagnosis.Operation != "" ||
+		byObservation.Diagnosis.Operation != "" || byObservation.Diagnosis.ErrorCounts != nil ||
 		byObservation.Diagnosis.Summary != "原观察记录可用" {
 		t.Fatalf("observation diagnosis: %+v", byObservation.Diagnosis)
 	}

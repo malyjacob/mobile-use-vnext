@@ -977,14 +977,15 @@ func (n *NotificationView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 // UnmarshalJSONFrom decodes the bounded diagnose report.
 func (d *DiagnosisView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 	var wire struct {
-		Summary   member[string]           `json:"summary"`
-		Issues    member[[]DiagnosisIssue] `json:"issues"`
-		TimingMS  member[map[string]int64] `json:"timing_ms"`
-		Timeline  member[[]DiagnosisEvent] `json:"timeline"`
-		Coverage  member[string]           `json:"coverage"`
-		Truncated member[bool]             `json:"truncated"`
-		Operation member[string]           `json:"operation_id"`
-		Outcome   member[string]           `json:"outcome"`
+		Summary     member[string]           `json:"summary"`
+		Issues      member[[]DiagnosisIssue] `json:"issues"`
+		ErrorCounts member[map[string]int]   `json:"error_counts"`
+		TimingMS    member[map[string]int64] `json:"timing_ms"`
+		Timeline    member[[]DiagnosisEvent] `json:"timeline"`
+		Coverage    member[string]           `json:"coverage"`
+		Truncated   member[bool]             `json:"truncated"`
+		Operation   member[string]           `json:"operation_id"`
+		Outcome     member[string]           `json:"outcome"`
 	}
 	if err := readObject(dec, "diagnosis", &wire); err != nil {
 		return err
@@ -1005,15 +1006,27 @@ func (d *DiagnosisView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 	if err != nil {
 		return err
 	}
+	counts := wire.ErrorCounts.Value
+	if wire.ErrorCounts.Present {
+		if len(counts) == 0 {
+			return fmt.Errorf("diagnosis.error_counts must not be empty")
+		}
+		for code, count := range counts {
+			if code == "" || count <= 0 {
+				return fmt.Errorf("diagnosis.error_counts requires non-empty keys and positive counts")
+			}
+		}
+	}
 	*d = DiagnosisView{
-		Summary:   summary,
-		Issues:    issues,
-		TimingMS:  wire.TimingMS.Value,
-		Timeline:  wire.Timeline.Value,
-		Coverage:  coverage,
-		Truncated: truncated,
-		Operation: wire.Operation.Value,
-		Outcome:   wire.Outcome.Value,
+		Summary:     summary,
+		Issues:      issues,
+		ErrorCounts: counts,
+		TimingMS:    wire.TimingMS.Value,
+		Timeline:    wire.Timeline.Value,
+		Coverage:    coverage,
+		Truncated:   truncated,
+		Operation:   wire.Operation.Value,
+		Outcome:     wire.Outcome.Value,
 	}
 	return nil
 }
