@@ -1,12 +1,12 @@
 # 提案：act 全分支静态准入高置信自动恢复与 Issue #52 闭环
 
-状态：提案，未实现。
+状态：已实现（`0.41.0` / 契约 37）。
 基线提交：`43807f245b5d740731f119b5f4f4d7f56884fcb8`（分支 `master`，`2026-11-28`）。
 适用范围：`act` 工具（`tap` / `long_press` / `text` / `text.submit_ref` / `scroll` / 坐标目标）认领前静态准入阶段（`phase=admission`）及其配套认领后重验联动（`phase=revalidate`）；关联并闭环 GitHub Issue #52（`https://github.com/malyjacob/mobile-use-vnext/issues/52`）。
 影响范围：`internal/engine`（`scroll.go`、`scroll_overlay.go`、`tap_scope.go`、`point.go`、`act.go`、`act_target_shared.go`、`act_revalidation_policy.go`、`act_rebind.go`、`act_recovery.go`、`act_rejection_diagnostics.go` 及单元测试）、`internal/protocol/errors.go`（白名单注释同步）、`release/versions.json` 及 4 个生成版本产物、`docs/{interface,architecture,mcp,integration,runbook,client,control-protocol,phone-operations,release}.md` 及 `README.md`（按实际变更执行第 15 条独立只读文档审计）、`maintenance/verification/act-static-admission-auto-recovery.md` 与整组发布交付物。
 契约（`/api/*` 字段与 `contract_version`）：**行为契约变化**——不增删 `/api/*` 请求/响应顶层字段、不改变 `Result.auto_recovery` 枚举与语义（静态解析沿用既有静默“弱保软”语义，不写 `Result.auto_recovery`）、不改变错误码表与 `candidates` 6 字段结构、不改变 MCP 13 工具 schema 与目录指纹；演进 9 项静态准入与重验联动语义，并在 `422 text_target_uncertain`（`stage="target"`、`reason="target_not_editable"`）拒绝且存在合法候选输入框时补充既有白名单键 `error.details.candidates`。通过单一版本源 `release/versions.json` 拟将版本由 `0.40.0 / contract_version=36 / android_version_code=42` 升级为 `0.41.0 / contract_version=37 / android_version_code=43`（本提案落盘不修改版本源）。
 
-本文引用的函数名、行号、常量与默认值均以该基线提交为准；实现落地前若代码已前进，须按当时的 `HEAD` 重新核对（重点：[scroll.go](../../internal/engine/scroll.go)、[scroll_overlay.go](../../internal/engine/scroll_overlay.go)、[tap_scope.go](../../internal/engine/tap_scope.go)、[point.go](../../internal/engine/point.go)、[act.go](../../internal/engine/act.go)、[act_target_shared.go](../../internal/engine/act_target_shared.go)、[act_revalidation_policy.go](../../internal/engine/act_revalidation_policy.go)、[act_rebind.go](../../internal/engine/act_rebind.go)、[act_recovery.go](../../internal/engine/act_recovery.go)、[act_rejection_diagnostics.go](../../internal/engine/act_rejection_diagnostics.go)、[errors.go](../../internal/protocol/errors.go)、[versions.json](../../release/versions.json)）。
+本文引用的函数名、行号、常量与默认值均以该基线提交为准；实现落地前若代码已前进，须按当时的 `HEAD` 重新核对（重点：[scroll.go](../../../internal/engine/scroll.go)、[scroll_overlay.go](../../../internal/engine/scroll_overlay.go)、[tap_scope.go](../../../internal/engine/tap_scope.go)、[point.go](../../../internal/engine/point.go)、[act.go](../../../internal/engine/act.go)、[act_target_shared.go](../../../internal/engine/act_target_shared.go)、[act_revalidation_policy.go](../../../internal/engine/act_revalidation_policy.go)、[act_rebind.go](../../../internal/engine/act_rebind.go)、[act_recovery.go](../../../internal/engine/act_recovery.go)、[act_rejection_diagnostics.go](../../../internal/engine/act_rejection_diagnostics.go)、[errors.go](../../../internal/protocol/errors.go)、[versions.json](../../../release/versions.json)）。
 
 ---
 
@@ -49,23 +49,23 @@
 
 | 通路 | 基线源码与测试落点 | 核实事实 |
 | :--- | :--- | :--- |
-| **A1（Issue #52）** | [scroll.go:1024-1029](../../internal/engine/scroll.go#L1024-L1029)、[scroll.go:1388-1453](../../internal/engine/scroll.go#L1388-L1453)、[scroll_overlay.go:259-295](../../internal/engine/scroll_overlay.go#L259-L295)、[scroll_axis_amount_test.go:564-599](../../internal/engine/scroll_axis_amount_test.go#L564-L599) | `axis_mismatch` 第 2 步调 `tryUniqueInnerScrollFallback`；`L1406` 硬检查 `!isCoextensiveRect(wantRect, descRect)` 拦截同界子容器，而 `L1439-L1444` 本已具备同视口折叠逻辑；且 `tryUniqueInnerScrollFallback` 未调用 `scroll_overlay.go` 遮罩过滤。注意 `isScrollCandidateOverlayOccluded(ctx, want, ...)` 对非空 `want` 会用 `wantDepth <= commonAncestorDepth(want, scrim)` 豁免外层遮罩叶，必须传 `want = nil` 才不放行外部遮罩。 |
-| **A2（非滚动壳内探）** | [scroll.go:1048-1055](../../internal/engine/scroll.go#L1048-L1055)、[scroll.go:1099-1106](../../internal/engine/scroll.go#L1099-L1106) | `len(ancestors)==0` 或全部兼容祖先失败/无兼容祖先时直接收集 `page_scroll` 候选并返回 `not_scrollable` / `axis_mismatch`，从不检查自身子树是否存在唯一可执行滚动子容器。 |
-| **A3（缺 `swipe` 滚动提升）** | [scroll.go:1041-1047](../../internal/engine/scroll.go#L1041-L1047)、[scroll.go:1056-1085](../../internal/engine/scroll.go#L1056-L1085)、[act_proposal_scroll_coord_test.go:112-163](../../internal/engine/act_proposal_scroll_coord_test.go#L112-L163) | `target.Role==RoleScroll` 缺 `ActionSwipe` 在 `L1041` 直拒；非滚动节点遇 `nearest` 缺 `ActionSwipe` 在 `L1066` 停止，尽管 `scrollRoleAncestors` 已收集完整祖先链且 `L1077` 在循环中过滤 `isScrollContainer(ancestor)`。 |
-| **D1（`text(ref)` 定向绑定与候选）** | [tap_scope.go:2528-2573](../../internal/engine/tap_scope.go#L2528-L2573)、[act.go:2153-2171](../../internal/engine/act.go#L2153-L2171)、[tap_scope.go:1906-2000](../../internal/engine/tap_scope.go#L1906-L2000)、[act_rebind.go:69](../../internal/engine/act_rebind.go#L69)、[act_recovery.go:64-76](../../internal/engine/act_recovery.go#L64-L76) | `L2565-2567` 遇 `target.Role != RoleInput \|\| !hasAction(target, ActionText)` 直接调用 `staticTextError(textReasonTargetNotEditable)`；`staticTextError` 只输出 `stage/reason/dispatch`，未调用已存在的 `collectTextFallbackCandidates`（`L1906`）；`act_rebind.go:69` 用 `req.TargetRef` 查 `oldView.byRef`，且 `act_recovery.go:70` 对 `text` 未排除 `delegateRaw != nil`。 |
-| **E1（被动子重叠）** | [tap_scope.go:635-678](../../internal/engine/tap_scope.go#L635-L678)、[tap_scope.go:840-863](../../internal/engine/tap_scope.go#L840-L863)、[tap_scope.go:895-920](../../internal/engine/tap_scope.go#L895-L920)、[act_tap_scope_test.go:349-374,1046](../../internal/engine/act_tap_scope_test.go#L349-L374)、[tap_static_error_test.go:159-219,546-552,653-687](../../internal/engine/tap_static_error_test.go#L159-L219) | `provesSubtreeTapPoint`（`L671`）强制 `bestCount == 1`；`provesGuidancePoint`（`L902`）强制 `state == pointUnique`；`tryPlanTapDirectBase`（`L857-861`）只枚举原 4 级+单命中；同目标下两个重叠被动 `TextView`/`ImageView` 均在 `scope.carrierByNode` 内却被拦截。 |
-| **E2（2D 残余安全区）** | [tap_scope.go:726-793](../../internal/engine/tap_scope.go#L726-L793)、[tap_scope.go:981-1019](../../internal/engine/tap_scope.go#L981-L1019) | `enumerateTapCandidates` 与 `tapVisualRegionPoints` 在 `3×3` 网格（`tapStaticGridPoints`）后即终止，无阻塞区差集二维矩形求点。 |
-| **E3（同视口子委托）** | [tap_scope.go:2571](../../internal/engine/tap_scope.go#L2571)、[tap_scope.go:1210-1233](../../internal/engine/tap_scope.go#L1210-L1233)、[tap_scope.go:2120-2150](../../internal/engine/tap_scope.go#L2120-L2150) | `L2571` 固定传 `allowCoextensiveChild=false`；`L1221` 硬要求 `len(blockers) == 1`。 |
-| **B1（异动作同视口子委托）** | [tap_scope.go:2506-2521](../../internal/engine/tap_scope.go#L2506-L2521) | `!hasAction(target, action)` 时仅在 `!isTouchInteractive(target)` 进入冒泡，否则直接返回 `target_has_other_action`，不探测同视口子容器。 |
-| **E4 / F1（共位与坐标最内层消歧）** | [tap_scope.go:2335-2377](../../internal/engine/tap_scope.go#L2335-L2377)、[point.go:179-208](../../internal/engine/point.go#L179-L208)、[scroll.go:1140-1152](../../internal/engine/scroll.go#L1140-L1152) | `L2340-2349` 只统计 `containsCenter` 总数；`point.go:190-191` 只判 `len(matching) == 1`；而 `scroll.go:1140-1152` 已具备最内层归约先例。 |
-| **认领后重验强耦合点** | [act_revalidation_policy.go:1710-1774](../../internal/engine/act_revalidation_policy.go#L1710-L1774)、[act_target_shared.go:241-258](../../internal/engine/act_target_shared.go#L241-L258)、[act.go:1142,1163,1180-1187,1357-1364,1608-1618](../../internal/engine/act.go#L1142-L1187)、[point.go:617-621](../../internal/engine/point.go#L617-L621)、[act.go:1748-1751](../../internal/engine/act.go#L1748-L1751)、[act_rejection_diagnostics.go:167-175](../../internal/engine/act_rejection_diagnostics.go#L167-L175) | `pointOwner`/`tapFrameTier4OcclusionProven` 以及 `resolveDirectTapScopeFrame:1616`/`revalidateColocatedTapFrame:1362` 二次选点均要求单命中；`revalidateCoextensiveChildFrame` 要求 `freshParent` 具原动作且 `len(blockers)==1`，且 `L1183` 仅在 `tier>=4` 查外部覆盖；`proveTargetSet`/`provePointTarget` 要求未归约 `len(matching)==1`。 |
+| **A1（Issue #52）** | [scroll.go:1024-1029](../../../internal/engine/scroll.go#L1024-L1029)、[scroll.go:1388-1453](../../../internal/engine/scroll.go#L1388-L1453)、[scroll_overlay.go:259-295](../../../internal/engine/scroll_overlay.go#L259-L295)、[scroll_axis_amount_test.go:564-599](../../../internal/engine/scroll_axis_amount_test.go#L564-L599) | `axis_mismatch` 第 2 步调 `tryUniqueInnerScrollFallback`；`L1406` 硬检查 `!isCoextensiveRect(wantRect, descRect)` 拦截同界子容器，而 `L1439-L1444` 本已具备同视口折叠逻辑；且 `tryUniqueInnerScrollFallback` 未调用 `scroll_overlay.go` 遮罩过滤。注意 `isScrollCandidateOverlayOccluded(ctx, want, ...)` 对非空 `want` 会用 `wantDepth <= commonAncestorDepth(want, scrim)` 豁免外层遮罩叶，必须传 `want = nil` 才不放行外部遮罩。 |
+| **A2（非滚动壳内探）** | [scroll.go:1048-1055](../../../internal/engine/scroll.go#L1048-L1055)、[scroll.go:1099-1106](../../../internal/engine/scroll.go#L1099-L1106) | `len(ancestors)==0` 或全部兼容祖先失败/无兼容祖先时直接收集 `page_scroll` 候选并返回 `not_scrollable` / `axis_mismatch`，从不检查自身子树是否存在唯一可执行滚动子容器。 |
+| **A3（缺 `swipe` 滚动提升）** | [scroll.go:1041-1047](../../../internal/engine/scroll.go#L1041-L1047)、[scroll.go:1056-1085](../../../internal/engine/scroll.go#L1056-L1085)、[act_proposal_scroll_coord_test.go:112-163](../../../internal/engine/act_proposal_scroll_coord_test.go#L112-L163) | `target.Role==RoleScroll` 缺 `ActionSwipe` 在 `L1041` 直拒；非滚动节点遇 `nearest` 缺 `ActionSwipe` 在 `L1066` 停止，尽管 `scrollRoleAncestors` 已收集完整祖先链且 `L1077` 在循环中过滤 `isScrollContainer(ancestor)`。 |
+| **D1（`text(ref)` 定向绑定与候选）** | [tap_scope.go:2528-2573](../../../internal/engine/tap_scope.go#L2528-L2573)、[act.go:2153-2171](../../../internal/engine/act.go#L2153-L2171)、[tap_scope.go:1906-2000](../../../internal/engine/tap_scope.go#L1906-L2000)、[act_rebind.go:69](../../../internal/engine/act_rebind.go#L69)、[act_recovery.go:64-76](../../../internal/engine/act_recovery.go#L64-L76) | `L2565-2567` 遇 `target.Role != RoleInput \|\| !hasAction(target, ActionText)` 直接调用 `staticTextError(textReasonTargetNotEditable)`；`staticTextError` 只输出 `stage/reason/dispatch`，未调用已存在的 `collectTextFallbackCandidates`（`L1906`）；`act_rebind.go:69` 用 `req.TargetRef` 查 `oldView.byRef`，且 `act_recovery.go:70` 对 `text` 未排除 `delegateRaw != nil`。 |
+| **E1（被动子重叠）** | [tap_scope.go:635-678](../../../internal/engine/tap_scope.go#L635-L678)、[tap_scope.go:840-863](../../../internal/engine/tap_scope.go#L840-L863)、[tap_scope.go:895-920](../../../internal/engine/tap_scope.go#L895-L920)、[act_tap_scope_test.go:349-374,1046](../../../internal/engine/act_tap_scope_test.go#L349-L374)、[tap_static_error_test.go:159-219,546-552,653-687](../../../internal/engine/tap_static_error_test.go#L159-L219) | `provesSubtreeTapPoint`（`L671`）强制 `bestCount == 1`；`provesGuidancePoint`（`L902`）强制 `state == pointUnique`；`tryPlanTapDirectBase`（`L857-861`）只枚举原 4 级+单命中；同目标下两个重叠被动 `TextView`/`ImageView` 均在 `scope.carrierByNode` 内却被拦截。 |
+| **E2（2D 残余安全区）** | [tap_scope.go:726-793](../../../internal/engine/tap_scope.go#L726-L793)、[tap_scope.go:981-1019](../../../internal/engine/tap_scope.go#L981-L1019) | `enumerateTapCandidates` 与 `tapVisualRegionPoints` 在 `3×3` 网格（`tapStaticGridPoints`）后即终止，无阻塞区差集二维矩形求点。 |
+| **E3（同视口子委托）** | [tap_scope.go:2571](../../../internal/engine/tap_scope.go#L2571)、[tap_scope.go:1210-1233](../../../internal/engine/tap_scope.go#L1210-L1233)、[tap_scope.go:2120-2150](../../../internal/engine/tap_scope.go#L2120-L2150) | `L2571` 固定传 `allowCoextensiveChild=false`；`L1221` 硬要求 `len(blockers) == 1`。 |
+| **B1（异动作同视口子委托）** | [tap_scope.go:2506-2521](../../../internal/engine/tap_scope.go#L2506-L2521) | `!hasAction(target, action)` 时仅在 `!isTouchInteractive(target)` 进入冒泡，否则直接返回 `target_has_other_action`，不探测同视口子容器。 |
+| **E4 / F1（共位与坐标最内层消歧）** | [tap_scope.go:2335-2377](../../../internal/engine/tap_scope.go#L2335-L2377)、[point.go:179-208](../../../internal/engine/point.go#L179-L208)、[scroll.go:1140-1152](../../../internal/engine/scroll.go#L1140-L1152) | `L2340-2349` 只统计 `containsCenter` 总数；`point.go:190-191` 只判 `len(matching) == 1`；而 `scroll.go:1140-1152` 已具备最内层归约先例。 |
+| **认领后重验强耦合点** | [act_revalidation_policy.go:1710-1774](../../../internal/engine/act_revalidation_policy.go#L1710-L1774)、[act_target_shared.go:241-258](../../../internal/engine/act_target_shared.go#L241-L258)、[act.go:1142,1163,1180-1187,1357-1364,1608-1618](../../../internal/engine/act.go#L1142-L1187)、[point.go:617-621](../../../internal/engine/point.go#L617-L621)、[act.go:1748-1751](../../../internal/engine/act.go#L1748-L1751)、[act_rejection_diagnostics.go:167-175](../../../internal/engine/act_rejection_diagnostics.go#L167-L175) | `pointOwner`/`tapFrameTier4OcclusionProven` 以及 `resolveDirectTapScopeFrame:1616`/`revalidateColocatedTapFrame:1362` 二次选点均要求单命中；`revalidateCoextensiveChildFrame` 要求 `freshParent` 具原动作且 `len(blockers)==1`，且 `L1183` 仅在 `tier>=4` 查外部覆盖；`proveTargetSet`/`provePointTarget` 要求未归约 `len(matching)==1`。 |
 
 ### 1.3 为什么直觉会出错
 
 1. **“让 `tap`/`long_press` 像 `scroll` 一样跳过 `target_has_other_action` 或 `ancestor_missing_action` 向上冒泡”**：
-   在 Android `View.onTouchEvent` 中，只要子节点具备 `CLICKABLE` 或 `LONG_CLICKABLE`（含禁用态），它会消费 `ACTION_DOWN` 阻断向父级冒泡；且 [`collectTapScope`](../../internal/engine/tap_scope.go#L583) 已把 `isTouchInteractive` 节点视为父级阻塞区。越级向上会把点击飘移到父容器无关空白处，故 `B1` 只能**向下委托同视口子容器**，严禁向上越级。
+   在 Android `View.onTouchEvent` 中，只要子节点具备 `CLICKABLE` 或 `LONG_CLICKABLE`（含禁用态），它会消费 `ACTION_DOWN` 阻断向父级冒泡；且 [`collectTapScope`](../../../internal/engine/tap_scope.go#L583) 已把 `isTouchInteractive` 节点视为父级阻塞区。越级向上会把点击飘移到父容器无关空白处，故 `B1` 只能**向下委托同视口子容器**，严禁向上越级。
 2. **“Issue #52 直接删掉 `scroll.go:1406` 的 `!isCoextensiveRect` 即可”**：
-   `tryUniqueInnerScrollFallback` 当前没有任何遮罩/跨窗隔离。如果不接入 [`scrollOverlayContext`](../../internal/engine/scroll_overlay.go#L259-L295) 并以 `want = nil` 禁止外层遮罩豁免，放开同视口内层回退与 A2 包装壳下探后，在模态遮罩页传外层容器就会穿透滚到底层滚动容器。
+   `tryUniqueInnerScrollFallback` 当前没有任何遮罩/跨窗隔离。如果不接入 [`scrollOverlayContext`](../../../internal/engine/scroll_overlay.go#L259-L295) 并以 `want = nil` 禁止外层遮罩豁免，放开同视口内层回退与 A2 包装壳下探后，在模态遮罩页传外层容器就会穿透滚到底层滚动容器。
 3. **“把 `no_interactive_ancestor` 自动转成被动中心点击，或者把非滚动/非可点容器里唯一的 `<50%` 小按钮也吸走”**：
    前者会让静态标题误点直接消费 `O` 并消耗 1~2s 后观察（且与契约 35 刚确立的 `target_center` 客观提示语义相悖）；后者会把信息卡内唯一的 `"X"` 关闭/删除按钮当成整卡操作目标误点。
 4. **“只改静态规划函数，不动 `phase=revalidate`”**：
@@ -122,17 +122,17 @@
 ### 4.1 滚动静态自动恢复（A1 / A2 / A3）
 
 1. **内部滚动兜底参数化与遮罩感知**：
-   扩展 [`tryUniqueInnerScrollFallback`](../../internal/engine/scroll.go#L1388) 为带策略参数 `(allowCoextensive bool, minCoverPercent int64)` 并接入 [`newScrollOverlayContext`](../../internal/engine/scroll_overlay.go#L32)：
+   扩展 [`tryUniqueInnerScrollFallback`](../../../internal/engine/scroll.go#L1388) 为带策略参数 `(allowCoextensive bool, minCoverPercent int64)` 并接入 [`newScrollOverlayContext`](../../../internal/engine/scroll_overlay.go#L32)：
    - 扫描 `want` 子树内全部满足 `isScrollContainer(node)` 且 `scrollContainerAxisCompatible(obs, view, node, operation.Direction)` 的严格后代 `node`（含裁剪面积正值与有效 `source`）；
    - **同视口约束**：若 `!allowCoextensive && isCoextensiveRect(wantRect, descRect)` → 跳过（保持原同轴轨迹失败路径不变）；
    - **面积占比约束**：若 `minCoverPercent > 0 && !rectOverlapAtLeast(wantRect, descRect, minCoverPercent)` → 跳过（防止大非滚动页面壳误委托给仅占局部角落的小横条/小列表）；
-   - **遮罩/浮层隔离**：调用 **`isScrollCandidateOverlayOccluded(overlayCtx, nil, node, operation.Direction, operation.Amount)`**（明确传 `want = nil`，防止 [`scroll_overlay.go:274-284`](../../internal/engine/scroll_overlay.go#L274-L284) 因 `wantDepth <= commonAncestorDepth(want, scrim)` 豁免位于 `want` 之外或跨窗口的模态遮罩叶）；返回真则剔除。同时检查该后代是否与任意多窗口中的其他非己顶层窗口存在无遮罩重叠的限制沿用既有 `scrollSafeSpansAt` 与 `scrollOverlayContext` 保守规则；
+   - **遮罩/浮层隔离**：调用 **`isScrollCandidateOverlayOccluded(overlayCtx, nil, node, operation.Direction, operation.Amount)`**（明确传 `want = nil`，防止 [`scroll_overlay.go:274-284`](../../../internal/engine/scroll_overlay.go#L274-L284) 因 `wantDepth <= commonAncestorDepth(want, scrim)` 豁免位于 `want` 之外或跨窗口的模态遮罩叶）；返回真则剔除。同时检查该后代是否与任意多窗口中的其他非己顶层窗口存在无遮罩重叠的限制沿用既有 `scrollSafeSpansAt` 与 `scrollOverlayContext` 保守规则；
    - 对能通过 `planScrollOnAxes(..., "ref", scrollModeInnerFallback)` 的候选，执行既有的双向同视口祖先-后代折叠（保留最内层）；**当且仅当折叠后总数严格 `== 1` 时委托返回该唯一 `scrollPlan`**，否则返回 `nil`。
 2. **A1（Issue #52，`axis_mismatch` 路径）**：
-   - 在 [`resolveScrollRefPlan`](../../internal/engine/scroll.go#L1026-L1029) 中，当 `isScrollContainer(target)` 且 `!scrollContainerAxisCompatible(...)`、沿父链向上回退未找到成功计划时，调用 `tryUniqueInnerScrollFallback(..., allowCoextensive=true, minCoverPercent=0)`（优先允许同视口且轴向兼容的唯一可执行内层子容器，如横向 `ViewPager` 内同界纵向 `RecyclerView`）；
-   - 同轴容器但 3 轴线轨迹失败路径（[`planScrollContainer:1377`](../../internal/engine/scroll.go#L1377)）保持 `allowCoextensive=false, minCoverPercent=0`，避免同视口自身再次循环落回本已被证明同视口免阻塞的子容器。
+   - 在 [`resolveScrollRefPlan`](../../../internal/engine/scroll.go#L1026-L1029) 中，当 `isScrollContainer(target)` 且 `!scrollContainerAxisCompatible(...)`、沿父链向上回退未找到成功计划时，调用 `tryUniqueInnerScrollFallback(..., allowCoextensive=true, minCoverPercent=0)`（优先允许同视口且轴向兼容的唯一可执行内层子容器，如横向 `ViewPager` 内同界纵向 `RecyclerView`）；
+   - 同轴容器但 3 轴线轨迹失败路径（[`planScrollContainer:1377`](../../../internal/engine/scroll.go#L1377)）保持 `allowCoextensive=false, minCoverPercent=0`，避免同视口自身再次循环落回本已被证明同视口免阻塞的子容器。
 3. **A2（非滚动包装壳唯一内层滚动下探）**：
-   - 在 [`resolveScrollRefPlan`](../../internal/engine/scroll.go#L1048-L1106) 对非滚动 `target` 仍优先执行向上查找滚动祖先与祖先提升；
+   - 在 [`resolveScrollRefPlan`](../../../internal/engine/scroll.go#L1048-L1106) 对非滚动 `target` 仍优先执行向上查找滚动祖先与祖先提升；
    - 当且仅当向上未得到任何可执行的兼容滚动祖先计划（即 `len(ancestors) == 0`，或所有有效祖先均因 `axis_mismatch` 被跳过且 `firstCompatErr == nil`）时，仅在 `targetRect` 有效的前提下调用 `tryUniqueInnerScrollFallback(..., allowCoextensive=true, minCoverPercent=50)`（要求唯一可执行子滚动容器覆盖 `targetRect` 至少 `50%` 面积，且通过 `want = nil` 的遮罩/浮层过滤）；
    - 注意：当 `nearest` 滚动祖先禁用/无几何（`ancestor_invalid`）或有轴向兼容祖先进入规划但因轨迹阻塞失败（`firstCompatErr != nil`）时，**不触发** A2，保持既有失败归因。
 4. **A3（缺 `swipe` 的未禁用 `role=scroll` 向兼容祖先提升）**：
@@ -144,7 +144,7 @@
 
 ### 4.2 `text(ref)` 静态定向绑定与候选补充（D1）
 
-在 [`staticTextRefCheck`](../../internal/engine/tap_scope.go#L2565-L2570) 先通过 `target` 存在、`!root`、`!context`、有正几何（否则 `no_geometry`）、`enabled != false`（否则 `409 node_disabled`）检查；若 `target.Role == RoleInput && hasAction(target, ActionText)` 则检查 `protected == false`（否则直接报 `target_protected`，**绝不恢复也不附 `candidates`**）。
+在 [`staticTextRefCheck`](../../../internal/engine/tap_scope.go#L2565-L2570) 先通过 `target` 存在、`!root`、`!context`、有正几何（否则 `no_geometry`）、`enabled != false`（否则 `409 node_disabled`）检查；若 `target.Role == RoleInput && hasAction(target, ActionText)` 则检查 `protected == false`（否则直接报 `target_protected`，**绝不恢复也不附 `candidates`**）。
 仅当 `target.Role != RoleInput || !hasAction(target, ActionText)`（即原 `target_not_editable` 出口）时，按顺序执行三条高置信定向解析：
 
 1. **D1a（非大屏包装壳向下找唯一 `RoleInput`）**：
@@ -160,48 +160,48 @@
    - 仅当总数严格 `== 1`、记 `B := matches[0]` 且 `isValidTextPublicTarget(B)`、并对 `B` 运行直接聚焦规划成功时 → 选用 `B`。
 4. **绑定结果与失败候选**：
    - D1 任一分支成功时，返回的 `tapPlan` 以实际解析出的输入节点 `resolved` 作为 `targetRef = resolved.Ref` 与 `targetRaw = raw(resolved)`；
-   - 若三条均未命中，保持返回 `422 text_target_uncertain`（`stage="target"`、`reason="target_not_editable"`、`dispatch={focus:"not_attempted", write:"not_attempted", submit:"not_attempted"}`），并通过 `collectTextFallbackCandidates(view, target, screen)` + `buildStaticCandidates` 计算可选输入框列表；仅当非空时写入 `error.details["candidates"]`（需在 [`internal/protocol/errors.go`](../../internal/protocol/errors.go#L45-L53) 同步登记该出口允许可选 `candidates`）。
+   - 若三条均未命中，保持返回 `422 text_target_uncertain`（`stage="target"`、`reason="target_not_editable"`、`dispatch={focus:"not_attempted", write:"not_attempted", submit:"not_attempted"}`），并通过 `collectTextFallbackCandidates(view, target, screen)` + `buildStaticCandidates` 计算可选输入框列表；仅当非空时写入 `error.details["candidates"]`（需在 [`internal/protocol/errors.go`](../../../internal/protocol/errors.go#L45-L53) 同步登记该出口允许可选 `candidates`）。
 
 ### 4.3 落点安全证明、残余安全区与同视口子委托（E1 / E2 / E3 / B1）
 
 1. **E1（同目标纯被动子节点重叠消歧）**：
-   - 保留 [`provesSubtreeTapPoint`](../../internal/engine/tap_scope.go#L635) 与 [`provesGuidancePoint`](../../internal/engine/tap_scope.go#L895) 既有单最深命中（`bestCount == 1` / `pointUnique`）行为不变，作为优先判定；
+   - 保留 [`provesSubtreeTapPoint`](../../../internal/engine/tap_scope.go#L635) 与 [`provesGuidancePoint`](../../../internal/engine/tap_scope.go#L895) 既有单最深命中（`bestCount == 1` / `pointUnique`）行为不变，作为优先判定；
    - 新增被动多命中谓词：
-     - `provesSubtreeTapPointPassive(scope, x, y)`：点在 `scope.base` 内、不命中任何 `scope.blocked`、经 [`tapSubtreePointOwners`](../../internal/engine/tap_scope.go#L1276) 所得最深命中 `ties` 满足 `len(ties) >= 1` 且对每个 `hit ∈ ties`，要么 `hit == scope.target`、要么 `scope.carrierByNode[hit] != nil`（全部属于本目标非阻塞被动载体，没有任何非载体节点混入）；
+     - `provesSubtreeTapPointPassive(scope, x, y)`：点在 `scope.base` 内、不命中任何 `scope.blocked`、经 [`tapSubtreePointOwners`](../../../internal/engine/tap_scope.go#L1276) 所得最深命中 `ties` 满足 `len(ties) >= 1` 且对每个 `hit ∈ ties`，要么 `hit == scope.target`、要么 `scope.carrierByNode[hit] != nil`（全部属于本目标非阻塞被动载体，没有任何非载体节点混入）；
      - `provesGuidancePointPassive(view, ancestor, scope, x, y)`：在 `provesSubtreeTapPointPassive(scope, x, y)` 基础上，要求 `len(externalInteractiveOwnersAt(view, ancestor, x, y)) == 0`，且整树 `resolvePointSet(view.tree.Root, x, y)` 非空并全部命中 `ancestor` 本身或 `scope.carrierByNode` 内拥有有效 `source` 的节点。
    - 被动多命中通过时，`tapPlan.carrierRef = ""`、`tapPlan.carrierRaw = nil`（不绑定单一脆弱载体）；
-   - 同步更新干跑评估器 [`tryPlanTapDirectBase`](../../internal/engine/tap_scope.go#L840-L863)（对齐 `chooseTapPlan` 的 E1/E2 规则，保证 `candidates[].executable` 与真实静态准入 100% 一致）。
+   - 同步更新干跑评估器 [`tryPlanTapDirectBase`](../../../internal/engine/tap_scope.go#L840-L863)（对齐 `chooseTapPlan` 的 E1/E2 规则，保证 `candidates[].executable` 与真实静态准入 100% 一致）。
 2. **E2（2D 残余安全区求点 `residualPatchPoints`）**：
    - 适用：`base \ ∪ blocked` 平面上固定 4 级采样全败的直接目标、载体目标与 `bubble` 视觉区；
    - **算法边界常数**：离散坐标点数上限 `tapResidualMaxCoords = 128`（包含 `region` 与所有相交 `blocked` 矩形的去重 X、Y 边界；若超出上限，直接跳过该级不退化为慢扫描）、最小安全块尺寸 `tapResidualMinPatchPx = 16`（要求自由矩形 `Width >= 16 && Height >= 16`，杜绝 `1–2px` 边缘细缝）、最大输出点数 `tapResidualMaxCandidates = 8`；
    - **生成与排序**：在 `[0..len(xs)-2] × [0..len(ys)-2]` 自由网格单元（未被任何 `blocked` 覆盖）上以直方图最大矩形在 `O(|xs|·|ys|)` 内枚举极大自由矩形（或去重后的最大自由块），滤除 `Width < 16 || Height < 16` 者；按 `min(w, h)` 降序 → `w*h` 降序 → `Top` 升序 → `Left` 升序排序，取前至多 8 个矩形的安全中心 `tapSafeCenter(rect)`（战略名 `tapModeResidualPatch = "residual_patch"`）。
    - **两级总探测顺序（单命中严格优先于被动多命中）**：
-     - 直接目标 [`chooseTapPlan`](../../internal/engine/tap_scope.go#L817)：Pass 1 原有 4 级（`default_center` → `carrier_node` → `center_span` → `grid_3x3`）经 `provesSubtreeTapPoint` → Pass 2 `residual_patch` 经 `provesSubtreeTapPoint` → Pass 3 原有 4 级 + `residual_patch` 经 `provesSubtreeTapPointPassive`；
-     - `bubble_ancestor` [`chooseBubbleTapPoint`](../../internal/engine/tap_scope.go#L1047)：在 `cClip` 内先试原有 `tapVisualRegionPoints`（单命中）→ `cClip` 残余安全区（单命中）→ `cClip` 被动多命中；无竞争遮挡补测 `A` 自身范围时亦同；
-     - `bubble_colocated` [`chooseColocatedTapPoint`](../../internal/engine/tap_scope.go#L1101)：先试 `childRect ∩ scope.base` 视觉点（单命中 → 残余安全区单命中 → 被动多命中），再委托候选 `B` 的 3-pass 直接规划（确保静态放行的 E1/E2 共位点在重验 `chooseColocatedTapPoint` 时对称可恢复）。
+     - 直接目标 [`chooseTapPlan`](../../../internal/engine/tap_scope.go#L817)：Pass 1 原有 4 级（`default_center` → `carrier_node` → `center_span` → `grid_3x3`）经 `provesSubtreeTapPoint` → Pass 2 `residual_patch` 经 `provesSubtreeTapPoint` → Pass 3 原有 4 级 + `residual_patch` 经 `provesSubtreeTapPointPassive`；
+     - `bubble_ancestor` [`chooseBubbleTapPoint`](../../../internal/engine/tap_scope.go#L1047)：在 `cClip` 内先试原有 `tapVisualRegionPoints`（单命中）→ `cClip` 残余安全区（单命中）→ `cClip` 被动多命中；无竞争遮挡补测 `A` 自身范围时亦同；
+     - `bubble_colocated` [`chooseColocatedTapPoint`](../../../internal/engine/tap_scope.go#L1101)：先试 `childRect ∩ scope.base` 视觉点（单命中 → 残余安全区单命中 → 被动多命中），再委托候选 `B` 的 3-pass 直接规划（确保静态放行的 E1/E2 共位点在重验 `chooseColocatedTapPoint` 时对称可恢复）。
 3. **E3（同视口子委托补强）**：
-   - **E3a**：[`staticTextRefCheck`](../../internal/engine/tap_scope.go#L2571) 向 [`planDirectTapRef`](../../internal/engine/tap_scope.go#L2087) 传入 `allowCoextensiveChild = true`；但在 `action == ActionText` 分支下，仅允许委托给满足 `isValidTextPublicTarget(delegate)`（即非密码、未禁用、`RoleInput`、含 `ActionText`）的唯一同视口子容器，绝不委托给非输入按钮或密码框。
-   - **E3b**：重构 [`isTopLevelCoextensiveBlockerAllowed`](../../internal/engine/tap_scope.go#L1210) 与 [`planDirectTapRef:2120-2150`](../../internal/engine/tap_scope.go#L2120-L2150) 为统一辅助函数 `findUniqueCoextensiveBlocker(scope, view, parent, screen, action, allowInitiallyDisabled)`：
+   - **E3a**：[`staticTextRefCheck`](../../../internal/engine/tap_scope.go#L2571) 向 [`planDirectTapRef`](../../../internal/engine/tap_scope.go#L2087) 传入 `allowCoextensiveChild = true`；但在 `action == ActionText` 分支下，仅允许委托给满足 `isValidTextPublicTarget(delegate)`（即非密码、未禁用、`RoleInput`、含 `ActionText`）的唯一同视口子容器，绝不委托给非输入按钮或密码框。
+   - **E3b**：重构 [`isTopLevelCoextensiveBlockerAllowed`](../../../internal/engine/tap_scope.go#L1210) 与 [`planDirectTapRef:2120-2150`](../../../internal/engine/tap_scope.go#L2120-L2150) 为统一辅助函数 `findUniqueCoextensiveBlocker(scope, view, parent, screen, action, allowInitiallyDisabled)`：
      - 从 `blockers := topLevelTapScopeBlockers(scope, parent)` 中筛选同时满足 `!b.Context` 且 `publicNodeClippedRect(b, screen)` 有效、并与 `parentRect` 满足 `isCoextensiveRect(bRect, parentRect)` 的成员集合 `coext`；
      - 要求 `len(coext) == 1`（存在且仅存在 1 个与 `parent` 双向 ≥85% 同视口的顶层阻塞者 `delegate`）；
      - 其余每个 `other ∈ blockers \ {delegate}` 须满足 **`!other.Context` 且 `publicNodeClippedRect(other, screen)` 成功**（任何无几何或 `context` 阻塞者直接拒绝，不按面积 0 放行），且裁剪面积 `<= 25%` 父面积（`rectArea64(otherRect) * 4 <= rectArea64(parentRect)`），防止把左右并排分栏误判为同视口包裹；
      - `delegate` 必须满足对应动作资格（`ActionText` 用 `isValidTextPublicTarget`，否则用 `validTapPublicTargetAllowed`）；
      - 当 `len(blockers) > 1`（存在小角标兄弟）时，`delegatePlan` 选出的落点 `(x, y)` 必须额外通过 `len(externalInteractiveOwnersAt(view, delegate, x, y)) == 0`，证明未踩在小角标或任何外部交互节点上。
 4. **B1（`target_has_other_action` 向下唯一同视口子委托）**：
-   - 在 [`staticTapRefCheckWithOptions`](../../internal/engine/tap_scope.go#L2506-L2521) 中，当 `!hasAction(target, action) && isTouchInteractive(target) && operation.EffectiveBubble()` 时，构建 `target` 的作用域 `scope` 并调用同一 `findUniqueCoextensiveBlocker` + 子委托直接规划（需同时满足上述 `len(blockers) > 1` 时的 `externalInteractiveOwnersAt == 0`）；
+   - 在 [`staticTapRefCheckWithOptions`](../../../internal/engine/tap_scope.go#L2506-L2521) 中，当 `!hasAction(target, action) && isTouchInteractive(target) && operation.EffectiveBubble()` 时，构建 `target` 的作用域 `scope` 并调用同一 `findUniqueCoextensiveBlocker` + 子委托直接规划（需同时满足上述 `len(blockers) > 1` 时的 `externalInteractiveOwnersAt == 0`）；
    - 命中时构造 `tapPlan{..., strategy: tapModeCoextensiveChild, targetRef: target.Ref, targetRaw: input.targetRaw, delegateRaw: delegateInput.targetRaw, delegateParentOtherAction: true}`；
    - 未命中（如无同视口子容器、有 `>25%` 竞争子区块、或子容器不支持目标动作、或显式 `bubble=false`）时，原样返回 `422 unsupported_node_action (reason="target_has_other_action")`；**绝不向 `target` 祖先冒泡**。
 
 ### 4.4 共位与坐标嵌套拥有者消歧（E4 / F1）
 
 1. **E4（`bubble_colocated` 局部嵌套/内层消歧）**：
-   - 在 [`planBubbleOrColocated:2338-2377`](../../internal/engine/tap_scope.go#L2338-L2377) 中，当 `len(folded) >= 2 && centerCount != 1` 时：
+   - 在 [`planBubbleOrColocated:2338-2377`](../../../internal/engine/tap_scope.go#L2338-L2377) 中，当 `len(folded) >= 2 && centerCount != 1` 时：
      1. 若存在 `containsCenter && inChild` 成员（落点在目标 `C` 裁剪区内的共位节点）构成非空子集 `inChildCenter`：若 `len(inChildCenter) == 1` → 直接选中；否则对 `inChildCenter` 移除任何存在严格公开后代也在 `inChildCenter` 内的祖先，若剩余最内层数量 `== 1` → 直接选中；
      2. 否则对全体 `containsCenter` 集合移除任何存在严格公开后代也在该集合内的祖先，若剩余最内层数量 `== 1` → 直接选中；
      3. 仍 `>= 2`（例如两个平级互不为祖先的子按钮同时包含 `C` 中心）→ 按既有逻辑返回 `422 no_safe_point (reason="colocated_ambiguous")` + `candidates`。
 2. **F1（坐标目标嵌套交互拥有者最内层消歧）**：
    - 新增辅助函数 `innermostPointOwners(view *tapPublicView, owners []*protocol.Node) []*protocol.Node`：移除存在任一严格公开后代也在 `owners` 内的祖先节点；
-   - 在 [`resolveObservedPoint`](../../internal/engine/point.go#L190-L208) 中，对 `matching := filterMatchingPointOwners(owners, operation)`：
+   - 在 [`resolveObservedPoint`](../../../internal/engine/point.go#L190-L208) 中，对 `matching := filterMatchingPointOwners(owners, operation)`：
      - 若 `len(matching) == 1` → 保持原样通过；
      - 若 `len(matching) >= 2` → 计算 `inner := innermostPointOwners(view, matching)`，当且仅当 `len(inner) == 1` 时消歧通过（`pointModeDisambiguated`）；
      - 仍 `len(inner) >= 2` 或 `len(matching) == 0` → 返回 `422 ambiguous_point (reason="competing_targets")`，`candidates` 列出竞争项（若 `len(inner) >= 2` 优先列 `inner`）。
@@ -209,20 +209,20 @@
 ### 4.5 认领后重验联动（必须同步修改的防线）
 
 1. **E1 / E2 重验全路径对齐（`pointOwner`、`resolveDirectTapScopeFrame`、`revalidateColocatedTapFrame` & `tapFrameTier4OcclusionProven`）**：
-   - [`pointOwner`](../../internal/engine/act_revalidation_policy.go#L1748-L1761) 在单节点 [`resolveTapScopePoint`](../../internal/engine/act_revalidation_policy.go#L1710) 失败后，若点满足 `provesSubtreeTapPointPassive(scope, x, y)`，允许返回 `(nil, true)`（注意：`pointHitsFixedCarrier` 仍严格保持单载体不变，不因 E1 放宽固定载体身份证明）；
-   - [`resolveDirectTapScopeFrame:1616`](../../internal/engine/act.go#L1616) 在 `chooseUnboundTapPlan` 之后，以及 [`revalidateColocatedTapFrame:1362`](../../internal/engine/act.go#L1362) 在 `chooseColocatedTapPoint` 之后，将强要求 `provesSubtreeTapPoint(scope, x, y)` 改为 `provesSubtreeTapPoint(scope, x, y) || provesSubtreeTapPointPassive(scope, x, y)`（同时 `chooseUnboundTapPlan`/`chooseTapPlan`/`chooseColocatedTapPoint` 已按 §4.3 覆盖 E1/E2），避免原本静态由 E1 放行、新帧发生合法重选点时在二道闸门被误拒为 `409 scope_blocked`；
-   - [`tapFrameTier4OcclusionProven`](../../internal/engine/act_target_shared.go#L241-L258) 保持单命中 `state == pointUnique` 优先；当 `state == pointAmbiguous` 且无外部交互拥有者时，通过 `resolvePointSet(view.tree.Root, x, y)` 检查最深命中非空且每个 `hit` 均满足 `hit == target || (isPublicAncestor(view, target, hit) && !isTouchInteractive(hit) && hasValidDirectNonInteractivePath)`（即 `hit` 到 `target` 之间无任何 `isTouchInteractive` 或 `context` 遮挡边界，与 `scope.carrierByNode` 一致），通过则视作 Tier 4+ 无遮挡。
+   - [`pointOwner`](../../../internal/engine/act_revalidation_policy.go#L1748-L1761) 在单节点 [`resolveTapScopePoint`](../../../internal/engine/act_revalidation_policy.go#L1710) 失败后，若点满足 `provesSubtreeTapPointPassive(scope, x, y)`，允许返回 `(nil, true)`（注意：`pointHitsFixedCarrier` 仍严格保持单载体不变，不因 E1 放宽固定载体身份证明）；
+   - [`resolveDirectTapScopeFrame:1616`](../../../internal/engine/act.go#L1616) 在 `chooseUnboundTapPlan` 之后，以及 [`revalidateColocatedTapFrame:1362`](../../../internal/engine/act.go#L1362) 在 `chooseColocatedTapPoint` 之后，将强要求 `provesSubtreeTapPoint(scope, x, y)` 改为 `provesSubtreeTapPoint(scope, x, y) || provesSubtreeTapPointPassive(scope, x, y)`（同时 `chooseUnboundTapPlan`/`chooseTapPlan`/`chooseColocatedTapPoint` 已按 §4.3 覆盖 E1/E2），避免原本静态由 E1 放行、新帧发生合法重选点时在二道闸门被误拒为 `409 scope_blocked`；
+   - [`tapFrameTier4OcclusionProven`](../../../internal/engine/act_target_shared.go#L241-L258) 保持单命中 `state == pointUnique` 优先；当 `state == pointAmbiguous` 且无外部交互拥有者时，通过 `resolvePointSet(view.tree.Root, x, y)` 检查最深命中非空且每个 `hit` 均满足 `hit == target || (isPublicAncestor(view, target, hit) && !isTouchInteractive(hit) && hasValidDirectNonInteractivePath)`（即 `hit` 到 `target` 之间无任何 `isTouchInteractive` 或 `context` 遮挡边界，与 `scope.carrierByNode` 一致），通过则视作 Tier 4+ 无遮挡。
 2. **B1 / E3 重验对齐（`revalidateCoextensiveChildFrame`）**：
-   - 在 [`act.go:1142`](../../internal/engine/act.go#L1142) 对 `freshParent` 校验：仅当 `plan.delegateParentOtherAction == true`（B1）时，只要 `freshParent` 非 root、非 context、有几何、未显式禁用且满足 `isTouchInteractive(freshParent)` 即允许保持父约束；对于普通点击及 E3a（`ActionText`），静态准入本身已要求 `target` 满足对应动作/可编辑性，故保持既有 `framePublicTargetError(freshParent, action, false, opts)` 不放宽；
-   - 在 [`act.go:1163`](../../internal/engine/act.go#L1163) 复核同一 `findUniqueCoextensiveBlocker` 逻辑，确保新鲜帧上唯一同视口阻塞者仍为 `freshDelegate`、其余阻塞者非 `context` 且裁剪面积 `<= 25%`；
-   - **关键无条件外覆盖校验**：当新鲜帧 `parentBlockers` 数量 `> 1` 时，[`act.go:1180`](../../internal/engine/act.go#L1180) 取得 `frame` 后**无条件（不限 `matchParent.tier >= 4`）**检查 `len(externalInteractiveOwnersAt(view, freshDelegate, frame.x, frame.y)) == 0`，未通过按 `scope_blocked` 拒绝，杜绝 `tier == 1..3` 时小角标移动覆盖落点导致误点。
+   - 在 [`act.go:1142`](../../../internal/engine/act.go#L1142) 对 `freshParent` 校验：仅当 `plan.delegateParentOtherAction == true`（B1）时，只要 `freshParent` 非 root、非 context、有几何、未显式禁用且满足 `isTouchInteractive(freshParent)` 即允许保持父约束；对于普通点击及 E3a（`ActionText`），静态准入本身已要求 `target` 满足对应动作/可编辑性，故保持既有 `framePublicTargetError(freshParent, action, false, opts)` 不放宽；
+   - 在 [`act.go:1163`](../../../internal/engine/act.go#L1163) 复核同一 `findUniqueCoextensiveBlocker` 逻辑，确保新鲜帧上唯一同视口阻塞者仍为 `freshDelegate`、其余阻塞者非 `context` 且裁剪面积 `<= 25%`；
+   - **关键无条件外覆盖校验**：当新鲜帧 `parentBlockers` 数量 `> 1` 时，[`act.go:1180`](../../../internal/engine/act.go#L1180) 取得 `frame` 后**无条件（不限 `matchParent.tier >= 4`）**检查 `len(externalInteractiveOwnersAt(view, freshDelegate, frame.x, frame.y)) == 0`，未通过按 `scope_blocked` 拒绝，杜绝 `tier == 1..3` 时小角标移动覆盖落点导致误点。
 3. **F1 重验与诊断对齐（`proveTargetSet`、`provePointTarget` & `changedPointBlockingRefs`）**：
-   - [`proveTargetSet`](../../internal/engine/point.go#L617-L621) 与 [`provePointTarget`](../../internal/engine/act.go#L1748-L1751) 中，判断新帧存在多个交互拥有者时，改用 `len(innermostPointOwners(view, filterMatchingPointOwners(owners, operation))) != 1`；若最内层归约后仍恰有唯一匹配请求动作的拥有者，则与静态阶段一致放行；
-   - [`changedPointBlockingRefs`](../../internal/engine/act_rejection_diagnostics.go#L167-L175) 同步使用 `innermostPointOwners(oldView, oldOwners)` 求 `expected`，避免 F1 场景重验失败 `point_changed` 时漏附 `blocking_refs`。
+   - [`proveTargetSet`](../../../internal/engine/point.go#L617-L621) 与 [`provePointTarget`](../../../internal/engine/act.go#L1748-L1751) 中，判断新帧存在多个交互拥有者时，改用 `len(innermostPointOwners(view, filterMatchingPointOwners(owners, operation))) != 1`；若最内层归约后仍恰有唯一匹配请求动作的拥有者，则与静态阶段一致放行；
+   - [`changedPointBlockingRefs`](../../../internal/engine/act_rejection_diagnostics.go#L167-L175) 同步使用 `innermostPointOwners(oldView, oldOwners)` 求 `expected`，避免 F1 场景重验失败 `point_changed` 时漏附 `blocking_refs`。
 4. **D1 与契约 36 重验 `text_rebind` 的对齐**：
    - D1 静态解析完成后，`tapPlan.targetRef` 为实际被选中的 `EditText` ref（如从包装壳 `n10` 解析到内部 `n11`，`tap.targetRef == "n11"`、`tap.targetRaw == raw(n11)`）；
-   - [`act.go:174-175`](../../internal/engine/act.go#L174-L175) 调用 `rebindActTarget` 时，把 **`tap.targetRef`** 传给 `planActRebind` 用以查找 `oldView.byRef[req.TargetRef]`（保证与 `req.OrigRaw` 一致，不因静态 D1 换节点而使 Attempt 2 `text_rebind` 直接失配）；同时 `error.details.original_ref` 与 `Result.auto_recovery.original_ref` 若发生动态重验恢复，继续忠实回显调用方原始请求中的 `actOriginalRef(&req.Operation)`（即 `n10`），不泄露内部解析细节；
-   - **对称排除 E3a `delegateRaw`**：在 [`act_recovery.go:70-71`](../../internal/engine/act_recovery.go#L70-L71)（`canRebindActTarget`）与 [`act_rebind.go:47-48`](../../internal/engine/act_rebind.go#L47-L48)（`planActRebind`）对 `kind == "text"` 同步增加 `tap.delegateRaw == nil` 门禁（与 `tap`/`long_press` 一致），避免 E3a 委托过的父容器误入 `text_rebind` 并将 `target_missing` 污染为 `scope_blocked`。
+   - [`act.go:174-175`](../../../internal/engine/act.go#L174-L175) 调用 `rebindActTarget` 时，把 **`tap.targetRef`** 传给 `planActRebind` 用以查找 `oldView.byRef[req.TargetRef]`（保证与 `req.OrigRaw` 一致，不因静态 D1 换节点而使 Attempt 2 `text_rebind` 直接失配）；同时 `error.details.original_ref` 与 `Result.auto_recovery.original_ref` 若发生动态重验恢复，继续忠实回显调用方原始请求中的 `actOriginalRef(&req.Operation)`（即 `n10`），不泄露内部解析细节；
+   - **对称排除 E3a `delegateRaw`**：在 [`act_recovery.go:70-71`](../../../internal/engine/act_recovery.go#L70-L71)（`canRebindActTarget`）与 [`act_rebind.go:47-48`](../../../internal/engine/act_rebind.go#L47-L48)（`planActRebind`）对 `kind == "text"` 同步增加 `tap.delegateRaw == nil` 门禁（与 `tap`/`long_press` 一致），避免 E3a 委托过的父容器误入 `text_rebind` 并将 `target_missing` 污染为 `scope_blocked`。
 
 ---
 
@@ -294,13 +294,13 @@ func residualPatchPoints(scope *tapScope, region device.Rect) []tapStaticPoint:
 
 | 文件 | 改动 |
 | :--- | :--- |
-| [release/versions.json](../../release/versions.json) & [scripts/generate-version.ps1](../../scripts/generate-version.ps1) | 升级为 `release_version: "0.41.0"`、`contract_version: 37`、`android_version_code: 43`，运行生成脚本更新 Go/Java/XML 常量 |
-| [internal/engine/scroll.go](../../internal/engine/scroll.go) | A1/A2/A3：`tryUniqueInnerScrollFallback` 支持 `(allowCoextensive, minCoverPercent)` 并以 `want = nil` 接入 `scrollOverlayContext`；`resolveScrollRefPlan` 接入 A1/A2/A3 逻辑 |
-| [internal/engine/tap_scope.go](../../internal/engine/tap_scope.go) | D1（`resolveEditableTextTarget` + 失败补 `candidates`）、E1（`provesSubtreeTapPointPassive` / `provesGuidancePointPassive` / `tryPlanTapDirectBase` 对齐）、E2（`residualPatchPoints` 与 3-pass 选点，含 `chooseColocatedTapPoint`）、E3a/E3b（`findUniqueCoextensiveBlocker`）、B1（`delegateParentOtherAction`）、E4（`bubble_colocated` `inChild` & 最内层消歧） |
-| [internal/engine/point.go](../../internal/engine/point.go) | F1（`innermostPointOwners` 并在 `resolveObservedPoint` 与 `proveTargetSet` 接入） |
-| [internal/engine/act.go](../../internal/engine/act.go)、[act_target_shared.go](../../internal/engine/act_target_shared.go)、[act_revalidation_policy.go](../../internal/engine/act_revalidation_policy.go)、[act_rebind.go](../../internal/engine/act_rebind.go)、[act_recovery.go](../../internal/engine/act_recovery.go)、[act_rejection_diagnostics.go](../../internal/engine/act_rejection_diagnostics.go) | 4 处重验联动对齐：`pointOwner`、`resolveDirectTapScopeFrame`、`revalidateColocatedTapFrame`、`tapFrameTier4OcclusionProven`、`revalidateCoextensiveChildFrame`（含 `len(parentBlockers)>1` 无条件外覆盖检查）、`provePointTarget`、`changedPointBlockingRefs`，以及 D1 后传递 `tap.targetRef` 给 `rebindActTarget` 与 `canRebindActTarget`/`planActRebind` 拦截 `text` `delegateRaw != nil` |
-| [internal/protocol/errors.go](../../internal/protocol/errors.go) | 更新包注释说明 `text_target_uncertain (stage=target, reason=target_not_editable)` 允许附带既有白名单键 `candidates` |
-| [internal/engine/*_test.go](../../internal/engine/) | 新增 A1/A2/A3/D1/E1/E2/E3/B1/E4/F1 正向、反控与反向对照用例；按新契约更新 5 处既有旧保守测试夹具并为之补齐外部同深回归用例 |
+| [release/versions.json](../../../release/versions.json) & [scripts/generate-version.ps1](../../../scripts/generate-version.ps1) | 升级为 `release_version: "0.41.0"`、`contract_version: 37`、`android_version_code: 43`，运行生成脚本更新 Go/Java/XML 常量 |
+| [internal/engine/scroll.go](../../../internal/engine/scroll.go) | A1/A2/A3：`tryUniqueInnerScrollFallback` 支持 `(allowCoextensive, minCoverPercent)` 并以 `want = nil` 接入 `scrollOverlayContext`；`resolveScrollRefPlan` 接入 A1/A2/A3 逻辑 |
+| [internal/engine/tap_scope.go](../../../internal/engine/tap_scope.go) | D1（`resolveEditableTextTarget` + 失败补 `candidates`）、E1（`provesSubtreeTapPointPassive` / `provesGuidancePointPassive` / `tryPlanTapDirectBase` 对齐）、E2（`residualPatchPoints` 与 3-pass 选点，含 `chooseColocatedTapPoint`）、E3a/E3b（`findUniqueCoextensiveBlocker`）、B1（`delegateParentOtherAction`）、E4（`bubble_colocated` `inChild` & 最内层消歧） |
+| [internal/engine/point.go](../../../internal/engine/point.go) | F1（`innermostPointOwners` 并在 `resolveObservedPoint` 与 `proveTargetSet` 接入） |
+| [internal/engine/act.go](../../../internal/engine/act.go)、[act_target_shared.go](../../../internal/engine/act_target_shared.go)、[act_revalidation_policy.go](../../../internal/engine/act_revalidation_policy.go)、[act_rebind.go](../../../internal/engine/act_rebind.go)、[act_recovery.go](../../../internal/engine/act_recovery.go)、[act_rejection_diagnostics.go](../../../internal/engine/act_rejection_diagnostics.go) | 4 处重验联动对齐：`pointOwner`、`resolveDirectTapScopeFrame`、`revalidateColocatedTapFrame`、`tapFrameTier4OcclusionProven`、`revalidateCoextensiveChildFrame`（含 `len(parentBlockers)>1` 无条件外覆盖检查）、`provePointTarget`、`changedPointBlockingRefs`，以及 D1 后传递 `tap.targetRef` 给 `rebindActTarget` 与 `canRebindActTarget`/`planActRebind` 拦截 `text` `delegateRaw != nil` |
+| [internal/protocol/errors.go](../../../internal/protocol/errors.go) | 更新包注释说明 `text_target_uncertain (stage=target, reason=target_not_editable)` 允许附带既有白名单键 `candidates` |
+| [internal/engine/*_test.go](../../../internal/engine/) | 新增 A1/A2/A3/D1/E1/E2/E3/B1/E4/F1 正向、反控与反向对照用例；按新契约更新 5 处既有旧保守测试夹具并为之补齐外部同深回归用例 |
 | `docs/{interface,architecture,mcp,integration,runbook,client,control-protocol,phone-operations,release}.md` 与 `README.md` | 同步 9 项静态解析演进、`target_not_editable` 可选 `candidates` 及版本引用 `36 -> 37` / `0.40.0 -> 0.41.0` |
 
 ### 6.2 配置与取值
@@ -317,7 +317,7 @@ func residualPatchPoints(scope *tapScope, region device.Rect) []tapStaticPoint:
 
 ### 6.3 日志与可观测性
 
-- **零新增 `eventlog` 白名单键**：复用 [`internal/eventlog/log.go`](../../internal/eventlog/log.go#L63-L108) 既有 `"mode"` 与 `"strategy"` 键；
+- **零新增 `eventlog` 白名单键**：复用 [`internal/eventlog/log.go`](../../../internal/eventlog/log.go#L63-L108) 既有 `"mode"` 与 `"strategy"` 键；
 - E2 命中时在既有 `act.tap_plan` 记录 `mode="residual_patch"`；F1 命中保留 `mode="point_disambiguated"`；A1/A2 命中保留 `mode="scroll_inner_fallback"`；A3 命中保留 `mode="scroll_ancestor_lift"`；B1/E3 命中保留 `mode="coextensive_child"`；
 - 严格遵守 `AGENTS.md` 第 10 条：不记录任何 `ref`、坐标、文本或树内容。
 
@@ -337,10 +337,10 @@ func residualPatchPoints(scope *tapScope, region device.Rect) []tapStaticPoint:
 
 | 文档 | 拟修订内容 |
 | :--- | :--- |
-| [docs/interface.md](../../docs/interface.md#L506-L755) | 同步 `tap`/`long_press`/`text(ref)`/`scroll`/`point` 静态解析规则（A1/A2/A3、D1 及 `target_not_editable` 可选 `candidates`、E1/E2/E3/B1、E4/F1）与对应 `phase=revalidate` 说明、`contract_version=37` |
-| [docs/architecture.md](../../docs/architecture.md#L198-L327) | 同步静态规划与重验联动架构描述及版本表述 |
-| [docs/mcp.md](../../docs/mcp.md#L57-L85) | 同步 `act` 静态能力说明与 `contract_version=37` |
-| [docs/integration.md](../../docs/integration.md#L187-L195)、[docs/runbook.md](../../docs/runbook.md#L278)、[docs/client.md](../../docs/client.md#L22)、[docs/control-protocol.md](../../docs/control-protocol.md#L26-L158)、[docs/phone-operations.md](../../docs/phone-operations.md#L124-L257)、[docs/release.md](../../docs/release.md#L39-L86) 与 [README.md](../../README.md) | 同步 `contract_version=37` / `0.41.0` / `version_code=43` 版本引用与排障说明 |
+| [docs/interface.md](../../../docs/interface.md#L506-L755) | 同步 `tap`/`long_press`/`text(ref)`/`scroll`/`point` 静态解析规则（A1/A2/A3、D1 及 `target_not_editable` 可选 `candidates`、E1/E2/E3/B1、E4/F1）与对应 `phase=revalidate` 说明、`contract_version=37` |
+| [docs/architecture.md](../../../docs/architecture.md#L198-L327) | 同步静态规划与重验联动架构描述及版本表述 |
+| [docs/mcp.md](../../../docs/mcp.md#L57-L85) | 同步 `act` 静态能力说明与 `contract_version=37` |
+| [docs/integration.md](../../../docs/integration.md#L187-L195)、[docs/runbook.md](../../../docs/runbook.md#L278)、[docs/client.md](../../../docs/client.md#L22)、[docs/control-protocol.md](../../../docs/control-protocol.md#L26-L158)、[docs/phone-operations.md](../../../docs/phone-operations.md#L124-L257)、[docs/release.md](../../../docs/release.md#L39-L86) 与 [README.md](../../../README.md) | 同步 `contract_version=37` / `0.41.0` / `version_code=43` 版本引用与排障说明 |
 
 ---
 
@@ -373,7 +373,7 @@ func residualPatchPoints(scope *tapScope, region device.Rect) []tapStaticPoint:
 
 ## 8. 验证计划
 
-按 [`AGENTS.md`](../../AGENTS.md) 第 19、24 条，所有全量测试、发布构建、实机部署与验证均由**主代理亲自执行与判定**。
+按 [`AGENTS.md`](../../../AGENTS.md) 第 19、24 条，所有全量测试、发布构建、实机部署与验证均由**主代理亲自执行与判定**。
 
 ### 8.1 单元测试
 
@@ -387,7 +387,7 @@ func residualPatchPoints(scope *tapScope, region device.Rect) []tapStaticPoint:
 | **E2** | 中心十字/`3×3` 被阻塞但外圈有 `>=16×16px` 安全块时 `mode="residual_patch"` 直接点击并重验通过；**反控**：仅留 `8×8px` 窄缝或边界超 `128` 时仍报 `422 no_safe_point (blocked)` |
 | **E3 & B1** | `text(ref)` 同视口子输入框委托成功（非输入子容器拒绝，且 `delegateRaw != nil` 不误入 `text_rebind`）；带 `<25%` 小角标同视口子容器点击+重验通过（`>25%` 分栏及新帧 `tier=1` 小角标覆盖落点均拒绝）；`target_has_other_action` `bubble=true` 向下同视口子容器成功（`bubble=false` 与向上祖先均拒绝） |
 | **E4 & F1** | `bubble_colocated` `inChild` 内层优先选中，平级竞争仍 `colocated_ambiguous`；坐标命中父卡+子按钮静态（`point_disambiguated`）与重验均放行，`point_changed` 仍附正确 `blocking_refs`，互不为祖先双按钮仍报 `ambiguous_point` |
-| **既有旧保守用例同步（5 处）** | 更新 [`act_proposal_scroll_coord_test.go:112-163`](../../internal/engine/act_proposal_scroll_coord_test.go#L112-L163)（适配 A3，同时保留外层无兼容祖先测 `target_missing_action`）、[`act_tap_scope_test.go:1046`](../../internal/engine/act_tap_scope_test.go#L1046)、[`tap_static_error_test.go:159-219`](../../internal/engine/tap_static_error_test.go#L159-L219) 及 [`tap_static_error_test.go:546,653-687`](../../internal/engine/tap_static_error_test.go#L653-L687)（将 `ambiguous`/`mixed` 与被裁剪对象可 `inspect` 回归改为外部同深非载体节点，留存守卫） |
+| **既有旧保守用例同步（5 处）** | 更新 [`act_proposal_scroll_coord_test.go:112-163`](../../../internal/engine/act_proposal_scroll_coord_test.go#L112-L163)（适配 A3，同时保留外层无兼容祖先测 `target_missing_action`）、[`act_tap_scope_test.go:1046`](../../../internal/engine/act_tap_scope_test.go#L1046)、[`tap_static_error_test.go:159-219`](../../../internal/engine/tap_static_error_test.go#L159-L219) 及 [`tap_static_error_test.go:546,653-687`](../../../internal/engine/tap_static_error_test.go#L653-L687)（将 `ambiguous`/`mixed` 与被裁剪对象可 `inspect` 回归改为外部同深非载体节点，留存守卫） |
 
 ### 8.2 实机/系统级、发布交付、推送与 Issue #52 闭环
 
@@ -436,19 +436,37 @@ func residualPatchPoints(scope *tapScope, region device.Rect) []tapStaticPoint:
 
 ---
 
-## 11. 实现结果（归档时补写）
+## 11. 实现结果
 
-实现提交：`<hash>`。实现与验证记录：`../../verification/act-static-admission-auto-recovery.md`。
+实现提交：`e0d92d1`（主实现 `d9ee0c1`）。实现与验证记录：[验证记录](../../verification/act-static-admission-auto-recovery.md)。
 
 ### 11.1 已落地
 
 | 提案条目 | 落点 |
 | --- | --- |
+| 轴不兼容内层委托（Issue #52） | `internal/engine/scroll.go`；`internal/engine/act_static_scroll_recovery_test.go` |
+| 非滚动包装壳下探 | 同上 |
+| 缺 `swipe` 的 `role=scroll` 向上提升 | 同上；`act_proposal_scroll_coord_test.go` |
+| 文本定向绑定与失败候选 | `internal/engine/tap_scope.go`；`act_static_tap_recovery_test.go` |
+| 被动多命中、2D 残余安全区、同视口子委托、异动作向下委托、共位最内层消歧 | `internal/engine/tap_scope.go`；`act_static_tap_recovery_test.go` |
+| 坐标嵌套拥有者最内层归约 | `internal/engine/point.go`、`act_rejection_diagnostics.go`；`act_point_disambiguation_test.go` |
+| 认领后重验联动 | `internal/engine/act.go`、`act_target_shared.go`、`act_revalidation_policy.go`、`act_rebind.go`、`act_recovery.go`；`act_static_recovery_revalidation_test.go` 等 |
+| 版本 0.41.0 / 契约 37 / versionCode 43 | `release/versions.json` 与 4 个生成产物 |
+| 受控实机夹具 | `android-control/test-target/.../ObservationFixtureActivity.java`（d05–d10） |
+| 文档与审计 | `README.md` 与 9 份 `docs/`；独立只读审计 AUDIT CLEAN |
 
 ### 11.2 与提案不同或未执行
 
 | 项 | 结论与理由 |
 | --- | --- |
+| 文本定向绑定硬停止 | 比提案 §4.2 字面更严格：包装壳子树 `RoleInput` ≥2 直接拒绝；唯一输入不可用（不合格、无正交集、聚焦失败）也直接拒绝；占位子存在最近交互祖先但绑定失败即停止，不再尝试共位吸附。理由：避免在已发现歧义或受限目标后改绑无关外部输入框。 |
+| 共位吸附收紧 | 仅扫描目标公开祖先/后代之外的外部共位 `RoleInput`，且目标面积 `<50%` 屏幕；先按共位与反底板守卫计数（含禁用、受保护、缺 `text`），唯一后才验证合法性。理由：防止绕过包装壳全子树计数与半屏门槛。 |
+| 被动多命中重验整树证明 | 认领后保留被动多命中点时，除目标子树证明外还要求整树同点命中与零外部交互拥有者（`provesGuidancePointPassive`），与静态准入一致；比提案 §4.5 字面（仅子树）更严格。 |
+| 残余安全区来源复验 | 计划记录内部 `residual`/`delegateResidual`；重验保留原残余点或委托最终点时再查外部交互拥有者。理由：残余点静态准入额外证明过无外部覆盖，重验不得丢失该前提。 |
+| 同视口父/子双证明 | 多阻塞者外覆盖检查与父绑定 Tier 4/5 整树证明改为相互独立执行（提案要求"无条件追加"外覆盖），两者同时生效。 |
+| 异动作委托父禁用门 | `text.submit_ref` 的静态 B1 拒绝显式禁用父；执行子初始灰置仍可规划。理由：避免静态放行后写前启用迁移只作用于执行子，导致先写后必然失败。 |
+| `bubble=false` 与同视口子委托 | 保持 `coextensive_child` 不依赖 `bubble` 语义（基线在 `bubble=false` 下也允许单阻塞者委托）；多阻塞者放宽作为已批准例外，并有不依赖 `bubble` 的用例锁定。 |
+| A3 可达性 | 正常投影同时派生 `role=scroll` 与 `swipe`，A3 为线格式/合成树防御分支；真实 `scrollable=false` 列表由普通祖先提升覆盖，并以新增真实首帧用例作为证据。 |
 
 ---
 
