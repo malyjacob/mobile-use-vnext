@@ -926,7 +926,7 @@ public final class ObservationFixtureActivity extends Activity {
 
     private void renderD09() {
         LinearLayout root = baseRoot(View.generateViewId());
-        root.addView(heading(View.generateViewId(), "D09 passive overlap card"));
+        root.addView(heading(View.generateViewId(), "D09 passive overlap fixture"));
 
         currentD09State = stateText(View.generateViewId());
         root.addView(currentD09State, verticalParams(-2, 0));
@@ -1329,3 +1329,5 @@ public final class ObservationFixtureActivity extends Activity {
         return false;
     }
 }
+
+
