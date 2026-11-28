@@ -454,6 +454,7 @@ func residualPatchPoints(scope *tapScope, region device.Rect) []tapStaticPoint:
 | 版本 0.41.0 / 契约 37 / versionCode 43 | `release/versions.json` 与 4 个生成产物 |
 | 受控实机夹具 | `android-control/test-target/.../ObservationFixtureActivity.java`（d05–d10） |
 | 文档与审计 | `README.md` 与 9 份 `docs/`；独立只读审计 AUDIT CLEAN |
+| Issue #52 闭环 | 回复 `#issuecomment-7239348345` 并关闭（`state=CLOSED`、`COMPLETED`） |
 
 ### 11.2 与提案不同或未执行
 

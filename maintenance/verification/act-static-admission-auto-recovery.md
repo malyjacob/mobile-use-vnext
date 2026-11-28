@@ -153,9 +153,12 @@ ollama 模型。审计历经多轮 `BLOCKED`：修正项包括残余安全区单
 
 ## 6. Issue #52
 
-实现与归档提交推送后，通过 `gh issue comment 52` 回复落地内容（`0.41.0` / 契约 37、Issue #52 形状
-直接 `scroll down` 一次成功、其余 8 项静态恢复与重验联动、单测/全量/实机/探针结果），并
-`gh issue close 52`。结果补记于后续提交。
+实现与归档提交推送后（`43807f2..419770a master`），通过 `gh issue comment 52` 回复落地内容
+（`0.41.0` / 契约 37、Issue #52 形状直接 `scroll down` 一次成功、其余静态恢复与重验联动、
+单测/全量/实机/探针结果），并以 `--reason completed` 关闭：
+
+- 回复：`https://github.com/malyjacob/mobile-use-vnext/issues/52#issuecomment-7239348345`
+- 关闭复核：`state=CLOSED`、`stateReason=COMPLETED`、`closedAt=2026-11-28T12:36:55Z`。
 
 ## 7. 未执行与缺口
 
