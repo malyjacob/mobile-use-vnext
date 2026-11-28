@@ -128,7 +128,11 @@
 
 ## 6. Issue #43
 
-实现与归档推送后回复完整落地内容并关闭 GitHub Issue #43（`0.40.0`/契约 36、统一详情、三种恢复策略、`auto_recovery`、单测/实机/探针结果，Issue #52 已单独分诊纳入后续静态拒绝自动恢复议程）。闭环结果补记于后续维护提交。
+实现与归档提交推送后回复完整落地内容并关闭 GitHub Issue #43（`0.40.0`/契约 36、统一详情、三种恢复策略、`auto_recovery`、单测/实机/探针结果，并明确 Issue #52 已单独分诊纳入后续静态拒绝自动恢复议程）：
+
+- 推送：`8dc872e..6f0789c master`（提案入库、实现、归档三次提交）。
+- 回复：`https://github.com/malyjacob/mobile-use-vnext/issues/43#issuecomment-7235470847`
+- 关闭复核：`state=CLOSED`、`stateReason=COMPLETED`、`closedAt=2026-11-28T06:42:48Z`。
 
 ## 7. 未执行与缺口
 
