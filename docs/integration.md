@@ -41,7 +41,7 @@ adb forward          主机 18881 → 服务；主机 18883 → 手机 MCP
    `adb forward`，也不需要 Agent token。
 
 只需要直连 HTTP 的 Agent 则使用 `http://127.0.0.1:18881/api/<tool>`、`agent_token` 与
-`X-Mobile-Use-Contract: 36`。
+`X-Mobile-Use-Contract: 37`。
 
 ## 1. 默认部署后的网络与进程
 
@@ -188,9 +188,18 @@ MCP 的 `act` schema 含 `scroll` 分支（`container`/`direction`/`amount`，`a
 `step`/`half`/`page`/`full`，省略为 `page`）与 `swipe` 的可选 `duration_ms`（`scroll` 不接受
 该时长，注入时长由服务端按档位固定）；`text` 分支另含 `auto_submit`（默认 `true`）与
 `submit_ref`（默认 `"enter_key"`，或满足 `^n[1-9][0-9]*$` 且不超过 64 个字符的公开节点编号）。
-`scroll` 的容器轴向与请求方向不兼容时自动回退兼容外层滚动祖先，无解返回
-`422 unsupported_node_action`（`reason=axis_mismatch`）。观察质量与滚动
-效果的字段和投影见[接口契约](interface.md)与 [MCP 入口](mcp.md)，本页不重复滚动判据。
+`scroll` 的内层自动委托只用于 `container.ref` 路径，坐标 `container={x,y}` 不触发：`container.ref`
+自身是有效 `role=scroll` 且轴向不兼容时，先沿公开父链回退兼容外层滚动祖先，全部试败后才允许唯一轴向
+兼容的严格内层子滚动容器接管（可接纳同视口也可非同视口，不要求双向 ≥85% 同视口或面积占比门槛）；
+内层也无解时，若兼容祖先进入过规划则返回其首个规划错误，否则返回 `422 unsupported_node_action`
+（`reason=axis_mismatch`）。同轴容器 3 轴轨迹失败时的内层兜底仍不接受同视口子容器。非滚动包装壳
+仅在“没有滚动祖先，或至少一个有几何的有效滚动祖先仅因轴向失配被跳过且没有兼容祖先进入规划”，并且没有
+首层 `ancestor_invalid` 时，下探覆盖其主体（≥50%）的唯一内层滚动容器；有兼容祖先进入规划而失败时
+返回该规划错误，不触发下探。缺 `swipe` 的未禁用 `role=scroll` 节点（含非滚动目标的最近滚动祖先）
+向兼容滚动祖先提升，最近滚动祖先禁用或无几何的 `ancestor_invalid` 停步只适用于该非滚动/缺 `swipe`
+路径。两类内层委托都在筛选阶段以遮罩/浮层过滤剔除候选；没有任何兼容祖先进入规划时，才按原入口返回
+`not_scrollable`/`target_missing_action`/`ancestor_missing_action` 等 `422`。
+观察质量与滚动效果的字段和投影见[接口契约](interface.md)与 [MCP 入口](mcp.md)，本页不重复滚动判据。
 
 只替换手机上的二进制或重启 service 进程，不会让已连接的宿主自动刷新工具；必须重启宿主进程/
 连接。MCP 适配器本身不保存会话，重启后重新发现即可。
@@ -347,7 +356,7 @@ HTTP 宿主在原有 `Authorization` 头之外按需添加：
 
 ```text
 Authorization: Bearer <agent_token>
-X-Mobile-Use-Contract: 36
+X-Mobile-Use-Contract: 37
 Content-Type: application/json; charset=utf-8
 ```
 
@@ -355,7 +364,7 @@ Content-Type: application/json; charset=utf-8
 $deploy = Get-Content .state/deploy.json -Raw | ConvertFrom-Json
 $headers = @{
     Authorization           = "Bearer $($deploy.agent_token)"
-    'X-Mobile-Use-Contract' = '36'
+    'X-Mobile-Use-Contract' = '37'
 }
 Invoke-RestMethod http://127.0.0.1:18881/api/status -Method Post `
   -Headers $headers -ContentType 'application/json' -Body '{}'
@@ -395,20 +404,21 @@ Invoke-RestMethod http://127.0.0.1:18881/api/status -Method Post `
 关闭资格进入。`act`、`inspect` 与 `app` 的引用字段都是 `reference`；旧 `observation_id`
 按未知成员拒绝。
 
-`act` 的常见省略形式与显式关闭：
+`act` 的常见省略形式与显式关闭（假设同一示例观察包含按钮 `n2`、滚动容器 `n3`、输入框 `n5`、提交按钮 `n7`；以下各请求为独立示例）：
 
 ```json
-{"reference":"O4821_72","operation":{"type":"tap","target":{"ref":"n1"}}}
-{"reference":"O4821_72","operation":{"type":"text","target":{"ref":"n1"},"text":"查询"}}
+{"reference":"O4821_72","operation":{"type":"tap","target":{"ref":"n2"}}}
+{"reference":"O4821_72","operation":{"type":"text","target":{"ref":"n5"},"text":"查询"}}
 {"reference":"O4821_72","operation":{"type":"tap","target":{"x":100,"y":200}}}
-{"reference":"O4821_72","operation":{"type":"tap","target":{"ref":"n1"},"bubble":false}}
-{"reference":"O4821_72","operation":{"type":"text","target":{"ref":"n1"},"text":"草稿","auto_submit":false}}
-{"reference":"O4821_72","operation":{"type":"text","target":{"ref":"n1"},"text":"周杰伦","submit_ref":"n7"}}
+{"reference":"O4821_72","operation":{"type":"scroll","container":{"ref":"n3"},"direction":"down"}}
+{"reference":"O4821_72","operation":{"type":"tap","target":{"ref":"n2"},"bubble":false}}
+{"reference":"O4821_72","operation":{"type":"text","target":{"ref":"n5"},"text":"草稿","auto_submit":false}}
+{"reference":"O4821_72","operation":{"type":"text","target":{"ref":"n5"},"text":"周杰伦","submit_ref":"n7"}}
 ```
 
-ref 点按/长按默认 `bubble=true`，原目标无 `tap`/`long_press`/`text` 动作时先在目标视觉区内尝试最近交互祖先提升，遇竞争控件止漂并自动吸附唯一局部共位按钮；`scroll` 支持同视口滚动栈直传、非滚动节点自动祖先提升、容器轴向不兼容时回退兼容外层滚动祖先，以及坐标最内层/回退/消歧；遇静态目标解析或规划 `422`（`invalid_target`/`unsupported_node_action`/`ambiguous_point`/`no_safe_point`/`no_safe_trajectory`）时，若 `error.details.candidates` 非空，取首个 `executable=true` 的 `ref` 用同一 O 与新 P 重试（无候选或无可执行项时按错误原因另行处理）。`scroll` 的静态候选已按前景上下文过滤：与请求目标不属于同一顶层窗口、被点击遮罩叶或同窗口后序实体浮层面板遮挡的容器不会出现在 `candidates` 中，全部被剔除时省略该字段且不回退被遮挡的背景页面，此时按错误原因处理而不是改试背景页；被前景浮层覆盖的容器也不会标成 `executable=true`。坐标目标不传 `bubble`。`text` 的 ref 目标只要求 `role=input`、公开动作含 `text`、未禁用、`protected=false` 与正面积几何，不要求 `tap`。`text` 默认 `auto_submit=true`、`submit_ref="enter_key"`，一次调用已包含必要聚焦（已聚焦 ref 走零点击快路径，未聚焦时在目标子树内规划唯一安全落点并至多点击一次，随后至多 3 次只读复查确认获焦：首帧立即、其后 `60ms`/`120ms` 退避，窗口上限 `1200ms`，绝不重发聚焦点击）、全文写入、写后精确确认（刷新值相等即完成；否则至多 3 次只读读回，退避 `40ms`/`80ms`/`150ms`、墙钟上限 `1000ms`，几何变化时至多一次严格写后重绑定）和至多一次 ENTER，不需要先 tap 或另发 ENTER；草稿、多行、逐字段填写或清空但不提交时显式 `auto_submit=false`（此时 `submit_ref` 只做语法校验后忽略）。`submit_ref="n<ref>"` 表示写后点击该提交按钮：认领前按完整 tap 规划校验，写前灰置也接受，写后重验启用状态与安全落点，失败不补发 ENTER。复合 text 结果携带 `text_input.write/submit`；`submit=uncertain` 先观察页面，不原样重发。`write=executed` 且提交确定未派发时 `outcome=partial`、`error.code=text_submit_not_executed`
+ref 点按/长按默认 `bubble=true`：直接目标的固定 4 级样点只要求目标子树内单命中，子树外同级交互节点不参与；4 级全败后补 2D 残余安全区（自由块不小于 `16×16px`），残余安全区的单命中候选还要求落点无外部交互拥有者覆盖；同一目标下纯被动子节点重叠且整树同点命中均属目标自身或被动载体、无外部交互拥有者覆盖时消歧通过；同视口子容器允许带不超过 `25%` 面积的小角标委托，`bubble_colocated` 优先内层共位节点；目标可交互但缺当前动作且在 `bubble=true` 时向下委托唯一支持该动作的同视口子容器，绝不向祖先冒泡（`bubble=false` 保持原拒绝）；原目标无 `tap`/`long_press`/`text` 动作时仍在目标视觉区内尝试最近交互祖先提升，遇竞争控件止漂并自动吸附唯一局部共位按钮；`scroll` 支持同视口滚动栈直传；内层自动委托只用于 `container.ref` 路径，坐标 `container={x,y}` 不触发：轴向不兼容时先试兼容外层滚动祖先，全部试败后仍试唯一可执行的内层滚动子容器（可接纳同视口也可非同视口，不要求双向 ≥85% 同视口或面积占比门槛）；内层无解时若有兼容祖先进入规划则返回其首个规划错误，否则返回 `axis_mismatch`；同轴容器 3 轴轨迹失败时的内层兜底仍不接受同视口子容器。非滚动包装壳仅在“没有滚动祖先，或至少一个有几何的有效滚动祖先仅因轴向失配被跳过且没有兼容祖先进入规划”且无首层 `ancestor_invalid` 时，下探覆盖其主体（≥50%）的唯一内层滚动容器；有兼容祖先进入规划而失败时返回该规划错误，不触发下探。缺 `swipe` 的未禁用滚动节点（含非滚动目标的最近滚动祖先）在最近滚动祖先未禁用且有几何时向兼容祖先提升，`ancestor_invalid` 首层停步只适用于该提升路径；两类内层委托在筛选阶段排除前景遮罩/浮层遮挡；坐标目标取最内层，不可行时沿命中祖先回退或唯一可执行消歧，不进入内层委托；遇静态目标解析或规划 `422`（`invalid_target`/`unsupported_node_action`/`ambiguous_point`/`no_safe_point`/`no_safe_trajectory`）时，若 `error.details.candidates` 非空，取首个 `executable=true` 的 `ref` 用同一 O 与新 P 重试（无候选或无可执行项时按错误原因另行处理）；上述 5 码之外，`422 text_target_uncertain` 且 `stage=target`、`reason=target_not_editable` 在存在合法输入候选时同样附带既有 `candidates`，按同一方式重试，`target_protected` 不带候选。`scroll` 的静态候选已按前景上下文过滤：与请求目标不属于同一顶层窗口、被点击遮罩叶或同窗口后序实体浮层面板遮挡的容器不会出现在 `candidates` 中，全部被剔除时省略该字段且不回退被遮挡的背景页面，此时按错误原因处理而不是改试背景页；被前景浮层覆盖的容器也不会标成 `executable=true`。坐标目标不传 `bubble`。`text` 的直接 ref 目标要求 `role=input`、公开动作含 `text`、未禁用与正面积几何，不要求 `tap`；`protected` 检查只用于这种具备 `text` 的直接输入（`protected=false`），`role=input` 但缺 `text` 仍返回 `text_target_uncertain`（`stage=target`、`reason=target_not_editable`）。非输入目标可按包装壳、非交互占位子或外部共位输入定向绑定：包装壳在目标小于 50% 屏幕面积时只接受唯一 `RoleInput`，该输入不可合法聚焦时直接失败；非交互占位子取最近交互祖先，存在最近交互祖先但无法聚焦时硬停、不再尝试共位吸附；共位吸附仅适用于非交互且小于 50% 屏幕面积的目标，要求没有最近交互祖先，候选既非目标的公开祖先也非其后代、先通过共位匹配与反底板守卫，再统计所有 `RoleInput`（含受保护、禁用、缺 `text`），唯一后才校验合法与可聚焦。包装壳与共位吸附均不绕过受保护/禁用框；未命中时按上文的 `target_not_editable` 候选处理。`text` 默认 `auto_submit=true`、`submit_ref="enter_key"`，一次调用已包含必要聚焦（已聚焦 ref 走零点击快路径，未聚焦时在目标子树内规划唯一安全落点，可委托唯一合法同视口输入子框，并至多点击一次，随后至多 3 次只读复查确认获焦：首帧立即、其后 `60ms`/`120ms` 退避，窗口上限 `1200ms`，绝不重发聚焦点击）、全文写入、写后精确确认（刷新值相等即完成；否则至多 3 次只读读回，退避 `40ms`/`80ms`/`150ms`、墙钟上限 `1000ms`，几何变化时至多一次严格写后重绑定）和至多一次 ENTER，不需要先 tap 或另发 ENTER；草稿、多行、逐字段填写或清空但不提交时显式 `auto_submit=false`（此时 `submit_ref` 只做语法校验后忽略）。`submit_ref="n<ref>"` 表示写后点击该提交按钮：认领前按完整 tap 规划校验，写前灰置也接受，写后重验启用状态与安全落点，失败不补发 ENTER。复合 text 结果携带 `text_input.write/submit`；`submit=uncertain` 先观察页面，不原样重发。`write=executed` 且提交确定未派发时 `outcome=partial`、`error.code=text_submit_not_executed`
 （期间 STOP 撤权为 `control_revoked`），首次结果通常附带新的 ready O；用 `obs` 行取该 O
-继续，需要时再读回框值，不重放原文字。text 派发阶段失败时读取 `error.details.stage/reason/dispatch` 区分未派发、目标不唯一、读回不等与提交问题，不要解析 `message`；认领后重验的 `409 target_changed` 按统一 `phase=revalidate` 详情处理；经零派发重验自动恢复并进入派发时，`Result.auto_recovery` 仅覆盖 `tap`/`long_press`/`text`/`scroll` 四种 kind；raw `swipe` 的瞬态复检不发布该字段；`original_ref`/`recovered_ref` 按 §2 条件出现（纯坐标省略），`strategy` 与 `attempts` 见该节。写入或提交仍 uncertain 且会话活动时按 `recovery entry=observe ref=<P>`（`structured` 中为 `recovery.entry`）用新 P 获取现场，而不是循环 `status(P)`。
+继续，需要时再读回框值，不重放原文字。text 派发阶段失败时读取 `error.details.stage/reason/dispatch` 区分未派发、目标不唯一、读回不等与提交问题，不要解析 `message`；认领后重验的 `409 target_changed` 按统一 `phase=revalidate` 详情处理；静态准入的自动解析与委托保持静默，不写 `Result.auto_recovery`；经零派发重验自动恢复并进入派发时，该字段仅覆盖 `tap`/`long_press`/`text`/`scroll` 四种 kind；raw `swipe` 的瞬态复检不发布该字段；`original_ref`/`recovered_ref` 按[接口契约 §2](interface.md#2-结果分层与错误)条件出现（纯坐标省略），`strategy` 与 `attempts` 见该节。写入或提交仍 uncertain 且会话活动时按 `recovery entry=observe ref=<P>`（`structured` 中为 `recovery.entry`）用新 P 获取现场，而不是循环 `status(P)`。
 
 P 的两种用法：`observe({"reference":"P7391_4"})` 的 `reference` 引用本 Agent 已有的
 `P7391_4` 原操作，不是本次 `observe` 的请求体 P；本次调用仍使用自己的新 P。
@@ -615,7 +625,7 @@ Header: Authorization: Bearer <mcp_token>
 两种选择：
 
 ```text
-直连 HTTP:  http://127.0.0.1:18880/api/<tool>   + agent_token + X-Mobile-Use-Contract: 36
+直连 HTTP:  http://127.0.0.1:18880/api/<tool>   + agent_token + X-Mobile-Use-Contract: 37
 MCP HTTP:   http://127.0.0.1:18882/mcp          + mcp_token
 ```
 
@@ -695,7 +705,7 @@ adb shell su -c 'tail -n 50 /data/local/chroots/debian13/var/lib/mobile-use-vnex
 
 升级后：
 
-- 服务、App、适配器与客户端共同使用同一个 `contract_version`（当前 `36`）；
+- 服务、App、适配器与客户端共同使用同一个 `contract_version`（当前 `37`）；
 - 重新建立可能失效的转发；
 - 重启实际 MCP 宿主进程，不能只替换磁盘文件；
 - 旧会话转退休记录，不恢复旧 O/P 或主屏授权；旧 cleanup 的 `pending`/`unconfirmed` 可继续
@@ -803,7 +813,7 @@ GET 判断工具是否可用。
 $deploy = Get-Content .state/deploy.json -Raw | ConvertFrom-Json
 $headers = @{
     Authorization           = "Bearer $($deploy.agent_token)"
-    'X-Mobile-Use-Contract' = '36'
+    'X-Mobile-Use-Contract' = '37'
 }
 $start = Invoke-RestMethod http://127.0.0.1:18881/api/start -Method Post `
   -Headers $headers -ContentType 'application/json' -Body '{}'

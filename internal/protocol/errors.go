@@ -49,7 +49,10 @@ import (
 // and the text dispatch stages; it does not describe the phase=revalidate
 // target_changed rejection, which follows the unified revalidate taxonomy above
 // while the top-level text_input member states the untouched not_attempted
-// write/submit pair.
+// write/submit pair. The static text_target_uncertain rejection (stage=target,
+// reason=target_not_editable) may additionally carry the existing whitelisted
+// candidates key when a legal candidate input field exists; the protected and
+// disabled input exits carry no candidates.
 //
 // Details never carry user text, device output, trees, commands or credentials.
 type APIError struct {

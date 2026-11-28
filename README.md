@@ -7,8 +7,8 @@ HTTP 协议配对。
 
 - 模块：`github.com/malyjacob/mobile-use-vnext`
 - Go：1.27.1，启用 `GOEXPERIMENT=jsonv2`
-- 契约：`contract_version = "36"`，服务、HTTP 客户端、控制 App 精确相等才做普通工作
-- 发行：`0.40.0`；`release/versions.json` 是发行号、契约号与 Android versionCode（42）的唯一
+- 契约：`contract_version = "37"`，服务、HTTP 客户端、控制 App 精确相等才做普通工作
+- 发行：`0.41.0`；`release/versions.json` 是发行号、契约号与 Android versionCode（43）的唯一
   来源，构建生成 Go/Java 常量
 
 ## 能力边界
@@ -52,7 +52,7 @@ HTTP 协议配对。
   `text`/`both` 的结果文本是紧凑的 `result v4` 外壳：头行给 `ok`/`err`、调用编号与 outcome；
   观察合并为单行 `obs`；复合 text 另带 `text_input write=… submit=…`，写入已确认而提交确定
   未派发时 `outcome=partial` 并附新的 ready O；经零派发重验自动恢复并进入派发时另带
-  `Result.auto_recovery`（仅覆盖 `tap`/`long_press`/`text`/`scroll` 四种 kind；`original_ref`/`recovered_ref` 按 §2 条件出现，纯坐标省略；`strategy` 与 `attempts` 见 §2）；可读块沿用 `tree v5`、`inspect v3`、`shell v1`
+  `Result.auto_recovery`（仅覆盖 `tap`/`long_press`/`text`/`scroll` 四种 kind；`original_ref`/`recovered_ref` 按[接口契约 §2](docs/interface.md#2-结果分层与错误)条件出现，纯坐标省略；`strategy` 与 `attempts` 见同节）；静态自动解析与委托沿用静默语义，不写该字段；可读块沿用 `tree v5`、`inspect v3`、`shell v1`
   与 `timeline v1` 语法；`recovery` 行在可判定时直接给出精确 `O`/`P` 编号。`text` 按清单省略
   固定元信息，`structured` 的 `structuredContent` 保留完整 `Result` JSON。
 
@@ -183,7 +183,7 @@ $env:GOEXPERIMENT = 'jsonv2'; go test ./...
 ## 接口
 
 Agent 工具（`POST /api/<tool>`，`Authorization: Bearer <agent_token>`，
-`X-Mobile-Use-Contract: 36`）：
+`X-Mobile-Use-Contract: 37`）：
 
 | 工具 | 说明 |
 | --- | --- |
@@ -192,7 +192,7 @@ Agent 工具（`POST /api/<tool>`，`Authorization: Bearer <agent_token>`，
 | `observe` | `reference`（O/P）；按服务端基线池返回 full 或 delta。当前基线跨度为 1–12，其他备用 full 为 1–10，采集龄 `< 180s`，池为 1 条当前基线加至多 4 条备用 full（容量 5）；合格候选按实际 `tree v5` 树块字节数取最短 delta，平手优先当前基线、再取较新修订，默认差分必须严格小于对应 full 的 80%；`observe(P)` 与 `full=true` 强制 full；`image=true` 附加本次图片 |
 | `snap` | `reference`（O/P）；立即读取当前屏的一张图，不读树、不发布观察；成功只含 `operation_id` 与顶层 `image` |
 | `wait_for` | `reference` + `timeout`（必填 1～40，`stable=true` 时至少 2）+ 可选 `query`/`absent_query`/`stable`/`full`/`image`；在唯一工作位上等待后发布一个新 `O` |
-| `act` | `reference` + `operation`：`tap`、`long_press`、`swipe`（可选 `duration_ms`）、`scroll`（`container`/`direction`/`amount`）、`key`、`text`；`tap`/`long_press` 的 ref 目标支持 4 级定位（含 3×3 网格）与同视口子容器委托，默认 `bubble=true` 时按视觉区锚定提升最近交互祖先或吸附唯一局部共位控件；`scroll` 的 `amount` 为闭合四档 `step`/`half`/`page`/`full`（可用跨度 15%/30%/60%/85%，注入 500/450/400/300ms，省略为 `page`，不接受 `duration_ms`）；支持双向同视口滚动栈、非滚动 ref 自动祖先提升、坐标最内层/回退/消歧与居中 3 轴线轨迹；容器轴向与请求方向不兼容时自动回退兼容外层滚动祖先，无解返回 `422 unsupported_node_action`（`reason=axis_mismatch`）；`act` 目标解析与规划类静态 422 使用 `invalid_target`/`unsupported_node_action`/`ambiguous_point`/`no_safe_point`/`no_safe_trajectory`，有候选时附统一 `candidates`，无交互祖先且有屏内裁剪几何时可带 `target_center`；`text` 默认 `auto_submit=true`、`submit_ref="enter_key"`：`text(ref)` 准入只要求 `role=input`、公开动作含 `text`、未禁用、非受保护与正面积几何（不要求 `tap`），已聚焦零点击直写、未聚焦在目标子树内点按一次可证明的安全位置；写入后 `0ms` 读回精确相等即完成，否则至多 3 次短退避只读读回（总上限约 1 秒，候选数变为 0 时至多一次严格的写后重新采集与读回），始终只写一次并要求全文精确相等；聚焦、写入、读回确认后至多一次 ENTER；`submit_ref="n…"` 写后点击提交按钮且失败不补发 ENTER；`auto_submit=false` 只写不提；`text_input` 报告 `write`/`submit`，`write=executed` 且提交确定未派发时 `outcome=partial` 并附新的 ready O；`image=true` 为后观察附图 |
+| `act` | `reference` + `operation`：`tap`、`long_press`、`swipe`（可选 `duration_ms`）、`scroll`（`container`/`direction`/`amount`）、`key`、`text`；`tap`/`long_press` 的 ref 目标按固定 4 级（含 3×3 网格）、2D 残余安全区、被动多命中三段定位，并可委托唯一同视口子容器；默认 `bubble=true` 时按视觉区锚定提升最近交互祖先或吸附唯一局部共位控件，目标自身可交互但缺本次动作且 `bubble=true` 时先向下委托唯一同视口子容器、绝不向上；`scroll` 的 `amount` 为闭合四档 `step`/`half`/`page`/`full`（可用跨度 15%/30%/60%/85%，注入 500/450/400/300ms，省略为 `page`，不接受 `duration_ms`）；支持双向同视口滚动栈、非滚动 ref 自动祖先提升、坐标最内层/回退/消歧与居中 3 轴线轨迹；内层自动委托仅限 `container.ref`：轴向不兼容时先回退兼容外层滚动祖先，均失败后仍试唯一轴向兼容内层容器（含同视口），内层也失败才返回首个规划错误（无规划错误则 `422 axis_mismatch`）；缺 `swipe` 的未禁用 `role=scroll` 与最近祖先缺 `swipe` 时向兼容祖先提升；非滚动 ref 仅在“无滚动祖先，或至少一个有效祖先仅因轴失配被跳过且无兼容祖先进入规划、且无最近祖先禁用/无几何硬拒”时，才在唯一内层容器覆盖目标至少 50% 面积时委托；同轴 3 轴轨迹兜底仍非同视口，遮挡过滤同样作用于内层委托；仍无解返回 `422 unsupported_node_action`（`reason=axis_mismatch` 等）；`act` 目标解析与规划类静态 422 使用 `invalid_target`/`unsupported_node_action`/`ambiguous_point`/`no_safe_point`/`no_safe_trajectory`，有候选时附统一 `candidates`；`422 text_target_uncertain`（`stage=target`、`reason=target_not_editable`）在有合法输入框候选时也附 `candidates`；无交互祖先且有屏内裁剪几何时可带 `target_center`，静态自动解析与委托不写 `Result.auto_recovery`；`text` 默认 `auto_submit=true`、`submit_ref="enter_key"`：`text(ref)` 的直接输入框目标要求 `role=input`、公开动作含 `text`、未禁用、非受保护与正面积几何（不要求 `tap`），包装壳/占位子/共位输入框按定向解析绑定唯一合法输入框（任一路径失败即硬停）且不绕过密码或禁用框，已聚焦零点击直写、未聚焦在目标子树内点按一次可证明的安全位置（可委托唯一同视口合法输入子框）；写入后 `0ms` 读回精确相等即完成，否则至多 3 次短退避只读读回（总上限约 1 秒，候选数变为 0 时至多一次严格的写后重新采集与读回），始终只写一次并要求全文精确相等；聚焦、写入、读回确认后至多一次 ENTER；`submit_ref="n…"` 写后点击提交按钮且失败不补发 ENTER；`auto_submit=false` 只写不提；`text_input` 报告 `write`/`submit`，`write=executed` 且提交确定未派发时 `outcome=partial` 并附新的 ready O；`image=true` 为后观察附图 |
 | `inspect` | `reference` 可选 `node` 或 `query`；只读历史树 |
 | `keepalive` | `reference`（O/P）+ 可选 `duration_minutes`（1～120，默认 2）；从应用时重设当前活动会话租期，可延长或缩短；普通活动仅按两分钟取最大值 |
 | `end` | `reference`（O/P）；撤权并启动独立收尾 |

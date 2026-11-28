@@ -24,6 +24,8 @@ func TestPlanActRebind(t *testing.T) {
 		{"bubble ancestor", func(req *actRebindRequest) { req.OrigPlan.bubbleAncestorRaw = req.OrigRaw }},
 		{"colocated", func(req *actRebindRequest) { req.OrigPlan.colocatedRaw = req.OrigRaw }},
 		{"delegate", func(req *actRebindRequest) { req.OrigPlan.delegateRaw = req.OrigRaw }},
+		{"text without original plan", func(req *actRebindRequest) { req.Kind, req.OrigPlan = "text", nil }},
+		{"text delegate", func(req *actRebindRequest) { req.Kind, req.OrigPlan.delegateRaw = "text", req.OrigRaw }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req := actRebindRequest{Kind: "tap", Reason: targetChangedReasonTargetMissing,
@@ -32,6 +34,27 @@ func TestPlanActRebind(t *testing.T) {
 			decision, apiErr := planActRebind(req)
 			if apiErr != nil || decision != (actRebindDecision{}) {
 				t.Fatalf("gate: decision=%+v err=%v", decision, apiErr)
+			}
+		})
+	}
+}
+
+func TestTextRebindDelegationGates(t *testing.T) {
+	for _, reason := range []string{targetChangedReasonTargetMissing, targetChangedReasonLineageChanged} {
+		t.Run(reason, func(t *testing.T) {
+			req := actRebindRequest{Kind: "text", Reason: reason, TargetRef: "n2", OrigPlan: &tapPlan{}}
+			if !canRebindActTarget(req.Kind, req.TargetRef, reason, req.OrigPlan) {
+				t.Fatal("direct text should reach rebind")
+			}
+			if decision, err := planActRebind(req); err != nil || !decision.Attempted || decision.Strategy != actRebindText {
+				t.Fatalf("direct text decision=%+v error=%v, want an attempted text rebind", decision, err)
+			}
+			req.OrigPlan.delegateRaw = &device.RawNode{}
+			if canRebindActTarget(req.Kind, req.TargetRef, reason, req.OrigPlan) {
+				t.Fatal("delegated text passed the rebind admission gate")
+			}
+			if decision, err := planActRebind(req); err != nil || decision != (actRebindDecision{}) {
+				t.Fatalf("delegated text decision=%+v error=%v, want no attempt", decision, err)
 			}
 		})
 	}

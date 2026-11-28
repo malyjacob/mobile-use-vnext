@@ -188,7 +188,8 @@ func resolveObservedPoint(obs *observationState, operation *protocol.Operation) 
 	}
 
 	matching := filterMatchingPointOwners(owners, operation)
-	if len(matching) == 1 {
+	inner := innermostPointOwners(view, matching)
+	if len(inner) == 1 {
 		if indices, mapped := collectPointRawIndices(obs, hits); mapped {
 			check.state = pointSet
 			check.indices = indices
@@ -198,7 +199,10 @@ func resolveObservedPoint(obs *observationState, operation *protocol.Operation) 
 		return check, nil
 	}
 
-	candidates := matching
+	candidates := inner
+	if len(candidates) == 0 {
+		candidates = matching
+	}
 	if len(candidates) == 0 {
 		candidates = owners
 	}
@@ -310,6 +314,38 @@ func filterMatchingPointOwners(owners []*protocol.Node, operation *protocol.Oper
 		}
 	}
 	return matching
+}
+
+// innermostPointOwners reduces a set of interactive point owners to its
+// innermost members: an owner is dropped as soon as another owner in the set is
+// a strict public descendant of it. Deepest hit leaves can never be ancestors of
+// each other, but their nearest interactive owners can still nest (a coordinate
+// that hits both a labelled card and a button inside that card). The reduction
+// is an admission rule only: nested owners are reduced so admission follows the
+// innermost owner, and the rule does not assert which view physically consumes
+// the touch. Owners that are not related through the public view stay, so two
+// sibling buttons still compete.
+// The input order is preserved. isPublicAncestor guards pointer cycles, so a
+// corrupt parent chain can never loop here; a cyclic pair therefore removes both
+// members and fails closed on the caller's unique-owner test.
+func innermostPointOwners(view *tapPublicView, owners []*protocol.Node) []*protocol.Node {
+	if len(owners) == 0 {
+		return nil
+	}
+	inner := make([]*protocol.Node, 0, len(owners))
+	for _, owner := range owners {
+		hasInner := false
+		for _, other := range owners {
+			if other != owner && isPublicAncestor(view, owner, other) {
+				hasInner = true
+				break
+			}
+		}
+		if !hasInner {
+			inner = append(inner, owner)
+		}
+	}
+	return inner
 }
 
 // Point hit-set matching bounds. The observed hit set is already capped by
@@ -616,7 +652,8 @@ func (proof *pointProof) proveTargetSet(observedIndices, freshIndices []int,
 	}
 	owners := collectPointOwners(view, freshNodes)
 	if len(owners) > 1 &&
-		len(filterMatchingPointOwners(owners, operation)) != 1 {
+		len(innermostPointOwners(view,
+			filterMatchingPointOwners(owners, operation))) != 1 {
 		return targetChangedAtPoint()
 	}
 	return nil

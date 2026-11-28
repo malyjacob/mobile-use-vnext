@@ -373,6 +373,28 @@ func tapAmbiguousCardStep() captureStep {
 	}
 }
 
+// tapWithExternalPeer places a passive hit at the same public depth as a
+// card carrier, but under a separate branch of the tree.
+func tapWithExternalPeer(step captureStep, peer device.RawNode) captureStep {
+	return func(dev *fakeDevice, display device.Display) (device.Capture, error) {
+		capture, err := step(dev, display)
+		if err != nil {
+			return device.Capture{}, err
+		}
+		parent := len(capture.Nodes)
+		wrapper := proposalNode(0, 0, 0, display, peer.Bounds,
+			"android.widget.FrameLayout", "external wrapper")
+		actRebindTestAppend(&capture, 0, wrapper)
+		actRebindTestAppend(&capture, parent, peer)
+		return capture, nil
+	}
+}
+
+func tapAmbiguousCardWithExternalPeerStep() captureStep {
+	return tapWithExternalPeer(tapAmbiguousCardStep(), tapRawNode(0, 0, 0, 0,
+		tapCardBounds, "android.widget.TextView", "external peer", false, false))
+}
+
 func tapCardWithBrokenParentStep() captureStep {
 	return tapCardVariant(func(capture *device.Capture, _ device.Display) {
 		capture.Nodes[3].Parent = len(capture.Nodes) + 4
@@ -1045,7 +1067,7 @@ func TestActTapFullyOccludedCardRejectsBeforeClaim(t *testing.T) {
 
 func TestActTapAmbiguousCardRejectsWithoutOccludingRef(t *testing.T) {
 	h := newTapScopeHarness(t)
-	h.device.scriptCaptures(tapAmbiguousCardStep())
+	h.device.scriptCaptures(tapAmbiguousCardWithExternalPeerStep())
 	start := h.startSession()
 	card := tapCardNode(t, h)
 	probes, captures := h.device.probeCount(), h.device.captureCount()
@@ -1060,9 +1082,11 @@ func TestActTapAmbiguousCardRejectsWithoutOccludingRef(t *testing.T) {
 		details["scope_ref"] != card.Ref {
 		t.Fatalf("ambiguous details = %#v, want ambiguous/target/%q", details, card.Ref)
 	}
-	if refs, ok := details["blocking_refs"].([]string); !ok || len(refs) != 2 {
-		t.Fatalf("blocking_refs = %#v, want two tied nodes", details["blocking_refs"])
-	}
+	root := currentTree(t, h.engine).Root
+	left := tapContentNodeByLabel(t, root, "left")
+	right := tapContentNodeByLabel(t, root, "right")
+	peer := tapContentNodeByLabel(t, root, "external peer")
+	requireDetailStringSlice(t, details, "blocking_refs", left.Ref, right.Ref, peer.Ref)
 	if _, exists := details["candidates"]; exists {
 		t.Fatalf("ambiguity-only rejection unexpectedly carried candidates: %#v", details)
 	}

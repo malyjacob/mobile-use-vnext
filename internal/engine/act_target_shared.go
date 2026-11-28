@@ -235,9 +235,9 @@ func bubbleRelationChangedError(ancestorRef string) *protocol.APIError {
 }
 
 // tapFrameTier4OcclusionProven reports whether a Tier 4 or higher landing
-// point has a unique whole-tree deepest hit inside the proven target subtree
-// and no external interactive owner covers it. Rebuilt ancestors and vertical
-// translations require the whole-tree proof in addition to the subtree scope.
+// point has a unique deepest hit in the target subtree or only deepest hits
+// on passive descendants, with no external interactive owner. Rebuilt ancestors
+// and vertical translations require this proof in addition to the subtree scope.
 func tapFrameTier4OcclusionProven(view *tapPublicView, target *protocol.Node,
 	x, y int) bool {
 	if view == nil || view.tree == nil || view.tree.Root == nil || target == nil {
@@ -247,14 +247,42 @@ func tapFrameTier4OcclusionProven(view *tapPublicView, target *protocol.Node,
 		return false
 	}
 	ref, state := resolvePoint(view.tree.Root, x, y)
-	if state != pointUnique || ref == "" {
+	if state == pointUnique {
+		hit := view.byRef[ref]
+		return ref != "" && (hit == target || isPublicAncestor(view, target, hit))
+	}
+	if state != pointAmbiguous {
 		return false
 	}
-	hit := view.byRef[ref]
-	if hit == nil {
+	hits := resolvePointSet(view.tree.Root, x, y)
+	for _, hit := range hits {
+		if hit != target && !hasValidDirectNonInteractivePath(view, target, hit) {
+			return false
+		}
+	}
+	return len(hits) > 0
+}
+
+// hasValidDirectNonInteractivePath proves strict descent through passive,
+// non-context nodes. The target itself may be interactive.
+func hasValidDirectNonInteractivePath(view *tapPublicView, target, hit *protocol.Node) bool {
+	if target == nil || target.Context || hit == target {
 		return false
 	}
-	return hit == target || isPublicAncestor(view, target, hit)
+	for range len(view.info) {
+		if hit == nil || hit.Context || isTouchInteractive(hit) {
+			return false
+		}
+		info := view.info[hit]
+		if info == nil {
+			return false
+		}
+		if info.parent == target {
+			return true
+		}
+		hit = info.parent
+	}
+	return false
 }
 
 // attachChangedRef adds the optional changed_ref detail to a lineage_changed

@@ -45,6 +45,9 @@ func planActRebind(req actRebindRequest) (actRebindDecision, *protocol.APIError)
 	var decision actRebindDecision
 	switch req.Kind {
 	case "text":
+		if req.OrigPlan == nil || req.OrigPlan.delegateRaw != nil {
+			return actRebindDecision{}, nil
+		}
 		decision.Strategy = actRebindText
 	case "tap", "long_press":
 		if req.OrigPlan == nil || req.OrigPlan.bubbleAncestorRaw != nil ||

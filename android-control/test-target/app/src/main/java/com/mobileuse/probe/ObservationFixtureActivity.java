@@ -21,6 +21,7 @@ import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.GridLayout;
+import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -50,6 +51,12 @@ public final class ObservationFixtureActivity extends Activity {
     private static final String SCENE_D02 = "d02";
     private static final String SCENE_D03 = "d03";
     private static final String SCENE_D04 = "d04";
+    private static final String SCENE_D05 = "d05";
+    private static final String SCENE_D06 = "d06";
+    private static final String SCENE_D07 = "d07";
+    private static final String SCENE_D08 = "d08";
+    private static final String SCENE_D09 = "d09";
+    private static final String SCENE_D10 = "d10";
 
     private static final int COLOR_BACKGROUND = Color.rgb(248, 249, 251);
     private static final int COLOR_SURFACE = Color.rgb(255, 255, 255);
@@ -105,6 +112,16 @@ public final class ObservationFixtureActivity extends Activity {
     private TextView currentD04State;
     private EditText currentD04InputA;
     private EditText currentD04InputB;
+    private TextView currentD08State;
+    private TextView currentD09State;
+    private TextView currentD10State;
+    private int d08CardTaps;
+    private int d08BlockerTaps;
+    private int d09CardTaps;
+    private int d10ParentTaps;
+    private int d10ChildTaps;
+    private int d10ChildLongTaps;
+    private int d10BadgeTaps;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -161,11 +178,10 @@ public final class ObservationFixtureActivity extends Activity {
         boolean keyboardCommand = false;
 
         String requestedScene = intent.getStringExtra(EXTRA_SCENE);
-        if (isOneOf(requestedScene, SCENE_D01, SCENE_D02, SCENE_D03, SCENE_D04)
-                && !requestedScene.equals(scene)) {
+        if (isFixtureScene(requestedScene) && !requestedScene.equals(scene)) {
             scene = requestedScene;
         }
-        if (isOneOf(requestedScene, SCENE_D01, SCENE_D02, SCENE_D03, SCENE_D04)) {
+        if (isFixtureScene(requestedScene)) {
             rebuild = true;
         }
 
@@ -297,6 +313,16 @@ public final class ObservationFixtureActivity extends Activity {
         currentD04State = null;
         currentD04InputA = null;
         currentD04InputB = null;
+        currentD08State = null;
+        currentD09State = null;
+        currentD10State = null;
+        d08CardTaps = 0;
+        d08BlockerTaps = 0;
+        d09CardTaps = 0;
+        d10ParentTaps = 0;
+        d10ChildTaps = 0;
+        d10ChildLongTaps = 0;
+        d10BadgeTaps = 0;
 
         if (SCENE_D02.equals(scene)) {
             renderD02();
@@ -304,9 +330,26 @@ public final class ObservationFixtureActivity extends Activity {
             renderD03();
         } else if (SCENE_D04.equals(scene)) {
             renderD04();
+        } else if (SCENE_D05.equals(scene)) {
+            renderD05();
+        } else if (SCENE_D06.equals(scene)) {
+            renderD06();
+        } else if (SCENE_D07.equals(scene)) {
+            renderD07();
+        } else if (SCENE_D08.equals(scene)) {
+            renderD08();
+        } else if (SCENE_D09.equals(scene)) {
+            renderD09();
+        } else if (SCENE_D10.equals(scene)) {
+            renderD10();
         } else {
             renderD01();
         }
+    }
+
+    private boolean isFixtureScene(String name) {
+        return isOneOf(name, SCENE_D01, SCENE_D02, SCENE_D03, SCENE_D04,
+                SCENE_D05, SCENE_D06, SCENE_D07, SCENE_D08, SCENE_D09, SCENE_D10);
     }
 
     private void renderD01() {
@@ -697,6 +740,336 @@ public final class ObservationFixtureActivity extends Activity {
 
         setContentView(root);
         updateD04State();
+    }
+
+    private void renderD05() {
+        LinearLayout root = baseRoot(View.generateViewId());
+        root.addView(heading(View.generateViewId(), "D05 horizontal pager over vertical list"));
+
+        HorizontalScrollView pager = new HorizontalScrollView(this);
+        pager.setId(View.generateViewId());
+        pager.setContentDescription("D05 outer horizontal pager");
+        pager.setFillViewport(true);
+        pager.setBackgroundColor(Color.rgb(235, 242, 248));
+
+        LinearLayout pages = new LinearLayout(this);
+        pages.setId(View.generateViewId());
+        pages.setOrientation(LinearLayout.HORIZONTAL);
+
+        ScrollView inner = new ScrollView(this);
+        inner.setId(View.generateViewId());
+        inner.setContentDescription("D05 inner vertical list");
+        inner.setFillViewport(false);
+
+        LinearLayout rows = new LinearLayout(this);
+        rows.setId(View.generateViewId());
+        rows.setOrientation(LinearLayout.VERTICAL);
+        for (int index = 1; index <= 40; index++) {
+            TextView row = plainText(String.format(Locale.ROOT, "D05 pager row %02d", index));
+            row.setTextSize(16);
+            row.setTextColor(COLOR_TEXT);
+            rows.addView(row, verticalParams(-2, 4));
+        }
+        inner.addView(rows, new ScrollView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        pages.addView(inner, new LinearLayout.LayoutParams(
+                dp(400), ViewGroup.LayoutParams.MATCH_PARENT));
+
+        TextView secondPage = plainText("D05 second pager page");
+        secondPage.setId(View.generateViewId());
+        secondPage.setTextSize(16);
+        secondPage.setGravity(Gravity.CENTER);
+        pages.addView(secondPage, new LinearLayout.LayoutParams(
+                dp(400), ViewGroup.LayoutParams.MATCH_PARENT));
+
+        pager.addView(pages, new HorizontalScrollView.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.MATCH_PARENT));
+        root.addView(pager, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(420)));
+
+        root.addView(plainText("D05 end: scroll down on the pager must drive the inner list."),
+                verticalParams(-2, 8));
+        setContentView(root);
+    }
+
+    private void renderD06() {
+        LinearLayout root = baseRoot(View.generateViewId());
+        root.addView(heading(View.generateViewId(), "D06 non-scroll wrapper over vertical list"));
+
+        FrameLayout wrapper = new FrameLayout(this);
+        wrapper.setId(View.generateViewId());
+        wrapper.setContentDescription("D06 non-scroll wrapper");
+        wrapper.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
+
+        ScrollView inner = new ScrollView(this);
+        inner.setId(View.generateViewId());
+        inner.setContentDescription("D06 wrapper inner vertical list");
+
+        LinearLayout rows = new LinearLayout(this);
+        rows.setId(View.generateViewId());
+        rows.setOrientation(LinearLayout.VERTICAL);
+        for (int index = 1; index <= 14; index++) {
+            TextView row = plainText(String.format(Locale.ROOT, "D06 wrapper row %02d", index));
+            row.setTextSize(16);
+            row.setTextColor(COLOR_TEXT);
+            rows.addView(row, verticalParams(-2, 6));
+        }
+        inner.addView(rows, new ScrollView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        wrapper.addView(inner, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT));
+        root.addView(wrapper, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(360)));
+
+        root.addView(plainText("D06 end: scroll down on the wrapper must drive the inner list."),
+                verticalParams(-2, 8));
+        setContentView(root);
+    }
+
+    private void renderD07() {
+        LinearLayout root = baseRoot(View.generateViewId());
+        root.addView(heading(View.generateViewId(), "D07 wrapped and flat text targets"));
+
+        FrameLayout wrapper = new FrameLayout(this);
+        wrapper.setId(View.generateViewId());
+        wrapper.setContentDescription("D07 wrapped input field");
+        wrapper.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
+        wrapper.setPadding(dp(12), dp(8), dp(12), dp(8));
+        wrapper.setBackgroundColor(Color.rgb(232, 240, 247));
+
+        EditText wrapped = new EditText(this);
+        wrapped.setId(View.generateViewId());
+        wrapped.setContentDescription("D07 wrapped editable");
+        wrapped.setHint("D07 wrapped input");
+        wrapped.setInputType(InputType.TYPE_CLASS_TEXT);
+        wrapped.setSingleLine(true);
+        wrapper.addView(wrapped, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        root.addView(wrapper, verticalParams(dp(72), 12));
+
+        FrameLayout flat = new FrameLayout(this);
+        flat.setId(View.generateViewId());
+        flat.setContentDescription("D07 flat field");
+        flat.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
+
+        EditText inner = new EditText(this);
+        inner.setId(View.generateViewId());
+        inner.setContentDescription("D07 flat editable");
+        inner.setHint("D07 flat input");
+        inner.setInputType(InputType.TYPE_CLASS_TEXT);
+        inner.setSingleLine(true);
+        flat.addView(inner, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(64)));
+
+        TextView placeholder = new TextView(this);
+        placeholder.setId(View.generateViewId());
+        placeholder.setText("D07 placeholder label");
+        placeholder.setTextSize(16);
+        placeholder.setTextColor(COLOR_MUTED);
+        placeholder.setGravity(Gravity.CENTER);
+        flat.addView(placeholder, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.CENTER));
+        root.addView(flat, verticalParams(dp(72), 12));
+
+        root.addView(plainText("D07 end: text(ref) may resolve a wrapper or a co-located label."),
+                verticalParams(-2, 8));
+        setContentView(root);
+    }
+
+    private void renderD08() {
+        LinearLayout root = baseRoot(View.generateViewId());
+        root.addView(heading(View.generateViewId(), "D08 residual safety patch card"));
+
+        currentD08State = stateText(View.generateViewId());
+        root.addView(currentD08State, verticalParams(-2, 0));
+
+        FrameLayout card = new FrameLayout(this);
+        card.setId(View.generateViewId());
+        card.setContentDescription("D08 residual patch card");
+        card.setClickable(true);
+        card.setFocusable(true);
+        card.setBackgroundColor(Color.rgb(225, 240, 247));
+        card.setOnClickListener(view -> {
+            d08CardTaps++;
+            updateD08State();
+        });
+
+        Button blocker = new Button(this);
+        blocker.setId(View.generateViewId());
+        blocker.setText("D08 center blocker");
+        blocker.setTextSize(14);
+        blocker.setOnClickListener(view -> {
+            d08BlockerTaps++;
+            updateD08State();
+        });
+        FrameLayout.LayoutParams blockerParams = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                Gravity.CENTER);
+        blockerParams.setMargins(dp(34), dp(34), dp(34), dp(34));
+        card.addView(blocker, blockerParams);
+
+        root.addView(card, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(320)));
+        root.addView(plainText("D08 end: tap(card) must land on the free border, not the blocker."),
+                verticalParams(-2, 8));
+        setContentView(root);
+        updateD08State();
+    }
+
+    private void renderD09() {
+        LinearLayout root = baseRoot(View.generateViewId());
+        root.addView(heading(View.generateViewId(), "D09 passive overlap card"));
+
+        currentD09State = stateText(View.generateViewId());
+        root.addView(currentD09State, verticalParams(-2, 0));
+
+        FrameLayout card = new FrameLayout(this);
+        card.setId(View.generateViewId());
+        card.setContentDescription("D09 passive overlap card");
+        card.setClickable(true);
+        card.setFocusable(true);
+        card.setBackgroundColor(Color.rgb(225, 240, 247));
+        card.setOnClickListener(view -> {
+            d09CardTaps++;
+            updateD09State();
+        });
+
+        ImageView cover = new ImageView(this);
+        cover.setId(View.generateViewId());
+        cover.setImageDrawable(new ColorDrawable(Color.rgb(53, 111, 179)));
+        cover.setScaleType(ImageView.ScaleType.FIT_XY);
+        cover.setClickable(false);
+        card.addView(cover, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT));
+
+        TextView title = new TextView(this);
+        title.setId(View.generateViewId());
+        title.setText("D09 passive title");
+        title.setTextSize(20);
+        title.setTextColor(Color.WHITE);
+        title.setGravity(Gravity.CENTER);
+        title.setClickable(false);
+        card.addView(title, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.CENTER));
+
+        root.addView(card, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(220)));
+        root.addView(plainText("D09 end: tap(card) must pass through passive image and title."),
+                verticalParams(-2, 8));
+        setContentView(root);
+        updateD09State();
+    }
+
+    private void renderD10() {
+        LinearLayout root = baseRoot(View.generateViewId());
+        root.addView(heading(View.generateViewId(), "D10 coextensive child and badge"));
+
+        currentD10State = stateText(View.generateViewId());
+        root.addView(currentD10State, verticalParams(-2, 0));
+
+        FrameLayout card = new FrameLayout(this);
+        card.setId(View.generateViewId());
+        card.setContentDescription("D10 coextensive card");
+        card.setClickable(true);
+        card.setFocusable(true);
+        card.setBackgroundColor(Color.rgb(225, 240, 247));
+        card.setOnClickListener(view -> {
+            d10ParentTaps++;
+            updateD10State();
+        });
+
+        FrameLayout child = new FrameLayout(this);
+        child.setId(View.generateViewId());
+        child.setContentDescription("D10 coextensive child");
+        child.setClickable(true);
+        child.setFocusable(true);
+        child.setLongClickable(true);
+        child.setBackgroundColor(Color.rgb(53, 111, 179));
+        child.setOnClickListener(view -> {
+            d10ChildTaps++;
+            updateD10State();
+        });
+        child.setOnLongClickListener(view -> {
+            d10ChildLongTaps++;
+            updateD10State();
+            return true;
+        });
+        card.addView(child, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT));
+
+        Button badge = new Button(this);
+        badge.setId(View.generateViewId());
+        badge.setText("x");
+        badge.setTextSize(14);
+        badge.setOnClickListener(view -> {
+            d10BadgeTaps++;
+            updateD10State();
+        });
+        FrameLayout.LayoutParams badgeParams = new FrameLayout.LayoutParams(
+                dp(44), dp(24), Gravity.TOP | Gravity.END);
+        badgeParams.topMargin = dp(4);
+        badgeParams.rightMargin = dp(4);
+        card.addView(badge, badgeParams);
+
+        root.addView(card, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(180)));
+        root.addView(plainText(
+                "D10 end: tap(card) delegates to the child; long_press(card) lifts to the child."),
+                verticalParams(-2, 8));
+        setContentView(root);
+        updateD10State();
+    }
+
+    private void updateD08State() {
+        if (currentD08State == null) {
+            return;
+        }
+        currentD08State.setText(String.format(
+                Locale.ROOT,
+                "scene=d08 revision=%d build=%d cardTaps=%d blockerTaps=%d",
+                revision,
+                buildNumber,
+                d08CardTaps,
+                d08BlockerTaps));
+    }
+
+    private void updateD09State() {
+        if (currentD09State == null) {
+            return;
+        }
+        currentD09State.setText(String.format(
+                Locale.ROOT,
+                "scene=d09 revision=%d build=%d cardTaps=%d",
+                revision,
+                buildNumber,
+                d09CardTaps));
+    }
+
+    private void updateD10State() {
+        if (currentD10State == null) {
+            return;
+        }
+        currentD10State.setText(String.format(
+                Locale.ROOT,
+                "scene=d10 revision=%d build=%d parentTaps=%d childTaps=%d childLongTaps=%d badgeTaps=%d",
+                revision,
+                buildNumber,
+                d10ParentTaps,
+                d10ChildTaps,
+                d10ChildLongTaps,
+                d10BadgeTaps));
     }
 
     private String inputBDescription() {

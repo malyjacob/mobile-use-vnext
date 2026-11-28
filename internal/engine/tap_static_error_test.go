@@ -99,16 +99,17 @@ func tapCrossCoveredExternalStep() captureStep {
 	}
 }
 
-// tapMixedCandidateStep blocks the original center while two same-depth
-// non-interactive carriers make another original candidate ambiguous.
+// tapMixedCandidateStep blocks the original center and overlaps the passive
+// carriers on the free side with a passive hit from a different branch.
 func tapMixedCandidateStep() captureStep {
-	return tapCardWithChildrenStep(device.Rect{Left: 0, Top: 0, Right: 1000, Bottom: 1000},
+	freeSide := device.Rect{Left: 0, Top: 0, Right: 400, Bottom: 1000}
+	step := tapCardWithChildrenStep(device.Rect{Left: 0, Top: 0, Right: 1000, Bottom: 1000},
 		tapRawNode(0, 0, 0, 0, device.Rect{Left: 400, Top: 0, Right: 1000, Bottom: 1000},
 			"android.widget.ImageButton", "vertical", true, true),
-		tapRawNode(0, 0, 0, 0, device.Rect{Left: 0, Top: 0, Right: 400, Bottom: 1000},
-			"android.widget.TextView", "left", false, false),
-		tapRawNode(0, 0, 0, 0, device.Rect{Left: 0, Top: 0, Right: 400, Bottom: 1000},
-			"android.widget.TextView", "right", false, false))
+		tapRawNode(0, 0, 0, 0, freeSide, "android.widget.TextView", "left", false, false),
+		tapRawNode(0, 0, 0, 0, freeSide, "android.widget.TextView", "right", false, false))
+	return tapWithExternalPeer(step, tapRawNode(0, 0, 0, 0, freeSide,
+		"android.widget.TextView", "external peer", false, false))
 }
 
 func TestActTapFullyOccludedReportsNoSafePointBlocked(t *testing.T) {
@@ -158,7 +159,7 @@ func TestActTapFullyOccludedReportsNoSafePointBlocked(t *testing.T) {
 
 func TestActTapAmbiguousReportsNoSafePointAmbiguous(t *testing.T) {
 	h := newTapScopeHarness(t)
-	h.device.scriptCaptures(tapAmbiguousCardStep())
+	h.device.scriptCaptures(tapAmbiguousCardWithExternalPeerStep())
 	start := h.startSession()
 	card := tapCardNode(t, h)
 	left := tapContentNodeByLabel(t, currentTree(t, h.engine).Root, "left")
@@ -169,7 +170,8 @@ func TestActTapAmbiguousReportsNoSafePointAmbiguous(t *testing.T) {
 	details := requireStaticRejection(t, result, "no_safe_point", "ambiguous")
 	requireDetailString(t, details, "scope", "target")
 	requireDetailString(t, details, "scope_ref", card.Ref)
-	requireDetailStringSlice(t, details, "blocking_refs", left.Ref, right.Ref)
+	peer := tapContentNodeByLabel(t, currentTree(t, h.engine).Root, "external peer")
+	requireDetailStringSlice(t, details, "blocking_refs", left.Ref, right.Ref, peer.Ref)
 	requireDetailAbsent(t, details, "candidates")
 	requireNoLegacyTapDetailKeys(t, details)
 	if len(h.device.taps) != 0 {
@@ -210,7 +212,8 @@ func TestActTapMixedCandidateFailuresReportBothLists(t *testing.T) {
 		candidates[0]["relation"] != candidateRelationChild || candidates[0]["executable"] != true {
 		t.Fatalf("candidates = %#v, want [%q child executable]", details["candidates"], cover.Ref)
 	}
-	requireDetailStringSlice(t, details, "blocking_refs", left.Ref, right.Ref)
+	peer := tapContentNodeByLabel(t, currentTree(t, h.engine).Root, "external peer")
+	requireDetailStringSlice(t, details, "blocking_refs", left.Ref, right.Ref, peer.Ref)
 	requireNoLegacyTapDetailKeys(t, details)
 	if len(h.device.taps) != 0 {
 		t.Fatalf("mixed rejection dispatched input: %v", h.device.taps)
@@ -544,11 +547,11 @@ func pruningCarrierSuggestionStep() captureStep {
 }
 
 func pruningAmbiguousStep() captureStep {
-	return tapCardWithChildrenStep(device.Rect{Left: 0, Top: 0, Right: 100, Bottom: 100},
-		pruningImageRaw("app:id/pruning_ambiguous_left",
-			device.Rect{Left: 0, Top: 0, Right: 100, Bottom: 100}),
-		pruningImageRaw("app:id/pruning_ambiguous_right",
-			device.Rect{Left: 0, Top: 0, Right: 100, Bottom: 100}))
+	bounds := device.Rect{Left: 0, Top: 0, Right: 100, Bottom: 100}
+	step := tapCardWithChildrenStep(bounds,
+		pruningImageRaw("app:id/pruning_ambiguous_left", bounds),
+		pruningImageRaw("app:id/pruning_ambiguous_right", bounds))
+	return tapWithExternalPeer(step, pruningImageRaw("app:id/pruning_ambiguous_peer", bounds))
 }
 
 func requirePrunedRefInspectable(t *testing.T, h *harness, observation *protocol.Observation,
@@ -657,8 +660,9 @@ func TestActStaticPrunedAmbiguityRemainsInspectable(t *testing.T) {
 	state := observationStateByID(t, h.engine, start.Observation.ID)
 	leftRef, leftOK := sourceRefForResource(state.Projection, "app:id/pruning_ambiguous_left")
 	rightRef, rightOK := sourceRefForResource(state.Projection, "app:id/pruning_ambiguous_right")
-	if !leftOK || !rightOK {
-		t.Fatalf("fixture refs: left=%q/%t right=%q/%t", leftRef, leftOK, rightRef, rightOK)
+	peerRef, peerOK := sourceRefForResource(state.Projection, "app:id/pruning_ambiguous_peer")
+	if !leftOK || !rightOK || !peerOK {
+		t.Fatalf("fixture refs: left=%q/%t right=%q/%t peer=%q/%t", leftRef, leftOK, rightRef, rightOK, peerRef, peerOK)
 	}
 	card := tapPublicBoundsNode(state.tree().Root,
 		device.Rect{Left: 0, Top: 0, Right: 100, Bottom: 100})
@@ -670,7 +674,7 @@ func TestActStaticPrunedAmbiguityRemainsInspectable(t *testing.T) {
 	result := h.actWith(t, "Pprunedambiguous",
 		tapRefRequest(start.Observation.ID, card.Ref))
 	details := requireStaticRejection(t, result, "no_safe_point", "ambiguous")
-	requireDetailStringSlice(t, details, "blocking_refs", leftRef, rightRef)
+	requireDetailStringSlice(t, details, "blocking_refs", leftRef, rightRef, peerRef)
 	requireNoLegacyTapDetailKeys(t, details)
 	if len(h.device.taps) != 0 {
 		t.Fatalf("static ambiguity dispatched input: %v", h.device.taps)
@@ -684,6 +688,7 @@ func TestActStaticPrunedAmbiguityRemainsInspectable(t *testing.T) {
 	requireReadyObservation(t, h, start.Observation.ID)
 	requirePrunedRefInspectable(t, h, start.Observation, leftRef, protocol.RoleImage)
 	requirePrunedRefInspectable(t, h, start.Observation, rightRef, protocol.RoleImage)
+	requirePrunedRefInspectable(t, h, start.Observation, peerRef, protocol.RoleImage)
 }
 
 func TestActTapSuggestionReportsCarrierRef(t *testing.T) {

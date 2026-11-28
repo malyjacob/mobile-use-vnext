@@ -109,57 +109,114 @@ func TestProposalScrollLiftNonScrollItemExecutesAndSkipsItemRevalidate(
 	})
 }
 
-func TestProposalScrollMissingSwipeReturnsUnsupportedWithCandidates(
-	testingHandle *testing.T) {
-	innerBounds := device.Rect{Left: 100, Top: 900, Right: 980, Bottom: 1500}
-	pageStep := scrollPageStep([]rawNodeSpec{
-		{Parent: -1, Bounds: screenRect(), Class: "android.widget.FrameLayout"},
-		{Parent: 0, Bounds: screenRect(), Class: "android.widget.ScrollView", Scrollable: true},
-		{Parent: 1, Bounds: innerBounds, Class: "androidx.recyclerview.widget.RecyclerView",
-			Scrollable: true},
-		{Parent: 2, Bounds: device.Rect{Left: 100, Top: 1000, Right: 980, Bottom: 1200},
-			Class: "android.widget.TextView", Text: "inner-content"},
-	})
-	harnessUnderTest := newHarness(testingHandle)
-	harnessUnderTest.device.scriptCaptures(pageStep)
-	start := harnessUnderTest.startSession()
-	root := currentTree(testingHandle, harnessUnderTest.engine).Root
-	targetNode := tapPublicNode(root, protocol.RoleScroll, innerBounds)
-	ancestorNode := tapPublicNode(root, protocol.RoleScroll, screenRect())
-	if targetNode == nil || ancestorNode == nil {
-		testingHandle.Fatal("missing-swipe fixture nodes were not published")
-	}
-	proposalRemovePublicAction(testingHandle, targetNode, protocol.ActionSwipe)
-
-	result := harnessUnderTest.actP(testingHandle, "", start.Observation.ID,
-		protocol.Operation{
-			Type: "scroll",
-			Container: &protocol.Target{
-				UseRef: true, Ref: targetNode.Ref,
-			},
-			Direction: protocol.ScrollDirectionDown,
+func TestProposalScrollMissingSwipeLiftsOrKeepsStaticRejection(t *testing.T) {
+	outerBounds := scrollOverlayTestRect(0, 0, 1080, 1800)
+	middleBounds := scrollOverlayTestRect(0, 400, 1080, 1400)
+	innerBounds := scrollOverlayTestRect(100, 900, 980, 1300)
+	fallbackBounds := scrollOverlayTestRect(0, 1900, 1080, 2400)
+	for _, tc := range []struct {
+		name, reason string
+		textTarget   bool
+	}{
+		{name: "list_lifts"},
+		{name: "text_lifts", textTarget: true},
+		{name: "disabled_target", reason: protocol.CodeNodeDisabled},
+		{name: "disabled_first_ancestor_list", reason: tapStaticReasonAncestorInvalid},
+		{name: "disabled_first_ancestor_text", reason: tapStaticReasonAncestorInvalid, textTarget: true},
+		{name: "geometryless_first_ancestor", reason: tapStaticReasonAncestorInvalid},
+		{name: "no_outer_capability_list", reason: tapStaticReasonTargetMissingAction},
+		{name: "no_outer_capability_text", reason: tapStaticReasonAncestorMissingAction, textTarget: true},
+		{name: "axis_mismatch_list", reason: staticReasonAxisMismatch},
+		{name: "axis_mismatch_text", reason: staticReasonAxisMismatch, textTarget: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			specs := []rawNodeSpec{
+				{Parent: -1, Bounds: screenRect(), Class: "android.widget.FrameLayout"},
+				{Parent: 0, Bounds: outerBounds, Class: "androidx.core.widget.NestedScrollView", Scrollable: true},
+			}
+			listParent := 1
+			if tc.name == "disabled_first_ancestor_list" || tc.name == "geometryless_first_ancestor" {
+				listParent = len(specs)
+				specs = append(specs, scrollOverlayTestList(1, middleBounds))
+			}
+			listIndex := len(specs)
+			specs = append(specs,
+				rawNodeSpec{Parent: listParent, Bounds: innerBounds, Class: "androidx.recyclerview.widget.RecyclerView", Scrollable: true},
+				rawNodeSpec{Parent: listIndex, Bounds: scrollOverlayTestRect(100, 1000, 980, 1200), Class: "android.widget.TextView", Text: "inner-content"},
+				scrollOverlayTestList(0, fallbackBounds))
+			h, buffer, logger := issue42NewLoggedHarness(t)
+			h.device.scriptCaptures(scrollPageStep(specs))
+			start := h.startSession()
+			outer := issue42ScrollNode(t, h, outerBounds)
+			inner := issue42ScrollNode(t, h, innerBounds)
+			target, nearest := inner, outer
+			if tc.textTarget {
+				target, nearest = issue42TextNode(t, h, "inner-content"), inner
+			}
+			proposalRemovePublicAction(t, inner, protocol.ActionSwipe)
+			switch tc.name {
+			case "disabled_target", "disabled_first_ancestor_text":
+				disabled := false
+				inner.Enabled = &disabled
+			case "disabled_first_ancestor_list":
+				nearest = issue42ScrollNode(t, h, middleBounds)
+				disabled := false
+				nearest.Enabled = &disabled
+			case "geometryless_first_ancestor":
+				nearest = issue42ScrollNode(t, h, middleBounds)
+				nearest.Bounds = nil
+			case "no_outer_capability_list", "no_outer_capability_text":
+				proposalRemovePublicAction(t, outer, protocol.ActionSwipe)
+			case "axis_mismatch_list", "axis_mismatch_text":
+				outer.Axis = protocol.AxisX
+			}
+			operation := staticScrollOperation(target.Ref, protocol.ScrollDirectionDown)
+			switch tc.reason {
+			case "":
+				// Projection derives role=scroll from swipe. The observation
+				// fixture above sets the wire role without swipe, and the fresh
+				// raw RecyclerView has scrollable=false.
+				specs[2].Scrollable = false
+				fresh := scrollPageStep(specs)
+				h.device.scriptCaptures(fresh, fresh)
+				issue42RequireExecutedScroll(t, h.actP(t, "", start.Observation.ID, operation))
+				proposalRequireSwipe(t, h, swipeCall{displayID: 12, x1: 540, y1: 1332, x2: 540, y2: 468, durationMS: 400})
+				issue42RequirePlan(t, issue42PlanFields(t, buffer, logger), scrollModeAncestorLift, operation.Direction, operation.Amount)
+			case protocol.CodeNodeDisabled:
+				captures := h.device.captureCount()
+				result := h.actP(t, "", start.Observation.ID, operation)
+				if result.Error == nil || result.Error.Code != protocol.CodeNodeDisabled || result.Outcome != OutcomeNotExecuted {
+					t.Fatalf("disabled target result = %+v, want node_disabled before claim", result)
+				}
+				if h.device.captureCount() != captures || observationStatus(h, start.Observation.ID) != ObservationReady {
+					t.Fatal("disabled target caused a new capture or consumed the observation")
+				}
+				proposalRequireNoDispatch(t, h)
+			default:
+				details := issue42RequireStaticRejection(t, h, start.Observation.ID, operation, tc.reason)
+				scope, scopeRef := tapStaticScopeAncestor, nearest.Ref
+				if tc.reason == tapStaticReasonTargetMissingAction {
+					scope, scopeRef = tapStaticScopeTarget, target.Ref
+				}
+				proposalRequireDetailString(t, details, "scope", scope)
+				proposalRequireDetailString(t, details, "scope_ref", scopeRef)
+				if scope == tapStaticScopeAncestor {
+					proposalRequireDetailString(t, details, "ancestor_ref", scopeRef)
+				}
+				proposalRequireEmptyTargetActions(t, details)
+				if tc.reason == tapStaticReasonTargetMissingAction || tc.reason == tapStaticReasonAncestorMissingAction {
+					fallback := issue42ScrollNode(t, h, fallbackBounds)
+					candidates := proposalCandidates(t, details)
+					proposalRequireCandidateRefs(t, candidates, fallback.Ref)
+					proposalRequireCandidateExecutable(t, candidates, fallback.Ref)
+					proposalRequireCandidateRelation(t, candidates, fallback.Ref, candidateRelationPageScroll)
+					if candidate := proposalScrollCandidateByRef(t, candidates, fallback.Ref); candidate["role"] != string(protocol.RoleScroll) {
+						t.Fatalf("fallback candidate role = %#v, want %q", candidate["role"], protocol.RoleScroll)
+					}
+				}
+			}
 		})
-	details := proposalRequireStaticReason(testingHandle, result,
-		protocol.CodeNodeUnsupported, "target_missing_action")
-	proposalRequireDetailString(testingHandle, details, "scope", "target")
-	proposalRequireDetailString(testingHandle, details, "scope_ref", targetNode.Ref)
-	proposalRequireEmptyTargetActions(testingHandle, details)
-	candidates := proposalCandidates(testingHandle, details)
-	proposalRequireCandidateRefs(testingHandle, candidates, ancestorNode.Ref)
-	proposalRequireCandidateExecutable(testingHandle, candidates, ancestorNode.Ref)
-	ancestorCandidate := proposalScrollCandidateByRef(testingHandle, candidates,
-		ancestorNode.Ref)
-	if ancestorCandidate["role"] != string(protocol.RoleScroll) {
-		testingHandle.Fatalf("ancestor candidate role = %#v, want %q",
-			ancestorCandidate["role"], protocol.RoleScroll)
 	}
-	switch ancestorCandidate["relation"] {
-	case "ancestor", "page_scroll":
-	default:
-		testingHandle.Fatalf("ancestor candidate relation = %#v, want ancestor or page_scroll",
-			ancestorCandidate["relation"])
-	}
-	proposalRequireNoDispatch(testingHandle, harnessUnderTest)
 }
 
 func TestProposalScrollNonScrollNoScrollAncestorReturnsPageScrollCandidates(

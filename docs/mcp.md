@@ -44,7 +44,7 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
 语义。已废除的 `press_enter` 不是别名，按未知成员拒绝。schema 的字段说明写明默认值，不发布
 可能被误读为全类型生效的通用 `default`。
 
-`act` 的滚动与手势输入与 [接口契约](interface.md) §6 一致：`scroll` 用 `container`（ref 或
+`act` 的滚动与手势输入与 [接口契约 §6](interface.md#6-post-apiact) 一致：`scroll` 用 `container`（ref 或
 坐标）与 `direction`（`up`/`down`/`left`/`right`）表达，可选 `amount` 为闭合四档
 `step`/`half`/`page`/`full`（可用跨度 15%/30%/60%/85%，注入时长 500/450/400/300ms，最小行程
 32/48/48/48px，省略为 `page`，其他值不接受）；
@@ -54,11 +54,11 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
 因此暴露 `scroll`、`container`、`direction`、`amount`、`duration_ms`、`bubble`、`auto_submit`
 与 `submit_ref`；服务端严格解码仍是权威。
 
-`tap`/`long_press` 的 `ref` 目标自身已有请求动作时（无论 `bubble` 值），均走直接目标规划（4 级选点含 3×3 网格；全败时若存在唯一双向同视口可点击子容器则自动委托并双绑定重验）。原目标完全没有 `tap`、`long_press`、`text` 动作且有效 `bubble=true`（省略或显式 true）时，先在原目标视觉区内按最近 touch-interactive 祖先 `A` 规划（`bubble_ancestor`；遇竞争交互控件重合即止漂）；若该路不可行，再吸附满足局部共位与反底板守卫的唯一可点击目标 `B`（`bubble_colocated`）。静态规划同时绑定原 child 与执行目标；认领后重验两者、公开 Role 与完整 Label、关系守卫及安全点，失配返回 `409 target_changed`（附封闭 `details.reason`），零派发。有效 `bubble=false` 禁用 `bubble_ancestor` 与 `bubble_colocated`（原目标自身已有请求动作时仍走直接规划并可使用 `coextensive_child`），坐标目标必须省略 `bubble`。该解析只在一次调用内派发一个动作，不模拟 DOM 多级事件传播。
+`tap`/`long_press` 的 `ref` 目标自身已有请求动作时（无论 `bubble` 值），均走直接目标三段选点：固定 4 级选点（含 3×3 网格）只按目标子树内的唯一最深命中判定；全败时在目标可视区扣除阻塞区后的平面上求 2D 残余安全区（短边至少 16px，至多 8 个候选点），其单命中候选还须无外部交互拥有者覆盖；两级单命中都不成立时才接受被动多命中：最深命中全部属于目标自身，或经无交互/`context` 边界路径的严格后代（非阻塞被动载体），整树同点命中也均属目标或其被动载体，且无外部交互拥有者覆盖。三段均败后若存在唯一双向同视口（≥85%）、具备请求动作且自身可规划的点击子容器，且其他顶层阻塞者都非 `context`、有几何、裁剪面积不超过目标 25%，则自动委托并双绑定重验（额外阻塞者存在时落点须无外部交互拥有者）。原目标完全没有 `tap`、`long_press`、`text` 动作且有效 `bubble=true`（省略或显式 true）时，沿公开父链跳过 `context` 与普通容器、止于 `root` 取最近 touch-interactive 祖先 `A`：局部先在原目标视觉区内按中心/中心线/3×3 网格（不含载体中心）取单命中点，再取残余安全区单命中，最后才接受被动多命中；`A` 的整域补测走完整三段（含载体中心）；`A` 段几何或落点失败仍继续尝试共位吸附（步 B）。若该路不可行，再吸附满足局部共位与反底板守卫的可点击目标 `B`（`bubble_colocated`）：`B` 先在原目标裁剪区内按局部视觉点、残余安全区单命中、被动多命中的顺序选点，局部失败后再按自身三段整域选点，任一成功都进入折叠/消歧集合，只有局部成功才把落点标记在原目标裁剪区内；折叠后唯一则吸附，否则在“同时覆盖原目标中心且在裁剪区内”的子集非空时只在该子集内做最内层归约，子集为空时才对全部覆盖中心的目标做同一归约；没有覆盖中心的目标或仍不唯一都报 `422 no_safe_point`，`candidates` 列出局部与整域两路的冲突项，覆盖原目标中心者优先）。原目标自身可交互但缺本次请求动作且 `bubble=true` 时，先向下委托唯一支持该动作的同视口子容器（判据同上），未命中才返回 `422 unsupported_node_action`（`reason=target_has_other_action`），绝不向祖先冒泡。静态规划同时绑定原 child 与执行目标；认领后重验两者、公开 Role 与完整 Label、关系守卫及安全点，失配返回 `409 target_changed`（附封闭 `details.reason`），零派发。有效 `bubble=false` 禁用 `bubble_ancestor` 与 `bubble_colocated`（原目标自身已有请求动作时仍走直接规划并可使用 `coextensive_child`），坐标目标必须省略 `bubble`。该解析只在一次调用内派发一个动作，不模拟 DOM 多级事件传播；静态自动解析与委托沿用静默语义，不写 `Result.auto_recovery`。
 
-`scroll` 支持双向同视口（宽与高交集各 ≥85%）滚动栈直传不互阻、非滚动节点 `ref` 自动向上找最近滚动祖先提升、坐标选最内层并在不可行时沿命中祖先回退或唯一可执行消歧，以及在安全区间正中对称展开的 3 轴线（50%/25%/75%）居中轨迹。容器公开 `axis` 与请求方向冲突，或未知轴向的嵌套极端扁平条带与请求轴不兼容时，服务沿公开父链自动回退到兼容外层滚动祖先；父链无解时尝试唯一轴向兼容的内层容器，仍无解才返回 `422 unsupported_node_action`（`reason=axis_mismatch`），若有兼容容器进入规划但均失败则返回其规划错误。坐标 `tap`/`long_press`/`text` 使用最深命中集合证明并按请求动作唯一拥有者消歧，raw `swipe` 永不返回 `ambiguous_point`。
+`scroll` 支持双向同视口（宽与高交集各 ≥85%）滚动栈直传不互阻、非滚动节点 `ref` 自动向上找最近滚动祖先提升、坐标选最内层并在不可行时沿命中祖先回退或唯一可执行消歧，以及在安全区间正中对称展开的 3 轴线（50%/25%/75%）居中轨迹。内层自动委托只用于 `container.ref` 路径，坐标容器不触发。容器公开 `axis` 与请求方向冲突，或未知轴向的嵌套极端扁平条带与请求轴不兼容时，服务先沿公开父链回退到兼容外层滚动祖先，全部试败后才允许唯一轴向兼容的内层容器接管（不要求同视口或面积占比门限；遮罩/浮层过滤不豁免请求目标之外的模态遮罩）；内层也无解时，若兼容祖先进入过规划则返回其规划错误，否则返回 `422 unsupported_node_action`（`reason=axis_mismatch`）。`role=scroll` 但缺 `swipe` 且未禁用、有几何时，没有滚动祖先保留 `target_missing_action`；只有最近滚动祖先禁用或无几何才按 `ancestor_invalid` 停步，否则跳过无 `swipe`、无几何与轴向不兼容的祖先向首个兼容祖先提升，失败时按实际规划错误或 `axis_mismatch`/`target_missing_action` 收口。非滚动 `ref` 同样先向上提升（最近祖先缺 `swipe` 不阻止提升）；只有向上没有滚动祖先，或至少一个有几何的有效滚动祖先仅因轴向不兼容被跳过且没有兼容祖先进入规划时，才在唯一可执行兼容滚动容器覆盖目标至少 50% 面积且通过同一遮罩过滤时向下委托；最近祖先禁用或无几何、或兼容祖先进入规划而失败时不触发该向下委托，按真实错误收口；仍无解才返回 `422 unsupported_node_action`（`reason=not_scrollable`/`axis_mismatch`/`ancestor_missing_action`）并附过滤后的候选。同轴容器 3 轴轨迹全败时的内层兜底仍不接受同视口子容器，也不设面积占比门限。坐标 `tap`/`long_press`/`text` 使用最深命中集合证明：最深命中超过 64 个时不做归约、直接返回 `422 ambiguous_point`；多个交互拥有者先按请求动作筛选并做祖先-后代最内层归约，最内层必须恰 1 个（0 与 ≥2 都拒绝）才消歧执行，≤1 个拥有者直接执行；认领后仍要求原命中集合等量映射，归约只用于竞争检查。raw `swipe` 永不返回 `ambiguous_point`。
 
-除参数语法、`409 node_not_found`/`node_disabled` 及 `text` 的非可编辑/受保护拒绝（`422 text_target_uncertain`）外，全 `act` 静态目标解析与规划拒绝统一收口为 5 个正交 `422` 错误码：`invalid_target`、`unsupported_node_action`、`ambiguous_point`、`no_safe_point`、`no_safe_trajectory`（`scroll` 的轴向失配为 `unsupported_node_action` + `reason=axis_mismatch`）。静态拒绝不认领 O，结果为 `not_executed`；`error.details` 携带封闭 `reason`、按出口约定的 `scope`/`scope_ref`，有候选时附至多 4 项经当前同一 O 干跑计算的 `candidates`（含 `ref`/`role`/`actions`/`bounds`/`relation`/`executable`），以及可选 `blocking_refs`（至多 3 项）。原 O 仍 ready 且 `candidates` 中存在 `executable=true` 的项时，可直接取首个 `executable=true` 的 `ref` 用同一 O 与新 P 重试，无需重观察或手算坐标；需要查看诊断子树时仍可用 `inspect({reference: 原 act 的 O, node: ref})` 补看。
+除参数语法、`409 node_not_found`/`node_disabled` 及 `text` 的非可编辑/受保护拒绝（`422 text_target_uncertain`）外，全 `act` 静态目标解析与规划拒绝统一收口为 5 个正交 `422` 错误码：`invalid_target`、`unsupported_node_action`、`ambiguous_point`、`no_safe_point`、`no_safe_trajectory`（`scroll` 的轴向失配为 `unsupported_node_action` + `reason=axis_mismatch`）。静态拒绝不认领 O，结果为 `not_executed`；`error.details` 携带封闭 `reason`、按出口约定的 `scope`/`scope_ref`，有候选时附至多 4 项经当前同一 O 干跑计算的 `candidates`（含 `ref`/`role`/`actions`/`bounds`/`relation`/`executable`），以及可选 `blocking_refs`（至多 3 项）。`422 text_target_uncertain` 在 `stage=target`、`reason=target_not_editable` 且存在合法候选输入框时也附这组 `candidates`（不附 `blocking_refs`），`target_protected` 与 focus/write/verify/submit 阶段错误不带；不新增错误码或详情键。原 O 仍 ready 且 `candidates` 中存在 `executable=true` 的项时，可直接取首个 `executable=true` 的 `ref` 用同一 O 与新 P 重试，无需重观察或手算坐标；需要查看诊断子树时仍可用 `inspect({reference: 原 act 的 O, node: ref})` 补看。
 
 `unsupported_node_action` 的 `reason=no_interactive_ancestor` 在目标有有效屏内裁剪几何时可带
 `error.details.target_center: [x, y]`，也适用于 `text` 的 `submit_ref` 静态校验。它只表达
@@ -74,10 +74,23 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
 与裸 `swipe` 的重验不返回 `changed_ref`；坐标 `scroll` 与 ref 容器一样，在
 `reason=lineage_changed` 且能唯一确定断裂公开祖先时可返回 `changed_ref`。
 
-`text` 的 `ref` 目标只要求 `role=input`、公开动作含 `text`、未禁用、`protected=false` 与正面积
-几何，不要求 `tap` 动作。`text` 默认 `auto_submit=true`、`submit_ref="enter_key"`：一次调用
-完成必要聚焦（已聚焦 ref 走零点击快路径，未聚焦时在目标子树内规划唯一安全落点并至多点击
-一次）、将目标框全文设为 text、确认写入，随后至多发送一次 ENTER；普通输入不需要先 tap 或
+`text` 的 `ref` 目标分两类：直接合法输入框要求 `role=input`、公开动作含 `text`、未禁用、
+`protected` 显式为 `false` 与正面积几何，不要求 `tap` 动作；`protected` 非显式 `false`（含未知）
+直接返回 `422 text_target_uncertain`（`reason=target_protected`），不恢复也不带候选，该检查只适用于
+具有 `text` 动作的直接输入框，`role=input` 但缺 `text` 的受限/只读框仍按 `target_not_editable`
+处理。非输入包装壳、输入框内占位子或扁平共位输入框按三步硬停顺序定向绑定，任一步失败即返回
+`target_not_editable`（不回退后续路径）：包装壳（目标小于半屏）只在后代 `role=input` 为 0 个时
+进入占位子路径，恰 1 个时只尝试该节点（不合法、无几何、无正面积交集或聚焦规划失败即拒绝），≥2 个直接
+拒绝；占位子只对非交互目标尝试最近交互祖先（跳过 `context`、止于 `root`），存在即不再向上或转入
+共位、失败即拒绝，大于等于半屏的目标跳过包装壳分支后仍走本步；仅当目标非交互、小于半屏且不存在
+交互祖先时，才扫描非 `context`、既非公开祖先也非公开后代且满足共位匹配与反底板守卫的 `RoleInput`
+（含禁用/受保护/缺 `text` 者一并计数，恰 1 个后才验证它合格并尝试聚焦）。未命中返回
+`422 text_target_uncertain`（`stage=target`、`reason=target_not_editable`），存在合法候选输入框时
+附 `candidates`。任何分支都不绕过密码框、禁用框或受保护框。`text` 默认 `auto_submit=true`、
+`submit_ref="enter_key"`：一次调用完成必要聚焦（已聚焦 ref 走零点击快路径，未聚焦时在目标子树内
+按固定 4 级、残余安全区、被动多命中三段规划安全落点，并可委托唯一同视口的合法输入子框，至多
+点击一次；直接合法输入框无安全落点返回 `422 no_safe_point`，经定向绑定得到的输入框聚焦失败回落
+`target_not_editable`）、将目标框全文设为 text、确认写入，随后至多发送一次 ENTER；普通输入不需要先 tap 或
 另发 ENTER。写入确认以写后刷新值精确相等为准；不可读或不等时至多 3 次只读读回（`40ms`/
 `80ms`/`150ms` 退避，墙钟上限 `1000ms`），几何变化时允许一次严格写后重绑定，仍不成立返回
 `uncertain`。显式 `operation.auto_submit=false` 只做必要聚焦、写入并读回，不发送提交原语，
@@ -92,10 +105,12 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
 两者都不证明搜索、提交、导航或业务结果。
 
 `text` 的认领前静态目标拒绝与派发阶段失败（含 `outcome=partial` 与 `outcome=uncertain`；
-认领后重验的 `409 target_changed` 使用统一 `phase=revalidate` 详情，见 [接口契约](interface.md)
-§6）的 `error.details` 固定给出 `stage`（`target`/`focus`/`write`/`verify`/`submit`）、`reason` 与
+认领后重验的 `409 target_changed` 使用统一 `phase=revalidate` 详情，见 [接口契约 §6](interface.md#6-post-apiact)）
+的 `error.details` 固定给出 `stage`（`target`/`focus`/`write`/`verify`/`submit`）、`reason` 与
 `dispatch.focus/write/submit`（`not_attempted|not_dispatched|dispatched|unknown`），
-可选 `candidate_count` 保留 `0`；MCP 的 structured/text/both 三种模式都保留同一组嵌套字段
+可选 `candidate_count` 保留 `0`；`stage=target`、`reason=target_not_editable` 且存在合法候选输入框
+时另附既有 `candidates`（与 5 码静态候选同为 6 字段、至多 4 项，经同一 O 干跑），`target_protected`
+与 focus/write/verify/submit 阶段不带；MCP 的 structured/text/both 三种模式都保留同一组嵌套字段
 （文本写作 `error.details=<紧凑 JSON>`），调用方按枚举决策而不解析 `message`。
 `submit_ref` 自身不存在返回 `409 node_not_found`；结构、能力或无安全落点的静态拒绝沿用 5 个
 `422` 码与 `candidates`，`details.scope_ref` 指向 `submit_ref` 或其祖先，失败不认领 O。
@@ -110,7 +125,7 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
 同一 `recovery` 观察。这个特定恢复覆盖通用的 `uncertain` 先 `status` 规则。当 `ref=` 是
 抽象词 `P` 而不是具体编号时，使用原活动会话的具体归属 P（如 `session.origin` 或已知属于该
 会话的 `operation_id`），不能把枚举值 P 当作编号。实时会话/耐久/设备/忙阻塞才覆盖为
-`end`/`status`/`user` 并给 `blocking_code`。字段与合法组合见 [接口契约](interface.md) §6。
+`end`/`status`/`user` 并给 `blocking_code`。字段与合法组合见 [接口契约 §6](interface.md#6-post-apiact)。
 
 公共树语法与调用规则由 server instructions 发布：`server/discover` 与兼容 `initialize`
 返回同一份说明，包含一份完整树图例，以及会话推进、O/P、`reference`、租期和跨工具恢复。
@@ -271,7 +286,7 @@ owned 他屏任务）。控制 App 包、前台服务/播放门禁、root
 `effect` 只由 `scroll` 的操作结果与保留的 P 视图携带，带树的观察都携带
 `observation.quality`（未采样或重验交付为 `unknown`/`0`/`not_sampled`），只有没有树的失败
 观察不携带它。`structured`/`both` 的 `structuredContent` 携带完整对象；`text` 与
-`both` 的 `result v4` 文本省略两个整对象。成员与取值见 [接口契约](interface.md) §11。
+`both` 的 `result v4` 文本省略两个整对象。成员与取值见 [接口契约 §11](interface.md#11-数据对象)。
 
 复合 `text` 的 `text_input`、`act` 的 `auto_recovery`、`wait_for` 的 `wait`、`snap` 的顶层
 `image` 与 `app` 结果同样取自这一份 `Result`；文本行与块语法见 3.2。显式 `auto_submit=false` 和非法组合不会产生

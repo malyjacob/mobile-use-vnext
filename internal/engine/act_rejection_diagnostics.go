@@ -168,6 +168,7 @@ func (e *Engine) changedPointBlockingRefs(ctx context.Context, original, publish
 	if oldView, apiErr := collectTapPublicView(original); apiErr == nil {
 		oldOwners := collectPointOwners(oldView, resolvePointSet(oldView.tree.Root, x, y))
 		oldOwners = filterMatchingPointOwners(oldOwners, operation)
+		oldOwners = innermostPointOwners(oldView, oldOwners)
 		if len(oldOwners) == 1 {
 			expected = e.matchRejectedPublicTarget(ctx, original, published, operation.Type,
 				sourceNode(original, oldOwners[0].Ref))

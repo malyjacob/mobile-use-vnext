@@ -68,7 +68,7 @@ func canRebindActTarget(kind, ref, reason string, tap *tapPlan) bool {
 	}
 	switch kind {
 	case "text":
-		return true
+		return tap.delegateRaw == nil
 	case "tap", "long_press":
 		return tap.bubbleAncestorRaw == nil && tap.colocatedRaw == nil && tap.delegateRaw == nil
 	}

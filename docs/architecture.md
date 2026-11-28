@@ -199,29 +199,43 @@ engine 的状态锁只做有限内存检查与转换：锁内不等待 ADB、u2 
   与请求轴冲突为不兼容，显式支持请求轴（含 `both`）为兼容且豁免扁平几何判据；`axis` 未知时，
   处于非同视口外层滚动祖先内、正交边不短于请求轴边 2 倍、请求轴跨度严格小于该祖先与屏幕同轴
   跨度较大者 25% 的极端扁平条带为不兼容；独立滚动容器不因自身外框比例自拒；
-- 容器在观察的公开树中解析：`container.ref` 若自身是有效 `role=scroll`（含 `swipe`）则直接作为锚点
-  （轴向不兼容时沿公开父链回退到最近兼容且可规划的外层滚动祖先，父链无解时尝试唯一轴向兼容的
-  内层子滚动容器，仍无解返回 `422 unsupported_node_action`（`reason=axis_mismatch`）并附
-  `candidates`；兼容祖先进入规划但均失败时返回其规划错误），若自身是 `role=scroll` 但缺 `swipe` 报
-  `422 unsupported_node_action`；若为非滚动
-  节点则沿公开父链跳过 `context` 止于 `root` 查找最近 `role=scroll` 祖先并自动提升，最近祖先轴向
-  不兼容时继续向更外层兼容祖先提升，整条链无兼容祖先时返回 `422 unsupported_node_action`
-  （`reason=axis_mismatch`、`scope=ancestor`）。坐标 `container={x,y}` 收集命中点上的全部有效滚动
-  容器并归约父子链保留最内层集合 `I`：最内层轴向不兼容或轨迹被阻时沿命中祖先由近及远回退兼容
-  容器，全部不兼容返回 `422 unsupported_node_action`（`reason=axis_mismatch`、`scope=point`）；
-  多个互不为祖先的平级容器只在轴向兼容且恰 1 个可执行时唯一消歧，否则返回 `422 ambiguous_point`
-  并附 `candidates`；
+- 容器在观察的公开树中解析；内层自动委托只用于 `container.ref` 路径，坐标 `container={x,y}` 不触发：
+  - `container.ref` 自身是有效 `role=scroll`（含 `swipe`）时直接作为锚点：轴向兼容则直接规划；轴向不兼容
+    时先沿公开父链回退到最近兼容且可规划的外层滚动祖先，全部试败后才允许唯一轴向兼容的严格内层子滚动
+    容器接管（该内层容器既可同视口也可非同视口，不要求同视口或面积占比门限；以不豁免请求目标之外模态
+    遮罩的遮罩/浮层过滤剔除候选，折叠双向同视口祖先-后代后仍唯一才委托）；内层也无解时，兼容祖先进入过
+    规划则返回其首个规划错误，否则返回 `422 unsupported_node_action`（`reason=axis_mismatch`）并附
+    `candidates`；
+  - `container.ref` 是 `role=scroll` 但缺 `swipe` 时，没有滚动祖先保留 `target_missing_action`；有滚动祖先且
+    最近祖先显式禁用或无裁剪几何时按 `ancestor_invalid` 停步；否则跳过无 `swipe`、非滚动、无几何与轴向
+    不兼容的后续祖先，向首个兼容且可规划的祖先提升；失败时若有兼容祖先进入规划则返回其规划错误，否则有
+    有效滚动祖先仅因轴向不兼容被跳过时返回 `axis_mismatch`，再无则保留 `target_missing_action`；
+  - `container.ref` 为非滚动节点时沿公开父链跳过 `context` 止于 `root` 查找最近 `role=scroll` 祖先并自动提升；
+    最近祖先缺 `swipe` 不阻止继续提升，最近祖先轴向不兼容时继续向更外层兼容祖先提升；最近祖先显式禁用
+    或无裁剪几何时按 `ancestor_invalid` 停步；向上没有任何可执行兼容计划（无滚动祖先，或至少一个有几何的
+    有效滚动祖先仅因轴向不兼容被跳过且没有兼容祖先进入规划）时，仅在目标矩形有效、子树内存在唯一可执行
+    且轴向兼容的滚动容器覆盖该矩形至少 50% 面积并同样通过遮罩过滤与折叠唯一性时向下委托；有兼容祖先进入
+    规划而失败时返回其规划错误，不触发该向下委托；仍无解时才返回 `422 unsupported_node_action`
+    （`reason=not_scrollable`、`axis_mismatch` 或 `ancestor_missing_action`，按实际入口取 `scope`）并附
+    过滤后的 `candidates`。
+  - 坐标 `container={x,y}` 收集命中点上的全部有效滚动容器并归约父子链保留最内层集合
+    `I`：最内层轴向不兼容或轨迹被阻时沿命中祖先由近及远回退兼容容器，全部不兼容返回
+    `422 unsupported_node_action`（`reason=axis_mismatch`、`scope=point`）；
+    多个互不为祖先的平级容器只在轴向兼容且恰 1 个可执行时唯一消歧，否则返回 `422 ambiguous_point`
+    并附 `candidates`；
 - 静态规划按 `50% → 25% → 75%` 固定顺序探测 3 条正交轴线：将自身、`raw` 外层祖先及满足双向同视口
   （双方宽与高交集均 ≥85%）的嵌套滚动子容器豁免阻塞，其余具有独立滚动作用域或未知来源的节点投影成
   轴上阻塞区间；在最长安全区间正中对称展开四档轨迹（`scrollGeometry` 显式接收选定轴线坐标，不回弹
   中点）：`step`/`half`/`page`/`full` 取可用跨度的 15%/30%/60%/85%，最小行程
   32px/48px/48px/48px，注入时长固定为 500/450/400/300ms；`scroll` 不接受 `duration_ms`。仅直接
-  `container.ref` 3 轴全败时检查唯一可执行非同视口内层子滚动兜底；否则返回
+  `container.ref` 3 轴全败时检查唯一可执行的非同视口内层子滚动兜底（不启用同视口委托与面积占比
+  门限，仍按同一遮罩/浮层过滤）；否则返回
   `422 no_safe_trajectory`（`trajectory_blocked` / `insufficient_travel`）并附 `candidates` 与可选 `blocking_refs`；
 - 认领后容器走 Tier 1–5 双向唯一匹配，校验新鲜 `isScrollContainer`、`sameScrollScope`（轴向重叠与离轴容差）及公开 `axis` 未与请求方向显式冲突（冲突按 `409 target_changed`、`reason=capability_changed` 零派发）；Tier 4/5 的滚动容器证据是 E1（容器自身非空可读文案/描述两侧相等）、E2（同屏同包全树双向唯一的非空资源）或滚动容器专用的 E3（两侧非空可读文案至少有 1 项共享；或同一非空资源且双向面积覆盖 ≥85%）之一，不要求容器内全部文案不变；
   新鲜树按相同双向同视口规则先证明原段，失效时在同一容器内按 3 轴线与居中规则重规划；失败返回
   `409 target_changed` 并附统一 `phase=revalidate` 的 `details.reason`（滚动典型为 `target_missing`/`target_ambiguous`/`lineage_changed`/`capability_changed`/`scroll_scope_changed`/`trajectory_blocked`）；
-- 静态不可执行在认领前拒绝，新鲜不成立走重验失败的交付路径。单次 `act(scroll)` 最多派发一次手势，不按派发后观察补滑；
+- 静态不可执行在认领前拒绝，新鲜不成立走重验失败的交付路径。单次 `act(scroll)` 最多派发一次手势，
+  不按派发后观察补滑；静态内层与祖先提升委托和其它静态解析一样不写 `Result.auto_recovery`；
 - 静态 `422` 的 `candidates` 先按前景上下文过滤再排序：剔除与请求目标不属于同一顶层窗口的容器
   （窗口顺序来自固定 `u2.jar` 的 `HashSet`，不代表 z 序，因此只比较窗口归属等值）；剔除被无文案
   的外部点击遮罩叶覆盖的容器（`v_mask`/`shadow`/`touch_outside` 一类，候选与请求目标的
@@ -232,40 +246,78 @@ engine 的状态锁只做有限内存检查与转换：锁内不等待 ADB、u2 
   的精确 2D 并集覆盖候选 ≥50% 的候选同样剔除；保留项按与请求目标的公共祖先深度降序稳定排序
   （同前景分支优先于跨分支），再按 `executable=true` 优先截取前 4 项。全部被剔除时省略
   `candidates`，绝不回退被遮挡的背景页面。轨迹证明仍按 `scrollSafeSpansAt` 的保守规则（3 条
-  轴线与安全区间扣除，取第一条整段通过的轨迹），遮挡信息只用于剔除静态候选、不参与派发；
+  轴线与安全区间扣除，取第一条整段通过的轨迹），遮挡信息只用于剔除静态候选与内层自动委托的候选、不参与派发；
   固定 `u2.jar` 只提供窗口根集合、不提供真实 z 序，单窗口侧边抽屉对自身请求受控 `scroll`
   仍可能返回 `422 no_safe_trajectory`。
 
 坐标 `tap`/`long_press`/`text` 与 raw `swipe` 都以最深命中集合为授权单位：认领前在观察公开树中解析原点，认领后在新鲜帧重新取得命中集合，并按动作类型分别证明。集合匹配使用有界二分图最大匹配（Kuhn 增广路，命中集合顶点数上限 64），不要求逐边一一对应。
 
-- **坐标 `tap`/`long_press`/`text`**：单边兼容要求目标自身源结构（包、类、文案、描述、资源与全部能力/启用/密码/可编辑三态）无已知冲突，新矩形在屏内且仍包含原点。匹配分两级：优先要求几何相交（重叠率至少 0.50）且原始祖先链 L1 或 L2 对齐；祖先链重建时，允许以双向面积覆盖均 ≥80% 的紧几何，加 E1 自身非空可读文案/描述、E2 全树双向唯一的非空资源、或 E3 有界子树可读文案指纹（输入/点击目标要求两侧指纹非空且排序后完全相等，精确多重集不成立时接受数字骨架守恒）之一作为抗重建回退。通过后还要在新鲜命中集合上重新归约最近交互拥有者，确认原点未引入新的竞争交互目标。上述几何、祖先链与拥有者条件都只约束严格证明：任一不成立即严格证明失败并归因 `409 target_changed`（`reason=point_changed`），坐标 `tap`/`long_press` 仍可能由紧随其后的唯一交互拥有者守恒放行。严格命中集合证明失败时，坐标 `tap`/`long_press` 仍可在原点始终不变、绝不重定向的前提下接受唯一交互拥有者守恒：新旧两帧在该点各恰有 1 个交互拥有者且都支持请求动作，该点最深命中的每个节点都是该拥有者本身或其公开后代，两帧都没有覆盖该点的外部交互拥有者，新拥有者矩形在屏内且包含该点，ref 匹配器在禁用 Tier 5 平移找回、只允许 Tier 1–4 的条件下把旧拥有者唯一映射到新拥有者，且旧拥有者既无自身可读文案/描述、也无全树唯一资源身份时目标子树再满足 E3（含数字骨架守恒）。其余任一
+- **坐标 `tap`/`long_press`/`text`**：单边兼容要求目标自身源结构（包、类、文案、描述、资源与全部能力/启用/密码/可编辑三态）无已知冲突，新矩形在屏内且仍包含原点。匹配分两级：优先要求几何相交（重叠率至少 0.50）且原始祖先链 L1 或 L2 对齐；祖先链重建时，允许以双向面积覆盖均 ≥80% 的紧几何，加 E1 自身非空可读文案/描述、E2 全树双向唯一的非空资源、或 E3 有界子树可读文案指纹（输入/点击目标要求两侧指纹非空且排序后完全相等，精确多重集不成立时接受数字骨架守恒）之一作为抗重建回退。通过后还要在新鲜命中集合上重新归约最近交互拥有者，确认原点未引入新的竞争交互目标；原命中集合的等量映射与结构匹配仍是硬条件，多个原始拥有者时的最内层归约只用于通过竞争检查。上述几何、祖先链与拥有者条件都只约束严格证明：任一不成立即严格证明失败并归因 `409 target_changed`（`reason=point_changed`），坐标 `tap`/`long_press` 仍可能由紧随其后的唯一交互拥有者守恒放行。严格命中集合证明失败时，坐标 `tap`/`long_press` 仍可在原点始终不变、绝不重定向的前提下接受唯一交互拥有者守恒：新旧两帧在该点各恰有 1 个交互拥有者且都支持请求动作，该点最深命中的每个节点都是该拥有者本身或其公开后代，两帧都没有覆盖该点的外部交互拥有者，新拥有者矩形在屏内且包含该点，ref 匹配器在禁用 Tier 5 平移找回、只允许 Tier 1–4 的条件下把旧拥有者唯一映射到新拥有者，且旧拥有者既无自身可读文案/描述、也无全树唯一资源身份时目标子树再满足 E3（含数字骨架守恒）。其余任一
 条件不成立仍是 `409 target_changed`（`reason=point_changed`），STOP、预算耗尽与畸形树保持既有终态；
 坐标 `text` 与 raw `swipe` 不走该兜底，二者的严格证明不被放宽。
-- **raw `swipe`**：只证明起点区域的源结构与防新遮挡，不要求无动作被动叶子的文案不变。新帧命中集合必须与旧集合等大且全部映射到互异有效节点；每个旧节点与新节点须同显示、同包、同类、同可编辑性，资源与点击/长按/滚动/启用/密码/勾选三态无冲突；任一侧具备动作能力时，文案与描述也不得冲突，两侧均为无动作被动叶子时忽略其文案与描述。新矩形必须在屏内、仍包含起点，且与旧矩形尺寸兼容、重叠率 ≥0.60、面积比不超过 4 倍。`Focused`、`Selected`、`Checked` 与祖先包装层差异不参与判定。任何新增更深层弹窗、对话框或浮层改变命中集合长度或节点结构时，该帧证明失败并归因 `point_changed`（属于可复检的瞬态归因）。raw `swipe` 永不返回 `ambiguous_point`：观察时命中超过 64 个节点则不做集合证明，只保留前台级校验；观察时命中为空时，新鲜帧同一点也必须仍为空，空白点被新节点或浮层覆盖同样拒绝。`tap`/`long_press`/`text` 对最深命中集合归约最近交互拥有者，≤1 个拥有者或恰 1 个满足请求动作能力的拥有者时直接消歧执行，否则返回 `422 ambiguous_point` 并附排序 `candidates`。`scroll` 不证明真实滚动方向、触摸消费者、业务安全或到达边界；设备事实仍只有 `Scrollable bool`，公开 `axis` 只是类名与子项排布得到的投影，不证明设备真实滚动轴。
+- **raw `swipe`**：只证明起点区域的源结构与防新遮挡，不要求无动作被动叶子的文案不变。新帧命中集合必须与旧集合等大且全部映射到互异有效节点；每个旧节点与新节点须同显示、同包、同类、同可编辑性，资源与点击/长按/滚动/启用/密码/勾选三态无冲突；任一侧具备动作能力时，文案与描述也不得冲突，两侧均为无动作被动叶子时忽略其文案与描述。新矩形必须在屏内、仍包含起点，且与旧矩形尺寸兼容、重叠率 ≥0.60、面积比不超过 4 倍。`Focused`、`Selected`、`Checked` 与祖先包装层差异不参与判定。任何新增更深层弹窗、对话框或浮层改变命中集合长度或节点结构时，该帧证明失败并归因 `point_changed`（属于可复检的瞬态归因）。raw `swipe` 永不返回 `ambiguous_point`：观察时命中超过 64 个节点则不做集合证明，只保留前台级校验；观察时命中为空时，新鲜帧同一点也必须仍为空，空白点被新节点或浮层覆盖同样拒绝。`tap`/`long_press`/`text` 只有在原始交互拥有者多于 1 个时才按请求动作筛选并做祖先-后代最内层归约，要求最内层恰 1 个（0 与 ≥2 都拒绝），唯一时按 `point_disambiguated` 消歧执行；拥有者 ≤1 个时不额外按动作筛选，直接执行；静态解析时最深命中超过 64 个则不做归约、直接返回 `422 ambiguous_point` 并附候选。该归约规则与认领后竞争检查、诊断候选一致；等量映射只是严格命中集合证明分支的要求，`tap`/`long_press` 的唯一交互拥有者守恒兜底仍可处理命中数量变化。`scroll` 不证明真实滚动方向、触摸消费者、业务安全或到达边界；设备事实仍只有 `Scrollable bool`，公开 `axis` 只是类名与子项排布得到的投影，不证明设备真实滚动轴。
 
 ### tap/long_press 的子树安全落点
 
-`tap`/`long_press` 的 `ref` 目标自身已有请求动作时（无论 `bubble` 值），走直接目标 4 级规划
-（`default_center` → `carrier_node` → `center_span` → `grid_3x3`，均经 `provesSubtreeTapPoint` 证明，
-`grid_3x3` 通过即直接执行）；4 级均败时若阻塞 `C` 的顶层交互边界中恰有 1 个满足双向同视口（≥85%）、
-未禁用、具备请求动作且自身通过直接 4 级规划的子容器 `B`，
-则自动委托 `C → B`（`coextensive_child`）并在认领后双绑定重验 `C` 与 `B`。
+`tap`/`long_press` 的 `ref` 目标自身已有请求动作时（无论 `bubble` 值），走直接目标三段选点：
+固定 4 级（`default_center` → `carrier_node` → `center_span` → `grid_3x3`）只按目标子树内的唯一最深
+命中判定，子树外同级不参与该级判定；4 级全败时在目标可视区扣除阻塞区后的平面上求 2D 残余安全区，取
+短边不小于 16px、离散边界点数不超过 128 的最大自由块中心（至多 8 个），其单命中候选除唯一最深命中
+外还须不被外部交互拥有者覆盖；两级单命中都未通过时才复用固定与残余候选，接受全部最深命中都属于
+目标自身或其非阻塞被动载体、未命中阻塞区、整树同点命中不越出这些被动节点且落点无外部交互拥有者
+的被动多命中，此时不绑定单一载体。前两级单命中严格优先于被动多命中。三段均败时若阻塞 `C` 的顶层
+交互边界中存在且仅存在 1 个满足双向同视口（≥85%）、未禁用、具备请求动作且自身通过上述三段选点的
+子容器 `B`，其余每个阻塞者都非 `context`、有有效裁剪几何且裁剪面积不超过 `C` 的 25%，则自动委托
+`C → B`（`coextensive_child`）并在认领后双绑定重验 `C` 与 `B`；存在这类额外阻塞者时落点还须无外部
+交互拥有者覆盖。
 
 当原目标 `C` 完全不含 `tap`/`long_press`/`text` 动作且有效 `bubble=true` 时，按两步顺序解析：
-- 步 A（`bubble_ancestor`）：查找最近交互祖先 `A`，先在 `cClip = rect(C) ∩ scopeA.base` 内选点（均须通过
-  `provesGuidancePoint`）；若无通过点且有竞争交互控件相交 `cClip`（或 `cClip` 为空），立即中止向 `A`
-  无关区域的搜索以防漂移，转入步 B；仅在 `cClip` 非空且无竞争交互重合时才补测 `A` 自身 4 级候选；
+- 步 A（`bubble_ancestor`）：沿公开父链跳过 `context` 与普通容器、止于 `root`，`root` 不作候选，取最近
+  touch-interactive 祖先 `A`；先在 `cClip = rect(C) ∩ scopeA.base` 内按中心、中心线与 3×3 网格的局部
+  固定点选点（不含载体中心，均须通过 `provesGuidancePoint` 的唯一最深命中证明），固定点全败后再按同一
+  单命中谓词取残余安全区；两级单命中都未通过时才复用同一批候选接受被动多命中（须通过
+  `provesGuidancePointPassive`：无外部交互拥有者，整树同点命中全属 `A` 或目标被动载体）；若无通过点且
+  有竞争交互控件相交 `cClip`（或 `cClip` 为空），立即中止向 `A` 无关区域的搜索以防漂移；仅在 `cClip`
+  非空且无竞争交互重合时才按完整三段（含载体中心、残余安全区与被动多命中）补测 `A` 自身整域；`A` 段
+  几何或落点失败仍继续尝试步 B，只有步 B 也不成立时才按 `A` 的失败归因拒绝；
 - 步 B（`bubble_colocated`）：在非 `C` 祖先的公开可点击节点中筛选满足局部共位与反底板守卫（非 `C` 后代须
   （包含 `C` 中心或与 `C` 重合率 ≥50%）且裁剪面积 <50% 屏幕；`C` 后代须与 `C` 双向同视口，或（与 `C` 重合率 ≥50%
-  且裁剪面积 <50% 屏幕））的目标 `B`，且 `B` 须先在 `rect(C) ∩ scopeB.base` 内通过局部视觉点证明，局部选点失败
-  后再按 `B` 自身直接 4 级候选证明；折叠双向同视口祖先-后代后若唯一（或唯独 1 个包含 `C` 中心）则吸附 `C → B`；
-  多个冲突且无法以中心唯一消歧时返回 `422 no_safe_point`（`reason=colocated_ambiguous`）。
+  且裁剪面积 <50% 屏幕））的目标 `B`：`B` 先在 `rect(C) ∩ scopeB.base` 内按中心/中心线与 3×3 网格的固定点、
+  残余安全区单命中、被动多命中的顺序做局部选点，局部失败后再按 `B` 自身三段直接选点整域证明；局部选点与
+  整域选点任一成功都进入折叠/消歧集合，只有局部选点成功才把落点标记在 `C` 裁剪区内（`inChild`）。折叠双向
+  同视口祖先-后代后若唯一则吸附 `C → B`，否则在 `containsCenter && inChild` 子集非空时只在该子集内做
+  祖先-后代最内层归约（不再改试其他 `B`），该子集为空时才对全部覆盖 `C` 中心的目标做同一归约；归约后唯一
+  即吸附，没有覆盖 `C` 中心的目标或仍 ≥2 才返回 `422 no_safe_point`（`reason=colocated_ambiguous`）并在
+  `candidates` 列出局部与整域两路得到的冲突项（覆盖 `C` 中心者优先）。
+
+目标 `C` 自身可交互但缺本次请求动作时不下探祖先：有效 `bubble=true` 时先按 `coextensive_child` 的
+同视口、动作能力与 25% 小阻塞者判据向下委托唯一支持该动作的子容器（存在额外阻塞者时落点须无外部
+交互拥有者），命中即以原目标为 `tap.targetRef`、子容器为执行目标；未命中（无同视口子容器、存在
+超过 25% 的竞争区块、子容器缺该动作或显式 `bubble=false`）才返回 `422 unsupported_node_action`
+（`reason=target_has_other_action`）并附候选。该分支绝不向目标祖先冒泡。
 
 `bubble=false` 禁用 `bubble_ancestor` 与 `bubble_colocated`（直接 `ref` 目标自身已有请求动作时仍走直接规划并可使用
-`coextensive_child`）。`text(ref)` 焦点规划不做祖先提升、共位吸附与 `coextensive_child` 委托，先过统一
-`invalid_target`/`node_disabled`，再做可编辑/受保护校验（`422 text_target_uncertain`），静态准入不要求
-`tap` 动作，最后按 `text` 能力在目标子树内规划唯一 4 级聚焦落点；无落点时返回 `422 no_safe_point`，
-遮挡的非输入控件列入 `blocking_refs`。已聚焦目标走零点击快路径，未聚焦时至多点击一次，并由
+`coextensive_child`）。`text(ref)` 先过统一 `invalid_target`/`node_disabled`：直接合法输入框目标（`role=input`、
+公开动作含 `text`、未禁用、`protected` 显式为 `false`、有正面积几何）按 `text` 能力规划聚焦落点，静态准入不要求
+`tap` 动作；`protected` 非显式 `false`（含未知）直接 `422 text_target_uncertain`（`reason=target_protected`）且
+不恢复、不带候选，该保护检查只适用于具有 `text` 动作的直接输入框，`role=input` 但缺 `text` 的受限/只读框仍走
+`target_not_editable`。非直接输入目标（本身是 `role=input` 但缺 `text` 的受限/只读框除外）按三步硬停顺序定向绑定唯一合法输入框，任一步失败即按 `target_not_editable`
+拒绝、不回退后续分支：
+- 包装壳向下绑定：只对非 `role=input` 且面积小于半屏的包装壳，在跳过 `context` 与 `root` 子树的后代中统计全部
+  `role=input` 节点（含禁用、受保护与缺 `text` 动作者，用于反歧义）；多于 1 个直接拒绝，恰 1 个时只尝试该节点
+  （不是合法公共输入框、无裁剪几何、与目标无正面积交集或聚焦规划失败即拒绝），没有后代输入框才进入占位子分支；
+- 占位子向上绑定：只对非交互目标检查最近交互祖先（跳过 `context`、止于 `root`），存在时仅尝试它、绑定失败即
+  停手，不再向更高祖先或共位吸附查找，不存在交互祖先才进入共位分支；面积大于等于半屏的目标跳过包装壳分支后
+  仍可进入本步；
+- 外部共位吸附：只对非交互、面积小于半屏且不存在交互祖先的目标，扫描全树中非 `context`、既非目标公开祖先也非
+  目标公开后代的 `RoleInput`（含禁用/受保护/缺 `text` 动作者，先按局部共位与反底板守卫计数），恰 1 个时才验证
+  它是合法公共输入框并尝试聚焦；共位集合有多个或该节点不合格即拒绝。
+三条路径均未命中返回 `422 text_target_uncertain`（`stage=target`、`reason=target_not_editable`、`dispatch` 三键
+`not_attempted`），存在合法候选输入框时附可选 `candidates`；任何分支都不绕过密码框、禁用框或受保护框。
+直接合法输入框的聚焦点规划与 `tap`/`long_press` 共用固定 4 级、残余安全区、被动多命中三段选点，并可委托唯一
+双向同视口的合法输入子框（同视口与额外阻塞者判据同 `coextensive_child`），但不进入
+`bubble_ancestor`/`bubble_colocated`；直接合法输入框无落点时返回 `422 no_safe_point` 并把遮挡的非输入控件列入
+`blocking_refs`，经三条绑定路径解析出的输入框聚焦失败则回落到 `target_not_editable`，该出口不带 `blocking_refs`。已聚焦目标走零点击快路径，未聚焦时至多点击一次，并由
 `afterTap` 与严格绑定证明获焦：ref 目标按 exact → near → shifted → expanded 依次绑定，
 `expanded` 允许点击后横向展开或多行撑高（新框宽度不小于原宽减 `max(8, 原宽/5)`、高度
 不小于原高减 `max(8, 原高/5)`，与原点 X 轴投影交叠至少覆盖原宽一半；纵向位置本就不参与
@@ -279,8 +331,11 @@ engine 的状态锁只做有限内存检查与转换：锁内不等待 ADB、u2 
 立即收口 `focus_unconfirmed`，STOP 立即 `control_revoked` 并保持整体 `uncertain`；仍未确认
 仍是 `409 text_target_uncertain`（`stage=focus`、`reason=focus_unconfirmed`）。除参数语法、节点存在/禁用及 `text` 自身输入能力/保护拒绝外，`act` 静态目标解析与规划拒绝统一收口为 5 个正交 `422` 错误码（`invalid_target`、`unsupported_node_action`、
 `ambiguous_point`、`no_safe_point`、`no_safe_trajectory`），有候选时附统一 `candidates`（至多 4 项，干跑计算 `executable`，
-不含文本/标签）与可选 `blocking_refs`（至多 3 项）；`scroll` 的静态候选另按受控滚动段的遮罩/浮层
-过滤与同前景分支排序收口，全部被剔除时省略 `candidates`。
+不含文本/标签）与可选 `blocking_refs`（至多 3 项）；`422 text_target_uncertain` 在 `stage=target`、
+`reason=target_not_editable` 且存在合法候选输入框时也附既有 `candidates`（同样 6 字段、至多 4 项），
+`target_protected` 与 focus/write/verify/submit 阶段错误不带；`scroll` 的静态候选另按受控滚动段的遮罩/浮层
+过滤与同前景分支排序收口，全部被剔除时省略 `candidates`。静态自动解析与委托沿用静默语义，不写
+`Result.auto_recovery`；该字段仍只属于认领后零派发重验恢复。
 
 认领后 ref 目标使用有界 Tier 1–5 双向唯一匹配（L1 不比较祖先 bounds、Focused/Selected；Tier 1 保持目标
 bounds；Tier 2 允许受限微移；Tier 3 仅移除已知空透明层并要求非根强锚点）。Tier 3 的祖先比较忽略非目标
@@ -314,8 +369,10 @@ Tier 5 都要求正向与反向扫描在全树唯一；该通道之外，任一 
 `target_ambiguous`，两种 `bubble` 模式下触发子节点的歧义归 `child_changed`；预算耗尽或畸形树返回
 `503 hierarchy_unavailable`。Tier 4 与 Tier 5 命中的
 点击/长按/输入执行目标实际落点还须通过全树遮挡证明
-（`tapFrameTier4OcclusionProven`）：全树唯一最深公开命中必须落在已证明的执行子树内，且没有外部
-交互拥有者覆盖落点。触发条件按模式区分：直接目标模式的执行绑定、`coextensive_child` 的执行绑定
+（`tapFrameTier4OcclusionProven`）：无论唯一最深命中还是被动多命中，落点都不得被外部交互拥有者覆盖；
+唯一最深公开命中落在已证明的执行子树内时通过；没有唯一最深命中时，每个最深公开命中都须属于执行目标
+本身，或从该命中到执行目标的整条公开祖先路径都不含交互与 `context` 边界；固定载体身份证明仍严格
+单载体。触发条件按模式区分：直接目标模式的执行绑定、`coextensive_child` 的执行绑定
 与 `bubble_colocated` 的任一绑定命中 Tier 4/5 时都须通过；`coextensive_child` 的父绑定命中
 Tier 4/5 时在此之上额外要求同一证明，而执行绑定自身的 Tier 4/5 落点已由直接目标检查覆盖；
 `bubble_ancestor` 只在其执行祖先命中这些层级时触发，触发子节点命中不单独触发。
@@ -323,7 +380,11 @@ Tier 4/5 时在此之上额外要求同一证明，而执行绑定自身的 Tier
 （`|Δ子节点中心Y − Δ共位节点中心Y| ≤ max(16, maxH/4)`，`maxH` 取四者高度最大值），否则按 `409
 target_changed`、`reason=child_changed` 拒绝。Tier 1–3 保持原有目标子树与双绑定关系边界。命中后分别按
 直接目标、`coextensive_child`、`bubble_ancestor`（禁止跨模式切回 `bubble_colocated`）或
-`bubble_colocated` 双绑定复验原节点、关系守卫与安全点；
+`bubble_colocated` 双绑定复验原节点、关系守卫与安全点（重新选点时同样接受已证明的被动多命中落点）。
+`coextensive_child` 在新鲜帧仍要求存在且仅存在 1 个与父目标双向同视口、具备请求动作的阻塞者，
+其余阻塞者都非 `context`、有裁剪几何且面积不超过父目标 25%；存在额外阻塞者（含小角标）时无条件
+要求落点无外部交互拥有者覆盖，不受 Tier 层级限制。异动作向下委托的父容器允许自身可交互但缺原
+请求动作。
 实际 `tapFrame` 冻结新鲜坐标/载体供派发使用。重验失配返回 `409 target_changed` 并附统一 `phase=revalidate` 的 `error.details`；
 `reason=lineage_changed` 时可附可选 `changed_ref`，按原目标公开祖先链自近及远给出第一个确实缺失、
 且能唯一确定的非 `root` 祖先 ref（在新帧链里仍有恰好一个结构对应层的祖先只算平移，不被指名；
@@ -331,8 +392,13 @@ target_changed`、`reason=child_changed` 拒绝。Tier 1–3 保持原有目标�
 `bubble_ancestor` 的最近交互祖先变更时，该字段指向原先的交互祖先，即使它仍然存在。
 无法唯一定位时省略 `changed_ref`。该字段不进入事件日志。全部 `kind`（`tap`/`long_press`/`text`/
 `scroll`）的认领后重验 `409 target_changed` 统一携带 `phase=revalidate` 的 `error.details`，包含
-`phase`、`kind`、`reason`、`original_ref`（按 §6 条件出现，纯坐标省略）、可选 `changed_ref`/
-`recovery_attempted`，以及仅首响应交付新 O 时附带的 `candidates`/`blocking_refs`。通过零派发
+`phase`、`kind`、`reason`、`original_ref`（按[接口契约的 `original_ref` 条件](interface.md#6-post-apiact)
+出现，纯坐标省略）、可选 `changed_ref`/
+`recovery_attempted`，以及仅首响应交付新 O 时附带的 `candidates`/`blocking_refs`；`text` 经定向
+绑定解析到输入框时，零派发重锚以实际输入框 ref 与原观测对齐（而不是调用方传入的包装壳 ref），
+`original_ref` 仍回显调用方原始请求，委托到同视口子框的 `text` 不进入 `text_rebind`；坐标重验在
+保留原命中集合等量映射的前提下，多个原始拥有者的竞争检查与 `point_changed` 诊断的 `blocking_refs`
+使用与静态一致的最内层归约。通过零派发
 重验自动恢复并进入派发时，`Result.auto_recovery` 携带 `strategy`、`original_ref`/`recovered_ref`
 （纯坐标省略）与 `attempts`。`Result.auto_recovery` 仅覆盖 `tap`/`long_press`/`text`/`scroll` 四种
 kind；raw `swipe` 的瞬态复检不发布该字段。`text` 未派发时由 `Result.text_input` 的
@@ -348,10 +414,11 @@ kind；raw `swipe` 的瞬态复检不发布该字段。`text` 未派发时由 `R
 不交付、不派发；派发与拒绝交付都只使用最后读取的那一帧（复检时为第 2 帧），两次尝试之间不发布中间观察，
 第 2 次采集自身失败时返回该真实错误且不交付帧。判据细节见[接口契约](interface.md)。
 
-静态落点、双绑定与子树证明只覆盖公开树模型内的目标子树，不覆盖子树外同级或跨窗口 z 序、未发布的
-透明触摸层、应用自定义事件拦截或私有业务回调；全树遮挡证明只补上落点上的最深公开命中与外部
-交互拥有者，仍不覆盖真实 z 序、未发布拦截层或应用内业务消费者。树证明与 `executed` 都不证明
-Android 实际事件消费者或期望业务结果。
+直接固定样点（4 级）的单命中证明只覆盖公开树模型内的目标子树：子树外同级节点不参与该级判定，也不
+因此自拒；残余安全区的单命中候选还须叠加外部交互拥有者证明，被动多命中与 Tier 4/5 落点则须同时叠加
+整树最深命中与外部交互拥有者证明。这些证明都不覆盖跨窗口 z 序、未发布的透明触摸层、应用自定义事件
+拦截或私有业务回调；全树遮挡证明只补上落点上的最深公开命中与外部交互拥有者，仍不覆盖真实 z 序、未
+发布拦截层或应用内业务消费者。树证明与 `executed` 都不证明 Android 实际事件消费者或期望业务结果。
 
 ### text 的复合输入阶段
 
@@ -389,7 +456,9 @@ SetText；`accepted` 只是框架回执，不单独否决。engine 不做写前 
   几何接受键盘顶起的同水平带、清除按钮导致的同垂直带内水平伸缩，或重叠率 ≥0.50。重绑定后须用
   新目标再做一次精确读回，全部通过才发送至多一次 `ENTER`。
 - `submit_ref="n…"`：认领前按完整 `tap` 规划器（等效 `bubble=true`）静态验证提交节点，并允许该
-  节点在写前显式 `enabled=false`；其他结构、能力与安全落点判据不变。写后重新采集新鲜帧，核对同
+  节点在写前显式 `enabled=false`。该完整 `tap` 规划器包含被动
+  多命中、残余安全区、唯一同视口子容器委托与异动作向下委托，`text(ref)` 的定向绑定与输入子框委托
+  属于另一条聚焦路径，不经过该规划器。写后重新采集新鲜帧，核对同
   显示与同前台任务，并对计划涉及的执行节点（含 `coextensive_child`、`bubble_ancestor`、
   `bubble_colocated` 的委托节点）走 Tier 1–4 与安全落点重验；该路径任何层级都不采用数字骨架守恒，
   子树证据一律要求精确可读多重集，键盘顶起导致仅 Y 轴平移时允许同水平带的唯一匹配回退，该回退的
@@ -553,7 +622,7 @@ O 状态机或输入授权。
 `wait_for` 的验证采集直接进入同一 `publishTreeAttempt`，不经过本节的收敛采样：等待期的只读
 采样不发布、不推进基线；命中或稳态退出复用候选帧，到时或采样守卫退出时若最新成功帧仍新鲜
 且之后没有失败，复用该帧，否则只读一次终帧。它的 `observation.quality` 由等待比较得出
-（见 §3 条件等待）。
+（见[条件等待](#条件等待wait_for)）。
 
 净化仅改变公开投影：公开 label 与输入框描述锚点剔除固定闭集的零宽与占位码点并去掉首尾
 空白，默认空叶与仅含占位或空白字符且无其他语义的普通叶不发布；可见但本身无语义、仍有可
@@ -733,7 +802,7 @@ inspect 与文本块不携带 defaults 声明。
 
 两个入口都归结为 `bindStopLocked`：
 
-- 普通同步携带 `stop_pending`（`seq` 单调、`reason`）；
+- 普通同步可经 `stop_pending` 提交停止意图（`seq` 单调、`reason`）；
 - 独立 `POST /v1/control/stop`（最小载体，不校验普通 `contract_version`）。
 
 绑定条件：同一 `app_instance_id` 的 `seq` 必须严格大于已记录值；否则忽略（HTTP 响应仍为
@@ -949,7 +1018,7 @@ text 完成事件记 `focus_dispatch`/`write_dispatch`/`submit_dispatch` 与受�
 ### 发布
 
 `release/versions.json` 是发行号、共同契约号与 Android versionCode 的唯一来源；当前为
-`release_version=0.40.0`、`contract_version=36`、`android_version_code=42`，构建生成
+`release_version=0.41.0`、`contract_version=37`、`android_version_code=43`，构建生成
 Go/Java 常量。`scripts/build-release.ps1` 产出整组产物与 `build/release/manifest.json`
 （源码提交、Go 版本、MCP SDK/协议、各产物 SHA-256/大小、Android 包名/版本、工具目录指纹）。
 工具目录固定为 `scripts/toolcatalog` 投影的 13 个工具。工具说明自包含关键调用规则，完整图例

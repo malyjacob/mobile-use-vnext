@@ -23,6 +23,9 @@ const (
 	minScrollStepTravel     = 32
 )
 
+// A non-scroll wrapper delegates only to a scope covering at least half of it.
+const scrollInnerFallbackMinCoverPercent int64 = 50
+
 // The four travel-amount tiers drive one service-controlled gesture duration:
 // a short step is deliberately slow so a released finger does not fling, and a
 // full-page push is deliberately quick. The request never supplies a duration.
@@ -982,7 +985,8 @@ func resolveScrollRefPlan(obs *observationState, view *tapPublicView,
 		return nil, newScrollInvalidTargetError(tapStaticReasonContext,
 			tapStaticScopeTarget, target.Ref, "")
 	}
-	if _, hasPublic := publicNodeClippedRect(target, screen); !hasPublic {
+	targetRect, hasPublic := publicNodeClippedRect(target, screen)
+	if !hasPublic {
 		apiErr := newScrollInvalidTargetError(tapStaticReasonNoGeometry,
 			tapStaticScopeTarget, target.Ref, "")
 		entries := collectScrollAncestorAndPageCandidates(obs, view, target)
@@ -993,7 +997,6 @@ func resolveScrollRefPlan(obs *observationState, view *tapPublicView,
 		return nil, protocol.NewError(409, protocol.CodeNodeDisabled, "目标节点已禁用")
 	}
 	targetActions := tapPublicActions(target)
-	targetRect, _ := publicNodeClippedRect(target, screen)
 	if isScrollContainer(target) {
 		if scrollContainerAxisCompatible(obs, view, target, operation.Direction) {
 			return planScrollContainer(obs, view, operation, target, target, "ref", scrollModeDirect,
@@ -1024,7 +1027,7 @@ func resolveScrollRefPlan(obs *observationState, view *tapPublicView,
 		// Step 2: one uniquely executable axis-compatible inner container may
 		// take over (for example a vertical list inside a horizontal pager).
 		if innerPlan := tryUniqueInnerScrollFallback(obs, view, operation, target,
-			targetRect); innerPlan != nil {
+			targetRect, true, 0); innerPlan != nil {
 			return innerPlan, nil
 		}
 		// Step 3: a compatible container that entered planning keeps its error.
@@ -1038,16 +1041,19 @@ func resolveScrollRefPlan(obs *observationState, view *tapPublicView,
 		attachStaticCandidates(apiErr, buildFilteredScrollCandidates(obs, view, operation, target, entries))
 		return nil, apiErr
 	}
-	if target.Role == protocol.RoleScroll {
-		apiErr := newScrollUnsupportedError(tapStaticReasonTargetMissingAction,
-			tapStaticScopeTarget, target.Ref, "", targetActions, nil)
-		entries := collectScrollAncestorAndPageCandidates(obs, view, target)
-		attachStaticCandidates(apiErr, buildFilteredScrollCandidates(obs, view, operation, target, entries))
-		return nil, apiErr
-	}
+	// The normal projection emits RoleScroll with swipe. Defend against a
+	// wire tree that has the role without the action.
+	targetMissingSwipe := target.Role == protocol.RoleScroll
 	ancestors := scrollRoleAncestors(view, target)
 	if len(ancestors) == 0 {
-		apiErr := newScrollUnsupportedError(staticReasonNotScrollable,
+		reason := staticReasonNotScrollable
+		if targetMissingSwipe {
+			reason = tapStaticReasonTargetMissingAction
+		} else if innerPlan := tryUniqueInnerScrollFallback(obs, view, operation, target,
+			targetRect, true, scrollInnerFallbackMinCoverPercent); innerPlan != nil {
+			return innerPlan, nil
+		}
+		apiErr := newScrollUnsupportedError(reason,
 			tapStaticScopeTarget, target.Ref, "", targetActions, nil)
 		entries := collectPageScrollCandidates(obs, view, target.Ref)
 		attachStaticCandidates(apiErr, buildFilteredScrollCandidates(obs, view, operation, target, entries))
@@ -1063,16 +1069,11 @@ func resolveScrollRefPlan(obs *observationState, view *tapPublicView,
 		attachStaticCandidates(apiErr, buildFilteredScrollCandidates(obs, view, operation, target, entries))
 		return nil, apiErr
 	}
-	if !hasAction(nearest, protocol.ActionSwipe) {
-		apiErr := newScrollUnsupportedError(tapStaticReasonAncestorMissingAction,
-			tapStaticScopeAncestor, nearest.Ref, nearest.Ref, targetActions, ancestorActions)
-		entries := collectPageScrollCandidates(obs, view, nearest.Ref)
-		attachStaticCandidates(apiErr, buildFilteredScrollCandidates(obs, view, operation, target, entries))
-		return nil, apiErr
-	}
-	// Ancestor promotion: an axis-incompatible nearer ancestor is skipped
-	// instead of stopping the walk, so the nearest compatible one still runs.
+	// For a wire scroll role without swipe, allow a compatible ancestor to
+	// take over after the nearest scroll-role ancestor passes the checks above.
+	missingSwipe := targetMissingSwipe || !hasAction(nearest, protocol.ActionSwipe)
 	var firstCompatErr *protocol.APIError
+	axisMismatch := false
 	for index, ancestor := range ancestors {
 		if !isScrollContainer(ancestor) {
 			continue
@@ -1081,10 +1082,11 @@ func resolveScrollRefPlan(obs *observationState, view *tapPublicView,
 			continue
 		}
 		if !scrollContainerAxisCompatible(obs, view, ancestor, operation.Direction) {
+			axisMismatch = true
 			continue
 		}
 		mode := scrollModeAncestorLift
-		if index > 0 {
+		if index > 0 && !missingSwipe {
 			mode = scrollModeAxisFallback
 		}
 		plan, planErr := planScrollContainer(obs, view, operation, ancestor, target, "ref", mode,
@@ -1099,7 +1101,24 @@ func resolveScrollRefPlan(obs *observationState, view *tapPublicView,
 	if firstCompatErr != nil {
 		return nil, firstCompatErr
 	}
-	apiErr := newScrollUnsupportedError(staticReasonAxisMismatch,
+	if axisMismatch && !targetMissingSwipe {
+		if innerPlan := tryUniqueInnerScrollFallback(obs, view, operation, target,
+			targetRect, true, scrollInnerFallbackMinCoverPercent); innerPlan != nil {
+			return innerPlan, nil
+		}
+	}
+	if !axisMismatch && targetMissingSwipe {
+		apiErr := newScrollUnsupportedError(tapStaticReasonTargetMissingAction,
+			tapStaticScopeTarget, target.Ref, "", targetActions, nil)
+		entries := collectScrollAncestorAndPageCandidates(obs, view, target)
+		attachStaticCandidates(apiErr, buildFilteredScrollCandidates(obs, view, operation, target, entries))
+		return nil, apiErr
+	}
+	reason := tapStaticReasonAncestorMissingAction
+	if axisMismatch {
+		reason = staticReasonAxisMismatch
+	}
+	apiErr := newScrollUnsupportedError(reason,
 		tapStaticScopeAncestor, nearest.Ref, nearest.Ref, targetActions, ancestorActions)
 	entries := collectPageScrollCandidates(obs, view, nearest.Ref)
 	attachStaticCandidates(apiErr, buildFilteredScrollCandidates(obs, view, operation, target, entries))
@@ -1374,7 +1393,8 @@ func planScrollContainer(obs *observationState, view *tapPublicView,
 		return nil, apiErr
 	}
 	if allowInnerFallback {
-		if innerPlan := tryUniqueInnerScrollFallback(obs, view, operation, container, publicRect); innerPlan != nil {
+		if innerPlan := tryUniqueInnerScrollFallback(obs, view, operation, container,
+			publicRect, false, 0); innerPlan != nil {
 			return innerPlan, nil
 		}
 	}
@@ -1386,9 +1406,11 @@ func planScrollContainer(obs *observationState, view *tapPublicView,
 }
 
 func tryUniqueInnerScrollFallback(obs *observationState, view *tapPublicView,
-	operation *protocol.Operation, want *protocol.Node, wantRect device.Rect) *scrollPlan {
+	operation *protocol.Operation, want *protocol.Node, wantRect device.Rect,
+	allowCoextensive bool, minCoverPercent int64) *scrollPlan {
 	projection := obs.Projection
 	screen := projection.Capture.Display.Bounds()
+	var overlayCtx *scrollOverlayContext
 	type innerCandidate struct {
 		node *protocol.Node
 		rect device.Rect
@@ -1396,36 +1418,39 @@ func tryUniqueInnerScrollFallback(obs *observationState, view *tapPublicView,
 	}
 	var executable []innerCandidate
 	var walk func(node *protocol.Node)
-	walk = func(node *protocol.Node) {
-		if node == nil {
-			return
-		}
-		if isScrollContainer(node) &&
-			scrollContainerAxisCompatible(obs, view, node, operation.Direction) {
-			if descRect, ok := publicNodeClippedRect(node, screen); ok &&
-				!isCoextensiveRect(wantRect, descRect) {
-				if index, mapped := projection.Source[node.Ref]; mapped &&
-					index >= 0 && index < len(projection.Capture.Nodes) {
-					rawClipped := projection.Capture.Nodes[index].Bounds.Intersect(screen)
-					if plan, _ := planScrollOnAxes(projection, index, rawClipped,
-						operation.Direction, operation.Amount, "ref",
-						scrollModeInnerFallback); plan != nil {
-						executable = append(executable, innerCandidate{
-							node: node,
-							rect: descRect,
-							plan: plan,
-						})
-					}
-				}
+	walk = func(parent *protocol.Node) {
+		for _, node := range parent.Children {
+			if node == nil {
+				continue
+			}
+			walk(node)
+			if !isScrollContainer(node) || !scrollContainerAxisCompatible(obs, view, node, operation.Direction) {
+				continue
+			}
+			descRect, ok := publicNodeClippedRect(node, screen)
+			if !ok || (!allowCoextensive && isCoextensiveRect(wantRect, descRect)) ||
+				(minCoverPercent > 0 && !rectOverlapAtLeast(wantRect, descRect, minCoverPercent)) {
+				continue
+			}
+			index, mapped := projection.Source[node.Ref]
+			if !mapped || index < 0 || index >= len(projection.Capture.Nodes) {
+				continue
+			}
+			if overlayCtx == nil {
+				overlayCtx = newScrollOverlayContext(obs, view)
+			}
+			// Keep the diagnostic exemption for external scrims out of admission.
+			if isScrollCandidateOverlayOccluded(overlayCtx, nil, node, operation.Direction, operation.Amount) {
+				continue
+			}
+			rawClipped := projection.Capture.Nodes[index].Bounds.Intersect(screen)
+			if plan, _ := planScrollOnAxes(projection, index, rawClipped,
+				operation.Direction, operation.Amount, "ref", scrollModeInnerFallback); plan != nil {
+				executable = append(executable, innerCandidate{node: node, rect: descRect, plan: plan})
 			}
 		}
-		for _, child := range node.Children {
-			walk(child)
-		}
 	}
-	for _, child := range want.Children {
-		walk(child)
-	}
+	walk(want)
 	if len(executable) == 0 {
 		return nil
 	}

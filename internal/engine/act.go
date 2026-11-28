@@ -172,7 +172,7 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 			attempted = []string{protocol.AutoRecoveryTransientRetry}
 			reason, _ := revalidateErr.Details["reason"].(string)
 			if canRebindActTarget(req.Operation.Type, originalRef, reason, tap) {
-				decision, rebindErr := e.rebindActTarget(work, op, obs, fresh, tap, req.Operation.Type, originalRef, reason)
+				decision, rebindErr := e.rebindActTarget(work, op, obs, fresh, tap, req.Operation.Type, tap.targetRef, reason)
 				if decision.Attempted {
 					attempted = append(attempted, decision.Strategy)
 				}
@@ -1139,7 +1139,14 @@ func (e *Engine) revalidateCoextensiveChildFrame(ctx context.Context,
 		return nil, tapTargetChangedReason(targetChangedReasonCapabilityChanged)
 	}
 	action := protocol.Action(plan.action)
-	if apiErr := framePublicTargetError(freshParent, action, false, opts); apiErr != nil {
+	screen := screenRectFromDisplay(fresh.Display)
+	if plan.delegateParentOtherAction {
+		if _, ok := publicNodeClippedRect(freshParent, screen); !ok ||
+			freshParent.Role == protocol.RoleRoot || freshParent.Context ||
+			explicitlyDisabledPublic(freshParent) || !isTouchInteractive(freshParent) {
+			return nil, tapTargetChangedReason(targetChangedReasonCapabilityChanged)
+		}
+	} else if apiErr := framePublicTargetError(freshParent, action, false, opts); apiErr != nil {
 		return nil, apiErr
 	}
 	if apiErr := framePublicTargetError(freshDelegate, action, true, opts); apiErr != nil {
@@ -1159,8 +1166,9 @@ func (e *Engine) revalidateCoextensiveChildFrame(ctx context.Context,
 		}
 		return nil, tapTargetChangedReason(targetChangedReasonCapabilityChanged)
 	}
-	screen := screenRectFromDisplay(fresh.Display)
-	if !isTopLevelCoextensiveBlocker(parentScope, view, freshParent, freshDelegate, screen) {
+	// Submit planning may admit an initially disabled delegate. The fresh
+	// execution binding has already passed framePublicTargetError above.
+	if findUniqueCoextensiveBlocker(parentScope, view, freshParent, screen, action, opts.submit) != freshDelegate {
 		return nil, tapTargetChangedReason(targetChangedReasonCapabilityChanged)
 	}
 	delegateInput := &tapInput{
@@ -1180,7 +1188,14 @@ func (e *Engine) revalidateCoextensiveChildFrame(ctx context.Context,
 	frame, apiErr := e.resolveDirectTapScopeFrame(ctx, revoked, obs, fresh, topology, view,
 		plan, matchDelegate, freshDelegate, delegateIndex, delegateInput,
 		delegateScope, opts)
-	if frame != nil && matchParent.tier >= 4 &&
+	if frame == nil {
+		return nil, apiErr
+	}
+	if (plan.delegateResidual || len(topLevelTapScopeBlockers(parentScope, freshParent)) > 1) &&
+		len(externalInteractiveOwnersAt(view, freshDelegate, frame.x, frame.y)) != 0 {
+		return nil, tapTargetChangedReason(targetChangedReasonScopeBlocked)
+	}
+	if matchParent.tier >= 4 &&
 		!tapFrameTier4OcclusionProven(view, freshDelegate, frame.x, frame.y) {
 		return nil, tapTargetChangedReason(targetChangedReasonScopeBlocked)
 	}
@@ -1326,7 +1341,7 @@ func (e *Engine) revalidateColocatedTapFrame(ctx context.Context,
 	}
 	fixedPointOK := false
 	var fixedPointCarrier *tapCarrier
-	if carrier, ok := pointOwner(colocatedScope, plan.x, plan.y); ok {
+	if carrier, ok := revalidatedPointOwner(view, colocatedScope, plan.x, plan.y); ok {
 		fixedPointOK = true
 		fixedPointCarrier = carrier
 		if plan.colocatedInChild {
@@ -1344,6 +1359,9 @@ func (e *Engine) revalidateColocatedTapFrame(ctx context.Context,
 		if stop() {
 			return nil, stoppedActRevalidation()
 		}
+		if plan.residual && len(externalInteractiveOwnersAt(view, freshColocated, plan.x, plan.y)) != 0 {
+			return nil, tapTargetChangedReason(targetChangedReasonScopeBlocked)
+		}
 		if (matchColocated.tier >= 4 || matchChild.tier >= 4) &&
 			!tapFrameTier4OcclusionProven(view, freshColocated, plan.x, plan.y) {
 			return nil, tapTargetChangedReason(targetChangedReasonScopeBlocked)
@@ -1359,7 +1377,8 @@ func (e *Engine) revalidateColocatedTapFrame(ctx context.Context,
 	if stop() {
 		return nil, stoppedActRevalidation()
 	}
-	if !ok || !provesSubtreeTapPoint(colocatedScope, x, y) {
+	if !ok || !(provesSubtreeTapPoint(colocatedScope, x, y) ||
+		provesGuidancePointPassive(view, freshColocated, colocatedScope, x, y)) {
 		return nil, tapTargetChangedReason(targetChangedReasonScopeBlocked)
 	}
 	if (matchColocated.tier >= 4 || matchChild.tier >= 4) &&
@@ -1537,7 +1556,7 @@ func (e *Engine) resolveDirectTapScopeFrame(ctx context.Context,
 		return ctx == nil || ctx.Err() != nil || (revoked != nil && revoked())
 	}
 	targetRaw := match.raw
-	originalPointCarrier, originalPointOK := pointOwner(scope, plan.x, plan.y)
+	originalPointCarrier, originalPointOK := revalidatedPointOwner(view, scope, plan.x, plan.y)
 
 	var fixedCarrier *tapCarrier
 	if plan.carrierRaw != nil {
@@ -1576,7 +1595,8 @@ func (e *Engine) resolveDirectTapScopeFrame(ctx context.Context,
 		if stop() {
 			return nil, stoppedActRevalidation()
 		}
-		if !directFrameOcclusionProven(match, view, targetPublic, plan.x, plan.y) {
+		if (plan.residual && len(externalInteractiveOwnersAt(view, targetPublic, plan.x, plan.y)) != 0) ||
+			!directFrameOcclusionProven(match, view, targetPublic, plan.x, plan.y) {
 			return nil, tapTargetChangedReason(targetChangedReasonScopeBlocked)
 		}
 		return &tapFrame{
@@ -1592,7 +1612,9 @@ func (e *Engine) resolveDirectTapScopeFrame(ctx context.Context,
 			if stop() {
 				return nil, stoppedActRevalidation()
 			}
-			if !directFrameOcclusionProven(match, view, targetPublic, x, y) {
+			if (plan.residual && x == plan.x && y == plan.y &&
+				len(externalInteractiveOwnersAt(view, targetPublic, x, y)) != 0) ||
+				!directFrameOcclusionProven(match, view, targetPublic, x, y) {
 				return nil, tapTargetChangedReason(targetChangedReasonScopeBlocked)
 			}
 			return &tapFrame{
@@ -1613,7 +1635,8 @@ func (e *Engine) resolveDirectTapScopeFrame(ctx context.Context,
 	if apiErr != nil || unbound == nil || unbound.strategy == tapModeRejected {
 		return nil, tapTargetChangedReason(targetChangedReasonScopeBlocked)
 	}
-	if !provesSubtreeTapPoint(scope, unbound.x, unbound.y) {
+	if !(provesSubtreeTapPoint(scope, unbound.x, unbound.y) ||
+		provesGuidancePointPassive(view, targetPublic, scope, unbound.x, unbound.y)) {
 		return nil, tapTargetChangedReason(targetChangedReasonScopeBlocked)
 	}
 	if !directFrameOcclusionProven(match, view, targetPublic, unbound.x, unbound.y) {
@@ -1746,7 +1769,7 @@ func (e *Engine) provePointTarget(ctx context.Context, revoked func() bool,
 		return finish(apiErr)
 	}
 	if owners := collectPointOwners(view, freshNodes); len(owners) > 1 &&
-		len(filterMatchingPointOwners(owners, operation)) != 1 {
+		len(innermostPointOwners(view, filterMatchingPointOwners(owners, operation))) != 1 {
 		// A competing interactive owner is never re-checked by the fallback.
 		return finish(apiErr)
 	}

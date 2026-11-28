@@ -23,21 +23,20 @@
 
 ```json
 {
-  "contract_version": "36",
-  "app_instance_id": "0b0b8c0e-...",
-  "app_version": "0.40.0",
+  "contract_version": "37",
+  "app_instance_id": "0b0b8c0e-5f3d-4c1a-9b2e-7d6f1a2b3c4d",
+  "app_version": "0.41.0",
   "selected_mode": "virtual",
-  "mode_generation": "8f0b2e2e-...",
+  "mode_generation": "8f0b2e2e-1a2b-4c3d-8e9f-0a1b2c3d4e5f",
   "mode_ready": true,
   "stop_ready": true,
   "notifications_enabled": true,
   "background_running": true,
   "power_interactive": true,
   "keyguard_locked": false,
-  "primary_display": {"display_id":0,"width":1080,"height":2400,"density_dpi":420,"rotation":0,"generation":"8f0b2e2e-...","ime_hide":false},
+  "primary_display": {"display_id":0,"width":1080,"height":2400,"density_dpi":420,"rotation":0,"generation":"8f0b2e2e-1a2b-4c3d-8e9f-0a1b2c3d4e5f","ime_hide":false},
   "display": null,
   "command_results": [{"command_id":"3b1...","ok":true,"error_code":null}],
-  "stop_pending": {"seq":7,"reason":"user_stop"},
   "message_acks": ["M12"]
 }
 ```
@@ -46,7 +45,7 @@
 
 | 字段 | 必填 | 含义 |
 | --- | --- | --- |
-| contract_version | 是 | 共同普通契约；必须等于 `"36"` |
+| contract_version | 是 | 共同普通契约；必须等于 `"37"` |
 | app_instance_id | 是 | 本次 App 进程实例，UUID；重建即变化 |
 | app_version | 否（App 应发送） | 仅发行标识，不参与能力协商 |
 | selected_mode | 是 | `virtual` 或 `primary`；App 重建默认 virtual |
@@ -76,8 +75,8 @@
 
 ```json
 {
-  "contract_version": "36",
-  "service_instance_id": "d0e...",
+  "contract_version": "37",
+  "service_instance_id": "d0e1f2a3-b4c5-4d6e-8f90-1a2b3c4d5e6f",
   "control": {
     "revision": 42,
     "availability": {"state": "ready"},
@@ -89,9 +88,20 @@
   "commands": [],
   "messages": [
     {"id":"M12","seq":12,"text":"…","created_at":"…"}
-  ],
-  "stop": {"seq":7,"state":"accepted"}
+  ]
 }
+```
+
+停止待同步的同步请求片段（此时 `mode_ready=false`）：
+
+```json
+{"mode_ready":false,"stop_pending":{"seq":7,"reason":"user_stop"}}
+```
+
+该次同步响应的停止确认片段：
+
+```json
+{"stop":{"seq":7,"state":"accepted"}}
 ```
 
 - `service_instance_id` 是服务实例的 36 字符 UUID，App 按 UUID 严格解析；它不随 Agent 可见的
@@ -149,13 +159,13 @@ App 必须拒绝无法解析、未知 kind、缺字段或 `contract_version` 不
 `POST /v1/control/stop`
 
 ```json
-{"contract_version":"36","app_instance_id":"...","stop_seq":7,"reason":"user_stop"}
+{"contract_version":"37","app_instance_id":"0b0b8c0e-5f3d-4c1a-9b2e-7d6f1a2b3c4d","stop_seq":7,"reason":"user_stop"}
 ```
 
 响应（最小，不含普通服务状态、消息或设备命令）：
 
 ```json
-{"contract_version":"36","service_instance_id":"...","accepted":true,"stop_seq":7,"state":"revoked"}
+{"contract_version":"37","service_instance_id":"d0e1f2a3-b4c5-4d6e-8f90-1a2b3c4d5e6f","accepted":true,"stop_seq":7,"state":"revoked"}
 ```
 
 - App 先在本地提高停止代次、拒绝旧命令/回调恢复权限，再在独立线程发起本请求；不等待

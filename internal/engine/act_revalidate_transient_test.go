@@ -230,10 +230,10 @@ func TestActRevalidateTier5OcclusionAndColocatedSync(t *testing.T) {
 	})
 
 	for _, tc := range []struct {
-		name       string
-		overlay    bool
-		tier       int
-		wantReason string
+		name                   string
+		overlay, passive, peer bool
+		tier                   int
+		wantReason             string
 	}{
 		{name: "tier_1_overlay", overlay: true, tier: 1},
 		{name: "tier_2_overlay", overlay: true, tier: 2},
@@ -241,16 +241,30 @@ func TestActRevalidateTier5OcclusionAndColocatedSync(t *testing.T) {
 		{name: "tier_4_overlay", overlay: true, tier: 4, wantReason: targetChangedReasonScopeBlocked},
 		{name: "tier_5_overlay", overlay: true, tier: 5, wantReason: targetChangedReasonScopeBlocked},
 		{name: "tier_5_clear", tier: 5},
+		{name: "tier_4_passive_tie", passive: true, tier: 4},
+		{name: "tier_4_passive_tie_with_interactive_overlay", passive: true, overlay: true, tier: 4, wantReason: targetChangedReasonScopeBlocked},
+		{name: "tier_4_passive_tie_with_external_peer", passive: true, peer: true, tier: 4, wantReason: targetChangedReasonScopeBlocked},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			display := targetProofDisplay()
 			bounds := device.Rect{Left: 100, Top: 200, Right: 300, Bottom: 300}
 			fresh := revalCapture(display, revalRoot(display.ID, 1),
 				revalButton(1, 0, 1, display.ID, bounds, "Continue", "", "continue_btn"))
+			if tc.passive {
+				image := pruningImageRaw("app:id/passive_image", bounds)
+				label := proposalNode(0, 0, 0, display, bounds, "android.widget.TextView", "title")
+				actRebindTestAppend(&fresh, 1, image)
+				actRebindTestAppend(&fresh, 1, label)
+			}
 			if tc.overlay {
-				fresh.Nodes[0].Children = append(fresh.Nodes[0].Children, 2)
-				fresh.Nodes = append(fresh.Nodes,
-					revalButton(2, 0, 1, display.ID, bounds, "Overlay", "", "overlay_btn"))
+				actRebindTestAppend(&fresh, 0, revalButton(0, 0, 0, display.ID, bounds, "Overlay", "", "overlay_btn"))
+			}
+			if tc.peer {
+				wrapper := proposalNode(0, 0, 0, display, bounds, "android.widget.FrameLayout", "outside")
+				wrapperIndex := len(fresh.Nodes)
+				actRebindTestAppend(&fresh, 0, wrapper)
+				peer := proposalNode(0, 0, 0, display, bounds, "android.widget.TextView", "external peer")
+				actRebindTestAppend(&fresh, wrapperIndex, peer)
 			}
 			projector := &testProjector{builder: observation.NewBuilder()}
 			projection, err := projector.Preview(&fresh)
@@ -276,6 +290,18 @@ func TestActRevalidateTier5OcclusionAndColocatedSync(t *testing.T) {
 				t.Fatal(apiErr)
 			}
 			x, y := bounds.Center()
+			if tc.passive {
+				if provesSubtreeTapPoint(scope, x, y) {
+					t.Fatal("fixture must have multiple deepest hits inside the target")
+				}
+				if carrier, ok := revalidatedPointOwner(view, scope, x, y); ok != (tc.wantReason == "") || carrier != nil {
+					t.Fatalf("passive point ownership = (%+v, %t), want (nil, %t)", carrier, ok, tc.wantReason == "")
+				}
+				fixed := scope.carrierByNode[view.byRaw[2]]
+				if fixed == nil || pointHitsFixedCarrier(scope, x, y, fixed) {
+					t.Fatal("tied passive hits must not prove one fixed carrier")
+				}
+			}
 			plan := &tapPlan{action: "tap", x: x, y: y}
 			match := actMatch{tier: tc.tier, raw: input.targetRaw}
 			frame, apiErr := (&Engine{}).resolveDirectTapScopeFrame(context.Background(), nil,

@@ -1744,20 +1744,25 @@ func resolveTapScopePoint(scope *tapScope, x, y int) (*protocol.Node, bool) {
 	return best, true
 }
 
-// pointOwner explains a point already proven by provesSubtreeTapPoint.
+// pointOwner returns a carrier only when there is one proven deepest hit.
 func pointOwner(scope *tapScope, x, y int) (*tapCarrier, bool) {
-	if scope == nil || !provesSubtreeTapPoint(scope, x, y) {
-		return nil, false
+	if provesSubtreeTapPoint(scope, x, y) {
+		if hit, ok := resolveTapScopePoint(scope, x, y); ok {
+			if hit == scope.target {
+				return nil, true
+			}
+			carrier := scope.carrierByNode[hit]
+			return carrier, carrier != nil
+		}
 	}
-	hit, ok := resolveTapScopePoint(scope, x, y)
-	if !ok {
-		return nil, false
+	return nil, false
+}
+
+func revalidatedPointOwner(view *tapPublicView, scope *tapScope, x, y int) (*tapCarrier, bool) {
+	if carrier, ok := pointOwner(scope, x, y); ok {
+		return carrier, true
 	}
-	if hit == scope.target {
-		return nil, true
-	}
-	carrier := scope.carrierByNode[hit]
-	return carrier, carrier != nil
+	return nil, scope != nil && provesGuidancePointPassive(view, scope.target, scope, x, y)
 }
 
 func pointHitsFixedCarrier(scope *tapScope, x, y int,
@@ -1799,7 +1804,7 @@ func inputPlanStrategyForPoint(scope *tapScope, carrier *tapCarrier) string {
 func chooseUnboundTapPlan(scope *tapScope, input *tapInput,
 	target *protocol.Node, action protocol.Action,
 	preferX, preferY int) (*tapPlan, *protocol.APIError) {
-	if carrier, ok := pointOwner(scope, preferX, preferY); ok {
+	if carrier, ok := revalidatedPointOwner(input.view, scope, preferX, preferY); ok {
 		return &tapPlan{
 			x: preferX, y: preferY,
 			strategy:  inputPlanStrategyForPoint(scope, carrier),

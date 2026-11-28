@@ -70,11 +70,12 @@ func rebindIntegrationCard(display device.Display, fresh bool) device.Capture {
 }
 
 func TestActRecoveryRebindDispatch(t *testing.T) {
-	for _, kind := range []string{"tap", "long_press", "text_parent", "text_label"} {
+	for _, kind := range []string{"tap", "long_press", "text_parent", "text_label", "text_wrapper", "text_wrapper_missing"} {
 		t.Run(kind, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				h := newHarnessWithLogger(t, false, nil)
-				text := kind == "text_parent" || kind == "text_label"
+				wrapperRequest := kind == "text_wrapper" || kind == "text_wrapper_missing"
+				text := kind == "text_parent" || kind == "text_label" || wrapperRequest
 				page := func(fresh bool) captureStep {
 					return proposalCaptureStep(func(display device.Display) device.Capture {
 						if !text {
@@ -94,6 +95,13 @@ func TestActRecoveryRebindDispatch(t *testing.T) {
 						}
 						parent := transparentNode(1, 0, 1, display.ID, panel, 2)
 						parent.ResourceID, parent.ResourceSet = "com.example:id/editor_panel", true
+						if wrapperRequest {
+							parent.Text, parent.TextSet = "Editor panel", true
+						}
+						if fresh && kind == "text_wrapper_missing" {
+							parent.Children = nil
+							return revalCapture(display, revalRoot(display.ID, 1), parent)
+						}
 						input := revalEditText(2, 1, 2, display.ID, bounds, "", "", resource, fresh)
 						return revalCapture(display, revalRoot(display.ID, 1), parent, input)
 					})
@@ -106,14 +114,35 @@ func TestActRecoveryRebindDispatch(t *testing.T) {
 				if text {
 					strategy = protocol.AutoRecoveryTextRebind
 					input := mustFindFirstNodeWithAction(t, root, protocol.ActionText)
+					requestRef := input.Ref
+					if wrapperRequest {
+						wrapper := mustFindNodeByTextOrResource(t, root, "Editor panel")
+						requestRef = wrapper.Ref
+					}
 					writeOnly := false
-					request = textFlowRequest(start.Observation.ID, input.Ref, "text fixture", &writeOnly)
+					request = textFlowRequest(start.Observation.ID, requestRef, "text fixture", &writeOnly)
+					if wrapperRequest {
+						obs := observationStateByID(t, h.engine, start.Observation.ID)
+						_, _, plan, apiErr := staticTextRefCheck(obs, &request.Operation)
+						if apiErr != nil || plan == nil || plan.targetRef != input.Ref || plan.targetRef == requestRef ||
+							plan.targetRaw != &obs.Projection.Capture.Nodes[obs.Projection.Source[input.Ref]] {
+							t.Fatalf("static plan = %+v error = %+v, want resolved input %s for wrapper %s", plan, apiErr, input.Ref, requestRef)
+						}
+					}
 				} else {
 					card := mustFindNodeByTextOrResource(t, root, "购买")
 					request = h.tapRefRequest(t, start.Observation.ID, card.Ref)
 					request.Operation.Type = kind
 				}
 				freshStep := page(true)
+				if kind == "text_wrapper_missing" {
+					h.device.scriptCaptures(freshStep)
+					result := h.actWith(t, "Pwrappermissing", request)
+					requireActRejectionDetails(t, result, "text", request.Operation.Target.Ref, targetChangedReasonTargetMissing)
+					requireRecoveryAttempts(t, result, protocol.AutoRecoveryTransientRetry, protocol.AutoRecoveryTextRebind)
+					proposalRequireNoDispatch(t, h)
+					return
+				}
 				fresh, captureErr := freshStep(h.device, h.engine.current.Screen)
 				if captureErr != nil {
 					t.Fatal(captureErr)
@@ -123,7 +152,7 @@ func TestActRecoveryRebindDispatch(t *testing.T) {
 					t.Fatal(previewErr)
 				}
 				index := 1
-				if kind == "text_parent" {
+				if kind == "text_parent" || kind == "text_wrapper" {
 					index = 2
 				}
 				wantRef := projectionPublicRefForRaw(preview, index)
@@ -152,6 +181,72 @@ func TestActRecoveryRebindDispatch(t *testing.T) {
 					t.Fatalf("rebind did not use the new card bounds: %v", taps)
 				}
 				requireRecoveryReplay(t, h, request, result)
+			})
+		})
+	}
+}
+
+func TestActRecoveryTextRebindFromPlaceholderAndColocated(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		placeholderParent int
+	}{
+		{name: "D1b placeholder child", placeholderParent: 1},
+		{name: "D1c colocated sibling"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				h, recorder := newRevalHarness(t)
+				oldBounds := device.Rect{Left: 100, Top: 680, Right: 500, Bottom: 790}
+				newBounds := device.Rect{Left: 115, Top: 220, Right: 440, Bottom: 290}
+				initial := proposalCaptureStep(func(display device.Display) device.Capture {
+					input := revalEditText(1, 0, 1, display.ID, oldBounds, "", "Search archive", "old_input", false)
+					capture := revalCapture(display, revalRoot(display.ID, 1), input)
+					placeholder := proposalNode(0, 0, 0, display, oldBounds, "android.widget.TextView", "Choose editor")
+					actRebindTestAppend(&capture, tc.placeholderParent, placeholder)
+					return capture
+				})
+				fresh := proposalCaptureStep(func(display device.Display) device.Capture {
+					input := revalEditText(1, 0, 1, display.ID, newBounds, "", "Search archive", "new_input", true)
+					return revalCapture(display, revalRoot(display.ID, 1), input)
+				})
+				h.device.scriptCaptures(initial)
+				start := h.startSession()
+				obs := observationStateByID(t, h.engine, start.Observation.ID)
+				placeholder := proposalFindLabel(t, obs.tree().Root, "Choose editor")
+				writeOnly := false
+				request := textFlowRequest(start.Observation.ID, placeholder.Ref, "search query", &writeOnly)
+				_, _, plan, apiErr := staticTextRefCheck(obs, &request.Operation)
+				oldEditorRef := projectionPublicRefForRaw(obs.Projection, 1)
+				if apiErr != nil || plan == nil || plan.targetRef != oldEditorRef ||
+					plan.targetRaw != &obs.Projection.Capture.Nodes[1] || plan.targetRef == placeholder.Ref {
+					t.Fatalf("static plan=%+v error=%+v, want editor %s for %s", plan, apiErr, oldEditorRef, placeholder.Ref)
+				}
+				capture, err := fresh(h.device, obs.Screen)
+				if err != nil {
+					t.Fatal(err)
+				}
+				preview, err := h.engine.projector.Preview(&capture)
+				if err != nil {
+					t.Fatal(err)
+				}
+				freshEditorRef := projectionPublicRefForRaw(preview, 1)
+				if freshEditorRef == "" || freshEditorRef == placeholder.Ref {
+					t.Fatalf("fresh editor ref = %q, original request = %q", freshEditorRef, placeholder.Ref)
+				}
+				h.device.scriptCaptures(fresh)
+				result := h.actWith(t, "Ptextrebindplaceholder", request)
+				proposalRequireExecuted(t, result)
+				want := protocol.AutoRecoveryView{Strategy: protocol.AutoRecoveryTextRebind,
+					Attempts: 2, OriginalRef: placeholder.Ref, RecoveredRef: freshEditorRef}
+				if result.AutoRecovery == nil || *result.AutoRecovery != want {
+					t.Fatalf("auto_recovery = %+v, want %+v", result.AutoRecovery, want)
+				}
+				writes := recorder.recordedSetTextTargets()
+				if len(writes) != 1 || writes[0].target != textTargetOf(&capture.Nodes[1], obs.Screen) ||
+					writes[0].text != request.Operation.Text || len(h.device.keys) != 0 || len(h.device.taps) != 0 {
+					t.Fatalf("writes = %+v, keys = %v, taps = %v, want one write to the fresh editor", writes, h.device.keys, h.device.taps)
+				}
 			})
 		})
 	}
