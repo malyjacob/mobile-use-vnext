@@ -258,7 +258,8 @@ func TestTier4RejectsWithoutSemanticEvidence(t *testing.T) {
 		device.Rect{Left: 200, Top: 400, Right: 800, Bottom: 600})
 	panel := targetProofNodeByBounds(t, root,
 		device.Rect{Left: 50, Top: 200, Right: 1030, Bottom: 1000})
-	h.device.scriptCaptures(proposalCaptureStep(func(device.Display) device.Capture {
+	h.device.scriptCaptures(proposalCaptureStep(func(display device.Display) device.Capture {
+		fresh.Display = display
 		return fresh
 	}))
 
@@ -300,7 +301,8 @@ func TestTier4InsertionOnlyWrapperOmitsChangedRef(t *testing.T) {
 	start := h.startSession()
 	target := targetProofNodeByBounds(t, currentTree(t, h.engine).Root,
 		device.Rect{Left: 200, Top: 400, Right: 800, Bottom: 600})
-	h.device.scriptCaptures(proposalCaptureStep(func(device.Display) device.Capture {
+	h.device.scriptCaptures(proposalCaptureStep(func(display device.Display) device.Capture {
+		fresh.Display = display
 		return fresh
 	}))
 
@@ -358,24 +360,27 @@ func TestTier4RejectsAmbiguousRebuild(t *testing.T) {
 
 // TestTier4RejectsMovedTargetBeyondCoverage proves the bidirectional 80%
 // coverage gate: a target that moved out of its old rectangle is not Tier 4.
+// The label contains a digit, so it does not provide a container rebind anchor.
 func TestTier4RejectsMovedTargetBeyondCoverage(t *testing.T) {
 	display := targetProofDisplay()
+	const label = "Continue 5"
 	original := targetProofPanelPage(display, "old_panel",
 		proposalClickableNode(2, 1, 2, display,
 			device.Rect{Left: 200, Top: 400, Right: 800, Bottom: 600},
-			"android.widget.Button", "Continue"))
+			"android.widget.Button", label))
 	fresh := targetProofPanelPage(display, "new_panel",
 		proposalClickableNode(2, 1, 2, display,
 			device.Rect{Left: 460, Top: 400, Right: 1060, Bottom: 600},
-			"android.widget.Button", "Continue"))
+			"android.widget.Button", label))
 
 	h := newHarness(t)
 	h.device.scriptCaptures(proposalCaptureStep(func(device.Display) device.Capture {
 		return original
 	}))
 	start := h.startSession()
-	target := proposalFindLabel(t, currentTree(t, h.engine).Root, "Continue")
-	h.device.scriptCaptures(proposalCaptureStep(func(device.Display) device.Capture {
+	target := proposalFindLabel(t, currentTree(t, h.engine).Root, label)
+	h.device.scriptCaptures(proposalCaptureStep(func(display device.Display) device.Capture {
+		fresh.Display = display
 		return fresh
 	}))
 

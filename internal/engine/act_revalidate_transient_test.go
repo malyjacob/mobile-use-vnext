@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -38,12 +39,18 @@ func TestActRevalidateTransientSingleRetryAndStop(t *testing.T) {
 		{name: "capability_change_has_no_retry", first: targetLabel, captures: 1,
 			code: protocol.CodeTargetChanged, reason: targetChangedReasonCapabilityChanged, deliver: targetLabel},
 		{name: "stop_interrupts_wait", first: "Loading", captures: 1, code: protocol.CodeStopped, wait: stopDelay},
+		{name: "deadline_interrupts_wait", first: "Loading", captures: 1, code: protocol.CodeStopped, wait: stopDelay},
+		{name: "foreground_changes_during_wait", first: "Loading", second: targetLabel, captures: 2,
+			code: protocol.CodeForegroundChanged, deliver: targetLabel, wait: 150 * time.Millisecond},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				var logged bytes.Buffer
-				logger := eventlog.New(&logged, "instance-test")
-				defer logger.Close()
+				var logger *eventlog.Logger
+				if tc.code == "" {
+					logger = eventlog.New(&logged, "instance-test")
+					defer logger.Close()
+				}
 				h := newHarnessWithLogger(t, false, logger)
 				rec := &revalDevice{fakeDevice: h.device}
 				h.engine.dev = rec
@@ -54,6 +61,7 @@ func TestActRevalidateTransientSingleRetryAndStop(t *testing.T) {
 				button := mustFindNodeByTextOrResource(t, currentTree(t, h.engine).Root, targetLabel)
 				captures := 0
 				lastCaptureAt := time.Time{}
+				var foregroundChanged atomic.Bool
 				rec.onCapture = func(_ context.Context, display device.Display) (device.Capture, error, bool) {
 					if len(rec.recordedTaps()) != 0 {
 						return capture(display, targetLabel), nil, true // Post-dispatch observation.
@@ -64,23 +72,39 @@ func TestActRevalidateTransientSingleRetryAndStop(t *testing.T) {
 						return device.Capture{}, errors.New("unreadable second frame"), true
 					}
 					if captures > 1 {
-						return capture(display, tc.second), nil, true
+						fresh := capture(display, tc.second)
+						if foregroundChanged.Load() {
+							fresh.Foreground = revalForeground("com.other", 77)
+						}
+						return fresh, nil, true
 					}
 					fresh := capture(display, tc.first)
 					if tc.reason == targetChangedReasonCapabilityChanged {
 						fresh.Nodes[1].Enabled = false
 					}
-					if tc.code == protocol.CodeStopped {
+					switch tc.name {
+					case "deadline_interrupts_wait":
 						h.engine.mu.Lock()
-						cancel := h.engine.work.Cancel
+						h.engine.work.Deadline = time.Now().Add(stopDelay)
 						h.engine.mu.Unlock()
-						time.AfterFunc(stopDelay, cancel)
+						time.AfterFunc(stopDelay, func() { h.engine.housekeeping(context.Background()) })
+					case "foreground_changes_during_wait":
+						time.AfterFunc(stopDelay, func() { foregroundChanged.Store(true) })
+					case "stop_interrupts_wait":
+						time.AfterFunc(stopDelay, func() {
+							if _, stopErr := h.engine.Stop(context.Background(), &protocol.ControlStopRequest{
+								AppInstanceID: h.appInstance, StopSeq: 1, Reason: "user_stop",
+							}); stopErr != nil {
+								t.Errorf("STOP failed: %v", stopErr)
+							}
+						})
 					}
 					return fresh, nil, true
 				}
 
 				began := time.Now()
-				result := h.actWith(t, "Ptransient", h.tapRefRequest(t, start.Observation.ID, button.Ref))
+				request := h.tapRefRequest(t, start.Observation.ID, button.Ref)
+				result := h.actWith(t, "Ptransient", request)
 				if captures != tc.captures || len(rec.recordedTaps()) != tc.taps {
 					t.Fatalf("revalidation captures=%d taps=%d, want %d and %d, result=%+v",
 						captures, len(rec.recordedTaps()), tc.captures, tc.taps, result)
@@ -99,8 +123,11 @@ func TestActRevalidateTransientSingleRetryAndStop(t *testing.T) {
 					if tc.captures == 2 {
 						attempt = "attempt=2"
 					}
-					var targetEvents []string
+					var targetEvents, recoveryEvents []string
 					for _, line := range strings.Split(logged.String(), "\n") {
+						if strings.Contains(line, " act.auto_recovery ") {
+							recoveryEvents = append(recoveryEvents, line)
+						}
 						if strings.Contains(line, " act.target ") && strings.Contains(line, `operation_id="`+result.OperationID+`"`) {
 							targetEvents = append(targetEvents, line)
 						}
@@ -108,11 +135,52 @@ func TestActRevalidateTransientSingleRetryAndStop(t *testing.T) {
 					if len(targetEvents) != 1 || !strings.Contains(targetEvents[0], attempt) {
 						t.Fatalf("act.target events = %v, want one with %s", targetEvents, attempt)
 					}
+					if tc.captures == 2 {
+						want := protocol.AutoRecoveryView{Strategy: protocol.AutoRecoveryTransientRetry,
+							OriginalRef: button.Ref, RecoveredRef: button.Ref, Attempts: 2}
+						if result.AutoRecovery == nil || *result.AutoRecovery != want {
+							t.Fatalf("auto_recovery = %+v, want %+v", result.AutoRecovery, want)
+						}
+						if len(recoveryEvents) != 1 {
+							t.Fatalf("want exactly one recovery event: %v", recoveryEvents)
+						}
+						event := recoveryEvents[0]
+						for _, field := range []string{`strategy="transient_retry"`, `attempt=2`, `outcome="proven"`,
+							`reason="target_missing"`, `ms=150`, `operation_id="Ptransient"`,
+							`observation_id="` + start.Observation.ID + `"`} {
+							if !strings.Contains(event, field) {
+								t.Fatalf("recovery event missing %s: %q", field, event)
+							}
+						}
+						if strings.Contains(event, "ref=") || strings.Contains(event, targetLabel) || strings.Contains(event, `"`+button.Ref+`"`) {
+							t.Fatalf("recovery event leaked target details: %q", event)
+						}
+						requireRecoveryReplay(t, h, request, result)
+					} else if len(recoveryEvents) != 0 || result.AutoRecovery != nil {
+						t.Fatalf("first attempt invented recovery: events=%v, result=%+v", recoveryEvents, result.AutoRecovery)
+					}
 					return
 				}
 				requireNotExecuted(t, result, tc.code)
-				if tc.reason != "" {
-					targetProofRequireDetailsString(t, result, "reason", tc.reason)
+				if tc.name == "deadline_interrupts_wait" && result.Phase != "work_deadline" {
+					t.Fatalf("deadline did not replay the frozen phase: %+v", result)
+				}
+				if result.AutoRecovery != nil {
+					t.Fatalf("rejected attempt saved recovery: %+v", result.AutoRecovery)
+				}
+				switch tc.reason {
+				case targetChangedReasonTargetMissing:
+					requireActRejectionDetails(t, result, "tap", button.Ref, tc.reason)
+					requireRecoveryAttempts(t, result, protocol.AutoRecoveryTransientRetry, protocol.AutoRecoveryContainerRebind)
+				case targetChangedReasonCapabilityChanged:
+					requireActRejectionDetails(t, result, "tap", button.Ref, tc.reason)
+					requireRecoveryAttempts(t, result)
+				default:
+					for _, key := range []string{"phase", "kind", "recovery_attempted", "original_ref"} {
+						if _, exists := result.Error.Details[key]; exists {
+							t.Fatalf("%s failure unexpectedly includes %s: %v", tc.code, key, result.Error.Details)
+						}
+					}
 				}
 				if tc.deliver == "" {
 					if result.Observation != nil {

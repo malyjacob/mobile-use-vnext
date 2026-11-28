@@ -222,6 +222,102 @@ func TestEffectQualityModeParity(t *testing.T) {
 	}
 }
 
+// TestAutoRecoveryModeParity proves the explicit zero-dispatch recovery marker
+// reaches all three result modes: the text channel carries the fixed v4 line in
+// the control-scalar section, structuredContent keeps the complete object, and
+// both mode never disagrees. A coordinate-only request omits both refs.
+func TestAutoRecoveryModeParity(t *testing.T) {
+	cases := []struct {
+		name string
+		view protocol.AutoRecoveryView
+		line string
+	}{
+		{
+			name: "transient retry repeats the original ref",
+			view: protocol.AutoRecoveryView{
+				Strategy:    protocol.AutoRecoveryTransientRetry,
+				OriginalRef: "n7", RecoveredRef: "n7", Attempts: 2,
+			},
+			line: "auto_recovery strategy=transient_retry original_ref=n7 recovered_ref=n7 attempts=2",
+		},
+		{
+			name: "text rebind publishes the replacement ref",
+			view: protocol.AutoRecoveryView{
+				Strategy:    protocol.AutoRecoveryTextRebind,
+				OriginalRef: "n12", RecoveredRef: "n31", Attempts: 2,
+			},
+			line: "auto_recovery strategy=text_rebind original_ref=n12 recovered_ref=n31 attempts=2",
+		},
+		{
+			name: "container rebind publishes the replacement ref",
+			view: protocol.AutoRecoveryView{
+				Strategy:    protocol.AutoRecoveryContainerRebind,
+				OriginalRef: "n3", RecoveredRef: "n8", Attempts: 2,
+			},
+			line: "auto_recovery strategy=container_rebind original_ref=n3 recovered_ref=n8 attempts=2",
+		},
+		{
+			name: "coordinate retry omits both refs",
+			view: protocol.AutoRecoveryView{
+				Strategy: protocol.AutoRecoveryTransientRetry, Attempts: 2,
+			},
+			line: "auto_recovery strategy=transient_retry attempts=2",
+		},
+	}
+	for _, testCase := range cases {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			view := testCase.view
+			source := &protocol.Result{
+				OperationID: "P31", Outcome: "executed", AutoRecovery: &view,
+			}
+			before := rmfResultBytes(t, source)
+			e := &execution{result: source}
+			canonical, err := canonicalResult(e)
+			if err != nil {
+				t.Fatalf("canonicalResult: %v", err)
+			}
+			if !bytes.Contains(canonical, []byte(`"auto_recovery":{"strategy":"`+view.Strategy+`"`)) {
+				t.Fatalf("canonical JSON lost auto_recovery: %s", canonical)
+			}
+			want := expectedResultV4(t, canonical, false)
+			for _, mode := range []ResultMode{ResultModeBoth, ResultModeText, ResultModeStructured} {
+				out := projectExecution(e, "act", mode)
+				if out.IsError {
+					t.Fatalf("mode %v: unexpected error", mode)
+				}
+				if mode == ResultModeStructured {
+					if got := rmfStructuredBytes(t, out.StructuredContent); !bytes.Equal(got, canonical) {
+						t.Fatalf("mode %v: structuredContent differs from canonical\ngot: %s", mode, got)
+					}
+					if len(out.Content) != 0 {
+						t.Fatalf("mode %v: structured mode carried result text", mode)
+					}
+					continue
+				}
+				text := testTextContent(t, out)
+				requireTestContains(t, text, "\n"+testCase.line+"\n")
+				decoded, flag, err := decodeResultText(t, text)
+				if err != nil || flag || !sameJSONValue(want, decoded) {
+					t.Fatalf("mode %v text parity error=%v flag=%t\n%s", mode, err, flag, text)
+				}
+				if mode == ResultModeText {
+					if out.StructuredContent != nil {
+						t.Fatalf("mode %v: text mode carried structured content", mode)
+					}
+					continue
+				}
+				if got := rmfStructuredBytes(t, out.StructuredContent); !bytes.Equal(got, canonical) {
+					t.Fatalf("both mode structuredContent differs from canonical")
+				}
+			}
+			if got := rmfResultBytes(t, source); !bytes.Equal(got, before) {
+				t.Fatalf("mode projection mutated the source result\nbefore: %s\n after: %s", before, got)
+			}
+		})
+	}
+}
+
 type resultModeFixture struct {
 	tool, name, raw string
 	cancelled       bool
@@ -309,6 +405,24 @@ func resultModeFixtures() []resultModeFixture {
 		`"dispatch":{"focus":"not_attempted","write":"executed","submit":"not_attempted"}}},`+
 		`"observation":{"status":"complete","id":"O2","quality":{"state":"unknown","samples":0,"stop_reason":"not_sampled"}},`+
 		`"recovery":{"entry":"observe","reference":"P","input_state":"retired"}}`)
+	// The explicit zero-dispatch recovery marker and the unified revalidate
+	// rejection details travel through every result mode unchanged. A rejected
+	// revalidation never publishes the marker.
+	add("act", "auto_recovery_transient_retry", `{"operation_id":"P31","outcome":"executed",`+
+		`"auto_recovery":{"strategy":"transient_retry","original_ref":"n7","recovered_ref":"n7","attempts":2}}`)
+	add("act", "auto_recovery_text_rebind", `{"operation_id":"P32","outcome":"executed",`+
+		`"text_input":{"write":"executed","submit":"executed"},`+
+		`"auto_recovery":{"strategy":"text_rebind","original_ref":"n12","recovered_ref":"n31","attempts":2}}`)
+	add("act", "auto_recovery_container_rebind", `{"operation_id":"P33","outcome":"executed",`+
+		`"auto_recovery":{"strategy":"container_rebind","original_ref":"n3","recovered_ref":"n8","attempts":2}}`)
+	add("act", "auto_recovery_coordinate", `{"operation_id":"P34","outcome":"executed",`+
+		`"auto_recovery":{"strategy":"transient_retry","attempts":2}}`)
+	add("act", "revalidate_target_changed", `{"operation_id":"P35","operation_state":"finished","outcome":"not_executed",`+
+		`"text_input":{"write":"not_executed","submit":"not_executed"},`+
+		`"error":{"code":"target_changed","message":"目标祖先已变化","details":`+
+		`{"phase":"revalidate","kind":"text","reason":"lineage_changed","original_ref":"n2",`+
+		`"changed_ref":"n820","recovery_attempted":["transient_retry"]}},`+
+		`"recovery":{"entry":"retry","reference":"O","input_state":"effective"}}`)
 	fixtures = append(fixtures, resultModeFixture{tool: "act", name: "executed_cancelled", raw: `{"outcome":"executed"}`, cancelled: true})
 	// The inspection tree scope carries the detailed view inside the nested
 	// complete tree; subtree and query declare it on the envelope.

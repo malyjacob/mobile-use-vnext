@@ -580,6 +580,11 @@ func colocatedMatchGuard(view *tapPublicView, child, candidate *protocol.Node, s
 
 func buildStaticCandidates(obs *observationState, view *tapPublicView,
 	operation *protocol.Operation, entries []candidateEntry) []map[string]any {
+	return buildActionCandidates(obs, view, operation, entries, false)
+}
+
+func buildActionCandidates(obs *observationState, view *tapPublicView,
+	operation *protocol.Operation, entries []candidateEntry, executableOnly bool) []map[string]any {
 	if obs == nil || view == nil || operation == nil || len(entries) == 0 {
 		return nil
 	}
@@ -631,6 +636,9 @@ func buildStaticCandidates(obs *observationState, view *tapPublicView,
 		case "text":
 			executable = tryPlanTextDirectBase(obs, view, entry.node)
 		}
+		if executableOnly && !executable {
+			continue
+		}
 		evaluated = append(evaluated, evaluatedCandidate{
 			entry:      entry,
 			clipped:    clipped,
@@ -667,10 +675,15 @@ func attachStaticCandidates(apiErr *protocol.APIError, candidates []map[string]a
 }
 
 func attachStaticBlockingRefs(apiErr *protocol.APIError, refs []string) {
-	if apiErr == nil || len(refs) == 0 {
-		return
+	if apiErr != nil {
+		if clean := boundedBlockingRefs(refs); len(clean) > 0 {
+			apiErr.WithDetail("blocking_refs", clean)
+		}
 	}
-	seen := make(map[string]struct{}, len(refs))
+}
+
+func boundedBlockingRefs(refs []string) []string {
+	seen := make(map[string]struct{}, min(len(refs), maxBlockingRefs))
 	clean := make([]string, 0, min(len(refs), maxBlockingRefs))
 	for _, ref := range refs {
 		if ref == "" {
@@ -685,9 +698,7 @@ func attachStaticBlockingRefs(apiErr *protocol.APIError, refs []string) {
 			break
 		}
 	}
-	if len(clean) > 0 {
-		apiErr.WithDetail("blocking_refs", clean)
-	}
+	return clean
 }
 
 func collectPageScrollCandidates(obs *observationState, view *tapPublicView, excludeRef string) []candidateEntry {

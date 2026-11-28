@@ -42,6 +42,9 @@ var v4ResultFields = func() map[string]resultV4FieldKind {
 	add("", "effect", v4Omitted)
 	add("effect.", "state", v4Token)
 	add("text_input.", "write submit", v4Token)
+	add("", "auto_recovery", v4Object)
+	add("auto_recovery.", "strategy original_ref recovered_ref", v4Token)
+	add("auto_recovery.", "attempts", v4Literal)
 	add("", "image inspection shell wait", v4Object)
 	add("wait.", "trigger", v4Token)
 	add("wait.", "matched", v4JSON)
@@ -424,6 +427,17 @@ func encodeResultText(raw []byte, isError bool, requestRef string) (string, erro
 	emitToken("start_operation_id", "start_operation_id")
 	emitToken("observation_state", "observation_state")
 	emitToken("input_state", "input_state")
+	// The explicit zero-dispatch recovery marker closes the control-scalar
+	// section: it tells the caller that this action reached dispatch only after
+	// a transient retry or one rebind, before the frame it was applied to.
+	if rawValue, present := values["auto_recovery"]; present {
+		handled["auto_recovery"] = true
+		if line, ok := renderAutoRecoveryV4(rawValue); ok {
+			w.line(line)
+		} else {
+			w.fallback("/auto_recovery", rawValue)
+		}
+	}
 
 	// 2. notify aggregate line.
 	renderNotifyV4(w, values, handled)
@@ -544,6 +558,77 @@ func renderTextInputV4(raw []byte) (string, bool) {
 		}
 	}
 	return "text_input write=" + write + " submit=" + submit, true
+}
+
+// renderAutoRecoveryV4 renders the fixed zero-dispatch recovery line:
+//
+//	auto_recovery strategy=<strategy> [original_ref=<ref>] [recovered_ref=<ref>] attempts=<n>
+//
+// The documented shape is closed: strategy names one of the three published
+// recoveries, attempts is at least 1, the two refs are either both present or
+// both omitted (only a coordinate-only transient_retry omits them), a
+// transient retry repeats the original ref, and a rebind always publishes the
+// replacement ref. Every object outside that shape fails as a whole, so the
+// json v1 fallback keeps the complete fact instead of dropping one.
+func renderAutoRecoveryV4(raw []byte) (string, bool) {
+	if rawIsNull(raw) {
+		return "", false
+	}
+	members, values, ok := resultMemberMap(raw)
+	if !ok {
+		return "", false
+	}
+	for _, member := range members {
+		switch member.name {
+		case "strategy", "original_ref", "recovered_ref", "attempts":
+		default:
+			return "", false
+		}
+	}
+	strategy, strategyOK := rawStringValue(values["strategy"])
+	if !strategyOK || !resultToken(strategy) {
+		return "", false
+	}
+	rebind := false
+	switch strategy {
+	case protocol.AutoRecoveryTransientRetry:
+	case protocol.AutoRecoveryTextRebind, protocol.AutoRecoveryContainerRebind:
+		rebind = true
+	default:
+		return "", false
+	}
+	attempts, attemptsOK := rawIntValue(values["attempts"])
+	if !attemptsOK || attempts < 1 {
+		return "", false
+	}
+	originalRaw, hasOriginal := values["original_ref"]
+	recoveredRaw, hasRecovered := values["recovered_ref"]
+	if hasOriginal != hasRecovered {
+		return "", false
+	}
+	original, recovered := "", ""
+	if hasOriginal {
+		if original, ok = rawStringValue(originalRaw); !ok || !resultToken(original) {
+			return "", false
+		}
+		if recovered, ok = rawStringValue(recoveredRaw); !ok || !resultToken(recovered) {
+			return "", false
+		}
+	}
+	if rebind {
+		// A rebind only happens when the original binding failed, so it always
+		// names the replacement ref.
+		if !hasOriginal {
+			return "", false
+		}
+	} else if hasOriginal && recovered != original {
+		return "", false
+	}
+	line := "auto_recovery strategy=" + strategy
+	if hasOriginal {
+		line += " original_ref=" + original + " recovered_ref=" + recovered
+	}
+	return line + " attempts=" + strconv.Itoa(attempts), true
 }
 
 func renderNotifyV4(w *resultV4Writer, values map[string]json.RawMessage, handled map[string]bool) {
@@ -2074,6 +2159,9 @@ var resultFields = func() map[string]resultFieldKind {
 	add("effect.", "state", fieldToken)
 	add("", "text_input", fieldObject)
 	add("text_input.", "write submit", fieldToken)
+	add("", "auto_recovery", fieldObject)
+	add("auto_recovery.", "strategy original_ref recovered_ref", fieldToken)
+	add("auto_recovery.", "attempts", fieldLiteral)
 	add("", "session cleanup error recovery observation app notification diagnosis", fieldObject)
 	add("", "image", fieldJSON)
 	add("", "inspection shell", fieldBlock)

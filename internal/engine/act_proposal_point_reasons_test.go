@@ -452,7 +452,8 @@ func TestProposalTargetChangedNineReasonMatrix(t *testing.T) {
 					UseRef: true, Ref: child.Ref,
 				},
 			})
-		proposalRequireTargetChanged(t, result, "child_changed")
+		requireActRejectionDetails(t, result, "tap", child.Ref, targetChangedReasonChildChanged)
+		requireRecoveryAttempts(t, result, protocol.AutoRecoveryTransientRetry)
 		proposalRequireNoDispatch(t, harnessUnderTest)
 	})
 
@@ -654,7 +655,17 @@ func TestProposalTargetChangedNineReasonMatrix(t *testing.T) {
 				},
 				Direction: protocol.ScrollDirectionDown,
 			})
-		proposalRequireTargetChanged(t, result, "trajectory_blocked")
+		requireActRejectionDetails(t, result, "scroll", containers[0].Ref, targetChangedReasonTrajectoryBlocked)
+		requireRecoveryAttempts(t, result, protocol.AutoRecoveryTransientRetry)
+		if result.Observation == nil {
+			t.Fatal("blocked trajectory did not deliver an observation")
+		}
+		blockerBounds := device.Rect{Left: 230, Top: bounds.Top, Right: 850, Bottom: bounds.Bottom}
+		blockers := proposalScrollNodesByBounds(currentTree(t, harnessUnderTest.engine).Root, blockerBounds)
+		refs, _ := result.Error.Details["blocking_refs"].([]string)
+		if len(blockers) != 1 || len(refs) != 1 || refs[0] != blockers[0].Ref {
+			t.Fatalf("blocking_refs = %v, want the published nested scroll blocker %v", refs, blockers)
+		}
 		proposalRequireNoDispatch(t, harnessUnderTest)
 	})
 

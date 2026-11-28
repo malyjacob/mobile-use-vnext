@@ -621,6 +621,8 @@ type operationState struct {
 	TextStageAutoSubmit bool
 	TextStage           *textStage
 	TextInput           *protocol.TextInputView
+	// AutoRecovery records the recovery that reached the act dispatch gate.
+	AutoRecovery *protocol.AutoRecoveryView
 }
 
 type workState struct {
@@ -1293,7 +1295,8 @@ func (e *Engine) pruneClosedLocked(now time.Time) {
 
 // operationView builds the status(P) projection without new side effects.
 func (e *Engine) operationViewLocked(op *operationState) *protocol.Result {
-	result := &protocol.Result{OperationID: op.ID, OperationState: op.State}
+	result := newResult(op)
+	result.OperationState = op.State
 	if op.State == OperationFinished {
 		result.Outcome = op.Outcome
 		result.Phase = op.Phase
@@ -1308,10 +1311,6 @@ func (e *Engine) operationViewLocked(op *operationState) *protocol.Result {
 		cloned.Details = protocol.CloneErrorDetails(op.Error.Details)
 		result.Error = &cloned
 		result.HTTPStatus = op.HTTPStatus
-	}
-	if op.TextInput != nil {
-		snapshot := *op.TextInput
-		result.TextInput = &snapshot
 	}
 	// The wait fact is one saved bounded outcome: a duplicate P or status(P)
 	// copies it and never recomputes a trigger, a match list or an elapsed time.

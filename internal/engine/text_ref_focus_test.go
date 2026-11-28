@@ -90,6 +90,33 @@ func TestTextRefNoTapFocusedWrites(t *testing.T) {
 	requireTextRefNoTapDispatch(t, dev, 0, 1, 0)
 }
 
+func TestTextRefNoTapStillRequiresUniqueAnchorInOriginalObservation(t *testing.T) {
+	bounds := device.Rect{Left: 100, Top: 300, Right: 900, Bottom: 400}
+	page := func(duplicate bool) captureStep {
+		return proposalCaptureStep(func(display device.Display) device.Capture {
+			input := revalEditText(1, 0, 1, display.ID, bounds, "", "", "editor", true)
+			input.HasClickable, input.Clickable = false, false
+			capture := revalCapture(display, revalRoot(display.ID, 1), input)
+			if duplicate {
+				other := revalEditText(0, 0, 0, display.ID,
+					device.Rect{Left: 100, Top: 900, Right: 900, Bottom: 1000}, "", "", "editor", false)
+				actRebindTestAppend(&capture, 0, other)
+			}
+			return capture
+		})
+	}
+	h, dev, obsRef, ref := newTextRefNoTapHarness(t, page(true))
+	h.device.scriptCaptures(page(false))
+
+	autoSubmit := false
+	result := h.actWith(t, "PnoTapOldAnchor", textFlowRequest(obsRef, ref, textRefNoTapValue, &autoSubmit))
+	requireTextRefNoTapExecuted(t, result, false)
+	if result.AutoRecovery != nil {
+		t.Fatalf("ordinary revalidation unexpectedly recovered: %+v", result.AutoRecovery)
+	}
+	requireTextRefNoTapDispatch(t, dev, 1, 1, 0)
+}
+
 func TestTextRefNoTapAutoSubmitSendsOneEnter(t *testing.T) {
 	bounds := device.Rect{Left: 100, Top: 300, Right: 900, Bottom: 400}
 	initial := textRefNoTapPage(bounds, device.Rect{}, false, false, true)
@@ -162,9 +189,7 @@ func TestTextRefNoTapLostEditableAfterClaim(t *testing.T) {
 	if status != 409 {
 		t.Fatalf("target change HTTP status = %d, want 409", status)
 	}
-	details := textDetailsOf(t, result)
-	requireTextDetail(t, details, "reason", "target_unconfirmed")
-	requireTextDispatch(t, details, "not_attempted", "not_attempted", "not_attempted")
+	requireActRejectionDetails(t, result, "text", ref, targetChangedReasonCapabilityChanged)
 	if result.Observation == nil || result.Observation.ID == obsRef {
 		t.Fatalf("expected a fresh observation after claim, got %+v", result.Observation)
 	}

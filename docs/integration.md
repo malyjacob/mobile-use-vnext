@@ -41,7 +41,7 @@ adb forward          主机 18881 → 服务；主机 18883 → 手机 MCP
    `adb forward`，也不需要 Agent token。
 
 只需要直连 HTTP 的 Agent 则使用 `http://127.0.0.1:18881/api/<tool>`、`agent_token` 与
-`X-Mobile-Use-Contract: 35`。
+`X-Mobile-Use-Contract: 36`。
 
 ## 1. 默认部署后的网络与进程
 
@@ -347,7 +347,7 @@ HTTP 宿主在原有 `Authorization` 头之外按需添加：
 
 ```text
 Authorization: Bearer <agent_token>
-X-Mobile-Use-Contract: 35
+X-Mobile-Use-Contract: 36
 Content-Type: application/json; charset=utf-8
 ```
 
@@ -355,7 +355,7 @@ Content-Type: application/json; charset=utf-8
 $deploy = Get-Content .state/deploy.json -Raw | ConvertFrom-Json
 $headers = @{
     Authorization           = "Bearer $($deploy.agent_token)"
-    'X-Mobile-Use-Contract' = '35'
+    'X-Mobile-Use-Contract' = '36'
 }
 Invoke-RestMethod http://127.0.0.1:18881/api/status -Method Post `
   -Headers $headers -ContentType 'application/json' -Body '{}'
@@ -408,7 +408,7 @@ Invoke-RestMethod http://127.0.0.1:18881/api/status -Method Post `
 
 ref 点按/长按默认 `bubble=true`，原目标无 `tap`/`long_press`/`text` 动作时先在目标视觉区内尝试最近交互祖先提升，遇竞争控件止漂并自动吸附唯一局部共位按钮；`scroll` 支持同视口滚动栈直传、非滚动节点自动祖先提升、容器轴向不兼容时回退兼容外层滚动祖先，以及坐标最内层/回退/消歧；遇静态目标解析或规划 `422`（`invalid_target`/`unsupported_node_action`/`ambiguous_point`/`no_safe_point`/`no_safe_trajectory`）时，若 `error.details.candidates` 非空，取首个 `executable=true` 的 `ref` 用同一 O 与新 P 重试（无候选或无可执行项时按错误原因另行处理）。`scroll` 的静态候选已按前景上下文过滤：与请求目标不属于同一顶层窗口、被点击遮罩叶或同窗口后序实体浮层面板遮挡的容器不会出现在 `candidates` 中，全部被剔除时省略该字段且不回退被遮挡的背景页面，此时按错误原因处理而不是改试背景页；被前景浮层覆盖的容器也不会标成 `executable=true`。坐标目标不传 `bubble`。`text` 的 ref 目标只要求 `role=input`、公开动作含 `text`、未禁用、`protected=false` 与正面积几何，不要求 `tap`。`text` 默认 `auto_submit=true`、`submit_ref="enter_key"`，一次调用已包含必要聚焦（已聚焦 ref 走零点击快路径，未聚焦时在目标子树内规划唯一安全落点并至多点击一次，随后至多 3 次只读复查确认获焦：首帧立即、其后 `60ms`/`120ms` 退避，窗口上限 `1200ms`，绝不重发聚焦点击）、全文写入、写后精确确认（刷新值相等即完成；否则至多 3 次只读读回，退避 `40ms`/`80ms`/`150ms`、墙钟上限 `1000ms`，几何变化时至多一次严格写后重绑定）和至多一次 ENTER，不需要先 tap 或另发 ENTER；草稿、多行、逐字段填写或清空但不提交时显式 `auto_submit=false`（此时 `submit_ref` 只做语法校验后忽略）。`submit_ref="n<ref>"` 表示写后点击该提交按钮：认领前按完整 tap 规划校验，写前灰置也接受，写后重验启用状态与安全落点，失败不补发 ENTER。复合 text 结果携带 `text_input.write/submit`；`submit=uncertain` 先观察页面，不原样重发。`write=executed` 且提交确定未派发时 `outcome=partial`、`error.code=text_submit_not_executed`
 （期间 STOP 撤权为 `control_revoked`），首次结果通常附带新的 ready O；用 `obs` 行取该 O
-继续，需要时再读回框值，不重放原文字。text 失败时读取 `error.details.stage/reason/dispatch` 区分未派发、目标不唯一、读回不等与提交问题，不要解析 `message`；写入或提交仍 uncertain 且会话活动时按 `recovery entry=observe ref=<P>`（`structured` 中为 `recovery.entry`）用新 P 获取现场，而不是循环 `status(P)`。
+继续，需要时再读回框值，不重放原文字。text 派发阶段失败时读取 `error.details.stage/reason/dispatch` 区分未派发、目标不唯一、读回不等与提交问题，不要解析 `message`；认领后重验的 `409 target_changed` 按统一 `phase=revalidate` 详情处理；经零派发重验自动恢复并进入派发时，`Result.auto_recovery` 仅覆盖 `tap`/`long_press`/`text`/`scroll` 四种 kind；raw `swipe` 的瞬态复检不发布该字段；`original_ref`/`recovered_ref` 按 §2 条件出现（纯坐标省略），`strategy` 与 `attempts` 见该节。写入或提交仍 uncertain 且会话活动时按 `recovery entry=observe ref=<P>`（`structured` 中为 `recovery.entry`）用新 P 获取现场，而不是循环 `status(P)`。
 
 P 的两种用法：`observe({"reference":"P7391_4"})` 的 `reference` 引用本 Agent 已有的
 `P7391_4` 原操作，不是本次 `observe` 的请求体 P；本次调用仍使用自己的新 P。
@@ -615,7 +615,7 @@ Header: Authorization: Bearer <mcp_token>
 两种选择：
 
 ```text
-直连 HTTP:  http://127.0.0.1:18880/api/<tool>   + agent_token + X-Mobile-Use-Contract: 35
+直连 HTTP:  http://127.0.0.1:18880/api/<tool>   + agent_token + X-Mobile-Use-Contract: 36
 MCP HTTP:   http://127.0.0.1:18882/mcp          + mcp_token
 ```
 
@@ -695,7 +695,7 @@ adb shell su -c 'tail -n 50 /data/local/chroots/debian13/var/lib/mobile-use-vnex
 
 升级后：
 
-- 服务、App、适配器与客户端共同使用同一个 `contract_version`（当前 `35`）；
+- 服务、App、适配器与客户端共同使用同一个 `contract_version`（当前 `36`）；
 - 重新建立可能失效的转发；
 - 重启实际 MCP 宿主进程，不能只替换磁盘文件；
 - 旧会话转退休记录，不恢复旧 O/P 或主屏授权；旧 cleanup 的 `pending`/`unconfirmed` 可继续
@@ -803,7 +803,7 @@ GET 判断工具是否可用。
 $deploy = Get-Content .state/deploy.json -Raw | ConvertFrom-Json
 $headers = @{
     Authorization           = "Bearer $($deploy.agent_token)"
-    'X-Mobile-Use-Contract' = '35'
+    'X-Mobile-Use-Contract' = '36'
 }
 $start = Invoke-RestMethod http://127.0.0.1:18881/api/start -Method Post `
   -Headers $headers -ContentType 'application/json' -Body '{}'

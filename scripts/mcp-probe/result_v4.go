@@ -427,6 +427,13 @@ func (p *v4Parser) decodeLine(lines []string, index int) (int, *checkError) {
 		if failure := p.setSimpleToken(line, "input_state", "input_state"); failure != nil {
 			return 0, failure
 		}
+	case strings.HasPrefix(line, "auto_recovery "):
+		if failure := p.enter(10); failure != nil {
+			return 0, failure
+		}
+		if failure := p.decodeAutoRecovery(line); failure != nil {
+			return 0, failure
+		}
 	case strings.HasPrefix(line, "notify.error.details="):
 		if failure := p.enter(11); failure != nil {
 			return 0, failure
@@ -679,6 +686,71 @@ func (p *v4Parser) decodeTextInput(line string) *checkError {
 		}
 	}
 	return nil
+}
+
+// decodeAutoRecovery parses the fixed zero-dispatch recovery line. strategy and
+// attempts are mandatory, each public node ref is optional and the four columns
+// keep their documented order. Only a coordinate-only transient retry omits
+// both refs; a rebind always publishes the replacement ref. The value is
+// reconstructed as the structured object so the both-mode gate is a plain
+// structural equality.
+func (p *v4Parser) decodeAutoRecovery(line string) *checkError {
+	tokens, failure := v4Tokens(line, "auto_recovery ")
+	if failure != nil {
+		return failure
+	}
+	if len(tokens) < 2 || len(tokens) > 4 {
+		return failf("text_result_auto_recovery_invalid")
+	}
+	order := map[string]int{
+		"strategy": 0, "original_ref": 1, "recovered_ref": 2, "attempts": 3,
+	}
+	last := -1
+	values := make(map[string]string, len(tokens))
+	for _, token := range tokens {
+		key, value, found := strings.Cut(token, "=")
+		rank, known := order[key]
+		if !found || !known || rank <= last || !resultToken(value) {
+			return failf("text_result_auto_recovery_invalid")
+		}
+		last = rank
+		values[key] = value
+	}
+	strategy, ok := values["strategy"]
+	if !ok || !autoRecoveryStrategies[strategy] {
+		return failf("text_result_auto_recovery_invalid", field("field", "strategy"))
+	}
+	attemptsToken, ok := values["attempts"]
+	if !ok {
+		return failf("text_result_auto_recovery_invalid", field("field", "attempts"))
+	}
+	attempts, ok := parsePositiveDecimal(attemptsToken)
+	if !ok {
+		return failf("text_result_auto_recovery_invalid", field("field", "attempts"))
+	}
+	original, hasOriginal := values["original_ref"]
+	recovered, hasRecovered := values["recovered_ref"]
+	if hasOriginal != hasRecovered {
+		return failf("text_result_auto_recovery_invalid")
+	}
+	if !hasOriginal {
+		if strategy != autoRecoveryTransientRetry {
+			return failf("text_result_auto_recovery_invalid", field("field", "original_ref"))
+		}
+	} else {
+		if !isPublicRef(original) || !isPublicRef(recovered) {
+			return failf("text_result_auto_recovery_invalid")
+		}
+		if strategy == autoRecoveryTransientRetry && original != recovered {
+			return failf("text_result_auto_recovery_invalid", field("field", "recovered_ref"))
+		}
+	}
+	recovery := map[string]any{"strategy": strategy, "attempts": attempts}
+	if hasOriginal {
+		recovery["original_ref"] = original
+		recovery["recovered_ref"] = recovered
+	}
+	return p.set([]string{"auto_recovery"}, recovery)
 }
 
 func (p *v4Parser) decodeJSONField(line, prefix string, path []string) *checkError {

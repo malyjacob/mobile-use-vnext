@@ -104,7 +104,7 @@ var allowedKeys = map[string]struct{}{
 	// match level (1-5) and baseline_pool is the closed enum
 	// primary/historical/full; a ref, a changed_ref, a text or a tree is never
 	// whitelisted here.
-	"tier": {}, "baseline_pool": {},
+	"tier": {}, "baseline_pool": {}, "strategy": {},
 }
 
 // Logger is a bounded, drop-counting event sink.

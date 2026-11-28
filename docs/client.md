@@ -19,7 +19,7 @@ instance, err := c.Discover(ctx)
 `POST /api/status {}` 取得当前准入事实（`can_start`、`blocking_code`、本 Agent 的
 `session`、`start_operation_id` 与 `cleanup`）。它不生成 P、不续租、不创建会话。
 
-当前共同契约为 `"35"`。契约版本不等时返回 `contract_mismatch`；客户端不刷新版本、不重发
+当前共同契约为 `"36"`。契约版本不等时返回 `contract_mismatch`；客户端不刷新版本、不重发
 业务动作。端口可应答、`/health` 正常都不等于 `can_start=true`。
 
 公开树与 detailed inspection 使用相同的完整节点布尔默认/unknown 规则，不携带 defaults。
@@ -76,7 +76,9 @@ type Response struct {
 `Result` 与服务 HTTP 结果同形：`outcome`（`executed`/`not_executed`/`uncertain`/`partial`）、
 `phase`、`session`、`observation`、`inspection`、
 `app`、`shell`、`wait`、`notification`、`diagnosis`、`cleanup`、`error`、`recovery` 等字段
-只在本次确有该事实时出现；`recovery` 缺失表示本次结果没有待恢复事实。客户端不改写主事实：
+只在本次确有该事实时出现；`recovery` 缺失表示本次结果没有待恢复事实。`Result.auto_recovery`
+只在经零派发重验自动恢复并进入派发的 `act` 结果中携带，成员与省略规则见 [接口契约](interface.md)
+§2。客户端不改写主事实：
 `observation.status=failed` 的 503 仍是带 `Result` 的正常响应，不降成无归属异常。
 
 `effect` 与 `observation.quality` 也来自同一份 `Result`：客户端用 `internal/protocol` 的
@@ -181,9 +183,9 @@ MCP 适配器的严格解码拒绝；两个条件折叠后相同则是引擎准�
 解码器约束；客户端不补 `not_executed`、不根据 `phase` 推导阶段，也不在本地改写快照。
 `outcome=partial` 时快照固定为 `write=executed`、`submit=not_executed`，客户端把
 `text_submit_not_executed` 与可能随结果交付的新 ready O 一起保留；没有新 O 时按 recovery 的
-`observe(P)` 获取现场。`text` 错误的 `details` 保留嵌套 `dispatch` 对象、`stage`/`reason` 与
-`candidate_count`；响应解码器不把 `0` 当成缺失、不改写枚举，客户端也不据此重建
-`text_input` 或恢复入口。
+`observe(P)` 获取现场。`text` 派发阶段错误的 `details` 保留嵌套 `dispatch` 对象、`stage`/`reason` 与
+`candidate_count`；认领后重验的 `409 target_changed` 使用统一 `phase=revalidate` 详情，不带该组。
+响应解码器不把 `0` 当成缺失、不改写枚举，客户端也不据此重建 `text_input` 或恢复入口。
 
 `Client.App(ctx, *protocol.AppRequest, ...Option)` 按 `Kind` 归一化七个分支：`Encode` 与
 HTTP/MCP 接入共用同一原则，只写该 kind 的生效成员与必填检查；调用方在非生效成员上填值

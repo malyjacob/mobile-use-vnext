@@ -97,28 +97,29 @@ var rmfKnownExclusions = map[string]string{
 // fieldBlock and appear in an existing fixture without review. Classification
 // still comes exclusively from resultFields; this inventory adds no codec.
 var rmfCompositeInventory = map[string]string{
-	"Screen":          "Width Height Rotation DisplayID",
-	"Foreground":      "State Package TaskID HasTask Reason",
-	"ImageMeta":       "CapturedAt Width Height MediaType ReadOnly Screen Error Base64",
-	"ReadTree":        "Format Scope View Root",
-	"ReadNode":        "Ref Chain Role Bounds Label Actions Enabled Focused Selected Protected Checked Value Hint Axis Resource Truncated Context Children",
-	"ReadDelta":       "Format Base View Set Add Remove Children Replace",
-	"ReadSetNode":     "Label Actions Bounds Enabled Focused Selected Checked Value Hint Protected Axis Resource Truncated",
-	"ReadBounds":      "Kind Rect Point",
-	"Point":           "X Y",
-	"AppItem":         "Name Package",
-	"AppTaskItem":     "TaskID Package Ownership OriginDisplay",
-	"AppCloseTask":    "TaskID Outcome RecentsCleaned HasRecentsCleaned Error",
-	"ShellView":       "Termination ExitCode Output Truncated OutputError",
-	"InspectionView":  "ObservationID Origin Revision CapturedAt Scope View Tree Root Matches Total HasTotal Truncated",
-	"InspectionMatch": "Node Path",
-	"DiagnosisIssue":  "Phase Code",
-	"DiagnosisEvent":  "At Phase Code",
-	"Error":           "Code Message Details",
-	"Quality":         "State Samples StopReason",
-	"Effect":          "State",
-	"TextInputView":   "Write Submit",
-	"WaitResult":      "Trigger Matched ElapsedMS",
+	"Screen":           "Width Height Rotation DisplayID",
+	"Foreground":       "State Package TaskID HasTask Reason",
+	"ImageMeta":        "CapturedAt Width Height MediaType ReadOnly Screen Error Base64",
+	"ReadTree":         "Format Scope View Root",
+	"ReadNode":         "Ref Chain Role Bounds Label Actions Enabled Focused Selected Protected Checked Value Hint Axis Resource Truncated Context Children",
+	"ReadDelta":        "Format Base View Set Add Remove Children Replace",
+	"ReadSetNode":      "Label Actions Bounds Enabled Focused Selected Checked Value Hint Protected Axis Resource Truncated",
+	"ReadBounds":       "Kind Rect Point",
+	"Point":            "X Y",
+	"AppItem":          "Name Package",
+	"AppTaskItem":      "TaskID Package Ownership OriginDisplay",
+	"AppCloseTask":     "TaskID Outcome RecentsCleaned HasRecentsCleaned Error",
+	"ShellView":        "Termination ExitCode Output Truncated OutputError",
+	"InspectionView":   "ObservationID Origin Revision CapturedAt Scope View Tree Root Matches Total HasTotal Truncated",
+	"InspectionMatch":  "Node Path",
+	"DiagnosisIssue":   "Phase Code",
+	"DiagnosisEvent":   "At Phase Code",
+	"Error":            "Code Message Details",
+	"Quality":          "State Samples StopReason",
+	"Effect":           "State",
+	"TextInputView":    "Write Submit",
+	"AutoRecoveryView": "Strategy OriginalRef RecoveredRef Attempts",
+	"WaitResult":       "Trigger Matched ElapsedMS",
 }
 
 // TestResultFieldManifest is the completeness gate required by the proposal:
@@ -1497,6 +1498,101 @@ func rmfResultFixtures() []rmfFixture {
 			},
 		},
 	}
+	// The explicit zero-dispatch recovery marker of an action that reached
+	// dispatch anyway: a transient retry repeats the original ref, a rebind
+	// publishes the replacement ref, and a coordinate-only request carries no
+	// ref at all.
+	autoRecoveryTransientRetry := rmfFixture{
+		name: "act_auto_recovery_transient_retry",
+		result: protocol.Result{
+			OperationID: "P28",
+			Outcome:     "executed",
+			AutoRecovery: &protocol.AutoRecoveryView{
+				Strategy:     protocol.AutoRecoveryTransientRetry,
+				OriginalRef:  "n7",
+				RecoveredRef: "n7",
+				Attempts:     2,
+			},
+		},
+	}
+	autoRecoveryTextRebind := rmfFixture{
+		name: "act_auto_recovery_text_rebind",
+		result: protocol.Result{
+			OperationID: "P29",
+			Outcome:     "executed",
+			TextInput: &protocol.TextInputView{
+				Write: protocol.TextInputExecuted, Submit: protocol.TextInputExecuted,
+			},
+			AutoRecovery: &protocol.AutoRecoveryView{
+				Strategy:     protocol.AutoRecoveryTextRebind,
+				OriginalRef:  "n12",
+				RecoveredRef: "n31",
+				Attempts:     2,
+			},
+		},
+	}
+	autoRecoveryContainerRebind := rmfFixture{
+		name: "act_auto_recovery_container_rebind",
+		result: protocol.Result{
+			OperationID: "P30",
+			Outcome:     "executed",
+			AutoRecovery: &protocol.AutoRecoveryView{
+				Strategy:     protocol.AutoRecoveryContainerRebind,
+				OriginalRef:  "n3",
+				RecoveredRef: "n8",
+				Attempts:     2,
+			},
+		},
+	}
+	autoRecoveryCoordinate := rmfFixture{
+		name: "act_auto_recovery_coordinate_retry",
+		result: protocol.Result{
+			OperationID: "P31",
+			Outcome:     "executed",
+			AutoRecovery: &protocol.AutoRecoveryView{
+				Strategy: protocol.AutoRecoveryTransientRetry,
+				Attempts: 2,
+			},
+		},
+	}
+	// A rejected revalidation publishes the unified phase=revalidate details
+	// and never the recovered marker: the action was not dispatched.
+	revalidateRejection := rmfFixture{
+		name: "act_revalidate_target_changed",
+		result: protocol.Result{
+			OperationID:    "P32",
+			OperationState: "finished",
+			Outcome:        "not_executed",
+			Error: &protocol.Error{
+				Code:    protocol.CodeTargetChanged,
+				Message: "目标已变化",
+				Details: map[string]any{
+					"phase":              "revalidate",
+					"kind":               "tap",
+					"reason":             "lineage_changed",
+					"original_ref":       "n7",
+					"changed_ref":        "n820",
+					"recovery_attempted": []string{"transient_retry", "container_rebind"},
+					"candidates": []map[string]any{
+						{
+							"ref":        "n66",
+							"role":       "button",
+							"actions":    []string{"tap"},
+							"bounds":     []int{0, 363, 1080, 2265},
+							"relation":   "sibling",
+							"executable": true,
+						},
+					},
+					"blocking_refs": []string{"n57"},
+				},
+			},
+			Recovery: &protocol.Recovery{
+				Entry:      protocol.RecoveryEntryRetry,
+				Reference:  protocol.RecoveryReferenceO,
+				InputState: protocol.RecoveryInputEffective,
+			},
+		},
+	}
 	snap := rmfFixture{
 		name: "snap_image",
 		result: protocol.Result{
@@ -1521,6 +1617,8 @@ func rmfResultFixtures() []rmfFixture {
 		scrollNotObserved, scrollUnknownEffect, notSampled,
 		textInputWriteOnly, textInputNotDispatched, textInputSubmitUncertain, textInputPartial,
 		staticNoSafeTrajectory,
+		autoRecoveryTransientRetry, autoRecoveryTextRebind, autoRecoveryContainerRebind,
+		autoRecoveryCoordinate, revalidateRejection,
 	}
 }
 

@@ -39,7 +39,20 @@ const (
 	textInputNotExecuted = "not_executed"
 	textInputUncertain   = "uncertain"
 	textInputExecuted    = "executed"
+
+	// The three published zero-dispatch recovery strategy names. The probe
+	// repeats them instead of importing protocol constants so the live wire is
+	// compared with an independent copy of the contract.
+	autoRecoveryTransientRetry  = "transient_retry"
+	autoRecoveryTextRebind      = "text_rebind"
+	autoRecoveryContainerRebind = "container_rebind"
 )
+
+var autoRecoveryStrategies = map[string]bool{
+	autoRecoveryTransientRetry:  true,
+	autoRecoveryTextRebind:      true,
+	autoRecoveryContainerRebind: true,
+}
 
 // Frozen public enumerations of the act quality/effect projection. The probe
 // repeats them instead of importing protocol constants so the live wire is
@@ -207,6 +220,16 @@ type textInputView struct {
 	Submit string `json:"submit"`
 }
 
+// autoRecoveryView is the explicit zero-dispatch recovery marker of an action
+// that reached dispatch anyway. strategy and attempts are mandatory; the two
+// public node refs are omitted for a coordinate-only request.
+type autoRecoveryView struct {
+	Strategy     string `json:"strategy"`
+	OriginalRef  string `json:"original_ref"`
+	RecoveredRef string `json:"recovered_ref"`
+	Attempts     int    `json:"attempts"`
+}
+
 // resultView is the probe's read-only projection of structuredContent.
 type resultView struct {
 	OperationID         string            `json:"operation_id"`
@@ -214,6 +237,7 @@ type resultView struct {
 	Outcome             string            `json:"outcome"`
 	Phase               string            `json:"phase"`
 	TextInput           *textInputView    `json:"text_input"`
+	AutoRecovery        *autoRecoveryView `json:"auto_recovery"`
 	Effect              *effectView       `json:"effect"`
 	TargetReference     string            `json:"target_reference"`
 	RequestClosed       *bool             `json:"request_closed"`
@@ -376,6 +400,9 @@ func project(result *sdk.CallToolResult, mode string, requestRefs ...string) (*c
 	if failure := checkTextInputSnapshot(projected.view.TextInput); failure != nil {
 		return nil, failure
 	}
+	if failure := checkAutoRecovery(projected.view.AutoRecovery); failure != nil {
+		return nil, failure
+	}
 	// Every result mode shares the checks on decoded observation metadata and
 	// the tree projection.
 	if failure := checkProjectionConsistency(projected); failure != nil {
@@ -400,6 +427,44 @@ func checkTextInputSnapshot(input *textInputView) *checkError {
 	}
 	if input.Submit != textInputNotExecuted && input.Write != textInputExecuted {
 		return failf("text_input_stage_order_invalid")
+	}
+	return nil
+}
+
+// checkAutoRecovery validates the explicit zero-dispatch recovery marker. An
+// absent object is valid; a present object must name one of the three published
+// strategies, keep attempts >= 1, and carry either both public node refs or
+// neither. Only a coordinate-only transient retry omits both refs: a rebind
+// always publishes the replacement ref, and a transient retry revalidated the
+// same binding, so it repeats the original ref.
+func checkAutoRecovery(recovery *autoRecoveryView) *checkError {
+	if recovery == nil {
+		return nil
+	}
+	if !autoRecoveryStrategies[recovery.Strategy] {
+		return failf("auto_recovery_strategy_invalid", field("strategy", recovery.Strategy))
+	}
+	if recovery.Attempts < 1 {
+		return failf("auto_recovery_attempts_invalid",
+			field("attempts", strconv.Itoa(recovery.Attempts)))
+	}
+	hasOriginal := recovery.OriginalRef != ""
+	hasRecovered := recovery.RecoveredRef != ""
+	if hasOriginal != hasRecovered {
+		return failf("auto_recovery_refs_incomplete")
+	}
+	if !hasOriginal {
+		if recovery.Strategy != autoRecoveryTransientRetry {
+			return failf("auto_recovery_refs_missing", field("strategy", recovery.Strategy))
+		}
+		return nil
+	}
+	if !isPublicRef(recovery.OriginalRef) || !isPublicRef(recovery.RecoveredRef) {
+		return failf("auto_recovery_ref_invalid")
+	}
+	if recovery.Strategy == autoRecoveryTransientRetry &&
+		recovery.RecoveredRef != recovery.OriginalRef {
+		return failf("auto_recovery_transient_refs_differ")
 	}
 	return nil
 }

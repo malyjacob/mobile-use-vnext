@@ -593,7 +593,7 @@ func TestProposalTextRefUnifiedStaticErrorsAndPreservedTextContract(testingHandl
 			requireReadyObservation(testingHandle, harnessUnderTest, start.Observation.ID)
 		})
 
-	testingHandle.Run("claimed_target_change_preserves_text_details",
+	testingHandle.Run("claimed_target_change_reports_revalidation_details",
 		func(testingHandle *testing.T) {
 			inputBounds := device.Rect{Left: 100, Top: 300, Right: 900, Bottom: 400}
 			initialBuilder := func(display device.Display) device.Capture {
@@ -626,11 +626,11 @@ func TestProposalTextRefUnifiedStaticErrorsAndPreservedTextContract(testingHandl
 			if status != 409 {
 				testingHandle.Fatalf("target_changed HTTP status = %d, want 409", status)
 			}
-			details := textDetailsOf(testingHandle, result)
-			requireTextDetail(testingHandle, details, "stage", "target")
-			requireTextDetail(testingHandle, details, "reason", "target_unconfirmed")
-			requireTextDispatch(testingHandle, details,
-				"not_attempted", "not_attempted", "not_attempted")
+			requireActRejectionDetails(testingHandle, result, "text", input.Ref, targetChangedReasonTargetMissing)
+			if result.TextInput == nil || result.TextInput.Write != protocol.TextInputNotExecuted ||
+				result.TextInput.Submit != protocol.TextInputNotExecuted {
+				testingHandle.Fatalf("text input snapshot = %+v, want no primitives attempted", result.TextInput)
+			}
 			proposalRequireNoDispatch(testingHandle, harnessUnderTest)
 		})
 }

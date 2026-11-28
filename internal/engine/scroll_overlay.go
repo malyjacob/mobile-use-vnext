@@ -401,6 +401,11 @@ func scrollOverlayIntersectedTravel(proven, open []scrollSpan, amount string) bo
 
 func buildFilteredScrollCandidates(obs *observationState, view *tapPublicView,
 	operation *protocol.Operation, want *protocol.Node, entries []candidateEntry) []map[string]any {
+	return buildStaticCandidates(obs, view, operation, filterScrollCandidateEntries(obs, view, operation, want, entries))
+}
+
+func filterScrollCandidateEntries(obs *observationState, view *tapPublicView,
+	operation *protocol.Operation, want *protocol.Node, entries []candidateEntry) []candidateEntry {
 	if obs == nil || obs.Projection == nil || view == nil || operation == nil || len(entries) == 0 {
 		return nil
 	}
@@ -416,5 +421,5 @@ func buildFilteredScrollCandidates(obs *observationState, view *tapPublicView,
 			return ctx.commonAncestorDepth(want, kept[i].node) > ctx.commonAncestorDepth(want, kept[j].node)
 		})
 	}
-	return buildStaticCandidates(obs, view, operation, kept)
+	return kept
 }

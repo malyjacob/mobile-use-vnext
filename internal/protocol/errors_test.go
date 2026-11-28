@@ -309,3 +309,56 @@ func TestErrorEncodesEmptyActionList(t *testing.T) {
 		t.Fatalf("empty target_actions encoded as %s, want []", text)
 	}
 }
+
+// TestCloneErrorDetailsCopiesRevalidateTaxonomy proves the unified revalidate
+// detail shapes are independent copies: the scalar phase/kind/original_ref stay
+// by value and the recovery_attempted string slice, candidates objects and
+// blocking refs never alias the APIError or a second Public projection.
+// Reverse control: sharing any nested container makes these assertions fail.
+func TestCloneErrorDetailsCopiesRevalidateTaxonomy(t *testing.T) {
+	source := NewError(http.StatusConflict, CodeTargetChanged, "目标在复核时已变化").
+		WithDetail("phase", "revalidate").
+		WithDetail("kind", "text").
+		WithDetail("reason", "target_missing").
+		WithDetail("original_ref", "n7").
+		WithDetail("recovery_attempted", []string{"transient_retry", "text_rebind"}).
+		WithDetail("candidates", []map[string]any{{
+			"ref":        "n9",
+			"role":       "input",
+			"actions":    []string{"text"},
+			"bounds":     []int{0, 10, 200, 60},
+			"relation":   "nearby",
+			"executable": true,
+		}}).
+		WithDetail("blocking_refs", []string{"n4"})
+
+	first := source.Public()
+	second := source.Public()
+	first.Details["recovery_attempted"].([]string)[0] = "mutated"
+	first.Details["blocking_refs"].([]string)[0] = "mutated"
+	firstCandidate := first.Details["candidates"].([]map[string]any)[0]
+	firstCandidate["ref"] = "mutated"
+	first.Details["original_ref"] = "mutated"
+
+	if got := source.Details["recovery_attempted"].([]string)[0]; got != "transient_retry" {
+		t.Fatalf("Public shared recovery_attempted with APIError: %#v", source.Details)
+	}
+	if got := source.Details["blocking_refs"].([]string)[0]; got != "n4" {
+		t.Fatalf("Public shared blocking_refs with APIError: %#v", source.Details)
+	}
+	if got := source.Details["candidates"].([]map[string]any)[0]["ref"]; got != "n9" {
+		t.Fatalf("Public shared a candidate map with APIError: %#v", source.Details)
+	}
+	if got := source.Details["original_ref"]; got != "n7" || source.Details["phase"] != "revalidate" {
+		t.Fatalf("Public shared a scalar detail with APIError: %#v", source.Details)
+	}
+	if got := second.Details["recovery_attempted"].([]string)[1]; got != "text_rebind" {
+		t.Fatalf("two Public projections shared recovery_attempted: %#v", second.Details)
+	}
+	if got := second.Details["candidates"].([]map[string]any)[0]["ref"]; got != "n9" {
+		t.Fatalf("two Public projections shared a candidate map: %#v", second.Details)
+	}
+	if got := second.Details["kind"]; got != "text" {
+		t.Fatalf("kind lost from the second projection: %#v", second.Details)
+	}
+}

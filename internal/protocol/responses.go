@@ -811,6 +811,94 @@ func (v *TextInputView) MarshalJSONTo(enc *jsontext.Encoder) error {
 	return enc.WriteToken(jsontext.EndObject)
 }
 
+// Auto-recovery strategy names. The three values are the closed set published
+// on the wire: transient_retry revalidated the original binding after the
+// bounded wait, text_rebind rebound one text target and container_rebind
+// rebound one directly tappable container, both from the revalidation frame
+// without an extra capture.
+const (
+	AutoRecoveryTransientRetry  = "transient_retry"
+	AutoRecoveryTextRebind      = "text_rebind"
+	AutoRecoveryContainerRebind = "container_rebind"
+)
+
+// AutoRecoveryView states that one accepted action reached dispatch only after
+// a zero-dispatch revalidation recovery. Strategy is required and must be one
+// of the three closed names; Attempts is required and at least 1. OriginalRef
+// and RecoveredRef appear together or not at all. A coordinate-only request
+// omits both. A transient retry on a ref request repeats that ref in
+// RecoveredRef, while a rebind always names both refs because it only happens
+// for a ref request.
+type AutoRecoveryView struct {
+	Strategy     string
+	OriginalRef  string
+	RecoveredRef string
+	Attempts     int
+}
+
+// ValidAutoRecovery reports whether the view is one publishable wire object. It
+// is the single validity rule shared by encoding and decoding: strategy is in
+// the closed strategy set, attempts is at least 1, the two ref members appear
+// together or not at all, a transient retry repeats the original ref, and a
+// rebind always carries both refs.
+func ValidAutoRecovery(v *AutoRecoveryView) bool {
+	if v == nil || v.Attempts < 1 {
+		return false
+	}
+	hasOriginal := v.OriginalRef != ""
+	hasRecovered := v.RecoveredRef != ""
+	if hasOriginal != hasRecovered {
+		return false
+	}
+	switch v.Strategy {
+	case AutoRecoveryTransientRetry:
+		return !hasOriginal || v.RecoveredRef == v.OriginalRef
+	case AutoRecoveryTextRebind, AutoRecoveryContainerRebind:
+		return hasOriginal
+	default:
+		return false
+	}
+}
+
+// MarshalJSONTo writes the fixed strategy/refs/attempts object.
+func (v *AutoRecoveryView) MarshalJSONTo(enc *jsontext.Encoder) error {
+	if v == nil {
+		return writeNull(enc)
+	}
+	if !ValidAutoRecovery(v) {
+		return errors.New("invalid auto_recovery view")
+	}
+	if err := enc.WriteToken(jsontext.BeginObject); err != nil {
+		return err
+	}
+	if err := writeName(enc, "strategy"); err != nil {
+		return err
+	}
+	if err := writeString(enc, v.Strategy); err != nil {
+		return err
+	}
+	for _, field := range []struct{ name, value string }{
+		{"original_ref", v.OriginalRef}, {"recovered_ref", v.RecoveredRef},
+	} {
+		if field.value == "" {
+			continue
+		}
+		if err := writeName(enc, field.name); err != nil {
+			return err
+		}
+		if err := writeString(enc, field.value); err != nil {
+			return err
+		}
+	}
+	if err := writeName(enc, "attempts"); err != nil {
+		return err
+	}
+	if err := writeInt(enc, v.Attempts); err != nil {
+		return err
+	}
+	return enc.WriteToken(jsontext.EndObject)
+}
+
 // Result is the operation/tool report. Only fields known for this call appear.
 type Result struct {
 	OperationID    string
@@ -820,11 +908,16 @@ type Result struct {
 	Effect         *Effect
 	// TextInput is the fixed primitive snapshot of a default/true text action.
 	// It is nil for every other action and for explicit auto_submit=false.
-	TextInput   *TextInputView
-	Observation *Observation
-	Inspection  *InspectionView
-	App         *AppView
-	Shell       *ShellView
+	TextInput *TextInputView
+	// AutoRecovery is the explicit zero-dispatch recovery marker of an action
+	// that reached dispatch anyway. It is nil unless a transient retry or one
+	// rebind actually happened; it sits between text_input and
+	// target_reference on the wire.
+	AutoRecovery *AutoRecoveryView
+	Observation  *Observation
+	Inspection   *InspectionView
+	App          *AppView
+	Shell        *ShellView
 	// Wait is the bounded outcome fact of a condition wait. It is published for
 	// the tool that owns this kind only, between shell and notification.
 	Wait                *WaitResult
@@ -906,6 +999,14 @@ func (r *Result) MarshalJSONTo(enc *jsontext.Encoder) error {
 			return err
 		}
 		if err := r.TextInput.MarshalJSONTo(enc); err != nil {
+			return err
+		}
+	}
+	if r.AutoRecovery != nil {
+		if err := writeName(enc, "auto_recovery"); err != nil {
+			return err
+		}
+		if err := r.AutoRecovery.MarshalJSONTo(enc); err != nil {
 			return err
 		}
 	}

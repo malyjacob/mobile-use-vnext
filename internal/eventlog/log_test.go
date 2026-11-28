@@ -49,12 +49,22 @@ func TestSubmitDispatchAndContinuityKeysAreWhitelisted(t *testing.T) {
 	}
 }
 
+func TestActAutoRecoveryStrategyIsWhitelisted(t *testing.T) {
+	var out bytes.Buffer
+	logger := New(&out, "")
+	logger.Event(Debug, "act.auto_recovery", Str("strategy", "text_rebind"), Int("attempt", 2))
+	logger.Close()
+	if !strings.Contains(out.String(), ` act.auto_recovery strategy="text_rebind" attempt=2`) {
+		t.Fatalf("missing recovery metadata: %s", out.String())
+	}
+}
+
 // TestWhitelistDropsUncontrolledContentKeys is the reverse control of the
 // single field whitelist: no ref, changed_ref, input text, command, output or
 // tree key can ever reach a log line even when a caller passes one.
 func TestWhitelistDropsUncontrolledContentKeys(t *testing.T) {
 	forbidden := []string{
-		"changed_ref", "ref", "scope_ref", "ancestor_ref", "blocking_refs",
+		"changed_ref", "ref", "scope_ref", "ancestor_ref", "blocking_refs", "original_ref", "recovered_ref",
 		"text", "value", "readback", "command", "output", "tree", "delta",
 		"message", "detail", "error_text", "candidates", "user",
 	}

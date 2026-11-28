@@ -220,8 +220,8 @@ func TestActRevalidationSkipsDeliveryForUnreadableForeground(t *testing.T) {
 func TestActRevalidationDeliveryReverseControl(t *testing.T) {
 	original := deliverRejection
 	deliverRejection = func(*Engine, *workState, *sessionState, *observationState,
-		*device.Capture, string) *protocol.Observation {
-		return nil
+		*device.Capture, string) (*protocol.Observation, *observationState) {
+		return nil, nil
 	}
 	t.Cleanup(func() { deliverRejection = original })
 
@@ -239,6 +239,11 @@ func TestActRevalidationDeliveryReverseControl(t *testing.T) {
 	requireNotExecuted(t, result, protocol.CodeTargetChanged)
 	if result.Observation != nil {
 		t.Fatalf("disabled delivery still produced an observation: %+v", result.Observation)
+	}
+	for _, key := range []string{"candidates", "blocking_refs"} {
+		if _, exists := result.Error.Details[key]; exists {
+			t.Fatalf("disabled delivery still produced %s: %v", key, result.Error.Details)
+		}
 	}
 	requireRecovery(t, result, protocol.RecoveryEntryObserve, protocol.RecoveryReferenceP,
 		protocol.RecoveryInputRetired, "")
@@ -304,9 +309,9 @@ func TestActRevalidationDeliveryRespectsRevocation(t *testing.T) {
 	work.Revoked = true
 	h.engine.mu.Unlock()
 
-	if public := h.engine.deliverRejectedObservation(work, session, obs, &capture,
-		protocol.CodeTargetChanged); public != nil {
-		t.Fatalf("revoked work delivered an observation: %+v", public)
+	if public, published := h.engine.deliverRejectedObservation(work, session, obs, &capture,
+		protocol.CodeTargetChanged); public != nil || published != nil {
+		t.Fatalf("revoked work delivered an observation: %+v %+v", public, published)
 	}
 	if status := observationStatus(h, start.Observation.ID); status != ObservationReady {
 		t.Fatalf("revocation changed the current observation: %q", status)

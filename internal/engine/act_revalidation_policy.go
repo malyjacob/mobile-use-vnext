@@ -1701,6 +1701,7 @@ type tapFrame struct {
 	carrier  *device.RawNode
 	tier     int
 	strategy string
+	rebound  bool
 }
 
 // resolveTapScopePoint applies the same deepest-unique rule as

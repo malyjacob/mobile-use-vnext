@@ -125,12 +125,19 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 	e.mu.Unlock()
 
 	e.setOperationPhase(op, "revalidate")
+	revalidationStarted := time.Now()
+	originalRef := actOriginalRef(&req.Operation)
+	var retryReason string
 	var fresh *device.Capture
 	var tapFrame *tapFrame
 	var frame *scrollFrame
 	var revalidateErr *protocol.APIError
 	attempt := 1
 	for ; attempt <= actRevalidateMaxAttempts; attempt++ {
+		if !e.actRevalidationAuthorized(work, op, obs) {
+			revalidateErr = stoppedActRevalidation()
+			break
+		}
 		if scroll != nil {
 			fresh, frame, revalidateErr = e.revalidateScrollTarget(work, obs, scroll, attempt)
 		} else {
@@ -139,46 +146,67 @@ func (e *Engine) Act(ctx context.Context, agent, p string, req *protocol.ActRequ
 				e.revalidateActTarget(work, obs, &req.Operation, point, tap, attempt)
 			tapTook += proofTook
 		}
-		if revalidateErr == nil || e.workRevoked(work) || work.Ctx.Err() != nil ||
-			attempt == actRevalidateMaxAttempts || !isTransientRevalidateError(revalidateErr) {
+		if revalidateErr == nil || attempt == actRevalidateMaxAttempts ||
+			!isTransientRevalidateError(revalidateErr) || !e.actRevalidationAuthorized(work, op, obs) {
 			break
 		}
-		pauseInterruptible(work.Ctx, actRevalidateRetryDelay)
-		if e.workRevoked(work) || work.Ctx.Err() != nil {
+		retryReason, _ = revalidateErr.Details["reason"].(string)
+		if !pauseInterruptible(work.Ctx, actRevalidateRetryDelay) {
 			break
 		}
 		// The next attempt owns every result, including a capture failure.
-		fresh, tapFrame, frame, revalidateErr = nil, nil, nil, nil
+		fresh, tapFrame, frame = nil, nil, nil
+	}
+
+	var autoRecovery *protocol.AutoRecoveryView
+	var attempted []string
+	if !e.actRevalidationAuthorized(work, op, obs) {
+		revalidateErr = stoppedActRevalidation()
+	} else if attempt == actRevalidateMaxAttempts && hasActRevalidationDetails(req.Operation.Type) {
+		if revalidateErr == nil {
+			autoRecovery = &protocol.AutoRecoveryView{
+				Strategy: protocol.AutoRecoveryTransientRetry, Attempts: attempt,
+				OriginalRef: originalRef, RecoveredRef: originalRef,
+			}
+		} else if revalidateErr.Code == protocol.CodeTargetChanged {
+			attempted = []string{protocol.AutoRecoveryTransientRetry}
+			reason, _ := revalidateErr.Details["reason"].(string)
+			if canRebindActTarget(req.Operation.Type, originalRef, reason, tap) {
+				decision, rebindErr := e.rebindActTarget(work, op, obs, fresh, tap, req.Operation.Type, originalRef, reason)
+				if decision.Attempted {
+					attempted = append(attempted, decision.Strategy)
+				}
+				if rebindErr != nil {
+					revalidateErr = rebindErr
+				} else if decision.Frame != nil {
+					tapFrame, revalidateErr = decision.Frame, nil
+					tapFrame.rebound = true
+					retryReason = reason
+					autoRecovery = &protocol.AutoRecoveryView{
+						Strategy: decision.Strategy, Attempts: attempt,
+						OriginalRef: originalRef, RecoveredRef: decision.RecoveredRef,
+					}
+				}
+			}
+		}
 	}
 	if revalidateErr != nil {
-		if e.workRevoked(work) || work.Ctx.Err() != nil {
-			revalidateErr = stoppedActRevalidation()
-		}
-		if req.Operation.Type == "text" {
-			e.decorateTextRevalidateError(op, revalidateErr)
-		}
 		e.logActPoint(op.ID, point, false, attempt)
-		revalidateErr.Outcome = OutcomeNotExecuted
-		// Publish the final rejected frame when available so the caller can
-		// retry against that O without a separate observation.
-		var public *protocol.Observation
-		if deliverableRejection(revalidateErr.Code) &&
-			!e.workRevoked(work) && work.Ctx.Err() == nil {
-			public = deliverRejection(e, work, session, obs, fresh, revalidateErr.Code)
-		}
-		if public != nil {
-			e.markDelivered(op)
-		}
-		result := e.finishWithError(op, "revalidate", revalidateErr)
-		if public != nil {
-			result.Observation = public
-		}
-		return result, nil
+		return e.finishActRevalidation(work, op, session, obs, fresh, &req.Operation, tap, scroll,
+			revalidateErr, originalRef, attempted), nil
+	}
+	if !e.commitActDispatch(work, op, obs, autoRecovery) {
+		return e.finishWithError(op, "revalidate", stoppedActRevalidation()), nil
+	}
+	if autoRecovery != nil {
+		e.log.Event(eventlog.Debug, "act.auto_recovery",
+			eventlog.Str("strategy", autoRecovery.Strategy), eventlog.Int("attempt", autoRecovery.Attempts),
+			eventlog.Str("outcome", "proven"), eventlog.Str("reason", retryReason),
+			eventlog.Duration("ms", time.Since(revalidationStarted)),
+			eventlog.Str("operation_id", op.ID), eventlog.Str("observation_id", obs.ID))
 	}
 	tapProven = true
 	e.logActPoint(op.ID, point, point != nil && (point.state == pointUnique || point.state == pointSet), attempt)
-
-	e.setOperationPhase(op, "dispatch")
 	var outcome string
 	var dispatchErr *protocol.APIError
 	var partialCapture *device.Capture
@@ -1882,8 +1910,14 @@ func (e *Engine) dispatchText(work *workState, op *operationState, session *sess
 		// binder: anchor uniqueness, TaskID and source presence are unchanged.
 		if want != nil && want.Visible && want.Editable && want.HasFocused && want.Focused &&
 			want.HasEnabled && want.Enabled && want.HasPassword && !want.Password {
+			anchorFrame := obs.Projection.Capture
+			if frame.rebound {
+				// Rebind proved the replacement in Attempt 2. The ordinary
+				// focus binder still checks uniqueness and the original task.
+				anchorFrame = frame.capture
+			}
 			var ok bool
-			bound, ok = bindFocusedText(obs.Projection.Capture, fresh, want, obs.Foreground, tapX, tapY)
+			bound, ok = bindFocusedText(anchorFrame, fresh, want, obs.Foreground, tapX, tapY)
 			if !ok {
 				bound = textBinding{}
 			}
@@ -2134,29 +2168,6 @@ func staticTextError(reason string) *protocol.APIError {
 			},
 		},
 	}
-}
-
-// decorateTextRevalidateError attaches the text target/focus detail group only
-// to failures that are explicitly about this text target or its revocation.
-// Public foreground, display and hierarchy errors keep their own contract.
-func (e *Engine) decorateTextRevalidateError(op *operationState, apiErr *protocol.APIError) {
-	if apiErr == nil {
-		return
-	}
-	var reason string
-	switch apiErr.Code {
-	case protocol.CodeTargetChanged:
-		reason = textReasonTargetUnconfirmed
-	case protocol.CodeStopped:
-		if apiErr.Details != nil {
-			return
-		}
-		reason = textReasonAuthorizationRevoked
-	default:
-		return
-	}
-	stage := e.textCurrentStage(op)
-	apiErr.Details = e.textDetails(op, stage, reason, nil)
 }
 
 // textDetails builds the fixed core detail group from the frozen dispatch

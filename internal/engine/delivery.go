@@ -7,7 +7,7 @@ import (
 )
 
 // deliverRejection publishes the frame a rejected act revalidation already read
-// and returns its public projection, or nil when the rejection is not eligible.
+// and returns its public observation and the immutable published projection.
 //
 // It is a variable only so the reverse-control test can prove the act path
 // derives the delivery here and nowhere else. Production never assigns it.
@@ -23,30 +23,30 @@ var deliverRejection = (*Engine).deliverRejectedObservation
 // projection or size failure, or a failed commit gate all leave the result
 // exactly as it was before this path existed.
 func (e *Engine) deliverRejectedObservation(work *workState, session *sessionState,
-	obs *observationState, fresh *device.Capture, code string) *protocol.Observation {
+	obs *observationState, fresh *device.Capture, code string) (*protocol.Observation, *observationState) {
 	if obs == nil || session == nil || fresh == nil || !deliverableRejection(code) {
 		e.logDelivery(work, "skipped", code, "")
-		return nil
+		return nil, nil
 	}
 	// The next act must be able to prove the same foreground; delivering a frame
 	// whose foreground is unknown would only produce another rejection.
 	if fresh.Foreground.State != device.ForegroundPresent &&
 		fresh.Foreground.State != device.ForegroundNone {
 		e.logDelivery(work, "skipped", code, "")
-		return nil
+		return nil, nil
 	}
 	if session.Display.ID != 0 {
 		for _, node := range fresh.Nodes {
 			if node.Package == e.cfg.ControlPackage && node.Visible {
 				e.logDelivery(work, "skipped", code, "")
-				return nil
+				return nil, nil
 			}
 		}
 	}
 	tree, apiErr := e.projectCapture(work, "act.delivery", *fresh)
 	if apiErr != nil {
 		e.logDelivery(work, "failed", apiErr.Code, "")
-		return nil
+		return nil, nil
 	}
 	// A delivered frame never settled: it is the single fresh frame the
 	// revalidation already read, so its quality is the fixed not_sampled fact.
@@ -61,16 +61,16 @@ func (e *Engine) deliverRejectedObservation(work *workState, session *sessionSta
 	if obs.Full {
 		selection = treeSelection{allowedBaseID: obs.ID}
 	}
-	public, _, publishErr := e.publishTreeAttempt(work, session, "act.delivery", tree,
+	public, publishedObs, publishErr := e.publishTreeAttempt(work, session, "act.delivery", tree,
 		tree.capture.CapturedAt, selection, "complete", nil, quality, nil)
 	if publishErr != nil {
 		e.logQuality(work.OperationID, "act.delivery", nil, quality)
 		e.logDelivery(work, "failed", publishErr.Code, "")
-		return nil
+		return nil, nil
 	}
 	e.logQuality(work.OperationID, "act.delivery", public, quality)
 	e.logDelivery(work, "published", code, treeFormat(public))
-	return public
+	return public, publishedObs
 }
 
 // deliverableRejection lists the rejection codes whose frame is worth handing

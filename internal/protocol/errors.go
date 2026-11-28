@@ -12,21 +12,46 @@ import (
 // app_code, field, task_ids, allowed_kinds, allowed_scopes,
 // blocking_operation_id, start_operation_id, reason, target_actions,
 // ancestor_ref, ancestor_actions, scope, scope_ref, candidates, blocking_refs,
-// changed_ref, stage, dispatch (focus/write/submit closed-state object),
-// candidate_count (non-negative integer), target_center (objective center point
-// []int), retry_parameter (controlled parameter name). The act static rejection
-// taxonomy owns reason, target_actions, ancestor_ref, ancestor_actions, scope,
-// scope_ref, candidates, and blocking_refs. Non-text target_changed uses reason with its
-// own closed enum. changed_ref is the one optional public n-prefixed ancestor
-// ref that attributes a target_changed rejection to the concrete changed
-// ancestor; it is omitted whenever it cannot be located uniquely. candidates
-// is fixed to []map[string]any whose objects contain ref, role, actions
-// ([]string), bounds ([]int [left, top, right, bottom]), relation, and
-// executable (bool); blocking_refs is []string. The text action owns
-// stage/reason/dispatch/candidate_count and no other tool inherits that
-// vocabulary: stage is target/focus/write/verify/submit and dispatch always
-// carries the three keys focus, write and submit. Details never carry user
-// text, device output, trees, commands or credentials.
+// changed_ref, phase, kind, original_ref, recovery_attempted, stage, dispatch
+// (focus/write/submit closed-state object), candidate_count (non-negative
+// integer), target_center (objective center point []int), retry_parameter
+// (controlled parameter name).
+//
+// The act static rejection taxonomy owns reason, target_actions, ancestor_ref,
+// ancestor_actions, scope, scope_ref, candidates, and blocking_refs.
+//
+// The act revalidate rejection taxonomy owns phase, kind, reason, original_ref,
+// recovery_attempted and, on the immediate response only, candidates and
+// blocking_refs. Every act kind shares it on a 409 target_changed revalidation
+// failure: phase is the single value revalidate, kind is the closed set
+// tap/long_press/text/scroll, and reason is the closed nine-value revalidate
+// enum (child_changed, target_missing, target_ambiguous, lineage_changed,
+// capability_changed, scroll_scope_changed, trajectory_blocked, scope_blocked,
+// point_changed). original_ref repeats the request's target.ref or
+// container.ref and is always omitted for a coordinate-only request.
+// recovery_attempted is []string and names the zero-dispatch recovery
+// strategies that actually ran before the rejection (transient_retry,
+// text_rebind, container_rebind); it is omitted when the first revalidation
+// attempt rejected directly. changed_ref is the one optional public n-prefixed
+// ancestor ref that attributes a target_changed rejection to the concrete
+// changed ancestor; it is omitted whenever it cannot be located uniquely.
+// candidates is fixed to []map[string]any whose objects contain ref, role,
+// actions ([]string), bounds ([]int [left, top, right, bottom]), relation, and
+// executable (bool); blocking_refs is []string. candidates and blocking_refs
+// describe the freshly delivered observation of the immediate response and
+// never enter the persisted operation error, so status(P) and a duplicate-P
+// replay carry neither member.
+//
+// The text target and dispatch stage group owns stage/reason/dispatch/
+// candidate_count and no other tool inherits that vocabulary: stage is
+// target/focus/write/verify/submit and dispatch always carries the three keys
+// focus, write and submit. It covers the static text_target_uncertain rejection
+// and the text dispatch stages; it does not describe the phase=revalidate
+// target_changed rejection, which follows the unified revalidate taxonomy above
+// while the top-level text_input member states the untouched not_attempted
+// write/submit pair.
+//
+// Details never carry user text, device output, trees, commands or credentials.
 type APIError struct {
 	Code       string
 	Message    string

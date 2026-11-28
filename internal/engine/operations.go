@@ -518,7 +518,7 @@ func newResult(op *operationState) *protocol.Result {
 	if op == nil {
 		return &protocol.Result{}
 	}
-	result := &protocol.Result{OperationID: op.ID}
+	result := &protocol.Result{OperationID: op.ID, AutoRecovery: cloneAutoRecovery(op.AutoRecovery)}
 	if op.TextInput != nil {
 		snapshot := *op.TextInput
 		result.TextInput = &snapshot

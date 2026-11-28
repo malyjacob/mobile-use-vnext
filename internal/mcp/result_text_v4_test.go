@@ -1,8 +1,11 @@
 package mcp
 
 import (
+	jsonv2 "encoding/json/v2"
 	"strings"
 	"testing"
+
+	"github.com/malyjacob/mobile-use-vnext/internal/protocol"
 )
 
 func TestResultV4GoldenActSuccess(t *testing.T) {
@@ -87,6 +90,120 @@ func TestResultV4TextInputSubmitLine(t *testing.T) {
 	requireTestContains(t, text, "text_input write=executed submit=not_executed\n")
 	requireTestContains(t, text, "recovery entry=observe ref=P6 input=retired\n")
 	requireTestNotContains(t, text, "enter=")
+}
+
+// TestResultV4AutoRecoveryLine pins the explicit zero-dispatch recovery marker.
+// It is the last control scalar (after input_state, before notify and the obs
+// line), keeps the fixed strategy/original_ref/recovered_ref/attempts column
+// order, and omits both refs only for a coordinate-only transient retry. An
+// unknown strategy, one-sided refs, a rebind without a replacement ref, a
+// transient retry that changes its ref, an invalid attempts value and every
+// unknown member fall back through json v1 instead of dropping a fact.
+func TestResultV4AutoRecoveryLine(t *testing.T) {
+	text := assertResultTextParity(t, []byte(`{"operation_id":"P1","outcome":"executed",`+
+		`"text_input":{"write":"executed","submit":"executed"},`+
+		`"input_state":"effective",`+
+		`"auto_recovery":{"strategy":"transient_retry","original_ref":"n7","recovered_ref":"n7","attempts":2},`+
+		`"notification":{"state":"queued"},`+
+		`"observation":{"status":"complete","id":"O1"}}`), false)
+	requireTestContains(t, text, "text_input write=executed submit=executed\n"+
+		"input_state=effective\n"+
+		"auto_recovery strategy=transient_retry original_ref=n7 recovered_ref=n7 attempts=2\n"+
+		"notify state=queued\nobs O1\n")
+
+	rebind := assertResultTextParity(t, []byte(`{"operation_id":"P2","outcome":"executed",`+
+		`"auto_recovery":{"strategy":"container_rebind","original_ref":"n3","recovered_ref":"n8","attempts":2}}`), false)
+	requireTestContains(t, rebind, "auto_recovery strategy=container_rebind original_ref=n3 recovered_ref=n8 attempts=2\n")
+	requireTestNotContains(t, rebind, "original_ref=n3 recovered_ref=n3")
+
+	// A coordinate-only request carries neither ref: the two columns disappear
+	// instead of publishing an empty placeholder.
+	coordinate := assertResultTextParity(t, []byte(`{"operation_id":"P3","outcome":"executed",`+
+		`"auto_recovery":{"strategy":"transient_retry","attempts":2}}`), false)
+	requireTestContains(t, coordinate, "\nauto_recovery strategy=transient_retry attempts=2\n")
+	requireTestNotContains(t, coordinate, "original_ref=")
+	requireTestNotContains(t, coordinate, "recovered_ref=")
+
+	// A single rebind attempt stays representable even though the state machine
+	// currently publishes 2.
+	oneAttempt := assertResultTextParity(t, []byte(`{"operation_id":"P4","outcome":"executed",`+
+		`"auto_recovery":{"strategy":"text_rebind","original_ref":"n12","recovered_ref":"n31","attempts":1}}`), false)
+	requireTestContains(t, oneAttempt, "auto_recovery strategy=text_rebind original_ref=n12 recovered_ref=n31 attempts=1\n")
+
+	// Every member outside the documented shape keeps its complete fact through
+	// the json v1 fallback; no partial auto_recovery line is emitted. The shape
+	// is closed: an unknown strategy, one-sided refs, a rebind without a
+	// replacement ref, and a transient retry that changes its ref all fail.
+	invalid := []struct {
+		name string
+		raw  string
+	}{
+		{"explicit null", `null`},
+		{"empty object", `{}`},
+		{"missing strategy", `{"attempts":2}`},
+		{"empty strategy", `{"strategy":"","attempts":2}`},
+		{"non-token strategy", `{"strategy":"transient retry","attempts":2}`},
+		{"unknown strategy", `{"strategy":"future_retry","attempts":2}`},
+		{"unknown rebind strategy", `{"strategy":"scroll_rebind","original_ref":"n3","recovered_ref":"n8","attempts":2}`},
+		{"missing attempts", `{"strategy":"transient_retry"}`},
+		{"zero attempts", `{"strategy":"transient_retry","attempts":0}`},
+		{"negative attempts", `{"strategy":"transient_retry","attempts":-1}`},
+		{"fractional attempts", `{"strategy":"transient_retry","attempts":2.5}`},
+		{"string attempts", `{"strategy":"transient_retry","attempts":"2"}`},
+		{"null original ref", `{"strategy":"text_rebind","original_ref":null,"attempts":2}`},
+		{"numeric recovered ref", `{"strategy":"text_rebind","original_ref":"n12","recovered_ref":7,"attempts":2}`},
+		{"non-token recovered ref", `{"strategy":"text_rebind","original_ref":"n12","recovered_ref":"n 8","attempts":2}`},
+		{"original ref only", `{"strategy":"text_rebind","original_ref":"n12","attempts":2}`},
+		{"recovered ref only", `{"strategy":"container_rebind","recovered_ref":"n8","attempts":2}`},
+		{"text rebind without refs", `{"strategy":"text_rebind","attempts":2}`},
+		{"container rebind without refs", `{"strategy":"container_rebind","attempts":2}`},
+		{"transient retry changes the ref", `{"strategy":"transient_retry","original_ref":"n7","recovered_ref":"n8","attempts":2}`},
+		{"unknown member", `{"strategy":"transient_retry","attempts":2,"future":true}`},
+	}
+	for _, testCase := range invalid {
+		t.Run("fallback/"+testCase.name, func(t *testing.T) {
+			raw := []byte(`{"operation_id":"P5","outcome":"executed","auto_recovery":` + testCase.raw + `}`)
+			text := assertResultTextParity(t, raw, false)
+			requireTestContains(t, text, `json v1 path="/auto_recovery" value=`)
+			requireTestNotContains(t, text, "auto_recovery strategy=")
+		})
+	}
+}
+
+// TestAutoRecoveryProjectionMatchesProtocolValidity keeps the v4 renderer's
+// closed shape tied to the one shared protocol rule: every object the protocol
+// accepts renders exactly one line, and every object it rejects falls back as a
+// whole. Token safety is the renderer's additional constraint and every legal
+// ref here is a public node token.
+func TestAutoRecoveryProjectionMatchesProtocolValidity(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{"transient same ref repeated", `{"strategy":"transient_retry","original_ref":"n7","recovered_ref":"n7","attempts":2}`},
+		{"transient coordinate omits refs", `{"strategy":"transient_retry","attempts":2}`},
+		{"text rebind publishes the replacement", `{"strategy":"text_rebind","original_ref":"n12","recovered_ref":"n31","attempts":2}`},
+		{"container rebind one attempt", `{"strategy":"container_rebind","original_ref":"n3","recovered_ref":"n8","attempts":1}`},
+		{"unknown strategy", `{"strategy":"future_retry","attempts":2}`},
+		{"transient changes the ref", `{"strategy":"transient_retry","original_ref":"n7","recovered_ref":"n8","attempts":2}`},
+		{"single original ref", `{"strategy":"text_rebind","original_ref":"n12","attempts":2}`},
+		{"single recovered ref", `{"strategy":"container_rebind","recovered_ref":"n8","attempts":2}`},
+		{"text rebind without refs", `{"strategy":"text_rebind","attempts":2}`},
+		{"container rebind without refs", `{"strategy":"container_rebind","attempts":2}`},
+		{"zero attempts", `{"strategy":"transient_retry","attempts":0}`},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			var view protocol.AutoRecoveryView
+			decodeErr := jsonv2.Unmarshal([]byte(testCase.raw), &view)
+			protocolValid := decodeErr == nil && protocol.ValidAutoRecovery(&view)
+			_, rendered := renderAutoRecoveryV4([]byte(testCase.raw))
+			if rendered != protocolValid {
+				t.Fatalf("renderAutoRecoveryV4 accepted=%t, protocol valid=%t (%v)",
+					rendered, protocolValid, decodeErr)
+			}
+		})
+	}
 }
 
 func TestResultV4ObservationStatusOmission(t *testing.T) {

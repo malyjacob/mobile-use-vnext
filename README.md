@@ -7,8 +7,8 @@ HTTP 协议配对。
 
 - 模块：`github.com/malyjacob/mobile-use-vnext`
 - Go：1.27.1，启用 `GOEXPERIMENT=jsonv2`
-- 契约：`contract_version = "35"`，服务、HTTP 客户端、控制 App 精确相等才做普通工作
-- 发行：`0.39.0`；`release/versions.json` 是发行号、契约号与 Android versionCode（41）的唯一
+- 契约：`contract_version = "36"`，服务、HTTP 客户端、控制 App 精确相等才做普通工作
+- 发行：`0.40.0`；`release/versions.json` 是发行号、契约号与 Android versionCode（42）的唯一
   来源，构建生成 Go/Java 常量
 
 ## 能力边界
@@ -51,7 +51,8 @@ HTTP 协议配对。
   [MCP 入口](docs/mcp.md)、[Agent 接入指南](docs/integration.md) 与 [Go 客户端](docs/client.md)。
   `text`/`both` 的结果文本是紧凑的 `result v4` 外壳：头行给 `ok`/`err`、调用编号与 outcome；
   观察合并为单行 `obs`；复合 text 另带 `text_input write=… submit=…`，写入已确认而提交确定
-  未派发时 `outcome=partial` 并附新的 ready O；可读块沿用 `tree v5`、`inspect v3`、`shell v1`
+  未派发时 `outcome=partial` 并附新的 ready O；经零派发重验自动恢复并进入派发时另带
+  `Result.auto_recovery`（仅覆盖 `tap`/`long_press`/`text`/`scroll` 四种 kind；`original_ref`/`recovered_ref` 按 §2 条件出现，纯坐标省略；`strategy` 与 `attempts` 见 §2）；可读块沿用 `tree v5`、`inspect v3`、`shell v1`
   与 `timeline v1` 语法；`recovery` 行在可判定时直接给出精确 `O`/`P` 编号。`text` 按清单省略
   固定元信息，`structured` 的 `structuredContent` 保留完整 `Result` JSON。
 
@@ -182,7 +183,7 @@ $env:GOEXPERIMENT = 'jsonv2'; go test ./...
 ## 接口
 
 Agent 工具（`POST /api/<tool>`，`Authorization: Bearer <agent_token>`，
-`X-Mobile-Use-Contract: 35`）：
+`X-Mobile-Use-Contract: 36`）：
 
 | 工具 | 说明 |
 | --- | --- |

@@ -506,39 +506,80 @@ func (v *TextInputView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 	return nil
 }
 
+// UnmarshalJSONFrom decodes the fixed auto_recovery object. strategy is one of
+// the three closed names and attempts is required and at least 1; the two ref
+// members appear together or not at all; a transient retry repeats its original
+// ref and a rebind always carries both refs. Unknown members are rejected and
+// explicit null is not a value for any member.
+func (v *AutoRecoveryView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	raw, err := readObjectValue(dec, "auto_recovery")
+	if err != nil {
+		return err
+	}
+	var wire struct {
+		Strategy     member[string] `json:"strategy"`
+		OriginalRef  member[string] `json:"original_ref"`
+		RecoveredRef member[string] `json:"recovered_ref"`
+		Attempts     member[int]    `json:"attempts"`
+	}
+	if err := json.Unmarshal(raw, &wire, json.RejectUnknownMembers(true)); err != nil {
+		return err
+	}
+	strategy, err := requireResponseMember(wire.Strategy, "auto_recovery.strategy")
+	if err != nil {
+		return err
+	}
+	attempts, err := requireResponseMember(wire.Attempts, "auto_recovery.attempts")
+	if err != nil {
+		return err
+	}
+	view := &AutoRecoveryView{
+		Strategy:     strategy,
+		OriginalRef:  wire.OriginalRef.Value,
+		RecoveredRef: wire.RecoveredRef.Value,
+		Attempts:     attempts,
+	}
+	if !ValidAutoRecovery(view) {
+		return fmt.Errorf("auto_recovery carries an invalid strategy or ref combination")
+	}
+	*v = *view
+	return nil
+}
+
 // UnmarshalJSONFrom decodes the operation/tool report. Session presence is
 // the wire evidence for IncludeSession, because the boolean has no member of
 // its own; an explicit null session is therefore a present, nil session.
 func (r *Result) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 	var wire struct {
-		OperationID         member[string]           `json:"operation_id"`
-		OperationState      member[string]           `json:"operation_state"`
-		Outcome             member[string]           `json:"outcome"`
-		Phase               member[string]           `json:"phase"`
-		Effect              member[*Effect]          `json:"effect"`
-		TextInput           member[*TextInputView]   `json:"text_input"`
-		TargetReference     member[string]           `json:"target_reference"`
-		RequestClosed       *bool                    `json:"request_closed"`
-		BlockingOperationID member[string]           `json:"blocking_operation_id"`
-		CanStart            *bool                    `json:"can_start"`
-		BlockingCode        member[string]           `json:"blocking_code"`
-		StartOperation      member[string]           `json:"start_operation_id"`
-		ObservationState    member[string]           `json:"observation_state"`
-		InputState          member[string]           `json:"input_state"`
-		MessageID           member[string]           `json:"message_id"`
-		Saved               *bool                    `json:"saved"`
-		Image               member[*ImageMeta]       `json:"image"`
-		Session             nullableMember[*Session] `json:"session"`
-		Observation         *Observation             `json:"observation"`
-		Inspection          *InspectionView          `json:"inspection"`
-		App                 *AppView                 `json:"app"`
-		Shell               *ShellView               `json:"shell"`
-		Wait                *WaitResult              `json:"wait"`
-		Notification        *NotificationView        `json:"notification"`
-		Diagnosis           *DiagnosisView           `json:"diagnosis"`
-		Cleanup             *Cleanup                 `json:"cleanup"`
-		Error               *Error                   `json:"error"`
-		Recovery            *Recovery                `json:"recovery"`
+		OperationID         member[string]            `json:"operation_id"`
+		OperationState      member[string]            `json:"operation_state"`
+		Outcome             member[string]            `json:"outcome"`
+		Phase               member[string]            `json:"phase"`
+		Effect              member[*Effect]           `json:"effect"`
+		TextInput           member[*TextInputView]    `json:"text_input"`
+		AutoRecovery        member[*AutoRecoveryView] `json:"auto_recovery"`
+		TargetReference     member[string]            `json:"target_reference"`
+		RequestClosed       *bool                     `json:"request_closed"`
+		BlockingOperationID member[string]            `json:"blocking_operation_id"`
+		CanStart            *bool                     `json:"can_start"`
+		BlockingCode        member[string]            `json:"blocking_code"`
+		StartOperation      member[string]            `json:"start_operation_id"`
+		ObservationState    member[string]            `json:"observation_state"`
+		InputState          member[string]            `json:"input_state"`
+		MessageID           member[string]            `json:"message_id"`
+		Saved               *bool                     `json:"saved"`
+		Image               member[*ImageMeta]        `json:"image"`
+		Session             nullableMember[*Session]  `json:"session"`
+		Observation         *Observation              `json:"observation"`
+		Inspection          *InspectionView           `json:"inspection"`
+		App                 *AppView                  `json:"app"`
+		Shell               *ShellView                `json:"shell"`
+		Wait                *WaitResult               `json:"wait"`
+		Notification        *NotificationView         `json:"notification"`
+		Diagnosis           *DiagnosisView            `json:"diagnosis"`
+		Cleanup             *Cleanup                  `json:"cleanup"`
+		Error               *Error                    `json:"error"`
+		Recovery            *Recovery                 `json:"recovery"`
 	}
 	if err := readObject(dec, "result", &wire); err != nil {
 		return err
@@ -550,6 +591,7 @@ func (r *Result) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 		Phase:               wire.Phase.Value,
 		Effect:              wire.Effect.Value,
 		TextInput:           wire.TextInput.Value,
+		AutoRecovery:        wire.AutoRecovery.Value,
 		TargetReference:     wire.TargetReference.Value,
 		RequestClosed:       wire.RequestClosed,
 		BlockingOperationID: wire.BlockingOperationID.Value,

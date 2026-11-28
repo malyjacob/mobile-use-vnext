@@ -327,6 +327,10 @@ func decodeResultTextV4(t *testing.T, text string) (map[string]any, bool, error)
 			if err := put("/text_input", map[string]any{"write": fields["write"], "submit": fields["submit"]}); err != nil {
 				return nil, false, err
 			}
+		case strings.HasPrefix(line, "auto_recovery "):
+			if err := decodeResultV4AutoRecoveryLine(line, put); err != nil {
+				return nil, false, err
+			}
 		default:
 			key, value, ok := strings.Cut(line, "=")
 			if !ok || key == "" || value == "" {
@@ -809,6 +813,43 @@ func decodeResultV4ScalarField(path, key, value string, put func(string, any) er
 	default:
 		return put(path, value)
 	}
+}
+
+// decodeResultV4AutoRecoveryLine parses the fixed zero-dispatch recovery line.
+// strategy and attempts are mandatory; each ref is optional for a
+// coordinate-only request and every column keeps its documented order.
+func decodeResultV4AutoRecoveryLine(line string, put func(string, any) error) error {
+	body := strings.TrimPrefix(line, "auto_recovery ")
+	if body == "" || strings.HasPrefix(body, " ") || strings.HasSuffix(body, " ") {
+		return fmt.Errorf("bad auto_recovery line")
+	}
+	order := map[string]int{"strategy": 0, "original_ref": 1, "recovered_ref": 2, "attempts": 3}
+	last := -1
+	fields := map[string]any{}
+	for _, part := range strings.Fields(body) {
+		key, value, ok := strings.Cut(part, "=")
+		rank, known := order[key]
+		if !ok || !known || rank <= last || value == "" {
+			return fmt.Errorf("bad auto_recovery field %q", part)
+		}
+		last = rank
+		if key == "attempts" {
+			number, err := strconv.Atoi(value)
+			if err != nil || number < 1 {
+				return fmt.Errorf("bad auto_recovery attempts")
+			}
+			fields[key] = number
+			continue
+		}
+		fields[key] = value
+	}
+	if _, present := fields["strategy"]; !present {
+		return fmt.Errorf("auto_recovery strategy is missing")
+	}
+	if _, present := fields["attempts"]; !present {
+		return fmt.Errorf("auto_recovery attempts is missing")
+	}
+	return put("/auto_recovery", fields)
 }
 
 func decodeResultV4NotifyLine(line string, put func(string, any) error) error {

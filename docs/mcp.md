@@ -65,13 +65,14 @@ chroot，并在 `127.0.0.1:18882` 启动 HTTP 入口；主机侧 stdio/HTTP 适�
 目标整数中心，其他静态拒绝或无有效裁剪几何时省略。若据此尝试坐标点按或长按，省略 `bubble`，
 并用仍有效的原 O 发起独立准入和重验；该字段不证明安全或业务响应。
 
-非 `text` 动作在认领后重验因祖先链失配返回 `409 target_changed (reason=lineage_changed)` 时，
-`error.details.changed_ref` 可给出原目标公开祖先链中第一个确实缺失且能唯一确定的公开祖先
-ref（在新帧链里仍有恰好一个结构对应层的祖先只算平移，不被指名）；`bubble_ancestor` 的最近交互
-祖先变化时，该字段指向原先的交互祖先，即使它仍然存在；无法唯一定位、祖先是 `root`
-或计算失败时省略，不编造；合成显示根不进入该祖先链，因此不会被
-指名。该字段只进入错误详情，不写入
-事件日志；坐标目标与裸 `swipe` 的重验不返回 `changed_ref`。
+全部 `kind`（`tap`/`long_press`/`text`/`scroll`）在认领后重验因祖先链失配返回
+`409 target_changed (reason=lineage_changed)` 时，`error.details.changed_ref` 可给出原目标公开
+祖先链中第一个确实缺失且能唯一确定的公开祖先 ref（在新帧链里仍有恰好一个结构对应层的祖先只算
+平移，不被指名）；`bubble_ancestor` 的最近交互祖先变化时，该字段指向原先的交互祖先，即使它
+仍然存在；无法唯一定位、祖先是 `root` 或计算失败时省略，不编造；合成显示根不进入该祖先链，
+因此不会被指名。该字段只进入错误详情，不写入事件日志；纯坐标操作（`tap`/`long_press`/`text`）
+与裸 `swipe` 的重验不返回 `changed_ref`；坐标 `scroll` 与 ref 容器一样，在
+`reason=lineage_changed` 且能唯一确定断裂公开祖先时可返回 `changed_ref`。
 
 `text` 的 `ref` 目标只要求 `role=input`、公开动作含 `text`、未禁用、`protected=false` 与正面积
 几何，不要求 `tap` 动作。`text` 默认 `auto_submit=true`、`submit_ref="enter_key"`：一次调用
@@ -90,8 +91,9 @@ ref（在新帧链里仍有恰好一个结构对应层的祖先只算平移，�
 `(executed,executed)`。写入确认只证明写入原语完成，提交原语只证明对应按键或点击已派发；
 两者都不证明搜索、提交、导航或业务结果。
 
-text 失败（含 `outcome=partial` 与 `outcome=uncertain`）的 `error.details` 固定给出
-`stage`（`target`/`focus`/`write`/`verify`/`submit`）、`reason` 与
+`text` 的认领前静态目标拒绝与派发阶段失败（含 `outcome=partial` 与 `outcome=uncertain`；
+认领后重验的 `409 target_changed` 使用统一 `phase=revalidate` 详情，见 [接口契约](interface.md)
+§6）的 `error.details` 固定给出 `stage`（`target`/`focus`/`write`/`verify`/`submit`）、`reason` 与
 `dispatch.focus/write/submit`（`not_attempted|not_dispatched|dispatched|unknown`），
 可选 `candidate_count` 保留 `0`；MCP 的 structured/text/both 三种模式都保留同一组嵌套字段
 （文本写作 `error.details=<紧凑 JSON>`），调用方按枚举决策而不解析 `message`。
@@ -271,8 +273,8 @@ owned 他屏任务）。控制 App 包、前台服务/播放门禁、root
 观察不携带它。`structured`/`both` 的 `structuredContent` 携带完整对象；`text` 与
 `both` 的 `result v4` 文本省略两个整对象。成员与取值见 [接口契约](interface.md) §11。
 
-复合 `text` 的 `text_input`、`wait_for` 的 `wait`、`snap` 的顶层 `image` 与 `app` 结果同样
-取自这一份 `Result`；文本行与块语法见 3.2。显式 `auto_submit=false` 和非法组合不会产生
+复合 `text` 的 `text_input`、`act` 的 `auto_recovery`、`wait_for` 的 `wait`、`snap` 的顶层
+`image` 与 `app` 结果同样取自这一份 `Result`；文本行与块语法见 3.2。显式 `auto_submit=false` 和非法组合不会产生
 `text_input` 对象；`outcome=partial` 的 `text_input` 固定为
 `write=executed`、`submit=not_executed`。首次结果、运行中 `status(P)`、重复 P 与冻结结果使用
 同一快照。
@@ -350,7 +352,9 @@ end result
 1. 动作与状态控制标量：`text_input write=<write> submit=<submit>`、
    `target_reference=<ref>`、`request_closed=<true|false>`（永不省略）、
    `blocking_operation_id=<P>`、`can_start=<true|false>`、`blocking_code=<code>`、
-   `start_operation_id=<P>`、`observation_state=<state>`、`input_state=<state>`。
+   `start_operation_id=<P>`、`observation_state=<state>`、`input_state=<state>`、
+   `auto_recovery strategy=<strategy> [original_ref=<ref>] [recovered_ref=<ref>] attempts=<n>`。
+   `auto_recovery` 位于控制标量末尾、`obs` 行之前。
 2. `notify` 聚合行及其错误子行。
 3. 顶层 `image` 行及其错误子行。
 4. `session` 行。
@@ -387,8 +391,8 @@ end result
 除上表列出的成员外，`Result` 的其余成员都在 `result v4` 中显式投影，不静默丢弃：
 `request_closed` 永不省略；`target_reference`、`blocking_operation_id`、`can_start`、
 `blocking_code`、`start_operation_id`、`observation_state`、`input_state`、
-`text_input`、`wait`、`cleanup`、`error`、`recovery` 与 `app` 的全部三态、缺席和空集合语义
-100% 保留。
+`text_input`、`auto_recovery`、`wait`、`cleanup`、`error`、`recovery` 与 `app` 的全部三态、
+缺席和空集合语义 100% 保留。
 
 词法与转义规则：
 
@@ -447,6 +451,37 @@ error text_submit_not_executed "文字已写入，但提交未执行"
 error.details={"stage":"submit","reason":"submit_target_unconfirmed","dispatch":{"focus":"not_attempted","write":"dispatched","submit":"not_attempted"}}
 end result
 ```
+
+**顶层 `auto_recovery`。** 仅在 `act` 经认领后重验的零派发自动恢复并最终进入派发时存在；该标记
+只覆盖 `tap`/`long_press`/`text`/`scroll`，raw `swipe` 的瞬态复检不发布该字段。在控制标量末尾、
+`obs` 行之前输出一行：
+
+```text
+auto_recovery strategy=<strategy> [original_ref=<ref>] [recovered_ref=<ref>] attempts=<n>
+```
+
+`strategy` 为 `transient_retry`/`text_rebind`/`container_rebind`；三种策略的 `recovered_ref` 都仅用于
+诊断本次恢复，不是后续操作的引用。`transient_retry` 的 `recovered_ref` 等于 `original_ref`；
+`text_rebind`/`container_rebind` 的 `recovered_ref` 为恢复后目标在新帧的公共 `ref`（公共投影连续性
+可能复用与 `original_ref` 相同的字符串，调用方不应依赖数值必然变化；rebind 的值仅描述恢复时的
+第二帧预览）；纯坐标请求省略 `original_ref` 与 `recovered_ref`；`attempts` 固定 `2`。例如：
+
+```text
+result v4 ok op=P7391_16
+text_input write=executed submit=executed
+auto_recovery strategy=text_rebind original_ref=n7 recovered_ref=n19 attempts=2
+obs O4821_91 fg=com.android.settings at=22:05:21
+
+tree v5 full nodes=3
+
+n1 root 0,0,1080,2400
+ n19 input 540,120 "搜索" value="周杰伦" hint="输入关键词"
+ n20 button 990,120 "搜索"
+end tree
+end result
+```
+
+示例中的 `n19` 是该新 O 树中的合法 `ref`；这里只否定把 `recovered_ref` 直接当作后续引用；新 O 树确有该 `ref` 时仍按树规则使用。
 
 **`notify`。** `message_id`、`saved` 与 `notification.state` 至少存在其一时合并为一行，
 `notification.error` 存在时紧跟错误子行：

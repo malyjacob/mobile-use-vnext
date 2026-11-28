@@ -1031,15 +1031,31 @@ func fakeResultText(payload map[string]any, isError bool) string {
 		builder.WriteString("text_input write=" + input["write"].(string) +
 			" submit=" + input["submit"].(string) + "\n")
 	}
-	for _, scalar := range []string{"target_reference", "blocking_operation_id", "blocking_code", "start_operation_id", "observation_state", "input_state"} {
-		if value, ok := payload[scalar].(string); ok && value != "" {
-			builder.WriteString(scalar + "=" + value + "\n")
+	// The control scalars keep the documented encoder order; the explicit
+	// zero-dispatch recovery marker closes the section.
+	for _, member := range []struct{ key, label string }{
+		{"target_reference", "target_reference"},
+		{"request_closed", "request_closed"},
+		{"blocking_operation_id", "blocking_operation_id"},
+		{"can_start", "can_start"},
+		{"blocking_code", "blocking_code"},
+		{"start_operation_id", "start_operation_id"},
+		{"observation_state", "observation_state"},
+		{"input_state", "input_state"},
+	} {
+		switch member.key {
+		case "request_closed", "can_start":
+			if value, ok := payload[member.key].(bool); ok {
+				builder.WriteString(member.label + "=" + strconv.FormatBool(value) + "\n")
+			}
+		default:
+			if value, ok := payload[member.key].(string); ok && value != "" {
+				builder.WriteString(member.label + "=" + value + "\n")
+			}
 		}
 	}
-	for _, boolean := range []string{"request_closed", "can_start"} {
-		if value, ok := payload[boolean].(bool); ok {
-			builder.WriteString(boolean + "=" + strconv.FormatBool(value) + "\n")
-		}
+	if recovery, ok := payload["auto_recovery"].(map[string]any); ok {
+		writeFakeAutoRecovery(&builder, recovery)
 	}
 	writeFakeNotify(&builder, payload)
 	if image, ok := payload["image"].(map[string]any); ok {
@@ -1091,7 +1107,7 @@ func fakeResultText(payload map[string]any, isError bool) string {
 	// json v1 fallback a future encoder must use.
 	known := map[string]bool{
 		"operation_id": true, "operation_state": true, "outcome": true, "phase": true,
-		"effect": true, "text_input": true, "target_reference": true,
+		"effect": true, "text_input": true, "auto_recovery": true, "target_reference": true,
 		"request_closed": true, "blocking_operation_id": true, "can_start": true,
 		"blocking_code": true, "start_operation_id": true, "observation_state": true,
 		"input_state": true, "message_id": true, "saved": true, "image": true,
@@ -1111,6 +1127,28 @@ func fakeResultText(payload map[string]any, isError bool) string {
 	}
 	builder.WriteString("end result\n")
 	return builder.String()
+}
+
+// writeFakeAutoRecovery renders the fixed zero-dispatch recovery line from the
+// same payload object the structured channel publishes, so both-mode comparisons
+// exercise the documented projection instead of a second ad-hoc shape.
+func writeFakeAutoRecovery(builder *strings.Builder, recovery map[string]any) {
+	builder.WriteString("auto_recovery")
+	if strategy, ok := recovery["strategy"].(string); ok && strategy != "" {
+		builder.WriteString(" strategy=" + strategy)
+	}
+	for _, key := range []string{"original_ref", "recovered_ref"} {
+		if value, ok := recovery[key].(string); ok && value != "" {
+			builder.WriteString(" " + key + "=" + value)
+		}
+	}
+	switch attempts := recovery["attempts"].(type) {
+	case int:
+		builder.WriteString(" attempts=" + strconv.Itoa(attempts))
+	case float64:
+		builder.WriteString(" attempts=" + strconv.Itoa(int(attempts)))
+	}
+	builder.WriteByte('\n')
 }
 
 func writeFakeNotify(builder *strings.Builder, payload map[string]any) {
@@ -3351,6 +3389,288 @@ func TestActScrollEffectOmissionFails(t *testing.T) {
 	if failure := checkScrollActResult(projected, resultModeBoth); failure == nil ||
 		failure.reason != "scroll_effect_missing" {
 		t.Fatalf("omitted effect accepted: %v", failure)
+	}
+}
+
+// TestDecodeResultTextAutoRecovery pins the zero-dispatch recovery line grammar:
+// strategy and attempts are mandatory, the two public refs are optional but
+// all-or-nothing, a transient retry repeats the original ref, and the line sits
+// in the control-scalar section after input_state.
+func TestDecodeResultTextAutoRecovery(t *testing.T) {
+	legal := []struct {
+		name string
+		text string
+		want map[string]any
+	}{
+		{
+			name: "transient retry repeats the original ref",
+			text: "result v4 ok op=P1\n" +
+				"input_state=effective\n" +
+				"auto_recovery strategy=transient_retry original_ref=n7 recovered_ref=n7 attempts=2\n" +
+				"end result\n",
+			want: map[string]any{
+				"strategy":     autoRecoveryTransientRetry,
+				"original_ref": "n7", "recovered_ref": "n7", "attempts": 2,
+			},
+		},
+		{
+			name: "text rebind publishes the replacement ref",
+			text: "result v4 ok op=P1\n" +
+				"auto_recovery strategy=text_rebind original_ref=n12 recovered_ref=n31 attempts=2\n" +
+				"end result\n",
+			want: map[string]any{
+				"strategy":     autoRecoveryTextRebind,
+				"original_ref": "n12", "recovered_ref": "n31", "attempts": 2,
+			},
+		},
+		{
+			name: "container rebind",
+			text: "result v4 ok op=P1\n" +
+				"auto_recovery strategy=container_rebind original_ref=n3 recovered_ref=n8 attempts=2\n" +
+				"end result\n",
+			want: map[string]any{
+				"strategy":     autoRecoveryContainerRebind,
+				"original_ref": "n3", "recovered_ref": "n8", "attempts": 2,
+			},
+		},
+		{
+			name: "coordinate retry omits both refs",
+			text: "result v4 ok op=P1\n" +
+				"auto_recovery strategy=transient_retry attempts=2\n" +
+				"end result\n",
+			want: map[string]any{"strategy": autoRecoveryTransientRetry, "attempts": 2},
+		},
+	}
+	for _, testCase := range legal {
+		t.Run("legal/"+testCase.name, func(t *testing.T) {
+			decoded, failure := decodeResultText(testCase.text)
+			if failure != nil {
+				t.Fatalf("decode: %s %v", failure.reason, failure.fields)
+			}
+			got, ok := lookupPath(decoded.object, []string{"auto_recovery"})
+			if !ok || !semanticEqual(got, testCase.want) {
+				t.Fatalf("auto_recovery = %#v, want %#v", got, testCase.want)
+			}
+			if decoded.view.AutoRecovery == nil ||
+				decoded.view.AutoRecovery.Strategy != testCase.want["strategy"] {
+				t.Fatalf("typed auto_recovery = %+v", decoded.view.AutoRecovery)
+			}
+		})
+	}
+
+	rejected := []struct {
+		name   string
+		text   string
+		reason string
+	}{
+		{
+			name:   "reversed columns",
+			text:   "result v4 ok\n" + "auto_recovery attempts=2 strategy=transient_retry\n" + "end result\n",
+			reason: "text_result_auto_recovery_invalid",
+		},
+		{
+			name:   "missing strategy",
+			text:   "result v4 ok\n" + "auto_recovery attempts=2\n" + "end result\n",
+			reason: "text_result_auto_recovery_invalid",
+		},
+		{
+			name:   "unknown strategy",
+			text:   "result v4 ok\n" + "auto_recovery strategy=future_retry attempts=2\n" + "end result\n",
+			reason: "text_result_auto_recovery_invalid",
+		},
+		{
+			name:   "missing attempts",
+			text:   "result v4 ok\n" + "auto_recovery strategy=transient_retry\n" + "end result\n",
+			reason: "text_result_auto_recovery_invalid",
+		},
+		{
+			name:   "zero attempts",
+			text:   "result v4 ok\n" + "auto_recovery strategy=transient_retry attempts=0\n" + "end result\n",
+			reason: "text_result_auto_recovery_invalid",
+		},
+		{
+			name:   "non numeric attempts",
+			text:   "result v4 ok\n" + "auto_recovery strategy=transient_retry attempts=two\n" + "end result\n",
+			reason: "text_result_auto_recovery_invalid",
+		},
+		{
+			name:   "half a ref pair",
+			text:   "result v4 ok\n" + "auto_recovery strategy=text_rebind original_ref=n7 attempts=2\n" + "end result\n",
+			reason: "text_result_auto_recovery_invalid",
+		},
+		{
+			name:   "text rebind without refs",
+			text:   "result v4 ok\n" + "auto_recovery strategy=text_rebind attempts=2\n" + "end result\n",
+			reason: "text_result_auto_recovery_invalid",
+		},
+		{
+			name:   "container rebind without refs",
+			text:   "result v4 ok\n" + "auto_recovery strategy=container_rebind attempts=2\n" + "end result\n",
+			reason: "text_result_auto_recovery_invalid",
+		},
+		{
+			name:   "ref outside the public grammar",
+			text:   "result v4 ok\n" + "auto_recovery strategy=text_rebind original_ref=n0 recovered_ref=n7 attempts=2\n" + "end result\n",
+			reason: "text_result_auto_recovery_invalid",
+		},
+		{
+			name:   "transient retry changes the ref",
+			text:   "result v4 ok\n" + "auto_recovery strategy=transient_retry original_ref=n7 recovered_ref=n8 attempts=2\n" + "end result\n",
+			reason: "text_result_auto_recovery_invalid",
+		},
+		{
+			name:   "duplicate strategy",
+			text:   "result v4 ok\n" + "auto_recovery strategy=transient_retry strategy=text_rebind original_ref=n7 recovered_ref=n7 attempts=2\n" + "end result\n",
+			reason: "text_result_auto_recovery_invalid",
+		},
+		{
+			name:   "empty body",
+			text:   "result v4 ok\n" + "auto_recovery\n" + "end result\n",
+			reason: "text_result_item_invalid",
+		},
+		{
+			name: "after notify",
+			text: "result v4 ok\n" +
+				"notify id=M1 saved=true\n" +
+				"auto_recovery strategy=transient_retry attempts=2\n" +
+				"end result\n",
+			reason: "text_result_order_invalid",
+		},
+	}
+	for _, testCase := range rejected {
+		t.Run("reject/"+testCase.name, func(t *testing.T) {
+			if _, failure := decodeResultText(testCase.text); failure == nil ||
+				failure.reason != testCase.reason {
+				t.Fatalf("failure = %v, want %s", failure, testCase.reason)
+			}
+		})
+	}
+}
+
+// TestCheckAutoRecovery guards the typed marker: an absent object is valid, the
+// three published strategies and attempts >= 1 are required, and the two public
+// node refs are both-or-none. Only a transient retry may omit both refs, and it
+// must repeat the original ref when it carries them.
+func TestCheckAutoRecovery(t *testing.T) {
+	legal := []*autoRecoveryView{
+		nil,
+		{Strategy: autoRecoveryTransientRetry, Attempts: 2},
+		{Strategy: autoRecoveryTransientRetry, OriginalRef: "n7", RecoveredRef: "n7", Attempts: 2},
+		{Strategy: autoRecoveryTextRebind, OriginalRef: "n12", RecoveredRef: "n31", Attempts: 2},
+		{Strategy: autoRecoveryContainerRebind, OriginalRef: "n3", RecoveredRef: "n8", Attempts: 1},
+	}
+	for _, recovery := range legal {
+		if failure := checkAutoRecovery(recovery); failure != nil {
+			t.Fatalf("legal marker %+v rejected: %s", recovery, failure.reason)
+		}
+	}
+	illegal := []struct {
+		recovery *autoRecoveryView
+		reason   string
+	}{
+		{&autoRecoveryView{Strategy: "", Attempts: 2}, "auto_recovery_strategy_invalid"},
+		{&autoRecoveryView{Strategy: "future_retry", Attempts: 2}, "auto_recovery_strategy_invalid"},
+		{&autoRecoveryView{Strategy: autoRecoveryTransientRetry}, "auto_recovery_attempts_invalid"},
+		{&autoRecoveryView{Strategy: autoRecoveryTransientRetry, Attempts: -1}, "auto_recovery_attempts_invalid"},
+		{&autoRecoveryView{Strategy: autoRecoveryTextRebind, OriginalRef: "n7", Attempts: 2}, "auto_recovery_refs_incomplete"},
+		{&autoRecoveryView{Strategy: autoRecoveryTextRebind, RecoveredRef: "n8", Attempts: 2}, "auto_recovery_refs_incomplete"},
+		{&autoRecoveryView{Strategy: autoRecoveryTextRebind, Attempts: 2}, "auto_recovery_refs_missing"},
+		{&autoRecoveryView{Strategy: autoRecoveryContainerRebind, Attempts: 2}, "auto_recovery_refs_missing"},
+		{&autoRecoveryView{Strategy: autoRecoveryTextRebind, OriginalRef: "n0", RecoveredRef: "n8", Attempts: 2}, "auto_recovery_ref_invalid"},
+		{&autoRecoveryView{Strategy: autoRecoveryContainerRebind, OriginalRef: "abc", RecoveredRef: "n8", Attempts: 2}, "auto_recovery_ref_invalid"},
+		{&autoRecoveryView{Strategy: autoRecoveryTransientRetry, OriginalRef: "n7", RecoveredRef: "n8", Attempts: 2}, "auto_recovery_transient_refs_differ"},
+	}
+	for _, testCase := range illegal {
+		if failure := checkAutoRecovery(testCase.recovery); failure == nil ||
+			failure.reason != testCase.reason {
+			t.Fatalf("marker %+v = %v, want %s", testCase.recovery, failure, testCase.reason)
+		}
+	}
+}
+
+// TestBothModeAutoRecoveryComparison proves the both-mode gate compares the
+// marker member for member: a missing, extra, or value-changed marker fails and
+// the four documented shapes round trip through the fake emitter and parser.
+func TestBothModeAutoRecoveryComparison(t *testing.T) {
+	shapes := []map[string]any{
+		{
+			"strategy":     autoRecoveryTransientRetry,
+			"original_ref": "n7", "recovered_ref": "n7", "attempts": 2,
+		},
+		{
+			"strategy":     autoRecoveryTextRebind,
+			"original_ref": "n12", "recovered_ref": "n31", "attempts": 2,
+		},
+		{"strategy": autoRecoveryTransientRetry, "attempts": 2},
+	}
+	for _, recovery := range shapes {
+		recovery := recovery
+		payload := map[string]any{
+			"operation_id": "P7391_12", "outcome": outcomeExecuted,
+			"auto_recovery": recovery,
+		}
+		result := &sdk.CallToolResult{
+			Content:           []sdk.Content{&sdk.TextContent{Text: fakeResultText(payload, false)}},
+			StructuredContent: payload,
+		}
+		projected, failure := project(result, resultModeBoth)
+		if failure != nil {
+			t.Fatalf("matching marker rejected: %s %v", failure.reason, failure.fields)
+		}
+		if projected.view.AutoRecovery == nil ||
+			projected.view.AutoRecovery.Strategy != recovery["strategy"] {
+			t.Fatalf("typed marker = %+v", projected.view.AutoRecovery)
+		}
+	}
+
+	base := map[string]any{
+		"operation_id": "P7391_12", "outcome": outcomeExecuted,
+		"auto_recovery": map[string]any{
+			"strategy":     autoRecoveryTextRebind,
+			"original_ref": "n12", "recovered_ref": "n31", "attempts": 2,
+		},
+	}
+	cases := []struct {
+		name       string
+		textSource map[string]any
+	}{
+		{
+			name: "text omits the marker",
+			textSource: map[string]any{
+				"operation_id": "P7391_12", "outcome": outcomeExecuted,
+			},
+		},
+		{
+			name: "text invents a marker",
+			textSource: map[string]any{
+				"operation_id": "P7391_12", "outcome": outcomeExecuted,
+				"auto_recovery": map[string]any{
+					"strategy": autoRecoveryTransientRetry, "attempts": 2,
+				},
+			},
+		},
+		{
+			name: "text changes the recovered ref",
+			textSource: map[string]any{
+				"operation_id": "P7391_12", "outcome": outcomeExecuted,
+				"auto_recovery": map[string]any{
+					"strategy":     autoRecoveryTextRebind,
+					"original_ref": "n12", "recovered_ref": "n32", "attempts": 2,
+				},
+			},
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			result := &sdk.CallToolResult{
+				Content:           []sdk.Content{&sdk.TextContent{Text: fakeResultText(testCase.textSource, false)}},
+				StructuredContent: base,
+			}
+			if _, failure := project(result, resultModeBoth); failure == nil ||
+				failure.reason != "both_mode_auto_recovery_mismatch" {
+				t.Fatalf("failure = %v, want both_mode_auto_recovery_mismatch", failure)
+			}
+		})
 	}
 }
 

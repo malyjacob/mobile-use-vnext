@@ -287,6 +287,9 @@ func compareResultTextToStructured(decoded *decodedTextResult,
 	if failure := compareRecoverySection(text, want, view, requestRef); failure != nil {
 		return failure
 	}
+	if failure := compareAutoRecoverySection(text, want); failure != nil {
+		return failure
+	}
 	normalizeSessionTimestamps(text, want)
 	if failure := normalizeImageView(text, want, "image"); failure != nil {
 		return failure
@@ -537,6 +540,29 @@ func compareAppSection(text, want map[string]any) *checkError {
 		return nil
 	}
 	normalizeTimestampField(textApp, "captured_at", wantApp, "captured_at")
+	return nil
+}
+
+// compareAutoRecoverySection requires the explicit zero-dispatch recovery
+// marker to survive the text projection unchanged: it is never omitted, never
+// synthesized, and its public node refs are compared verbatim because the
+// marker describes this call's own binding, not a next-step reference. The
+// member is removed from both sides after an exact structural comparison so the
+// remaining object is still compared member for member.
+func compareAutoRecoverySection(text, want map[string]any) *checkError {
+	textRecovery, textHas := text["auto_recovery"].(map[string]any)
+	wantRecovery, wantHas := want["auto_recovery"].(map[string]any)
+	if textHas != wantHas {
+		return failf("both_mode_auto_recovery_mismatch")
+	}
+	if !wantHas {
+		return nil
+	}
+	if !semanticEqual(textRecovery, wantRecovery) {
+		return failf("both_mode_auto_recovery_mismatch")
+	}
+	delete(text, "auto_recovery")
+	delete(want, "auto_recovery")
 	return nil
 }
 

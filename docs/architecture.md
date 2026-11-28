@@ -220,7 +220,7 @@ engine 的状态锁只做有限内存检查与转换：锁内不等待 ADB、u2 
   `422 no_safe_trajectory`（`trajectory_blocked` / `insufficient_travel`）并附 `candidates` 与可选 `blocking_refs`；
 - 认领后容器走 Tier 1–5 双向唯一匹配，校验新鲜 `isScrollContainer`、`sameScrollScope`（轴向重叠与离轴容差）及公开 `axis` 未与请求方向显式冲突（冲突按 `409 target_changed`、`reason=capability_changed` 零派发）；Tier 4/5 的滚动容器证据是 E1（容器自身非空可读文案/描述两侧相等）、E2（同屏同包全树双向唯一的非空资源）或滚动容器专用的 E3（两侧非空可读文案至少有 1 项共享；或同一非空资源且双向面积覆盖 ≥85%）之一，不要求容器内全部文案不变；
   新鲜树按相同双向同视口规则先证明原段，失效时在同一容器内按 3 轴线与居中规则重规划；失败返回
-  `409 target_changed` 并附封闭归因 `details.reason`（`target_missing`/`target_ambiguous`/`lineage_changed`/`capability_changed`/`scroll_scope_changed`/`trajectory_blocked`）；
+  `409 target_changed` 并附统一 `phase=revalidate` 的 `details.reason`（滚动典型为 `target_missing`/`target_ambiguous`/`lineage_changed`/`capability_changed`/`scroll_scope_changed`/`trajectory_blocked`）；
 - 静态不可执行在认领前拒绝，新鲜不成立走重验失败的交付路径。单次 `act(scroll)` 最多派发一次手势，不按派发后观察补滑；
 - 静态 `422` 的 `candidates` 先按前景上下文过滤再排序：剔除与请求目标不属于同一顶层窗口的容器
   （窗口顺序来自固定 `u2.jar` 的 `HashSet`，不代表 z 序，因此只比较窗口归属等值）；剔除被无文案
@@ -311,8 +311,7 @@ Tier 2 或 Tier 3、目标自身没有可读文案/描述且有子节点、动�
 Tier 5 都要求正向与反向扫描在全树唯一；该通道之外，任一 Tier 出现 ≥2 个候选即结束本次绑定搜索，
 由调用方分类：
 普通 ref 目标、滚动容器以及 `bubble_ancestor`/`bubble_colocated` 的执行祖先或共位绑定的歧义是
-`target_ambiguous`，两种 `bubble` 模式下触发子节点的歧义归 `child_changed`，`text` 整体仍按
-`target_unconfirmed` 收口；预算耗尽或畸形树返回
+`target_ambiguous`，两种 `bubble` 模式下触发子节点的歧义归 `child_changed`；预算耗尽或畸形树返回
 `503 hierarchy_unavailable`。Tier 4 与 Tier 5 命中的
 点击/长按/输入执行目标实际落点还须通过全树遮挡证明
 （`tapFrameTier4OcclusionProven`）：全树唯一最深公开命中必须落在已证明的执行子树内，且没有外部
@@ -325,14 +324,20 @@ Tier 4/5 时在此之上额外要求同一证明，而执行绑定自身的 Tier
 target_changed`、`reason=child_changed` 拒绝。Tier 1–3 保持原有目标子树与双绑定关系边界。命中后分别按
 直接目标、`coextensive_child`、`bubble_ancestor`（禁止跨模式切回 `bubble_colocated`）或
 `bubble_colocated` 双绑定复验原节点、关系守卫与安全点；
-实际 `tapFrame` 冻结新鲜坐标/载体供派发使用。重验失配返回 `409 target_changed` 并附封闭 `details.reason`；
+实际 `tapFrame` 冻结新鲜坐标/载体供派发使用。重验失配返回 `409 target_changed` 并附统一 `phase=revalidate` 的 `error.details`；
 `reason=lineage_changed` 时可附可选 `changed_ref`，按原目标公开祖先链自近及远给出第一个确实缺失、
 且能唯一确定的非 `root` 祖先 ref（在新帧链里仍有恰好一个结构对应层的祖先只算平移，不被指名；
 合成显示根不在该链中，因此也不会被指名）。
 `bubble_ancestor` 的最近交互祖先变更时，该字段指向原先的交互祖先，即使它仍然存在。
-无法唯一定位时省略 `changed_ref`。该字段不进入事件日志。`text` 因 `target_changed` 重验失败时仍保持
-`stage=target`/`reason=target_unconfirmed`/`dispatch` 专属结构，该分类在复检循环结束后统一应用一次；
-STOP 撤权改为 `authorization_revoked`，其余错误码保持各自结构；
+无法唯一定位时省略 `changed_ref`。该字段不进入事件日志。全部 `kind`（`tap`/`long_press`/`text`/
+`scroll`）的认领后重验 `409 target_changed` 统一携带 `phase=revalidate` 的 `error.details`，包含
+`phase`、`kind`、`reason`、`original_ref`（按 §6 条件出现，纯坐标省略）、可选 `changed_ref`/
+`recovery_attempted`，以及仅首响应交付新 O 时附带的 `candidates`/`blocking_refs`。通过零派发
+重验自动恢复并进入派发时，`Result.auto_recovery` 携带 `strategy`、`original_ref`/`recovered_ref`
+（纯坐标省略）与 `attempts`。`Result.auto_recovery` 仅覆盖 `tap`/`long_press`/`text`/`scroll` 四种
+kind；raw `swipe` 的瞬态复检不发布该字段。`text` 未派发时由 `Result.text_input` 的
+`write`/`submit=not_executed` 表达，重验阶段不再使用独立错误详情结构。`swipe` 不进入该统一闭集，
+保持既有坐标起点证明错误形状；
 预算耗尽、畸形树或投影损坏返回 `503 hierarchy_unavailable`；撤权优先返回
 `control_revoked`，不交付新 O。认领后至多读取两帧：第 1 帧被拒且 `reason` 属于 `target_missing`、
 `lineage_changed`、`child_changed`、`scope_blocked`、`scroll_scope_changed`、`trajectory_blocked`、
@@ -944,7 +949,7 @@ text 完成事件记 `focus_dispatch`/`write_dispatch`/`submit_dispatch` 与受�
 ### 发布
 
 `release/versions.json` 是发行号、共同契约号与 Android versionCode 的唯一来源；当前为
-`release_version=0.39.0`、`contract_version=35`、`android_version_code=41`，构建生成
+`release_version=0.40.0`、`contract_version=36`、`android_version_code=42`，构建生成
 Go/Java 常量。`scripts/build-release.ps1` 产出整组产物与 `build/release/manifest.json`
 （源码提交、Go 版本、MCP SDK/协议、各产物 SHA-256/大小、Android 包名/版本、工具目录指纹）。
 工具目录固定为 `scripts/toolcatalog` 投影的 13 个工具。工具说明自包含关键调用规则，完整图例

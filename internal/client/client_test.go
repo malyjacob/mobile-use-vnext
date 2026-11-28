@@ -2427,3 +2427,195 @@ func TestCallerHTTPClientIsNotMutated(t *testing.T) {
 		t.Fatal("New mutated the caller-supplied HTTP client")
 	}
 }
+
+// TestAutoRecoveryOverHTTP proves the typed client decodes the top-level
+// zero-dispatch recovery marker of an accepted action, including the
+// coordinate-only shape with no refs, keeps it absent on a rejected
+// revalidation, and rejects a malformed marker as an invalid response.
+func TestAutoRecoveryOverHTTP(t *testing.T) {
+	actRequest := &protocol.ActRequest{
+		Reference: "O1",
+		Operation: protocol.Operation{
+			Type:   "text",
+			Target: &protocol.Target{UseRef: true, Ref: "n12"},
+			Text:   "probe",
+		},
+	}
+	t.Run("accepted action carries the marker", func(t *testing.T) {
+		source := &protocol.Result{
+			OperationID: "Pautorec",
+			Outcome:     "executed",
+			TextInput: &protocol.TextInputView{
+				Write: protocol.TextInputExecuted, Submit: protocol.TextInputExecuted,
+			},
+			AutoRecovery: &protocol.AutoRecoveryView{
+				Strategy:     protocol.AutoRecoveryTextRebind,
+				OriginalRef:  "n12",
+				RecoveredRef: "n31",
+				Attempts:     2,
+			},
+		}
+		body, err := protocol.JSON(source)
+		if err != nil {
+			t.Fatalf("encode service result: %v", err)
+		}
+		if !bytes.Contains(body, []byte(`"auto_recovery"`)) {
+			t.Fatalf("service encoding lost auto_recovery: %s", body)
+		}
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+			writeResponse(w, http.StatusOK, string(body))
+		}))
+		defer server.Close()
+
+		client := newTestClient(t, server.URL)
+		response, err := client.Act(context.Background(), actRequest, WithOperationID("Pautorec"))
+		if err != nil {
+			t.Fatalf("Act() error: %v", err)
+		}
+		if response.Result == nil || response.Result.AutoRecovery == nil {
+			t.Fatal("client dropped auto_recovery")
+		}
+		if *response.Result.AutoRecovery != *source.AutoRecovery {
+			t.Fatalf("auto_recovery = %+v, want %+v",
+				*response.Result.AutoRecovery, *source.AutoRecovery)
+		}
+		if response.Result.TextInput == nil ||
+			*response.Result.TextInput != *source.TextInput {
+			t.Fatalf("text_input = %+v", response.Result.TextInput)
+		}
+	})
+
+	t.Run("coordinate retry omits both refs", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+			writeResponse(w, http.StatusOK,
+				`{"operation_id":"Pautorec","outcome":"executed",`+
+					`"auto_recovery":{"strategy":"transient_retry","attempts":2}}`)
+		}))
+		defer server.Close()
+
+		client := newTestClient(t, server.URL)
+		response, err := client.Act(context.Background(), actRequest, WithOperationID("Pautorec"))
+		if err != nil {
+			t.Fatalf("Act() error: %v", err)
+		}
+		recovery := response.Result.AutoRecovery
+		if recovery == nil || recovery.Strategy != protocol.AutoRecoveryTransientRetry ||
+			recovery.Attempts != 2 ||
+			recovery.OriginalRef != "" || recovery.RecoveredRef != "" {
+			t.Fatalf("coordinate auto_recovery = %+v", recovery)
+		}
+	})
+
+	t.Run("rejected revalidation keeps unified details and no marker", func(t *testing.T) {
+		source := &protocol.Result{
+			OperationID:    "Prevalid",
+			OperationState: "finished",
+			Outcome:        "not_executed",
+			TextInput: &protocol.TextInputView{
+				Write: protocol.TextInputNotExecuted, Submit: protocol.TextInputNotExecuted,
+			},
+			Error: &protocol.Error{
+				Code:    protocol.CodeTargetChanged,
+				Message: "目标已变化",
+				Details: map[string]any{
+					"phase":              "revalidate",
+					"kind":               "text",
+					"reason":             "lineage_changed",
+					"original_ref":       "n12",
+					"changed_ref":        "n820",
+					"recovery_attempted": []string{"transient_retry", "text_rebind"},
+					"candidates": []map[string]any{{
+						"ref":        "n31",
+						"role":       "input",
+						"actions":    []string{"text"},
+						"bounds":     []int{0, 300, 1080, 420},
+						"relation":   "sibling",
+						"executable": true,
+					}},
+					"blocking_refs": []string{"n57"},
+				},
+			},
+		}
+		body, err := protocol.JSON(source)
+		if err != nil {
+			t.Fatalf("encode service result: %v", err)
+		}
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+			writeResponse(w, http.StatusConflict, string(body))
+		}))
+		defer server.Close()
+
+		client := newTestClient(t, server.URL)
+		response, err := client.Act(context.Background(), actRequest, WithOperationID("Prevalid"))
+		if response == nil {
+			t.Fatal("structured revalidation failure dropped the response")
+		}
+		clientErr := requireClientError(t, err)
+		if clientErr.Code != protocol.CodeTargetChanged ||
+			clientErr.HTTPStatus != http.StatusConflict ||
+			clientErr.Result == nil || clientErr.Result.Error == nil {
+			t.Fatalf("structured failure changed: %+v", clientErr)
+		}
+		if response.Result.AutoRecovery != nil {
+			t.Fatalf("rejected revalidation invented auto_recovery: %+v", response.Result.AutoRecovery)
+		}
+		details := clientErr.Result.Error.Details
+		for key, want := range map[string]any{
+			"phase": "revalidate", "kind": "text", "reason": "lineage_changed",
+			"original_ref": "n12", "changed_ref": "n820",
+		} {
+			if details[key] != want {
+				t.Fatalf("details[%q] = %#v, want %#v", key, details[key], want)
+			}
+		}
+		attempted, ok := details["recovery_attempted"].([]any)
+		if !ok || len(attempted) != 2 || attempted[0] != "transient_retry" ||
+			attempted[1] != "text_rebind" {
+			t.Fatalf("recovery_attempted = %#v", details["recovery_attempted"])
+		}
+		blocking, ok := details["blocking_refs"].([]any)
+		if !ok || len(blocking) != 1 || blocking[0] != "n57" {
+			t.Fatalf("blocking_refs = %#v", details["blocking_refs"])
+		}
+		candidates, ok := details["candidates"].([]any)
+		if !ok || len(candidates) != 1 {
+			t.Fatalf("candidates = %#v", details["candidates"])
+		}
+		first, ok := candidates[0].(map[string]any)
+		if !ok || first["ref"] != "n31" || first["executable"] != true {
+			t.Fatalf("candidate = %#v", candidates[0])
+		}
+	})
+
+	t.Run("malformed marker is an invalid response", func(t *testing.T) {
+		bodies := []string{
+			`{"operation_id":"Pbad","outcome":"executed","auto_recovery":{"strategy":"transient_retry","attempts":0}}`,
+			`{"operation_id":"Pbad","outcome":"executed","auto_recovery":{"strategy":"","attempts":2}}`,
+			`{"operation_id":"Pbad","outcome":"executed","auto_recovery":{"strategy":"transient_retry"}}`,
+			`{"operation_id":"Pbad","outcome":"executed","auto_recovery":null}`,
+			`{"operation_id":"Pbad","outcome":"executed","auto_recovery":{"strategy":"transient_retry","attempts":2,"future":true}}`,
+			`{"operation_id":"Pbad","outcome":"executed","auto_recovery":{"strategy":"transient_retry","original_ref":null,"attempts":2}}`,
+		}
+		var index atomic.Int32
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+			current := int(index.Add(1)) - 1
+			if current >= len(bodies) {
+				current = len(bodies) - 1
+			}
+			writeResponse(w, http.StatusOK, bodies[current])
+		}))
+		defer server.Close()
+
+		client := newTestClient(t, server.URL)
+		for caseIndex := range bodies {
+			response, err := client.Act(context.Background(), actRequest, WithOperationID("Pbad"))
+			if response != nil {
+				t.Fatalf("case %d: invalid marker produced a response", caseIndex)
+			}
+			clientErr := requireClientError(t, err)
+			if clientErr.Code != ErrorResponse {
+				t.Fatalf("case %d: code = %q, want %q", caseIndex, clientErr.Code, ErrorResponse)
+			}
+		}
+	})
+}
